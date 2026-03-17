@@ -1,0 +1,415 @@
+import axios, { AxiosInstance } from 'axios';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { join, dirname } from 'path';
+import {
+  DecryptResponse,
+  ProjectInitResult,
+  PushResult,
+  ServiceToken,
+  EnvVariable,
+  VaultFile,
+  CapyError,
+  ERROR_CODES
+} from '../types/index';
+
+export class ServiceClient {
+  private api: AxiosInstance;
+  private token: ServiceToken | null = null;
+  private mockMode: boolean;
+
+  constructor(apiUrl: string = process.env.CAPY_API_URL || 'https://api.capyvault.com') {
+    this.mockMode = process.env.CAPY_MOCK_AUTH === 'true';
+    if (this.mockMode) {
+      console.log('🔫 ServiceClient: Mock mode enabled');
+    }
+    this.api = axios.create({
+      baseURL: apiUrl,
+      timeout: 30000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    this.setupInterceptors();
+  }
+
+  setToken(token: ServiceToken): void {
+    this.token = token;
+  }
+
+  private setupInterceptors(): void {
+    // Request interceptor to add auth token
+    this.api.interceptors.request.use(
+      config => {
+        if (this.token) {
+          config.headers['Authorization'] = `Bearer ${this.token.access_token}`;
+        }
+        return config;
+      },
+      error => Promise.reject(error)
+    );
+
+    // Response interceptor for error handling
+    this.api.interceptors.response.use(
+      response => response,
+      error => {
+        if (error.response?.status === 401) {
+          throw new CapyError(
+            'Authentication required. Please run capy to authenticate.',
+            ERROR_CODES.AUTH_FAILED,
+            { status: 401 }
+          );
+        }
+
+        if (error.response?.status === 403) {
+          throw new CapyError(
+            'Access denied. You do not have permission to access this project.',
+            ERROR_CODES.PERMISSION_DENIED,
+            { status: 403 }
+          );
+        }
+
+        if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+          throw new CapyError(
+            'Failed to connect to CapyVault service. Please check your internet connection.',
+            ERROR_CODES.NETWORK_ERROR,
+            { code: error.code }
+          );
+        }
+
+        throw new CapyError(
+          error.response?.data?.message || 'Service request failed',
+          ERROR_CODES.SERVICE_ERROR,
+          {
+            status: error.response?.status,
+            data: error.response?.data
+          }
+        );
+      }
+    );
+  }
+
+  async initializeProject(projectName: string, organizationId: string): Promise<ProjectInitResult> {
+    if (this.mockMode) {
+      console.log(`🔫 Mock: Initializing project "${projectName}" for org "${organizationId}"`);
+      await this.mockDelay();
+      return {
+        capy_id: `capy_${organizationId}`,
+        project_id: `proj_${projectName.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${Math.random().toString(36).substr(2, 6)}`,
+        project_name: projectName,
+        created: true
+      };
+    }
+
+    try {
+      const response = await this.api.post('/projects', {
+        project_name: projectName,
+        organization_id: organizationId
+      });
+
+      return {
+        capy_id: response.data.capy_id,
+        project_id: response.data.project_id,
+        project_name: response.data.project_name,
+        created: response.data.created || true
+      };
+    } catch (error: any) {
+      if (error instanceof CapyError) {
+        throw error;
+      }
+      throw new CapyError(
+        'Failed to initialize project',
+        ERROR_CODES.SERVICE_ERROR,
+        { error: error.message }
+      );
+    }
+  }
+
+  async getDecryptData(projectId: string): Promise<DecryptResponse> {
+    if (this.mockMode) {
+      console.log(`🔫 Mock: Retrieving decrypt data for project "${projectId}"`);
+      await this.mockDelay();
+      const mockEnvPath = this.getMockEnvPath();
+
+      // Check if mock.env exists - if not, this is a new project with no variables
+      let mockEnvContent = '';
+      if (existsSync(mockEnvPath)) {
+        mockEnvContent = this.readMockEnvContent();
+        const variableCount = mockEnvContent.split('\n').filter(line => line.trim() && !line.startsWith('#')).length;
+        console.log(`🔫 Mock: Read env content with ${variableCount} variables from mock.env`);
+      } else {
+        console.log(`🔫 Mock: No existing mock.env found - new project with 0 variables`);
+      }
+
+      return {
+        env_content: mockEnvContent,
+        decrypt_key: 'mock-decrypt-key-persistent', // Consistent key for all projects in mock mode
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours from now
+      };
+    }
+
+    try {
+      const response = await this.api.get('/decrypt', {
+        params: { project_id: projectId }
+      });
+
+      return {
+        env_content: response.data.env_content,
+        decrypt_key: response.data.decrypt_key,
+        expires_at: response.data.expires_at
+      };
+    } catch (error: any) {
+      if (error instanceof CapyError) {
+        throw error;
+      }
+      throw new CapyError(
+        error.response?.data?.error || error.message || 'Failed to retrieve decryption data',
+        ERROR_CODES.SERVICE_ERROR,
+        { error: error.message }
+      );
+    }
+  }
+
+  async pushVariables(
+    projectId: string,
+    variables: Record<string, string>,
+    vault: VaultFile | null = null
+  ): Promise<PushResult> {
+    if (this.mockMode) {
+      console.log(`🔫 Mock: Pushing ${Object.keys(variables).length} variables to project "${projectId}"`);
+      await this.mockDelay();
+
+      const { Encryptor } = require('../crypto/encryptor');
+      const mockDecryptKey = 'mock-decrypt-key-persistent';
+
+      // Read current mock.env content
+      const currentContent = this.readMockEnvContent();
+      const currentVars: Record<string, string> = {};
+
+      // Parse existing variables (they are encrypted with capy:{resource_id}: prefix)
+      currentContent.split('\n').forEach(line => {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+          const [key, ...valueParts] = trimmed.split('=');
+          currentVars[key] = valueParts.join('='); // Keep encrypted format
+        }
+      });
+
+      // Encrypt new variables and create snippet-enhanced format with resource_id prefix
+      const encryptedNewVars: Record<string, string> = {};
+      const mockVariables: Record<string, any> = {};
+
+      Object.entries(variables).forEach(([key, value]) => {
+        // Check if this is a deletion marker
+        if (value === 'capy:deleted') {
+          // Store deletion marker as-is without encryption
+          encryptedNewVars[key] = 'capy:deleted';
+          
+          mockVariables[key] = {
+            resource_id: vault?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            success: true
+          };
+        } else {
+          // Get resource_id from vault if exists, otherwise generate new one
+          const resourceId = vault?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`;
+
+          const encrypted = Encryptor.encrypt(value, mockDecryptKey);
+          const snippetValue = this.createSnippetWithEncryption(value, encrypted);
+
+          // Format: capy:{resource_id}:{encrypted_value}
+          encryptedNewVars[key] = `capy:${resourceId}:${snippetValue}`;
+
+          mockVariables[key] = {
+            resource_id: resourceId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            success: true
+          };
+        }
+      });
+
+      // Merge with existing encrypted variables
+      const updatedVars = { ...currentVars, ...encryptedNewVars };
+
+      // Convert back to content
+      const updatedContent = Object.entries(updatedVars)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
+
+      // Write back to mock.env
+      this.writeMockEnvContent(updatedContent);
+
+      console.log(`🔫 Mock: Updated mock.env with ${Object.keys(variables).length} new/updated encrypted variables`);
+      return {
+        success: true,
+        variables: mockVariables
+      };
+    }
+
+    try {
+      // Include resource_ids for existing variables from vault
+      const variablesWithMetadata = Object.entries(variables).map(([name, value]) => ({
+        name,
+        value,
+        resource_id: vault?.variables[name]?.resource_id || null
+      }));
+
+      const response = await this.api.post('/variables/push', {
+        project_id: projectId,
+        variables: variablesWithMetadata
+      });
+
+      return {
+        success: response.data.success,
+        variables: response.data.variables
+      };
+    } catch (error: any) {
+      if (error instanceof CapyError) {
+        throw error;
+      }
+      throw new CapyError(
+        error.response?.data?.error || error.message || 'Failed to push variables',
+        ERROR_CODES.SERVICE_ERROR,
+        { error: error.message }
+      );
+    }
+  }
+
+  async deleteVariable(projectId: string, variableName: string): Promise<boolean> {
+    try {
+      const response = await this.api.delete(`/variables/${variableName}`, {
+        params: { project_id: projectId }
+      });
+      return response.data.success;
+    } catch (error: any) {
+      if (error instanceof CapyError) {
+        throw error;
+      }
+      throw new CapyError(
+        `Failed to delete variable ${variableName}`,
+        ERROR_CODES.SERVICE_ERROR,
+        { error: error.message }
+      );
+    }
+  }
+
+  async checkProjectAccess(projectId: string): Promise<boolean> {
+    try {
+      const response = await this.api.get(`/projects/${projectId}/access`);
+      return response.data.has_access;
+    } catch (error: any) {
+      if (error.response?.status === 404) {
+        return false;
+      }
+      if (error instanceof CapyError) {
+        throw error;
+      }
+      throw new CapyError(
+        'Failed to check project access',
+        ERROR_CODES.SERVICE_ERROR,
+        { error: error.message }
+      );
+    }
+  }
+
+  async listProjects(organizationId: string): Promise<Array<{ id: string; name: string }>> {
+    try {
+      const response = await this.api.get('/projects', {
+        params: { organization_id: organizationId }
+      });
+      return response.data.projects;
+    } catch (error: any) {
+      if (error instanceof CapyError) {
+        throw error;
+      }
+      throw new CapyError(
+        'Failed to list projects',
+        ERROR_CODES.SERVICE_ERROR,
+        { error: error.message }
+      );
+    }
+  }
+
+  async healthCheck(): Promise<boolean> {
+    if (this.mockMode) {
+      console.log('🔫 Mock: Health check - always healthy in mock mode');
+      await this.mockDelay(100); // Short delay
+      return true;
+    }
+
+    try {
+      const response = await this.api.get('/health', {
+        timeout: 5000
+      });
+      return response.status === 200;
+    } catch {
+      return false;
+    }
+  }
+
+  private async mockDelay(ms: number = 500): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private getMockEnvPath(): string {
+    // Store mock.env in .capy folder
+    return join(process.cwd(), '.capy', 'mock.env');
+  }
+
+  private readMockEnvContent(): string {
+    const mockEnvPath = this.getMockEnvPath();
+
+    if (!existsSync(mockEnvPath)) {
+      // Return empty string for new projects - don't auto-create sample data
+      return '';
+    }
+
+    try {
+      const content = readFileSync(mockEnvPath, 'utf-8').trim();
+      return content;
+    } catch (error) {
+      console.warn(`⚠️  Failed to read mock.env: ${error}`);
+      return '';
+    }
+  }
+
+  private writeMockEnvContent(content: string): void {
+    const mockEnvPath = this.getMockEnvPath();
+    try {
+      // Ensure .capy directory exists
+      const capyDir = dirname(mockEnvPath);
+      if (!existsSync(capyDir)) {
+        mkdirSync(capyDir, { recursive: true });
+      }
+      
+      writeFileSync(mockEnvPath, content + '\n', 'utf-8');
+      console.log(`🔫 Updated mock.env at ${mockEnvPath}`);
+    } catch (error) {
+      console.warn(`⚠️  Failed to write mock.env: ${error}`);
+    }
+  }
+
+  /**
+   * Creates a snippet-enhanced encrypted value for better usability (same logic as FileManager)
+   */
+  private createSnippetWithEncryption(originalValue: string, encryptedValue: string): string {
+    const valueLength = originalValue.length;
+
+    if (valueLength <= 8) {
+      // For short values (<=8 chars), show only last character
+      const snippet = originalValue.slice(-1);
+      return `${encryptedValue}...${snippet}`;
+    } else if (valueLength <= 16) {
+      // For medium values (9-16 chars), show last 3 characters
+      const snippet = originalValue.slice(-3);
+      return `${encryptedValue}...${snippet}`;
+    } else {
+      // For long values (>16 chars), show first 4 and last 4 characters
+      const firstSnippet = originalValue.slice(0, 4);
+      const lastSnippet = originalValue.slice(-4);
+      return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
+    }
+  }
+}

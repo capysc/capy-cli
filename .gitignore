@@ -1,0 +1,8 @@
+node_modules
+.spec-workflow
+.env
+.decrypt
+.capy-sync
+dist
+.capy-token
+*.env

@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+
+// Simple wrapper that requires the built CLI
+require('../dist/index.js');
