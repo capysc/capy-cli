@@ -7,7 +7,7 @@ import {
   PushResult,
   ServiceToken,
   EnvVariable,
-  VaultFile,
+  KeepFile,
   CapyError,
   ERROR_CODES
 } from '../types/index';
@@ -17,7 +17,7 @@ export class ServiceClient {
   private token: ServiceToken | null = null;
   private mockMode: boolean;
 
-  constructor(apiUrl: string = process.env.CAPY_API_URL || 'https://api.capyvault.com') {
+  constructor(apiUrl: string = process.env.CAPY_API_URL || 'https://api.capy.sc') {
     this.mockMode = process.env.CAPY_MOCK_AUTH === 'true';
     if (this.mockMode) {
       console.log('🔫 ServiceClient: Mock mode enabled');
@@ -71,7 +71,7 @@ export class ServiceClient {
 
         if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
           throw new CapyError(
-            'Failed to connect to CapyVault service. Please check your internet connection.',
+            'Failed to connect to Capy service. Please check your internet connection.',
             ERROR_CODES.NETWORK_ERROR,
             { code: error.code }
           );
@@ -173,7 +173,7 @@ export class ServiceClient {
   async pushVariables(
     projectId: string,
     variables: Record<string, string>,
-    vault: VaultFile | null = null
+    vault: KeepFile | null = null
   ): Promise<PushResult> {
     if (this.mockMode) {
       console.log(`🔫 Mock: Pushing ${Object.keys(variables).length} variables to project "${projectId}"`);

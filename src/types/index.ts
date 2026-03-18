@@ -5,17 +5,17 @@ export interface EnvVariable {
   encrypted: boolean;
 }
 
-export interface VaultFile {
+export interface KeepFile {
   version: string;
   capy_id: string;
   project_id: string;
   project_name: string;
   created_at: string;
   last_sync: string;
-  variables: Record<string, VaultVariable>;
+  variables: Record<string, KeepVariable>;
 }
 
-export interface VaultVariable {
+export interface KeepVariable {
   resource_id: string;
   created_at: string;
   updated_at: string;
@@ -33,7 +33,7 @@ export interface DecryptKey {
 
 export interface ProjectState {
   initialized: boolean;
-  hasVaultFile: boolean;
+  hasKeepFile: boolean;
   hasDecryptKey: boolean;
   hasEnvFile: boolean;
   projectName?: string;
@@ -148,7 +148,7 @@ export class CapyError extends Error {
 export const ERROR_CODES = {
   AUTH_FAILED: 'AUTH_FAILED',
   NO_ENV_FILE: 'NO_ENV_FILE',
-  NO_VAULT_FILE: 'NO_VAULT_FILE',
+  NO_KEEP_FILE: 'NO_KEEP_FILE',
   PERMISSION_DENIED: 'PERMISSION_DENIED',
   NETWORK_ERROR: 'NETWORK_ERROR',
   ENCRYPTION_ERROR: 'ENCRYPTION_ERROR',

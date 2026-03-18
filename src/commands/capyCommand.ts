@@ -8,7 +8,7 @@ import { PromptEngine } from '../ui/promptEngine';
 import {
   CliOptions,
   ProjectState,
-  VaultFile,
+  KeepFile,
   SyncState,
   CapyError,
   ERROR_CODES
@@ -39,7 +39,7 @@ export class CapyCommand {
       const projectState = await this.projectManager.detectProjectState();
 
       if (!projectState.initialized) {
-        // Automatically initialize if .vault doesn't exist
+        // Automatically initialize if .keep doesn't exist
         await this.initializeProject();
       } else {
         await this.syncProject(projectState);
@@ -50,7 +50,7 @@ export class CapyCommand {
   }
 
   private async initializeProject(): Promise<void> {
-    console.log('⚠  No .vault file found - initializing project...');
+    console.log('⚠  No .keep file found - initializing project...');
 
     // Authenticate first
     const spinner = ora('🔐 Authenticating with WorkOS...').start();
@@ -88,7 +88,7 @@ export class CapyCommand {
     const keySpinner = ora('🔑 Generating encryption keys...').start();
 
     // Create vault file
-    const vault: VaultFile = {
+    const vault: KeepFile = {
       version: '1.0',
       capy_id: projectResult.capy_id,
       project_id: projectResult.project_id,
@@ -98,8 +98,8 @@ export class CapyCommand {
       variables: {}
     };
 
-    this.fileManager.writeVaultFile(vault);
-    keySpinner.text = 'Created .vault configuration file';
+    this.fileManager.writeKeepFile(vault);
+    keySpinner.text = 'Created .keep configuration file';
 
     // Get initial decrypt data from service
     try {
@@ -163,8 +163,8 @@ export class CapyCommand {
             
             if (pushResult.success) {
               // Update vault file with variable metadata
-              const updatedVault = this.syncEngine.mergeWithVault(vault, pushResult.variables);
-              this.fileManager.writeVaultFile(updatedVault);
+              const updatedVault = this.syncEngine.mergeWithKeep(vault, pushResult.variables);
+              this.fileManager.writeKeepFile(updatedVault);
               
               // Write encrypted .env file
               this.fileManager.writeEncryptedEnvFile(localEnv, decryptData.decrypt_key, this.options.envPath, updatedVault);
@@ -351,7 +351,7 @@ export class CapyCommand {
       }
 
       // Get vault to retrieve existing resource_ids
-      const vault = this.projectManager.readVaultFile();
+      const vault = this.projectManager.readKeepFile();
       
       const pushResult = await this.serviceClient.pushVariables(
         projectState.projectId!,
@@ -363,9 +363,9 @@ export class CapyCommand {
         syncSpinner.text = `Pushed ${decisions.pushVariables.length} variables`;
 
         // Update vault file
-        const vault = this.projectManager.readVaultFile()!;
-        const updatedVault = this.syncEngine.mergeWithVault(vault, pushResult.variables);
-        this.fileManager.writeVaultFile(updatedVault);
+        const vault = this.projectManager.readKeepFile()!;
+        const updatedVault = this.syncEngine.mergeWithKeep(vault, pushResult.variables);
+        this.fileManager.writeKeepFile(updatedVault);
       }
     }
 
@@ -378,7 +378,7 @@ export class CapyCommand {
       }
 
       // Get vault to retrieve existing resource_ids
-      const vault = this.projectManager.readVaultFile();
+      const vault = this.projectManager.readKeepFile();
       
       const pushResult = await this.serviceClient.pushVariables(
         projectState.projectId!,
@@ -390,12 +390,12 @@ export class CapyCommand {
         syncSpinner.text = `Deleted ${decisions.deleteRemote.length} variables from remote`;
         
         // Remove from vault file
-        const vault = this.projectManager.readVaultFile()!;
+        const vault = this.projectManager.readKeepFile()!;
         for (const varName of decisions.deleteRemote) {
           delete vault.variables[varName];
         }
         vault.last_sync = new Date().toISOString();
-        this.fileManager.writeVaultFile(vault);
+        this.fileManager.writeKeepFile(vault);
       }
     }
 
@@ -403,7 +403,7 @@ export class CapyCommand {
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
     
     // Get updated vault after push and clean it up
-    let finalVault = this.projectManager.readVaultFile();
+    let finalVault = this.projectManager.readKeepFile();
     
     // Update vault with resource_ids from pulled/restored variables
     if (finalVault && (decisions.pullVariables.length > 0 || decisions.keepRemote.length > 0)) {
@@ -439,7 +439,7 @@ export class CapyCommand {
       
       if (vaultUpdated) {
         finalVault.last_sync = new Date().toISOString();
-        this.fileManager.writeVaultFile(finalVault);
+        this.fileManager.writeKeepFile(finalVault);
       }
     }
     
@@ -458,7 +458,7 @@ export class CapyCommand {
       
       if (removedFromVault > 0) {
         finalVault.last_sync = new Date().toISOString();
-        this.fileManager.writeVaultFile(finalVault);
+        this.fileManager.writeKeepFile(finalVault);
       }
     }
     
@@ -508,7 +508,7 @@ export class CapyCommand {
       if (error.code === ERROR_CODES.AUTH_FAILED) {
         console.log('\nPlease ensure:');
         console.log('1. You have internet connectivity');
-        console.log('2. You have a CapyVault account');
+        console.log('2. You have a Capy account');
       } else if (error.code === ERROR_CODES.PERMISSION_DENIED) {
         console.log('\nContact your administrator to grant access to this project.');
       } else if (error.code === ERROR_CODES.NETWORK_ERROR) {

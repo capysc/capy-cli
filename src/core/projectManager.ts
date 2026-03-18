@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, VaultFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -10,11 +10,11 @@ export class ProjectManager {
   }
 
   async detectProjectState(): Promise<ProjectState> {
-    const vaultPath = this.getVaultPath();
+    const vaultPath = this.getKeepPath();
     const decryptPath = this.getDecryptPath();
     const envPath = this.getEnvPath();
 
-    const hasVaultFile = existsSync(vaultPath);
+    const hasKeepFile = existsSync(vaultPath);
     const hasDecryptKey = existsSync(decryptPath);
     const hasEnvFile = existsSync(envPath);
 
@@ -22,17 +22,17 @@ export class ProjectManager {
     let organizationId: string | undefined;
     let projectId: string | undefined;
 
-    if (hasVaultFile) {
+    if (hasKeepFile) {
       try {
         const vaultContent = readFileSync(vaultPath, 'utf-8');
-        const vault: VaultFile = JSON.parse(vaultContent);
-        this.validateVaultFile(vault);
+        const vault: KeepFile = JSON.parse(vaultContent);
+        this.validateKeepFile(vault);
         projectName = vault.project_name;
         organizationId = vault.capy_id;
         projectId = vault.project_id;
       } catch (error) {
         throw new CapyError(
-          'Invalid .vault file format',
+          'Invalid .keep file format',
           ERROR_CODES.INVALID_FORMAT,
           { error, path: vaultPath }
         );
@@ -40,8 +40,8 @@ export class ProjectManager {
     }
 
     return {
-      initialized: hasVaultFile,
-      hasVaultFile,
+      initialized: hasKeepFile,
+      hasKeepFile,
       hasDecryptKey,
       hasEnvFile,
       projectName,
@@ -50,8 +50,8 @@ export class ProjectManager {
     };
   }
 
-  getVaultPath(): string {
-    return join(this.projectRoot, '.vault');
+  getKeepPath(): string {
+    return join(this.projectRoot, '.keep');
   }
 
   getCapyDir(): string {
@@ -85,16 +85,16 @@ export class ProjectManager {
     return normalized;
   }
 
-  readVaultFile(): VaultFile | null {
-    const vaultPath = this.getVaultPath();
+  readKeepFile(): KeepFile | null {
+    const vaultPath = this.getKeepPath();
     if (!existsSync(vaultPath)) {
       return null;
     }
 
     try {
       const content = readFileSync(vaultPath, 'utf-8');
-      const vault = JSON.parse(content) as VaultFile;
-      this.validateVaultFile(vault);
+      const vault = JSON.parse(content) as KeepFile;
+      this.validateKeepFile(vault);
       if (vault.variables && typeof vault.variables !== 'object') {
         throw new CapyError('Invalid variables structure', ERROR_CODES.INVALID_FORMAT);
       }
@@ -104,14 +104,14 @@ export class ProjectManager {
         throw error;
       }
       throw new CapyError(
-        'Failed to read .vault file',
+        'Failed to read .keep file',
         ERROR_CODES.INVALID_FORMAT,
         { error, path: vaultPath }
       );
     }
   }
 
-  private validateVaultFile(vault: any): void {
+  private validateKeepFile(vault: any): void {
     const required = ['version', 'capy_id', 'project_id', 'project_name'];
     for (const field of required) {
       if (!vault || vault[field] === undefined || vault[field] === null) {
@@ -162,20 +162,20 @@ export class ProjectManager {
   }
 
   validateProjectConfiguration(state: ProjectState): void {
-    if (!state.hasVaultFile) {
+    if (!state.hasKeepFile) {
       return;
     }
 
     if (!state.organizationId) {
       throw new CapyError(
-        'Invalid .vault file: missing organization ID',
+        'Invalid .keep file: missing organization ID',
         ERROR_CODES.INVALID_FORMAT
       );
     }
 
     if (!state.projectId) {
       throw new CapyError(
-        'Invalid .vault file: missing project ID',
+        'Invalid .keep file: missing project ID',
         ERROR_CODES.INVALID_FORMAT
       );
     }
