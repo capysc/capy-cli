@@ -49,7 +49,7 @@ export class PromptEngine {
         {
           type: 'confirm',
           name: 'pushAll',
-          message: 'Push all local variables to capy-vault?',
+          message: 'Push all local variables to capy?',
           default: false
         }
       ]);
@@ -63,7 +63,7 @@ export class PromptEngine {
             {
               type: 'confirm',
               name: 'push',
-              message: `${variable.name}: Push to capy-vault?`,
+              message: `${variable.name}: Push to capy?`,
               default: false
             }
           ]);
@@ -253,7 +253,7 @@ export class PromptEngine {
             {
               type: 'confirm',
               name: 'pushLocal',
-              message: `Push local value to capy-vault?`,
+              message: `Push local value to capy?`,
               default: false
             }
           ]);

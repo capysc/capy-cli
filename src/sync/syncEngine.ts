@@ -4,7 +4,7 @@ import {
   ConflictVariable,
   UserDecisions,
   SyncResult,
-  VaultFile,
+  KeepFile,
   DecryptKey,
   SyncState
 } from '../types/index';
@@ -193,21 +193,21 @@ export class SyncEngine {
     };
   }
 
-  mergeWithVault(
-    vault: VaultFile,
+  mergeWithKeep(
+    keep: KeepFile,
     pushedVariables: Record<string, { resource_id: string }>
-  ): VaultFile {
-    const updatedVault = { ...vault };
+  ): KeepFile {
+    const updatedKeep = { ...keep };
     const now = new Date().toISOString();
 
     for (const [varName, data] of Object.entries(pushedVariables)) {
-      if (updatedVault.variables[varName]) {
+      if (updatedKeep.variables[varName]) {
         // Update existing variable
-        updatedVault.variables[varName].resource_id = data.resource_id;
-        updatedVault.variables[varName].updated_at = now;
+        updatedKeep.variables[varName].resource_id = data.resource_id;
+        updatedKeep.variables[varName].updated_at = now;
       } else {
         // Add new variable
-        updatedVault.variables[varName] = {
+        updatedKeep.variables[varName] = {
           resource_id: data.resource_id,
           created_at: now,
           updated_at: now
@@ -215,8 +215,8 @@ export class SyncEngine {
       }
     }
 
-    updatedVault.last_sync = now;
-    return updatedVault;
+    updatedKeep.last_sync = now;
+    return updatedKeep;
   }
 
   createDecryptKey(

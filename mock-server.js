@@ -38,7 +38,7 @@ app.post('/variables/push', (req, res) => {
 
 const PORT = 3001;
 app.listen(PORT, () => {
-  console.log(`🚀 Mock CapyVault service running on http://localhost:${PORT}`);
+  console.log(`🚀 Mock Capy service running on http://localhost:${PORT}`);
   console.log('\nSet environment variable:');
   console.log(`export CAPY_API_URL=http://localhost:${PORT}`);
 });

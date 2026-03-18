@@ -8,7 +8,7 @@ const program = new Command();
 
 program
   .name('capy')
-  .description('CapyVault CLI - Secure environment variable management with intelligent sync')
+  .description('Capy CLI - SecretOps for the AI age')
   .version('1.0.0')
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
@@ -22,7 +22,7 @@ program
       dryRun: options.dryRun
     };
 
-    console.log('\n🔐 CapyVault CLI\n');
+    console.log('\n🔐 Capy CLI\n');
 
     const command = new CapyCommand(cliOptions);
     await command.execute();
@@ -39,7 +39,7 @@ program
   .command('version')
   .description('Show version information')
   .action(() => {
-    console.log('CapyVault CLI v1.0.0');
+    console.log('Capy CLI v1.0.0');
   });
 
 // Parse command line arguments
