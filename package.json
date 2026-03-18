@@ -1,7 +1,7 @@
 {
-  "name": "@capyvault/cli",
+  "name": "@capy/cli",
   "version": "0.1.0",
-  "description": "CapyVault CLI - Intelligent environment variable sync with granular control",
+  "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",
   "bin": {
     "capy": "bin/capy"

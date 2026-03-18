@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, chmodSync, mkdirSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
-import { EnvVariable, VaultFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 
@@ -108,7 +108,7 @@ export class FileManager {
     }
   }
 
-  writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, vault?: VaultFile | null): void {
+  writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, vault?: KeepFile | null): void {
     const envPath = path || join(this.projectRoot, '.env');
     console.log(`🔐 Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
@@ -166,25 +166,25 @@ export class FileManager {
     return parseDotenv(content);
   }
 
-  writeVaultFile(vault: VaultFile): void {
-    const vaultPath = join(this.projectRoot, '.vault');
-    const backup = this.createBackup(vaultPath);
+  writeKeepFile(keep: KeepFile): void {
+    const keepPath = join(this.projectRoot, '.keep');
+    const backup = this.createBackup(keepPath);
 
     try {
-      const content = JSON.stringify(vault, null, 2);
-      writeFileSync(vaultPath, content + '\n', 'utf-8');
+      const content = JSON.stringify(keep, null, 2);
+      writeFileSync(keepPath, content + '\n', 'utf-8');
 
       if (backup) {
         this.removeBackup(backup);
       }
     } catch (error) {
       if (backup) {
-        this.restoreBackup(backup, vaultPath);
+        this.restoreBackup(backup, keepPath);
       }
       throw new CapyError(
-        'Failed to write .vault file',
+        'Failed to write .keep file',
         ERROR_CODES.PERMISSION_DENIED,
-        { error, path: vaultPath }
+        { error, path: keepPath }
       );
     }
   }
@@ -271,7 +271,7 @@ export class FileManager {
       }
 
       if (newEntries.length > 0) {
-        appendFileSync(gitignorePath, '\n# CapyVault\n', 'utf-8');
+        appendFileSync(gitignorePath, '\n# Capy\n', 'utf-8');
         appendFileSync(gitignorePath, contentToAppend + '\n', 'utf-8');
       }
     } catch (error) {
