@@ -84,11 +84,11 @@ export class CapyCommand {
     );
     initSpinner.succeed(`Project "${projectName}" created`);
 
-    // Generate master key and create vault
+    // Generate master key and create keep
     const keySpinner = ora('🔑 Generating encryption keys...').start();
 
-    // Create vault file
-    const vault: KeepFile = {
+    // Create keep file
+    const keep: KeepFile = {
       version: '1.0',
       capy_id: projectResult.capy_id,
       project_id: projectResult.project_id,
@@ -98,7 +98,7 @@ export class CapyCommand {
       variables: {}
     };
 
-    this.fileManager.writeKeepFile(vault);
+    this.fileManager.writeKeepFile(keep);
     keySpinner.text = 'Created .keep configuration file';
 
     // Get initial decrypt data from service
@@ -120,7 +120,7 @@ export class CapyCommand {
       // Parse and write encrypted env file if content exists
       if (decryptData.env_content) {
         const envVars = this.fileManager.parseEnvContent(decryptData.env_content);
-        this.fileManager.writeEncryptedEnvFile(envVars, decryptData.decrypt_key, undefined, vault);
+        this.fileManager.writeEncryptedEnvFile(envVars, decryptData.decrypt_key, undefined, keep);
         keySpinner.succeed(`Retrieved and encrypted ${Object.keys(envVars).length} variables`);
       } else {
         keySpinner.succeed('No existing variables found');
@@ -151,23 +151,23 @@ export class CapyCommand {
           
           // Automatically sync since this is a new project with no remote variables
           // No conflicts possible, so no need to prompt
-          const syncSpinner = ora('🔄 Syncing local variables to vault...').start();
+          const syncSpinner = ora('🔄 Syncing local variables to keep...').start();
           
           try {
             // Push all local variables
             const pushResult = await this.serviceClient.pushVariables(
               projectResult.project_id,
               localEnv,
-              vault
+              keep
             );
-            
+
             if (pushResult.success) {
-              // Update vault file with variable metadata
-              const updatedVault = this.syncEngine.mergeWithKeep(vault, pushResult.variables);
-              this.fileManager.writeKeepFile(updatedVault);
-              
+              // Update keep file with variable metadata
+              const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables);
+              this.fileManager.writeKeepFile(updatedKeep);
+
               // Write encrypted .env file
-              this.fileManager.writeEncryptedEnvFile(localEnv, decryptData.decrypt_key, this.options.envPath, updatedVault);
+              this.fileManager.writeEncryptedEnvFile(localEnv, decryptData.decrypt_key, this.options.envPath, updatedKeep);
               
               // Update decrypt key with variable permissions
               const decryptKey = this.syncEngine.createDecryptKey(
@@ -186,7 +186,7 @@ export class CapyCommand {
               };
               this.fileManager.writeSyncState(initialSyncState);
               
-              syncSpinner.succeed(`Synced ${localVarCount} variable(s) to vault`);
+              syncSpinner.succeed(`Synced ${localVarCount} variable(s) to keep`);
             } else {
               syncSpinner.fail('Failed to sync variables');
             }
@@ -343,29 +343,29 @@ export class CapyCommand {
     // Perform sync operations
     const syncSpinner = ora('🔄 Syncing...').start();
 
-    // Push variables to vault
+    // Push variables to keep
     if (decisions.pushVariables.length > 0) {
       const pushVars: Record<string, string> = {};
       for (const varName of decisions.pushVariables) {
         pushVars[varName] = localEnv[varName];
       }
 
-      // Get vault to retrieve existing resource_ids
-      const vault = this.projectManager.readKeepFile();
-      
+      // Get keep to retrieve existing resource_ids
+      const keep = this.projectManager.readKeepFile();
+
       const pushResult = await this.serviceClient.pushVariables(
         projectState.projectId!,
         pushVars,
-        vault
+        keep
       );
 
       if (pushResult.success) {
         syncSpinner.text = `Pushed ${decisions.pushVariables.length} variables`;
 
-        // Update vault file
-        const vault = this.projectManager.readKeepFile()!;
-        const updatedVault = this.syncEngine.mergeWithKeep(vault, pushResult.variables);
-        this.fileManager.writeKeepFile(updatedVault);
+        // Update keep file
+        const keep = this.projectManager.readKeepFile()!;
+        const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables);
+        this.fileManager.writeKeepFile(updatedKeep);
       }
     }
 
@@ -377,39 +377,39 @@ export class CapyCommand {
         deleteVars[varName] = 'capy:deleted';
       }
 
-      // Get vault to retrieve existing resource_ids
-      const vault = this.projectManager.readKeepFile();
-      
+      // Get keep to retrieve existing resource_ids
+      const keep = this.projectManager.readKeepFile();
+
       const pushResult = await this.serviceClient.pushVariables(
         projectState.projectId!,
         deleteVars,
-        vault
+        keep
       );
 
       if (pushResult.success) {
         syncSpinner.text = `Deleted ${decisions.deleteRemote.length} variables from remote`;
-        
-        // Remove from vault file
-        const vault = this.projectManager.readKeepFile()!;
+
+        // Remove from keep file
+        const keep = this.projectManager.readKeepFile()!;
         for (const varName of decisions.deleteRemote) {
-          delete vault.variables[varName];
+          delete keep.variables[varName];
         }
-        vault.last_sync = new Date().toISOString();
-        this.fileManager.writeKeepFile(vault);
+        keep.last_sync = new Date().toISOString();
+        this.fileManager.writeKeepFile(keep);
       }
     }
 
     // Apply decisions to create final env
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
     
-    // Get updated vault after push and clean it up
-    let finalVault = this.projectManager.readKeepFile();
-    
-    // Update vault with resource_ids from pulled/restored variables
-    if (finalVault && (decisions.pullVariables.length > 0 || decisions.keepRemote.length > 0)) {
+    // Get updated keep after push and clean it up
+    let finalKeep = this.projectManager.readKeepFile();
+
+    // Update keep with resource_ids from pulled/restored variables
+    if (finalKeep && (decisions.pullVariables.length > 0 || decisions.keepRemote.length > 0)) {
       const pulledVars = [...decisions.pullVariables, ...decisions.keepRemote];
-      let vaultUpdated = false;
-      
+      let keepUpdated = false;
+
       for (const varName of pulledVars) {
         // Extract resource_id from remoteEnvEncrypted
         const encryptedValue = remoteEnvEncrypted[varName];
@@ -418,52 +418,52 @@ export class CapyCommand {
           if (parts.length >= 3) {
             const resourceId = parts[1];
             const now = new Date().toISOString();
-            
-            if (!finalVault.variables[varName]) {
+
+            if (!finalKeep.variables[varName]) {
               // New variable pulled from remote
-              finalVault.variables[varName] = {
+              finalKeep.variables[varName] = {
                 resource_id: resourceId,
                 created_at: now,
                 updated_at: now
               };
-              vaultUpdated = true;
-            } else if (finalVault.variables[varName].resource_id !== resourceId) {
+              keepUpdated = true;
+            } else if (finalKeep.variables[varName].resource_id !== resourceId) {
               // Existing variable but resource_id changed
-              finalVault.variables[varName].resource_id = resourceId;
-              finalVault.variables[varName].updated_at = now;
-              vaultUpdated = true;
+              finalKeep.variables[varName].resource_id = resourceId;
+              finalKeep.variables[varName].updated_at = now;
+              keepUpdated = true;
             }
           }
         }
       }
-      
-      if (vaultUpdated) {
-        finalVault.last_sync = new Date().toISOString();
-        this.fileManager.writeKeepFile(finalVault);
+
+      if (keepUpdated) {
+        finalKeep.last_sync = new Date().toISOString();
+        this.fileManager.writeKeepFile(finalKeep);
       }
     }
-    
-    // Clean up vault: remove variables that no longer exist in finalEnv
-    if (finalVault) {
+
+    // Clean up keep: remove variables that no longer exist in finalEnv
+    if (finalKeep) {
       const finalEnvKeys = new Set(Object.keys(finalEnv));
-      const vaultKeys = Object.keys(finalVault.variables);
-      let removedFromVault = 0;
-      
-      for (const vaultKey of vaultKeys) {
-        if (!finalEnvKeys.has(vaultKey)) {
-          delete finalVault.variables[vaultKey];
-          removedFromVault++;
+      const keepKeys = Object.keys(finalKeep.variables);
+      let removedFromKeep = 0;
+
+      for (const keepKey of keepKeys) {
+        if (!finalEnvKeys.has(keepKey)) {
+          delete finalKeep.variables[keepKey];
+          removedFromKeep++;
         }
       }
-      
-      if (removedFromVault > 0) {
-        finalVault.last_sync = new Date().toISOString();
-        this.fileManager.writeKeepFile(finalVault);
+
+      if (removedFromKeep > 0) {
+        finalKeep.last_sync = new Date().toISOString();
+        this.fileManager.writeKeepFile(finalKeep);
       }
     }
-    
+
     // Write encrypted .env file using the decryption key
-    this.fileManager.writeEncryptedEnvFile(finalEnv, decryptData.decrypt_key, this.options.envPath, finalVault);
+    this.fileManager.writeEncryptedEnvFile(finalEnv, decryptData.decrypt_key, this.options.envPath, finalKeep);
     syncSpinner.text = `Updated encrypted .env with ${Object.keys(finalEnv).length} total variables`;
 
     // Update decrypt key
@@ -489,10 +489,10 @@ export class CapyCommand {
     const result = this.syncEngine.generateSyncResult(changeSet, decisions);
 
     if (result.pushed.length > 0) {
-      this.promptEngine.displaySuccess(`Pushed ${result.pushed.length} variable(s) to vault`);
+      this.promptEngine.displaySuccess(`Pushed ${result.pushed.length} variable(s) to keep`);
     }
     if (result.pulled.length > 0) {
-      this.promptEngine.displaySuccess(`Pulled ${result.pulled.length} variable(s) from vault`);
+      this.promptEngine.displaySuccess(`Pulled ${result.pulled.length} variable(s) from keep`);
     }
     if (result.conflicts.length > 0) {
       this.promptEngine.displaySuccess(`Resolved ${result.conflicts.length} conflict(s)`);

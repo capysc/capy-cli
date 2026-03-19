@@ -108,7 +108,7 @@ export class FileManager {
     }
   }
 
-  writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, vault?: KeepFile | null): void {
+  writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null): void {
     const envPath = path || join(this.projectRoot, '.env');
     console.log(`🔐 Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
@@ -127,8 +127,8 @@ export class FileManager {
           const encrypted = Encryptor.encrypt(value, encryptionKey);
           const snippetValue = this.createSnippetWithEncryption(value, encrypted);
           
-          // Prepend capy:{resource_id}: if we have a vault with resource_id
-          const resourceId = vault?.variables[key]?.resource_id;
+          // Prepend capy:{resource_id}: if we have a keep with resource_id
+          const resourceId = keep?.variables[key]?.resource_id;
           if (resourceId) {
             finalValue = `capy:${resourceId}:${snippetValue}`;
           } else {

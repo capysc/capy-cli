@@ -263,8 +263,8 @@ describe('PromptEngine', () => {
       const result = await promptEngine.confirmSync(decisions);
 
       expect(consoleSpy).toHaveBeenCalledWith('\n📋 Summary of changes:');
-      expect(consoleSpy).toHaveBeenCalledWith('✓ Push 2 variable(s) to vault');
-      expect(consoleSpy).toHaveBeenCalledWith('✓ Pull 1 variable(s) from vault');
+      expect(consoleSpy).toHaveBeenCalledWith('✓ Push 2 variable(s) to keep');
+      expect(consoleSpy).toHaveBeenCalledWith('✓ Pull 1 variable(s) from keep');
       expect(consoleSpy).toHaveBeenCalledWith('✓ Keep 1 local value(s)');
       expect(consoleSpy).toHaveBeenCalledWith('✓ Use 1 remote value(s)');
 

@@ -6,7 +6,7 @@ import { SyncEngine } from '../../src/sync/syncEngine';
 import { PromptEngine } from '../../src/ui/promptEngine';
 import { AuthService } from '../../src/auth/authService';
 import { ServiceClient } from '../../src/service/serviceClient';
-import { CapyError, VaultFile, DecryptKey } from '../../src/types/index';
+import { CapyError, KeepFile, DecryptKey } from '../../src/types/index';
 
 // Integration tests - testing components working together without full mocking
 describe('CLI Integration Tests', () => {
@@ -42,7 +42,7 @@ describe('CLI Integration Tests', () => {
     test('should correctly detect uninitialized project state', async () => {
       // Mock file system operations since we're not actually creating files
       jest.spyOn(require('fs'), 'existsSync').mockImplementation((path: any) => {
-        if (path.includes('.vault')) return false;
+        if (path.includes('.keep')) return false;
         if (path.includes('.capy/decrypt')) return false;
         if (path.includes('.env')) return true;
         return false;
@@ -52,14 +52,14 @@ describe('CLI Integration Tests', () => {
 
       expect(state).toEqual({
         initialized: false,
-        hasVaultFile: false,
+        hasKeepFile: false,
         hasDecryptKey: false,
         hasEnvFile: true
       });
     });
 
     test('should correctly detect initialized project state', async () => {
-      const mockVault: VaultFile = {
+      const mockKeep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -70,19 +70,19 @@ describe('CLI Integration Tests', () => {
       };
 
       jest.spyOn(require('fs'), 'existsSync').mockImplementation((path: any) => {
-        if (path.includes('.vault')) return true;
+        if (path.includes('.keep')) return true;
         if (path.includes('.capy/decrypt')) return true;
         if (path.includes('.env')) return true;
         return false;
       });
 
-      jest.spyOn(require('fs'), 'readFileSync').mockReturnValue(JSON.stringify(mockVault));
+      jest.spyOn(require('fs'), 'readFileSync').mockReturnValue(JSON.stringify(mockKeep));
 
       const state = await projectManager.detectProjectState();
 
       expect(state).toEqual({
         initialized: true,
-        hasVaultFile: true,
+        hasKeepFile: true,
         hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
@@ -110,8 +110,8 @@ DEBUG=true`;
       });
     });
 
-    test('should create proper vault file structure', () => {
-      const mockVault: VaultFile = {
+    test('should create proper keep file structure', () => {
+      const mockKeep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -129,11 +129,11 @@ DEBUG=true`;
 
       const writeFileSyncSpy = jest.spyOn(require('fs'), 'writeFileSync').mockImplementation(() => {});
 
-      fileManager.writeVaultFile(mockVault);
+      fileManager.writeKeepFile(mockKeep);
 
       expect(writeFileSyncSpy).toHaveBeenCalledWith(
-        expect.stringContaining('.vault'),
-        JSON.stringify(mockVault, null, 2) + '\n',
+        expect.stringContaining('.keep'),
+        JSON.stringify(mockKeep, null, 2) + '\n',
         'utf-8'
       );
     });
@@ -212,8 +212,8 @@ DEBUG=true`;
       });
     });
 
-    test('should merge vault file with pushed variables', () => {
-      const originalVault: VaultFile = {
+    test('should merge keep file with pushed variables', () => {
+      const originalKeep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -234,12 +234,12 @@ DEBUG=true`;
         EXISTING_VAR: { resource_id: 'res_updated' }
       };
 
-      const updatedVault = syncEngine.mergeWithVault(originalVault, pushedVariables);
+      const updatedKeep = syncEngine.mergeWithKeep(originalKeep, pushedVariables);
 
-      expect(updatedVault.variables.NEW_VAR).toBeDefined();
-      expect(updatedVault.variables.NEW_VAR.resource_id).toBe('res_new');
-      expect(updatedVault.variables.EXISTING_VAR.resource_id).toBe('res_updated');
-      expect(updatedVault.last_sync).not.toBe(originalVault.last_sync);
+      expect(updatedKeep.variables.NEW_VAR).toBeDefined();
+      expect(updatedKeep.variables.NEW_VAR.resource_id).toBe('res_new');
+      expect(updatedKeep.variables.EXISTING_VAR.resource_id).toBe('res_updated');
+      expect(updatedKeep.last_sync).not.toBe(originalKeep.last_sync);
     });
 
     test('should validate user decisions correctly', () => {
@@ -283,25 +283,25 @@ DEBUG=true`;
   });
 
   describe('Error Handling Integration', () => {
-    test('should handle malformed vault file gracefully', () => {
+    test('should handle malformed keep file gracefully', () => {
       jest.spyOn(require('fs'), 'existsSync').mockReturnValue(true);
       jest.spyOn(require('fs'), 'readFileSync').mockReturnValue('invalid json');
 
-      expect(() => projectManager.readVaultFile()).toThrow(CapyError);
-      expect(() => projectManager.readVaultFile()).toThrow('Failed to read .vault file');
+      expect(() => projectManager.readKeepFile()).toThrow(CapyError);
+      expect(() => projectManager.readKeepFile()).toThrow('Failed to read .keep file');
     });
 
-    test('should handle missing required vault file fields', () => {
-      const invalidVault = {
+    test('should handle missing required keep file fields', () => {
+      const invalidKeep = {
         version: '1.0',
         // Missing required fields
         project_name: 'test'
       };
 
       jest.spyOn(require('fs'), 'existsSync').mockReturnValue(true);
-      jest.spyOn(require('fs'), 'readFileSync').mockReturnValue(JSON.stringify(invalidVault));
+      jest.spyOn(require('fs'), 'readFileSync').mockReturnValue(JSON.stringify(invalidKeep));
 
-      expect(() => projectManager.readVaultFile()).toThrow(CapyError);
+      expect(() => projectManager.readKeepFile()).toThrow(CapyError);
     });
 
     test('should generate proper error messages for sync failures', () => {
