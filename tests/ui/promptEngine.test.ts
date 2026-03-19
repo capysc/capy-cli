@@ -471,6 +471,34 @@ describe('PromptEngine', () => {
         expect((promptEngine as any).applySnippetObfuscation('abcdefghijklmnopqrstuvwxyz1234')).toBe('abcd...yz1234');
         expect((promptEngine as any).applySnippetObfuscation('very_long_encrypted_value_for_testing_obfuscation')).toBe('very...cation');
       });
+
+      test('should strip capy: prefix before obfuscating GCM-encrypted values', () => {
+        // GCM format: capy:{base64_data} — prefix should be stripped so
+        // the masked output shows base64 fingerprint chars, not "capy"
+        const gcmValue = 'capy:DKj8f2lQm+abc123def456ghi789==';
+        const stripped = 'DKj8f2lQm+abc123def456ghi789==';
+        // stripped is 31 chars → XXXX...XXXXXX pattern
+        expect((promptEngine as any).applySnippetObfuscation(gcmValue)).toBe('DKj8...i789==');
+        // Verify it matches what we'd get from the stripped value directly
+        expect((promptEngine as any).applySnippetObfuscation(gcmValue))
+          .toBe((promptEngine as any).applySnippetObfuscation(stripped));
+      });
+
+      test('should strip capy:{resource_id}: prefix before obfuscating legacy values', () => {
+        // Legacy format: capy:{resource_id}:{encrypted_value}
+        const legacyValue = 'capy:res_123:abcdefghijklmnopqrstuvwxyz';
+        const stripped = 'abcdefghijklmnopqrstuvwxyz';
+        // stripped is 26 chars → XXXX...XXXXXX pattern
+        expect((promptEngine as any).applySnippetObfuscation(legacyValue)).toBe('abcd...uvwxyz');
+        expect((promptEngine as any).applySnippetObfuscation(legacyValue))
+          .toBe((promptEngine as any).applySnippetObfuscation(stripped));
+      });
+
+      test('should handle short GCM values after prefix stripping', () => {
+        // Short base64 after stripping capy: prefix
+        expect((promptEngine as any).applySnippetObfuscation('capy:abc')).toBe('...c');
+        expect((promptEngine as any).applySnippetObfuscation('capy:abcdefgh')).toBe('a...h');
+      });
     });
   });
 
