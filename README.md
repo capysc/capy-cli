@@ -1,4 +1,4 @@
-# CapyVault CLI
+# Capy CLI
 
 > Secret Ops for people with better things to do
 
@@ -8,7 +8,7 @@ A zero-trust command-line tool for secure environment variable management with s
 
 ```bash
 # Install globally
-npm install -g @capyvault/cli
+npm install -g @capy/cli
 
 # Run in any project directory
 capy
@@ -21,15 +21,15 @@ That's it! The CLI intelligently handles initialization, authentication, and syn
 ### Global Installation (Recommended)
 
 ```bash
-npm install -g @capyvault/cli
+npm install -g @capy/cli
 ```
 
 ### Local Development Usage
 
 ```bash
 # Clone and build
-git clone https://github.com/capyvault/capy-vault
-cd capy-vault/packages/cli
+git clone https://github.com/capysc/capy-cli
+cd capy-cli
 npm install
 npm run build
 
@@ -55,7 +55,7 @@ tsx src/index.ts
 
 ### First-Time Project Setup
 
-When you run `capy` in a directory without a `.vault` file:
+When you run `capy` in a directory without a `.keep` file:
 
 ```bash
 $ capy
@@ -102,10 +102,10 @@ $ capy
 │ DEBUG_MODE      │ true                 │
 └─────────────────┴──────────────────────┘
 
-? NEW_API_KEY: Push to capy-vault? (y/N) y
-? DEBUG_MODE: Push to capy-vault? (y/N) n
+? NEW_API_KEY: Push to capy? (y/N) y
+? DEBUG_MODE: Push to capy? (y/N) n
 
-✓ Pushed NEW_API_KEY to vault
+✓ Pushed NEW_API_KEY to keep
 ✓ Kept DEBUG_MODE local only
 ✓ Updated .env with 4 total variables
 ```
@@ -200,11 +200,11 @@ npm link
 The CLI creates and manages these files:
 
 - **`.env`** - Your plaintext environment variables (gitignored)
-- **`.vault`** - Project metadata only, no secrets (committed to git)
+- **`.keep`** - Project metadata only, no secrets (committed to git)
 - **`.decrypt`** - User-specific decryption key (gitignored)
 - **`.gitignore`** - Automatically updated to exclude secrets
 
-Only `.vault` is committed to version control - it contains no secrets, just project metadata.
+Only `.keep` is committed to version control - it contains no secrets, just project metadata.
 
 ## Security Model
 
@@ -221,9 +221,9 @@ Only `.vault` is committed to version control - it contains no secrets, just pro
 | Location | What's Stored | Committed to Git |
 |----------|---------------|------------------|
 | `.env` | Plaintext secrets | ❌ Never |
-| `.vault` | Project metadata only | ✅ Always |
+| `.keep` | Project metadata only | ✅ Always |
 | `.decrypt` | User-specific key | ❌ Never |
-| CapyVault Service | Encrypted secrets in KMS | N/A |
+| Capy Service | Encrypted secrets in KMS | N/A |
 
 ## Troubleshooting
 
@@ -263,7 +263,7 @@ capy --env-path ./config/.env
 ### Connection Issues
 
 ```bash
-❌ Failed to connect to CapyVault service
+❌ Failed to connect to Capy service
 ```
 
 **Solution**: Check your internet connection and verify the service is running.
@@ -287,7 +287,7 @@ Configure CLI behavior with these environment variables:
 
 Example:
 ```bash
-export CAPY_API_URL=https://api.capyvault.dev
+export CAPY_API_URL=https://api.capy.sc
 export CAPY_LOG_LEVEL=debug
 capy
 ```
@@ -321,9 +321,9 @@ Contributions welcome! Please read our [Contributing Guide](../../CONTRIBUTING.m
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/capyvault/capy-cli/issues)
-- **Documentation**: [docs.capyvault.com](https://docs.capyvault.com)
-- **Discord**: [Join our community](https://discord.gg/capyvault)
+- **Issues**: [GitHub Issues](https://github.com/capysc/capy-cli/issues)
+- **Documentation**: [docs.capy.sc](https://docs.capy.sc)
+- **Discord**: [Join our community](https://discord.gg/capy)
 
 ## License
 
