@@ -2,7 +2,7 @@ import { jest } from '@jest/globals';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { ProjectManager } from '../../src/core/projectManager';
-import { CapyError, ERROR_CODES, VaultFile } from '../../src/types/index';
+import { CapyError, ERROR_CODES, KeepFile } from '../../src/types/index';
 
 // Mock fs module
 jest.mock('fs');
@@ -19,9 +19,9 @@ describe('ProjectManager', () => {
   });
 
   describe('detectProjectState', () => {
-    test('should detect uninitialized project when no .vault file exists', async () => {
+    test('should detect uninitialized project when no .keep file exists', async () => {
       mockExistsSync.mockImplementation((path) => {
-        if (path === join(testRoot, '.vault')) return false;
+        if (path === join(testRoot, '.keep')) return false;
         if (path === join(testRoot, '.capy/decrypt')) return false;
         if (path === join(testRoot, '.env')) return true;
         return false;
@@ -31,14 +31,14 @@ describe('ProjectManager', () => {
 
       expect(state).toEqual({
         initialized: false,
-        hasVaultFile: false,
+        hasKeepFile: false,
         hasDecryptKey: false,
         hasEnvFile: true
       });
     });
 
-    test('should detect initialized project with valid .vault file', async () => {
-      const mockVault: VaultFile = {
+    test('should detect initialized project with valid .keep file', async () => {
+      const mockKeep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -49,19 +49,19 @@ describe('ProjectManager', () => {
       };
 
       mockExistsSync.mockImplementation((path) => {
-        if (path === join(testRoot, '.vault')) return true;
+        if (path === join(testRoot, '.keep')) return true;
         if (path === join(testRoot, '.capy/decrypt')) return true;
         if (path === join(testRoot, '.env')) return true;
         return false;
       });
 
-      mockReadFileSync.mockReturnValue(JSON.stringify(mockVault));
+      mockReadFileSync.mockReturnValue(JSON.stringify(mockKeep));
 
       const state = await projectManager.detectProjectState();
 
       expect(state).toEqual({
         initialized: true,
-        hasVaultFile: true,
+        hasKeepFile: true,
         hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
@@ -70,30 +70,30 @@ describe('ProjectManager', () => {
       });
     });
 
-    test('should throw CapyError for invalid .vault file', async () => {
+    test('should throw CapyError for invalid .keep file', async () => {
       mockExistsSync.mockImplementation((path) => {
-        if (path === join(testRoot, '.vault')) return true;
+        if (path === join(testRoot, '.keep')) return true;
         return false;
       });
 
       mockReadFileSync.mockReturnValue('invalid json');
 
       await expect(projectManager.detectProjectState()).rejects.toThrow(CapyError);
-      await expect(projectManager.detectProjectState()).rejects.toThrow('Invalid .vault file format');
+      await expect(projectManager.detectProjectState()).rejects.toThrow('Invalid .keep file format');
     });
   });
 
-  describe('readVaultFile', () => {
-    test('should return null when .vault file does not exist', () => {
+  describe('readKeepFile', () => {
+    test('should return null when .keep file does not exist', () => {
       mockExistsSync.mockReturnValue(false);
 
-      const result = projectManager.readVaultFile();
+      const result = projectManager.readKeepFile();
 
       expect(result).toBeNull();
     });
 
-    test('should read and validate .vault file successfully', () => {
-      const mockVault: VaultFile = {
+    test('should read and validate .keep file successfully', () => {
+      const mockKeep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -110,37 +110,37 @@ describe('ProjectManager', () => {
       };
 
       mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(mockVault));
+      mockReadFileSync.mockReturnValue(JSON.stringify(mockKeep));
 
-      const result = projectManager.readVaultFile();
+      const result = projectManager.readKeepFile();
 
-      expect(result).toEqual(mockVault);
-      expect(mockReadFileSync).toHaveBeenCalledWith(join(testRoot, '.vault'), 'utf-8');
+      expect(result).toEqual(mockKeep);
+      expect(mockReadFileSync).toHaveBeenCalledWith(join(testRoot, '.keep'), 'utf-8');
     });
 
     test('should throw CapyError for malformed JSON', () => {
       mockExistsSync.mockReturnValue(true);
       mockReadFileSync.mockReturnValue('invalid json');
 
-      expect(() => projectManager.readVaultFile()).toThrow(CapyError);
-      expect(() => projectManager.readVaultFile()).toThrow('Failed to read .vault file');
+      expect(() => projectManager.readKeepFile()).toThrow(CapyError);
+      expect(() => projectManager.readKeepFile()).toThrow('Failed to read .keep file');
     });
 
     test('should throw CapyError for missing required fields', () => {
-      const invalidVault = {
+      const invalidKeep = {
         version: '1.0',
         // Missing required fields
         project_name: 'test'
       };
 
       mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(invalidVault));
+      mockReadFileSync.mockReturnValue(JSON.stringify(invalidKeep));
 
-      expect(() => projectManager.readVaultFile()).toThrow(CapyError);
+      expect(() => projectManager.readKeepFile()).toThrow(CapyError);
     });
 
     test('should throw CapyError for invalid variables structure', () => {
-      const invalidVault = {
+      const invalidKeep = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -151,9 +151,9 @@ describe('ProjectManager', () => {
       };
 
       mockExistsSync.mockReturnValue(true);
-      mockReadFileSync.mockReturnValue(JSON.stringify(invalidVault));
+      mockReadFileSync.mockReturnValue(JSON.stringify(invalidKeep));
 
-      expect(() => projectManager.readVaultFile()).toThrow('Invalid variables structure');
+      expect(() => projectManager.readKeepFile()).toThrow('Invalid variables structure');
     });
   });
 
@@ -195,9 +195,9 @@ describe('ProjectManager', () => {
     });
   });
 
-  describe('validateVaultFile', () => {
+  describe('validateKeepFile', () => {
     test('should validate required fields', () => {
-      const validVault = {
+      const validKeep = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -205,33 +205,33 @@ describe('ProjectManager', () => {
         variables: {}
       };
 
-      expect(() => (projectManager as any).validateVaultFile(validVault)).not.toThrow();
+      expect(() => (projectManager as any).validateKeepFile(validKeep)).not.toThrow();
     });
 
     test('should throw for missing version', () => {
-      const invalidVault = {
+      const invalidKeep = {
         capy_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {}
       };
 
-      expect(() => (projectManager as any).validateVaultFile(invalidVault)).toThrow('Missing required field: version');
+      expect(() => (projectManager as any).validateKeepFile(invalidKeep)).toThrow('Missing required field: version');
     });
 
     test('should throw for missing capy_id', () => {
-      const invalidVault = {
+      const invalidKeep = {
         version: '1.0',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {}
       };
 
-      expect(() => (projectManager as any).validateVaultFile(invalidVault)).toThrow('Missing required field: capy_id');
+      expect(() => (projectManager as any).validateKeepFile(invalidKeep)).toThrow('Missing required field: capy_id');
     });
 
     test('should throw for invalid variables type', () => {
-      const invalidVault = {
+      const invalidKeep = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -239,14 +239,14 @@ describe('ProjectManager', () => {
         variables: 'not an object'
       };
 
-      expect(() => (projectManager as any).validateVaultFile(invalidVault)).toThrow('Invalid variables structure');
+      expect(() => (projectManager as any).validateKeepFile(invalidKeep)).toThrow('Invalid variables structure');
     });
   });
 
   describe('file path utilities', () => {
-    test('should return correct vault path', () => {
-      const path = (projectManager as any).getVaultPath();
-      expect(path).toBe(join(testRoot, '.vault'));
+    test('should return correct keep path', () => {
+      const path = (projectManager as any).getKeepPath();
+      expect(path).toBe(join(testRoot, '.keep'));
     });
 
     test('should return correct decrypt path', () => {

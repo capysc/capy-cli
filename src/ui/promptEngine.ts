@@ -137,7 +137,7 @@ export class PromptEngine {
         console.log(`✓ Will delete all ${changeSet.deleted.length} variables from local`);
       } else if (batchAction === 'restore_all') {
         decisions.pushVariables.push(...changeSet.deleted.map(v => v.name));
-        console.log(`✓ Will restore all ${changeSet.deleted.length} variables to vault`);
+        console.log(`✓ Will restore all ${changeSet.deleted.length} variables to keep`);
       } else {
         for (const variable of changeSet.deleted) {
           const { action } = await inquirer.prompt([
@@ -147,7 +147,7 @@ export class PromptEngine {
               message: `${variable.name} was deleted remotely. What would you like to do?`,
               choices: [
                 { name: 'Delete from local', value: 'delete' },
-                { name: 'Restore to vault', value: 'restore' },
+                { name: 'Restore to keep', value: 'restore' },
                 { name: 'Keep local only', value: 'keep' }
               ],
               default: 'delete'
@@ -159,7 +159,7 @@ export class PromptEngine {
             console.log(`✓ Will delete ${variable.name} from local`);
           } else if (action === 'restore') {
             decisions.pushVariables.push(variable.name);
-            console.log(`✓ Will restore ${variable.name} to vault`);
+            console.log(`✓ Will restore ${variable.name} to keep`);
           } else {
             console.log(`⚠ Will keep ${variable.name} locally (out of sync with remote)`);
           }
@@ -260,7 +260,7 @@ export class PromptEngine {
 
           if (pushLocal) {
             decisions.pushVariables.push(conflict.name);
-            console.log(`✓ Will push local ${conflict.name} to vault`);
+            console.log(`✓ Will push local ${conflict.name} to keep`);
           } else {
             console.log(`⚠ Will keep ${conflict.name} local only`);
           }
@@ -294,11 +294,11 @@ export class PromptEngine {
     console.log('\n' + '📋 Summary of changes:');
 
     if (decisions.pushVariables.length > 0) {
-      console.log(`✓ Push ${decisions.pushVariables.length} variable(s) to vault`);
+      console.log(`✓ Push ${decisions.pushVariables.length} variable(s) to keep`);
     }
 
     if (decisions.pullVariables.length > 0) {
-      console.log(`✓ Pull ${decisions.pullVariables.length} variable(s) from vault`);
+      console.log(`✓ Pull ${decisions.pullVariables.length} variable(s) from keep`);
     }
 
     if (decisions.deleteLocal.length > 0) {

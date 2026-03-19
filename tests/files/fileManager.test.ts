@@ -2,7 +2,7 @@ import { jest } from '@jest/globals';
 import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, mkdirSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { FileManager } from '../../src/files/fileManager';
-import { VaultFile, DecryptKey, CapyError, ERROR_CODES } from '../../src/types/index';
+import { KeepFile, DecryptKey, CapyError, ERROR_CODES } from '../../src/types/index';
 
 // Mock fs module
 jest.mock('fs');
@@ -182,9 +182,9 @@ describe('FileManager', () => {
     });
   });
 
-  describe('writeVaultFile', () => {
-    test('should write vault file with proper formatting', () => {
-      const vault: VaultFile = {
+  describe('writeKeepFile', () => {
+    test('should write keep file with proper formatting', () => {
+      const keep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -196,17 +196,17 @@ describe('FileManager', () => {
 
       mockExistsSync.mockReturnValue(false); // No backup needed
 
-      fileManager.writeVaultFile(vault);
+      fileManager.writeKeepFile(keep);
 
       expect(mockWriteFileSync).toHaveBeenCalledWith(
-        join(testRoot, '.vault'),
-        JSON.stringify(vault, null, 2) + '\n',
+        join(testRoot, '.keep'),
+        JSON.stringify(keep, null, 2) + '\n',
         'utf-8'
       );
     });
 
     test('should handle write failure with backup restoration', () => {
-      const vault: VaultFile = {
+      const keep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -216,9 +216,9 @@ describe('FileManager', () => {
         variables: {}
       };
 
-      const vaultPath = join(testRoot, '.vault');
-      mockExistsSync.mockImplementation((path) => path === vaultPath);
-      mockReadFileSync.mockReturnValue('old vault content');
+      const keepPath = join(testRoot, '.keep');
+      mockExistsSync.mockImplementation((path) => path === keepPath);
+      mockReadFileSync.mockReturnValue('old keep content');
 
       let writeCallCount = 0;
       mockWriteFileSync.mockImplementation(() => {
@@ -228,7 +228,7 @@ describe('FileManager', () => {
         }
       });
 
-      expect(() => fileManager.writeVaultFile(vault)).toThrow(CapyError);
+      expect(() => fileManager.writeKeepFile(keep)).toThrow(CapyError);
     });
   });
 
@@ -285,7 +285,7 @@ describe('FileManager', () => {
 
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '\n# CapyVault\n',
+        '\n# Capy\n',
         'utf-8'
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
@@ -319,7 +319,7 @@ describe('FileManager', () => {
 
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '\n# CapyVault\n',
+        '\n# Capy\n',
         'utf-8'
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
@@ -367,7 +367,7 @@ describe('FileManager', () => {
 
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '\n# CapyVault\n',
+        '\n# Capy\n',
         'utf-8'
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(

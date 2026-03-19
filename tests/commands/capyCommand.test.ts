@@ -49,13 +49,13 @@ describe('CapyCommand', () => {
     mockProjectManager = {
       detectProjectState: jest.fn(),
       getDefaultProjectName: jest.fn().mockReturnValue('test-project'),
-      readVaultFile: jest.fn(),
+      readKeepFile: jest.fn(),
       readDecryptKey: jest.fn(),
       readSyncState: jest.fn().mockReturnValue(null)
     } as any;
 
     mockFileManager = {
-      writeVaultFile: jest.fn(),
+      writeKeepFile: jest.fn(),
       writeDecryptKey: jest.fn(),
       writeSyncState: jest.fn(),
       writeEncryptedEnvFile: jest.fn(),
@@ -86,7 +86,7 @@ describe('CapyCommand', () => {
       formatSyncSummary: jest.fn(),
       validateDecisions: jest.fn().mockReturnValue([]),
       applyDecisions: jest.fn(),
-      mergeWithVault: jest.fn(),
+      mergeWithKeep: jest.fn(),
       generateSyncResult: jest.fn()
     } as any;
 
@@ -137,7 +137,7 @@ describe('CapyCommand', () => {
     test('should initialize project when not initialized', async () => {
       mockProjectManager.detectProjectState.mockResolvedValue({
         initialized: false,
-        hasVaultFile: false,
+        hasKeepFile: false,
         hasDecryptKey: false,
         hasEnvFile: false,
         projectName: undefined,
@@ -156,7 +156,7 @@ describe('CapyCommand', () => {
     test('should sync project when initialized', async () => {
       const projectState = {
         initialized: true,
-        hasVaultFile: true,
+        hasKeepFile: true,
         hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
@@ -173,10 +173,10 @@ describe('CapyCommand', () => {
       expect(spy).toHaveBeenCalledWith(projectState);
     });
 
-    test('should not initialize project if .vault file already exists', async () => {
+    test('should not initialize project if .keep file already exists', async () => {
       mockProjectManager.detectProjectState.mockResolvedValue({
         initialized: true,
-        hasVaultFile: true,
+        hasKeepFile: true,
         hasDecryptKey: false,
         hasEnvFile: false,
         projectName: 'existing-project',
@@ -263,27 +263,27 @@ describe('CapyCommand', () => {
       expect(mockServiceClient.setToken).toHaveBeenCalled();
       expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledWith('test-project');
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-123');
-      expect(mockFileManager.writeVaultFile).toHaveBeenCalled();
+      expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
       expect(mockServiceClient.getDecryptData).toHaveBeenCalledWith('proj-123');
       expect(mockFileManager.writeDecryptKey).toHaveBeenCalled();
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
 
-    test('should log correct message when .vault file is not found', async () => {
+    test('should log correct message when .keep file is not found', async () => {
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
       await (capyCommand as any).initializeProject();
 
-      expect(consoleSpy).toHaveBeenCalledWith('⚠  No .vault file found - initializing project...');
+      expect(consoleSpy).toHaveBeenCalledWith('⚠  No .keep file found - initializing project...');
       
       consoleSpy.mockRestore();
     });
 
-    test('should create .vault file with correct structure', async () => {
+    test('should create .keep file with correct structure', async () => {
       await (capyCommand as any).initializeProject();
 
-      expect(mockFileManager.writeVaultFile).toHaveBeenCalledWith(
+      expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
           version: '1.0',
           capy_id: 'capy-123',
@@ -294,11 +294,11 @@ describe('CapyCommand', () => {
       );
       
       // Verify that created_at and last_sync are timestamps
-      const vaultArg = mockFileManager.writeVaultFile.mock.calls[0][0];
-      expect(vaultArg.created_at).toBeDefined();
-      expect(vaultArg.last_sync).toBeDefined();
-      expect(new Date(vaultArg.created_at).toString()).not.toBe('Invalid Date');
-      expect(new Date(vaultArg.last_sync).toString()).not.toBe('Invalid Date');
+      const keepArg = mockFileManager.writeKeepFile.mock.calls[0][0];
+      expect(keepArg.created_at).toBeDefined();
+      expect(keepArg.last_sync).toBeDefined();
+      expect(new Date(keepArg.created_at).toString()).not.toBe('Invalid Date');
+      expect(new Date(keepArg.last_sync).toString()).not.toBe('Invalid Date');
     });
 
     test('should handle authentication failure', async () => {
@@ -362,8 +362,8 @@ describe('CapyCommand', () => {
         }
       });
 
-      // Mock mergeWithVault to return an updated vault
-      mockSyncEngine.mergeWithVault.mockReturnValue({
+      // Mock mergeWithKeep to return an updated keep
+      mockSyncEngine.mergeWithKeep.mockReturnValue({
         version: '1.0',
         capy_id: 'capy-123',
         project_id: 'proj-123',
@@ -393,7 +393,7 @@ describe('CapyCommand', () => {
         undefined,
         expect.any(Object)
       );
-      expect(mockSyncEngine.mergeWithVault).toHaveBeenCalled();
+      expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
 
       existsSyncSpy.mockRestore();
       consoleSpy.mockRestore();
@@ -456,7 +456,7 @@ describe('CapyCommand', () => {
   describe('syncProject', () => {
     const mockProjectState = {
       initialized: true,
-      hasVaultFile: true,
+      hasKeepFile: true,
       hasDecryptKey: true,
       hasEnvFile: true,
       projectName: 'test-project',
@@ -523,7 +523,7 @@ describe('CapyCommand', () => {
         }
       });
 
-      mockProjectManager.readVaultFile.mockReturnValue({
+      mockProjectManager.readKeepFile.mockReturnValue({
         version: '1.0',
         capy_id: 'capy-123',
         project_id: 'proj-123',
@@ -533,7 +533,7 @@ describe('CapyCommand', () => {
         variables: {}
       });
 
-      mockSyncEngine.mergeWithVault.mockReturnValue({
+      mockSyncEngine.mergeWithKeep.mockReturnValue({
         version: '1.0',
         capy_id: 'capy-123',
         project_id: 'proj-123',

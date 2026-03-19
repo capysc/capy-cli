@@ -1,5 +1,5 @@
 import { SyncEngine } from '../../src/sync/syncEngine';
-import { ChangeSet, UserDecisions, VaultFile, ConflictVariable } from '../../src/types/index';
+import { ChangeSet, UserDecisions, KeepFile, ConflictVariable } from '../../src/types/index';
 
 describe('SyncEngine', () => {
   let syncEngine: SyncEngine;
@@ -350,9 +350,9 @@ describe('SyncEngine', () => {
     });
   });
 
-  describe('mergeWithVault', () => {
-    test('should update existing variables in vault', () => {
-      const vault: VaultFile = {
+  describe('mergeWithKeep', () => {
+    test('should update existing variables in keep', () => {
+      const keep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -372,15 +372,15 @@ describe('SyncEngine', () => {
         EXISTING_VAR: { resource_id: 'res_new' }
       };
 
-      const result = syncEngine.mergeWithVault(vault, pushedVariables);
+      const result = syncEngine.mergeWithKeep(keep, pushedVariables);
 
       expect(result.variables.EXISTING_VAR.resource_id).toBe('res_new');
       expect(result.variables.EXISTING_VAR.updated_at).not.toBe('2024-01-01T00:00:00Z');
       expect(result.last_sync).not.toBe('2024-01-01T00:00:00Z');
     });
 
-    test('should add new variables to vault', () => {
-      const vault: VaultFile = {
+    test('should add new variables to keep', () => {
+      const keep: KeepFile = {
         version: '1.0',
         capy_id: 'org_123',
         project_id: 'proj_456',
@@ -394,7 +394,7 @@ describe('SyncEngine', () => {
         NEW_VAR: { resource_id: 'res_123' }
       };
 
-      const result = syncEngine.mergeWithVault(vault, pushedVariables);
+      const result = syncEngine.mergeWithKeep(keep, pushedVariables);
 
       expect(result.variables.NEW_VAR).toBeDefined();
       expect(result.variables.NEW_VAR.resource_id).toBe('res_123');

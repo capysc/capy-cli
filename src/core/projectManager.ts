@@ -10,11 +10,11 @@ export class ProjectManager {
   }
 
   async detectProjectState(): Promise<ProjectState> {
-    const vaultPath = this.getKeepPath();
+    const keepPath = this.getKeepPath();
     const decryptPath = this.getDecryptPath();
     const envPath = this.getEnvPath();
 
-    const hasKeepFile = existsSync(vaultPath);
+    const hasKeepFile = existsSync(keepPath);
     const hasDecryptKey = existsSync(decryptPath);
     const hasEnvFile = existsSync(envPath);
 
@@ -24,17 +24,17 @@ export class ProjectManager {
 
     if (hasKeepFile) {
       try {
-        const vaultContent = readFileSync(vaultPath, 'utf-8');
-        const vault: KeepFile = JSON.parse(vaultContent);
-        this.validateKeepFile(vault);
-        projectName = vault.project_name;
-        organizationId = vault.capy_id;
-        projectId = vault.project_id;
+        const keepContent = readFileSync(keepPath, 'utf-8');
+        const keep: KeepFile = JSON.parse(keepContent);
+        this.validateKeepFile(keep);
+        projectName = keep.project_name;
+        organizationId = keep.capy_id;
+        projectId = keep.project_id;
       } catch (error) {
         throw new CapyError(
           'Invalid .keep file format',
           ERROR_CODES.INVALID_FORMAT,
-          { error, path: vaultPath }
+          { error, path: keepPath }
         );
       }
     }
@@ -86,19 +86,19 @@ export class ProjectManager {
   }
 
   readKeepFile(): KeepFile | null {
-    const vaultPath = this.getKeepPath();
-    if (!existsSync(vaultPath)) {
+    const keepPath = this.getKeepPath();
+    if (!existsSync(keepPath)) {
       return null;
     }
 
     try {
-      const content = readFileSync(vaultPath, 'utf-8');
-      const vault = JSON.parse(content) as KeepFile;
-      this.validateKeepFile(vault);
-      if (vault.variables && typeof vault.variables !== 'object') {
+      const content = readFileSync(keepPath, 'utf-8');
+      const keep = JSON.parse(content) as KeepFile;
+      this.validateKeepFile(keep);
+      if (keep.variables && typeof keep.variables !== 'object') {
         throw new CapyError('Invalid variables structure', ERROR_CODES.INVALID_FORMAT);
       }
-      return vault;
+      return keep;
     } catch (error) {
       if (error instanceof CapyError) {
         throw error;
@@ -106,19 +106,19 @@ export class ProjectManager {
       throw new CapyError(
         'Failed to read .keep file',
         ERROR_CODES.INVALID_FORMAT,
-        { error, path: vaultPath }
+        { error, path: keepPath }
       );
     }
   }
 
-  private validateKeepFile(vault: any): void {
+  private validateKeepFile(keep: any): void {
     const required = ['version', 'capy_id', 'project_id', 'project_name'];
     for (const field of required) {
-      if (!vault || vault[field] === undefined || vault[field] === null) {
+      if (!keep || keep[field] === undefined || keep[field] === null) {
         throw new CapyError(`Missing required field: ${field}`, ERROR_CODES.INVALID_FORMAT);
       }
     }
-    if (vault.variables !== undefined && typeof vault.variables !== 'object') {
+    if (keep.variables !== undefined && typeof keep.variables !== 'object') {
       throw new CapyError('Invalid variables structure', ERROR_CODES.INVALID_FORMAT);
     }
   }
