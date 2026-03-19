@@ -287,7 +287,7 @@ Configure CLI behavior with these environment variables:
 
 Example:
 ```bash
-export CAPY_API_URL=https://api.capy.dev
+export CAPY_API_URL=https://api.capy.sc
 export CAPY_LOG_LEVEL=debug
 capy
 ```
@@ -322,7 +322,7 @@ Contributions welcome! Please read our [Contributing Guide](../../CONTRIBUTING.m
 ## Support
 
 - **Issues**: [GitHub Issues](https://github.com/capysc/capy-cli/issues)
-- **Documentation**: [docs.capy.dev](https://docs.capy.dev)
+- **Documentation**: [docs.capy.sc](https://docs.capy.sc)
 - **Discord**: [Join our community](https://discord.gg/capy)
 
 ## License

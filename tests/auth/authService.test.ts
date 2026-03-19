@@ -46,7 +46,7 @@ describe('AuthService', () => {
     });
 
     test('should use environment variable for service URL', () => {
-      const customUrl = 'https://api.capy.dev';
+      const customUrl = 'https://api.capy.sc';
       const service = new AuthService(customUrl);
       expect((service as any).serviceApiUrl).toBe(customUrl);
     });
