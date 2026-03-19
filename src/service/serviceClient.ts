@@ -173,7 +173,7 @@ export class ServiceClient {
   async pushVariables(
     projectId: string,
     variables: Record<string, string>,
-    vault: KeepFile | null = null
+    keep: KeepFile | null = null
   ): Promise<PushResult> {
     if (this.mockMode) {
       console.log(`🔫 Mock: Pushing ${Object.keys(variables).length} variables to project "${projectId}"`);
@@ -206,14 +206,14 @@ export class ServiceClient {
           encryptedNewVars[key] = 'capy:deleted';
           
           mockVariables[key] = {
-            resource_id: vault?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`,
+            resource_id: keep?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
             success: true
           };
         } else {
-          // Get resource_id from vault if exists, otherwise generate new one
-          const resourceId = vault?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`;
+          // Get resource_id from keep if exists, otherwise generate new one
+          const resourceId = keep?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`;
 
           const encrypted = Encryptor.encrypt(value, mockDecryptKey);
           const snippetValue = this.createSnippetWithEncryption(value, encrypted);
@@ -249,11 +249,11 @@ export class ServiceClient {
     }
 
     try {
-      // Include resource_ids for existing variables from vault
+      // Include resource_ids for existing variables from keep
       const variablesWithMetadata = Object.entries(variables).map(([name, value]) => ({
         name,
         value,
-        resource_id: vault?.variables[name]?.resource_id || null
+        resource_id: keep?.variables[name]?.resource_id || null
       }));
 
       const response = await this.api.post('/variables/push', {
