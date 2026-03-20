@@ -14,10 +14,11 @@ export class Encryptor {
   /**
    * Encrypts a value using AES-256-GCM with the provided key.
    * Format: capy:{resourceId}:{base64(iv + ciphertext + authTag)}
+   * The resourceId is deterministically derived from the key.
    */
-  static encrypt(value: string, key: string, resourceId?: string): string {
+  static encrypt(value: string, key: string): string {
     try {
-      const id = resourceId ?? this.generateResourceId();
+      const id = this.deriveResourceId(key);
       const iv = randomBytes(this.ivLength);
       const derivedKey = this.deriveKey(key);
 
@@ -42,17 +43,25 @@ export class Encryptor {
    * Expects format: capy:{resourceId}:{base64(iv + ciphertext + authTag)}
    */
   static decrypt(encryptedValue: string, key: string): string {
+    if (!encryptedValue.startsWith(this.prefix)) {
+      throw new Error('Invalid encrypted value format');
+    }
+
+    const afterPrefix = encryptedValue.slice(this.prefix.length);
+    const colonIdx = afterPrefix.indexOf(':');
+    if (colonIdx === -1) {
+      throw new Error('Invalid encrypted value format: missing resource ID');
+    }
+
+    const resourceId = afterPrefix.slice(0, colonIdx);
+    const expectedId = this.deriveResourceId(key);
+    if (resourceId !== expectedId) {
+      throw new Error(
+        `Key mismatch: encrypted with key "${resourceId}" but decrypting with key "${expectedId}"`
+      );
+    }
+
     try {
-      if (!encryptedValue.startsWith(this.prefix)) {
-        throw new Error('Invalid encrypted value format');
-      }
-
-      const afterPrefix = encryptedValue.slice(this.prefix.length);
-      const colonIdx = afterPrefix.indexOf(':');
-      if (colonIdx === -1) {
-        throw new Error('Invalid encrypted value format: missing resource ID');
-      }
-
       const base64Data = afterPrefix.slice(colonIdx + 1);
       const combined = Buffer.from(base64Data, 'base64');
 
@@ -96,13 +105,14 @@ export class Encryptor {
   }
 
   /**
-   * Generates a readable 5-character resource ID for referencing in .keep files
+   * Derives a deterministic 5-character resource ID from the encryption key.
+   * Same key always produces the same ID; rotating the key produces a new ID.
    */
-  static generateResourceId(): string {
-    const bytes = randomBytes(RESOURCE_ID_LENGTH);
+  static deriveResourceId(key: string): string {
+    const hash = createHash('sha256').update(key).digest();
     let id = '';
     for (let i = 0; i < RESOURCE_ID_LENGTH; i++) {
-      id += RESOURCE_ID_ALPHABET[bytes[i] % RESOURCE_ID_ALPHABET.length];
+      id += RESOURCE_ID_ALPHABET[hash[i] % RESOURCE_ID_ALPHABET.length];
     }
     return id;
   }

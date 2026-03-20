@@ -1,6 +1,7 @@
 import { Encryptor } from '../../src/crypto/encryptor';
 
 const TEST_KEY = 'test-key-for-encryptor-tests';
+const OTHER_KEY = 'a-completely-different-key';
 
 describe('Encryptor', () => {
   describe('encrypt', () => {
@@ -15,15 +16,16 @@ describe('Encryptor', () => {
       expect(a).not.toBe(b);
     });
 
-    it('uses provided resourceId when given', () => {
-      const result = Encryptor.encrypt('hello', TEST_KEY, 'abcde');
-      expect(result.startsWith('capy:abcde:')).toBe(true);
+    it('always uses the same resource ID for the same key', () => {
+      const a = Encryptor.encrypt('hello', TEST_KEY);
+      const b = Encryptor.encrypt('world', TEST_KEY);
+      expect(Encryptor.extractResourceId(a)).toBe(Encryptor.extractResourceId(b));
     });
 
-    it('generates a resourceId when not provided', () => {
-      const result = Encryptor.encrypt('hello', TEST_KEY);
-      const id = Encryptor.extractResourceId(result);
-      expect(id).toHaveLength(5);
+    it('uses different resource IDs for different keys', () => {
+      const a = Encryptor.encrypt('hello', TEST_KEY);
+      const b = Encryptor.encrypt('hello', OTHER_KEY);
+      expect(Encryptor.extractResourceId(a)).not.toBe(Encryptor.extractResourceId(b));
     });
   });
 
@@ -51,16 +53,24 @@ describe('Encryptor', () => {
       }
     });
 
-    it('throws on wrong key', () => {
+    it('throws key mismatch error on wrong key before attempting decryption', () => {
       const encrypted = Encryptor.encrypt('secret', TEST_KEY);
-      expect(() => Encryptor.decrypt(encrypted, 'wrong-key')).toThrow(
-        /Failed to decrypt/
+      expect(() => Encryptor.decrypt(encrypted, OTHER_KEY)).toThrow(
+        /Key mismatch/
+      );
+    });
+
+    it('includes both resource IDs in the mismatch error', () => {
+      const encrypted = Encryptor.encrypt('secret', TEST_KEY);
+      const expectedId = Encryptor.deriveResourceId(TEST_KEY);
+      const wrongId = Encryptor.deriveResourceId(OTHER_KEY);
+      expect(() => Encryptor.decrypt(encrypted, OTHER_KEY)).toThrow(
+        `Key mismatch: encrypted with key "${expectedId}" but decrypting with key "${wrongId}"`
       );
     });
 
     it('throws on tampered ciphertext (GCM auth tag rejects)', () => {
       const encrypted = Encryptor.encrypt('secret', TEST_KEY);
-      // Flip a byte in the base64 payload
       const parts = encrypted.split(':');
       const buf = Buffer.from(parts[2], 'base64');
       buf[buf.length - 5] ^= 0xff;
@@ -84,7 +94,9 @@ describe('Encryptor', () => {
     });
 
     it('throws when payload is too short', () => {
-      expect(() => Encryptor.decrypt('capy:abcde:AAAA', TEST_KEY)).toThrow(
+      // Use the correct resource ID so we get past the key check
+      const id = Encryptor.deriveResourceId(TEST_KEY);
+      expect(() => Encryptor.decrypt(`capy:${id}:AAAA`, TEST_KEY)).toThrow(
         /Invalid encrypted value format/
       );
     });
@@ -113,29 +125,39 @@ describe('Encryptor', () => {
     });
   });
 
-  describe('generateResourceId', () => {
+  describe('deriveResourceId', () => {
     it('returns a 5-character string', () => {
-      const id = Encryptor.generateResourceId();
+      const id = Encryptor.deriveResourceId(TEST_KEY);
       expect(id).toHaveLength(5);
     });
 
     it('uses only readable characters (no ambiguous 0/O/1/l/I)', () => {
-      for (let i = 0; i < 50; i++) {
-        const id = Encryptor.generateResourceId();
+      // Test with many different keys to exercise the alphabet
+      const keys = Array.from({ length: 50 }, (_, i) => `test-key-${i}`);
+      for (const key of keys) {
+        const id = Encryptor.deriveResourceId(key);
         expect(id).toMatch(/^[a-hjkmnp-z2-9]{5}$/);
       }
     });
 
-    it('generates unique IDs', () => {
-      const ids = new Set(Array.from({ length: 100 }, () => Encryptor.generateResourceId()));
-      expect(ids.size).toBeGreaterThan(90);
+    it('is deterministic — same key always produces the same ID', () => {
+      const a = Encryptor.deriveResourceId(TEST_KEY);
+      const b = Encryptor.deriveResourceId(TEST_KEY);
+      expect(a).toBe(b);
+    });
+
+    it('produces different IDs for different keys', () => {
+      const a = Encryptor.deriveResourceId(TEST_KEY);
+      const b = Encryptor.deriveResourceId(OTHER_KEY);
+      expect(a).not.toBe(b);
     });
   });
 
   describe('extractResourceId', () => {
     it('extracts resource ID from encrypted value', () => {
-      const encrypted = Encryptor.encrypt('test', TEST_KEY, 'xyz42');
-      expect(Encryptor.extractResourceId(encrypted)).toBe('xyz42');
+      const encrypted = Encryptor.encrypt('test', TEST_KEY);
+      const expectedId = Encryptor.deriveResourceId(TEST_KEY);
+      expect(Encryptor.extractResourceId(encrypted)).toBe(expectedId);
     });
 
     it('returns null for non-encrypted values', () => {
