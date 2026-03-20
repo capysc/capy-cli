@@ -1,5 +1,9 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 
+// Readable alphabet for resource IDs (no ambiguous chars: 0/O, 1/l/I)
+const RESOURCE_ID_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+const RESOURCE_ID_LENGTH = 5;
+
 export class Encryptor {
   private static readonly algorithm = 'aes-256-gcm';
   private static readonly keyLength = 32;
@@ -8,14 +12,13 @@ export class Encryptor {
   private static readonly prefix = 'capy:';
 
   /**
-   * Encrypts a value using AES-256-GCM with the provided key
+   * Encrypts a value using AES-256-GCM with the provided key.
+   * Format: capy:{resourceId}:{base64(iv + ciphertext + authTag)}
    */
-  static encrypt(value: string, key: string): string {
+  static encrypt(value: string, key: string, resourceId?: string): string {
     try {
-      // Generate a random IV for each encryption
+      const id = resourceId ?? this.generateResourceId();
       const iv = randomBytes(this.ivLength);
-
-      // Derive a proper key from the provided key
       const derivedKey = this.deriveKey(key);
 
       const cipher = createCipheriv(this.algorithm, derivedKey, iv, {
@@ -27,16 +30,16 @@ export class Encryptor {
       ]);
       const authTag = cipher.getAuthTag();
 
-      // Format: capy:base64(iv + ciphertext + authTag)
       const combined = Buffer.concat([iv, encrypted, authTag]);
-      return this.prefix + combined.toString('base64');
+      return `${this.prefix}${id}:${combined.toString('base64')}`;
     } catch (error) {
       throw new Error(`Failed to encrypt value: ${error}`);
     }
   }
 
   /**
-   * Decrypts a value using AES-256-GCM with the provided key
+   * Decrypts a value using AES-256-GCM with the provided key.
+   * Expects format: capy:{resourceId}:{base64(iv + ciphertext + authTag)}
    */
   static decrypt(encryptedValue: string, key: string): string {
     try {
@@ -44,7 +47,14 @@ export class Encryptor {
         throw new Error('Invalid encrypted value format');
       }
 
-      const combined = Buffer.from(encryptedValue.slice(this.prefix.length), 'base64');
+      const afterPrefix = encryptedValue.slice(this.prefix.length);
+      const colonIdx = afterPrefix.indexOf(':');
+      if (colonIdx === -1) {
+        throw new Error('Invalid encrypted value format: missing resource ID');
+      }
+
+      const base64Data = afterPrefix.slice(colonIdx + 1);
+      const combined = Buffer.from(base64Data, 'base64');
 
       if (combined.length < this.ivLength + this.authTagLength) {
         throw new Error('Invalid encrypted value format');
@@ -54,7 +64,6 @@ export class Encryptor {
       const authTag = combined.subarray(combined.length - this.authTagLength);
       const encrypted = combined.subarray(this.ivLength, combined.length - this.authTagLength);
 
-      // Derive the same key
       const derivedKey = this.deriveKey(key);
 
       const decipher = createDecipheriv(this.algorithm, derivedKey, iv, {
@@ -87,16 +96,42 @@ export class Encryptor {
   }
 
   /**
-   * Checks if a value appears to be encrypted (capy: prefix with base64 data)
+   * Generates a readable 5-character resource ID for referencing in .keep files
+   */
+  static generateResourceId(): string {
+    const bytes = randomBytes(RESOURCE_ID_LENGTH);
+    let id = '';
+    for (let i = 0; i < RESOURCE_ID_LENGTH; i++) {
+      id += RESOURCE_ID_ALPHABET[bytes[i] % RESOURCE_ID_ALPHABET.length];
+    }
+    return id;
+  }
+
+  /**
+   * Extracts the resource ID from an encrypted value
+   */
+  static extractResourceId(encryptedValue: string): string | null {
+    if (!encryptedValue.startsWith(this.prefix)) return null;
+    const afterPrefix = encryptedValue.slice(this.prefix.length);
+    const colonIdx = afterPrefix.indexOf(':');
+    if (colonIdx === -1) return null;
+    return afterPrefix.slice(0, colonIdx);
+  }
+
+  /**
+   * Checks if a value appears to be encrypted: capy:{resourceId}:{base64}
    */
   static isEncrypted(value: string): boolean {
     if (!value.startsWith(this.prefix)) return false;
 
-    const data = value.slice(this.prefix.length);
-    // Must be valid base64 and long enough to contain IV + auth tag at minimum
-    if (!/^[A-Za-z0-9+/]+=*$/.test(data)) return false;
+    const afterPrefix = value.slice(this.prefix.length);
+    const colonIdx = afterPrefix.indexOf(':');
+    if (colonIdx === -1) return false;
 
-    const decoded = Buffer.from(data, 'base64');
+    const base64Data = afterPrefix.slice(colonIdx + 1);
+    if (!/^[A-Za-z0-9+/]+=*$/.test(base64Data)) return false;
+
+    const decoded = Buffer.from(base64Data, 'base64');
     return decoded.length >= this.ivLength + this.authTagLength;
   }
 }
