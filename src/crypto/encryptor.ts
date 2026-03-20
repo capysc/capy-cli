@@ -1,24 +1,17 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 
-// Readable alphabet for resource IDs (no ambiguous chars: 0/O, 1/l/I)
-const RESOURCE_ID_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
-const RESOURCE_ID_LENGTH = 5;
-
 export class Encryptor {
   private static readonly algorithm = 'aes-256-gcm';
   private static readonly keyLength = 32;
   private static readonly ivLength = 12;
   private static readonly authTagLength = 16;
-  private static readonly prefix = 'capy:';
 
   /**
-   * Encrypts a value using AES-256-GCM with the provided key.
-   * Format: capy:{resourceId}:{base64(iv + ciphertext + authTag)}
-   * The resourceId is deterministically derived from the key.
+   * Encrypts a value using AES-256-GCM.
+   * Returns base64(iv + ciphertext + authTag).
    */
   static encrypt(value: string, key: string): string {
     try {
-      const id = this.deriveResourceId(key);
       const iv = randomBytes(this.ivLength);
       const derivedKey = this.deriveKey(key);
 
@@ -32,41 +25,21 @@ export class Encryptor {
       const authTag = cipher.getAuthTag();
 
       const combined = Buffer.concat([iv, encrypted, authTag]);
-      return `${this.prefix}${id}:${combined.toString('base64')}`;
+      return combined.toString('base64');
     } catch (error) {
       throw new Error(`Failed to encrypt value: ${error}`);
     }
   }
 
   /**
-   * Decrypts a value using AES-256-GCM with the provided key.
-   * Expects format: capy:{resourceId}:{base64(iv + ciphertext + authTag)}
+   * Decrypts a base64(iv + ciphertext + authTag) value using AES-256-GCM.
    */
   static decrypt(encryptedValue: string, key: string): string {
-    if (!encryptedValue.startsWith(this.prefix)) {
-      throw new Error('Invalid encrypted value format');
-    }
-
-    const afterPrefix = encryptedValue.slice(this.prefix.length);
-    const colonIdx = afterPrefix.indexOf(':');
-    if (colonIdx === -1) {
-      throw new Error('Invalid encrypted value format: missing resource ID');
-    }
-
-    const resourceId = afterPrefix.slice(0, colonIdx);
-    const expectedId = this.deriveResourceId(key);
-    if (resourceId !== expectedId) {
-      throw new Error(
-        `Key mismatch: encrypted with key "${resourceId}" but decrypting with key "${expectedId}"`
-      );
-    }
-
     try {
-      const base64Data = afterPrefix.slice(colonIdx + 1);
-      const combined = Buffer.from(base64Data, 'base64');
+      const combined = Buffer.from(encryptedValue, 'base64');
 
       if (combined.length < this.ivLength + this.authTagLength) {
-        throw new Error('Invalid encrypted value format');
+        throw new Error('Encrypted payload too short');
       }
 
       const iv = combined.subarray(0, this.ivLength);
@@ -91,57 +64,16 @@ export class Encryptor {
   }
 
   /**
-   * Derives a consistent key from the provided string
+   * Derives a consistent AES-256 key from the provided string.
    */
   private static deriveKey(key: string): Buffer {
     return createHash('sha256').update(key).digest().subarray(0, this.keyLength);
   }
 
   /**
-   * Generates a random encryption key
+   * Generates a random encryption key.
    */
   static generateKey(): string {
     return randomBytes(32).toString('hex');
-  }
-
-  /**
-   * Derives a deterministic 5-character resource ID from the encryption key.
-   * Same key always produces the same ID; rotating the key produces a new ID.
-   */
-  static deriveResourceId(key: string): string {
-    const hash = createHash('sha256').update(key).digest();
-    let id = '';
-    for (let i = 0; i < RESOURCE_ID_LENGTH; i++) {
-      id += RESOURCE_ID_ALPHABET[hash[i] % RESOURCE_ID_ALPHABET.length];
-    }
-    return id;
-  }
-
-  /**
-   * Extracts the resource ID from an encrypted value
-   */
-  static extractResourceId(encryptedValue: string): string | null {
-    if (!encryptedValue.startsWith(this.prefix)) return null;
-    const afterPrefix = encryptedValue.slice(this.prefix.length);
-    const colonIdx = afterPrefix.indexOf(':');
-    if (colonIdx === -1) return null;
-    return afterPrefix.slice(0, colonIdx);
-  }
-
-  /**
-   * Checks if a value appears to be encrypted: capy:{resourceId}:{base64}
-   */
-  static isEncrypted(value: string): boolean {
-    if (!value.startsWith(this.prefix)) return false;
-
-    const afterPrefix = value.slice(this.prefix.length);
-    const colonIdx = afterPrefix.indexOf(':');
-    if (colonIdx === -1) return false;
-
-    const base64Data = afterPrefix.slice(colonIdx + 1);
-    if (!/^[A-Za-z0-9+/]+=*$/.test(base64Data)) return false;
-
-    const decoded = Buffer.from(base64Data, 'base64');
-    return decoded.length >= this.ivLength + this.authTagLength;
   }
 }

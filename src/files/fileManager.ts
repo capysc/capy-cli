@@ -3,6 +3,7 @@ import { join, dirname } from 'path';
 import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
+import { deriveResourceId } from '../crypto/resourceId';
 
 export class FileManager {
   private projectRoot: string;
@@ -43,29 +44,10 @@ export class FileManager {
       
       const decrypted: Record<string, string> = {};
       for (const [key, value] of Object.entries(parsed)) {
-        if (this.isSnippetEncrypted(value)) {
-          // Handle snippet-enhanced encrypted values - extract actual encrypted data
-          const extractedEncrypted = this.extractEncryptedFromSnippet(value);
-          if (extractedEncrypted) {
-            try {
-              decrypted[key] = Encryptor.decrypt(extractedEncrypted, decryptionKey);
-            } catch (decryptError) {
-              console.warn(`⚠️  Failed to decrypt ${key}, keeping snippet format`);
-              decrypted[key] = value;
-            }
-          } else {
-            console.warn(`⚠️  Could not extract encrypted data from ${key}`);
-            decrypted[key] = value;
-          }
-        } else if (Encryptor.isEncrypted(value)) {
-          // Handle standard encrypted values
-          try {
-            decrypted[key] = Encryptor.decrypt(value, decryptionKey);
-          } catch (decryptError) {
-            console.warn(`⚠️  Failed to decrypt ${key}, keeping encrypted value`);
-            decrypted[key] = value;
-          }
-        } else {
+        try {
+          decrypted[key] = this.decryptValue(value, decryptionKey);
+        } catch (decryptError) {
+          console.warn(`⚠️  Failed to decrypt ${key}, keeping original value`);
           decrypted[key] = value;
         }
       }
@@ -118,22 +100,16 @@ export class FileManager {
       
       for (const [key, value] of Object.entries(variables)) {
         let finalValue: string;
-        
-        if (Encryptor.isEncrypted(value) || this.isSnippetEncrypted(value) || value.startsWith('capy:')) {
-          // Already encrypted (standard, snippet, or with capy: prefix), keep as is
+
+        if (value.startsWith('capy:') || this.isSnippetEncrypted(value)) {
+          // Already encrypted, keep as is
           finalValue = value;
         } else {
-          // Encrypt the plain text value and add snippet
+          // Encrypt the plain text value
           const encrypted = Encryptor.encrypt(value, encryptionKey);
           const snippetValue = this.createSnippetWithEncryption(value, encrypted);
-          
-          // Prepend capy:{resource_id}: if we have a keep with resource_id
-          const resourceId = keep?.variables[key]?.resource_id;
-          if (resourceId) {
-            finalValue = `capy:${resourceId}:${snippetValue}`;
-          } else {
-            finalValue = snippetValue;
-          }
+          const resourceId = deriveResourceId(encryptionKey, key);
+          finalValue = `capy:${resourceId}:${snippetValue}`;
         }
         
         encryptedVariables[key] = finalValue;
@@ -389,37 +365,43 @@ export class FileManager {
   }
 
   /**
-   * Public method to check if value is encrypted (standard format)
+   * Checks if a value is in the capy:{resourceId}:{payload} encrypted format.
    */
   isEncrypted(value: string): boolean {
-    return Encryptor.isEncrypted(value);
+    if (!value.startsWith('capy:')) return false;
+    const afterPrefix = value.slice(5);
+    const colonIdx = afterPrefix.indexOf(':');
+    return colonIdx !== -1;
   }
 
   /**
-   * Public method to decrypt a single value
+   * Decrypts a single value. Handles capy:{id}:{payload}, snippet-wrapped, and plaintext.
    */
   decryptValue(value: string, decryptionKey: string): string {
     // Strip capy:{resource_id}: prefix if present
-    let valueToDecrypt = value;
+    let payload = value;
     if (value.startsWith('capy:')) {
-      // Format: capy:{resource_id}:{encrypted_value}
       const parts = value.split(':');
       if (parts.length >= 3) {
-        // Rejoin everything after the resource_id (in case encrypted value contains ':')
-        valueToDecrypt = parts.slice(2).join(':');
+        payload = parts.slice(2).join(':');
+      } else {
+        return value; // Not a valid encrypted format, return as-is
       }
     }
-    
-    if (this.isSnippetEncrypted(valueToDecrypt)) {
-      const extractedEncrypted = this.extractEncryptedFromSnippet(valueToDecrypt);
-      if (extractedEncrypted) {
-        return Encryptor.decrypt(extractedEncrypted, decryptionKey);
+
+    if (this.isSnippetEncrypted(payload)) {
+      const extracted = this.extractEncryptedFromSnippet(payload);
+      if (extracted) {
+        return Encryptor.decrypt(extracted, decryptionKey);
       }
       throw new Error('Could not extract encrypted data from snippet');
-    } else if (Encryptor.isEncrypted(valueToDecrypt)) {
-      return Encryptor.decrypt(valueToDecrypt, decryptionKey);
-    } else {
-      return valueToDecrypt; // Already plaintext
+    }
+
+    // Try decrypting as raw base64
+    try {
+      return Encryptor.decrypt(payload, decryptionKey);
+    } catch {
+      return value; // Not encrypted, return as-is
     }
   }
 }
