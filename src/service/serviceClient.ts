@@ -180,6 +180,7 @@ export class ServiceClient {
       await this.mockDelay();
 
       const { Encryptor } = require('../crypto/encryptor');
+      const { deriveResourceId } = require('../crypto/resourceId');
       const mockDecryptKey = 'mock-decrypt-key-persistent';
 
       // Read current mock.env content
@@ -206,19 +207,16 @@ export class ServiceClient {
           encryptedNewVars[key] = 'capy:deleted';
           
           mockVariables[key] = {
-            resource_id: keep?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`,
+            resource_id: deriveResourceId(mockDecryptKey, key),
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
             success: true
           };
         } else {
-          // Get resource_id from keep if exists, otherwise generate new one
-          const resourceId = keep?.variables[key]?.resource_id || `res_${key.toLowerCase()}_${Math.random().toString(36).substr(2, 8)}`;
-
+          const resourceId = deriveResourceId(mockDecryptKey, key);
           const encrypted = Encryptor.encrypt(value, mockDecryptKey);
           const snippetValue = this.createSnippetWithEncryption(value, encrypted);
 
-          // Format: capy:{resource_id}:{encrypted_value}
           encryptedNewVars[key] = `capy:${resourceId}:${snippetValue}`;
 
           mockVariables[key] = {

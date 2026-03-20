@@ -1,90 +1,79 @@
-import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'crypto';
-import { promisify } from 'util';
-
-const scryptAsync = promisify(scrypt);
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 
 export class Encryptor {
-  private static readonly algorithm = 'aes-256-cbc';
+  private static readonly algorithm = 'aes-256-gcm';
   private static readonly keyLength = 32;
-  private static readonly ivLength = 16;
+  private static readonly ivLength = 12;
+  private static readonly authTagLength = 16;
 
   /**
-   * Encrypts a value using AES-256-CBC with the provided key
+   * Encrypts a value using AES-256-GCM.
+   * Returns base64(iv + ciphertext + authTag).
    */
   static encrypt(value: string, key: string): string {
     try {
-      // Generate a random IV for each encryption
       const iv = randomBytes(this.ivLength);
-      
-      // Derive a proper key from the provided key
       const derivedKey = this.deriveKey(key);
-      
-      const cipher = createCipheriv(this.algorithm, derivedKey, iv);
-      let encrypted = cipher.update(value, 'utf8', 'hex');
-      encrypted += cipher.final('hex');
-      
-      // Prepend IV to the encrypted data
-      return iv.toString('hex') + ':' + encrypted;
+
+      const cipher = createCipheriv(this.algorithm, derivedKey, iv, {
+        authTagLength: this.authTagLength,
+      });
+      const encrypted = Buffer.concat([
+        cipher.update(value, 'utf8'),
+        cipher.final(),
+      ]);
+      const authTag = cipher.getAuthTag();
+
+      const combined = Buffer.concat([iv, encrypted, authTag]);
+      return combined.toString('base64');
     } catch (error) {
       throw new Error(`Failed to encrypt value: ${error}`);
     }
   }
 
   /**
-   * Decrypts a value using AES-256-CBC with the provided key
+   * Decrypts a base64(iv + ciphertext + authTag) value using AES-256-GCM.
    */
   static decrypt(encryptedValue: string, key: string): string {
     try {
-      // Split IV and encrypted data
-      const parts = encryptedValue.split(':');
-      if (parts.length !== 2) {
-        throw new Error('Invalid encrypted value format');
+      const combined = Buffer.from(encryptedValue, 'base64');
+
+      if (combined.length < this.ivLength + this.authTagLength) {
+        throw new Error('Encrypted payload too short');
       }
-      
-      const iv = Buffer.from(parts[0], 'hex');
-      const encrypted = parts[1];
-      
-      // Derive the same key
+
+      const iv = combined.subarray(0, this.ivLength);
+      const authTag = combined.subarray(combined.length - this.authTagLength);
+      const encrypted = combined.subarray(this.ivLength, combined.length - this.authTagLength);
+
       const derivedKey = this.deriveKey(key);
-      
-      const decipher = createDecipheriv(this.algorithm, derivedKey, iv);
-      let decrypted = decipher.update(encrypted, 'hex', 'utf8');
-      decrypted += decipher.final('utf8');
-      
-      return decrypted;
+
+      const decipher = createDecipheriv(this.algorithm, derivedKey, iv, {
+        authTagLength: this.authTagLength,
+      });
+      decipher.setAuthTag(authTag);
+      const decrypted = Buffer.concat([
+        decipher.update(encrypted),
+        decipher.final(),
+      ]);
+
+      return decrypted.toString('utf8');
     } catch (error) {
       throw new Error(`Failed to decrypt value: ${error}`);
     }
   }
 
   /**
-   * Derives a consistent key from the provided string
+   * Derives a consistent AES-256 key from the provided string.
    */
   private static deriveKey(key: string): Buffer {
-    // Use a simple hash-based approach for consistent key derivation
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(key).digest().slice(0, this.keyLength);
+    return createHash('sha256').update(key).digest().subarray(0, this.keyLength);
   }
 
   /**
-   * Generates a random encryption key
+   * Generates a random encryption key.
    */
   static generateKey(): string {
     return randomBytes(32).toString('hex');
-  }
-
-  /**
-   * Checks if a value appears to be encrypted (IV:encrypted format)
-   */
-  static isEncrypted(value: string): boolean {
-    // Check for our IV:encrypted format
-    const parts = value.split(':');
-    if (parts.length !== 2) return false;
-    
-    // IV should be 32 hex chars (16 bytes), encrypted should be hex
-    const ivPart = parts[0];
-    const encryptedPart = parts[1];
-    
-    return /^[0-9a-f]{32}$/i.test(ivPart) && /^[0-9a-f]{16,}$/i.test(encryptedPart);
   }
 }
