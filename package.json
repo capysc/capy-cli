@@ -19,6 +19,7 @@
     "start": "ts-node ./bin/capy.ts",
     "dev": "tsc --watch",
     "capy-dev": "bun run build && node bin/capy-dev",
+    "link-dev": "ln -sf \"$(pwd)/bin/capy-dev\" /usr/local/bin/capy-dev",
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
