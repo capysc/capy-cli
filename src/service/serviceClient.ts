@@ -17,10 +17,10 @@ export class ServiceClient {
   private token: ServiceToken | null = null;
   private mockMode: boolean;
 
-  constructor(apiUrl: string = process.env.CAPY_API_URL || 'https://api.capy.sc') {
-    this.mockMode = process.env.CAPY_MOCK_AUTH === 'true';
+  constructor(apiUrl: string = process.env.CAPY_API_URL || 'https://api.capy.sc', mockMode: boolean = false) {
+    this.mockMode = mockMode;
     if (this.mockMode) {
-      console.log('🔫 ServiceClient: Mock mode enabled');
+      console.log('🔫 ServiceClient: Mock mode enabled (dev entrypoint)');
     }
     this.api = axios.create({
       baseURL: apiUrl,

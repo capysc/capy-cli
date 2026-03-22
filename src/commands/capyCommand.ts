@@ -23,12 +23,12 @@ export class CapyCommand {
   private promptEngine: PromptEngine;
   private options: CliOptions;
 
-  constructor(options: CliOptions = {}) {
+  constructor(options: CliOptions = {}, devMode: boolean = false) {
     this.options = options;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
-    this.authService = new AuthService();
-    this.serviceClient = new ServiceClient();
+    this.authService = new AuthService(undefined, devMode);
+    this.serviceClient = new ServiceClient(undefined, devMode);
     this.syncEngine = new SyncEngine();
     this.promptEngine = new PromptEngine();
   }
