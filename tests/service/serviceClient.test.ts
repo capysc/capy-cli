@@ -54,8 +54,8 @@ describe('ServiceClient', () => {
       const projectId = 'proj_123';
       const mockResponse = {
         data: {
-          decrypt_key: 'decrypt_key_abc',
-          env_content: 'API_KEY=test123\nDB_URL=postgres://localhost'
+          env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
+          permissions: ['*']
         }
       };
 
@@ -63,10 +63,8 @@ describe('ServiceClient', () => {
 
       const result = await serviceClient.getDecryptData(projectId);
 
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/decrypt', {
-        params: { project_id: projectId }
-      });
-      expect(result).toEqual(mockResponse.data);
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith(`/secrets/${projectId}`);
+      expect(result.env_content).toBe(mockResponse.data.env_file);
     });
 
     test('should include authorization header when token is set', async () => {
@@ -78,14 +76,12 @@ describe('ServiceClient', () => {
       };
       serviceClient.setToken(token);
 
-      const mockResponse = { data: { decrypt_key: 'key', env_content: '' } };
+      const mockResponse = { data: { env_file: '', permissions: [] } };
       mockAxiosInstance.get.mockResolvedValue(mockResponse);
 
       await serviceClient.getDecryptData('proj_123');
 
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/decrypt', {
-        params: { project_id: 'proj_123' }
-      });
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/secrets/proj_123');
     });
 
     test('should handle service errors', async () => {
@@ -117,10 +113,10 @@ describe('ServiceClient', () => {
       const organizationId = 'org_123';
       const mockResponse = {
         data: {
-          capy_id: organizationId,
-          project_id: 'proj_456',
-          project_name: projectName,
-          created: true
+          id: 'proj_456',
+          name: projectName,
+          organization_id: organizationId,
+          s3_prefix: `${organizationId}/proj_456`
         }
       };
 
@@ -129,10 +125,12 @@ describe('ServiceClient', () => {
       const result = await serviceClient.initializeProject(projectName, organizationId);
 
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/projects', {
-        project_name: projectName,
-        organization_id: organizationId
+        name: projectName
       });
-      expect(result).toEqual(mockResponse.data);
+      expect(result.project_id).toBe('proj_456');
+      expect(result.project_name).toBe(projectName);
+      expect(result.capy_id).toBe(organizationId);
+      expect(result.created).toBe(true);
     });
 
     test('should include auth headers when authenticated', async () => {
@@ -144,14 +142,13 @@ describe('ServiceClient', () => {
       };
       serviceClient.setToken(token);
 
-      const mockResponse = { data: { capy_id: 'org_123', project_id: 'proj_456', project_name: 'test', created: true } };
+      const mockResponse = { data: { id: 'proj_456', name: 'test', organization_id: 'org_123', s3_prefix: 'org_123/proj_456' } };
       mockAxiosInstance.post.mockResolvedValue(mockResponse);
 
       await serviceClient.initializeProject('test', 'org_123');
 
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/projects', {
-        project_name: 'test',
-        organization_id: 'org_123'
+        name: 'test'
       });
     });
 
@@ -175,11 +172,7 @@ describe('ServiceClient', () => {
       const variables = { API_KEY: 'test123', DB_URL: 'postgres://localhost' };
       const mockResponse = {
         data: {
-          success: true,
-          variables: {
-            API_KEY: { resource_id: 'res_1' },
-            DB_URL: { resource_id: 'res_2' }
-          }
+          success: true
         }
       };
 
@@ -187,14 +180,11 @@ describe('ServiceClient', () => {
 
       const result = await serviceClient.pushVariables(projectId, variables);
 
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/variables/push', {
-        project_id: projectId,
-        variables: [
-          { name: 'API_KEY', value: 'test123', resource_id: null },
-          { name: 'DB_URL', value: 'postgres://localhost', resource_id: null }
-        ]
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith(`/secrets/${projectId}`, {
+        env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
+        keep_file: JSON.stringify({ variables: {} })
       });
-      expect(result).toEqual(mockResponse.data);
+      expect(result.success).toBe(true);
     });
 
     test('should handle push errors', async () => {
@@ -212,50 +202,17 @@ describe('ServiceClient', () => {
     });
   });
 
-  describe('deleteVariable', () => {
-    test('should delete variable successfully', async () => {
-      const projectId = 'proj_123';
-      const variableName = 'API_KEY';
-      const mockResponse = { data: { success: true } };
-
-      mockAxiosInstance.delete.mockResolvedValue(mockResponse);
-
-      const result = await serviceClient.deleteVariable(projectId, variableName);
-
-      expect(mockAxiosInstance.delete).toHaveBeenCalledWith(`/variables/${variableName}`, {
-        params: { project_id: projectId }
-      });
-      expect(result).toBe(true);
-    });
-  });
-
-  describe('checkProjectAccess', () => {
-    test('should check project access successfully', async () => {
-      const projectId = 'proj_123';
-      const mockResponse = { data: { has_access: true } };
-
-      mockAxiosInstance.get.mockResolvedValue(mockResponse);
-
-      const result = await serviceClient.checkProjectAccess(projectId);
-
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith(`/projects/${projectId}/access`);
-      expect(result).toBe(true);
-    });
-  });
-
   describe('custom service URL', () => {
     test('should use custom service URL', async () => {
       const customUrl = 'https://api.example.com';
       const customClient = new ServiceClient(customUrl);
 
-      const mockResponse = { data: { result: 'success' } };
+      const mockResponse = { data: { env_file: '', permissions: [] } };
       mockAxiosInstance.get.mockResolvedValue(mockResponse);
 
       await customClient.getDecryptData('proj_123');
 
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/decrypt', {
-        params: { project_id: 'proj_123' }
-      });
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/secrets/proj_123');
     });
   });
 

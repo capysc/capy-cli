@@ -702,16 +702,17 @@ export class PromptEngine {
   }
 
   /**
-   * Strip capy:{resource_id}: prefix from value if present
+   * Strip capy: prefix (and optional resource_id) from value if present
    */
   private stripResourceIdPrefix(value: string): string {
     if (value.startsWith('capy:')) {
-      // Format: capy:{resource_id}:{encrypted_value}
       const parts = value.split(':');
       if (parts.length >= 3) {
-        // Rejoin everything after the resource_id
+        // Format: capy:{resource_id}:{encrypted_value}
         return parts.slice(2).join(':');
       }
+      // Format: capy:{base64_data} (GCM format)
+      return parts.slice(1).join(':');
     }
     return value;
   }

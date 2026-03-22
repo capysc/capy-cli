@@ -103,15 +103,14 @@ export class ServiceClient {
 
     try {
       const response = await this.api.post('/projects', {
-        project_name: projectName,
-        organization_id: organizationId
+        name: projectName
       });
 
       return {
-        capy_id: response.data.capy_id,
-        project_id: response.data.project_id,
-        project_name: response.data.project_name,
-        created: response.data.created || true
+        capy_id: response.data.organization_id,
+        project_id: response.data.id,
+        project_name: response.data.name,
+        created: true
       };
     } catch (error: any) {
       if (error instanceof CapyError) {
@@ -149,14 +148,12 @@ export class ServiceClient {
     }
 
     try {
-      const response = await this.api.get('/decrypt', {
-        params: { project_id: projectId }
-      });
+      const response = await this.api.get(`/secrets/${projectId}`);
 
       return {
-        env_content: response.data.env_content,
-        decrypt_key: response.data.decrypt_key,
-        expires_at: response.data.expires_at
+        env_content: response.data.env_file || '',
+        decrypt_key: '', // Decrypt key is managed client-side
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       };
     } catch (error: any) {
       if (error instanceof CapyError) {
@@ -247,21 +244,22 @@ export class ServiceClient {
     }
 
     try {
-      // Include resource_ids for existing variables from keep
-      const variablesWithMetadata = Object.entries(variables).map(([name, value]) => ({
-        name,
-        value,
-        resource_id: keep?.variables[name]?.resource_id || null
-      }));
+      // Build env_file content from variables
+      const envFileContent = Object.entries(variables)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
 
-      const response = await this.api.post('/variables/push', {
-        project_id: projectId,
-        variables: variablesWithMetadata
+      // Build keep_file content from keep data
+      const keepFileContent = keep ? JSON.stringify(keep) : JSON.stringify({ variables: {} });
+
+      const response = await this.api.post(`/secrets/${projectId}`, {
+        env_file: envFileContent,
+        keep_file: keepFileContent
       });
 
       return {
         success: response.data.success,
-        variables: response.data.variables
+        variables: {}
       };
     } catch (error: any) {
       if (error instanceof CapyError) {
@@ -269,61 +267,6 @@ export class ServiceClient {
       }
       throw new CapyError(
         error.response?.data?.error || error.message || 'Failed to push variables',
-        ERROR_CODES.SERVICE_ERROR,
-        { error: error.message }
-      );
-    }
-  }
-
-  async deleteVariable(projectId: string, variableName: string): Promise<boolean> {
-    try {
-      const response = await this.api.delete(`/variables/${variableName}`, {
-        params: { project_id: projectId }
-      });
-      return response.data.success;
-    } catch (error: any) {
-      if (error instanceof CapyError) {
-        throw error;
-      }
-      throw new CapyError(
-        `Failed to delete variable ${variableName}`,
-        ERROR_CODES.SERVICE_ERROR,
-        { error: error.message }
-      );
-    }
-  }
-
-  async checkProjectAccess(projectId: string): Promise<boolean> {
-    try {
-      const response = await this.api.get(`/projects/${projectId}/access`);
-      return response.data.has_access;
-    } catch (error: any) {
-      if (error.response?.status === 404) {
-        return false;
-      }
-      if (error instanceof CapyError) {
-        throw error;
-      }
-      throw new CapyError(
-        'Failed to check project access',
-        ERROR_CODES.SERVICE_ERROR,
-        { error: error.message }
-      );
-    }
-  }
-
-  async listProjects(organizationId: string): Promise<Array<{ id: string; name: string }>> {
-    try {
-      const response = await this.api.get('/projects', {
-        params: { organization_id: organizationId }
-      });
-      return response.data.projects;
-    } catch (error: any) {
-      if (error instanceof CapyError) {
-        throw error;
-      }
-      throw new CapyError(
-        'Failed to list projects',
         ERROR_CODES.SERVICE_ERROR,
         { error: error.message }
       );
