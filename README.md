@@ -24,32 +24,14 @@ That's it! The CLI intelligently handles initialization, authentication, and syn
 npm install -g @capy/cli
 ```
 
-### Local Development Usage
-
-```bash
-# Clone and build
-git clone https://github.com/capysc/capy-cli
-cd capy-cli
-npm install
-npm run build
-
-# Link for global use
-npm link
-
-# Or run directly
-node bin/capy
-
-# For development with TypeScript source
-npm install -g tsx
-tsx src/index.ts
-```
-
 ### Requirements
 
 - Node.js v18 or higher
-- npm or yarn
+- bun
 - Git (for automatic `.gitignore` management)
 - WorkOS organization access (for team features)
+
+For local development setup, see the [root README](../../README.md#local-development).
 
 ## Usage
 
@@ -163,37 +145,6 @@ capy --verbose
 capy --force
 ```
 
-## Development
-
-### Building
-
-```bash
-npm install
-npm run build
-```
-
-### Testing
-
-```bash
-npm test
-```
-
-### Type Checking
-
-```bash
-npm run typecheck
-```
-
-### Development Mode
-
-```bash
-npm run dev  # Watches for changes and rebuilds
-```
-
-### Running CLI locally
-```bash
-npm link
-```
 
 ## Project Files
 
@@ -283,7 +234,6 @@ Configure CLI behavior with these environment variables:
 - `CAPY_API_URL` - Override default API endpoint
 - `CAPY_AUTH_TIMEOUT` - OAuth timeout in seconds (default: 300)
 - `CAPY_LOG_LEVEL` - Logging verbosity (error, warn, info, debug)
-- `CAPY_MOCK_AUTH` - Enable mock authentication for development (default: false)
 
 Example:
 ```bash
@@ -291,21 +241,6 @@ export CAPY_API_URL=https://api.capy.sc
 export CAPY_LOG_LEVEL=debug
 capy
 ```
-
-### Development Mode
-
-For testing without WorkOS authentication:
-
-```bash
-export CAPY_MOCK_AUTH=true
-capy
-```
-
-This will:
-- Skip real WorkOS OAuth flow
-- Generate mock authentication tokens
-- Return fake environment variables
-- Simulate API responses with delays
 
 ## Contributing
 
