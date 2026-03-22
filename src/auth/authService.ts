@@ -8,14 +8,15 @@ export class AuthService {
   private serviceApiUrl: string;
   private tokenPath: string;
   private serviceToken: ServiceToken | null = null;
+  private mockMode: boolean;
 
-  constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'http://localhost:3002') {
+  constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'http://localhost:3002', mockMode: boolean = false) {
     this.serviceApiUrl = serviceApiUrl;
+    this.mockMode = mockMode;
     this.tokenPath = join(process.cwd(), '.capy', 'token');
 
-    // Mock mode setup
-    if (process.env.CAPY_MOCK_AUTH === 'true') {
-      console.log('🔫 AuthService: Mock mode enabled');
+    if (this.mockMode) {
+      console.log('🔫 AuthService: Mock mode enabled (dev entrypoint)');
     }
 
     this.loadToken();
@@ -24,7 +25,9 @@ export class AuthService {
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
       // Check for mock mode FIRST - skip all other checks
-      if (process.env.CAPY_MOCK_AUTH === 'true') {
+      // Mock mode can only be enabled via the dev entrypoint (bin/capy-dev),
+      // not via environment variables, to prevent leaking into production.
+      if (this.mockMode) {
         return this.mockAuthenticate(organizationId);
       }
 

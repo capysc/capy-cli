@@ -1,0 +1,5 @@
+#!/usr/bin/env node
+
+// Dev-only CLI wrapper with mock auth enabled.
+// NOT included in production npm package.
+require('../dist/index-dev.js');
