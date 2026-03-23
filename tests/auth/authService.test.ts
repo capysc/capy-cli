@@ -99,16 +99,6 @@ describe('AuthService', () => {
       mockExistsSync.mockReturnValue(true);
       mockReadFileSync.mockReturnValue(JSON.stringify(mockToken));
 
-      // Mock axios.get for token validation
-      (mockAxios.get as jest.MockedFunction<typeof axios.get>).mockResolvedValue({
-        data: {
-          organization_id: 'org-123',
-          organization_name: 'Test Org',
-          user_id: 'user-456',
-          user_email: 'test@example.com'
-        }
-      } as any);
-
       const service = new AuthService();
       const result = await service.authenticate();
 
