@@ -22,8 +22,8 @@ export class AuthService {
   private serviceToken: ServiceToken | null = null;
   private mockMode: boolean;
 
-  constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'https://api.capy.sc', devMode: boolean = false) {
-    this.serviceApiUrl = serviceApiUrl;
+  constructor(serviceApiUrl?: string, devMode: boolean = false) {
+    this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
     // Mock mode requires BOTH dev entrypoint AND explicit env var
     this.mockMode = devMode && process.env.CAPY_MOCK_AUTH === 'true';
     this.tokenPath = join(process.cwd(), '.capy', 'token');

@@ -16,13 +16,13 @@ export class ServiceClient {
   private token: ServiceToken | null = null;
   private mockMode: boolean;
 
-  constructor(apiUrl: string = process.env.CAPY_API_URL || 'https://api.capy.sc', devMode: boolean = false) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     // Mock mode requires BOTH dev entrypoint AND explicit env var
     this.mockMode = devMode && process.env.CAPY_MOCK_AUTH === 'true';
     if (this.mockMode) {
       console.log('🔫 ServiceClient: Mock mode enabled (CAPY_MOCK_AUTH=true)');
     }
-    this.apiUrl = apiUrl;
+    this.apiUrl = apiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
   }
 
   setToken(token: ServiceToken): void {
