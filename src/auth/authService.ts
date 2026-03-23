@@ -4,20 +4,16 @@ import { join, dirname } from 'path';
 import { AuthResult, ServiceToken, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 
-const DEFAULT_WORKOS_CLIENT_ID = process.env.WORKOS_CLIENT_ID || '';
-
 export class AuthService {
   private serviceApiUrl: string;
   private tokenPath: string;
   private serviceToken: ServiceToken | null = null;
   private mockMode: boolean;
-  private workosClientId: string;
 
   constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'http://localhost:3000', devMode: boolean = false) {
     this.serviceApiUrl = serviceApiUrl;
     // Mock mode requires BOTH dev entrypoint AND explicit env var
     this.mockMode = devMode && process.env.CAPY_MOCK_AUTH === 'true';
-    this.workosClientId = DEFAULT_WORKOS_CLIENT_ID;
     this.tokenPath = join(process.cwd(), '.capy', 'token');
 
     if (this.mockMode) {
@@ -69,22 +65,16 @@ export class AuthService {
   }
 
   private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
-    // CLI generates the AuthKit auth URL directly (client_id is public)
     const oauthServer = new OAuthServer(3001);
     const state = oauthServer.getState();
 
-    const params = new URLSearchParams({
-      client_id: this.workosClientId,
-      redirect_uri: 'http://localhost:3001/callback',
-      response_type: 'code',
-      provider: 'authkit',
+    // Ask the service for the auth URL (service owns all WorkOS config)
+    const initiateResponse = await axios.post(`${this.serviceApiUrl}/auth/initiate`, {
       state,
+      redirect_uri: 'http://localhost:3001/callback',
+      organization_id: organizationId,
     });
-    if (organizationId) {
-      params.set('organization', organizationId);
-    }
-
-    const authUrl = `https://api.workos.com/user_management/authorize?${params.toString()}`;
+    const authUrl = initiateResponse.data.auth_url;
 
     // Open browser and capture the code
     const code = await oauthServer.startAuthFlow(authUrl);
