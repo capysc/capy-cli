@@ -1,4 +1,3 @@
-import axios, { AxiosInstance } from 'axios';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import {
@@ -13,7 +12,7 @@ import {
 } from '../types/index';
 
 export class ServiceClient {
-  private api: AxiosInstance;
+  private apiUrl: string;
   private token: ServiceToken | null = null;
   private mockMode: boolean;
 
@@ -23,72 +22,77 @@ export class ServiceClient {
     if (this.mockMode) {
       console.log('🔫 ServiceClient: Mock mode enabled (CAPY_MOCK_AUTH=true)');
     }
-    this.api = axios.create({
-      baseURL: apiUrl,
-      timeout: 30000,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-
-    this.setupInterceptors();
+    this.apiUrl = apiUrl;
   }
 
   setToken(token: ServiceToken): void {
     this.token = token;
   }
 
-  private setupInterceptors(): void {
-    // Request interceptor to add auth token
-    this.api.interceptors.request.use(
-      config => {
-        if (this.token) {
-          config.headers['Authorization'] = `Bearer ${this.token.access_token}`;
-        }
-        return config;
-      },
-      error => Promise.reject(error)
-    );
+  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number }): Promise<T> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token.access_token}`;
+    }
 
-    // Response interceptor for error handling
-    this.api.interceptors.response.use(
-      response => response,
-      error => {
-        if (error.response?.status === 401) {
-          throw new CapyError(
-            'Authentication required. Please run capy to authenticate.',
-            ERROR_CODES.AUTH_FAILED,
-            { status: 401 }
-          );
-        }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), options?.timeout ?? 30000);
 
-        if (error.response?.status === 403) {
-          throw new CapyError(
-            'Access denied. You do not have permission to access this project.',
-            ERROR_CODES.PERMISSION_DENIED,
-            { status: 403 }
-          );
-        }
-
-        if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-          throw new CapyError(
-            'Failed to connect to Capy service. Please check your internet connection.',
-            ERROR_CODES.NETWORK_ERROR,
-            { code: error.code }
-          );
-        }
-
-        const serverMessage = error.response?.data?.error || error.response?.data?.message || 'Service request failed';
+    let res: Response;
+    try {
+      res = await fetch(`${this.apiUrl}${path}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+    } catch (err: any) {
+      clearTimeout(timeout);
+      if (err.name === 'AbortError') {
         throw new CapyError(
-          serverMessage,
-          ERROR_CODES.SERVICE_ERROR,
-          {
-            status: error.response?.status,
-            data: error.response?.data
-          }
+          'Failed to connect to Capy service. Please check your internet connection.',
+          ERROR_CODES.NETWORK_ERROR,
+          { code: 'ETIMEDOUT' }
         );
       }
-    );
+      throw new CapyError(
+        'Failed to connect to Capy service. Please check your internet connection.',
+        ERROR_CODES.NETWORK_ERROR,
+        { code: err.code || err.cause?.code }
+      );
+    }
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({})) as Record<string, any>;
+
+      if (res.status === 401) {
+        throw new CapyError(
+          'Authentication required. Please run capy to authenticate.',
+          ERROR_CODES.AUTH_FAILED,
+          { status: 401 }
+        );
+      }
+
+      if (res.status === 403) {
+        throw new CapyError(
+          'Access denied. You do not have permission to access this project.',
+          ERROR_CODES.PERMISSION_DENIED,
+          { status: 403 }
+        );
+      }
+
+      const serverMessage = data.error || data.message || 'Service request failed';
+      throw new CapyError(
+        serverMessage,
+        ERROR_CODES.SERVICE_ERROR,
+        { status: res.status, data }
+      );
+    }
+
+    return res.json() as Promise<T>;
   }
 
   async initializeProject(projectName: string, organizationId: string): Promise<ProjectInitResult> {
@@ -104,15 +108,15 @@ export class ServiceClient {
     }
 
     try {
-      const response = await this.api.post('/projects', {
-        name: projectName,
-        organization_id: organizationId,
-      });
+      const data = await this.request<{ id: string; name: string; organization_id: string; s3_prefix: string }>(
+        'POST', '/projects',
+        { name: projectName, organization_id: organizationId },
+      );
 
       return {
-        org_id: response.data.organization_id,
-        project_id: response.data.id,
-        project_name: response.data.name,
+        org_id: data.organization_id,
+        project_id: data.id,
+        project_name: data.name,
         created: true
       };
     } catch (error: any) {
@@ -151,10 +155,12 @@ export class ServiceClient {
     }
 
     try {
-      const response = await this.api.get(`/secrets/${projectId}`);
+      const data = await this.request<{ env_file?: string; permissions: string[] }>(
+        'GET', `/secrets/${projectId}`,
+      );
 
       return {
-        env_content: response.data.env_file || '',
+        env_content: data.env_file || '',
         decrypt_key: '', // Decrypt key is managed client-side
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       };
@@ -163,7 +169,7 @@ export class ServiceClient {
         throw error;
       }
       throw new CapyError(
-        error.response?.data?.error || error.message || 'Failed to retrieve decryption data',
+        error.message || 'Failed to retrieve decryption data',
         ERROR_CODES.SERVICE_ERROR,
         { error: error.message }
       );
@@ -205,7 +211,7 @@ export class ServiceClient {
         if (value === 'capy:deleted') {
           // Store deletion marker as-is without encryption
           encryptedNewVars[key] = 'capy:deleted';
-          
+
           mockVariables[key] = {
             resource_id: deriveResourceId(mockDecryptKey, key),
             created_at: new Date().toISOString(),
@@ -255,13 +261,13 @@ export class ServiceClient {
       // Build keep_file content from keep data
       const keepFileContent = keep ? JSON.stringify(keep) : JSON.stringify({ variables: {} });
 
-      const response = await this.api.post(`/secrets/${projectId}`, {
-        env_file: envFileContent,
-        keep_file: keepFileContent
-      });
+      const data = await this.request<{ success: boolean }>(
+        'POST', `/secrets/${projectId}`,
+        { env_file: envFileContent, keep_file: keepFileContent },
+      );
 
       return {
-        success: response.data.success,
+        success: data.success,
         variables: {}
       };
     } catch (error: any) {
@@ -269,7 +275,7 @@ export class ServiceClient {
         throw error;
       }
       throw new CapyError(
-        error.response?.data?.error || error.message || 'Failed to push variables',
+        error.message || 'Failed to push variables',
         ERROR_CODES.SERVICE_ERROR,
         { error: error.message }
       );
@@ -284,10 +290,10 @@ export class ServiceClient {
     }
 
     try {
-      const response = await this.api.get('/health', {
-        timeout: 5000
+      const res = await fetch(`${this.apiUrl}/health`, {
+        signal: AbortSignal.timeout(5000),
       });
-      return response.status === 200;
+      return res.status === 200;
     } catch {
       return false;
     }
@@ -327,7 +333,7 @@ export class ServiceClient {
       if (!existsSync(capyDir)) {
         mkdirSync(capyDir, { recursive: true });
       }
-      
+
       writeFileSync(mockEnvPath, content + '\n', 'utf-8');
       console.log(`🔫 Updated mock.env at ${mockEnvPath}`);
     } catch (error) {

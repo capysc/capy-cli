@@ -1,19 +1,29 @@
 import { jest } from '@jest/globals';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
-import axios from 'axios';
 import { AuthService } from '../../src/auth/authService';
 import { OAuthServer } from '../../src/auth/oauthServer';
 
 // Mock dependencies
 jest.mock('fs');
-jest.mock('axios');
 jest.mock('../../src/auth/oauthServer');
 
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
-const mockAxios = axios as jest.Mocked<typeof axios>;
 const MockOAuthServer = OAuthServer as jest.MockedClass<typeof OAuthServer>;
+
+// Mock global fetch
+const mockFetch = jest.fn() as jest.MockedFunction<typeof fetch>;
+global.fetch = mockFetch;
+
+function mockFetchResponse(data: any, ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    json: () => Promise.resolve(data),
+    text: () => Promise.resolve(JSON.stringify(data)),
+  } as unknown as Response;
+}
 
 describe('AuthService', () => {
   let authService: AuthService;
@@ -114,31 +124,27 @@ describe('AuthService', () => {
       mockExistsSync.mockReturnValue(false);
       const service = new AuthService();
 
-      // Mock axios responses
-      mockAxios.post
-        .mockResolvedValueOnce({
-          data: {
-            auth_url: 'https://workos.com/auth',
-          }
-        })
-        .mockResolvedValueOnce({
-          data: {
-            token: {
-              access_token: 'new-token',
-              refresh_token: 'new-refresh',
-              expires_in: 3600,
-            },
-            user: {
-              id: 'user-456',
-              email: 'test@example.com',
-              organization_id: 'org-123',
-              organization_name: 'Test Org',
-            },
-            organizations: [
-              { id: 'org-123', name: 'Test Org' }
-            ]
-          }
-        });
+      // Mock fetch responses
+      mockFetch
+        .mockResolvedValueOnce(mockFetchResponse({
+          auth_url: 'https://workos.com/auth',
+        }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          token: {
+            access_token: 'new-token',
+            refresh_token: 'new-refresh',
+            expires_in: 3600,
+          },
+          user: {
+            id: 'user-456',
+            email: 'test@example.com',
+            organization_id: 'org-123',
+            organization_name: 'Test Org',
+          },
+          organizations: [
+            { id: 'org-123', name: 'Test Org' }
+          ]
+        }));
 
       // Mock OAuth server
       const mockOAuthInstance = {
@@ -161,16 +167,22 @@ describe('AuthService', () => {
       });
 
       expect(mockOAuthInstance.bind).toHaveBeenCalled();
-      expect(mockAxios.post).toHaveBeenCalledWith(
+      expect(mockFetch).toHaveBeenCalledWith(
         'https://api.capy.sc/auth/initiate',
-        { state: 'mock-state', redirect_uri: 'http://localhost:19420/callback', organization_id: 'org-123' }
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ state: 'mock-state', redirect_uri: 'http://localhost:19420/callback', organization_id: 'org-123' }),
+        })
       );
 
       expect(mockOAuthInstance.startAuthFlow).toHaveBeenCalledWith('https://workos.com/auth');
 
-      expect(mockAxios.post).toHaveBeenCalledWith(
+      expect(mockFetch).toHaveBeenCalledWith(
         'https://api.capy.sc/auth/exchange',
-        { code: 'auth-code-123' }
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ code: 'auth-code-123' }),
+        })
       );
     });
 
@@ -187,13 +199,13 @@ describe('AuthService', () => {
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
 
-      mockAxios.post
-        .mockResolvedValueOnce({
-          data: {
-            auth_url: 'https://workos.com/auth',
-          }
-        })
-        .mockRejectedValueOnce(new Error('Invalid credentials'));
+      mockFetch
+        .mockResolvedValueOnce(mockFetchResponse({
+          auth_url: 'https://workos.com/auth',
+        }))
+        .mockResolvedValueOnce(mockFetchResponse(
+          { error: 'Invalid credentials' }, false, 401
+        ));
 
       const result = await service.authenticate();
 
@@ -216,7 +228,7 @@ describe('AuthService', () => {
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
 
-      mockAxios.post.mockRejectedValue(new Error('Network error'));
+      mockFetch.mockRejectedValue(new Error('Network error'));
 
       const result = await service.authenticate();
 

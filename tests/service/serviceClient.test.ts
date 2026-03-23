@@ -1,28 +1,19 @@
 import { jest } from '@jest/globals';
-import axios from 'axios';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { ServiceToken, CapyError, ERROR_CODES } from '../../src/types/index';
 
-// Mock axios
-jest.mock('axios');
-const mockAxios = axios as jest.Mocked<typeof axios>;
+// Mock global fetch
+const mockFetch = jest.fn() as jest.MockedFunction<typeof fetch>;
+global.fetch = mockFetch;
 
-// Mock axios.create to return a mock instance
-const mockAxiosInstance = {
-  get: jest.fn() as jest.MockedFunction<any>,
-  post: jest.fn() as jest.MockedFunction<any>,
-  delete: jest.fn() as jest.MockedFunction<any>,
-  interceptors: {
-    request: {
-      use: jest.fn()
-    },
-    response: {
-      use: jest.fn()
-    }
-  }
-};
-
-mockAxios.create.mockReturnValue(mockAxiosInstance as any);
+function mockFetchResponse(data: any, ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    json: () => Promise.resolve(data),
+    text: () => Promise.resolve(JSON.stringify(data)),
+  } as unknown as Response;
+}
 
 describe('ServiceClient', () => {
   let serviceClient: ServiceClient;
@@ -52,19 +43,20 @@ describe('ServiceClient', () => {
   describe('getDecryptData', () => {
     test('should retrieve decrypt data successfully', async () => {
       const projectId = 'proj_123';
-      const mockResponse = {
-        data: {
-          env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
-          permissions: ['*']
-        }
+      const mockData = {
+        env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
+        permissions: ['*']
       };
 
-      mockAxiosInstance.get.mockResolvedValue(mockResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse(mockData));
 
       const result = await serviceClient.getDecryptData(projectId);
 
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith(`/secrets/${projectId}`);
-      expect(result.env_content).toBe(mockResponse.data.env_file);
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/secrets/${projectId}`,
+        expect.objectContaining({ method: 'GET' })
+      );
+      expect(result.env_content).toBe(mockData.env_file);
     });
 
     test('should include authorization header when token is set', async () => {
@@ -76,23 +68,24 @@ describe('ServiceClient', () => {
       };
       serviceClient.setToken(token);
 
-      const mockResponse = { data: { env_file: '', permissions: [] } };
-      mockAxiosInstance.get.mockResolvedValue(mockResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse({ env_file: '', permissions: [] }));
 
       await serviceClient.getDecryptData('proj_123');
 
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/secrets/proj_123');
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/secrets/proj_123`,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer test_token',
+          }),
+        })
+      );
     });
 
     test('should handle service errors', async () => {
-      const errorResponse = {
-        response: {
-          status: 404,
-          data: { error: 'Project not found' }
-        }
-      };
-
-      mockAxiosInstance.get.mockRejectedValue(errorResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'Project not found' }, false, 404
+      ));
 
       await expect(serviceClient.getDecryptData('invalid_proj')).rejects.toThrow(CapyError);
       await expect(serviceClient.getDecryptData('invalid_proj')).rejects.toThrow('Project not found');
@@ -100,10 +93,11 @@ describe('ServiceClient', () => {
 
     test('should handle network errors', async () => {
       const networkError = new Error('Network Error');
-      mockAxiosInstance.get.mockRejectedValue(networkError);
+      (networkError as any).code = 'ECONNREFUSED';
+      mockFetch.mockRejectedValue(networkError);
 
       await expect(serviceClient.getDecryptData('proj_123')).rejects.toThrow(CapyError);
-      await expect(serviceClient.getDecryptData('proj_123')).rejects.toThrow('Network Error');
+      await expect(serviceClient.getDecryptData('proj_123')).rejects.toThrow('Failed to connect to Capy service');
     });
   });
 
@@ -111,23 +105,24 @@ describe('ServiceClient', () => {
     test('should create new project successfully', async () => {
       const projectName = 'test-project';
       const organizationId = 'org_123';
-      const mockResponse = {
-        data: {
-          id: 'proj_456',
-          name: projectName,
-          organization_id: organizationId,
-          s3_prefix: `${organizationId}/proj_456`
-        }
+      const mockData = {
+        id: 'proj_456',
+        name: projectName,
+        organization_id: organizationId,
+        s3_prefix: `${organizationId}/proj_456`
       };
 
-      mockAxiosInstance.post.mockResolvedValue(mockResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse(mockData));
 
       const result = await serviceClient.initializeProject(projectName, organizationId);
 
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/projects', {
-        name: projectName,
-        organization_id: organizationId,
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/projects`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ name: projectName, organization_id: organizationId }),
+        })
+      );
       expect(result.project_id).toBe('proj_456');
       expect(result.project_name).toBe(projectName);
       expect(result.org_id).toBe(organizationId);
@@ -143,26 +138,26 @@ describe('ServiceClient', () => {
       };
       serviceClient.setToken(token);
 
-      const mockResponse = { data: { id: 'proj_456', name: 'test', organization_id: 'org_123', s3_prefix: 'org_123/proj_456' } };
-      mockAxiosInstance.post.mockResolvedValue(mockResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse({
+        id: 'proj_456', name: 'test', organization_id: 'org_123', s3_prefix: 'org_123/proj_456'
+      }));
 
       await serviceClient.initializeProject('test', 'org_123');
 
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/projects', {
-        name: 'test',
-        organization_id: 'org_123',
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/projects`,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer test_token',
+          }),
+        })
+      );
     });
 
     test('should handle project creation errors', async () => {
-      const errorResponse = {
-        response: {
-          status: 400,
-          data: { error: 'Project name already exists' }
-        }
-      };
-
-      mockAxiosInstance.post.mockRejectedValue(errorResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'Project name already exists' }, false, 400
+      ));
 
       await expect(serviceClient.initializeProject('existing', 'org_123')).rejects.toThrow(CapyError);
     });
@@ -172,35 +167,31 @@ describe('ServiceClient', () => {
     test('should push variables successfully', async () => {
       const projectId = 'proj_123';
       const variables = { API_KEY: 'test123', DB_URL: 'postgres://localhost' };
-      const mockResponse = {
-        data: {
-          success: true
-        }
-      };
 
-      mockAxiosInstance.post.mockResolvedValue(mockResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse({ success: true }));
 
       const result = await serviceClient.pushVariables(projectId, variables);
 
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith(`/secrets/${projectId}`, {
-        env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
-        keep_file: JSON.stringify({ variables: {} })
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/secrets/${projectId}`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
+            keep_file: JSON.stringify({ variables: {} })
+          }),
+        })
+      );
       expect(result.success).toBe(true);
     });
 
     test('should handle push errors', async () => {
-      const errorResponse = {
-        response: {
-          status: 403,
-          data: { error: 'Insufficient permissions' }
-        }
-      };
-
-      mockAxiosInstance.post.mockRejectedValue(errorResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'Insufficient permissions' }, false, 403
+      ));
 
       await expect(serviceClient.pushVariables('proj_123', {})).rejects.toThrow(CapyError);
-      await expect(serviceClient.pushVariables('proj_123', {})).rejects.toThrow('Insufficient permissions');
+      await expect(serviceClient.pushVariables('proj_123', {})).rejects.toThrow('Access denied');
     });
   });
 
@@ -209,12 +200,14 @@ describe('ServiceClient', () => {
       const customUrl = 'https://api.example.com';
       const customClient = new ServiceClient(customUrl);
 
-      const mockResponse = { data: { env_file: '', permissions: [] } };
-      mockAxiosInstance.get.mockResolvedValue(mockResponse);
+      mockFetch.mockResolvedValue(mockFetchResponse({ env_file: '', permissions: [] }));
 
       await customClient.getDecryptData('proj_123');
 
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/secrets/proj_123');
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${customUrl}/secrets/proj_123`,
+        expect.anything()
+      );
     });
   });
 

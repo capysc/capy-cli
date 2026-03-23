@@ -1,8 +1,20 @@
-import axios from 'axios';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { AuthResult, Organization, ServiceToken, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
+
+async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error((data as any).error || `Request failed with status ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
 
 export class AuthService {
   private serviceApiUrl: string;
@@ -72,20 +84,23 @@ export class AuthService {
     const redirectUri = oauthServer.getRedirectUri();
 
     // Ask the service for the auth URL (service owns all WorkOS config)
-    const initiateResponse = await axios.post(`${this.serviceApiUrl}/auth/initiate`, {
-      state,
-      redirect_uri: redirectUri,
-      organization_id: organizationId,
-    });
-    const authUrl = initiateResponse.data.auth_url;
+    const initiateData = await postJson<{ auth_url: string }>(
+      `${this.serviceApiUrl}/auth/initiate`,
+      { state, redirect_uri: redirectUri, organization_id: organizationId },
+    );
+    const authUrl = initiateData.auth_url;
 
     // Open browser and capture the code
     const code = await oauthServer.startAuthFlow(authUrl);
 
     // Send code to service for exchange
     // Service now mints its own JWT (if exactly 1 org) or returns org list
-    const response = await axios.post(`${this.serviceApiUrl}/auth/exchange`, { code });
-    const { token, user, organizations, _workos_user_id } = response.data;
+    const { token, user, organizations, _workos_user_id } = await postJson<{
+      token: { access_token: string | null; refresh_token: string; expires_in: number };
+      user: { id: string; email: string };
+      organizations: Organization[];
+      _workos_user_id?: string;
+    }>(`${this.serviceApiUrl}/auth/exchange`, { code });
 
     // If service returned a JWT (single org), use it directly
     if (token.access_token) {
@@ -129,15 +144,15 @@ export class AuthService {
    * After the CLI prompts the user to pick an org, call this to get a service JWT.
    */
   async selectOrganization(userId: string, organizationId: string, refreshToken?: string): Promise<void> {
-    const response = await axios.post(`${this.serviceApiUrl}/auth/select-org`, {
-      user_id: userId,
-      organization_id: organizationId,
-    });
+    const data = await postJson<{ access_token: string; expires_in: number }>(
+      `${this.serviceApiUrl}/auth/select-org`,
+      { user_id: userId, organization_id: organizationId },
+    );
 
     this.serviceToken = {
-      access_token: response.data.access_token,
+      access_token: data.access_token,
       refresh_token: refreshToken || '',
-      expires_at: Date.now() + (response.data.expires_in * 1000),
+      expires_at: Date.now() + (data.expires_in * 1000),
       organization_id: organizationId,
       user_id: userId,
     };
@@ -150,16 +165,19 @@ export class AuthService {
     }
 
     try {
-      const response = await axios.post(`${this.serviceApiUrl}/auth/refresh`, {
-        refresh_token: this.serviceToken.refresh_token,
-        organization_id: this.serviceToken.organization_id,
-      });
+      const data = await postJson<{ access_token: string; refresh_token?: string; expires_in: number }>(
+        `${this.serviceApiUrl}/auth/refresh`,
+        {
+          refresh_token: this.serviceToken.refresh_token,
+          organization_id: this.serviceToken.organization_id,
+        },
+      );
 
       this.serviceToken = {
         ...this.serviceToken,
-        access_token: response.data.access_token,
-        refresh_token: response.data.refresh_token || this.serviceToken.refresh_token,
-        expires_at: Date.now() + (response.data.expires_in * 1000)
+        access_token: data.access_token,
+        refresh_token: data.refresh_token || this.serviceToken.refresh_token,
+        expires_at: Date.now() + (data.expires_in * 1000)
       };
 
       this.saveToken();
@@ -208,24 +226,24 @@ export class AuthService {
   }
 
   async createOrganization(name: string, userId: string): Promise<Organization> {
-    const response = await axios.post(`${this.serviceApiUrl}/auth/create-org`, {
-      name,
-      user_id: userId,
-    });
+    const data = await postJson<Organization & { access_token?: string; expires_in?: number }>(
+      `${this.serviceApiUrl}/auth/create-org`,
+      { name, user_id: userId },
+    );
 
     // Service now returns a JWT with the new org — save it
-    if (response.data.access_token) {
+    if (data.access_token) {
       this.serviceToken = {
-        access_token: response.data.access_token,
+        access_token: data.access_token,
         refresh_token: this.serviceToken?.refresh_token || '',
-        expires_at: Date.now() + ((response.data.expires_in || 86400) * 1000),
-        organization_id: response.data.id,
+        expires_at: Date.now() + ((data.expires_in || 86400) * 1000),
+        organization_id: data.id,
         user_id: userId,
       };
       this.saveToken();
     }
 
-    return response.data;
+    return data;
   }
 
   setOrganizationId(orgId: string): void {
