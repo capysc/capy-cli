@@ -145,7 +145,7 @@ export class AuthService {
   }
 
   async refreshToken(): Promise<boolean> {
-    if (!this.serviceToken?.refresh_token || !this.serviceToken?.access_token) {
+    if (!this.serviceToken?.refresh_token || !this.serviceToken?.organization_id) {
       return false;
     }
 
@@ -154,7 +154,7 @@ export class AuthService {
         `${this.serviceApiUrl}/auth/refresh`,
         {
           refresh_token: this.serviceToken.refresh_token,
-          expired_token: this.serviceToken.access_token,
+          organization_id: this.serviceToken.organization_id,
         },
       );
 
