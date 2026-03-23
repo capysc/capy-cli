@@ -133,7 +133,10 @@ describe('AuthService', () => {
               email: 'test@example.com',
               organization_id: 'org-123',
               organization_name: 'Test Org',
-            }
+            },
+            organizations: [
+              { id: 'org-123', name: 'Test Org' }
+            ]
           }
         });
 
@@ -153,9 +156,11 @@ describe('AuthService', () => {
         organizationId: 'org-123',
         organizationName: 'Test Org',
         userId: 'user-456',
-        userEmail: 'test@example.com'
+        userEmail: 'test@example.com',
+        organizations: [{ id: 'org-123', name: 'Test Org' }],
       });
 
+      expect(mockOAuthInstance.bind).toHaveBeenCalled();
       expect(mockAxios.post).toHaveBeenCalledWith(
         'http://localhost:3000/auth/initiate',
         { state: 'mock-state', redirect_uri: 'http://localhost:19420/callback', organization_id: 'org-123' }
@@ -174,14 +179,6 @@ describe('AuthService', () => {
       mockExistsSync.mockReturnValue(false);
       const service = new AuthService();
 
-      mockAxios.post
-        .mockResolvedValueOnce({
-          data: {
-            auth_url: 'https://workos.com/auth',
-          }
-        })
-        .mockRejectedValueOnce(new Error('Invalid credentials'));
-
       const mockOAuthInstance = {
         bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
         getState: jest.fn().mockReturnValue('mock-state'),
@@ -189,6 +186,14 @@ describe('AuthService', () => {
         startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+
+      mockAxios.post
+        .mockResolvedValueOnce({
+          data: {
+            auth_url: 'https://workos.com/auth',
+          }
+        })
+        .mockRejectedValueOnce(new Error('Invalid credentials'));
 
       const result = await service.authenticate();
 
@@ -203,8 +208,6 @@ describe('AuthService', () => {
       mockExistsSync.mockReturnValue(false);
       const service = new AuthService();
 
-      mockAxios.post.mockRejectedValue(new Error('Network error'));
-
       const mockOAuthInstance = {
         bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
         getState: jest.fn().mockReturnValue('mock-state'),
@@ -212,6 +215,8 @@ describe('AuthService', () => {
         startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+
+      mockAxios.post.mockRejectedValue(new Error('Network error'));
 
       const result = await service.authenticate();
 

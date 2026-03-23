@@ -61,7 +61,7 @@ describe('CLI Integration Tests', () => {
     test('should correctly detect initialized project state', async () => {
       const mockKeep: KeepFile = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
@@ -113,7 +113,7 @@ DEBUG=true`;
     test('should create proper keep file structure', () => {
       const mockKeep: KeepFile = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'integration-test',
         created_at: new Date().toISOString(),
@@ -141,7 +141,7 @@ DEBUG=true`;
     test('should create decrypt key with secure permissions', () => {
       const mockDecryptKey: DecryptKey = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         user_id: 'user_789',
         decryption_key: 'decrypt_key_abc',
@@ -215,7 +215,7 @@ DEBUG=true`;
     test('should merge keep file with pushed variables', () => {
       const originalKeep: KeepFile = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
@@ -362,7 +362,7 @@ DEBUG=true`;
       const decryptKey = syncEngine.createDecryptKey(orgId, projectId, userId, decryptionKey, permissions);
 
       expect(decryptKey.version).toBe('1.0');
-      expect(decryptKey.capy_id).toBe(orgId);
+      expect(decryptKey.org_id).toBe(orgId);
       expect(decryptKey.project_id).toBe(projectId);
       expect(decryptKey.user_id).toBe(userId);
       expect(decryptKey.decryption_key).toBe(decryptionKey);

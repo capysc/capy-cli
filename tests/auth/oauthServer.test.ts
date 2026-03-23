@@ -29,7 +29,9 @@ describe('OAuthServer', () => {
     mockServer = {
       listen: jest.fn((port: number, callback: () => void) => callback()),
       close: jest.fn(),
-      on: jest.fn()
+      on: jest.fn(),
+      once: jest.fn(),
+      removeListener: jest.fn()
     };
     mockCreateServer.mockReturnValue(mockServer);
 
@@ -37,9 +39,6 @@ describe('OAuthServer', () => {
     mockOpen.mockResolvedValue({} as any);
 
     oauthServer = new OAuthServer();
-    // Simulate bind() having already been called
-    (oauthServer as any).server = mockServer;
-    (oauthServer as any).port = 3001;
   });
 
   describe('generateState', () => {
@@ -50,24 +49,26 @@ describe('OAuthServer', () => {
   });
 
   describe('bind', () => {
-    test('should bind to the first available port', async () => {
-      const server = new OAuthServer();
-      mockServer.once = jest.fn((event: string, handler: any) => {
-        // Don't trigger error
+    test('should bind to first available port', async () => {
+      // Mock the listen to call the callback (success)
+      mockServer.listen.mockImplementation((port: number, callback: () => void) => {
+        mockServer.removeListener('error', expect.any(Function));
+        callback();
       });
-      mockServer.listen = jest.fn((port: number, callback: () => void) => callback());
-      mockServer.removeListener = jest.fn();
-      mockCreateServer.mockReturnValue(mockServer);
 
-      await server.bind();
+      await oauthServer.bind();
 
+      expect(mockCreateServer).toHaveBeenCalled();
       expect(mockServer.listen).toHaveBeenCalledWith(19420, expect.any(Function));
     });
   });
 
   describe('startAuthFlow', () => {
-    test('should open browser and return auth code on success', async () => {
+    test('should open browser and resolve with auth code on success', async () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
+
+      // Manually set the server (as bind() would)
+      (oauthServer as any).server = mockServer;
 
       // Mock successful flow
       setTimeout(() => {
@@ -90,6 +91,9 @@ describe('OAuthServer', () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
       mockOpen.mockRejectedValue(new Error('Browser failed'));
 
+      // Manually set the server (as bind() would)
+      (oauthServer as any).server = mockServer;
+
       // Mock successful auth after browser failure
       setTimeout(() => {
         const closeHandler = mockServer.on.mock.calls.find((call: any) => call[0] === 'close')?.[1];
@@ -106,6 +110,9 @@ describe('OAuthServer', () => {
     test('should timeout after 5 minutes', async () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
 
+      // Manually set the server (as bind() would)
+      (oauthServer as any).server = mockServer;
+
       jest.useFakeTimers();
 
       const flowPromise = oauthServer.startAuthFlow(authUrl);
@@ -121,6 +128,9 @@ describe('OAuthServer', () => {
 
     test('should reject with error when OAuth error occurs', async () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
+
+      // Manually set the server (as bind() would)
+      (oauthServer as any).server = mockServer;
 
       setTimeout(() => {
         const closeHandler = mockServer.on.mock.calls.find((call: any) => call[0] === 'close')?.[1];

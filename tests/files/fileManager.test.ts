@@ -186,7 +186,7 @@ describe('FileManager', () => {
     test('should write keep file with proper formatting', () => {
       const keep: KeepFile = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
@@ -208,7 +208,7 @@ describe('FileManager', () => {
     test('should handle write failure with backup restoration', () => {
       const keep: KeepFile = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
@@ -236,7 +236,7 @@ describe('FileManager', () => {
     test('should write decrypt key with secure permissions', () => {
       const decryptKey: DecryptKey = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         user_id: 'user_789',
         decryption_key: 'key_abc',
@@ -258,7 +258,7 @@ describe('FileManager', () => {
     test('should handle write failure with error throwing', () => {
       const decryptKey: DecryptKey = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         user_id: 'user_789',
         decryption_key: 'key_abc',

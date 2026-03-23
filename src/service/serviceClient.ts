@@ -95,7 +95,7 @@ export class ServiceClient {
       console.log(`🔫 Mock: Initializing project "${projectName}" for org "${organizationId}"`);
       await this.mockDelay();
       return {
-        capy_id: `capy_${organizationId}`,
+        org_id: organizationId,
         project_id: `proj_${projectName.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${Math.random().toString(36).substr(2, 6)}`,
         project_name: projectName,
         created: true
@@ -104,11 +104,12 @@ export class ServiceClient {
 
     try {
       const response = await this.api.post('/projects', {
-        name: projectName
+        name: projectName,
+        organization_id: organizationId,
       });
 
       return {
-        capy_id: response.data.organization_id,
+        org_id: response.data.organization_id,
         project_id: response.data.id,
         project_name: response.data.name,
         created: true

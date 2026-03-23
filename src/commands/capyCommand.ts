@@ -5,8 +5,10 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
+import inquirer from 'inquirer';
 import {
   CliOptions,
+  Organization,
   ProjectState,
   KeepFile,
   SyncState,
@@ -66,7 +68,7 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Authenticated as ${authResult.userEmail} (${authResult.organizationName})`);
+    spinner.succeed(`Authenticated as ${authResult.userEmail}`);
 
     // Set token for service client
     const token = this.authService.getToken();
@@ -77,6 +79,45 @@ export class CapyCommand {
       }
     }
 
+    // Resolve organization
+    const orgs = authResult.organizations || [];
+    let selectedOrg: Organization;
+
+    if (orgs.length === 0) {
+      // No orgs — prompt to create one
+      console.log('\n🏢 No organization found. Let\'s create one.');
+      const { orgName } = await inquirer.prompt([{
+        type: 'input',
+        name: 'orgName',
+        message: 'Organization name:',
+        validate: (input: string) => input.trim().length > 0 || 'Organization name cannot be empty',
+      }]);
+
+      const orgSpinner = ora('Creating organization...').start();
+      selectedOrg = await this.authService.createOrganization(orgName.trim(), authResult.userId!);
+      orgSpinner.succeed(`Organization "${selectedOrg.name}" created`);
+    } else if (orgs.length === 1) {
+      // Single org — auto-select
+      selectedOrg = orgs[0];
+      console.log(`🏢 Organization: ${selectedOrg.name}`);
+    } else {
+      // Multiple orgs — prompt to pick
+      const { orgId } = await inquirer.prompt([{
+        type: 'list',
+        name: 'orgId',
+        message: 'Select an organization:',
+        choices: orgs.map(o => ({ name: o.name, value: o.id })),
+      }]);
+      selectedOrg = orgs.find(o => o.id === orgId)!;
+    }
+
+    // Update token with selected org
+    this.authService.setOrganizationId(selectedOrg.id);
+    const updatedToken = this.authService.getToken();
+    if (updatedToken) {
+      this.serviceClient.setToken(updatedToken);
+    }
+
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
     const projectName = await this.promptEngine.promptForProjectName(defaultName);
@@ -85,7 +126,7 @@ export class CapyCommand {
     const initSpinner = ora('Creating project...').start();
     const projectResult = await this.serviceClient.initializeProject(
       projectName,
-      authResult.organizationId!
+      selectedOrg.id
     );
     initSpinner.succeed(`Project "${projectName}" created`);
 
@@ -95,7 +136,7 @@ export class CapyCommand {
     // Create keep file
     const keep: KeepFile = {
       version: '1.0',
-      capy_id: projectResult.capy_id,
+      org_id: projectResult.org_id,
       project_id: projectResult.project_id,
       project_name: projectResult.project_name,
       created_at: new Date().toISOString(),
@@ -112,7 +153,7 @@ export class CapyCommand {
 
       // Create decrypt key
       const decryptKey = this.syncEngine.createDecryptKey(
-        projectResult.capy_id,
+        projectResult.org_id,
         projectResult.project_id,
         authResult.userId!,
         decryptData.decrypt_key,
@@ -176,7 +217,7 @@ export class CapyCommand {
               
               // Update decrypt key with variable permissions
               const decryptKey = this.syncEngine.createDecryptKey(
-                projectResult.capy_id,
+                projectResult.org_id,
                 projectResult.project_id,
                 authResult.userId!,
                 decryptData.decrypt_key,

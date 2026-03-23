@@ -7,7 +7,7 @@ export interface EnvVariable {
 
 export interface KeepFile {
   version: string;
-  capy_id: string;
+  org_id: string;
   project_id: string;
   project_name: string;
   created_at: string;
@@ -23,7 +23,7 @@ export interface KeepVariable {
 
 export interface DecryptKey {
   version: string;
-  capy_id: string;
+  org_id: string;
   project_id: string;
   user_id: string;
   decryption_key: string;
@@ -80,12 +80,19 @@ export interface UserDecisions {
   deleteRemote: string[]; // Variables to delete from remote (push deletion)
 }
 
+export interface Organization {
+  id: string;
+  workos_org_id: string;
+  name: string;
+}
+
 export interface AuthResult {
   success: boolean;
   organizationId?: string;
   organizationName?: string;
   userId?: string;
   userEmail?: string;
+  organizations?: Organization[];
   error?: string;
 }
 
@@ -111,7 +118,7 @@ export interface CliOptions {
 }
 
 export interface ProjectInitResult {
-  capy_id: string;
+  org_id: string;
   project_id: string;
   project_name: string;
   created: boolean;

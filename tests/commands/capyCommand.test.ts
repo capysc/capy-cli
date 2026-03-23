@@ -15,6 +15,7 @@ jest.mock('../../src/auth/authService');
 jest.mock('../../src/service/serviceClient');
 jest.mock('../../src/sync/syncEngine');
 jest.mock('../../src/ui/promptEngine');
+jest.mock('inquirer');
 jest.mock('../../src/ui/spinner', () => ({
   __esModule: true,
   default: (text: string) => ({
@@ -70,7 +71,9 @@ describe('CapyCommand', () => {
 
     mockAuthService = {
       authenticate: jest.fn(),
-      getToken: jest.fn()
+      getToken: jest.fn(),
+      setOrganizationId: jest.fn(),
+      createOrganization: jest.fn()
     } as any;
 
     mockServiceClient = {
@@ -98,6 +101,10 @@ describe('CapyCommand', () => {
       displayError: jest.fn(),
       displayWarning: jest.fn()
     } as any;
+
+    // Mock inquirer to auto-answer org selection prompts
+    const mockInquirer = require('inquirer');
+    mockInquirer.default = { prompt: (jest.fn() as any).mockResolvedValue({ orgId: 'org-123', orgName: 'Test Org' }) };
 
     // Mock constructors
     MockProjectManager.mockImplementation(() => mockProjectManager);
@@ -228,7 +235,8 @@ describe('CapyCommand', () => {
         organizationId: 'org-123',
         organizationName: 'Test Org',
         userId: 'user-456',
-        userEmail: 'test@example.com'
+        userEmail: 'test@example.com',
+        organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }]
       });
 
       mockAuthService.getToken.mockReturnValue({
@@ -240,7 +248,7 @@ describe('CapyCommand', () => {
       });
 
       mockServiceClient.initializeProject.mockResolvedValue({
-        capy_id: 'capy-123',
+        org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         created: true
@@ -286,7 +294,7 @@ describe('CapyCommand', () => {
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
           version: '1.0',
-          capy_id: 'capy-123',
+          org_id: 'capy-123',
           project_id: 'proj-123',
           project_name: 'test-project',
           variables: {}
@@ -365,7 +373,7 @@ describe('CapyCommand', () => {
       // Mock mergeWithKeep to return an updated keep
       mockSyncEngine.mergeWithKeep.mockReturnValue({
         version: '1.0',
-        capy_id: 'capy-123',
+        org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
@@ -525,7 +533,7 @@ describe('CapyCommand', () => {
 
       mockProjectManager.readKeepFile.mockReturnValue({
         version: '1.0',
-        capy_id: 'capy-123',
+        org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
@@ -535,7 +543,7 @@ describe('CapyCommand', () => {
 
       mockSyncEngine.mergeWithKeep.mockReturnValue({
         version: '1.0',
-        capy_id: 'capy-123',
+        org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
