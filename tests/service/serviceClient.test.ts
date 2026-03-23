@@ -220,9 +220,9 @@ describe('ServiceClient', () => {
     let mockServiceClient: ServiceClient;
 
     beforeEach(() => {
-      // Enable mock mode
+      // Enable mock mode — requires both devMode=true and CAPY_MOCK_AUTH=true
       process.env.CAPY_MOCK_AUTH = 'true';
-      mockServiceClient = new ServiceClient();
+      mockServiceClient = new ServiceClient(undefined, true);
     });
 
     afterEach(() => {

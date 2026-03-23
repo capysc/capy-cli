@@ -36,7 +36,10 @@ describe('OAuthServer', () => {
     // Mock open
     mockOpen.mockResolvedValue({} as any);
 
-    oauthServer = new OAuthServer(3001);
+    oauthServer = new OAuthServer();
+    // Simulate bind() having already been called
+    (oauthServer as any).server = mockServer;
+    (oauthServer as any).port = 3001;
   });
 
   describe('generateState', () => {
@@ -46,8 +49,24 @@ describe('OAuthServer', () => {
     });
   });
 
+  describe('bind', () => {
+    test('should bind to the first available port', async () => {
+      const server = new OAuthServer();
+      mockServer.once = jest.fn((event: string, handler: any) => {
+        // Don't trigger error
+      });
+      mockServer.listen = jest.fn((port: number, callback: () => void) => callback());
+      mockServer.removeListener = jest.fn();
+      mockCreateServer.mockReturnValue(mockServer);
+
+      await server.bind();
+
+      expect(mockServer.listen).toHaveBeenCalledWith(19420, expect.any(Function));
+    });
+  });
+
   describe('startAuthFlow', () => {
-    test('should start server and open browser successfully', async () => {
+    test('should open browser and return auth code on success', async () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
 
       // Mock successful flow
@@ -63,7 +82,6 @@ describe('OAuthServer', () => {
 
       const result = await oauthServer.startAuthFlow(authUrl);
 
-      expect(mockServer.listen).toHaveBeenCalledWith(3001, expect.any(Function));
       expect(mockOpen).toHaveBeenCalledWith(authUrl);
       expect(result).toBe('test-auth-code');
     });
