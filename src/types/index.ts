@@ -94,7 +94,7 @@ export interface AuthResult {
   userEmail?: string;
   organizations?: Organization[];
   error?: string;
-  /** Temporary refresh token for use with selectOrganization() when org selection is pending */
+  /** WorkOS refresh token for use with selectOrganization/createOrganization when org selection is pending */
   _refreshToken?: string;
 }
 

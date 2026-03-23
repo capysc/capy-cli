@@ -94,7 +94,7 @@ export class CapyCommand {
       }]);
 
       const orgSpinner = ora('Creating organization...').start();
-      selectedOrg = await this.authService.createOrganization(orgName.trim(), authResult.userId!);
+      selectedOrg = await this.authService.createOrganization(orgName.trim(), authResult._refreshToken!, authResult.userId!);
       orgSpinner.succeed(`Organization "${selectedOrg.name}" created`);
     } else if (orgs.length === 1) {
       // Single org — auto-select

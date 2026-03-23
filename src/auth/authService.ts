@@ -95,11 +95,10 @@ export class AuthService {
 
     // Send code to service for exchange
     // Service now mints its own JWT (if exactly 1 org) or returns org list
-    const { token, user, organizations, _workos_user_id } = await postJson<{
+    const { token, user, organizations } = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
       user: { id: string; email: string };
       organizations: Organization[];
-      _workos_user_id?: string;
     }>(`${this.serviceApiUrl}/auth/exchange`, { code });
 
     // If service returned a JWT (single org), use it directly
@@ -128,30 +127,33 @@ export class AuthService {
     }
 
     // No JWT yet — user must select an org (0 or >1 orgs)
-    // Return with organizations list for the CLI to prompt
+    // Return with organizations list for the CLI to prompt.
+    // The refresh_token is used by selectOrganization/createOrganization
+    // to prove identity via WorkOS — no raw user_id is ever sent to the server.
     return {
       success: true,
       organizationId: '',
-      userId: _workos_user_id || user.id,
+      userId: user.id,
       userEmail: user.email,
       organizations: organizations || [],
-      // Store refresh token temporarily so we can use it after org selection
       _refreshToken: token.refresh_token,
     };
   }
 
   /**
    * After the CLI prompts the user to pick an org, call this to get a service JWT.
+   * The server uses WorkOS refresh-with-org-switch to verify membership —
+   * no raw user_id is ever sent to the server.
    */
-  async selectOrganization(userId: string, organizationId: string, refreshToken?: string): Promise<void> {
-    const data = await postJson<{ access_token: string; expires_in: number }>(
+  async selectOrganization(refreshToken: string, organizationId: string, userId: string): Promise<void> {
+    const data = await postJson<{ access_token: string; refresh_token: string; expires_in: number }>(
       `${this.serviceApiUrl}/auth/select-org`,
-      { user_id: userId, organization_id: organizationId },
+      { refresh_token: refreshToken, organization_id: organizationId },
     );
 
     this.serviceToken = {
       access_token: data.access_token,
-      refresh_token: refreshToken || '',
+      refresh_token: data.refresh_token,
       expires_at: Date.now() + (data.expires_in * 1000),
       organization_id: organizationId,
       user_id: userId,
@@ -160,7 +162,7 @@ export class AuthService {
   }
 
   async refreshToken(): Promise<boolean> {
-    if (!this.serviceToken?.refresh_token) {
+    if (!this.serviceToken?.refresh_token || !this.serviceToken?.access_token) {
       return false;
     }
 
@@ -169,7 +171,7 @@ export class AuthService {
         `${this.serviceApiUrl}/auth/refresh`,
         {
           refresh_token: this.serviceToken.refresh_token,
-          organization_id: this.serviceToken.organization_id,
+          expired_token: this.serviceToken.access_token,
         },
       );
 
@@ -225,17 +227,17 @@ export class AuthService {
     }
   }
 
-  async createOrganization(name: string, userId: string): Promise<Organization> {
-    const data = await postJson<Organization & { access_token?: string; expires_in?: number }>(
+  async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
+    const data = await postJson<Organization & { access_token?: string; refresh_token?: string; expires_in?: number }>(
       `${this.serviceApiUrl}/auth/create-org`,
-      { name, user_id: userId },
+      { name, refresh_token: refreshToken },
     );
 
-    // Service now returns a JWT with the new org — save it
+    // Service returns a JWT + fresh refresh token for the new org — save both
     if (data.access_token) {
       this.serviceToken = {
         access_token: data.access_token,
-        refresh_token: this.serviceToken?.refresh_token || '',
+        refresh_token: data.refresh_token || refreshToken,
         expires_at: Date.now() + ((data.expires_in || 86400) * 1000),
         organization_id: data.id,
         user_id: userId,
