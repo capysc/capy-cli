@@ -82,21 +82,31 @@ export class AuthService {
     const redirectUri = oauthServer.getRedirectUri();
     const state = oauthServer.getState();
 
-    // Ask the backend to generate the WorkOS auth URL (confidential client)
+    // Ask the backend to generate the WorkOS auth URL.
+    // Send the PKCE code_challenge so WorkOS binds the auth code to our verifier.
     const { auth_url } = await postJson<{ auth_url: string }>(
       `${this.serviceApiUrl}/auth/initiate`,
-      { state, redirect_uri: redirectUri, organization_id: organizationId },
+      {
+        state,
+        redirect_uri: redirectUri,
+        organization_id: organizationId,
+        code_challenge: oauthServer.getCodeChallenge(),
+      },
     );
 
     // Open browser and capture the authorization code
     const code = await oauthServer.startAuthFlow(auth_url);
 
-    // Send code to backend for exchange (backend uses client_secret with WorkOS)
+    // Send code + PKCE verifier to backend for exchange.
+    // Backend uses client_secret + code_verifier with WorkOS (defense in depth).
     const { token, user, organizations } = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
       user: { id: string; email: string };
       organizations: Organization[];
-    }>(`${this.serviceApiUrl}/auth/exchange`, { code });
+    }>(`${this.serviceApiUrl}/auth/exchange`, {
+      code,
+      code_verifier: oauthServer.getCodeVerifier(),
+    });
 
     // If service returned a JWT (single org), use it directly
     if (token.access_token) {

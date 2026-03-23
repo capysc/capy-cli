@@ -1,10 +1,21 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { URL } from 'url';
 import open from 'open';
 import { CapyError, ERROR_CODES } from '../types/index';
 
 const CALLBACK_PORTS = [19420, 19421, 19422, 19423, 19424];
+
+/**
+ * Generate a PKCE code verifier and S256 code challenge.
+ * The verifier stays on the CLI; only the challenge is sent to the server.
+ */
+function generatePKCE(): { codeVerifier: string; codeChallenge: string } {
+  // RFC 7636: 43-128 unreserved characters
+  const codeVerifier = randomBytes(32).toString('base64url');
+  const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
+  return { codeVerifier, codeChallenge };
+}
 
 export class OAuthServer {
   private port: number = 0;
@@ -12,13 +23,23 @@ export class OAuthServer {
   private server: any;
   private authorizationCode: string | null = null;
   private error: string | null = null;
+  private pkce: { codeVerifier: string; codeChallenge: string };
 
   constructor() {
     this.state = randomBytes(32).toString('hex');
+    this.pkce = generatePKCE();
   }
 
   getState(): string {
     return this.state;
+  }
+
+  getCodeChallenge(): string {
+    return this.pkce.codeChallenge;
+  }
+
+  getCodeVerifier(): string {
+    return this.pkce.codeVerifier;
   }
 
   getRedirectUri(): string {
