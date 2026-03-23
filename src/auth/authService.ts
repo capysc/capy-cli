@@ -13,14 +13,15 @@ export class AuthService {
   private mockMode: boolean;
   private workosClientId: string;
 
-  constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'http://localhost:3000', mockMode: boolean = false) {
+  constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'http://localhost:3000', devMode: boolean = false) {
     this.serviceApiUrl = serviceApiUrl;
-    this.mockMode = mockMode;
+    // Mock mode requires BOTH dev entrypoint AND explicit env var
+    this.mockMode = devMode && process.env.CAPY_MOCK_AUTH === 'true';
     this.workosClientId = DEFAULT_WORKOS_CLIENT_ID;
     this.tokenPath = join(process.cwd(), '.capy', 'token');
 
     if (this.mockMode) {
-      console.log('🔫 AuthService: Mock mode enabled (dev entrypoint)');
+      console.log('🔫 AuthService: Mock mode enabled (CAPY_MOCK_AUTH=true)');
     }
 
     this.loadToken();
@@ -28,7 +29,7 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
-      // Mock mode — dev entrypoint only
+      // Mock mode — only when dev entrypoint + CAPY_MOCK_AUTH=true
       if (this.mockMode) {
         return this.mockAuthenticate(organizationId);
       }
