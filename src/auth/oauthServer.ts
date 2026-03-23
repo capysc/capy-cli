@@ -4,7 +4,7 @@ import { URL } from 'url';
 import open from 'open';
 import { CapyError, ERROR_CODES } from '../types/index';
 
-const CALLBACK_PORTS = [3001, 3002, 3003, 3004, 3005, 8085, 8086, 8087];
+const CALLBACK_PORTS = [19170, 19171, 19172, 19173, 19174];
 
 export class OAuthServer {
   private port: number = 0;
