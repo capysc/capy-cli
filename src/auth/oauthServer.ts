@@ -140,16 +140,25 @@ export class OAuthServer {
   private sendSuccessResponse(res: ServerResponse): void {
     const html = `
       <!DOCTYPE html>
-      <html>
+      <html class="dark">
         <head>
           <title>Authentication Successful</title>
           <script src="https://cdn.tailwindcss.com"></script>
+          <link rel="preconnect" href="https://fonts.googleapis.com">
+          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+          <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
+          <script>
+            tailwind.config = {
+              darkMode: 'class',
+              theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
+            }
+          </script>
         </head>
-        <body class="flex items-center justify-center min-h-screen bg-gray-50">
-          <div class="text-center p-8 bg-white rounded-lg shadow-md">
-            <div class="text-green-500 text-5xl mb-4">✓</div>
-            <h1 class="text-2xl font-semibold text-gray-800 mb-2">Authentication Successful!</h1>
-            <p class="text-gray-500">You can now close this window and return to your terminal.</p>
+        <body class="flex items-center justify-center min-h-screen bg-gray-950 font-geist">
+          <div class="text-center p-8 bg-gray-900 rounded-lg border border-gray-800">
+            <div class="text-green-400 text-5xl mb-4">✓</div>
+            <h1 class="text-2xl font-semibold text-gray-100 mb-2">Authentication Successful!</h1>
+            <p class="text-gray-400">You can now close this window and return to your terminal.</p>
             <script>setTimeout(() => window.close(), 3000);</script>
           </div>
         </body>
@@ -163,17 +172,26 @@ export class OAuthServer {
   private sendErrorResponse(res: ServerResponse, error: string): void {
     const html = `
       <!DOCTYPE html>
-      <html>
+      <html class="dark">
         <head>
           <title>Authentication Failed</title>
           <script src="https://cdn.tailwindcss.com"></script>
+          <link rel="preconnect" href="https://fonts.googleapis.com">
+          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+          <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
+          <script>
+            tailwind.config = {
+              darkMode: 'class',
+              theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
+            }
+          </script>
         </head>
-        <body class="flex items-center justify-center min-h-screen bg-gray-50">
-          <div class="text-center p-8 bg-white rounded-lg shadow-md max-w-md">
-            <div class="text-red-500 text-5xl mb-4">✗</div>
-            <h1 class="text-2xl font-semibold text-gray-800 mb-2">Authentication Failed</h1>
-            <p class="text-gray-500 mb-4">Please return to your terminal and try again.</p>
-            <div class="bg-red-50 text-red-800 p-3 rounded text-sm">${error}</div>
+        <body class="flex items-center justify-center min-h-screen bg-gray-950 font-geist">
+          <div class="text-center p-8 bg-gray-900 rounded-lg border border-gray-800 max-w-md">
+            <div class="text-red-400 text-5xl mb-4">✗</div>
+            <h1 class="text-2xl font-semibold text-gray-100 mb-2">Authentication Failed</h1>
+            <p class="text-gray-400 mb-4">Please return to your terminal and try again.</p>
+            <div class="bg-red-950 text-red-300 p-3 rounded text-sm border border-red-900">${error}</div>
           </div>
         </body>
       </html>
