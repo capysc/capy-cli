@@ -154,11 +154,11 @@ export class OAuthServer {
             }
           </script>
         </head>
-        <body class="flex items-center justify-center min-h-screen bg-gray-950 font-geist">
-          <div class="text-center p-8 bg-gray-900 rounded-lg border border-gray-800">
-            <div class="flex justify-center mb-6"><svg width="48" height="48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#s0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="s0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg></div>
-            <h1 class="text-2xl font-semibold text-gray-100 mb-2">Authentication Successful!</h1>
-            <p class="text-gray-400">You can now close this window and return to your terminal.</p>
+        <body class="flex items-center justify-center min-h-screen dark:bg-neutral-950 font-geist">
+          <div class="text-center p-8 rounded-lg border border-neutral-200 dark:border-neutral-800 dark:text-white">
+            <div class="flex justify-center mb-6 dark:invert"><svg width="48" height="48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#s0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="s0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg></div>
+            <h1>Authentication Successful!</h1>
+            <p>You can now close this window and return to your terminal.</p>
             <script>setTimeout(() => window.close(), 3000);</script>
           </div>
         </body>
@@ -186,12 +186,12 @@ export class OAuthServer {
             }
           </script>
         </head>
-        <body class="flex items-center justify-center min-h-screen bg-gray-950 font-geist">
-          <div class="text-center p-8 bg-gray-900 rounded-lg border border-gray-800 max-w-md">
-            <div class="flex justify-center mb-6"><svg width="48" height="48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#e0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="e0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg></div>
-            <h1 class="text-2xl font-semibold text-gray-100 mb-2">Authentication Failed</h1>
-            <p class="text-gray-400 mb-4">Please return to your terminal and try again.</p>
-            <div class="bg-red-950 text-red-300 p-3 rounded text-sm border border-red-900">${error}</div>
+        <body class="flex items-center justify-center min-h-screen dark:bg-neutral-950 font-geist">
+          <div class="text-center p-8 rounded-lg border border-neutral-200 dark:border-neutral-800 max-w-md dark:text-white">
+            <div class="flex justify-center mb-6 dark:invert"><svg width="48" height="48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#e0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="e0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg></div>
+            <h1>Authentication Failed</h1>
+            <p>Please return to your terminal and try again.</p>
+            <div class="text-neutral-500">${error}</div>
           </div>
         </body>
       </html>

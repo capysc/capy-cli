@@ -8,6 +8,11 @@ import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 
+// Default to localhost for dev builds
+if (!process.env.CAPY_API_URL) {
+  process.env.CAPY_API_URL = 'http://localhost:3000';
+}
+
 const program = new Command();
 
 program

@@ -78,8 +78,9 @@ export class ServiceClient {
           );
         }
 
+        const serverMessage = error.response?.data?.error || error.response?.data?.message || 'Service request failed';
         throw new CapyError(
-          error.response?.data?.message || 'Service request failed',
+          serverMessage,
           ERROR_CODES.SERVICE_ERROR,
           {
             status: error.response?.status,

@@ -42,7 +42,7 @@ describe('AuthService', () => {
   describe('constructor', () => {
     test('should use default service URL when no environment variable set', () => {
       const service = new AuthService();
-      expect((service as any).serviceApiUrl).toBe('http://localhost:3000');
+      expect((service as any).serviceApiUrl).toBe('https://api.capy.sc');
     });
 
     test('should use environment variable for service URL', () => {
@@ -162,14 +162,14 @@ describe('AuthService', () => {
 
       expect(mockOAuthInstance.bind).toHaveBeenCalled();
       expect(mockAxios.post).toHaveBeenCalledWith(
-        'http://localhost:3000/auth/initiate',
+        'https://api.capy.sc/auth/initiate',
         { state: 'mock-state', redirect_uri: 'http://localhost:19420/callback', organization_id: 'org-123' }
       );
 
       expect(mockOAuthInstance.startAuthFlow).toHaveBeenCalledWith('https://workos.com/auth');
 
       expect(mockAxios.post).toHaveBeenCalledWith(
-        'http://localhost:3000/auth/exchange',
+        'https://api.capy.sc/auth/exchange',
         { code: 'auth-code-123' }
       );
     });
