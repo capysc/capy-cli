@@ -170,24 +170,34 @@ export class AuthService {
   }
 
   async refreshToken(): Promise<boolean> {
-    if (!this.serviceToken?.refresh_token || !this.serviceToken?.access_token) {
+    if (!this.serviceToken?.refresh_token) {
       return false;
     }
 
     try {
-      const data = await postJson<{ access_token: string; refresh_token?: string; expires_in: number }>(
-        `${this.serviceApiUrl}/auth/refresh`,
-        {
-          refresh_token: this.serviceToken.refresh_token,
-          expired_token: this.serviceToken.access_token,
-        },
-      );
+      // Refresh the WorkOS token directly via SDK (public client, PKCE mode)
+      const clientId = await this.fetchClientId();
+      const workos = new WorkOS({ clientId });
+
+      const workosResult = await workos.userManagement.authenticateWithRefreshToken({
+        refreshToken: this.serviceToken.refresh_token,
+        clientId,
+      });
+
+      // Send the fresh WorkOS refresh token to the backend with the org hint.
+      // The backend verifies identity, confirms org membership, and mints a service JWT.
+      const { token } = await postJson<{
+        token: { access_token: string; refresh_token: string; expires_in: number };
+      }>(`${this.serviceApiUrl}/auth/exchange`, {
+        refresh_token: workosResult.refreshToken,
+        organization_id: this.serviceToken.organization_id,
+      });
 
       this.serviceToken = {
         ...this.serviceToken,
-        access_token: data.access_token,
-        refresh_token: data.refresh_token || this.serviceToken.refresh_token,
-        expires_at: Date.now() + (data.expires_in * 1000)
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        expires_at: Date.now() + (token.expires_in * 1000),
       };
 
       this.saveToken();
