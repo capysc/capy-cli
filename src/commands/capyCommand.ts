@@ -22,9 +22,11 @@ export class CapyCommand {
   private syncEngine: SyncEngine;
   private promptEngine: PromptEngine;
   private options: CliOptions;
+  private devMode: boolean;
 
   constructor(options: CliOptions = {}, devMode: boolean = false) {
     this.options = options;
+    this.devMode = devMode;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
     this.authService = new AuthService(undefined, devMode);
@@ -70,6 +72,9 @@ export class CapyCommand {
     const token = this.authService.getToken();
     if (token) {
       this.serviceClient.setToken(token);
+      if (this.devMode) {
+        console.log(`\n🔑 Bearer token (dev mode):\n${token.access_token}\n`);
+      }
     }
 
     // Prompt for project name
@@ -227,6 +232,9 @@ export class CapyCommand {
     const token = this.authService.getToken();
     if (token) {
       this.serviceClient.setToken(token);
+      if (this.devMode) {
+        console.log(`\n🔑 Bearer token (dev mode):\n${token.access_token}\n`);
+      }
     }
 
     // Get remote environment

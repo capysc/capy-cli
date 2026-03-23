@@ -4,15 +4,19 @@ import { join, dirname } from 'path';
 import { AuthResult, ServiceToken, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 
+const DEFAULT_WORKOS_CLIENT_ID = process.env.WORKOS_CLIENT_ID || '';
+
 export class AuthService {
   private serviceApiUrl: string;
   private tokenPath: string;
   private serviceToken: ServiceToken | null = null;
   private mockMode: boolean;
+  private workosClientId: string;
 
-  constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'http://localhost:3002', mockMode: boolean = false) {
+  constructor(serviceApiUrl: string = process.env.CAPY_API_URL || 'http://localhost:3000', mockMode: boolean = false) {
     this.serviceApiUrl = serviceApiUrl;
     this.mockMode = mockMode;
+    this.workosClientId = DEFAULT_WORKOS_CLIENT_ID;
     this.tokenPath = join(process.cwd(), '.capy', 'token');
 
     if (this.mockMode) {
@@ -24,84 +28,86 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
-      // Check for mock mode FIRST - skip all other checks
-      // Mock mode can only be enabled via the dev entrypoint (bin/capy-dev),
-      // not via environment variables, to prevent leaking into production.
+      // Mock mode — dev entrypoint only
       if (this.mockMode) {
         return this.mockAuthenticate(organizationId);
       }
 
-      // Check if we have a valid token and verify it with the service
+      // Check for valid cached token
       if (this.isAuthenticated()) {
         const token = this.getToken();
         if (token) {
-          try {
-            // Validate token with service
-            const response = await axios.get(`${this.serviceApiUrl}/auth/validate`, {
-              headers: {
-                'Authorization': `Bearer ${token.access_token}`
-              }
-            });
-
-            const userData = response.data;
-            return {
-              success: true,
-              organizationId: userData.organization_id || token.organization_id,
-              organizationName: userData.organization_name,
-              userId: userData.user_id || token.user_id,
-              userEmail: userData.user_email
-            };
-          } catch (error) {
-            // Token validation failed, clear it and continue with fresh auth
-            console.warn('⚠️  Cached token invalid, re-authenticating...');
-            this.clearToken();
-          }
+          return {
+            success: true,
+            organizationId: token.organization_id,
+            userId: token.user_id,
+          };
         }
       }
 
-      // Step 1: Request auth URL from service
-      const authUrlResponse = await axios.post(`${this.serviceApiUrl}/auth/initiate`, {
-        organization_id: organizationId
-      });
-
-      const { auth_url, session_id } = authUrlResponse.data;
-
-      // Step 2: Start local OAuth server to handle callback
-      const oauthServer = new OAuthServer();
-      const authorizationCode = await oauthServer.startAuthFlow(auth_url);
-
-      // Step 3: Send authorization code to service for token exchange
-      const tokenResponse = await axios.post(`${this.serviceApiUrl}/auth/exchange`, {
-        code: authorizationCode,
-        session_id: session_id
-      });
-
-      const { auth_result, token } = tokenResponse.data;
-
-      if (!auth_result.success) {
-        return {
-          success: false,
-          error: auth_result.error || 'Authentication failed'
-        };
+      // Try refresh if we have a refresh token
+      if (this.serviceToken?.refresh_token) {
+        const refreshed = await this.refreshToken();
+        if (refreshed) {
+          return {
+            success: true,
+            organizationId: this.serviceToken!.organization_id,
+            userId: this.serviceToken!.user_id,
+          };
+        }
       }
 
-      // Save token locally
-      this.serviceToken = token;
-      this.saveToken();
-
-      return {
-        success: true,
-        organizationId: auth_result.organizationId,
-        organizationName: auth_result.organizationName,
-        userId: auth_result.userId,
-        userEmail: auth_result.userEmail
-      };
+      // Full OAuth flow
+      return await this.startOAuthFlow(organizationId);
     } catch (error: any) {
       return {
         success: false,
         error: error.message || 'Authentication failed'
       };
     }
+  }
+
+  private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
+    // CLI generates the AuthKit auth URL directly (client_id is public)
+    const oauthServer = new OAuthServer(3001);
+    const state = oauthServer.getState();
+
+    const params = new URLSearchParams({
+      client_id: this.workosClientId,
+      redirect_uri: 'http://localhost:3001/callback',
+      response_type: 'code',
+      provider: 'authkit',
+      state,
+    });
+    if (organizationId) {
+      params.set('organization', organizationId);
+    }
+
+    const authUrl = `https://api.workos.com/user_management/authorize?${params.toString()}`;
+
+    // Open browser and capture the code
+    const code = await oauthServer.startAuthFlow(authUrl);
+
+    // Send code to service for exchange (service has the API key)
+    const response = await axios.post(`${this.serviceApiUrl}/auth/exchange`, { code });
+    const { token, user } = response.data;
+
+    this.serviceToken = {
+      access_token: token.access_token,
+      refresh_token: token.refresh_token,
+      expires_at: Date.now() + (token.expires_in * 1000),
+      organization_id: user.organization_id || organizationId || '',
+      user_id: user.id,
+    };
+    this.saveToken();
+
+    return {
+      success: true,
+      organizationId: this.serviceToken.organization_id,
+      organizationName: user.organization_name,
+      userId: user.id,
+      userEmail: user.email,
+    };
   }
 
   async refreshToken(): Promise<boolean> {
@@ -129,16 +135,8 @@ export class AuthService {
   }
 
   isAuthenticated(): boolean {
-    if (!this.serviceToken) {
-      return false;
-    }
-
-    // Check if token is expired
-    if (this.serviceToken.expires_at < Date.now()) {
-      return false;
-    }
-
-    return true;
+    if (!this.serviceToken) return false;
+    return this.serviceToken.expires_at > Date.now();
   }
 
   getToken(): ServiceToken | null {
@@ -150,9 +148,7 @@ export class AuthService {
   }
 
   private loadToken(): void {
-    if (!existsSync(this.tokenPath)) {
-      return;
-    }
+    if (!existsSync(this.tokenPath)) return;
 
     try {
       const content = readFileSync(this.tokenPath, 'utf-8');
@@ -163,21 +159,16 @@ export class AuthService {
   }
 
   private saveToken(): void {
-    if (!this.serviceToken) {
-      return;
-    }
+    if (!this.serviceToken) return;
 
     try {
-      // Ensure .capy directory exists
       const capyDir = dirname(this.tokenPath);
       if (!existsSync(capyDir)) {
         mkdirSync(capyDir, { recursive: true });
       }
-      
-      const content = JSON.stringify(this.serviceToken, null, 2);
-      writeFileSync(this.tokenPath, content, { encoding: 'utf-8', mode: 0o600 });
+      writeFileSync(this.tokenPath, JSON.stringify(this.serviceToken, null, 2), { encoding: 'utf-8', mode: 0o600 });
     } catch {
-      // Failed to save token, continue anyway
+      // Failed to save token
     }
   }
 
@@ -189,27 +180,23 @@ export class AuthService {
         fs.unlinkSync(this.tokenPath);
       }
     } catch {
-      // Ignore errors
+      // Ignore
     }
   }
 
   private mockAuthenticate(organizationId?: string): AuthResult {
-    console.log('🔫 Using mock authentication (CAPY_MOCK_AUTH=true)');
+    console.log('🔫 Using mock authentication');
 
     const mockOrgId = organizationId || 'mock-org-123';
     const mockUserId = 'mock-user-456';
 
-    // Create mock token
-    const mockToken: ServiceToken = {
+    this.serviceToken = {
       access_token: 'mock-access-token-' + Math.random().toString(36).substr(2, 9),
       refresh_token: 'mock-refresh-token-' + Math.random().toString(36).substr(2, 9),
-      expires_at: Date.now() + (24 * 60 * 60 * 1000), // 24 hours from now
+      expires_at: Date.now() + (24 * 60 * 60 * 1000),
       organization_id: mockOrgId,
       user_id: mockUserId
     };
-
-    // Save mock token
-    this.serviceToken = mockToken;
     this.saveToken();
 
     return {
