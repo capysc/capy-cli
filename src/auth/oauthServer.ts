@@ -4,17 +4,16 @@ import { URL } from 'url';
 import open from 'open';
 import { CapyError, ERROR_CODES } from '../types/index';
 
+const CALLBACK_PORTS = [3001, 3002, 3003, 3004, 3005, 8085, 8086, 8087];
+
 export class OAuthServer {
-  private port: number;
-  private redirectUri: string;
+  private port: number = 0;
   private state: string;
   private server: any;
   private authorizationCode: string | null = null;
   private error: string | null = null;
 
-  constructor(port: number = 3001) {
-    this.port = port;
-    this.redirectUri = `http://localhost:${port}/callback`;
+  constructor() {
     this.state = randomBytes(32).toString('hex');
   }
 
@@ -22,20 +21,48 @@ export class OAuthServer {
     return this.state;
   }
 
+  getRedirectUri(): string {
+    return `http://localhost:${this.port}/callback`;
+  }
+
+  /**
+   * Bind to the first available port from the candidate list.
+   * Must be called before startAuthFlow.
+   */
+  async bind(): Promise<void> {
+    this.server = createServer(this.handleRequest.bind(this));
+
+    for (const candidate of CALLBACK_PORTS) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          this.server.once('error', reject);
+          this.server.listen(candidate, () => {
+            this.server.removeListener('error', reject);
+            resolve();
+          });
+        });
+        this.port = candidate;
+        return;
+      } catch {
+        // Port in use, try next
+      }
+    }
+
+    throw new CapyError(
+      `Could not bind to any callback port (tried ${CALLBACK_PORTS.join(', ')})`,
+      ERROR_CODES.AUTH_FAILED
+    );
+  }
+
   async startAuthFlow(authUrl: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      this.server = createServer(this.handleRequest.bind(this));
+      console.log(`🔐 Starting OAuth authentication...`);
 
-      this.server.listen(this.port, async () => {
-        console.log(`🔐 Starting OAuth authentication...`);
-
-        try {
-          await open(authUrl);
-          console.log(`✓ Opened browser for authentication`);
-          console.log(`  If the browser didn't open, visit: ${authUrl}`);
-        } catch (error) {
-          console.error(`❌ Failed to open browser. Please visit: ${authUrl}`);
-        }
+      open(authUrl).then(() => {
+        console.log(`✓ Opened browser for authentication`);
+        console.log(`  If the browser didn't open, visit: ${authUrl}`);
+      }).catch(() => {
+        console.error(`❌ Failed to open browser. Please visit: ${authUrl}`);
       });
 
       const timeout = setTimeout(() => {

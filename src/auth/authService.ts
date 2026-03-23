@@ -65,13 +65,16 @@ export class AuthService {
   }
 
   private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
-    const oauthServer = new OAuthServer(3001);
+    const oauthServer = new OAuthServer();
+    await oauthServer.bind();
+
     const state = oauthServer.getState();
+    const redirectUri = oauthServer.getRedirectUri();
 
     // Ask the service for the auth URL (service owns all WorkOS config)
     const initiateResponse = await axios.post(`${this.serviceApiUrl}/auth/initiate`, {
       state,
-      redirect_uri: 'http://localhost:3001/callback',
+      redirect_uri: redirectUri,
       organization_id: organizationId,
     });
     const authUrl = initiateResponse.data.auth_url;
