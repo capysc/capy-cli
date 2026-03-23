@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
-import { AuthResult, ServiceToken, CapyError, ERROR_CODES } from '../types/index';
+import { AuthResult, Organization, ServiceToken, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 
 export class AuthService {
@@ -84,23 +84,32 @@ export class AuthService {
 
     // Send code to service for exchange (service has the API key)
     const response = await axios.post(`${this.serviceApiUrl}/auth/exchange`, { code });
-    const { token, user } = response.data;
+    const { token, user, organizations } = response.data;
+
+    // If user has exactly one org, auto-select it
+    const resolvedOrgId = organizations?.length === 1
+      ? organizations[0].id
+      : (user.organization_id || organizationId || '');
+    const resolvedOrgName = organizations?.length === 1
+      ? organizations[0].name
+      : user.organization_name;
 
     this.serviceToken = {
       access_token: token.access_token,
       refresh_token: token.refresh_token,
       expires_at: Date.now() + (token.expires_in * 1000),
-      organization_id: user.organization_id || organizationId || '',
+      organization_id: resolvedOrgId,
       user_id: user.id,
     };
     this.saveToken();
 
     return {
       success: true,
-      organizationId: this.serviceToken.organization_id,
-      organizationName: user.organization_name,
+      organizationId: resolvedOrgId,
+      organizationName: resolvedOrgName,
       userId: user.id,
       userEmail: user.email,
+      organizations: organizations || [],
     };
   }
 
@@ -163,6 +172,21 @@ export class AuthService {
       writeFileSync(this.tokenPath, JSON.stringify(this.serviceToken, null, 2), { encoding: 'utf-8', mode: 0o600 });
     } catch {
       // Failed to save token
+    }
+  }
+
+  async createOrganization(name: string, userId: string): Promise<Organization> {
+    const response = await axios.post(`${this.serviceApiUrl}/auth/create-org`, {
+      name,
+      user_id: userId,
+    });
+    return response.data;
+  }
+
+  setOrganizationId(orgId: string): void {
+    if (this.serviceToken) {
+      this.serviceToken.organization_id = orgId;
+      this.saveToken();
     }
   }
 

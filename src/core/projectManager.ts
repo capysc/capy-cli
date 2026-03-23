@@ -28,7 +28,7 @@ export class ProjectManager {
         const keep: KeepFile = JSON.parse(keepContent);
         this.validateKeepFile(keep);
         projectName = keep.project_name;
-        organizationId = keep.capy_id;
+        organizationId = keep.org_id;
         projectId = keep.project_id;
       } catch (error) {
         throw new CapyError(
@@ -112,7 +112,7 @@ export class ProjectManager {
   }
 
   private validateKeepFile(keep: any): void {
-    const required = ['version', 'capy_id', 'project_id', 'project_name'];
+    const required = ['version', 'org_id', 'project_id', 'project_name'];
     for (const field of required) {
       if (!keep || keep[field] === undefined || keep[field] === null) {
         throw new CapyError(`Missing required field: ${field}`, ERROR_CODES.INVALID_FORMAT);

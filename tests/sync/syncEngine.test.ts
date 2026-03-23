@@ -354,7 +354,7 @@ describe('SyncEngine', () => {
     test('should update existing variables in keep', () => {
       const keep: KeepFile = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
@@ -382,7 +382,7 @@ describe('SyncEngine', () => {
     test('should add new variables to keep', () => {
       const keep: KeepFile = {
         version: '1.0',
-        capy_id: 'org_123',
+        org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
@@ -414,7 +414,7 @@ describe('SyncEngine', () => {
       const result = syncEngine.createDecryptKey(orgId, projectId, userId, decryptionKey, permissions);
 
       expect(result.version).toBe('1.0');
-      expect(result.capy_id).toBe(orgId);
+      expect(result.org_id).toBe(orgId);
       expect(result.project_id).toBe(projectId);
       expect(result.user_id).toBe(userId);
       expect(result.decryption_key).toBe(decryptionKey);

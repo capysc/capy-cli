@@ -10,7 +10,7 @@ app.get('/health', (req, res) => {
 
 app.post('/projects', (req, res) => {
   res.json({
-    capy_id: 'org_mock123',
+    org_id: 'org_mock123',
     project_id: 'proj_mock456',
     project_name: req.body.project_name,
     created: true

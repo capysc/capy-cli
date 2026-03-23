@@ -231,7 +231,7 @@ export class SyncEngine {
 
     return {
       version: '1.0',
-      capy_id: organizationId,
+      org_id: organizationId,
       project_id: projectId,
       user_id: userId,
       decryption_key: decryptionKey,

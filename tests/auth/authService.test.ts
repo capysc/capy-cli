@@ -42,7 +42,7 @@ describe('AuthService', () => {
   describe('constructor', () => {
     test('should use default service URL when no environment variable set', () => {
       const service = new AuthService();
-      expect((service as any).serviceApiUrl).toBe('http://localhost:3002');
+      expect((service as any).serviceApiUrl).toBe('http://localhost:3000');
     });
 
     test('should use environment variable for service URL', () => {
@@ -75,13 +75,13 @@ describe('AuthService', () => {
       expect(service.getToken()).toBeNull();
     });
 
-    test('should enable mock mode when CAPY_MOCK_AUTH is set', () => {
+    test('should enable mock mode when CAPY_MOCK_AUTH is set and devMode is true', () => {
       process.env.CAPY_MOCK_AUTH = 'true';
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-      new AuthService();
+      new AuthService(undefined, true);
 
-      expect(consoleSpy).toHaveBeenCalledWith('🔫 AuthService: Mock mode enabled');
+      expect(consoleSpy).toHaveBeenCalledWith('🔫 AuthService: Mock mode enabled (CAPY_MOCK_AUTH=true)');
       consoleSpy.mockRestore();
     });
   });
@@ -115,9 +115,7 @@ describe('AuthService', () => {
       expect(result).toEqual({
         success: true,
         organizationId: 'org-123',
-        organizationName: 'Test Org',
         userId: 'user-456',
-        userEmail: 'test@example.com'
       });
     });
 
@@ -131,30 +129,32 @@ describe('AuthService', () => {
         .mockResolvedValueOnce({
           data: {
             auth_url: 'https://workos.com/auth',
-            session_id: 'session-123'
           }
         })
         .mockResolvedValueOnce({
           data: {
-            auth_result: {
-              success: true,
-              organizationId: 'org-123',
-              organizationName: 'Test Org',
-              userId: 'user-456',
-              userEmail: 'test@example.com'
-            },
             token: {
               access_token: 'new-token',
               refresh_token: 'new-refresh',
-              expires_at: Date.now() + 3600000,
+              expires_in: 3600,
+            },
+            user: {
+              id: 'user-456',
+              email: 'test@example.com',
               organization_id: 'org-123',
-              user_id: 'user-456'
-            }
+              organization_name: 'Test Org',
+            },
+            organizations: [
+              { id: 'org-123', name: 'Test Org' }
+            ]
           }
         });
 
       // Mock OAuth server
       const mockOAuthInstance = {
+        bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+        getState: jest.fn().mockReturnValue('mock-state'),
+        getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
         startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
@@ -166,19 +166,21 @@ describe('AuthService', () => {
         organizationId: 'org-123',
         organizationName: 'Test Org',
         userId: 'user-456',
-        userEmail: 'test@example.com'
+        userEmail: 'test@example.com',
+        organizations: [{ id: 'org-123', name: 'Test Org' }],
       });
 
+      expect(mockOAuthInstance.bind).toHaveBeenCalled();
       expect(mockAxios.post).toHaveBeenCalledWith(
-        'http://localhost:3002/auth/initiate',
-        { organization_id: 'org-123' }
+        'http://localhost:3000/auth/initiate',
+        { state: 'mock-state', redirect_uri: 'http://localhost:19420/callback', organization_id: 'org-123' }
       );
 
       expect(mockOAuthInstance.startAuthFlow).toHaveBeenCalledWith('https://workos.com/auth');
 
       expect(mockAxios.post).toHaveBeenCalledWith(
-        'http://localhost:3002/auth/exchange',
-        { code: 'auth-code-123', session_id: 'session-123' }
+        'http://localhost:3000/auth/exchange',
+        { code: 'auth-code-123' }
       );
     });
 
@@ -187,26 +189,21 @@ describe('AuthService', () => {
       mockExistsSync.mockReturnValue(false);
       const service = new AuthService();
 
+      const mockOAuthInstance = {
+        bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+        getState: jest.fn().mockReturnValue('mock-state'),
+        getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
+        startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
+      };
+      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+
       mockAxios.post
         .mockResolvedValueOnce({
           data: {
             auth_url: 'https://workos.com/auth',
-            session_id: 'session-123'
           }
         })
-        .mockResolvedValueOnce({
-          data: {
-            auth_result: {
-              success: false,
-              error: 'Invalid credentials'
-            }
-          }
-        });
-
-      const mockOAuthInstance = {
-        startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
-      };
-      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+        .mockRejectedValueOnce(new Error('Invalid credentials'));
 
       const result = await service.authenticate();
 
@@ -221,6 +218,14 @@ describe('AuthService', () => {
       mockExistsSync.mockReturnValue(false);
       const service = new AuthService();
 
+      const mockOAuthInstance = {
+        bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+        getState: jest.fn().mockReturnValue('mock-state'),
+        getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
+        startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
+      };
+      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+
       mockAxios.post.mockRejectedValue(new Error('Network error'));
 
       const result = await service.authenticate();
@@ -231,11 +236,11 @@ describe('AuthService', () => {
       });
     });
 
-    test('should use mock authentication when CAPY_MOCK_AUTH is enabled', async () => {
+    test('should use mock authentication when CAPY_MOCK_AUTH is enabled and devMode is true', async () => {
       process.env.CAPY_MOCK_AUTH = 'true';
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, true);
       const result = await service.authenticate('test-org');
 
       expect(result.success).toBe(true);
@@ -244,7 +249,7 @@ describe('AuthService', () => {
       expect(result.userId).toBe('mock-user-456');
       expect(result.userEmail).toBe('mock.user@example.com');
 
-      expect(consoleSpy).toHaveBeenCalledWith('🔫 Using mock authentication (CAPY_MOCK_AUTH=true)');
+      expect(consoleSpy).toHaveBeenCalledWith('🔫 Using mock authentication');
       consoleSpy.mockRestore();
     });
 
@@ -252,7 +257,7 @@ describe('AuthService', () => {
       process.env.CAPY_MOCK_AUTH = 'true';
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, true);
       const result = await service.authenticate();
 
       expect(result.organizationId).toBe('mock-org-123');

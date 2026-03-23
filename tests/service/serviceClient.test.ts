@@ -125,11 +125,12 @@ describe('ServiceClient', () => {
       const result = await serviceClient.initializeProject(projectName, organizationId);
 
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/projects', {
-        name: projectName
+        name: projectName,
+        organization_id: organizationId,
       });
       expect(result.project_id).toBe('proj_456');
       expect(result.project_name).toBe(projectName);
-      expect(result.capy_id).toBe(organizationId);
+      expect(result.org_id).toBe(organizationId);
       expect(result.created).toBe(true);
     });
 
@@ -148,7 +149,8 @@ describe('ServiceClient', () => {
       await serviceClient.initializeProject('test', 'org_123');
 
       expect(mockAxiosInstance.post).toHaveBeenCalledWith('/projects', {
-        name: 'test'
+        name: 'test',
+        organization_id: 'org_123',
       });
     });
 
@@ -220,9 +222,9 @@ describe('ServiceClient', () => {
     let mockServiceClient: ServiceClient;
 
     beforeEach(() => {
-      // Enable mock mode
+      // Enable mock mode (requires both devMode=true AND CAPY_MOCK_AUTH=true)
       process.env.CAPY_MOCK_AUTH = 'true';
-      mockServiceClient = new ServiceClient();
+      mockServiceClient = new ServiceClient(undefined, true);
     });
 
     afterEach(() => {
