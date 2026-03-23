@@ -128,8 +128,8 @@ export class AuthService {
 
     // No JWT yet — user must select an org (0 or >1 orgs)
     // Return with organizations list for the CLI to prompt.
-    // The refresh_token is used by selectOrganization/createOrganization
-    // to prove identity via WorkOS — no raw user_id is ever sent to the server.
+    // The refresh_token is used by createOrganization to prove identity
+    // via WorkOS — no raw user_id is ever sent to the server.
     return {
       success: true,
       organizationId: '',
@@ -138,27 +138,6 @@ export class AuthService {
       organizations: organizations || [],
       _refreshToken: token.refresh_token,
     };
-  }
-
-  /**
-   * After the CLI prompts the user to pick an org, call this to get a service JWT.
-   * The server uses WorkOS refresh-with-org-switch to verify membership —
-   * no raw user_id is ever sent to the server.
-   */
-  async selectOrganization(refreshToken: string, organizationId: string, userId: string): Promise<void> {
-    const data = await postJson<{ access_token: string; refresh_token: string; expires_in: number }>(
-      `${this.serviceApiUrl}/auth/select-org`,
-      { refresh_token: refreshToken, organization_id: organizationId },
-    );
-
-    this.serviceToken = {
-      access_token: data.access_token,
-      refresh_token: data.refresh_token,
-      expires_at: Date.now() + (data.expires_in * 1000),
-      organization_id: organizationId,
-      user_id: userId,
-    };
-    this.saveToken();
   }
 
   async refreshToken(): Promise<boolean> {
@@ -246,13 +225,6 @@ export class AuthService {
     }
 
     return data;
-  }
-
-  setOrganizationId(orgId: string): void {
-    if (this.serviceToken) {
-      this.serviceToken.organization_id = orgId;
-      this.saveToken();
-    }
   }
 
   clearToken(): void {

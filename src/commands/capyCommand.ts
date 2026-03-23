@@ -101,7 +101,9 @@ export class CapyCommand {
       selectedOrg = orgs[0];
       console.log(`🏢 Organization: ${selectedOrg.name}`);
     } else {
-      // Multiple orgs — prompt to pick
+      // Multiple orgs — prompt to pick, then re-authenticate scoped to that org.
+      // Passing the WorkOS org ID to /auth/initiate lets AuthKit handle org selection,
+      // so the exchange comes back with a single org and mints a JWT immediately.
       const { orgId } = await inquirer.prompt([{
         type: 'list',
         name: 'orgId',
@@ -109,10 +111,20 @@ export class CapyCommand {
         choices: orgs.map(o => ({ name: o.name, value: o.id })),
       }]);
       selectedOrg = orgs.find(o => o.id === orgId)!;
+
+      const orgSpinner = ora('Authenticating with organization...').start();
+      const scopedAuth = await this.authService.authenticate(selectedOrg.workos_org_id);
+      if (!scopedAuth.success) {
+        orgSpinner.fail('Failed to authenticate with organization');
+        throw new CapyError(
+          scopedAuth.error || 'Organization authentication failed',
+          ERROR_CODES.AUTH_FAILED
+        );
+      }
+      orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
     }
 
-    // Update token with selected org
-    this.authService.setOrganizationId(selectedOrg.id);
+    // Set token for service client (now valid for the selected org)
     const updatedToken = this.authService.getToken();
     if (updatedToken) {
       this.serviceClient.setToken(updatedToken);
