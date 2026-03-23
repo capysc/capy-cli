@@ -5,21 +5,21 @@ import open from 'open';
 import { CapyError, ERROR_CODES } from '../types/index';
 
 export class OAuthServer {
-  private port: number = 3000;
+  private port: number;
   private redirectUri: string;
   private state: string;
   private server: any;
   private authorizationCode: string | null = null;
   private error: string | null = null;
 
-  constructor(port: number = 3000) {
+  constructor(port: number = 3001) {
     this.port = port;
     this.redirectUri = `http://localhost:${port}/callback`;
-    this.state = this.generateState();
+    this.state = randomBytes(32).toString('hex');
   }
 
-  private generateState(): string {
-    return randomBytes(32).toString('hex');
+  getState(): string {
+    return this.state;
   }
 
   async startAuthFlow(authUrl: string): Promise<string> {
