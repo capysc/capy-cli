@@ -143,19 +143,13 @@ export class OAuthServer {
       <html>
         <head>
           <title>Authentication Successful</title>
-          <style>
-            body { font-family: system-ui; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
-            .container { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-            .success { color: #22c55e; font-size: 48px; }
-            h1 { color: #333; margin: 1rem 0; }
-            p { color: #666; }
-          </style>
+          <script src="https://cdn.tailwindcss.com"></script>
         </head>
-        <body>
-          <div class="container">
-            <div class="success">✓</div>
-            <h1>Authentication Successful!</h1>
-            <p>You can now close this window and return to your terminal.</p>
+        <body class="flex items-center justify-center min-h-screen bg-gray-50">
+          <div class="text-center p-8 bg-white rounded-lg shadow-md">
+            <div class="text-green-500 text-5xl mb-4">✓</div>
+            <h1 class="text-2xl font-semibold text-gray-800 mb-2">Authentication Successful!</h1>
+            <p class="text-gray-500">You can now close this window and return to your terminal.</p>
             <script>setTimeout(() => window.close(), 3000);</script>
           </div>
         </body>
@@ -172,21 +166,14 @@ export class OAuthServer {
       <html>
         <head>
           <title>Authentication Failed</title>
-          <style>
-            body { font-family: system-ui; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
-            .container { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 500px; }
-            .error { color: #ef4444; font-size: 48px; }
-            h1 { color: #333; margin: 1rem 0; }
-            p { color: #666; }
-            .error-detail { background: #fef2f2; color: #991b1b; padding: 1rem; border-radius: 4px; margin-top: 1rem; }
-          </style>
+          <script src="https://cdn.tailwindcss.com"></script>
         </head>
-        <body>
-          <div class="container">
-            <div class="error">❌</div>
-            <h1>Authentication Failed</h1>
-            <p>Please return to your terminal and try again.</p>
-            <div class="error-detail">${error}</div>
+        <body class="flex items-center justify-center min-h-screen bg-gray-50">
+          <div class="text-center p-8 bg-white rounded-lg shadow-md max-w-md">
+            <div class="text-red-500 text-5xl mb-4">✗</div>
+            <h1 class="text-2xl font-semibold text-gray-800 mb-2">Authentication Failed</h1>
+            <p class="text-gray-500 mb-4">Please return to your terminal and try again.</p>
+            <div class="bg-red-50 text-red-800 p-3 rounded text-sm">${error}</div>
           </div>
         </body>
       </html>
