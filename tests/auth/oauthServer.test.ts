@@ -216,18 +216,21 @@ describe('OAuthServer', () => {
   });
 
   describe('sendErrorResponse', () => {
-    test('should send professional error page with details', () => {
+    test('should send error page without exposing raw error string (XSS prevention)', () => {
       const mockRes = {
         writeHead: jest.fn(),
         end: jest.fn()
       };
-      const errorMessage = 'Test error message';
+      const errorMessage = '<script>alert("xss")</script>';
 
       (oauthServer as any).sendErrorResponse(mockRes, errorMessage);
 
       expect(mockRes.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'text/html' });
       expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('Authentication Failed'));
-      expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining(errorMessage));
+      // Raw error string must NOT appear in HTML output (XSS prevention)
+      expect(mockRes.end).toHaveBeenCalledWith(expect.not.stringContaining(errorMessage));
+      // Should show a safe, static message instead
+      expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('Check your terminal'));
     });
   });
 

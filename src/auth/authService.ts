@@ -82,35 +82,66 @@ export class AuthService {
     // Open browser and capture the code
     const code = await oauthServer.startAuthFlow(authUrl);
 
-    // Send code to service for exchange (service has the API key)
+    // Send code to service for exchange
+    // Service now mints its own JWT (if exactly 1 org) or returns org list
     const response = await axios.post(`${this.serviceApiUrl}/auth/exchange`, { code });
-    const { token, user, organizations } = response.data;
+    const { token, user, organizations, _workos_user_id } = response.data;
 
-    // If user has exactly one org, auto-select it
-    const resolvedOrgId = organizations?.length === 1
-      ? organizations[0].id
-      : (user.organization_id || organizationId || '');
-    const resolvedOrgName = organizations?.length === 1
-      ? organizations[0].name
-      : user.organization_name;
+    // If service returned a JWT (single org), use it directly
+    if (token.access_token) {
+      const resolvedOrgId = organizations?.length === 1
+        ? organizations[0].id
+        : '';
 
-    this.serviceToken = {
-      access_token: token.access_token,
-      refresh_token: token.refresh_token,
-      expires_at: Date.now() + (token.expires_in * 1000),
-      organization_id: resolvedOrgId,
-      user_id: user.id,
-    };
-    this.saveToken();
+      this.serviceToken = {
+        access_token: token.access_token,
+        refresh_token: token.refresh_token,
+        expires_at: Date.now() + (token.expires_in * 1000),
+        organization_id: resolvedOrgId,
+        user_id: user.id,
+      };
+      this.saveToken();
 
+      return {
+        success: true,
+        organizationId: resolvedOrgId,
+        organizationName: organizations?.[0]?.name,
+        userId: user.id,
+        userEmail: user.email,
+        organizations: organizations || [],
+      };
+    }
+
+    // No JWT yet — user must select an org (0 or >1 orgs)
+    // Return with organizations list for the CLI to prompt
     return {
       success: true,
-      organizationId: resolvedOrgId,
-      organizationName: resolvedOrgName,
-      userId: user.id,
+      organizationId: '',
+      userId: _workos_user_id || user.id,
       userEmail: user.email,
       organizations: organizations || [],
+      // Store refresh token temporarily so we can use it after org selection
+      _refreshToken: token.refresh_token,
     };
+  }
+
+  /**
+   * After the CLI prompts the user to pick an org, call this to get a service JWT.
+   */
+  async selectOrganization(userId: string, organizationId: string, refreshToken?: string): Promise<void> {
+    const response = await axios.post(`${this.serviceApiUrl}/auth/select-org`, {
+      user_id: userId,
+      organization_id: organizationId,
+    });
+
+    this.serviceToken = {
+      access_token: response.data.access_token,
+      refresh_token: refreshToken || '',
+      expires_at: Date.now() + (response.data.expires_in * 1000),
+      organization_id: organizationId,
+      user_id: userId,
+    };
+    this.saveToken();
   }
 
   async refreshToken(): Promise<boolean> {
@@ -120,7 +151,8 @@ export class AuthService {
 
     try {
       const response = await axios.post(`${this.serviceApiUrl}/auth/refresh`, {
-        refresh_token: this.serviceToken.refresh_token
+        refresh_token: this.serviceToken.refresh_token,
+        organization_id: this.serviceToken.organization_id,
       });
 
       this.serviceToken = {
@@ -180,6 +212,19 @@ export class AuthService {
       name,
       user_id: userId,
     });
+
+    // Service now returns a JWT with the new org — save it
+    if (response.data.access_token) {
+      this.serviceToken = {
+        access_token: response.data.access_token,
+        refresh_token: this.serviceToken?.refresh_token || '',
+        expires_at: Date.now() + ((response.data.expires_in || 86400) * 1000),
+        organization_id: response.data.id,
+        user_id: userId,
+      };
+      this.saveToken();
+    }
+
     return response.data;
   }
 
