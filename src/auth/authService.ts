@@ -1,6 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
-import { WorkOS } from '@workos-inc/node';
 import { AuthResult, Organization, ServiceToken, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 
@@ -77,58 +76,27 @@ export class AuthService {
     }
   }
 
-  /**
-   * Fetch the WorkOS client ID from the backend.
-   */
-  private async fetchClientId(): Promise<string> {
-    const res = await fetch(`${this.serviceApiUrl}/auth/config`);
-    if (!res.ok) {
-      throw new CapyError('Failed to fetch auth config from server', ERROR_CODES.NETWORK_ERROR);
-    }
-    const data = await res.json() as { client_id: string };
-    return data.client_id;
-  }
-
   private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
-    // Get client ID from backend (CLI never hardcodes WorkOS config)
-    const clientId = await this.fetchClientId();
-
-    // Initialize WorkOS SDK as a public client (no API key, PKCE only)
-    const workos = new WorkOS({ clientId });
-
     const oauthServer = new OAuthServer();
     await oauthServer.bind();
     const redirectUri = oauthServer.getRedirectUri();
+    const state = oauthServer.getState();
 
-    // Generate PKCE auth URL directly with WorkOS SDK
-    const { url, state, codeVerifier } = await workos.userManagement.getAuthorizationUrlWithPKCE({
-      provider: 'authkit',
-      clientId,
-      redirectUri,
-      organizationId,
-    });
-
-    // Use the SDK-generated state for CSRF validation in the callback
-    oauthServer.setState(state);
+    // Ask the backend to generate the WorkOS auth URL (confidential client)
+    const { auth_url } = await postJson<{ auth_url: string }>(
+      `${this.serviceApiUrl}/auth/initiate`,
+      { state, redirect_uri: redirectUri, organization_id: organizationId },
+    );
 
     // Open browser and capture the authorization code
-    const code = await oauthServer.startAuthFlow(url);
+    const code = await oauthServer.startAuthFlow(auth_url);
 
-    // Exchange code directly with WorkOS (PKCE, no client_secret needed)
-    const workosAuth = await workos.userManagement.authenticateWithCodeAndVerifier({
-      code,
-      codeVerifier,
-      clientId,
-    });
-
-    // Send the WorkOS refresh token to our backend to get a service JWT.
-    // The backend verifies identity via WorkOS, resolves org memberships,
-    // syncs to DB, and mints a service JWT.
+    // Send code to backend for exchange (backend uses client_secret with WorkOS)
     const { token, user, organizations } = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
       user: { id: string; email: string };
       organizations: Organization[];
-    }>(`${this.serviceApiUrl}/auth/exchange`, { refresh_token: workosAuth.refreshToken });
+    }>(`${this.serviceApiUrl}/auth/exchange`, { code });
 
     // If service returned a JWT (single org), use it directly
     if (token.access_token) {
@@ -156,9 +124,6 @@ export class AuthService {
     }
 
     // No JWT yet — user must select an org (0 or >1 orgs)
-    // Return with organizations list for the CLI to prompt.
-    // The refresh_token is used by createOrganization to prove identity
-    // via WorkOS — no raw user_id is ever sent to the server.
     return {
       success: true,
       organizationId: '',
@@ -170,34 +135,24 @@ export class AuthService {
   }
 
   async refreshToken(): Promise<boolean> {
-    if (!this.serviceToken?.refresh_token) {
+    if (!this.serviceToken?.refresh_token || !this.serviceToken?.access_token) {
       return false;
     }
 
     try {
-      // Refresh the WorkOS token directly via SDK (public client, PKCE mode)
-      const clientId = await this.fetchClientId();
-      const workos = new WorkOS({ clientId });
-
-      const workosResult = await workos.userManagement.authenticateWithRefreshToken({
-        refreshToken: this.serviceToken.refresh_token,
-        clientId,
-      });
-
-      // Send the fresh WorkOS refresh token to the backend with the org hint.
-      // The backend verifies identity, confirms org membership, and mints a service JWT.
-      const { token } = await postJson<{
-        token: { access_token: string; refresh_token: string; expires_in: number };
-      }>(`${this.serviceApiUrl}/auth/exchange`, {
-        refresh_token: workosResult.refreshToken,
-        organization_id: this.serviceToken.organization_id,
-      });
+      const data = await postJson<{ access_token: string; refresh_token: string; expires_in: number }>(
+        `${this.serviceApiUrl}/auth/refresh`,
+        {
+          refresh_token: this.serviceToken.refresh_token,
+          expired_token: this.serviceToken.access_token,
+        },
+      );
 
       this.serviceToken = {
         ...this.serviceToken,
-        access_token: token.access_token,
-        refresh_token: token.refresh_token,
-        expires_at: Date.now() + (token.expires_in * 1000),
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_at: Date.now() + (data.expires_in * 1000),
       };
 
       this.saveToken();
