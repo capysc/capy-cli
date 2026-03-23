@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
+import { WorkOS } from '@workos-inc/node';
 import { AuthResult, Organization, ServiceToken, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 
@@ -76,30 +77,58 @@ export class AuthService {
     }
   }
 
+  /**
+   * Fetch the WorkOS client ID from the backend.
+   */
+  private async fetchClientId(): Promise<string> {
+    const res = await fetch(`${this.serviceApiUrl}/auth/config`);
+    if (!res.ok) {
+      throw new CapyError('Failed to fetch auth config from server', ERROR_CODES.NETWORK_ERROR);
+    }
+    const data = await res.json() as { client_id: string };
+    return data.client_id;
+  }
+
   private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
+    // Get client ID from backend (CLI never hardcodes WorkOS config)
+    const clientId = await this.fetchClientId();
+
+    // Initialize WorkOS SDK as a public client (no API key, PKCE only)
+    const workos = new WorkOS({ clientId });
+
     const oauthServer = new OAuthServer();
     await oauthServer.bind();
-
-    const state = oauthServer.getState();
     const redirectUri = oauthServer.getRedirectUri();
 
-    // Ask the service for the auth URL (service owns all WorkOS config)
-    const initiateData = await postJson<{ auth_url: string }>(
-      `${this.serviceApiUrl}/auth/initiate`,
-      { state, redirect_uri: redirectUri, organization_id: organizationId },
-    );
-    const authUrl = initiateData.auth_url;
+    // Generate PKCE auth URL directly with WorkOS SDK
+    const { url, state, codeVerifier } = await workos.userManagement.getAuthorizationUrlWithPKCE({
+      provider: 'authkit',
+      clientId,
+      redirectUri,
+      organizationId,
+    });
 
-    // Open browser and capture the code
-    const code = await oauthServer.startAuthFlow(authUrl);
+    // Use the SDK-generated state for CSRF validation in the callback
+    oauthServer.setState(state);
 
-    // Send code to service for exchange
-    // Service now mints its own JWT (if exactly 1 org) or returns org list
+    // Open browser and capture the authorization code
+    const code = await oauthServer.startAuthFlow(url);
+
+    // Exchange code directly with WorkOS (PKCE, no client_secret needed)
+    const workosAuth = await workos.userManagement.authenticateWithCodeAndVerifier({
+      code,
+      codeVerifier,
+      clientId,
+    });
+
+    // Send the WorkOS refresh token to our backend to get a service JWT.
+    // The backend verifies identity via WorkOS, resolves org memberships,
+    // syncs to DB, and mints a service JWT.
     const { token, user, organizations } = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
       user: { id: string; email: string };
       organizations: Organization[];
-    }>(`${this.serviceApiUrl}/auth/exchange`, { code });
+    }>(`${this.serviceApiUrl}/auth/exchange`, { refresh_token: workosAuth.refreshToken });
 
     // If service returned a JWT (single org), use it directly
     if (token.access_token) {

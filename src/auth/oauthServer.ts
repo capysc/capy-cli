@@ -17,6 +17,14 @@ export class OAuthServer {
     this.state = randomBytes(32).toString('hex');
   }
 
+  /**
+   * Override the internally generated state with an externally provided one
+   * (e.g. from WorkOS SDK's PKCE URL generation).
+   */
+  setState(state: string): void {
+    this.state = state;
+  }
+
   getState(): string {
     return this.state;
   }
