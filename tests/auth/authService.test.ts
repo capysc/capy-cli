@@ -151,6 +151,8 @@ describe('AuthService', () => {
         bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
         getState: jest.fn().mockReturnValue('mock-state'),
         getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
+        getCodeChallenge: jest.fn().mockReturnValue('mock-code-challenge'),
+        getCodeVerifier: jest.fn().mockReturnValue('mock-code-verifier'),
         startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
@@ -171,7 +173,7 @@ describe('AuthService', () => {
         'https://api.capy.sc/auth/initiate',
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ state: 'mock-state', redirect_uri: 'http://localhost:19420/callback', organization_id: 'org-123' }),
+          body: JSON.stringify({ state: 'mock-state', redirect_uri: 'http://localhost:19420/callback', organization_id: 'org-123', code_challenge: 'mock-code-challenge' }),
         })
       );
 
@@ -181,7 +183,7 @@ describe('AuthService', () => {
         'https://api.capy.sc/auth/exchange',
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ code: 'auth-code-123' }),
+          body: JSON.stringify({ code: 'auth-code-123', code_verifier: 'mock-code-verifier' }),
         })
       );
     });
@@ -195,6 +197,8 @@ describe('AuthService', () => {
         bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
         getState: jest.fn().mockReturnValue('mock-state'),
         getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
+        getCodeChallenge: jest.fn().mockReturnValue('mock-code-challenge'),
+        getCodeVerifier: jest.fn().mockReturnValue('mock-code-verifier'),
         startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
@@ -224,6 +228,8 @@ describe('AuthService', () => {
         bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
         getState: jest.fn().mockReturnValue('mock-state'),
         getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
+        getCodeChallenge: jest.fn().mockReturnValue('mock-code-challenge'),
+        getCodeVerifier: jest.fn().mockReturnValue('mock-code-verifier'),
         startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123')
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);

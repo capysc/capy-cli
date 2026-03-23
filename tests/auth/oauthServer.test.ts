@@ -7,7 +7,12 @@ import open from 'open';
 // Mock dependencies
 jest.mock('http');
 jest.mock('crypto', () => ({
-  randomBytes: jest.fn().mockReturnValue(Buffer.from('mock-random-bytes-32-characters-long'))
+  randomBytes: jest.fn().mockReturnValue(Buffer.from('mock-random-bytes-32-characters-long')),
+  createHash: jest.fn().mockReturnValue({
+    update: jest.fn().mockReturnValue({
+      digest: jest.fn().mockReturnValue('mock-code-challenge'),
+    }),
+  }),
 }));
 jest.mock('open', () => ({
   __esModule: true,
