@@ -114,8 +114,8 @@ describe('AuthService', () => {
 
       expect(result).toEqual({
         success: true,
-        organizationId: 'org-123',
-        userId: 'user-456',
+        organization_id: 'org-123',
+        user_id: 'user-456',
       });
     });
 
@@ -138,6 +138,8 @@ describe('AuthService', () => {
           user: {
             id: 'user-456',
             email: 'test@example.com',
+            first_name: null,
+            last_name: null,
             organization_id: 'org-123',
             organization_name: 'Test Org',
           },
@@ -161,10 +163,12 @@ describe('AuthService', () => {
 
       expect(result).toEqual({
         success: true,
-        organizationId: 'org-123',
-        organizationName: 'Test Org',
-        userId: 'user-456',
-        userEmail: 'test@example.com',
+        organization_id: 'org-123',
+        organization_name: 'Test Org',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        user_first_name: null,
+        user_last_name: null,
         organizations: [{ id: 'org-123', name: 'Test Org' }],
       });
 
@@ -252,10 +256,10 @@ describe('AuthService', () => {
       const result = await service.authenticate('test-org');
 
       expect(result.success).toBe(true);
-      expect(result.organizationId).toBe('test-org');
-      expect(result.organizationName).toBe('Mock Organization');
-      expect(result.userId).toBe('mock-user-456');
-      expect(result.userEmail).toBe('mock.user@example.com');
+      expect(result.organization_id).toBe('test-org');
+      expect(result.organization_name).toBe('Mock Organization');
+      expect(result.user_id).toBe('mock-user-456');
+      expect(result.user_email).toBe('mock.user@example.com');
 
       expect(consoleSpy).toHaveBeenCalledWith('🔫 Using mock authentication');
       consoleSpy.mockRestore();
@@ -268,7 +272,7 @@ describe('AuthService', () => {
       const service = new AuthService(undefined, true);
       const result = await service.authenticate();
 
-      expect(result.organizationId).toBe('mock-org-123');
+      expect(result.organization_id).toBe('mock-org-123');
       consoleSpy.mockRestore();
     });
   });

@@ -88,14 +88,16 @@ export interface Organization {
 
 export interface AuthResult {
   success: boolean;
-  organizationId?: string;
-  organizationName?: string;
-  userId?: string;
-  userEmail?: string;
+  organization_id?: string;
+  organization_name?: string;
+  user_id?: string;
+  user_email?: string;
+  user_first_name?: string | null;
+  user_last_name?: string | null;
   organizations?: Organization[];
   error?: string;
   /** WorkOS refresh token for use with createOrganization when org selection is pending */
-  _refreshToken?: string;
+  _refresh_token?: string;
 }
 
 export interface DecryptResponse {

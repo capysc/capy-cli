@@ -232,10 +232,10 @@ describe('CapyCommand', () => {
       // Mock successful authentication
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
-        organizationId: 'org-123',
-        organizationName: 'Test Org',
-        userId: 'user-456',
-        userEmail: 'test@example.com',
+        organization_id: 'org-123',
+        organization_name: 'Test Org',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
         organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }]
       });
 
@@ -475,9 +475,9 @@ describe('CapyCommand', () => {
     beforeEach(() => {
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
-        organizationId: 'org-123',
-        userId: 'user-456',
-        userEmail: 'test@example.com'
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com'
       });
 
       mockAuthService.getToken.mockReturnValue({

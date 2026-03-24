@@ -68,7 +68,7 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Authenticated as ${authResult.userEmail}`);
+    spinner.succeed(`Authenticated as ${authResult.user_email}`);
 
     // Set token for service client
     const token = this.authService.getToken();
@@ -94,7 +94,7 @@ export class CapyCommand {
       }]);
 
       const orgSpinner = ora('Creating organization...').start();
-      selectedOrg = await this.authService.createOrganization(orgName.trim(), authResult._refreshToken!, authResult.userId!);
+      selectedOrg = await this.authService.createOrganization(orgName.trim(), authResult._refresh_token!, authResult.user_id!);
       orgSpinner.succeed(`Organization "${selectedOrg.name}" created`);
     } else if (orgs.length === 1) {
       // Single org — auto-select
@@ -167,7 +167,7 @@ export class CapyCommand {
       const decryptKey = this.syncEngine.createDecryptKey(
         projectResult.org_id,
         projectResult.project_id,
-        authResult.userId!,
+        authResult.user_id!,
         decryptData.decrypt_key,
         []
       );
@@ -196,21 +196,21 @@ export class CapyCommand {
     try {
       const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
       const existsEnv = require('fs').existsSync(localEnvPath);
-      
+
       if (existsEnv) {
         const localEnv = this.fileManager.readEnvFile(this.options.envPath);
         const localVarCount = Object.keys(localEnv).length;
-        
+
         if (localVarCount > 0) {
           console.log(`\n📋 Found existing .env file with ${localVarCount} variable(s)`);
-          
+
           // Get decrypt data for syncing
           const decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
-          
+
           // Automatically sync since this is a new project with no remote variables
           // No conflicts possible, so no need to prompt
           const syncSpinner = ora('🔄 Syncing local variables to keep...').start();
-          
+
           try {
             // Push all local variables
             const pushResult = await this.serviceClient.pushVariables(
@@ -226,24 +226,24 @@ export class CapyCommand {
 
               // Write encrypted .env file
               this.fileManager.writeEncryptedEnvFile(localEnv, decryptData.decrypt_key, this.options.envPath, updatedKeep);
-              
+
               // Update decrypt key with variable permissions
               const decryptKey = this.syncEngine.createDecryptKey(
                 projectResult.org_id,
                 projectResult.project_id,
-                authResult.userId!,
+                authResult.user_id!,
                 decryptData.decrypt_key,
                 Object.keys(localEnv)
               );
               this.fileManager.writeDecryptKey(decryptKey);
-              
+
               // Write initial sync state
               const initialSyncState: SyncState = {
                 last_sync: new Date().toISOString(),
                 synced_variables: Object.keys(localEnv)
               };
               this.fileManager.writeSyncState(initialSyncState);
-              
+
               syncSpinner.succeed(`Synced ${localVarCount} variable(s) to keep`);
             } else {
               syncSpinner.fail('Failed to sync variables');
@@ -279,7 +279,7 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Authenticated as ${authResult.userEmail}`);
+    spinner.succeed(`Authenticated as ${authResult.user_email}`);
 
     // Set token for service client
     const token = this.authService.getToken();
@@ -293,13 +293,13 @@ export class CapyCommand {
     // Get remote environment
     const fetchSpinner = ora('Retrieving remote .env...').start();
     const decryptData = await this.serviceClient.getDecryptData(projectState.projectId!);
-    
+
     // Get remote environment - both encrypted (for resource_id) and decrypted (for comparison)
     let remoteEnvEncrypted: Record<string, string> = {};
     let remoteEnv: Record<string, string> = {};
     if (decryptData.env_content) {
       remoteEnvEncrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-      
+
       // Decrypt remote values for actual comparison
       for (const [key, value] of Object.entries(remoteEnvEncrypted)) {
         if (this.fileManager.isSnippetEncrypted(value) || this.fileManager.isEncrypted(value)) {
@@ -314,14 +314,14 @@ export class CapyCommand {
         }
       }
     }
-    
+
     fetchSpinner.succeed(`Retrieved remote .env (${Object.keys(remoteEnv).length} variables)`);
 
     // Get local environment - both encrypted (for resource_id) and decrypted (for comparison)
     let localEnvEncrypted: Record<string, string> = {};
     let localEnv: Record<string, string> = {};
     const existingDecryptKey = this.projectManager.readDecryptKey();
-    
+
     try {
       if (existingDecryptKey) {
         try {
@@ -354,9 +354,9 @@ export class CapyCommand {
 
     // Compare environments (use decrypted for actual comparison, encrypted for resource_id checking)
     const changeSet = this.syncEngine.compareEnvironments(
-      localEnv, 
-      remoteEnv, 
-      localEnvEncrypted, 
+      localEnv,
+      remoteEnv,
+      localEnvEncrypted,
       remoteEnvEncrypted,
       syncState
     );
@@ -462,7 +462,7 @@ export class CapyCommand {
 
     // Apply decisions to create final env
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
-    
+
     // Get updated keep after push and clean it up
     let finalKeep = this.projectManager.readKeepFile();
 
@@ -531,19 +531,19 @@ export class CapyCommand {
     const decryptKey = this.syncEngine.createDecryptKey(
       projectState.organizationId!,
       projectState.projectId!,
-      authResult.userId!,
+      authResult.user_id!,
       decryptData.decrypt_key,
       Object.keys(finalEnv)
     );
     this.fileManager.writeDecryptKey(decryptKey);
-    
+
     // Update sync state with current variables
     const newSyncState: SyncState = {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv)
     };
     this.fileManager.writeSyncState(newSyncState);
-    
+
     syncSpinner.succeed('Sync completed successfully');
 
     // Generate result

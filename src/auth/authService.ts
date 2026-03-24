@@ -48,8 +48,8 @@ export class AuthService {
         if (token) {
           return {
             success: true,
-            organizationId: token.organization_id,
-            userId: token.user_id,
+            organization_id: token.organization_id,
+            user_id: token.user_id,
           };
         }
       }
@@ -60,8 +60,8 @@ export class AuthService {
         if (refreshed) {
           return {
             success: true,
-            organizationId: this.serviceToken!.organization_id,
-            userId: this.serviceToken!.user_id,
+            organization_id: this.serviceToken!.organization_id,
+            user_id: this.serviceToken!.user_id,
           };
         }
       }
@@ -101,7 +101,7 @@ export class AuthService {
     // Backend uses client_secret + code_verifier with WorkOS (defense in depth).
     const { token, user, organizations } = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
-      user: { id: string; email: string };
+      user: { id: string; email: string; first_name: string | null; last_name: string | null };
       organizations: Organization[];
     }>(`${this.serviceApiUrl}/auth/exchange`, {
       code,
@@ -125,10 +125,12 @@ export class AuthService {
 
       return {
         success: true,
-        organizationId: resolvedOrgId,
-        organizationName: organizations?.[0]?.name,
-        userId: user.id,
-        userEmail: user.email,
+        organization_id: resolvedOrgId,
+        organization_name: organizations?.[0]?.name,
+        user_id: user.id,
+        user_email: user.email,
+        user_first_name: user.first_name,
+        user_last_name: user.last_name,
         organizations: organizations || [],
       };
     }
@@ -136,11 +138,13 @@ export class AuthService {
     // No JWT yet — user must select an org (0 or >1 orgs)
     return {
       success: true,
-      organizationId: '',
-      userId: user.id,
-      userEmail: user.email,
+      organization_id: '',
+      user_id: user.id,
+      user_email: user.email,
+      user_first_name: user.first_name,
+      user_last_name: user.last_name,
       organizations: organizations || [],
-      _refreshToken: token.refresh_token,
+      _refresh_token: token.refresh_token,
     };
   }
 
@@ -260,10 +264,12 @@ export class AuthService {
 
     return {
       success: true,
-      organizationId: mockOrgId,
-      organizationName: 'Mock Organization',
-      userId: mockUserId,
-      userEmail: 'mock.user@example.com'
+      organization_id: mockOrgId,
+      organization_name: 'Mock Organization',
+      user_id: mockUserId,
+      user_email: 'mock.user@example.com',
+      user_first_name: 'Mock',
+      user_last_name: 'User',
     };
   }
 }
