@@ -105,7 +105,10 @@ describe('CapyCommand', () => {
 
     // Mock inquirer to auto-answer org selection prompts
     const mockInquirer = require('inquirer');
-    mockInquirer.default = { prompt: (jest.fn() as any).mockResolvedValue({ orgId: 'org-123', orgName: 'Test Org' }) };
+    mockInquirer.default = {
+      prompt: (jest.fn() as any).mockResolvedValue({ orgId: 'org-123', orgName: 'Test Org' }),
+      Separator: class Separator { constructor() {} },
+    };
 
     // Mock constructors
     MockProjectManager.mockImplementation(() => mockProjectManager);

@@ -83,46 +83,44 @@ export class CapyCommand {
     // Resolve organization
     const orgs = authResult.organizations || [];
     let selectedOrg: Organization;
+    const CREATE_NEW_ORG = '__create_new__';
+    // Refresh token: available from exchange (multi/no org) or from stored token (single org)
+    const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
 
     if (orgs.length === 0) {
       // No orgs — prompt to create one
       console.log('\n🏢 No organization found. Let\'s create one.');
-      const { orgName } = await inquirer.prompt([{
-        type: 'input',
-        name: 'orgName',
-        message: 'Organization name:',
-        validate: (input: string) => input.trim().length > 0 || 'Organization name cannot be empty',
-      }]);
-
-      const orgSpinner = ora('Creating organization...').start();
-      selectedOrg = await this.authService.createOrganization(orgName.trim(), authResult._refresh_token!, authResult.user_id!);
-      orgSpinner.succeed(`Organization "${selectedOrg.name}" created`);
-    } else if (orgs.length === 1) {
-      // Single org — auto-select
-      selectedOrg = orgs[0];
-      console.log(`🏢 Organization: ${selectedOrg.name}`);
+      selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
     } else {
-      // Multiple orgs — prompt to pick, then re-authenticate scoped to that org.
-      // Passing the WorkOS org ID to /auth/initiate lets AuthKit handle org selection,
-      // so the exchange comes back with a single org and mints a JWT immediately.
+      // One or more orgs — let user pick or create new
       const { orgId } = await inquirer.prompt([{
         type: 'list',
         name: 'orgId',
         message: 'Select an organization:',
-        choices: orgs.map(o => ({ name: o.name, value: o.id })),
+        choices: [
+          ...orgs.map(o => ({ name: o.name, value: o.id })),
+          new inquirer.Separator(),
+          { name: '+ Create new organization', value: CREATE_NEW_ORG },
+        ],
       }]);
-      selectedOrg = orgs.find(o => o.id === orgId)!;
 
-      const orgSpinner = ora('Authenticating with organization...').start();
-      const scopedAuth = await this.authService.authenticate(selectedOrg.workos_org_id);
-      if (!scopedAuth.success) {
-        orgSpinner.fail('Failed to authenticate with organization');
-        throw new CapyError(
-          scopedAuth.error || 'Organization authentication failed',
-          ERROR_CODES.AUTH_FAILED
-        );
+      if (orgId === CREATE_NEW_ORG) {
+        selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+      } else {
+        selectedOrg = orgs.find(o => o.id === orgId)!;
+
+        // Re-authenticate scoped to the selected org to get an org-scoped token
+        const orgSpinner = ora('Authenticating with organization...').start();
+        const scopedAuth = await this.authService.authenticate(selectedOrg.workos_org_id);
+        if (!scopedAuth.success) {
+          orgSpinner.fail('Failed to authenticate with organization');
+          throw new CapyError(
+            scopedAuth.error || 'Organization authentication failed',
+            ERROR_CODES.AUTH_FAILED
+          );
+        }
+        orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
       }
-      orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
     }
 
     // Set token for service client (now valid for the selected org)
@@ -553,5 +551,19 @@ export class CapyCommand {
     }
 
     process.exit(1);
+  }
+
+  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+    const { orgName } = await inquirer.prompt([{
+      type: 'input',
+      name: 'orgName',
+      message: 'Organization name:',
+      validate: (input: string) => input.trim().length > 0 || 'Organization name cannot be empty',
+    }]);
+
+    const orgSpinner = ora('Creating organization...').start();
+    const org = await this.authService.createOrganization(orgName.trim(), refreshToken, userId);
+    orgSpinner.succeed(`Organization "${org.name}" created`);
+    return org;
   }
 }
