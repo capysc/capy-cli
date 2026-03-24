@@ -395,13 +395,6 @@ describe('CapyCommand', () => {
         { API_KEY: 'test-key', DB_URL: 'postgres://localhost' },
         expect.any(Object)
       );
-      // Should write encrypted env file once during the sync phase (not during initial since env_content is empty)
-      expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
-        { API_KEY: 'test-key', DB_URL: 'postgres://localhost' },
-        'decrypt-key-123',
-        undefined,
-        expect.any(Object)
-      );
       expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
 
       existsSyncSpy.mockRestore();
