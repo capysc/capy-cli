@@ -117,6 +117,7 @@ export interface ServiceToken {
   user_email?: string;
   user_first_name?: string | null;
   user_last_name?: string | null;
+  organizations?: Organization[];
 }
 
 export interface CliOptions {

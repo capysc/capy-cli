@@ -53,6 +53,7 @@ export class AuthService {
             user_email: token.user_email,
             user_first_name: token.user_first_name,
             user_last_name: token.user_last_name,
+            organizations: token.organizations,
             _auth_method: 'cached',
           };
         }
@@ -69,6 +70,7 @@ export class AuthService {
             user_email: this.serviceToken!.user_email,
             user_first_name: this.serviceToken!.user_first_name,
             user_last_name: this.serviceToken!.user_last_name,
+            organizations: this.serviceToken!.organizations,
             _auth_method: 'refreshed',
           };
         }
@@ -131,6 +133,7 @@ export class AuthService {
         user_email: user.email,
         user_first_name: user.first_name,
         user_last_name: user.last_name,
+        organizations: organizations || [],
       };
       this.saveToken();
 
@@ -249,6 +252,8 @@ export class AuthService {
 
     // Service returns a JWT + fresh refresh token for the new org — save both
     if (data.access_token) {
+      const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
+      const existingOrgs = this.serviceToken?.organizations || [];
       this.serviceToken = {
         access_token: data.access_token,
         refresh_token: data.refresh_token || refreshToken,
@@ -258,6 +263,7 @@ export class AuthService {
         user_email: data.user?.email,
         user_first_name: data.user?.first_name,
         user_last_name: data.user?.last_name,
+        organizations: [...existingOrgs, newOrg],
       };
       this.saveToken();
     }
