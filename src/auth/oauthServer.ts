@@ -161,7 +161,7 @@ export class OAuthServer {
   private sendSuccessResponse(res: ServerResponse): void {
     const html = `
       <!DOCTYPE html>
-      <html class="dark">
+      <html>
         <head>
           <title>Authentication Successful</title>
           <script src="https://cdn.tailwindcss.com"></script>
@@ -193,7 +193,7 @@ export class OAuthServer {
   private sendErrorResponse(res: ServerResponse, _error: string): void {
     const html = `
       <!DOCTYPE html>
-      <html class="dark">
+      <html>
         <head>
           <title>Authentication Failed</title>
           <script src="https://cdn.tailwindcss.com"></script>
