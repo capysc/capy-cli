@@ -69,10 +69,11 @@ export class ServiceClient {
       const data = await res.json().catch(() => ({})) as Record<string, any>;
 
       if (res.status === 401) {
+        const detail = data.error || 'Unknown auth error';
         throw new CapyError(
-          'Authentication required. Please run capy to authenticate.',
+          `Authentication failed: ${detail}`,
           ERROR_CODES.AUTH_FAILED,
-          { status: 401 }
+          { status: 401, detail }
         );
       }
 
