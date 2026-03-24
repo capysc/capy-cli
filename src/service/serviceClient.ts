@@ -166,6 +166,14 @@ export class ServiceClient {
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       };
     } catch (error: any) {
+      // 404 is normal for a new project with no secrets yet
+      if (error instanceof CapyError && error.details?.status === 404) {
+        return {
+          env_content: '',
+          decrypt_key: '',
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        };
+      }
       if (error instanceof CapyError) {
         throw error;
       }

@@ -82,13 +82,21 @@ describe('ServiceClient', () => {
       );
     });
 
-    test('should handle service errors', async () => {
+    test('should return empty data on 404 (new project with no secrets)', async () => {
       mockFetch.mockResolvedValue(mockFetchResponse(
-        { error: 'Project not found' }, false, 404
+        { error: 'No secrets stored for this project' }, false, 404
+      ));
+
+      const result = await serviceClient.getDecryptData('new_proj');
+      expect(result.env_content).toBe('');
+    });
+
+    test('should throw on non-404 service errors', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'Internal server error' }, false, 500
       ));
 
       await expect(serviceClient.getDecryptData('invalid_proj')).rejects.toThrow(CapyError);
-      await expect(serviceClient.getDecryptData('invalid_proj')).rejects.toThrow('Project not found');
     });
 
     test('should handle network errors', async () => {
