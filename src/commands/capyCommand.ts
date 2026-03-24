@@ -57,7 +57,7 @@ export class CapyCommand {
     console.log('⚠  No .keep file found - initializing project...');
 
     // Authenticate first
-    const spinner = ora('🔐 Authenticating with WorkOS...').start();
+    const spinner = ora('🔐 Authenticating...').start();
     const authResult = await this.authService.authenticate();
 
     if (!authResult.success) {
@@ -68,7 +68,7 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Authenticated as ${authResult.user_email}`);
+    spinner.succeed(`Welcome ${authResult.user_first_name || authResult.user_email}`);
 
     // Set token for service client
     const token = this.authService.getToken();
@@ -268,7 +268,7 @@ export class CapyCommand {
     console.log(`📁 Project: ${projectState.projectName}`);
 
     // Authenticate
-    const spinner = ora('🔐 Authenticating with WorkOS...').start();
+    const spinner = ora('🔐 Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);
 
     if (!authResult.success) {
@@ -279,7 +279,7 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Authenticated as ${authResult.user_email}`);
+    spinner.succeed(`Welcome ${authResult.user_first_name || authResult.user_email}`);
 
     // Set token for service client
     const token = this.authService.getToken();
