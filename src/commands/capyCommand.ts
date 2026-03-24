@@ -100,7 +100,7 @@ export class CapyCommand {
         choices: [
           ...orgs.map(o => ({ name: o.name, value: o.id })),
           new inquirer.Separator(),
-          { name: '+ Create new organization', value: CREATE_NEW_ORG },
+          { name: '+ Initialize project under a new organization', value: CREATE_NEW_ORG },
         ],
       }]);
 
