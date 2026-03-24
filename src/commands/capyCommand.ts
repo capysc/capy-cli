@@ -96,11 +96,11 @@ export class CapyCommand {
       const { orgId } = await inquirer.prompt([{
         type: 'list',
         name: 'orgId',
-        message: 'Select an organization:',
+        message: 'Select orgeanization for project:',
         choices: [
           ...orgs.map(o => ({ name: o.name, value: o.id })),
           new inquirer.Separator(),
-          { name: '+ Initialize project under a new organization', value: CREATE_NEW_ORG },
+          { name: 'Create new organization for project +', value: CREATE_NEW_ORG },
         ],
       }]);
 
