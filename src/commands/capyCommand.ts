@@ -283,6 +283,18 @@ export class CapyCommand {
 
     fetchSpinner.succeed(`Retrieved remote .env (${Object.keys(remoteEnv).length} variables)`);
 
+    if (this.devMode) {
+      console.log('\n📦 Remote .env (dev mode):');
+      if (Object.keys(remoteEnv).length === 0) {
+        console.log('  (empty)');
+      } else {
+        for (const [key, value] of Object.entries(remoteEnv)) {
+          console.log(`  ${key}=${value}`);
+        }
+      }
+      console.log('');
+    }
+
     // Get local environment - both encrypted (for resource_id) and decrypted (for comparison)
     let localEnvEncrypted: Record<string, string> = {};
     let localEnv: Record<string, string> = {};
