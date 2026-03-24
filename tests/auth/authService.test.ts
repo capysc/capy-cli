@@ -116,6 +116,10 @@ describe('AuthService', () => {
         success: true,
         organization_id: 'org-123',
         user_id: 'user-456',
+        user_email: undefined,
+        user_first_name: undefined,
+        user_last_name: undefined,
+        _auth_method: 'cached',
       });
     });
 

@@ -98,6 +98,8 @@ export interface AuthResult {
   error?: string;
   /** WorkOS refresh token for use with createOrganization when org selection is pending */
   _refresh_token?: string;
+  /** How the token was obtained: 'cached', 'refreshed', or 'oauth' */
+  _auth_method?: 'cached' | 'refreshed' | 'oauth';
 }
 
 export interface DecryptResponse {
@@ -112,6 +114,9 @@ export interface ServiceToken {
   expires_at: number;
   organization_id: string;
   user_id: string;
+  user_email?: string;
+  user_first_name?: string | null;
+  user_last_name?: string | null;
 }
 
 export interface CliOptions {

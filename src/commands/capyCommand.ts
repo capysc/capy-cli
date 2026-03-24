@@ -75,7 +75,7 @@ export class CapyCommand {
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
-        console.log(`\n🔑 Bearer token (dev mode):\n${token.access_token}\n`);
+        console.log(`\n🔑 Bearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
     }
 
@@ -286,7 +286,7 @@ export class CapyCommand {
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
-        console.log(`\n🔑 Bearer token (dev mode):\n${token.access_token}\n`);
+        console.log(`\n🔑 Bearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
     }
 

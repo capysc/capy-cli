@@ -50,6 +50,10 @@ export class AuthService {
             success: true,
             organization_id: token.organization_id,
             user_id: token.user_id,
+            user_email: token.user_email,
+            user_first_name: token.user_first_name,
+            user_last_name: token.user_last_name,
+            _auth_method: 'cached',
           };
         }
       }
@@ -62,6 +66,10 @@ export class AuthService {
             success: true,
             organization_id: this.serviceToken!.organization_id,
             user_id: this.serviceToken!.user_id,
+            user_email: this.serviceToken!.user_email,
+            user_first_name: this.serviceToken!.user_first_name,
+            user_last_name: this.serviceToken!.user_last_name,
+            _auth_method: 'refreshed',
           };
         }
       }
@@ -120,6 +128,9 @@ export class AuthService {
         expires_at: Date.now() + (token.expires_in * 1000),
         organization_id: resolvedOrgId,
         user_id: user.id,
+        user_email: user.email,
+        user_first_name: user.first_name,
+        user_last_name: user.last_name,
       };
       this.saveToken();
 
@@ -154,7 +165,12 @@ export class AuthService {
     }
 
     try {
-      const data = await postJson<{ access_token: string; refresh_token: string; expires_in: number }>(
+      const data = await postJson<{
+        access_token: string;
+        refresh_token: string;
+        expires_in: number;
+        user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+      }>(
         `${this.serviceApiUrl}/auth/refresh`,
         {
           refresh_token: this.serviceToken.refresh_token,
@@ -167,6 +183,12 @@ export class AuthService {
         access_token: data.access_token,
         refresh_token: data.refresh_token,
         expires_at: Date.now() + (data.expires_in * 1000),
+        ...(data.user && {
+          user_id: data.user.id,
+          user_email: data.user.email,
+          user_first_name: data.user.first_name,
+          user_last_name: data.user.last_name,
+        }),
       };
 
       this.saveToken();
@@ -215,7 +237,12 @@ export class AuthService {
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
-    const data = await postJson<Organization & { access_token?: string; refresh_token?: string; expires_in?: number }>(
+    const data = await postJson<Organization & {
+      access_token?: string;
+      refresh_token?: string;
+      expires_in?: number;
+      user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+    }>(
       `${this.serviceApiUrl}/auth/create-org`,
       { name, refresh_token: refreshToken },
     );
@@ -227,7 +254,10 @@ export class AuthService {
         refresh_token: data.refresh_token || refreshToken,
         expires_at: Date.now() + ((data.expires_in || 86400) * 1000),
         organization_id: data.id,
-        user_id: userId,
+        user_id: data.user?.id || userId,
+        user_email: data.user?.email,
+        user_first_name: data.user?.first_name,
+        user_last_name: data.user?.last_name,
       };
       this.saveToken();
     }
