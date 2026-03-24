@@ -50,6 +50,7 @@ describe('CapyCommand', () => {
     mockProjectManager = {
       detectProjectState: jest.fn(),
       getDefaultProjectName: jest.fn().mockReturnValue('test-project'),
+      getEnvPath: jest.fn().mockReturnValue('.env'),
       readKeepFile: jest.fn(),
       readDecryptKey: jest.fn(),
       readSyncState: jest.fn().mockReturnValue(null)

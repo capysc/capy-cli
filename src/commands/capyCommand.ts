@@ -5,6 +5,8 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
+import { Encryptor } from '../crypto/encryptor';
+import { existsSync } from 'fs';
 import inquirer from 'inquirer';
 import {
   CliOptions,
@@ -142,7 +144,9 @@ export class CapyCommand {
     );
     initSpinner.succeed(`Project "${projectName}" created`);
 
-    // Generate master key and create keep
+    // Generate local encryption key (decrypt key is managed client-side)
+    const localDecryptKey = Encryptor.generateKey();
+
     const keySpinner = ora('🔑 Generating encryption keys...').start();
 
     // Create keep file
@@ -159,33 +163,32 @@ export class CapyCommand {
     this.fileManager.writeKeepFile(keep);
     keySpinner.text = 'Created .keep configuration file';
 
-    // Get initial decrypt data from service
+    // Check if project already has remote secrets (e.g. joining existing project)
+    let remoteData = { env_content: '', decrypt_key: '', expires_at: '' };
     try {
-      const decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
-
-      // Create decrypt key
-      const decryptKey = this.syncEngine.createDecryptKey(
-        projectResult.org_id,
-        projectResult.project_id,
-        authResult.user_id!,
-        decryptData.decrypt_key,
-        []
-      );
-
-      this.fileManager.writeDecryptKey(decryptKey);
-      keySpinner.text = 'Generated your personal .decrypt key';
-
-      // Parse and write encrypted env file if content exists
-      if (decryptData.env_content) {
-        const envVars = this.fileManager.parseEnvContent(decryptData.env_content);
-        this.fileManager.writeEncryptedEnvFile(envVars, decryptData.decrypt_key, undefined, keep);
-        keySpinner.succeed(`Retrieved and encrypted ${Object.keys(envVars).length} variables`);
-      } else {
-        keySpinner.succeed('No existing variables found');
-      }
+      remoteData = await this.serviceClient.getDecryptData(projectResult.project_id);
     } catch {
-      // No existing data, that's ok for new project
-      keySpinner.succeed('Project initialized');
+      // Service unavailable — proceed with local key
+    }
+    const decryptionKey = remoteData.decrypt_key || localDecryptKey;
+
+    // Create decrypt key file
+    const decryptKey = this.syncEngine.createDecryptKey(
+      projectResult.org_id,
+      projectResult.project_id,
+      authResult.user_id!,
+      decryptionKey,
+      []
+    );
+    this.fileManager.writeDecryptKey(decryptKey);
+
+    // If remote has existing variables, pull them
+    if (remoteData.env_content) {
+      const envVars = this.fileManager.parseEnvContent(remoteData.env_content);
+      this.fileManager.writeEncryptedEnvFile(envVars, decryptionKey, undefined, keep);
+      keySpinner.succeed(`Retrieved and encrypted ${Object.keys(envVars).length} variables`);
+    } else {
+      keySpinner.succeed('Generated encryption keys');
     }
 
     // Update gitignore
@@ -193,71 +196,57 @@ export class CapyCommand {
     this.promptEngine.displaySuccess('Updated .gitignore to protect secrets');
 
     // Check if there's an existing .env file with variables to sync
-    try {
-      const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
-      const existsEnv = require('fs').existsSync(localEnvPath);
+    const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
+    const existsEnv = existsSync(localEnvPath);
 
-      if (existsEnv) {
-        const localEnv = this.fileManager.readEnvFile(this.options.envPath);
-        const localVarCount = Object.keys(localEnv).length;
+    if (existsEnv) {
+      const localEnv = this.fileManager.readEnvFile(this.options.envPath);
+      const localVarCount = Object.keys(localEnv).length;
 
-        if (localVarCount > 0) {
-          console.log(`\n📋 Found existing .env file with ${localVarCount} variable(s)`);
+      if (localVarCount > 0) {
+        console.log(`\n📋 Found existing .env file with ${localVarCount} variable(s)`);
+        const syncSpinner = ora('🔄 Syncing local variables to keep...').start();
 
-          // Get decrypt data for syncing
-          const decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
+        try {
+          const pushResult = await this.serviceClient.pushVariables(
+            projectResult.project_id,
+            localEnv,
+            keep
+          );
 
-          // Automatically sync since this is a new project with no remote variables
-          // No conflicts possible, so no need to prompt
-          const syncSpinner = ora('🔄 Syncing local variables to keep...').start();
+          if (pushResult.success) {
+            // Update keep file with variable metadata
+            const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables);
+            this.fileManager.writeKeepFile(updatedKeep);
 
-          try {
-            // Push all local variables
-            const pushResult = await this.serviceClient.pushVariables(
+            // Write encrypted .env file
+            this.fileManager.writeEncryptedEnvFile(localEnv, decryptionKey, this.options.envPath, updatedKeep);
+
+            // Update decrypt key with variable permissions
+            const updatedDecryptKey = this.syncEngine.createDecryptKey(
+              projectResult.org_id,
               projectResult.project_id,
-              localEnv,
-              keep
+              authResult.user_id!,
+              decryptionKey,
+              Object.keys(localEnv)
             );
+            this.fileManager.writeDecryptKey(updatedDecryptKey);
 
-            if (pushResult.success) {
-              // Update keep file with variable metadata
-              const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables);
-              this.fileManager.writeKeepFile(updatedKeep);
+            // Write initial sync state
+            const initialSyncState: SyncState = {
+              last_sync: new Date().toISOString(),
+              synced_variables: Object.keys(localEnv)
+            };
+            this.fileManager.writeSyncState(initialSyncState);
 
-              // Write encrypted .env file
-              this.fileManager.writeEncryptedEnvFile(localEnv, decryptData.decrypt_key, this.options.envPath, updatedKeep);
-
-              // Update decrypt key with variable permissions
-              const decryptKey = this.syncEngine.createDecryptKey(
-                projectResult.org_id,
-                projectResult.project_id,
-                authResult.user_id!,
-                decryptData.decrypt_key,
-                Object.keys(localEnv)
-              );
-              this.fileManager.writeDecryptKey(decryptKey);
-
-              // Write initial sync state
-              const initialSyncState: SyncState = {
-                last_sync: new Date().toISOString(),
-                synced_variables: Object.keys(localEnv)
-              };
-              this.fileManager.writeSyncState(initialSyncState);
-
-              syncSpinner.succeed(`Synced ${localVarCount} variable(s) to keep`);
-            } else {
-              syncSpinner.fail('Failed to sync variables');
-            }
-          } catch (syncError) {
+            syncSpinner.succeed(`Synced ${localVarCount} variable(s) to keep`);
+          } else {
             syncSpinner.fail('Failed to sync variables');
-            console.log('⚠️  You can run \'capy\' again to retry syncing');
           }
+        } catch (syncError: any) {
+          syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
+          console.log('⚠️  You can run \'capy\' again to retry syncing');
         }
-      }
-    } catch (error) {
-      // Don't fail initialization if sync check fails
-      if (this.options.verbose) {
-        console.error('Error checking for .env file:', error);
       }
     }
 
