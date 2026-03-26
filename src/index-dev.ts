@@ -76,13 +76,15 @@ program
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
 
+    const maxLen = Math.max(...branches.map(b => (b.name || 'no branch').length));
     const choices = branches.map(b => {
       const name = b.name || 'no branch';
+      const padded = name.padEnd(maxLen + 2);
       const isCurrent = b.name === (activeBranch || '');
-      const currentLabel = isCurrent ? ' \x1b[36m← current\x1b[0m' : '';
-      const prodLabel = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
+      const currentLabel = isCurrent ? '\x1b[38;5;43m← current\x1b[0m' : '';
+      const prodLabel = b.is_production ? '\x1b[90m(protected)\x1b[0m' : '';
       return {
-        name: `${name}${currentLabel}${prodLabel}`,
+        name: `${padded}${currentLabel}${prodLabel}`,
         value: b.name,
         short: name,
       };
@@ -92,7 +94,7 @@ program
     const { selected } = await inquirer.prompt([{
       type: 'list',
       name: 'selected',
-      message: 'Secret branches:',
+      message: 'Switch branch:',
       choices,
     }]);
 
