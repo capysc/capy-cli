@@ -14,7 +14,13 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
-  .action(async (options) => {
+  .action(async (options, cmd) => {
+    if (cmd.args.length > 0) {
+      console.error(`Unknown command: ${cmd.args[0]}\n`);
+      program.outputHelp();
+      process.exit(1);
+    }
+
     const cliOptions: CliOptions = {
       envPath: options.envPath,
       verbose: options.verbose,
@@ -60,5 +66,4 @@ program
     console.log('Capy CLI v1.0.0');
   });
 
-// Parse command line arguments
 program.parse(process.argv);
