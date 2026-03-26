@@ -38,6 +38,17 @@ program
   });
 
 program
+  .command('checkout <branch>')
+  .description('Switch to a secret branch')
+  .option('-b, --create', 'Create the branch if it does not exist')
+  .option('--production', 'Mark as a production branch (protected, invite-only)')
+  .action(async (branch, options) => {
+    const { CheckoutCommand } = await import('./commands/checkoutCommand');
+    const cmd = new CheckoutCommand(true);
+    await cmd.execute(branch, { create: options.create, production: options.production });
+  });
+
+program
   .command('deploy')
   .description('Create a deployment PR with the .keep file')
   .action(async () => {

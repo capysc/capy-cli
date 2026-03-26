@@ -354,18 +354,18 @@ describe('SyncEngine', () => {
   describe('mergeWithKeep', () => {
     test('should update existing variables in keep', () => {
       const keep: KeepFile = {
-        version: '1.0',
+        version: '2.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
         last_sync: '2024-01-01T00:00:00Z',
         variables: {
-          EXISTING_VAR: {
+          EXISTING_VAR: [{
             resource_id: 'res_old',
             created_at: '2024-01-01T00:00:00Z',
             updated_at: '2024-01-01T00:00:00Z'
-          }
+          }]
         }
       };
 
@@ -375,14 +375,14 @@ describe('SyncEngine', () => {
 
       const result = syncEngine.mergeWithKeep(keep, pushedVariables);
 
-      expect(result.variables.EXISTING_VAR.resource_id).toBe('res_new');
-      expect(result.variables.EXISTING_VAR.updated_at).not.toBe('2024-01-01T00:00:00Z');
+      expect(result.variables.EXISTING_VAR[0].resource_id).toBe('res_new');
+      expect(result.variables.EXISTING_VAR[0].updated_at).not.toBe('2024-01-01T00:00:00Z');
       expect(result.last_sync).not.toBe('2024-01-01T00:00:00Z');
     });
 
     test('should add new variables to keep', () => {
       const keep: KeepFile = {
-        version: '1.0',
+        version: '2.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
@@ -398,9 +398,9 @@ describe('SyncEngine', () => {
       const result = syncEngine.mergeWithKeep(keep, pushedVariables);
 
       expect(result.variables.NEW_VAR).toBeDefined();
-      expect(result.variables.NEW_VAR.resource_id).toBe('res_123');
-      expect(result.variables.NEW_VAR.created_at).toBeDefined();
-      expect(result.variables.NEW_VAR.updated_at).toBeDefined();
+      expect(result.variables.NEW_VAR[0].resource_id).toBe('res_123');
+      expect(result.variables.NEW_VAR[0].created_at).toBeDefined();
+      expect(result.variables.NEW_VAR[0].updated_at).toBeDefined();
     });
   });
 

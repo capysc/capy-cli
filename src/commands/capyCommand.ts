@@ -192,9 +192,9 @@ export class CapyCommand {
 
     const keySpinner = ora('🔑 Generating encryption keys...').start();
 
-    // Create keep file
+    // Create keep file (v2 format)
     const keep: KeepFile = {
-      version: '1.0',
+      version: '2.0',
       org_id: projectResult.org_id,
       project_id: projectResult.project_id,
       project_name: projectResult.project_name,
@@ -328,9 +328,10 @@ export class CapyCommand {
       }
     }
 
-    // Get remote environment
-    const fetchSpinner = ora('Retrieving remote .env...').start();
-    const decryptData = await this.serviceClient.getDecryptData(projectState.projectId!);
+    // Get remote environment (branch-aware)
+    const activeBranch = projectState.activeBranch;
+    const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
+    const decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
     const existingDecryptKey = this.projectManager.readDecryptKey();
     const encryptionKey = existingDecryptKey?.decryption_key ?? decryptData.decrypt_key;
 
@@ -415,7 +416,7 @@ export class CapyCommand {
 
       // Always re-encrypt local .env (e.g. after `capy decrypt`)
       const finalKeep = this.projectManager.readKeepFile();
-      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, finalKeep);
+      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
       return;
     }
 
@@ -446,18 +447,19 @@ export class CapyCommand {
     // Apply decisions to create final env (all variables, merged)
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
 
-    // Push the full state to remote (replaces entire blob)
+    // Push the full state to remote (branch-aware, replaces entire blob)
     const keep = this.projectManager.readKeepFile();
     const pushResult = await this.serviceClient.pushVariables(
       projectState.projectId!,
       finalEnv,
-      keep
+      keep,
+      activeBranch
     );
 
     let finalKeep = keep;
     if (pushResult.success) {
       // Update keep with resource_ids from push
-      finalKeep = this.syncEngine.mergeWithKeep(keep!, pushResult.variables);
+      finalKeep = this.syncEngine.mergeWithKeep(keep!, pushResult.variables, activeBranch);
 
       // Remove deleted variables from keep
       for (const varName of decisions.deleteRemote) {
@@ -469,7 +471,7 @@ export class CapyCommand {
     }
 
     // Write encrypted .env file
-    this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep);
+    this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
     syncSpinner.text = `Updated encrypted .env with ${Object.keys(finalEnv).length} total variables`;
 
     // Update decrypt key
