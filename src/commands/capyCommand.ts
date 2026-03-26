@@ -329,9 +329,50 @@ export class CapyCommand {
     }
 
     // Get remote environment (branch-aware)
-    const activeBranch = projectState.activeBranch;
+    let activeBranch = projectState.activeBranch;
     const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
-    const decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+
+    let decryptData;
+    try {
+      decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+    } catch (error: any) {
+      if (error instanceof CapyError && error.details?.status === 404) {
+        fetchSpinner.fail('Project not found on server');
+        const { recreate } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'recreate',
+          message: 'Project not found — create a new one and re-sync?',
+          default: true,
+        }]);
+
+        if (!recreate) {
+          console.log('Run capy again after resolving the issue.');
+          return;
+        }
+
+        // Re-create the project
+        const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
+        const initSpinner = ora('Re-creating project...').start();
+        const projectResult = await this.serviceClient.initializeProject(
+          projectName,
+          authResult.organization_id || projectState.organizationId!
+        );
+        initSpinner.succeed(`Project "${projectName}" re-created`);
+
+        // Update .keep with new project ID
+        const keep = this.projectManager.readKeepFile()!;
+        keep.project_id = projectResult.project_id;
+        keep.org_id = projectResult.org_id;
+        this.fileManager.writeKeepFile(keep);
+
+        // Retry with new project ID
+        decryptData = await this.serviceClient.getDecryptData(projectResult.project_id, activeBranch);
+        // Update projectState for the rest of the flow
+        projectState.projectId = projectResult.project_id;
+      } else {
+        throw error;
+      }
+    }
     const existingDecryptKey = this.projectManager.readDecryptKey();
     const encryptionKey = existingDecryptKey?.decryption_key ?? decryptData.decrypt_key;
 
