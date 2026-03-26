@@ -48,8 +48,13 @@ export class AuthService {
         if (token) {
           return {
             success: true,
-            organizationId: token.organization_id,
-            userId: token.user_id,
+            organization_id: token.organization_id,
+            user_id: token.user_id,
+            user_email: token.user_email,
+            user_first_name: token.user_first_name,
+            user_last_name: token.user_last_name,
+            organizations: token.organizations,
+            _auth_method: 'cached',
           };
         }
       }
@@ -60,8 +65,13 @@ export class AuthService {
         if (refreshed) {
           return {
             success: true,
-            organizationId: this.serviceToken!.organization_id,
-            userId: this.serviceToken!.user_id,
+            organization_id: this.serviceToken!.organization_id,
+            user_id: this.serviceToken!.user_id,
+            user_email: this.serviceToken!.user_email,
+            user_first_name: this.serviceToken!.user_first_name,
+            user_last_name: this.serviceToken!.user_last_name,
+            organizations: this.serviceToken!.organizations,
+            _auth_method: 'refreshed',
           };
         }
       }
@@ -101,7 +111,7 @@ export class AuthService {
     // Backend uses client_secret + code_verifier with WorkOS (defense in depth).
     const { token, user, organizations } = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
-      user: { id: string; email: string };
+      user: { id: string; email: string; first_name: string | null; last_name: string | null };
       organizations: Organization[];
     }>(`${this.serviceApiUrl}/auth/exchange`, {
       code,
@@ -120,15 +130,21 @@ export class AuthService {
         expires_at: Date.now() + (token.expires_in * 1000),
         organization_id: resolvedOrgId,
         user_id: user.id,
+        user_email: user.email,
+        user_first_name: user.first_name,
+        user_last_name: user.last_name,
+        organizations: organizations || [],
       };
       this.saveToken();
 
       return {
         success: true,
-        organizationId: resolvedOrgId,
-        organizationName: organizations?.[0]?.name,
-        userId: user.id,
-        userEmail: user.email,
+        organization_id: resolvedOrgId,
+        organization_name: organizations?.[0]?.name,
+        user_id: user.id,
+        user_email: user.email,
+        user_first_name: user.first_name,
+        user_last_name: user.last_name,
         organizations: organizations || [],
       };
     }
@@ -136,11 +152,13 @@ export class AuthService {
     // No JWT yet — user must select an org (0 or >1 orgs)
     return {
       success: true,
-      organizationId: '',
-      userId: user.id,
-      userEmail: user.email,
+      organization_id: '',
+      user_id: user.id,
+      user_email: user.email,
+      user_first_name: user.first_name,
+      user_last_name: user.last_name,
       organizations: organizations || [],
-      _refreshToken: token.refresh_token,
+      _refresh_token: token.refresh_token,
     };
   }
 
@@ -150,7 +168,12 @@ export class AuthService {
     }
 
     try {
-      const data = await postJson<{ access_token: string; refresh_token: string; expires_in: number }>(
+      const data = await postJson<{
+        access_token: string;
+        refresh_token: string;
+        expires_in: number;
+        user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+      }>(
         `${this.serviceApiUrl}/auth/refresh`,
         {
           refresh_token: this.serviceToken.refresh_token,
@@ -163,12 +186,73 @@ export class AuthService {
         access_token: data.access_token,
         refresh_token: data.refresh_token,
         expires_at: Date.now() + (data.expires_in * 1000),
+        ...(data.user && {
+          user_id: data.user.id,
+          user_email: data.user.email,
+          user_first_name: data.user.first_name,
+          user_last_name: data.user.last_name,
+        }),
       };
 
       this.saveToken();
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Refresh using an explicit refresh token and organization ID.
+   * Used after multi-org auth when the user selects an org but we don't
+   * have a serviceToken saved yet (exchange returned no access_token).
+   */
+  async refreshWithCredentials(
+    refreshToken: string,
+    organizationId: string,
+    userId?: string,
+  ): Promise<AuthResult> {
+    try {
+      const data = await postJson<{
+        access_token: string;
+        refresh_token: string;
+        expires_in: number;
+        user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+      }>(
+        `${this.serviceApiUrl}/auth/refresh`,
+        {
+          refresh_token: refreshToken,
+          organization_id: organizationId,
+        },
+      );
+
+      this.serviceToken = {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_at: Date.now() + (data.expires_in * 1000),
+        organization_id: organizationId,
+        user_id: data.user?.id || userId || '',
+        user_email: data.user?.email,
+        user_first_name: data.user?.first_name,
+        user_last_name: data.user?.last_name,
+        organizations: this.serviceToken?.organizations || [],
+      };
+
+      this.saveToken();
+
+      return {
+        success: true,
+        organization_id: organizationId,
+        user_id: this.serviceToken.user_id,
+        user_email: this.serviceToken.user_email,
+        user_first_name: this.serviceToken.user_first_name,
+        user_last_name: this.serviceToken.user_last_name,
+        _auth_method: 'refreshed',
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error.message || 'Failed to refresh token for organization',
+      };
     }
   }
 
@@ -211,19 +295,30 @@ export class AuthService {
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
-    const data = await postJson<Organization & { access_token?: string; refresh_token?: string; expires_in?: number }>(
+    const data = await postJson<Organization & {
+      access_token?: string;
+      refresh_token?: string;
+      expires_in?: number;
+      user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+    }>(
       `${this.serviceApiUrl}/auth/create-org`,
       { name, refresh_token: refreshToken },
     );
 
     // Service returns a JWT + fresh refresh token for the new org — save both
     if (data.access_token) {
+      const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
+      const existingOrgs = this.serviceToken?.organizations || [];
       this.serviceToken = {
         access_token: data.access_token,
         refresh_token: data.refresh_token || refreshToken,
         expires_at: Date.now() + ((data.expires_in || 86400) * 1000),
         organization_id: data.id,
-        user_id: userId,
+        user_id: data.user?.id || userId,
+        user_email: data.user?.email,
+        user_first_name: data.user?.first_name,
+        user_last_name: data.user?.last_name,
+        organizations: [...existingOrgs, newOrg],
       };
       this.saveToken();
     }
@@ -260,10 +355,12 @@ export class AuthService {
 
     return {
       success: true,
-      organizationId: mockOrgId,
-      organizationName: 'Mock Organization',
-      userId: mockUserId,
-      userEmail: 'mock.user@example.com'
+      organization_id: mockOrgId,
+      organization_name: 'Mock Organization',
+      user_id: mockUserId,
+      user_email: 'mock.user@example.com',
+      user_first_name: 'Mock',
+      user_last_name: 'User',
     };
   }
 }

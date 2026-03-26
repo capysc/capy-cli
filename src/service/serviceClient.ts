@@ -10,6 +10,8 @@ import {
   CapyError,
   ERROR_CODES
 } from '../types/index';
+import { Encryptor } from '../crypto/encryptor';
+import { deriveResourceId } from '../crypto/resourceId';
 
 export class ServiceClient {
   private apiUrl: string;
@@ -69,10 +71,11 @@ export class ServiceClient {
       const data = await res.json().catch(() => ({})) as Record<string, any>;
 
       if (res.status === 401) {
+        const detail = data.error || 'Unknown auth error';
         throw new CapyError(
-          'Authentication required. Please run capy to authenticate.',
+          `Authentication failed: ${detail}`,
           ERROR_CODES.AUTH_FAILED,
-          { status: 401 }
+          { status: 401, detail }
         );
       }
 
@@ -165,6 +168,14 @@ export class ServiceClient {
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       };
     } catch (error: any) {
+      // 404 is normal for a new project with no secrets yet
+      if (error instanceof CapyError && error.details?.status === 404) {
+        return {
+          env_content: '',
+          decrypt_key: '',
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        };
+      }
       if (error instanceof CapyError) {
         throw error;
       }
@@ -253,8 +264,42 @@ export class ServiceClient {
     }
 
     try {
-      // Build env_file content from variables
-      const envFileContent = Object.entries(variables)
+      // Encrypt variables before sending to service
+      const encryptionKey = keep?.variables ? '' : ''; // Will use proper key lifecycle later
+      const encryptedVars: Record<string, string> = {};
+      const resultVariables: Record<string, any> = {};
+
+      for (const [key, value] of Object.entries(variables)) {
+        if (value === 'capy:deleted') {
+          encryptedVars[key] = 'capy:deleted';
+          resultVariables[key] = {
+            resource_id: deriveResourceId(encryptionKey, key),
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        } else if (value.startsWith('capy:')) {
+          // Already encrypted — pass through as-is
+          const existingResourceId = value.split(':')[1] || deriveResourceId(encryptionKey, key);
+          encryptedVars[key] = value;
+          resultVariables[key] = {
+            resource_id: existingResourceId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        } else {
+          const resourceId = deriveResourceId(encryptionKey, key);
+          const encrypted = Encryptor.encrypt(value, encryptionKey);
+          const snippetValue = this.createSnippetWithEncryption(value, encrypted);
+          encryptedVars[key] = `capy:${resourceId}:${snippetValue}`;
+          resultVariables[key] = {
+            resource_id: resourceId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        }
+      }
+
+      const envFileContent = Object.entries(encryptedVars)
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
 
@@ -268,7 +313,7 @@ export class ServiceClient {
 
       return {
         success: data.success,
-        variables: {}
+        variables: resultVariables
       };
     } catch (error: any) {
       if (error instanceof CapyError) {

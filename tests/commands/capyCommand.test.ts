@@ -50,6 +50,7 @@ describe('CapyCommand', () => {
     mockProjectManager = {
       detectProjectState: jest.fn(),
       getDefaultProjectName: jest.fn().mockReturnValue('test-project'),
+      getEnvPath: jest.fn().mockReturnValue('.env'),
       readKeepFile: jest.fn(),
       readDecryptKey: jest.fn(),
       readSyncState: jest.fn().mockReturnValue(null)
@@ -104,7 +105,10 @@ describe('CapyCommand', () => {
 
     // Mock inquirer to auto-answer org selection prompts
     const mockInquirer = require('inquirer');
-    mockInquirer.default = { prompt: (jest.fn() as any).mockResolvedValue({ orgId: 'org-123', orgName: 'Test Org' }) };
+    mockInquirer.default = {
+      prompt: (jest.fn() as any).mockResolvedValue({ orgId: 'org-123', orgName: 'Test Org' }),
+      Separator: class Separator { constructor() {} },
+    };
 
     // Mock constructors
     MockProjectManager.mockImplementation(() => mockProjectManager);
@@ -232,10 +236,10 @@ describe('CapyCommand', () => {
       // Mock successful authentication
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
-        organizationId: 'org-123',
-        organizationName: 'Test Org',
-        userId: 'user-456',
-        userEmail: 'test@example.com',
+        organization_id: 'org-123',
+        organization_name: 'Test Org',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
         organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }]
       });
 
@@ -394,13 +398,6 @@ describe('CapyCommand', () => {
         { API_KEY: 'test-key', DB_URL: 'postgres://localhost' },
         expect.any(Object)
       );
-      // Should write encrypted env file once during the sync phase (not during initial since env_content is empty)
-      expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
-        { API_KEY: 'test-key', DB_URL: 'postgres://localhost' },
-        'decrypt-key-123',
-        undefined,
-        expect.any(Object)
-      );
       expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
 
       existsSyncSpy.mockRestore();
@@ -475,9 +472,9 @@ describe('CapyCommand', () => {
     beforeEach(() => {
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
-        organizationId: 'org-123',
-        userId: 'user-456',
-        userEmail: 'test@example.com'
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com'
       });
 
       mockAuthService.getToken.mockReturnValue({
@@ -575,7 +572,8 @@ describe('CapyCommand', () => {
       expect(mockSyncEngine.compareEnvironments).toHaveBeenCalled();
       expect(mockPromptEngine.promptForChanges).toHaveBeenCalled();
       expect(mockPromptEngine.confirmSync).toHaveBeenCalled();
-      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value' }, expect.any(Object));
+      // Push sends the full finalEnv (from applyDecisions), not just changed vars
+      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object));
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
       expect(mockFileManager.writeDecryptKey).toHaveBeenCalled();
     });

@@ -37,4 +37,38 @@ program
     await command.execute();
   });
 
+program
+  .command('decrypt')
+  .description('Decrypt .env file back to plaintext (dev only)')
+  .option('--env-path <path>', 'specify custom .env file location')
+  .action(async (options) => {
+    const { FileManager } = await import('./files/fileManager');
+    const { ProjectManager } = await import('./core/projectManager');
+
+    const fm = new FileManager();
+    const pm = new ProjectManager();
+    const decryptKey = pm.readDecryptKey();
+
+    if (!decryptKey) {
+      console.error('❌ No .decrypt key found. Run capy-dev first to initialize.');
+      process.exit(1);
+    }
+
+    const envPath = options.envPath || '.env';
+    const decrypted = fm.readEncryptedEnvFile(decryptKey.decryption_key, envPath);
+
+    if (Object.keys(decrypted).length === 0) {
+      console.log('No variables found in .env');
+      process.exit(0);
+    }
+
+    const { writeFileSync } = await import('fs');
+    const content = Object.entries(decrypted)
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n');
+
+    writeFileSync(envPath, content + '\n', 'utf-8');
+    console.log(`✓ Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
+  });
+
 program.parse(process.argv);

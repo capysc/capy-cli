@@ -82,13 +82,21 @@ describe('ServiceClient', () => {
       );
     });
 
-    test('should handle service errors', async () => {
+    test('should return empty data on 404 (new project with no secrets)', async () => {
       mockFetch.mockResolvedValue(mockFetchResponse(
-        { error: 'Project not found' }, false, 404
+        { error: 'No secrets stored for this project' }, false, 404
+      ));
+
+      const result = await serviceClient.getDecryptData('new_proj');
+      expect(result.env_content).toBe('');
+    });
+
+    test('should throw on non-404 service errors', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'Internal server error' }, false, 500
       ));
 
       await expect(serviceClient.getDecryptData('invalid_proj')).rejects.toThrow(CapyError);
-      await expect(serviceClient.getDecryptData('invalid_proj')).rejects.toThrow('Project not found');
     });
 
     test('should handle network errors', async () => {
@@ -176,13 +184,21 @@ describe('ServiceClient', () => {
         `${defaultServiceUrl}/secrets/${projectId}`,
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({
-            env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
-            keep_file: JSON.stringify({ variables: {} })
-          }),
         })
       );
+
+      // Verify the body contains encrypted values (capy: prefix)
+      const callArgs = mockFetch.mock.calls[0];
+      const body = JSON.parse((callArgs[1] as any).body);
+      expect(body.env_file).toContain('API_KEY=capy:');
+      expect(body.env_file).toContain('DB_URL=capy:');
+      expect(body.keep_file).toBeDefined();
+
       expect(result.success).toBe(true);
+      // Non-mock push returns resource IDs
+      expect(result.variables).toHaveProperty('API_KEY');
+      expect(result.variables).toHaveProperty('DB_URL');
+      expect(result.variables.API_KEY.resource_id).toBeDefined();
     });
 
     test('should handle push errors', async () => {
