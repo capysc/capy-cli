@@ -25,6 +25,17 @@ export class CheckoutCommand {
   }
 
   async execute(branchName: string, options: { create?: boolean; production?: boolean } = {}): Promise<void> {
+    try {
+      await this._execute(branchName, options);
+    } catch (error: any) {
+      if (error?.name === 'ExitPromptError') {
+        process.exit(0);
+      }
+      throw error;
+    }
+  }
+
+  private async _execute(branchName: string, options: { create?: boolean; production?: boolean }): Promise<void> {
     // Read .keep — must be initialized
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {

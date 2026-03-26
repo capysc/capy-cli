@@ -50,7 +50,10 @@ export class CapyCommand {
       } else {
         await this.syncProject(projectState);
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.name === 'ExitPromptError') {
+        process.exit(0);
+      }
       this.handleError(error);
     }
   }
@@ -602,10 +605,10 @@ export class CapyCommand {
     const { confirm } = await inquirer.prompt([{
       type: 'list',
       name: 'confirm',
-      message: `Do you want to deploy your secrets update to the "${targetBranch}" git branch?`,
+      message: `Deploy your secrets to a git branch?`,
       choices: [
         { name: `Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
-        { name: 'Another branch', value: 'other' },
+        { name: 'Another git branch', value: 'other' },
       ],
     }]);
 
@@ -653,6 +656,9 @@ export class CapyCommand {
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
     } catch (error: any) {
+      if (error?.name === 'ExitPromptError') {
+        process.exit(0);
+      }
       console.error(`Failed to create PR: ${error.message}`);
     }
   }
