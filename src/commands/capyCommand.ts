@@ -536,8 +536,13 @@ export class CapyCommand {
 
       const title = `chore: sync ${syncedVars.length} ${projectName} secret${syncedVars.length === 1 ? '' : 's'} via capy`;
       const varList = syncedVars.map(v => `- ${v}`).join('\n');
-      const message = `${title}\n\nSynced variables:\n${varList}`;
-      execSync(`git commit -m ${JSON.stringify(message)}`, { stdio: 'pipe' });
+      const fullMessage = `${title}\n\nSynced variables:\n${varList}`;
+      const { writeFileSync: writeTmp, unlinkSync: unlinkTmp } = require('fs');
+      const { join: joinTmp } = require('path');
+      const tmpMsg = joinTmp(require('os').tmpdir(), `capy-commit-msg-${Date.now()}`);
+      writeTmp(tmpMsg, fullMessage, 'utf-8');
+      execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
+      unlinkTmp(tmpMsg);
       execSync(`git push -u origin ${deployBranch}`, { stdio: 'pipe' });
 
       // Switch back to original branch
