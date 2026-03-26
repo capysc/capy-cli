@@ -286,6 +286,9 @@ export class CapyCommand {
             for (const varName of Object.keys(localEnv)) {
               console.log(`  📤 ${varName}`);
             }
+
+            console.log('\n✓ Ready to work!');
+            await this.promptDeployOrContinue(Object.keys(localEnv));
           } else {
             syncSpinner.fail('Failed to sync variables');
           }
@@ -297,7 +300,6 @@ export class CapyCommand {
     }
 
     console.log('\n✓ Ready to work!');
-    await this.promptDeployOrContinue();
   }
 
   private async syncProject(projectState: ProjectState): Promise<void> {
@@ -505,11 +507,11 @@ export class CapyCommand {
     console.log(`\n✓ Total: ${result.totalVariables} variables synchronized`);
 
     if (decisions.pushVariables.length > 0) {
-      await this.promptDeployOrContinue();
+      await this.promptDeployOrContinue(decisions.pushVariables);
     }
   }
 
-  private async promptDeployOrContinue(): Promise<void> {
+  private async promptDeployOrContinue(syncedVars: string[]): Promise<void> {
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
@@ -532,8 +534,10 @@ export class CapyCommand {
       execSync(`git checkout -b ${deployBranch}`, { stdio: 'pipe' });
       execSync('git add .keep', { stdio: 'pipe' });
 
-      const message = `chore: sync ${projectName} secrets via capy`;
-      execSync(`git commit -m "${message}"`, { stdio: 'pipe' });
+      const title = `chore: sync ${projectName} secrets via capy`;
+      const varList = syncedVars.map(v => `- ${v}`).join('\n');
+      const message = `${title}\n\nSynced variables:\n${varList}`;
+      execSync(`git commit -m ${JSON.stringify(message)}`, { stdio: 'pipe' });
       execSync(`git push -u origin ${deployBranch}`, { stdio: 'pipe' });
 
       // Switch back to original branch
@@ -546,7 +550,7 @@ export class CapyCommand {
         .replace(/^https:\/\/github\.com\//, '')
         .replace(/\.git$/, '');
 
-      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${deployBranch}?expand=1&title=${encodeURIComponent(message)}`;
+      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${deployBranch}?expand=1&title=${encodeURIComponent(title)}`;
 
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
