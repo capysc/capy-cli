@@ -28,6 +28,7 @@ program
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
       console.log('    capy-dev                        \x1b[90mSync secrets\x1b[0m');
+      console.log('    capy-dev branch                 \x1b[90mList secret branches\x1b[0m');
       console.log('    capy-dev checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
       console.log('    capy-dev deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
       console.log('');
@@ -45,6 +46,44 @@ program
 
     const command = new CapyCommand(cliOptions, true);
     await command.execute();
+  });
+
+program
+  .command('branch')
+  .description('List secret branches')
+  .action(async () => {
+    const { AuthService } = await import('./auth/authService');
+    const { ServiceClient } = await import('./service/serviceClient');
+    const { ProjectManager } = await import('./core/projectManager');
+
+    const pm = new ProjectManager();
+    const projectState = await pm.detectProjectState();
+    if (!projectState.initialized) {
+      console.error('No .keep file found. Run capy-dev first to initialize.');
+      process.exit(1);
+    }
+
+    const authService = new AuthService(undefined, true);
+    const serviceClient = new ServiceClient(undefined, true);
+    const authResult = await authService.authenticate(projectState.organizationId);
+    if (!authResult.success) {
+      console.error('Authentication failed');
+      process.exit(1);
+    }
+    const token = authService.getToken();
+    if (token) serviceClient.setToken(token);
+
+    const branches = await serviceClient.listBranches(projectState.projectId!);
+    const activeBranch = projectState.activeBranch;
+
+    console.log('');
+    for (const b of branches) {
+      const name = b.name || '(default)';
+      const active = (b.name === (activeBranch || '')) ? ' *' : '';
+      const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
+      console.log(`  ${name}${active}${prod}`);
+    }
+    console.log('');
   });
 
 program
