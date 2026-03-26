@@ -523,17 +523,17 @@ export class CapyCommand {
     if (action !== 'pr') return;
 
     const projectName = this.projectManager.getDefaultProjectName();
-    const branch = `capy/sync-${projectName}-${Date.now()}`;
+    const originalBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
 
     try {
       const prSpinner = ora('Creating PR...').start();
 
-      execSync(`git checkout -b ${branch}`, { stdio: 'pipe' });
+      // Commit to current branch, push, then generate PR URL
       execSync('git add .keep', { stdio: 'pipe' });
 
       const message = `chore: sync ${projectName} secrets via capy`;
       execSync(`git commit -m "${message}"`, { stdio: 'pipe' });
-      execSync(`git push -u origin ${branch}`, { stdio: 'pipe' });
+      execSync(`git push -u origin ${originalBranch}`, { stdio: 'pipe' });
 
       // Build GitHub PR URL
       const remoteUrl = execSync('git remote get-url origin', { stdio: 'pipe', encoding: 'utf-8' }).trim();
@@ -554,9 +554,9 @@ export class CapyCommand {
         .replace(/^https:\/\/github\.com\//, '')
         .replace(/\.git$/, '');
 
-      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${branch}?expand=1&title=${encodeURIComponent(message)}`;
+      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${originalBranch}?expand=1&title=${encodeURIComponent(message)}`;
 
-      prSpinner.succeed('Branch pushed');
+      prSpinner.succeed('Pushed to ' + originalBranch);
       console.log(`\nCreate PR: ${prUrl}`);
     } catch (error: any) {
       console.error(`Failed to create PR: ${error.message}`);
