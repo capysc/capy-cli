@@ -170,8 +170,13 @@ export class ServiceClient {
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       };
     } catch (error: any) {
-      // 404 is normal for a new project with no secrets yet
+      // 404 with "No secrets" is normal for a new project — return empty
+      // 404 with "Project not found" or "Branch not found" should propagate
       if (error instanceof CapyError && error.details?.status === 404) {
+        const msg = error.message || '';
+        if (msg.includes('not found') && !msg.includes('No secrets')) {
+          throw error; // Project or branch not found — let caller handle
+        }
         return {
           env_content: '',
           decrypt_key: '',
