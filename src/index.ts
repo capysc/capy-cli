@@ -67,14 +67,32 @@ program
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
 
-    console.log('');
-    for (const b of branches) {
+    const choices = branches.map(b => {
       const name = b.name || 'no branch';
-      const active = (b.name === (activeBranch || '')) ? ' \x1b[90m← selected\x1b[0m' : '';
-      const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
-      console.log(`  ${name}${active}${prod}`);
+      const isCurrent = b.name === (activeBranch || '');
+      const currentLabel = isCurrent ? ' \x1b[36m← current\x1b[0m' : '';
+      const prodLabel = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
+      return {
+        name: `${name}${currentLabel}${prodLabel}`,
+        value: b.name,
+        short: name,
+      };
+    });
+
+    const inquirer = (await import('inquirer')).default;
+    const { selected } = await inquirer.prompt([{
+      type: 'list',
+      name: 'selected',
+      message: 'Secret branches:',
+      choices,
+    }]);
+
+    // If they picked a different branch, check it out
+    if (selected !== (activeBranch || '')) {
+      const { CheckoutCommand } = await import('./commands/checkoutCommand');
+      const cmd = new CheckoutCommand();
+      await cmd.execute(selected, {});
     }
-    console.log('');
   });
 
 program
