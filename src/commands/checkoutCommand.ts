@@ -53,7 +53,7 @@ export class CheckoutCommand {
 
     const token = this.authService.getToken();
     if (token) this.serviceClient.setToken(token);
-    spinner.succeed(`Authenticated`);
+    spinner.stop();
 
     const projectId = projectState.projectId!;
 
@@ -65,17 +65,18 @@ export class CheckoutCommand {
       const branches = await this.serviceClient.listBranches(projectId);
       const branch = branches.find(b => b.name === branchName);
       if (!branch) {
-        branchSpinner.fail(`Branch "${branchName}" not found`);
-        console.log(`\nAvailable branches:`);
+        branchSpinner.stop();
+        console.log(`Branch "${branchName}" not found\n`);
+        console.log('Available branches:');
         for (const b of branches) {
-          const label = b.name || '(default)';
-          const prod = b.is_production ? ' [production]' : '';
+          const label = b.name || 'no branch';
+          const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
           console.log(`  ${label}${prod}`);
         }
         console.log(`\nCreate it with: capy checkout -b ${branchName}`);
         process.exit(1);
       }
-      branchSpinner.succeed(`Switched to ${branchName}`);
+      branchSpinner.stop();
     }
 
     // Update .keep with active_branch
@@ -103,19 +104,23 @@ export class CheckoutCommand {
         }
         // Re-encrypt locally for this branch
         this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep, branchName);
-        pullSpinner.succeed(`Pulled ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
+        pullSpinner.stop();
+        console.log(`Pulled ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
       } else {
-        pullSpinner.succeed(`No secrets yet for ${branchName}`);
+        pullSpinner.stop();
+        console.log(`No secrets yet for ${branchName}`);
       }
     } catch (error: any) {
+      pullSpinner.stop();
       if (error?.details?.status === 404) {
-        pullSpinner.succeed(`No secrets yet for ${branchName}`);
+        console.log(`No secrets yet for ${branchName}`);
       } else {
-        pullSpinner.fail(`Failed to pull secrets: ${error.message}`);
+        console.log(`Failed to pull secrets: ${error.message}`);
       }
     }
 
-    console.log(`\n✓ Now on branch: ${branchName}`);
+    const displayName = branchName || 'no branch selected';
+    console.log(`\nNow on branch: ${displayName}`);
   }
 
   private async createBranch(
@@ -138,7 +143,6 @@ export class CheckoutCommand {
 
     try {
       await this.serviceClient.createBranch(projectId, branchName, isProduction);
-      branchSpinner.text = `Branch "${branchName}" created`;
 
       // Copy secrets from current branch
       const keep = this.projectManager.readKeepFile()!;
@@ -151,7 +155,6 @@ export class CheckoutCommand {
         if (currentData.env_content) {
           // Push current secrets to the new branch
           const currentEnv = this.fileManager.parseEnvContent(currentData.env_content);
-          // Decrypt and re-push to new branch
           const decrypted: Record<string, string> = {};
           for (const [key, value] of Object.entries(currentEnv)) {
             try {
@@ -161,19 +164,23 @@ export class CheckoutCommand {
             }
           }
           await this.serviceClient.pushVariables(projectId, decrypted, keep, branchName);
-          branchSpinner.succeed(`Branch "${branchName}" created with ${Object.keys(decrypted).length} variable(s) copied`);
+          branchSpinner.stop();
+          console.log(`Branch "${branchName}" created with ${Object.keys(decrypted).length} variable(s) copied`);
         } else {
-          branchSpinner.succeed(`Branch "${branchName}" created (empty)`);
+          branchSpinner.stop();
+          console.log(`Branch "${branchName}" created (empty)`);
         }
       } catch {
-        branchSpinner.succeed(`Branch "${branchName}" created (no secrets to copy)`);
+        branchSpinner.stop();
+        console.log(`Branch "${branchName}" created (no secrets to copy)`);
       }
 
       if (isProduction) {
-        console.log(`\n⚠ "${branchName}" is a production branch — access is invite-only`);
+        console.log(`\n"${branchName}" is a production branch — access is invite-only`);
       }
     } catch (error: any) {
-      branchSpinner.fail(`Failed to create branch: ${error.message}`);
+      branchSpinner.stop();
+      console.error(`Failed to create branch: ${error.message}`);
       process.exit(1);
     }
   }
