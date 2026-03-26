@@ -522,7 +522,7 @@ export class CapyCommand {
       message: 'Want to deploy your changes to an environment?',
       choices: [
         { name: 'Continue working', value: 'continue' },
-        { name: `Create a deployment PR → ${targetLabel}`, value: 'pr' },
+        { name: `Create a deployment PR → "${targetLabel}"`, value: 'pr' },
       ],
     }]);
 
@@ -554,6 +554,29 @@ export class CapyCommand {
     }
 
     const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const targetBranch = keepFile.active_branch || baseBranch;
+
+    // Confirmation prompt
+    const { confirm } = await inquirer.prompt([{
+      type: 'list',
+      name: 'confirm',
+      message: `Do you want to deploy your secrets update to the "${targetBranch}" git branch?`,
+      choices: [
+        { name: `Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
+        { name: 'Another branch', value: 'other' },
+      ],
+    }]);
+
+    if (confirm === 'other') {
+      console.log('');
+      console.log('  To deploy to a different branch:');
+      console.log('');
+      console.log('    1. Switch branches:  capy checkout -b <branch-name>');
+      console.log('    2. Deploy:           capy deploy');
+      console.log('');
+      return;
+    }
+
     const deployBranch = `capy/sync-${projectName}-${Date.now()}`;
 
     try {
