@@ -201,6 +201,61 @@ export class AuthService {
     }
   }
 
+  /**
+   * Refresh using an explicit refresh token and organization ID.
+   * Used after multi-org auth when the user selects an org but we don't
+   * have a serviceToken saved yet (exchange returned no access_token).
+   */
+  async refreshWithCredentials(
+    refreshToken: string,
+    organizationId: string,
+    userId?: string,
+  ): Promise<AuthResult> {
+    try {
+      const data = await postJson<{
+        access_token: string;
+        refresh_token: string;
+        expires_in: number;
+        user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+      }>(
+        `${this.serviceApiUrl}/auth/refresh`,
+        {
+          refresh_token: refreshToken,
+          organization_id: organizationId,
+        },
+      );
+
+      this.serviceToken = {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_at: Date.now() + (data.expires_in * 1000),
+        organization_id: organizationId,
+        user_id: data.user?.id || userId || '',
+        user_email: data.user?.email,
+        user_first_name: data.user?.first_name,
+        user_last_name: data.user?.last_name,
+        organizations: this.serviceToken?.organizations || [],
+      };
+
+      this.saveToken();
+
+      return {
+        success: true,
+        organization_id: organizationId,
+        user_id: this.serviceToken.user_id,
+        user_email: this.serviceToken.user_email,
+        user_first_name: this.serviceToken.user_first_name,
+        user_last_name: this.serviceToken.user_last_name,
+        _auth_method: 'refreshed',
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error.message || 'Failed to refresh token for organization',
+      };
+    }
+  }
+
   isAuthenticated(): boolean {
     if (!this.serviceToken) return false;
     return this.serviceToken.expires_at > Date.now();

@@ -134,36 +134,56 @@ export class SyncEngine {
     remote: Record<string, string>,
     decisions: UserDecisions
   ): Record<string, string> {
-    const result: Record<string, string> = { ...local };
+    // Start from remote as the base — unchanged variables keep their remote value
+    const result: Record<string, string> = { ...remote };
 
-    // Pull remote variables
+    // Remove deletion markers
+    for (const key of Object.keys(result)) {
+      if (result[key] === 'capy:deleted') {
+        delete result[key];
+      }
+    }
+
+    // Add unchanged local-only variables (not in remote, not conflicts)
+    for (const key of Object.keys(local)) {
+      if (!(key in remote)) {
+        // New local variable — only include if user chose to push
+        if (decisions.pushVariables.includes(key)) {
+          result[key] = local[key];
+        }
+      }
+    }
+
+    // Apply user's explicit push decisions (local value wins)
+    for (const varName of decisions.pushVariables) {
+      if (local[varName] !== undefined) {
+        result[varName] = local[varName];
+      }
+    }
+
+    // Keep local values for conflicts resolved as "keep local" (not pushed)
+    for (const varName of decisions.keepLocal) {
+      if (local[varName] !== undefined) {
+        result[varName] = local[varName];
+      }
+    }
+
+    // Apply user's explicit pull decisions (remote value wins, already in result)
     for (const varName of decisions.pullVariables) {
       if (remote[varName] !== undefined && remote[varName] !== 'capy:deleted') {
         result[varName] = remote[varName];
       }
     }
 
-    // Keep remote values for conflicts
-    for (const varName of decisions.keepRemote) {
-      if (remote[varName] !== undefined && remote[varName] !== 'capy:deleted') {
-        result[varName] = remote[varName];
-      } else if (remote[varName] === 'capy:deleted') {
-        // Remote is deleted, remove from local
-        delete result[varName];
-      }
-    }
+    // Keep remote values for conflicts resolved as "keep remote" (already in result from base)
 
-    // Delete local variables that user confirmed
+    // Delete variables the user confirmed for deletion
     for (const varName of decisions.deleteLocal) {
       delete result[varName];
     }
-
-    // Keep local values (already in result)
-    // Remove variables that shouldn't be pushed
-    const allLocalVars = Object.keys(local);
-    const varsToKeepLocal = allLocalVars.filter(
-      v => !decisions.pushVariables.includes(v)
-    );
+    for (const varName of decisions.deleteRemote) {
+      delete result[varName];
+    }
 
     return result;
   }
@@ -176,12 +196,15 @@ export class SyncEngine {
     const pushed = decisions.pushVariables;
     const pulled = decisions.pullVariables;
     const resolved = [...decisions.keepLocal, ...decisions.keepRemote];
-    
-    const totalVariables = 
-      changeSet.unchanged.length + 
-      pushed.length + 
-      pulled.length + 
-      resolved.length;
+
+    // Deduplicate: pushed conflicts are in both pushVariables and keepLocal
+    const allNames = new Set([
+      ...changeSet.unchanged.map(v => v.name),
+      ...pushed,
+      ...pulled,
+      ...resolved,
+    ]);
+    const totalVariables = allNames.size;
 
     return {
       success: errors.length === 0,

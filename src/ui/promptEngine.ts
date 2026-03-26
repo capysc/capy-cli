@@ -221,52 +221,105 @@ export class PromptEngine {
       }
     }
 
-    // Prompt for conflicts
+    // Prompt for conflicts — Phase 1: resolve local vs remote for each
     if (changeSet.conflicts.length > 0) {
       console.log('\n⚠ Found ' + changeSet.conflicts.length + ' conflict(s):');
       this.displayConflictTable(changeSet.conflicts);
 
-      for (const conflict of changeSet.conflicts) {
-        const { resolution } = await inquirer.prompt([
-          {
-            type: 'list',
-            name: 'resolution',
-            message: `${conflict.name} conflict resolution:`,
-            choices: [
-              {
-                name: `Use local value (${this.applySnippetObfuscation(conflict.localValue)})`,
-                value: 'local'
-              },
-              {
-                name: `Use remote value (${this.applySnippetObfuscation(conflict.remoteValue)})`,
-                value: 'remote'
-              }
-            ]
-          }
-        ]);
+      if (changeSet.conflicts.length > 1) {
+        const { bulkChoice } = await inquirer.prompt([{
+          type: 'list',
+          name: 'bulkChoice',
+          message: 'Resolve conflicts:',
+          choices: [
+            { name: 'Use all local', value: 'all_local' },
+            { name: 'Use all remote', value: 'all_remote' },
+            { name: 'Resolve individually', value: 'individual' },
+          ]
+        }]);
 
+        if (bulkChoice === 'all_local') {
+          decisions.keepLocal.push(...changeSet.conflicts.map(c => c.name));
+        } else if (bulkChoice === 'all_remote') {
+          decisions.keepRemote.push(...changeSet.conflicts.map(c => c.name));
+        } else {
+          for (const conflict of changeSet.conflicts) {
+            const { resolution } = await inquirer.prompt([{
+              type: 'list',
+              name: 'resolution',
+              message: `${conflict.name}:`,
+              choices: [
+                { name: `Use local (${this.applySnippetObfuscation(conflict.localValue)})`, value: 'local' },
+                { name: `Use remote (${this.applySnippetObfuscation(conflict.remoteValue)})`, value: 'remote' },
+              ]
+            }]);
+            if (resolution === 'local') {
+              decisions.keepLocal.push(conflict.name);
+            } else {
+              decisions.keepRemote.push(conflict.name);
+            }
+          }
+        }
+      } else {
+        const conflict = changeSet.conflicts[0];
+        const { resolution } = await inquirer.prompt([{
+          type: 'list',
+          name: 'resolution',
+          message: `${conflict.name}:`,
+          choices: [
+            { name: `Use local (${this.applySnippetObfuscation(conflict.localValue)})`, value: 'local' },
+            { name: `Use remote (${this.applySnippetObfuscation(conflict.remoteValue)})`, value: 'remote' },
+          ]
+        }]);
         if (resolution === 'local') {
           decisions.keepLocal.push(conflict.name);
-          console.log(`✓ Keeping local ${conflict.name} value`);
-
-          const { pushLocal } = await inquirer.prompt([
-            {
-              type: 'confirm',
-              name: 'pushLocal',
-              message: `Push local value to capy?`,
-              default: false
-            }
-          ]);
-
-          if (pushLocal) {
-            decisions.pushVariables.push(conflict.name);
-            console.log(`✓ Will push local ${conflict.name} to keep`);
-          } else {
-            console.log(`⚠ Will keep ${conflict.name} local only`);
-          }
         } else {
           decisions.keepRemote.push(conflict.name);
-          console.log(`✓ Using remote ${conflict.name} value`);
+        }
+      }
+
+      // Phase 2: for variables kept local, decide which to push
+      if (decisions.keepLocal.length > 0) {
+        console.log(`\n${decisions.keepLocal.length} variable(s) kept local. Push to capy?`);
+
+        if (decisions.keepLocal.length === 1) {
+          const varName = decisions.keepLocal[0];
+          const { push } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'push',
+            message: `Push ${varName} to capy?`,
+            default: true
+          }]);
+          if (push) {
+            decisions.pushVariables.push(varName);
+          }
+        } else {
+          const { pushChoice } = await inquirer.prompt([{
+            type: 'list',
+            name: 'pushChoice',
+            message: 'Push local values to capy?',
+            choices: [
+              { name: 'Push all', value: 'all' },
+              { name: 'Choose individually', value: 'individual' },
+              { name: 'Push none', value: 'none' },
+            ]
+          }]);
+
+          if (pushChoice === 'all') {
+            decisions.pushVariables.push(...decisions.keepLocal);
+          } else if (pushChoice === 'individual') {
+            for (const varName of decisions.keepLocal) {
+              const { push } = await inquirer.prompt([{
+                type: 'confirm',
+                name: 'push',
+                message: `Push ${varName}?`,
+                default: true
+              }]);
+              if (push) {
+                decisions.pushVariables.push(varName);
+              }
+            }
+          }
         }
       }
     }

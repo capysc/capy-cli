@@ -6,6 +6,7 @@ import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
 import { existsSync } from 'fs';
+import { execSync } from 'child_process';
 import inquirer from 'inquirer';
 import {
   CliOptions,
@@ -83,24 +84,62 @@ export class CapyCommand {
     // Resolve organization
     const orgs = authResult.organizations || [];
     let selectedOrg: Organization;
+    const SWITCH_ORG = '__switch_org__';
     const CREATE_NEW_ORG = '__create_new__';
     // Refresh token: available from exchange (multi/no org) or from stored token (single org)
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
+
+    // Find the current org (the one the token is scoped to)
+    const currentOrgId = authResult.organization_id;
+    const currentOrg = orgs.find(o => o.id === currentOrgId);
 
     if (orgs.length === 0) {
       // No orgs — prompt to create one
       console.log('\n🏢 No organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+    } else if (currentOrg) {
+      // Authenticated with an org — offer to use it, switch, or create new
+      const { orgAction } = await inquirer.prompt([{
+        type: 'list',
+        name: 'orgAction',
+        message: 'Select organization for project:',
+        choices: [
+          { name: currentOrg.name, value: currentOrg.id },
+          { name: 'Switch to another organization', value: SWITCH_ORG },
+          { name: 'Create new organization', value: CREATE_NEW_ORG },
+        ],
+      }]);
+
+      if (orgAction === SWITCH_ORG) {
+        // Clear token and re-auth so WorkOS prompts for org selection
+        this.authService.clearToken();
+        const orgSpinner = ora('Re-authenticating...').start();
+        const freshAuth = await this.authService.authenticate();
+        if (!freshAuth.success) {
+          orgSpinner.fail('Authentication failed');
+          throw new CapyError(
+            freshAuth.error || 'Authentication failed',
+            ERROR_CODES.AUTH_FAILED
+          );
+        }
+        orgSpinner.succeed('Authenticated');
+        // Recurse to re-show org selection with fresh auth
+        return this.initializeProject();
+      } else if (orgAction === CREATE_NEW_ORG) {
+        selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+      } else {
+        selectedOrg = currentOrg;
+      }
     } else {
-      // One or more orgs — let user pick or create new
+      // Have orgs but no current org (multi-org, no token yet) — pick one
       const { orgId } = await inquirer.prompt([{
         type: 'list',
         name: 'orgId',
-        message: 'Select orgeanization for project:',
+        message: 'Select organization for project:',
         choices: [
           ...orgs.map(o => ({ name: o.name, value: o.id })),
           new inquirer.Separator(),
-          { name: 'Create new organization for project +', value: CREATE_NEW_ORG },
+          { name: 'Create new organization +', value: CREATE_NEW_ORG },
         ],
       }]);
 
@@ -109,15 +148,25 @@ export class CapyCommand {
       } else {
         selectedOrg = orgs.find(o => o.id === orgId)!;
 
-        // Re-authenticate scoped to the selected org to get an org-scoped token
+        // Use refresh token to get an org-scoped token
         const orgSpinner = ora('Authenticating with organization...').start();
-        const scopedAuth = await this.authService.authenticate(selectedOrg.workos_org_id);
+        let scopedAuth = await this.authService.refreshWithCredentials(
+          refreshToken!,
+          selectedOrg.id,
+          authResult.user_id,
+        );
         if (!scopedAuth.success) {
-          orgSpinner.fail('Failed to authenticate with organization');
-          throw new CapyError(
-            scopedAuth.error || 'Organization authentication failed',
-            ERROR_CODES.AUTH_FAILED
-          );
+          // Stale cache — clear token and re-auth from scratch
+          orgSpinner.text = 'Re-authenticating...';
+          this.authService.clearToken();
+          scopedAuth = await this.authService.authenticate(selectedOrg.workos_org_id);
+          if (!scopedAuth.success) {
+            orgSpinner.fail('Failed to authenticate with organization');
+            throw new CapyError(
+              scopedAuth.error || 'Organization authentication failed',
+              ERROR_CODES.AUTH_FAILED
+            );
+          }
         }
         orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
       }
@@ -165,22 +214,22 @@ export class CapyCommand {
       // Service unavailable
     }
 
-    // Create decrypt key file
-    if (remoteData.decrypt_key) {
-      const decryptKey = this.syncEngine.createDecryptKey(
-        projectResult.org_id,
-        projectResult.project_id,
-        authResult.user_id!,
-        remoteData.decrypt_key,
-        []
-      );
-      this.fileManager.writeDecryptKey(decryptKey);
-    }
+    const encryptionKey = remoteData.decrypt_key;
+
+    // Always write decrypt key file so sync can find it later
+    const decryptKey = this.syncEngine.createDecryptKey(
+      projectResult.org_id,
+      projectResult.project_id,
+      authResult.user_id!,
+      encryptionKey,
+      []
+    );
+    this.fileManager.writeDecryptKey(decryptKey);
 
     // If remote has existing variables, pull them
     if (remoteData.env_content) {
       const envVars = this.fileManager.parseEnvContent(remoteData.env_content);
-      this.fileManager.writeEncryptedEnvFile(envVars, remoteData.decrypt_key, undefined, keep);
+      this.fileManager.writeEncryptedEnvFile(envVars, encryptionKey, undefined, keep);
       keySpinner.succeed(`Retrieved and encrypted ${Object.keys(envVars).length} variables`);
     } else {
       keySpinner.succeed('Project initialized');
@@ -216,7 +265,27 @@ export class CapyCommand {
               last_sync: new Date().toISOString(),
               synced_variables: Object.keys(localEnv)
             });
-            syncSpinner.succeed(`Synced ${localVarCount} variable(s) to keep`);
+
+            // Encrypt the local .env file
+            this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep);
+
+            // Update decrypt key with variable permissions
+            const finalDecryptKey = this.syncEngine.createDecryptKey(
+              projectResult.org_id,
+              projectResult.project_id,
+              authResult.user_id!,
+              encryptionKey,
+              Object.keys(localEnv)
+            );
+            this.fileManager.writeDecryptKey(finalDecryptKey);
+
+            syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s)`);
+
+            // Show what was synced
+            console.log('');
+            for (const varName of Object.keys(localEnv)) {
+              console.log(`  📤 ${varName}`);
+            }
           } else {
             syncSpinner.fail('Failed to sync variables');
           }
@@ -228,6 +297,7 @@ export class CapyCommand {
     }
 
     console.log('\n✓ Ready to work!');
+    await this.promptDeployOrContinue();
   }
 
   private async syncProject(projectState: ProjectState): Promise<void> {
@@ -259,23 +329,18 @@ export class CapyCommand {
     // Get remote environment
     const fetchSpinner = ora('Retrieving remote .env...').start();
     const decryptData = await this.serviceClient.getDecryptData(projectState.projectId!);
+    const existingDecryptKey = this.projectManager.readDecryptKey();
+    const encryptionKey = existingDecryptKey?.decryption_key ?? decryptData.decrypt_key;
 
-    // Get remote environment - both encrypted (for resource_id) and decrypted (for comparison)
+    // Parse remote (encrypted) and decrypt for comparison
     let remoteEnvEncrypted: Record<string, string> = {};
     let remoteEnv: Record<string, string> = {};
     if (decryptData.env_content) {
       remoteEnvEncrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-
-      // Decrypt remote values for actual comparison
       for (const [key, value] of Object.entries(remoteEnvEncrypted)) {
-        if (this.fileManager.isSnippetEncrypted(value) || this.fileManager.isEncrypted(value)) {
-          try {
-            remoteEnv[key] = this.fileManager.decryptValue(value, decryptData.decrypt_key);
-          } catch (decryptError) {
-            // If we can't decrypt, use the encrypted value
-            remoteEnv[key] = value;
-          }
-        } else {
+        try {
+          remoteEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
+        } catch {
           remoteEnv[key] = value;
         }
       }
@@ -285,44 +350,34 @@ export class CapyCommand {
 
     if (this.devMode) {
       console.log('\n📦 Remote .env (dev mode):');
-      if (Object.keys(remoteEnv).length === 0) {
+      if (Object.keys(remoteEnvEncrypted).length === 0) {
         console.log('  (empty)');
       } else {
-        for (const [key, value] of Object.entries(remoteEnv)) {
+        for (const [key, value] of Object.entries(remoteEnvEncrypted)) {
           console.log(`  ${key}=${value}`);
         }
       }
       console.log('');
     }
 
-    // Get local environment - both encrypted (for resource_id) and decrypted (for comparison)
-    let localEnvEncrypted: Record<string, string> = {};
+    // Get local environment — decrypt if encrypted, read as-is if plaintext
     let localEnv: Record<string, string> = {};
-    const existingDecryptKey = this.projectManager.readDecryptKey();
-
     try {
-      if (existingDecryptKey) {
-        try {
-          // Read encrypted to get resource_ids
-          localEnvEncrypted = this.fileManager.readEnvFile(this.options.envPath);
-          // Decrypt for actual comparison
-          localEnv = this.fileManager.readEncryptedEnvFile(
-            existingDecryptKey.decryption_key,
-            this.options.envPath
-          );
-        } catch (error) {
-          console.warn('⚠️  Failed to decrypt local .env, reading as plain text');
-          localEnv = this.fileManager.readEnvFile(this.options.envPath);
-          localEnvEncrypted = localEnv;
+      const rawLocal = this.fileManager.readEnvFile(this.options.envPath);
+      for (const [key, value] of Object.entries(rawLocal)) {
+        if (value.startsWith('capy:')) {
+          try {
+            localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
+          } catch {
+            localEnv[key] = value;
+          }
+        } else {
+          localEnv[key] = value;
         }
-      } else {
-        localEnv = this.fileManager.readEnvFile(this.options.envPath);
-        localEnvEncrypted = localEnv;
       }
-    } catch (readError) {
+    } catch {
       console.warn('⚠️  Failed to read local .env');
       localEnv = {};
-      localEnvEncrypted = {};
     }
 
     // Read sync state for deletion detection
@@ -330,12 +385,12 @@ export class CapyCommand {
     const localEnvExists = Object.keys(localEnv).length > 0;
     const syncState = localEnvExists ? this.projectManager.readSyncState() : null;
 
-    // Compare environments (use decrypted for actual comparison, encrypted for resource_id checking)
+    // Compare decrypted plaintext values
     const changeSet = this.syncEngine.compareEnvironments(
       localEnv,
       remoteEnv,
-      localEnvEncrypted,
-      remoteEnvEncrypted,
+      undefined,
+      undefined,
       syncState
     );
 
@@ -355,6 +410,10 @@ export class CapyCommand {
 
     if (!hasChanges) {
       this.promptEngine.displaySuccess('Everything is up to date!');
+
+      // Always re-encrypt local .env (e.g. after `capy decrypt`)
+      const finalKeep = this.projectManager.readKeepFile();
+      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, finalKeep);
       return;
     }
 
@@ -382,127 +441,33 @@ export class CapyCommand {
     // Perform sync operations
     const syncSpinner = ora('🔄 Syncing...').start();
 
-    // Push variables to keep
-    if (decisions.pushVariables.length > 0) {
-      const pushVars: Record<string, string> = {};
-      for (const varName of decisions.pushVariables) {
-        pushVars[varName] = localEnv[varName];
-      }
-
-      // Get keep to retrieve existing resource_ids
-      const keep = this.projectManager.readKeepFile();
-
-      const pushResult = await this.serviceClient.pushVariables(
-        projectState.projectId!,
-        pushVars,
-        keep
-      );
-
-      if (pushResult.success) {
-        syncSpinner.text = `Pushed ${decisions.pushVariables.length} variables`;
-
-        // Update keep file
-        const keep = this.projectManager.readKeepFile()!;
-        const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables);
-        this.fileManager.writeKeepFile(updatedKeep);
-      }
-    }
-
-    // Push deletions to remote
-    if (decisions.deleteRemote.length > 0) {
-      const deleteVars: Record<string, string> = {};
-      for (const varName of decisions.deleteRemote) {
-        // Mark as deleted
-        deleteVars[varName] = 'capy:deleted';
-      }
-
-      // Get keep to retrieve existing resource_ids
-      const keep = this.projectManager.readKeepFile();
-
-      const pushResult = await this.serviceClient.pushVariables(
-        projectState.projectId!,
-        deleteVars,
-        keep
-      );
-
-      if (pushResult.success) {
-        syncSpinner.text = `Deleted ${decisions.deleteRemote.length} variables from remote`;
-
-        // Remove from keep file
-        const keep = this.projectManager.readKeepFile()!;
-        for (const varName of decisions.deleteRemote) {
-          delete keep.variables[varName];
-        }
-        keep.last_sync = new Date().toISOString();
-        this.fileManager.writeKeepFile(keep);
-      }
-    }
-
-    // Apply decisions to create final env
+    // Apply decisions to create final env (all variables, merged)
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
 
-    // Get updated keep after push and clean it up
-    let finalKeep = this.projectManager.readKeepFile();
+    // Push the full state to remote (replaces entire blob)
+    const keep = this.projectManager.readKeepFile();
+    const pushResult = await this.serviceClient.pushVariables(
+      projectState.projectId!,
+      finalEnv,
+      keep
+    );
 
-    // Update keep with resource_ids from pulled/restored variables
-    if (finalKeep && (decisions.pullVariables.length > 0 || decisions.keepRemote.length > 0)) {
-      const pulledVars = [...decisions.pullVariables, ...decisions.keepRemote];
-      let keepUpdated = false;
+    let finalKeep = keep;
+    if (pushResult.success) {
+      // Update keep with resource_ids from push
+      finalKeep = this.syncEngine.mergeWithKeep(keep!, pushResult.variables);
 
-      for (const varName of pulledVars) {
-        // Extract resource_id from remoteEnvEncrypted
-        const encryptedValue = remoteEnvEncrypted[varName];
-        if (encryptedValue && encryptedValue.startsWith('capy:')) {
-          const parts = encryptedValue.split(':');
-          if (parts.length >= 3) {
-            const resourceId = parts[1];
-            const now = new Date().toISOString();
-
-            if (!finalKeep.variables[varName]) {
-              // New variable pulled from remote
-              finalKeep.variables[varName] = {
-                resource_id: resourceId,
-                created_at: now,
-                updated_at: now
-              };
-              keepUpdated = true;
-            } else if (finalKeep.variables[varName].resource_id !== resourceId) {
-              // Existing variable but resource_id changed
-              finalKeep.variables[varName].resource_id = resourceId;
-              finalKeep.variables[varName].updated_at = now;
-              keepUpdated = true;
-            }
-          }
-        }
+      // Remove deleted variables from keep
+      for (const varName of decisions.deleteRemote) {
+        delete finalKeep.variables[varName];
       }
 
-      if (keepUpdated) {
-        finalKeep.last_sync = new Date().toISOString();
-        this.fileManager.writeKeepFile(finalKeep);
-      }
+      finalKeep.last_sync = new Date().toISOString();
+      this.fileManager.writeKeepFile(finalKeep);
     }
 
-    // Clean up keep: remove variables that no longer exist in finalEnv
-    if (finalKeep) {
-      const finalEnvKeys = new Set(Object.keys(finalEnv));
-      const keepKeys = Object.keys(finalKeep.variables);
-      let removedFromKeep = 0;
-
-      for (const keepKey of keepKeys) {
-        if (!finalEnvKeys.has(keepKey)) {
-          delete finalKeep.variables[keepKey];
-          removedFromKeep++;
-        }
-      }
-
-      if (removedFromKeep > 0) {
-        finalKeep.last_sync = new Date().toISOString();
-        this.fileManager.writeKeepFile(finalKeep);
-      }
-    }
-
-    // Write encrypted .env file using the decryption key
-    this.fileManager.writeEncryptedEnvFile(finalEnv, decryptData.decrypt_key, this.options.envPath, finalKeep);
+    // Write encrypted .env file
+    this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep);
     syncSpinner.text = `Updated encrypted .env with ${Object.keys(finalEnv).length} total variables`;
 
     // Update decrypt key
@@ -510,7 +475,7 @@ export class CapyCommand {
       projectState.organizationId!,
       projectState.projectId!,
       authResult.user_id!,
-      decryptData.decrypt_key,
+      encryptionKey,
       Object.keys(finalEnv)
     );
     this.fileManager.writeDecryptKey(decryptKey);
@@ -538,6 +503,64 @@ export class CapyCommand {
     }
 
     console.log(`\n✓ Total: ${result.totalVariables} variables synchronized`);
+
+    if (decisions.pushVariables.length > 0) {
+      await this.promptDeployOrContinue();
+    }
+  }
+
+  private async promptDeployOrContinue(): Promise<void> {
+    const { action } = await inquirer.prompt([{
+      type: 'list',
+      name: 'action',
+      message: 'Want to deploy your changes to an environment?',
+      choices: [
+        { name: 'Continue working', value: 'continue' },
+        { name: 'Create a deployment PR', value: 'pr' },
+      ],
+    }]);
+
+    if (action !== 'pr') return;
+
+    const projectName = this.projectManager.getDefaultProjectName();
+    const branch = `capy/sync-${projectName}-${Date.now()}`;
+
+    try {
+      const prSpinner = ora('Creating PR...').start();
+
+      execSync(`git checkout -b ${branch}`, { stdio: 'pipe' });
+      execSync('git add .keep', { stdio: 'pipe' });
+
+      const message = `chore: sync ${projectName} secrets via capy`;
+      execSync(`git commit -m "${message}"`, { stdio: 'pipe' });
+      execSync(`git push -u origin ${branch}`, { stdio: 'pipe' });
+
+      // Build GitHub PR URL
+      const remoteUrl = execSync('git remote get-url origin', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+      let baseBranch = 'main';
+      try {
+        baseBranch = execSync('git rev-parse --abbrev-ref origin/HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim().replace('origin/', '');
+      } catch {
+        // Detect main vs master
+        try {
+          execSync('git rev-parse --verify origin/main', { stdio: 'pipe' });
+          baseBranch = 'main';
+        } catch {
+          baseBranch = 'master';
+        }
+      }
+      const repoPath = remoteUrl
+        .replace(/^git@github\.com:/, '')
+        .replace(/^https:\/\/github\.com\//, '')
+        .replace(/\.git$/, '');
+
+      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${branch}?expand=1&title=${encodeURIComponent(message)}`;
+
+      prSpinner.succeed('Branch pushed');
+      console.log(`\nCreate PR: ${prUrl}`);
+    } catch (error: any) {
+      console.error(`Failed to create PR: ${error.message}`);
+    }
   }
 
   private handleError(error: any): void {

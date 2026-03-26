@@ -10,6 +10,8 @@ import {
   CapyError,
   ERROR_CODES
 } from '../types/index';
+import { Encryptor } from '../crypto/encryptor';
+import { deriveResourceId } from '../crypto/resourceId';
 
 export class ServiceClient {
   private apiUrl: string;
@@ -262,8 +264,42 @@ export class ServiceClient {
     }
 
     try {
-      // Build env_file content from variables
-      const envFileContent = Object.entries(variables)
+      // Encrypt variables before sending to service
+      const encryptionKey = keep?.variables ? '' : ''; // Will use proper key lifecycle later
+      const encryptedVars: Record<string, string> = {};
+      const resultVariables: Record<string, any> = {};
+
+      for (const [key, value] of Object.entries(variables)) {
+        if (value === 'capy:deleted') {
+          encryptedVars[key] = 'capy:deleted';
+          resultVariables[key] = {
+            resource_id: deriveResourceId(encryptionKey, key),
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        } else if (value.startsWith('capy:')) {
+          // Already encrypted — pass through as-is
+          const existingResourceId = value.split(':')[1] || deriveResourceId(encryptionKey, key);
+          encryptedVars[key] = value;
+          resultVariables[key] = {
+            resource_id: existingResourceId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        } else {
+          const resourceId = deriveResourceId(encryptionKey, key);
+          const encrypted = Encryptor.encrypt(value, encryptionKey);
+          const snippetValue = this.createSnippetWithEncryption(value, encrypted);
+          encryptedVars[key] = `capy:${resourceId}:${snippetValue}`;
+          resultVariables[key] = {
+            resource_id: resourceId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        }
+      }
+
+      const envFileContent = Object.entries(encryptedVars)
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
 
@@ -277,7 +313,7 @@ export class ServiceClient {
 
       return {
         success: data.success,
-        variables: {}
+        variables: resultVariables
       };
     } catch (error: any) {
       if (error instanceof CapyError) {
