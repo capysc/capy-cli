@@ -16,8 +16,12 @@ program
   .option('-d, --dry-run', 'preview changes without applying')
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
-      console.error(`Unknown command: ${cmd.args[0]}\n`);
-      program.outputHelp();
+      console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
+      console.log('  Available commands:\n');
+      console.log('    capy                        Sync secrets');
+      console.log('    capy checkout -b <branch>   Switch to a secret branch');
+      console.log('    capy deploy                 Create a deployment PR');
+      console.log('');
       process.exit(1);
     }
 
