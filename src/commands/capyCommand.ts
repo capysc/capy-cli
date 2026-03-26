@@ -337,7 +337,7 @@ export class CapyCommand {
       decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
     } catch (error: any) {
       if (error instanceof CapyError && error.details?.status === 404) {
-        fetchSpinner.fail('Project not found on server');
+        fetchSpinner.stop();
         const { recreate } = await inquirer.prompt([{
           type: 'confirm',
           name: 'recreate',
