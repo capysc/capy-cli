@@ -29,6 +29,13 @@ program
   });
 
 program
+  .command('deploy')
+  .description('Create a deployment PR with the .keep file')
+  .action(async () => {
+    await CapyCommand.createDeployPR();
+  });
+
+program
   .command('help')
   .description('Show help information')
   .action(() => {

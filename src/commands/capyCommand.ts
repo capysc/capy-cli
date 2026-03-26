@@ -524,7 +524,31 @@ export class CapyCommand {
 
     if (action !== 'pr') return;
 
-    const projectName = this.projectManager.getDefaultProjectName();
+    await CapyCommand.createDeployPR(syncedVars);
+  }
+
+  /**
+   * Create a deployment PR with the .keep file.
+   * Can be called directly via `capy deploy` or after a sync.
+   */
+  static async createDeployPR(syncedVars?: string[]): Promise<void> {
+    const { ProjectManager } = await import('../core/projectManager');
+    const pm = new ProjectManager();
+    const projectName = pm.getDefaultProjectName();
+    const keepFile = pm.readKeepFile();
+
+    if (!keepFile) {
+      console.error('No .keep file found. Run capy first to initialize.');
+      process.exit(1);
+    }
+
+    // If no vars specified, use all variables from .keep
+    const vars = syncedVars || Object.keys(keepFile.variables);
+    if (vars.length === 0) {
+      console.error('No variables to deploy.');
+      return;
+    }
+
     const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
     const deployBranch = `capy/sync-${projectName}-${Date.now()}`;
 
@@ -534,8 +558,8 @@ export class CapyCommand {
       execSync(`git checkout -b ${deployBranch}`, { stdio: 'pipe' });
       execSync('git add .keep', { stdio: 'pipe' });
 
-      const title = `chore: sync ${syncedVars.length} ${projectName} secret${syncedVars.length === 1 ? '' : 's'} via capy`;
-      const varList = syncedVars.map(v => `- ${v}`).join('\n');
+      const title = `chore: sync ${vars.length} ${projectName} secret${vars.length === 1 ? '' : 's'} via capy`;
+      const varList = vars.map(v => `- ${v}`).join('\n');
       const fullMessage = `${title}\n\nSynced variables:\n${varList}`;
       const { writeFileSync: writeTmp, unlinkSync: unlinkTmp } = require('fs');
       const { join: joinTmp } = require('path');

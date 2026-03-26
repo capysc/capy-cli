@@ -38,6 +38,14 @@ program
   });
 
 program
+  .command('deploy')
+  .description('Create a deployment PR with the .keep file')
+  .action(async () => {
+    const { CapyCommand } = await import('./commands/capyCommand');
+    await CapyCommand.createDeployPR();
+  });
+
+program
   .command('decrypt')
   .description('Decrypt .env file back to plaintext (dev only)')
   .option('--env-path <path>', 'specify custom .env file location')
