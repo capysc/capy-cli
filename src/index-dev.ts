@@ -27,10 +27,9 @@ program
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
-      console.log('    capy-dev                        Sync secrets');
-      console.log('    capy-dev checkout -b <branch>   Switch to a secret branch');
-      console.log('    capy-dev deploy                 Create a deployment PR');
-      console.log('    capy-dev decrypt                Decrypt .env to plaintext');
+      console.log('    capy-dev                        \x1b[90mSync secrets\x1b[0m');
+      console.log('    capy-dev checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
+      console.log('    capy-dev deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
       console.log('');
       process.exit(1);
     }

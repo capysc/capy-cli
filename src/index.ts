@@ -18,9 +18,9 @@ program
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
-      console.log('    capy                        Sync secrets');
-      console.log('    capy checkout -b <branch>   Switch to a secret branch');
-      console.log('    capy deploy                 Create a deployment PR');
+      console.log('    capy                        \x1b[90mSync secrets\x1b[0m');
+      console.log('    capy checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
+      console.log('    capy deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
       console.log('');
       process.exit(1);
     }
