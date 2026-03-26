@@ -64,15 +64,12 @@ program
     const token = authService.getToken();
     if (token) serviceClient.setToken(token);
 
-    const { execSync } = await import('child_process');
-    const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
 
     console.log('');
     for (const b of branches) {
-      const name = b.name || gitBranch;
+      const name = b.name || 'no branch';
       const active = (b.name === (activeBranch || '')) ? ' *' : '';
       const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
       console.log(`  ${name}${active}${prod}`);
