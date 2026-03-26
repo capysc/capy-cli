@@ -506,8 +506,9 @@ export class CapyCommand {
 
     console.log(`\n✓ Total: ${result.totalVariables} variables synchronized`);
 
-    if (decisions.pushVariables.length > 0) {
-      await this.promptDeployOrContinue(decisions.pushVariables);
+    const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
+    if (changedVars.length > 0) {
+      await this.promptDeployOrContinue(changedVars);
     }
   }
 
