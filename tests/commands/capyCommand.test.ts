@@ -572,7 +572,8 @@ describe('CapyCommand', () => {
       expect(mockSyncEngine.compareEnvironments).toHaveBeenCalled();
       expect(mockPromptEngine.promptForChanges).toHaveBeenCalled();
       expect(mockPromptEngine.confirmSync).toHaveBeenCalled();
-      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value' }, expect.any(Object));
+      // Push sends the full finalEnv (from applyDecisions), not just changed vars
+      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object));
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
       expect(mockFileManager.writeDecryptKey).toHaveBeenCalled();
     });

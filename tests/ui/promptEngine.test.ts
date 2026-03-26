@@ -177,9 +177,10 @@ describe('PromptEngine', () => {
         deletedLocal: []
       };
 
+      // Phase 1: resolve as local, Phase 2: push
       mockInquirer.prompt
         .mockResolvedValueOnce({ resolution: 'local' })
-        .mockResolvedValueOnce({ pushLocal: true });
+        .mockResolvedValueOnce({ push: true });
 
       const spyDisplayConflictTable = jest.spyOn(promptEngine as any, 'displayConflictTable').mockImplementation(() => {});
 

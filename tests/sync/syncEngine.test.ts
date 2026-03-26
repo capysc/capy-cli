@@ -214,7 +214,7 @@ describe('SyncEngine', () => {
       const local = { LOCAL_VAR: 'local' };
       const remote = { REMOTE_VAR: 'remote' };
       const decisions: UserDecisions = {
-        pushVariables: [],
+        pushVariables: ['LOCAL_VAR'],
         pullVariables: ['REMOTE_VAR'],
         keepLocal: [],
         keepRemote: [],
@@ -261,7 +261,8 @@ describe('SyncEngine', () => {
 
       const result = syncEngine.applyDecisions(local, remote, decisions);
 
-      expect(result).toEqual(local);
+      // With no decisions, result is remote base (local-only vars not included)
+      expect(result).toEqual(remote);
     });
 
     test('should delete local variables when user confirms deletion', () => {

@@ -184,13 +184,21 @@ describe('ServiceClient', () => {
         `${defaultServiceUrl}/secrets/${projectId}`,
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({
-            env_file: 'API_KEY=test123\nDB_URL=postgres://localhost',
-            keep_file: JSON.stringify({ variables: {} })
-          }),
         })
       );
+
+      // Verify the body contains encrypted values (capy: prefix)
+      const callArgs = mockFetch.mock.calls[0];
+      const body = JSON.parse((callArgs[1] as any).body);
+      expect(body.env_file).toContain('API_KEY=capy:');
+      expect(body.env_file).toContain('DB_URL=capy:');
+      expect(body.keep_file).toBeDefined();
+
       expect(result.success).toBe(true);
+      // Non-mock push returns resource IDs
+      expect(result.variables).toHaveProperty('API_KEY');
+      expect(result.variables).toHaveProperty('DB_URL');
+      expect(result.variables.API_KEY.resource_id).toBeDefined();
     });
 
     test('should handle push errors', async () => {
