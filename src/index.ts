@@ -67,15 +67,19 @@ program
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
 
-    const maxLen = Math.max(...branches.map(b => (b.name || 'no branch').length));
-    const choices = branches.map(b => {
+    const labels = branches.map(b => {
       const name = b.name || 'no branch';
-      const padded = name.padEnd(maxLen + 2);
+      const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
+      return { name, prod, rawLen: name.length + (b.is_production ? ' (protected)'.length : 0) };
+    });
+    const maxLen = Math.max(...labels.map(l => l.rawLen));
+    const choices = branches.map((b, i) => {
+      const { name, prod, rawLen } = labels[i];
+      const padding = ' '.repeat(maxLen - rawLen + 2);
       const isCurrent = b.name === (activeBranch || '');
-      const currentLabel = isCurrent ? '\x1b[38;5;43m← current\x1b[0m' : '';
-      const prodLabel = b.is_production ? '\x1b[90m(protected)\x1b[0m' : '';
+      const currentLabel = isCurrent ? `${padding}\x1b[38;5;43m← current\x1b[0m` : '';
       return {
-        name: `${padded}${currentLabel}${prodLabel}`,
+        name: `${name}${prod}${currentLabel}`,
         value: b.name,
         short: name,
       };
