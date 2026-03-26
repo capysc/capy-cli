@@ -79,7 +79,7 @@ program
     console.log('');
     for (const b of branches) {
       const name = b.name || 'no branch';
-      const active = (b.name === (activeBranch || '')) ? ' \x1b[90m<- selected\x1b[0m' : '';
+      const active = (b.name === (activeBranch || '')) ? ' \x1b[90m← selected\x1b[0m' : '';
       const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
       console.log(`  ${name}${active}${prod}`);
     }
