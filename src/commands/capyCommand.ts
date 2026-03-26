@@ -534,7 +534,7 @@ export class CapyCommand {
       execSync(`git checkout -b ${deployBranch}`, { stdio: 'pipe' });
       execSync('git add .keep', { stdio: 'pipe' });
 
-      const title = `chore: sync ${projectName} secrets via capy`;
+      const title = `chore: sync ${syncedVars.length} ${projectName} secret${syncedVars.length === 1 ? '' : 's'} via capy`;
       const varList = syncedVars.map(v => `- ${v}`).join('\n');
       const message = `${title}\n\nSynced variables:\n${varList}`;
       execSync(`git commit -m ${JSON.stringify(message)}`, { stdio: 'pipe' });
