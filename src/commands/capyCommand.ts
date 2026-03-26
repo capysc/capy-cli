@@ -556,7 +556,8 @@ export class CapyCommand {
   }
 
   private async promptDeployOrContinue(syncedVars: string[], branch?: string): Promise<void> {
-    const targetLabel = branch || 'current branch';
+    const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const targetLabel = branch || gitBranch;
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
