@@ -523,40 +523,32 @@ export class CapyCommand {
     if (action !== 'pr') return;
 
     const projectName = this.projectManager.getDefaultProjectName();
-    const originalBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const deployBranch = `capy/sync-${projectName}-${Date.now()}`;
 
     try {
       const prSpinner = ora('Creating PR...').start();
 
-      // Commit to current branch, push, then generate PR URL
+      execSync(`git checkout -b ${deployBranch}`, { stdio: 'pipe' });
       execSync('git add .keep', { stdio: 'pipe' });
 
       const message = `chore: sync ${projectName} secrets via capy`;
       execSync(`git commit -m "${message}"`, { stdio: 'pipe' });
-      execSync(`git push -u origin ${originalBranch}`, { stdio: 'pipe' });
+      execSync(`git push -u origin ${deployBranch}`, { stdio: 'pipe' });
+
+      // Switch back to original branch
+      execSync(`git checkout ${baseBranch}`, { stdio: 'pipe' });
 
       // Build GitHub PR URL
       const remoteUrl = execSync('git remote get-url origin', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-      let baseBranch = 'main';
-      try {
-        baseBranch = execSync('git rev-parse --abbrev-ref origin/HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim().replace('origin/', '');
-      } catch {
-        // Detect main vs master
-        try {
-          execSync('git rev-parse --verify origin/main', { stdio: 'pipe' });
-          baseBranch = 'main';
-        } catch {
-          baseBranch = 'master';
-        }
-      }
       const repoPath = remoteUrl
         .replace(/^git@github\.com:/, '')
         .replace(/^https:\/\/github\.com\//, '')
         .replace(/\.git$/, '');
 
-      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${originalBranch}?expand=1&title=${encodeURIComponent(message)}`;
+      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${deployBranch}?expand=1&title=${encodeURIComponent(message)}`;
 
-      prSpinner.succeed('Pushed to ' + originalBranch);
+      prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
     } catch (error: any) {
       console.error(`Failed to create PR: ${error.message}`);
