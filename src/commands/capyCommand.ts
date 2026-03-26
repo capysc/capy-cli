@@ -510,18 +510,19 @@ export class CapyCommand {
 
     const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
     if (changedVars.length > 0) {
-      await this.promptDeployOrContinue(changedVars);
+      await this.promptDeployOrContinue(changedVars, activeBranch);
     }
   }
 
-  private async promptDeployOrContinue(syncedVars: string[]): Promise<void> {
+  private async promptDeployOrContinue(syncedVars: string[], branch?: string): Promise<void> {
+    const targetLabel = branch || 'current branch';
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
       message: 'Want to deploy your changes to an environment?',
       choices: [
         { name: 'Continue working', value: 'continue' },
-        { name: 'Create a deployment PR', value: 'pr' },
+        { name: `Create a deployment PR → ${targetLabel}`, value: 'pr' },
       ],
     }]);
 
