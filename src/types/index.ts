@@ -10,11 +10,20 @@ export interface KeepFile {
   org_id: string;
   project_id: string;
   project_name: string;
+  active_branch?: string;
   created_at: string;
   last_sync: string;
-  variables: Record<string, KeepVariable>;
+  variables: Record<string, KeepVariableEntry[]>;
 }
 
+export interface KeepVariableEntry {
+  resource_id: string;
+  branch?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** @deprecated v1 format — auto-migrated to KeepVariableEntry[] on read */
 export interface KeepVariable {
   resource_id: string;
   created_at: string;
@@ -39,6 +48,15 @@ export interface ProjectState {
   projectName?: string;
   organizationId?: string;
   projectId?: string;
+  activeBranch?: string;
+}
+
+export interface Branch {
+  id: string;
+  name: string;
+  project_id: string;
+  is_production: boolean;
+  created_at?: string;
 }
 
 export interface SyncResult {
