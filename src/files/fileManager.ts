@@ -47,7 +47,14 @@ export class FileManager {
         try {
           decrypted[key] = this.decryptValue(value, decryptionKey);
         } catch (decryptError) {
-          console.warn(`Failed to decrypt ${key}, keeping original value`);
+          if (value.startsWith('capy:')) {
+            throw new CapyError(
+              `Cannot decrypt "${key}": encrypted with a different project's key. This value cannot be transferred between orgs.`,
+              ERROR_CODES.PERMISSION_DENIED,
+              { variable: key }
+            );
+          }
+          // Non-capy value that failed — keep as-is (likely plaintext)
           decrypted[key] = value;
         }
       }
@@ -102,7 +109,16 @@ export class FileManager {
         let finalValue: string;
 
         if (value.startsWith('capy:') || this.isSnippetEncrypted(value)) {
-          // Already encrypted, keep as is
+          // Already encrypted — verify it belongs to THIS project's key
+          try {
+            this.decryptValue(value, encryptionKey);
+          } catch {
+            throw new CapyError(
+              `Cannot write "${key}": encrypted with a different project's key. This value cannot be transferred between orgs.`,
+              ERROR_CODES.PERMISSION_DENIED,
+              { variable: key }
+            );
+          }
           finalValue = value;
         } else {
           // Encrypt the plain text value
@@ -439,10 +455,6 @@ export class FileManager {
     }
 
     // Try decrypting as raw base64
-    try {
-      return Encryptor.decrypt(payload, decryptionKey);
-    } catch {
-      return value; // Not encrypted, return as-is
-    }
+    return Encryptor.decrypt(payload, decryptionKey);
   }
 }
