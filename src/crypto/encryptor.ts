@@ -71,6 +71,19 @@ export class Encryptor {
   }
 
   /**
+   * Attempts to decrypt a value and returns true if the key is correct.
+   * Used to verify that an encrypted value belongs to the current project/org.
+   */
+  static canDecrypt(encryptedValue: string, key: string): boolean {
+    try {
+      this.decrypt(encryptedValue, key);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Generates a random encryption key.
    */
   static generateKey(): string {

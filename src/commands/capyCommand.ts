@@ -260,6 +260,24 @@ export class CapyCommand {
       const localVarCount = Object.keys(localEnv).length;
 
       if (localVarCount > 0) {
+        // Cross-org exfiltration guard: reject encrypted values from a different project
+        const foreignKeys = Object.entries(localEnv)
+          .filter(([_, value]) => value.startsWith('capy:'))
+          .map(([key]) => key);
+
+        if (foreignKeys.length > 0) {
+          console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted for a different project:`);
+          for (const key of foreignKeys) {
+            console.error(`  ${key}`);
+          }
+          console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
+          throw new CapyError(
+            'Cannot push secrets encrypted with a different project\'s key to a new org',
+            ERROR_CODES.PERMISSION_DENIED,
+            { foreignKeys }
+          );
+        }
+
         console.log(`\nFound existing .env file with ${localVarCount} variable(s)`);
         const syncSpinner = ora('Syncing local variables to keep...').start();
 
@@ -426,13 +444,20 @@ export class CapyCommand {
           try {
             localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
           } catch {
-            localEnv[key] = value;
+            // Value is encrypted with a different project's key — reject
+            throw new CapyError(
+              `"${key}" is encrypted with a different project's key and cannot be used in this project. ` +
+              `This can happen if you reset project metadata (.keep/.capy) without clearing the .env file.`,
+              ERROR_CODES.PERMISSION_DENIED,
+              { variable: key }
+            );
           }
         } else {
           localEnv[key] = value;
         }
       }
-    } catch {
+    } catch (error: any) {
+      if (error instanceof CapyError) throw error;
       console.warn('Failed to read local .env');
       localEnv = {};
     }
