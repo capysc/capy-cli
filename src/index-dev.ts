@@ -78,6 +78,8 @@ program
     const token = authService.getToken();
     if (token) serviceClient.setToken(token);
 
+    try {
+
     // Delete branch
     if (options.D) {
       const deleteName = options.D;
@@ -159,6 +161,13 @@ program
         const cmd = new CheckoutCommand(true);
         await cmd.execute(selected, {});
       }
+    }
+
+    } catch (error: any) {
+      if (error?.name === 'ExitPromptError') process.exit(0);
+      const msg = error?.details?.data?.error || error?.message || 'Unknown error';
+      console.log(msg);
+      process.exit(1);
     }
   });
 
