@@ -263,11 +263,11 @@ describe('PromptEngine', () => {
 
       const result = await promptEngine.confirmSync(decisions);
 
-      expect(consoleSpy).toHaveBeenCalledWith('\n📋 Summary of changes:');
-      expect(consoleSpy).toHaveBeenCalledWith('✓ Push 2 variable(s) to keep');
-      expect(consoleSpy).toHaveBeenCalledWith('✓ Pull 1 variable(s) from keep');
-      expect(consoleSpy).toHaveBeenCalledWith('✓ Keep 1 local value(s)');
-      expect(consoleSpy).toHaveBeenCalledWith('✓ Use 1 remote value(s)');
+      expect(consoleSpy).toHaveBeenCalledWith('\nSummary of changes:');
+      expect(consoleSpy).toHaveBeenCalledWith('- Push 2 variable(s) to keep');
+      expect(consoleSpy).toHaveBeenCalledWith('- Pull 1 variable(s) from keep');
+      expect(consoleSpy).toHaveBeenCalledWith('- Keep 1 local value(s)');
+      expect(consoleSpy).toHaveBeenCalledWith('- Use 1 remote value(s)');
 
       expect(mockInquirer.prompt).toHaveBeenCalledWith([
         {
@@ -669,17 +669,17 @@ describe('PromptEngine', () => {
 
     test('displaySuccess should log success message', () => {
       promptEngine.displaySuccess('Test success message');
-      expect(consoleSpy).toHaveBeenCalledWith('✓ Test success message');
+      expect(consoleSpy).toHaveBeenCalledWith('Test success message');
     });
 
     test('displayError should log error message', () => {
       promptEngine.displayError('Test error message');
-      expect(consoleSpy).toHaveBeenCalledWith('❌ Test error message');
+      expect(consoleSpy).toHaveBeenCalledWith('Test error message');
     });
 
     test('displayWarning should log warning message', () => {
       promptEngine.displayWarning('Test warning message');
-      expect(consoleSpy).toHaveBeenCalledWith('⚠ Test warning message');
+      expect(consoleSpy).toHaveBeenCalledWith('Test warning message');
     });
 
     test('displayInfo should log info message', () => {

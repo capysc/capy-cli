@@ -79,6 +79,7 @@ describe('CapyCommand', () => {
 
     mockServiceClient = {
       setToken: jest.fn(),
+      setTokenRefresher: jest.fn(),
       initializeProject: jest.fn(),
       getDecryptData: jest.fn(),
       pushVariables: jest.fn()
