@@ -359,7 +359,7 @@ export class CapyCommand {
   private async promptBranchSwitch(projectId: string, missingBranch: string): Promise<string | undefined> {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
 
-    console.log(`\n  Branch "${missingBranch}" no longer exists on the server.\n`);
+    console.log(`\n  Branch "${missingBranch}" cannot be found on Capy.\n`);
 
     let branches;
     try {
