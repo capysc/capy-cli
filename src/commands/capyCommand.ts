@@ -352,7 +352,7 @@ export class CapyCommand {
     console.log('\nReady to work!');
   }
 
-  private displayHeader(projectName: string, orgName: string, userName: string): void {
+  private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -368,6 +368,7 @@ export class CapyCommand {
     const content = [
       `Project:      ${bold(projectName)}`,
       `Organization: ${orgName}`,
+      `Branch:       ${branch || grey('none')}`,
       '',
       shimmer(`Welcome ${userName}`),
     ];
@@ -376,13 +377,13 @@ export class CapyCommand {
     const maxLen = Math.max(40, ...content.map(l => stripAnsi(l).length + 2));
 
     console.log('');
-    console.log(`  ${grey('Capy CLI')}`);
-    console.log(`  ${grey('┌' + '─'.repeat(maxLen) + '┐')}`);
+    console.log(grey('Capy CLI'));
+    console.log(grey('┌' + '─'.repeat(maxLen) + '┐'));
     for (const line of content) {
       const pad = maxLen - stripAnsi(line).length - 1;
-      console.log(`  ${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
+      console.log(`${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
     }
-    console.log(`  ${grey('└' + '─'.repeat(maxLen) + '┘')}`);
+    console.log(grey('└' + '─'.repeat(maxLen) + '┘'));
     console.log('');
   }
 
@@ -405,6 +406,7 @@ export class CapyCommand {
       projectState.projectName || 'unknown',
       authResult.organization_name || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name || authResult.organization_id || '',
       authResult.user_first_name || authResult.user_email || '',
+      projectState.activeBranch,
     );
 
     // Set token for service client
