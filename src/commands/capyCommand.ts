@@ -352,6 +352,57 @@ export class CapyCommand {
     console.log('\nReady to work!');
   }
 
+  /**
+   * Prompt the user to switch branches when their active branch no longer exists.
+   * Returns the selected branch name ('' for default/no branch, or a named branch).
+   */
+  private async promptBranchSwitch(projectId: string, missingBranch: string): Promise<string | undefined> {
+    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+
+    console.log(`\n  Branch "${missingBranch}" no longer exists on the server.\n`);
+
+    let branches;
+    try {
+      branches = await this.serviceClient.listBranches(projectId);
+    } catch {
+      console.log('  Could not retrieve branches. Falling back to default.');
+      this.projectManager.writeActiveBranch(undefined);
+      return undefined;
+    }
+
+    if (branches.length === 0) {
+      console.log('  No branches found. Using default.');
+      this.projectManager.writeActiveBranch(undefined);
+      return undefined;
+    }
+
+    // Show tree view
+    console.log(`  Available branches:`);
+    branches.forEach((b, i) => {
+      const isLast = i === branches.length - 1;
+      const connector = isLast ? '└──' : '├──';
+      const name = b.name || 'no branch';
+      const prot = b.is_production ? `  ${grey('(protected)')}` : '';
+      console.log(`  ${connector} ${name}${prot}`);
+    });
+    console.log('');
+
+    const choices = branches.map(b => ({
+      name: b.name || 'no branch',
+      value: b.name,
+    }));
+
+    const { selected } = await inquirer.prompt([{
+      type: 'list',
+      name: 'selected',
+      message: 'Switch to:',
+      choices,
+    }]);
+
+    this.projectManager.writeActiveBranch(selected || undefined);
+    return selected || undefined;
+  }
+
   private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -447,38 +498,47 @@ export class CapyCommand {
       decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
     } catch (error: any) {
       if (error instanceof CapyError && error.details?.status === 404) {
+        const errorMsg = error.message || '';
         fetchSpinner.stop();
-        const { recreate } = await inquirer.prompt([{
-          type: 'confirm',
-          name: 'recreate',
-          message: 'Project not found — create a new one and re-sync?',
-          default: true,
-        }]);
 
-        if (!recreate) {
-          console.log('Run capy again after resolving the issue.');
-          return;
+        // Branch not found — prompt to switch
+        if (errorMsg.includes('Branch') || (errorMsg.includes('not found') && activeBranch)) {
+          activeBranch = await this.promptBranchSwitch(projectState.projectId!, activeBranch!);
+          decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch || undefined);
         }
+        // Project not found — offer to recreate
+        else {
+          const { recreate } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'recreate',
+            message: 'Project not found — create a new one and re-sync?',
+            default: true,
+          }]);
 
-        // Re-create the project
-        const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
-        const initSpinner = ora('Re-creating project...').start();
-        const projectResult = await this.serviceClient.initializeProject(
-          projectName,
-          authResult.organization_id || projectState.organizationId!
-        );
-        initSpinner.succeed(`Project "${projectName}" re-created`);
+          if (!recreate) {
+            console.log('Run capy again after resolving the issue.');
+            return;
+          }
 
-        // Update .keep with new project ID
-        const keep = this.projectManager.readKeepFile()!;
-        keep.project_id = projectResult.project_id;
-        keep.org_id = projectResult.org_id;
-        this.fileManager.writeKeepFile(keep);
+          const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
+          const initSpinner = ora('Re-creating project...').start();
+          const projectResult = await this.serviceClient.initializeProject(
+            projectName,
+            authResult.organization_id || projectState.organizationId!
+          );
+          initSpinner.succeed(`Project "${projectName}" re-created`);
 
-        // Retry with new project ID
-        decryptData = await this.serviceClient.getDecryptData(projectResult.project_id, activeBranch);
-        // Update projectState for the rest of the flow
-        projectState.projectId = projectResult.project_id;
+          const keep = this.projectManager.readKeepFile()!;
+          keep.project_id = projectResult.project_id;
+          keep.org_id = projectResult.org_id;
+          this.fileManager.writeKeepFile(keep);
+
+          projectState.projectId = projectResult.project_id;
+          // New project only has default branch — reset active branch
+          activeBranch = undefined;
+          this.projectManager.writeActiveBranch(undefined);
+          decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
+        }
       } else {
         throw error;
       }
