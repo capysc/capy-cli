@@ -75,38 +75,42 @@ program
 
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
+    const projectName = projectState.projectName || 'project';
 
-    const labels = branches.map(b => {
+    // Tree view
+    console.log('');
+    console.log(`  Project "${projectName}"`);
+    branches.forEach((b, i) => {
+      const isLast = i === branches.length - 1;
+      const connector = isLast ? '└──' : '├──';
       const name = b.name || 'no branch';
-      const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
-      return { name, prod, rawLen: name.length + (b.is_production ? ' (protected)'.length : 0) };
-    });
-    const maxLen = Math.max(...labels.map(l => l.rawLen));
-    const choices = branches.map((b, i) => {
-      const { name, prod, rawLen } = labels[i];
-      const padding = ' '.repeat(maxLen - rawLen + 2);
+      const prot = b.is_production ? '\x1b[90m(protected)\x1b[0m' : '\x1b[90m(unprotected)\x1b[0m';
       const isCurrent = b.name === (activeBranch || '');
-      const currentLabel = isCurrent ? `${padding}\x1b[38;5;43m← current\x1b[0m` : '';
-      return {
-        name: `${name}${prod}${currentLabel}`,
-        value: b.name,
-        short: name,
-      };
+      const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
+      console.log(`  ${connector} ${name}  ${prot}${current}`);
     });
+    console.log('');
 
+    // Prompt to switch
     const inquirer = (await import('inquirer')).default;
-    const { selected } = await inquirer.prompt([{
-      type: 'list',
-      name: 'selected',
-      message: 'Switch branch:',
-      choices,
-    }]);
+    const choices = branches
+      .filter(b => b.name !== (activeBranch || ''))
+      .map(b => ({ name: b.name || 'no branch', value: b.name }));
 
-    // If they picked a different branch, check it out
-    if (selected !== (activeBranch || '')) {
-      const { CheckoutCommand } = await import('./commands/checkoutCommand');
-      const cmd = new CheckoutCommand(true);
-      await cmd.execute(selected, {});
+    if (choices.length > 0) {
+      choices.push({ name: 'Stay on current branch', value: '__stay__' });
+      const { selected } = await inquirer.prompt([{
+        type: 'list',
+        name: 'selected',
+        message: 'Switch branch:',
+        choices,
+      }]);
+
+      if (selected !== '__stay__') {
+        const { CheckoutCommand } = await import('./commands/checkoutCommand');
+        const cmd = new CheckoutCommand(true);
+        await cmd.execute(selected, {});
+      }
     }
   });
 
