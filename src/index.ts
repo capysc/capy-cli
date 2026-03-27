@@ -33,8 +33,6 @@ program
       dryRun: options.dryRun
     };
 
-    console.log('\n🔐 Capy CLI\n');
-
     const command = new CapyCommand(cliOptions);
     await command.execute();
   });

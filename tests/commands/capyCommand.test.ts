@@ -22,6 +22,7 @@ jest.mock('../../src/ui/spinner', () => ({
     start: () => ({
       fail: jest.fn(),
       succeed: jest.fn(),
+      stop: jest.fn(),
       text: ''
     })
   })

@@ -42,8 +42,6 @@ program
       dryRun: options.dryRun
     };
 
-    console.log('\n🔐 Capy CLI (DEV MODE)\n');
-
     const command = new CapyCommand(cliOptions, true);
     await command.execute();
   });

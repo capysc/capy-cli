@@ -352,9 +352,30 @@ export class CapyCommand {
     console.log('\nReady to work!');
   }
 
-  private async syncProject(projectState: ProjectState): Promise<void> {
-    console.log(`Project: ${projectState.projectName}`);
+  private displayHeader(projectName: string, orgName: string, userName: string): void {
+    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+    const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+    const lines = [
+      `Project:      ${bold(projectName)}`,
+      `Organization: ${orgName}`,
+      `Welcome ${userName}`,
+    ];
+
+    const maxLen = Math.max(...lines.map(l => l.replace(/\x1b\[[0-9;]*m/g, '').length));
+    const border = grey('─'.repeat(maxLen + 4));
+
+    console.log('');
+    console.log(`  ${grey('Capy CLI')}`);
+    console.log(`  ${border}`);
+    for (const line of lines) {
+      console.log(`  ${grey('│')} ${line}`);
+    }
+    console.log(`  ${border}`);
+    console.log('');
+  }
+
+  private async syncProject(projectState: ProjectState): Promise<void> {
     // Authenticate
     const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);
@@ -367,7 +388,13 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Welcome ${authResult.user_first_name || authResult.user_email}`);
+    spinner.stop();
+
+    this.displayHeader(
+      projectState.projectName || 'unknown',
+      authResult.organization_name || authResult.organization_id || '',
+      authResult.user_first_name || authResult.user_email || '',
+    );
 
     // Set token for service client
     const token = this.authService.getToken();
