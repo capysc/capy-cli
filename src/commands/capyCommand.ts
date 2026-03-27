@@ -298,7 +298,7 @@ export class CapyCommand {
             }
 
             console.log('\nReady to work!');
-            await this.promptDeployOrContinue(Object.keys(localEnv));
+            await CapyCommand.createDeployPR(Object.keys(localEnv));
           } else {
             syncSpinner.fail('Failed to sync variables');
           }
@@ -562,34 +562,15 @@ export class CapyCommand {
 
     const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
     if (changedVars.length > 0) {
-      await this.promptDeployOrContinue(changedVars, activeBranch);
+      await CapyCommand.createDeployPR(changedVars);
     }
-  }
-
-  private async promptDeployOrContinue(syncedVars: string[], branch?: string): Promise<void> {
-    const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    const targetLabel = branch || gitBranch;
-    const { action } = await inquirer.prompt([{
-      type: 'list',
-      name: 'action',
-      message: 'Want to deploy your secrets to an environment?',
-      choices: [
-        { name: 'No  - Continue working', value: 'continue' },
-        { name: `Yes - Create a deployment PR → "${targetLabel}"`, value: 'pr' },
-      ],
-    }]);
-
-    if (action !== 'pr') return;
-
-    await CapyCommand.createDeployPR(syncedVars, true);
   }
 
   /**
    * Create a deployment PR with the .keep file.
    * Can be called directly via `capy deploy` or after a sync.
-   * @param skipConfirm - skip the branch confirmation prompt (already confirmed by caller)
    */
-  static async createDeployPR(syncedVars?: string[], skipConfirm: boolean = false): Promise<void> {
+  static async createDeployPR(syncedVars?: string[]): Promise<void> {
     const { ProjectManager } = await import('../core/projectManager');
     const pm = new ProjectManager();
     const projectName = pm.getDefaultProjectName();
@@ -610,27 +591,27 @@ export class CapyCommand {
     const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
     const targetBranch = pm.readActiveBranch() || baseBranch;
 
-    // Confirmation prompt (only when called directly via `capy deploy`)
-    if (!skipConfirm) {
-      const { confirm } = await inquirer.prompt([{
-        type: 'list',
-        name: 'confirm',
-        message: `Deploy your secrets to a git branch?`,
-        choices: [
-          { name: `Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
-          { name: 'Another git branch', value: 'other' },
-        ],
-      }]);
+    const { confirm } = await inquirer.prompt([{
+      type: 'list',
+      name: 'confirm',
+      message: `Deploy your secrets to a git branch?`,
+      choices: [
+        { name: `Yes - Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
+        { name: 'Another git branch', value: 'other' },
+        { name: 'No  - Continue working', value: 'cancel' },
+      ],
+    }]);
 
-      if (confirm === 'other') {
-        console.log('');
-        console.log('  To deploy to a different branch:');
-        console.log('');
-        console.log('    1. Switch branches:  capy checkout -b <branch-name>');
-        console.log('    2. Deploy:           capy deploy');
-        console.log('');
-        return;
-      }
+    if (confirm === 'cancel') return;
+
+    if (confirm === 'other') {
+      console.log('');
+      console.log('  To deploy to a different branch:');
+      console.log('');
+      console.log('    1. Switch branches:  capy checkout -b <branch-name>');
+      console.log('    2. Deploy:           capy deploy');
+      console.log('');
+      return;
     }
 
     const deployBranch = `capy/sync-${projectName}-${Date.now()}`;
