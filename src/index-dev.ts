@@ -66,6 +66,10 @@ program
 
     const authService = new AuthService(undefined, true);
     const serviceClient = new ServiceClient(undefined, true);
+    serviceClient.setTokenRefresher(async () => {
+      const refreshed = await authService.refreshToken();
+      return refreshed ? authService.getToken() : null;
+    });
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');

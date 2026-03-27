@@ -475,7 +475,7 @@ export class CapyCommand {
     }
 
     // Prompt for decisions
-    const decisions = await this.promptEngine.promptForChanges(changeSet);
+    const decisions = await this.promptEngine.promptForChanges(changeSet, activeBranch);
 
     // Validate decisions
     const validationErrors = this.syncEngine.validateDecisions(decisions, changeSet);
@@ -576,8 +576,8 @@ export class CapyCommand {
       name: 'action',
       message: 'Want to deploy your changes to an environment?',
       choices: [
-        { name: 'Continue working', value: 'continue' },
-        { name: `Create a deployment PR → "${targetLabel}"`, value: 'pr' },
+        { name: 'No  - Continue working', value: 'continue' },
+        { name: `Yes - Create a deployment PR → "${targetLabel}"`, value: 'pr' },
       ],
     }]);
 

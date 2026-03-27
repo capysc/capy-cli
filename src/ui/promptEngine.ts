@@ -30,7 +30,7 @@ export class PromptEngine {
     return projectName;
   }
 
-  async promptForChanges(changeSet: ChangeSet): Promise<UserDecisions> {
+  async promptForChanges(changeSet: ChangeSet, branch?: string): Promise<UserDecisions> {
     const decisions: UserDecisions = {
       pushVariables: [],
       pullVariables: [],
@@ -49,7 +49,7 @@ export class PromptEngine {
         {
           type: 'confirm',
           name: 'pushAll',
-          message: 'Push all local variables to capy?',
+          message: branch ? `Push all local variables to capy (${branch})?` : 'Push all local variables to capy?',
           default: false
         }
       ]);
@@ -63,7 +63,7 @@ export class PromptEngine {
             {
               type: 'confirm',
               name: 'push',
-              message: `${variable.name}: Push to capy?`,
+              message: branch ? `${variable.name}: Push to capy (${branch})?` : `${variable.name}: Push to capy?`,
               default: false
             }
           ]);
@@ -280,14 +280,14 @@ export class PromptEngine {
 
       // Phase 2: for variables kept local, decide which to push
       if (decisions.keepLocal.length > 0) {
-        console.log(`\n${decisions.keepLocal.length} variable(s) kept local. Push to capy?`);
+        console.log(`\n${decisions.keepLocal.length} variable(s) kept local. Push to capy${branch ? ` (${branch})` : ''}?`);
 
         if (decisions.keepLocal.length === 1) {
           const varName = decisions.keepLocal[0];
           const { push } = await inquirer.prompt([{
             type: 'confirm',
             name: 'push',
-            message: `Push ${varName} to capy?`,
+            message: branch ? `Push ${varName} to capy (${branch})?` : `Push ${varName} to capy?`,
             default: true
           }]);
           if (push) {
@@ -297,7 +297,7 @@ export class PromptEngine {
           const { pushChoice } = await inquirer.prompt([{
             type: 'list',
             name: 'pushChoice',
-            message: 'Push local values to capy?',
+            message: branch ? `Push local values to capy (${branch})?` : 'Push local values to capy?',
             choices: [
               { name: 'Push all', value: 'all' },
               { name: 'Choose individually', value: 'individual' },
