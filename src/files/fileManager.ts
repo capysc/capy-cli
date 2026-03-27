@@ -327,7 +327,8 @@ export class FileManager {
     if (!hasPlaintext) return false;
 
     const oldPath = envPath + '.old';
-    writeFileSync(oldPath, content, 'utf-8');
+    const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting them or putting them somewhere safe because they are unencrypted.\n\n';
+    writeFileSync(oldPath, header + content, 'utf-8');
     this.updateGitignore(['.env.old']);
     console.log(`Saved plaintext backup to ${oldPath}`);
     return true;
