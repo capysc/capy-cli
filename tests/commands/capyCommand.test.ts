@@ -45,6 +45,8 @@ describe('CapyCommand', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Mock process.exit globally to prevent child process crashes
+    jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
 
     // Create mock instances
     mockProjectManager = {
@@ -53,7 +55,8 @@ describe('CapyCommand', () => {
       getEnvPath: jest.fn().mockReturnValue('.env'),
       readKeepFile: jest.fn(),
       readDecryptKey: jest.fn(),
-      readSyncState: jest.fn().mockReturnValue(null)
+      readSyncState: jest.fn().mockReturnValue(null),
+      readActiveBranch: jest.fn().mockReturnValue(null)
     } as any;
 
     mockFileManager = {
@@ -79,6 +82,7 @@ describe('CapyCommand', () => {
 
     mockServiceClient = {
       setToken: jest.fn(),
+      setTokenRefresher: jest.fn(),
       initializeProject: jest.fn(),
       getDecryptData: jest.fn(),
       pushVariables: jest.fn()
@@ -207,27 +211,34 @@ describe('CapyCommand', () => {
 
     test('should handle errors properly', async () => {
       mockProjectManager.detectProjectState.mockRejectedValue(new Error('Test error'));
-      const handleErrorSpy = jest.spyOn(capyCommand as any, 'handleError').mockImplementation(() => {});
+
+      // Mock process.exit to prevent actual exit during tests
+      const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
       await capyCommand.execute();
 
-      expect(handleErrorSpy).toHaveBeenCalledWith(new Error('Test error'));
+      // execute() catches errors and calls displayErrorAndExit which calls process.exit(1)
+      expect(exitSpy).toHaveBeenCalledWith(1);
+
+      consoleSpy.mockRestore();
+      exitSpy.mockRestore();
     });
 
     test('should handle scenario where project state detection fails during initialization', async () => {
       mockProjectManager.detectProjectState.mockRejectedValue(
         new CapyError('Failed to detect project state', ERROR_CODES.INVALID_FORMAT)
       );
-      const handleErrorSpy = jest.spyOn(capyCommand as any, 'handleError').mockImplementation(() => {});
+
+      const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
       await capyCommand.execute();
 
-      expect(handleErrorSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          message: 'Failed to detect project state',
-          code: ERROR_CODES.INVALID_FORMAT
-        })
-      );
+      expect(exitSpy).toHaveBeenCalledWith(1);
+
+      consoleSpy.mockRestore();
+      exitSpy.mockRestore();
     });
   });
 
@@ -287,7 +298,7 @@ describe('CapyCommand', () => {
 
       await (capyCommand as any).initializeProject();
 
-      expect(consoleSpy).toHaveBeenCalledWith('⚠  No .keep file found - initializing project...');
+      expect(consoleSpy).toHaveBeenCalledWith('No .keep file found - initializing project...');
       
       consoleSpy.mockRestore();
     });
@@ -661,74 +672,28 @@ describe('CapyCommand', () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
       // Should continue with empty local env if read fails
-      expect(consoleSpy).toHaveBeenCalledWith('⚠️  Failed to read local .env');
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to read local .env');
       
       consoleSpy.mockRestore();
     });
   });
 
-  describe('handleError', () => {
-    beforeEach(() => {
-      // Mock process.exit to prevent actual exit during tests
-      jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-    });
+  describe('error handling', () => {
+    test('should use displayErrorAndExit for errors in execute', async () => {
+      // The execute method now uses displayErrorAndExit from errorScreen module
+      // We verify that errors don't propagate unhandled
+      mockProjectManager.detectProjectState.mockRejectedValue(new Error('Test error'));
 
-    test('should handle CapyError with auth failure', () => {
-      const error = new CapyError('Auth failed', ERROR_CODES.AUTH_FAILED);
+      const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-      (capyCommand as any).handleError(error);
+      // execute() catches errors and calls displayErrorAndExit which calls process.exit
+      await capyCommand.execute();
 
-      expect(mockPromptEngine.displayError).toHaveBeenCalledWith('Auth failed');
-      expect(consoleSpy).toHaveBeenCalledWith('\nPlease ensure:');
-      expect(process.exit).toHaveBeenCalledWith(1);
-
-      consoleSpy.mockRestore();
-    });
-
-    test('should handle CapyError with permission denied', () => {
-      const error = new CapyError('Permission denied', ERROR_CODES.PERMISSION_DENIED);
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-
-      (capyCommand as any).handleError(error);
-
-      expect(mockPromptEngine.displayError).toHaveBeenCalledWith('Permission denied');
-      expect(consoleSpy).toHaveBeenCalledWith('\nContact your administrator to grant access to this project.');
+      expect(exitSpy).toHaveBeenCalledWith(1);
 
       consoleSpy.mockRestore();
-    });
-
-    test('should handle CapyError with network error', () => {
-      const error = new CapyError('Network error', ERROR_CODES.NETWORK_ERROR);
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-
-      (capyCommand as any).handleError(error);
-
-      expect(mockPromptEngine.displayError).toHaveBeenCalledWith('Network error');
-      expect(consoleSpy).toHaveBeenCalledWith('\nWorking offline with local .env file');
-
-      consoleSpy.mockRestore();
-    });
-
-    test('should handle generic errors', () => {
-      const error = new Error('Generic error');
-
-      (capyCommand as any).handleError(error);
-
-      expect(mockPromptEngine.displayError).toHaveBeenCalledWith('Generic error');
-      expect(process.exit).toHaveBeenCalledWith(1);
-    });
-
-    test('should show verbose error details when enabled', () => {
-      const error = new Error('Generic error');
-      const capyCommandVerbose = new CapyCommand({ verbose: true });
-      const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-
-      (capyCommandVerbose as any).handleError(error);
-
-      expect(consoleErrorSpy).toHaveBeenCalledWith(error);
-
-      consoleErrorSpy.mockRestore();
+      exitSpy.mockRestore();
     });
   });
 });
