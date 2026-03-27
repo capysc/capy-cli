@@ -47,7 +47,7 @@ export class FileManager {
         try {
           decrypted[key] = this.decryptValue(value, decryptionKey);
         } catch (decryptError) {
-          console.warn(`⚠️  Failed to decrypt ${key}, keeping original value`);
+          console.warn(`Failed to decrypt ${key}, keeping original value`);
           decrypted[key] = value;
         }
       }
@@ -63,7 +63,7 @@ export class FileManager {
 
   writeEnvFile(variables: Record<string, string>, path?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`📝 Writing ${Object.keys(variables).length} variables to ${envPath}`);
+    console.log(`Writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -73,7 +73,7 @@ export class FileManager {
 
       this.ensureDirectoryExists(dirname(envPath));
       writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`✅ Successfully wrote .env file`);
+      console.log(`Successfully wrote .env file`);
 
       if (backup) {
         this.removeBackup(backup);
@@ -92,7 +92,7 @@ export class FileManager {
 
   writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null, branch?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`🔐 Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
+    console.log(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -121,7 +121,7 @@ export class FileManager {
 
       this.ensureDirectoryExists(dirname(envPath));
       writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`🔒 Successfully wrote encrypted .env file`);
+      console.log(`Successfully wrote encrypted .env file`);
 
       if (backup) {
         this.removeBackup(backup);

@@ -68,10 +68,10 @@ export class CapyCommand {
   }
 
   private async initializeProject(): Promise<void> {
-    console.log('⚠  No .keep file found - initializing project...');
+    console.log('No .keep file found - initializing project...');
 
     // Authenticate first
-    const spinner = ora('🔐 Authenticating...').start();
+    const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate();
 
     if (!authResult.success) {
@@ -89,7 +89,7 @@ export class CapyCommand {
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
-        console.log(`\n🔑 Bearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
+        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
     }
 
@@ -107,7 +107,7 @@ export class CapyCommand {
 
     if (orgs.length === 0) {
       // No orgs — prompt to create one
-      console.log('\n🏢 No organization found. Let\'s create one.');
+      console.log('\nNo organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
     } else if (currentOrg) {
       // Authenticated with an org — offer to use it, switch, or create new
@@ -202,7 +202,7 @@ export class CapyCommand {
     );
     initSpinner.succeed(`Project "${projectName}" created`);
 
-    const keySpinner = ora('🔑 Generating encryption keys...').start();
+    const keySpinner = ora('Generating encryption keys...').start();
 
     // Create keep file (v2 format)
     const keep: KeepFile = {
@@ -260,8 +260,8 @@ export class CapyCommand {
       const localVarCount = Object.keys(localEnv).length;
 
       if (localVarCount > 0) {
-        console.log(`\n📋 Found existing .env file with ${localVarCount} variable(s)`);
-        const syncSpinner = ora('🔄 Syncing local variables to keep...').start();
+        console.log(`\nFound existing .env file with ${localVarCount} variable(s)`);
+        const syncSpinner = ora('Syncing local variables to keep...').start();
 
         try {
           const pushResult = await this.serviceClient.pushVariables(
@@ -296,29 +296,29 @@ export class CapyCommand {
             // Show what was synced
             console.log('');
             for (const varName of Object.keys(localEnv)) {
-              console.log(`  📤 ${varName}`);
+              console.log(`  ${varName}`);
             }
 
-            console.log('\n✓ Ready to work!');
+            console.log('\nReady to work!');
             await this.promptDeployOrContinue(Object.keys(localEnv));
           } else {
             syncSpinner.fail('Failed to sync variables');
           }
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
-          console.log('⚠️  You can run \'capy\' again to retry syncing');
+          console.log('You can run \'capy\' again to retry syncing');
         }
       }
     }
 
-    console.log('\n✓ Ready to work!');
+    console.log('\nReady to work!');
   }
 
   private async syncProject(projectState: ProjectState): Promise<void> {
-    console.log(`📁 Project: ${projectState.projectName}`);
+    console.log(`Project: ${projectState.projectName}`);
 
     // Authenticate
-    const spinner = ora('🔐 Authenticating...').start();
+    const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);
 
     if (!authResult.success) {
@@ -336,7 +336,7 @@ export class CapyCommand {
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
-        console.log(`\n🔑 Bearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
+        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
     }
 
@@ -406,7 +406,7 @@ export class CapyCommand {
     fetchSpinner.succeed(`Retrieved remote .env${branchLabel} (${Object.keys(remoteEnv).length} variables)`);
 
     if (this.devMode) {
-      console.log(`\n📦 Remote .env${branchLabel} (dev mode):`);
+      console.log(`\nRemote .env${branchLabel} (dev mode):`);
       if (Object.keys(remoteEnvEncrypted).length === 0) {
         console.log('  (empty)');
       } else {
@@ -433,7 +433,7 @@ export class CapyCommand {
         }
       }
     } catch {
-      console.warn('⚠️  Failed to read local .env');
+      console.warn('Failed to read local .env');
       localEnv = {};
     }
 
@@ -496,7 +496,7 @@ export class CapyCommand {
     }
 
     // Perform sync operations
-    const syncSpinner = ora('🔄 Syncing...').start();
+    const syncSpinner = ora('Syncing...').start();
 
     // Apply decisions to create final env (all variables, merged)
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
@@ -560,7 +560,7 @@ export class CapyCommand {
       this.promptEngine.displaySuccess(`Resolved ${result.conflicts.length} conflict(s)`);
     }
 
-    console.log(`\n✓ Total: ${result.totalVariables} variables synchronized`);
+    console.log(`\nTotal: ${result.totalVariables} variables synchronized`);
 
     const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
     if (changedVars.length > 0) {
