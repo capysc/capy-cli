@@ -89,8 +89,8 @@ export class CheckoutCommand {
     this.projectManager.writeActiveBranch(branchName);
     const keep = this.projectManager.readKeepFile()!;
 
-    // Pull secrets for the branch
-    const pullSpinner = ora(`Pulling secrets for ${branchName}...`).start();
+    // Sync local .env with the branch's secrets
+    const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
     const existingDecryptKey = this.projectManager.readDecryptKey();
     const encryptionKey = existingDecryptKey?.decryption_key ?? '';
 
@@ -98,7 +98,6 @@ export class CheckoutCommand {
       const decryptData = await this.serviceClient.getDecryptData(projectId, branchName);
       if (decryptData.env_content) {
         const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
-        // Decrypt remote values
         const decrypted: Record<string, string> = {};
         for (const [key, value] of Object.entries(remoteEnv)) {
           try {
@@ -109,18 +108,18 @@ export class CheckoutCommand {
         }
         // Re-encrypt locally for this branch
         this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep, branchName);
-        pullSpinner.stop();
-        console.log(`Pulled ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
+        syncSpinner.stop();
+        console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
       } else {
-        pullSpinner.stop();
+        syncSpinner.stop();
         console.log(`No secrets yet for ${branchName}`);
       }
     } catch (error: any) {
-      pullSpinner.stop();
+      syncSpinner.stop();
       if (error?.details?.status === 404) {
         console.log(`No secrets yet for ${branchName}`);
       } else {
-        console.log(`Failed to pull secrets: ${error.message}`);
+        console.log(`Failed to sync secrets: ${error.message}`);
       }
     }
 
