@@ -87,10 +87,9 @@ export class CheckoutCommand {
       branchSpinner.stop();
     }
 
-    // Update .keep with active_branch
+    // Save active branch to .capy/branch (local state, not committed)
+    this.projectManager.writeActiveBranch(branchName);
     const keep = this.projectManager.readKeepFile()!;
-    keep.active_branch = branchName;
-    this.fileManager.writeKeepFile(keep);
 
     // Pull secrets for the branch
     const pullSpinner = ora(`Pulling secrets for ${branchName}...`).start();
@@ -154,7 +153,7 @@ export class CheckoutCommand {
 
       // Copy secrets from current branch
       const keep = this.projectManager.readKeepFile()!;
-      const currentBranch = keep.active_branch;
+      const currentBranch = this.projectManager.readActiveBranch();
       const existingDecryptKey = this.projectManager.readDecryptKey();
       const encryptionKey = existingDecryptKey?.decryption_key ?? '';
 

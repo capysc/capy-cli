@@ -608,7 +608,7 @@ export class CapyCommand {
     }
 
     const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    const targetBranch = keepFile.active_branch || baseBranch;
+    const targetBranch = pm.readActiveBranch() || baseBranch;
 
     // Confirmation prompt
     const { confirm } = await inquirer.prompt([{
