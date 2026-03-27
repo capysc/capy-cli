@@ -224,4 +224,30 @@ program
     console.log(`✓ Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
   });
 
+program
+  .command('logout')
+  .description('End the current session')
+  .action(async () => {
+    const { existsSync, unlinkSync } = await import('fs');
+    const { join } = await import('path');
+
+    const capyDir = join(process.cwd(), '.capy');
+    const sessionFiles = ['token', 'decrypt', 'sync-state'];
+
+    let cleared = false;
+    for (const file of sessionFiles) {
+      const filePath = join(capyDir, file);
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+        cleared = true;
+      }
+    }
+
+    if (cleared) {
+      console.log('Logged out. Session cleared.');
+    } else {
+      console.log('No active session.');
+    }
+  });
+
 program.parse(process.argv);
