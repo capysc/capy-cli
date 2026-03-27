@@ -356,12 +356,32 @@ export class CapyCommand {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
-    // Shimmer effect: gradient through teal/cyan shades
+    // Shimmer effect: continuous gradient matching Capy brand
+    // #3a5555 → #688795 → #a06b6b → #b1aa92 → #3a5555
     const shimmer = (s: string) => {
-      const colors = [43, 44, 45, 80, 81, 116, 117, 152, 153];
-      return s.split('').map((ch, i) => {
-        const color = colors[i % colors.length];
-        return `\x1b[38;5;${color}m${ch}\x1b[0m`;
+      const stops = [
+        [58, 85, 85],    // #3a5555
+        [104, 135, 149], // #688795
+        [160, 107, 107], // #a06b6b
+        [177, 170, 146], // #b1aa92
+        [58, 85, 85],    // #3a5555
+      ];
+      const len = s.replace(/ /g, '').length;
+      let charIdx = 0;
+      return s.split('').map((ch) => {
+        if (ch === ' ') return ch;
+        const t = len > 1 ? charIdx / (len - 1) : 0;
+        // Interpolate between gradient stops
+        const segment = t * (stops.length - 1);
+        const i = Math.floor(segment);
+        const f = segment - i;
+        const a = stops[Math.min(i, stops.length - 1)];
+        const b = stops[Math.min(i + 1, stops.length - 1)];
+        const r = Math.round(a[0] + (b[0] - a[0]) * f);
+        const g = Math.round(a[1] + (b[1] - a[1]) * f);
+        const bl = Math.round(a[2] + (b[2] - a[2]) * f);
+        charIdx++;
+        return `\x1b[38;2;${r};${g};${bl}m${ch}\x1b[0m`;
       }).join('');
     };
 
