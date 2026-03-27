@@ -22,6 +22,14 @@ export class CheckoutCommand {
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
     this.syncEngine = new SyncEngine();
+
+    this.serviceClient.setTokenRefresher(async () => {
+      const refreshed = await this.authService.refreshToken();
+      if (refreshed) {
+        return this.authService.getToken();
+      }
+      return null;
+    });
   }
 
   async execute(branchName: string, options: { create?: boolean; production?: boolean } = {}): Promise<void> {

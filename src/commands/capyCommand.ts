@@ -37,6 +37,15 @@ export class CapyCommand {
     this.serviceClient = new ServiceClient(undefined, devMode);
     this.syncEngine = new SyncEngine();
     this.promptEngine = new PromptEngine();
+
+    // Auto-refresh token on 401
+    this.serviceClient.setTokenRefresher(async () => {
+      const refreshed = await this.authService.refreshToken();
+      if (refreshed) {
+        return this.authService.getToken();
+      }
+      return null;
+    });
   }
 
   async execute(): Promise<void> {
