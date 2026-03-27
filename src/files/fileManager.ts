@@ -307,7 +307,8 @@ export class FileManager {
 
   /**
    * If the .env file contains plaintext secrets (not capy-encrypted),
-   * save a backup as .env.old and add .env.old to .gitignore.
+   * save a backup as .env.pre-capy.old with all values commented out,
+   * and add .env.pre-capy.old to .gitignore.
    */
   backupPlaintextEnv(path?: string): boolean {
     const envPath = path || join(this.projectRoot, '.env');
@@ -326,10 +327,18 @@ export class FileManager {
 
     if (!hasPlaintext) return false;
 
-    const oldPath = envPath + '.old';
-    const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting them or putting them somewhere safe because they are unencrypted.\n\n';
-    writeFileSync(oldPath, header + content, 'utf-8');
-    this.updateGitignore(['.env.old']);
+    // Comment out all lines
+    const commented = content.split('\n').map(line => {
+      if (line.trim() && !line.startsWith('#')) {
+        return `# ${line}`;
+      }
+      return line;
+    }).join('\n');
+
+    const oldPath = envPath.replace(/\.env$/, '.env.pre-capy.old');
+    const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting this file or putting it somewhere safe because the values are unencrypted.\n\n';
+    writeFileSync(oldPath, header + commented, 'utf-8');
+    this.updateGitignore(['.env.pre-capy.old']);
     console.log(`Saved plaintext backup to ${oldPath}`);
     return true;
   }

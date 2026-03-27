@@ -467,7 +467,7 @@ describe('FileManager', () => {
   });
 
   describe('backupPlaintextEnv', () => {
-    test('should backup plaintext .env to .env.old with warning header', () => {
+    test('should backup plaintext .env to .env.pre-capy.old with warning header', () => {
       const envContent = 'DB_URL=postgres://localhost\nAPI_KEY=sk_live_abc123\n';
       mockExistsSync.mockImplementation((p) => {
         if (String(p) === join(testRoot, '.env')) return true;
@@ -479,20 +479,20 @@ describe('FileManager', () => {
 
       expect(result).toBe(true);
       expect(mockWriteFileSync).toHaveBeenCalledWith(
-        join(testRoot, '.env.old'),
+        join(testRoot, '.env.pre-capy.old'),
         expect.stringContaining('From Capy'),
         'utf-8'
       );
       // Verify the original content is included after the header
       const writtenContent = (mockWriteFileSync as jest.Mock).mock.calls.find(
-        (c: any[]) => String(c[0]).endsWith('.env.old')
+        (c: any[]) => String(c[0]).endsWith('.env.pre-capy.old')
       )?.[1] as string;
-      expect(writtenContent).toContain('DB_URL=postgres://localhost');
-      expect(writtenContent).toContain('API_KEY=sk_live_abc123');
+      expect(writtenContent).toContain('# DB_URL=postgres://localhost');
+      expect(writtenContent).toContain('# API_KEY=sk_live_abc123');
       expect(writtenContent).toContain('unencrypted');
     });
 
-    test('should add .env.old to .gitignore', () => {
+    test('should add .env.pre-capy.old to .gitignore', () => {
       mockExistsSync.mockImplementation((p) => {
         if (String(p) === join(testRoot, '.env')) return true;
         return false;
@@ -503,7 +503,7 @@ describe('FileManager', () => {
 
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        expect.stringContaining('.env.old'),
+        expect.stringContaining('.env.pre-capy.old'),
         'utf-8'
       );
     });
@@ -557,8 +557,8 @@ describe('FileManager', () => {
       fileManager.backupPlaintextEnv(customPath);
 
       expect(mockWriteFileSync).toHaveBeenCalledWith(
-        customPath + '.old',
-        expect.stringContaining('KEY=value'),
+        '/custom/.env.pre-capy.old',
+        expect.stringContaining('# KEY=value'),
         'utf-8'
       );
     });
