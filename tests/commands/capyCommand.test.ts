@@ -288,7 +288,7 @@ describe('CapyCommand', () => {
 
       await (capyCommand as any).initializeProject();
 
-      expect(consoleSpy).toHaveBeenCalledWith('⚠  No .keep file found - initializing project...');
+      expect(consoleSpy).toHaveBeenCalledWith('No .keep file found - initializing project...');
       
       consoleSpy.mockRestore();
     });
@@ -662,7 +662,7 @@ describe('CapyCommand', () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
       // Should continue with empty local env if read fails
-      expect(consoleSpy).toHaveBeenCalledWith('⚠️  Failed to read local .env');
+      expect(consoleSpy).toHaveBeenCalledWith('Failed to read local .env');
       
       consoleSpy.mockRestore();
     });
