@@ -597,7 +597,7 @@ export class CapyCommand {
       message: `Deploy your secrets to a git branch?`,
       choices: [
         { name: `Yes - Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
-        { name: 'Another git branch', value: 'other' },
+        { name: 'Yes - Another git branch', value: 'other' },
         { name: 'No  - Continue working', value: 'cancel' },
       ],
     }]);
