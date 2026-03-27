@@ -184,7 +184,7 @@ program
     const { join } = await import('path');
 
     const capyDir = join(process.cwd(), '.capy');
-    const sessionFiles = ['token', 'decrypt', 'sync-state'];
+    const sessionFiles = ['token', 'decrypt'];
 
     let cleared = false;
     for (const file of sessionFiles) {
