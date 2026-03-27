@@ -60,10 +60,8 @@ export class CapyCommand {
         await this.syncProject(projectState);
       }
     } catch (error: any) {
-      if (error?.name === 'ExitPromptError') {
-        process.exit(0);
-      }
-      this.handleError(error);
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      displayErrorAndExit(error);
     }
   }
 
@@ -669,37 +667,11 @@ export class CapyCommand {
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
     } catch (error: any) {
-      if (error?.name === 'ExitPromptError') {
-        process.exit(0);
-      }
-      console.error(`Failed to create PR: ${error.message}`);
+      if (error?.name === 'ExitPromptError') process.exit(0);
+      console.log(`Failed to create PR: ${error.message}`);
     }
   }
 
-  private handleError(error: any): void {
-    if (error instanceof CapyError) {
-      this.promptEngine.displayError(error.message);
-
-      if (error.code === ERROR_CODES.AUTH_FAILED) {
-        console.log('\nPlease ensure:');
-        console.log('1. You have internet connectivity');
-        console.log('2. You have a Capy account');
-      } else if (error.code === ERROR_CODES.PERMISSION_DENIED) {
-        console.log('\nContact your administrator to grant access to this project.');
-      } else if (error.code === ERROR_CODES.NETWORK_ERROR) {
-        console.log('\nWorking offline with local .env file');
-        console.log('Run \'capy\' again when connection is restored');
-      }
-    } else {
-      this.promptEngine.displayError(error.message || 'An unexpected error occurred');
-
-      if (this.options.verbose) {
-        console.error(error);
-      }
-    }
-
-    process.exit(1);
-  }
 
   private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
     const { orgName } = await inquirer.prompt([{

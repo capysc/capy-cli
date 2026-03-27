@@ -36,10 +36,8 @@ export class CheckoutCommand {
     try {
       await this._execute(branchName, options);
     } catch (error: any) {
-      if (error?.name === 'ExitPromptError') {
-        process.exit(0);
-      }
-      throw error;
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      displayErrorAndExit(error);
     }
   }
 
@@ -187,9 +185,8 @@ export class CheckoutCommand {
       }
     } catch (error: any) {
       branchSpinner.stop();
-      const detail = error?.details?.data?.error || error?.message || 'Unknown error';
-      console.log(`Failed to create branch: ${detail}`);
-      process.exit(1);
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      displayErrorAndExit(error);
     }
   }
 }

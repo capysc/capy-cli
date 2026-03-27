@@ -151,10 +151,12 @@ program
     }
 
     } catch (error: any) {
-      if (error?.name === 'ExitPromptError') process.exit(0);
-      const msg = error?.details?.data?.error || error?.message || 'Unknown error';
-      console.log(msg);
-      process.exit(1);
+      const { displayErrorAndExit } = await import('./ui/errorScreen');
+      displayErrorAndExit(error, {
+        projectName: projectState.projectName,
+        projectId: projectState.projectId,
+        branch: projectState.activeBranch,
+      });
     }
   });
 
