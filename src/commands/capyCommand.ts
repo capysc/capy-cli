@@ -356,22 +356,33 @@ export class CapyCommand {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
-    const lines = [
+    // Shimmer effect: gradient through teal/cyan shades
+    const shimmer = (s: string) => {
+      const colors = [43, 44, 45, 80, 81, 116, 117, 152, 153];
+      return s.split('').map((ch, i) => {
+        const color = colors[i % colors.length];
+        return `\x1b[38;5;${color}m${ch}\x1b[0m`;
+      }).join('');
+    };
+
+    const content = [
       `Project:      ${bold(projectName)}`,
       `Organization: ${orgName}`,
-      `Welcome ${userName}`,
+      shimmer(`Welcome ${userName}`),
     ];
 
-    const maxLen = Math.max(...lines.map(l => l.replace(/\x1b\[[0-9;]*m/g, '').length));
-    const border = grey('─'.repeat(maxLen + 4));
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const maxLen = Math.max(...content.map(l => stripAnsi(l).length));
+    const width = maxLen + 2;
 
     console.log('');
     console.log(`  ${grey('Capy CLI')}`);
-    console.log(`  ${border}`);
-    for (const line of lines) {
-      console.log(`  ${grey('│')} ${line}`);
+    console.log(`  ${grey('┌' + '─'.repeat(width) + '┐')}`);
+    for (const line of content) {
+      const pad = width - stripAnsi(line).length - 1;
+      console.log(`  ${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
     }
-    console.log(`  ${border}`);
+    console.log(`  ${grey('└' + '─'.repeat(width) + '┘')}`);
     console.log('');
   }
 
