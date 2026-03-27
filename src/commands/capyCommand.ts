@@ -402,10 +402,11 @@ export class CapyCommand {
       }
     }
 
-    fetchSpinner.succeed(`Retrieved remote .env (${Object.keys(remoteEnv).length} variables)`);
+    const branchLabel = activeBranch ? ` (${activeBranch})` : '';
+    fetchSpinner.succeed(`Retrieved remote .env${branchLabel} (${Object.keys(remoteEnv).length} variables)`);
 
     if (this.devMode) {
-      console.log('\n📦 Remote .env (dev mode):');
+      console.log(`\n📦 Remote .env${branchLabel} (dev mode):`);
       if (Object.keys(remoteEnvEncrypted).length === 0) {
         console.log('  (empty)');
       } else {
@@ -525,7 +526,7 @@ export class CapyCommand {
 
     // Write encrypted .env file
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
-    syncSpinner.text = `Updated encrypted .env with ${Object.keys(finalEnv).length} total variables`;
+    syncSpinner.text = `Updated encrypted .env${branchLabel} with ${Object.keys(finalEnv).length} total variables`;
 
     // Update decrypt key
     const decryptKey = this.syncEngine.createDecryptKey(
