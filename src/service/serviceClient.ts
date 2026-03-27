@@ -365,6 +365,18 @@ export class ServiceClient {
     );
   }
 
+  async deleteBranch(projectId: string, branchId: string): Promise<void> {
+    if (this.mockMode) {
+      console.log(`🔫 Mock: Deleting branch "${branchId}" from project "${projectId}"`);
+      await this.mockDelay();
+      return;
+    }
+
+    await this.request<{ success: boolean }>(
+      'DELETE', `/projects/${projectId}/branches/${branchId}`,
+    );
+  }
+
   async listBranches(projectId: string): Promise<Branch[]> {
     if (this.mockMode) {
       console.log(`🔫 Mock: Listing branches for project "${projectId}"`);

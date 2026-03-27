@@ -42,7 +42,8 @@ program
 program
   .command('branch')
   .description('List secret branches')
-  .action(async () => {
+  .option('-D <name>', 'Delete a branch')
+  .action(async (options) => {
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -63,6 +64,49 @@ program
     }
     const token = authService.getToken();
     if (token) serviceClient.setToken(token);
+
+    // Delete branch
+    if (options.D) {
+      const deleteName = options.D;
+      const branches = await serviceClient.listBranches(projectState.projectId!);
+      const branch = branches.find(b => b.name === deleteName);
+
+      if (!branch) {
+        console.log(`Branch "${deleteName}" not found`);
+        process.exit(1);
+      }
+
+      if (branch.name === (projectState.activeBranch || '')) {
+        console.log(`Cannot delete the current branch. Switch first with: capy checkout <other-branch>`);
+        process.exit(1);
+      }
+
+      const inquirer = (await import('inquirer')).default;
+      const { confirm } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirm',
+        message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
+        default: false,
+      }]);
+
+      if (!confirm) return;
+
+      await serviceClient.deleteBranch(projectState.projectId!, branch.id);
+
+      // Remove branch entries from .keep
+      const keep = pm.readKeepFile();
+      if (keep) {
+        const { FileManager } = await import('./files/fileManager');
+        const fm = new FileManager();
+        for (const [varName, entries] of Object.entries(keep.variables)) {
+          keep.variables[varName] = entries.filter(e => e.branch !== deleteName);
+        }
+        fm.writeKeepFile(keep);
+      }
+
+      console.log(`Deleted branch "${deleteName}"`);
+      return;
+    }
 
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
