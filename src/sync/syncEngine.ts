@@ -1,10 +1,11 @@
-import { 
-  EnvVariable, 
-  ChangeSet, 
+import {
+  EnvVariable,
+  ChangeSet,
   ConflictVariable,
   UserDecisions,
   SyncResult,
   KeepFile,
+  KeepVariableEntry,
   DecryptKey,
   SyncState
 } from '../types/index';
@@ -218,24 +219,32 @@ export class SyncEngine {
 
   mergeWithKeep(
     keep: KeepFile,
-    pushedVariables: Record<string, { resource_id: string }>
+    pushedVariables: Record<string, { resource_id: string }>,
+    branch?: string
   ): KeepFile {
-    const updatedKeep = { ...keep };
+    const updatedKeep = { ...keep, variables: { ...keep.variables } };
     const now = new Date().toISOString();
 
     for (const [varName, data] of Object.entries(pushedVariables)) {
-      if (updatedKeep.variables[varName]) {
-        // Update existing variable
-        updatedKeep.variables[varName].resource_id = data.resource_id;
-        updatedKeep.variables[varName].updated_at = now;
+      const entries = [...(updatedKeep.variables[varName] || [])];
+      const existingIdx = entries.findIndex(e =>
+        branch ? e.branch === branch : !e.branch
+      );
+
+      const newEntry: KeepVariableEntry = {
+        resource_id: data.resource_id,
+        ...(branch ? { branch } : {}),
+        created_at: existingIdx >= 0 ? entries[existingIdx].created_at : now,
+        updated_at: now,
+      };
+
+      if (existingIdx >= 0) {
+        entries[existingIdx] = newEntry;
       } else {
-        // Add new variable
-        updatedKeep.variables[varName] = {
-          resource_id: data.resource_id,
-          created_at: now,
-          updated_at: now
-        };
+        entries.push(newEntry);
       }
+
+      updatedKeep.variables[varName] = entries;
     }
 
     updatedKeep.last_sync = now;

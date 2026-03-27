@@ -7,6 +7,7 @@ import {
   ServiceToken,
   EnvVariable,
   KeepFile,
+  Branch,
   CapyError,
   ERROR_CODES
 } from '../types/index';
@@ -134,7 +135,7 @@ export class ServiceClient {
     }
   }
 
-  async getDecryptData(projectId: string): Promise<DecryptResponse> {
+  async getDecryptData(projectId: string, branch?: string): Promise<DecryptResponse> {
     if (this.mockMode) {
       console.log(`🔫 Mock: Retrieving decrypt data for project "${projectId}"`);
       await this.mockDelay();
@@ -158,8 +159,9 @@ export class ServiceClient {
     }
 
     try {
+      const query = branch ? `?branch=${encodeURIComponent(branch)}` : '';
       const data = await this.request<{ env_file?: string; permissions: string[] }>(
-        'GET', `/secrets/${projectId}`,
+        'GET', `/secrets/${projectId}${query}`,
       );
 
       return {
@@ -168,8 +170,13 @@ export class ServiceClient {
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       };
     } catch (error: any) {
-      // 404 is normal for a new project with no secrets yet
+      // 404 with "No secrets" is normal for a new project — return empty
+      // 404 with "Project not found" or "Branch not found" should propagate
       if (error instanceof CapyError && error.details?.status === 404) {
+        const msg = error.message || '';
+        if (msg.includes('not found') && !msg.includes('No secrets')) {
+          throw error; // Project or branch not found — let caller handle
+        }
         return {
           env_content: '',
           decrypt_key: '',
@@ -190,7 +197,8 @@ export class ServiceClient {
   async pushVariables(
     projectId: string,
     variables: Record<string, string>,
-    keep: KeepFile | null = null
+    keep: KeepFile | null = null,
+    branch?: string
   ): Promise<PushResult> {
     if (this.mockMode) {
       console.log(`🔫 Mock: Pushing ${Object.keys(variables).length} variables to project "${projectId}"`);
@@ -224,13 +232,13 @@ export class ServiceClient {
           encryptedNewVars[key] = 'capy:deleted';
 
           mockVariables[key] = {
-            resource_id: deriveResourceId(mockDecryptKey, key),
+            resource_id: deriveResourceId(branch || '', key),
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
             success: true
           };
         } else {
-          const resourceId = deriveResourceId(mockDecryptKey, key);
+          const resourceId = deriveResourceId(branch || '', key);
           const encrypted = Encryptor.encrypt(value, mockDecryptKey);
           const snippetValue = this.createSnippetWithEncryption(value, encrypted);
 
@@ -264,8 +272,7 @@ export class ServiceClient {
     }
 
     try {
-      // Encrypt variables before sending to service
-      const encryptionKey = keep?.variables ? '' : ''; // Will use proper key lifecycle later
+      const activeBranch = branch || '';
       const encryptedVars: Record<string, string> = {};
       const resultVariables: Record<string, any> = {};
 
@@ -273,13 +280,13 @@ export class ServiceClient {
         if (value === 'capy:deleted') {
           encryptedVars[key] = 'capy:deleted';
           resultVariables[key] = {
-            resource_id: deriveResourceId(encryptionKey, key),
+            resource_id: deriveResourceId(activeBranch, key),
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           };
         } else if (value.startsWith('capy:')) {
           // Already encrypted — pass through as-is
-          const existingResourceId = value.split(':')[1] || deriveResourceId(encryptionKey, key);
+          const existingResourceId = value.split(':')[1] || deriveResourceId(activeBranch, key);
           encryptedVars[key] = value;
           resultVariables[key] = {
             resource_id: existingResourceId,
@@ -287,8 +294,8 @@ export class ServiceClient {
             updated_at: new Date().toISOString(),
           };
         } else {
-          const resourceId = deriveResourceId(encryptionKey, key);
-          const encrypted = Encryptor.encrypt(value, encryptionKey);
+          const resourceId = deriveResourceId(activeBranch, key);
+          const encrypted = Encryptor.encrypt(value, '');
           const snippetValue = this.createSnippetWithEncryption(value, encrypted);
           encryptedVars[key] = `capy:${resourceId}:${snippetValue}`;
           resultVariables[key] = {
@@ -308,7 +315,7 @@ export class ServiceClient {
 
       const data = await this.request<{ success: boolean }>(
         'POST', `/secrets/${projectId}`,
-        { env_file: envFileContent, keep_file: keepFileContent },
+        { env_file: envFileContent, keep_file: keepFileContent, ...(branch ? { branch } : {}) },
       );
 
       return {
@@ -325,6 +332,37 @@ export class ServiceClient {
         { error: error.message }
       );
     }
+  }
+
+  async createBranch(projectId: string, name: string, isProduction: boolean = false): Promise<Branch> {
+    if (this.mockMode) {
+      console.log(`🔫 Mock: Creating branch "${name}" for project "${projectId}"`);
+      await this.mockDelay();
+      return {
+        id: `branch_${name}_${Math.random().toString(36).substr(2, 6)}`,
+        name,
+        project_id: projectId,
+        is_production: isProduction,
+      };
+    }
+
+    return this.request<Branch>(
+      'POST', `/projects/${projectId}/branches`,
+      { name, is_production: isProduction },
+    );
+  }
+
+  async listBranches(projectId: string): Promise<Branch[]> {
+    if (this.mockMode) {
+      console.log(`🔫 Mock: Listing branches for project "${projectId}"`);
+      await this.mockDelay();
+      return [{ id: 'branch_default', name: '', project_id: projectId, is_production: false }];
+    }
+
+    const data = await this.request<{ branches: Branch[] }>(
+      'GET', `/projects/${projectId}/branches`,
+    );
+    return data.branches;
   }
 
   async healthCheck(): Promise<boolean> {

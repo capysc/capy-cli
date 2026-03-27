@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { ProjectState, KeepFile, KeepVariableEntry, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -22,15 +22,19 @@ export class ProjectManager {
     let organizationId: string | undefined;
     let projectId: string | undefined;
 
+    let activeBranch: string | undefined;
+
     if (hasKeepFile) {
       try {
         const keepContent = readFileSync(keepPath, 'utf-8');
-        const keep: KeepFile = JSON.parse(keepContent);
+        const keep = this.migrateKeepIfNeeded(JSON.parse(keepContent));
         this.validateKeepFile(keep);
         projectName = keep.project_name;
         organizationId = keep.org_id;
         projectId = keep.project_id;
+        activeBranch = keep.active_branch;
       } catch (error) {
+        if (error instanceof CapyError) throw error;
         throw new CapyError(
           'Invalid .keep file format',
           ERROR_CODES.INVALID_FORMAT,
@@ -46,7 +50,8 @@ export class ProjectManager {
       hasEnvFile,
       projectName,
       organizationId,
-      projectId
+      projectId,
+      activeBranch,
     };
   }
 
@@ -93,11 +98,9 @@ export class ProjectManager {
 
     try {
       const content = readFileSync(keepPath, 'utf-8');
-      const keep = JSON.parse(content) as KeepFile;
+      const raw = JSON.parse(content);
+      const keep = this.migrateKeepIfNeeded(raw);
       this.validateKeepFile(keep);
-      if (keep.variables && typeof keep.variables !== 'object') {
-        throw new CapyError('Invalid variables structure', ERROR_CODES.INVALID_FORMAT);
-      }
       return keep;
     } catch (error) {
       if (error instanceof CapyError) {
@@ -109,6 +112,34 @@ export class ProjectManager {
         { error, path: keepPath }
       );
     }
+  }
+
+  /**
+   * Migrate v1 .keep format (variables as objects) to v2 (variables as arrays).
+   */
+  private migrateKeepIfNeeded(raw: any): KeepFile {
+    if (raw.version === '2.0') return raw as KeepFile;
+
+    // v1 → v2: convert each variable from object to single-entry array
+    const migratedVariables: Record<string, KeepVariableEntry[]> = {};
+    if (raw.variables && typeof raw.variables === 'object') {
+      for (const [varName, entry] of Object.entries(raw.variables)) {
+        const v1 = entry as { resource_id: string; created_at: string; updated_at: string };
+        if (v1.resource_id) {
+          migratedVariables[varName] = [{
+            resource_id: v1.resource_id,
+            created_at: v1.created_at,
+            updated_at: v1.updated_at,
+          }];
+        }
+      }
+    }
+
+    return {
+      ...raw,
+      version: '2.0',
+      variables: migratedVariables,
+    };
   }
 
   private validateKeepFile(keep: any): void {

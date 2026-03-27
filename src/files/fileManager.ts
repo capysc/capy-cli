@@ -90,14 +90,14 @@ export class FileManager {
     }
   }
 
-  writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null): void {
+  writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null, branch?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
     console.log(`🔐 Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
       const encryptedVariables: Record<string, string> = {};
-      
+
       for (const [key, value] of Object.entries(variables)) {
         let finalValue: string;
 
@@ -108,7 +108,7 @@ export class FileManager {
           // Encrypt the plain text value
           const encrypted = Encryptor.encrypt(value, encryptionKey);
           const snippetValue = this.createSnippetWithEncryption(value, encrypted);
-          const resourceId = deriveResourceId(encryptionKey, key);
+          const resourceId = deriveResourceId(branch || '', key);
           finalValue = `capy:${resourceId}:${snippetValue}`;
         }
         

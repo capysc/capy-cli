@@ -60,7 +60,7 @@ describe('CLI Integration Tests', () => {
 
     test('should correctly detect initialized project state', async () => {
       const mockKeep: KeepFile = {
-        version: '1.0',
+        version: '2.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -112,18 +112,18 @@ DEBUG=true`;
 
     test('should create proper keep file structure', () => {
       const mockKeep: KeepFile = {
-        version: '1.0',
+        version: '2.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'integration-test',
         created_at: new Date().toISOString(),
         last_sync: new Date().toISOString(),
         variables: {
-          API_KEY: {
+          API_KEY: [{
             resource_id: 'res_123',
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString()
-          }
+          }]
         }
       };
 
@@ -214,18 +214,18 @@ DEBUG=true`;
 
     test('should merge keep file with pushed variables', () => {
       const originalKeep: KeepFile = {
-        version: '1.0',
+        version: '2.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
         last_sync: '2024-01-01T00:00:00Z',
         variables: {
-          EXISTING_VAR: {
+          EXISTING_VAR: [{
             resource_id: 'res_old',
             created_at: '2024-01-01T00:00:00Z',
             updated_at: '2024-01-01T00:00:00Z'
-          }
+          }]
         }
       };
 
@@ -237,8 +237,8 @@ DEBUG=true`;
       const updatedKeep = syncEngine.mergeWithKeep(originalKeep, pushedVariables);
 
       expect(updatedKeep.variables.NEW_VAR).toBeDefined();
-      expect(updatedKeep.variables.NEW_VAR.resource_id).toBe('res_new');
-      expect(updatedKeep.variables.EXISTING_VAR.resource_id).toBe('res_updated');
+      expect(updatedKeep.variables.NEW_VAR[0].resource_id).toBe('res_new');
+      expect(updatedKeep.variables.EXISTING_VAR[0].resource_id).toBe('res_updated');
       expect(updatedKeep.last_sync).not.toBe(originalKeep.last_sync);
     });
 
@@ -293,7 +293,7 @@ DEBUG=true`;
 
     test('should handle missing required keep file fields', () => {
       const invalidKeep = {
-        version: '1.0',
+        version: '2.0',
         // Missing required fields
         project_name: 'test'
       };

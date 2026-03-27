@@ -50,7 +50,10 @@ export class CapyCommand {
       } else {
         await this.syncProject(projectState);
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.name === 'ExitPromptError') {
+        process.exit(0);
+      }
       this.handleError(error);
     }
   }
@@ -192,9 +195,9 @@ export class CapyCommand {
 
     const keySpinner = ora('🔑 Generating encryption keys...').start();
 
-    // Create keep file
+    // Create keep file (v2 format)
     const keep: KeepFile = {
-      version: '1.0',
+      version: '2.0',
       org_id: projectResult.org_id,
       project_id: projectResult.project_id,
       project_name: projectResult.project_name,
@@ -328,9 +331,51 @@ export class CapyCommand {
       }
     }
 
-    // Get remote environment
-    const fetchSpinner = ora('Retrieving remote .env...').start();
-    const decryptData = await this.serviceClient.getDecryptData(projectState.projectId!);
+    // Get remote environment (branch-aware)
+    let activeBranch = projectState.activeBranch;
+    const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
+
+    let decryptData;
+    try {
+      decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+    } catch (error: any) {
+      if (error instanceof CapyError && error.details?.status === 404) {
+        fetchSpinner.stop();
+        const { recreate } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'recreate',
+          message: 'Project not found — create a new one and re-sync?',
+          default: true,
+        }]);
+
+        if (!recreate) {
+          console.log('Run capy again after resolving the issue.');
+          return;
+        }
+
+        // Re-create the project
+        const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
+        const initSpinner = ora('Re-creating project...').start();
+        const projectResult = await this.serviceClient.initializeProject(
+          projectName,
+          authResult.organization_id || projectState.organizationId!
+        );
+        initSpinner.succeed(`Project "${projectName}" re-created`);
+
+        // Update .keep with new project ID
+        const keep = this.projectManager.readKeepFile()!;
+        keep.project_id = projectResult.project_id;
+        keep.org_id = projectResult.org_id;
+        this.fileManager.writeKeepFile(keep);
+
+        // Retry with new project ID
+        decryptData = await this.serviceClient.getDecryptData(projectResult.project_id, activeBranch);
+        // Update projectState for the rest of the flow
+        projectState.projectId = projectResult.project_id;
+      } else {
+        throw error;
+      }
+    }
     const existingDecryptKey = this.projectManager.readDecryptKey();
     const encryptionKey = existingDecryptKey?.decryption_key ?? decryptData.decrypt_key;
 
@@ -415,7 +460,7 @@ export class CapyCommand {
 
       // Always re-encrypt local .env (e.g. after `capy decrypt`)
       const finalKeep = this.projectManager.readKeepFile();
-      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, finalKeep);
+      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
       return;
     }
 
@@ -446,18 +491,19 @@ export class CapyCommand {
     // Apply decisions to create final env (all variables, merged)
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
 
-    // Push the full state to remote (replaces entire blob)
+    // Push the full state to remote (branch-aware, replaces entire blob)
     const keep = this.projectManager.readKeepFile();
     const pushResult = await this.serviceClient.pushVariables(
       projectState.projectId!,
       finalEnv,
-      keep
+      keep,
+      activeBranch
     );
 
     let finalKeep = keep;
     if (pushResult.success) {
       // Update keep with resource_ids from push
-      finalKeep = this.syncEngine.mergeWithKeep(keep!, pushResult.variables);
+      finalKeep = this.syncEngine.mergeWithKeep(keep!, pushResult.variables, activeBranch);
 
       // Remove deleted variables from keep
       for (const varName of decisions.deleteRemote) {
@@ -469,7 +515,7 @@ export class CapyCommand {
     }
 
     // Write encrypted .env file
-    this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep);
+    this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
     syncSpinner.text = `Updated encrypted .env with ${Object.keys(finalEnv).length} total variables`;
 
     // Update decrypt key
@@ -506,26 +552,76 @@ export class CapyCommand {
 
     console.log(`\n✓ Total: ${result.totalVariables} variables synchronized`);
 
-    if (decisions.pushVariables.length > 0) {
-      await this.promptDeployOrContinue(decisions.pushVariables);
+    const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
+    if (changedVars.length > 0) {
+      await this.promptDeployOrContinue(changedVars, activeBranch);
     }
   }
 
-  private async promptDeployOrContinue(syncedVars: string[]): Promise<void> {
+  private async promptDeployOrContinue(syncedVars: string[], branch?: string): Promise<void> {
+    const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const targetLabel = branch || gitBranch;
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
       message: 'Want to deploy your changes to an environment?',
       choices: [
         { name: 'Continue working', value: 'continue' },
-        { name: 'Create a deployment PR', value: 'pr' },
+        { name: `Create a deployment PR → "${targetLabel}"`, value: 'pr' },
       ],
     }]);
 
     if (action !== 'pr') return;
 
-    const projectName = this.projectManager.getDefaultProjectName();
+    await CapyCommand.createDeployPR(syncedVars);
+  }
+
+  /**
+   * Create a deployment PR with the .keep file.
+   * Can be called directly via `capy deploy` or after a sync.
+   */
+  static async createDeployPR(syncedVars?: string[]): Promise<void> {
+    const { ProjectManager } = await import('../core/projectManager');
+    const pm = new ProjectManager();
+    const projectName = pm.getDefaultProjectName();
+    const keepFile = pm.readKeepFile();
+
+    if (!keepFile) {
+      console.error('No .keep file found. Run capy first to initialize.');
+      process.exit(1);
+    }
+
+    // If no vars specified, use all variables from .keep
+    const vars = syncedVars || Object.keys(keepFile.variables);
+    if (vars.length === 0) {
+      console.error('No variables to deploy.');
+      return;
+    }
+
     const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const targetBranch = keepFile.active_branch || baseBranch;
+
+    // Confirmation prompt
+    const { confirm } = await inquirer.prompt([{
+      type: 'list',
+      name: 'confirm',
+      message: `Deploy your secrets to a git branch?`,
+      choices: [
+        { name: `Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
+        { name: 'Another git branch', value: 'other' },
+      ],
+    }]);
+
+    if (confirm === 'other') {
+      console.log('');
+      console.log('  To deploy to a different branch:');
+      console.log('');
+      console.log('    1. Switch branches:  capy checkout -b <branch-name>');
+      console.log('    2. Deploy:           capy deploy');
+      console.log('');
+      return;
+    }
+
     const deployBranch = `capy/sync-${projectName}-${Date.now()}`;
 
     try {
@@ -534,8 +630,8 @@ export class CapyCommand {
       execSync(`git checkout -b ${deployBranch}`, { stdio: 'pipe' });
       execSync('git add .keep', { stdio: 'pipe' });
 
-      const title = `chore: sync ${syncedVars.length} ${projectName} secret${syncedVars.length === 1 ? '' : 's'} via capy`;
-      const varList = syncedVars.map(v => `- ${v}`).join('\n');
+      const title = `chore: sync ${vars.length} ${projectName} secret${vars.length === 1 ? '' : 's'} via capy`;
+      const varList = vars.map(v => `- ${v}`).join('\n');
       const fullMessage = `${title}\n\nSynced variables:\n${varList}`;
       const { writeFileSync: writeTmp, unlinkSync: unlinkTmp } = require('fs');
       const { join: joinTmp } = require('path');
@@ -560,6 +656,9 @@ export class CapyCommand {
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
     } catch (error: any) {
+      if (error?.name === 'ExitPromptError') {
+        process.exit(0);
+      }
       console.error(`Failed to create PR: ${error.message}`);
     }
   }

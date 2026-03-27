@@ -185,7 +185,7 @@ describe('FileManager', () => {
   describe('writeKeepFile', () => {
     test('should write keep file with proper formatting', () => {
       const keep: KeepFile = {
-        version: '1.0',
+        version: '2.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -207,7 +207,7 @@ describe('FileManager', () => {
 
     test('should handle write failure with backup restoration', () => {
       const keep: KeepFile = {
-        version: '1.0',
+        version: '2.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',

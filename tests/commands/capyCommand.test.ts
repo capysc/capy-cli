@@ -297,7 +297,7 @@ describe('CapyCommand', () => {
 
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
-          version: '1.0',
+          version: '2.0',
           org_id: 'capy-123',
           project_id: 'proj-123',
           project_name: 'test-project',
@@ -376,15 +376,15 @@ describe('CapyCommand', () => {
 
       // Mock mergeWithKeep to return an updated keep
       mockSyncEngine.mergeWithKeep.mockReturnValue({
-        version: '1.0',
+        version: '2.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
         last_sync: new Date().toISOString(),
         variables: {
-          API_KEY: { resource_id: 'res-1', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
-          DB_URL: { resource_id: 'res-2', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }
+          API_KEY: [{ resource_id: 'res-1', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }],
+          DB_URL: [{ resource_id: 'res-2', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }]
         }
       });
 
@@ -529,7 +529,7 @@ describe('CapyCommand', () => {
       });
 
       mockProjectManager.readKeepFile.mockReturnValue({
-        version: '1.0',
+        version: '2.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
@@ -539,18 +539,18 @@ describe('CapyCommand', () => {
       });
 
       mockSyncEngine.mergeWithKeep.mockReturnValue({
-        version: '1.0',
+        version: '2.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
         last_sync: new Date().toISOString(),
-        variables: { 
-          LOCAL_VAR: {
+        variables: {
+          LOCAL_VAR: [{
             resource_id: 'res-123',
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString()
-          }
+          }]
         }
       });
 
@@ -568,12 +568,12 @@ describe('CapyCommand', () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
       expect(mockAuthService.authenticate).toHaveBeenCalledWith('org-123');
-      expect(mockServiceClient.getDecryptData).toHaveBeenCalledWith('proj-123');
+      expect(mockServiceClient.getDecryptData).toHaveBeenCalledWith('proj-123', undefined);
       expect(mockSyncEngine.compareEnvironments).toHaveBeenCalled();
       expect(mockPromptEngine.promptForChanges).toHaveBeenCalled();
       expect(mockPromptEngine.confirmSync).toHaveBeenCalled();
       // Push sends the full finalEnv (from applyDecisions), not just changed vars
-      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object));
+      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object), undefined);
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
       expect(mockFileManager.writeDecryptKey).toHaveBeenCalled();
     });
