@@ -180,7 +180,8 @@ export class CheckoutCommand {
       }
     } catch (error: any) {
       branchSpinner.stop();
-      console.error(`Failed to create branch: ${error.message}`);
+      const detail = error?.details?.data?.error || error?.message || 'Unknown error';
+      console.log(`Failed to create branch: ${detail}`);
       process.exit(1);
     }
   }
