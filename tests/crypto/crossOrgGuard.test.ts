@@ -104,8 +104,33 @@ describe('Cross-Org Exfiltration Guard', () => {
     }).toThrow();
   });
 
-  it('init flow rejects .env with capy: prefixed values', () => {
-    // Simulate: .env has encrypted values from a previous org
+  it('init flow rejects .env with capy: values encrypted for a different org', () => {
+    const orgAKey = Encryptor.generateKey();
+    const orgBKey = Encryptor.generateKey();
+    const encrypted = Encryptor.encrypt('secret', orgAKey);
+    const resourceId = deriveResourceId('', 'SECRET');
+
+    const envContent = `SECRET=capy:${resourceId}:${encrypted}\nPLAINTEXT=hello\n`;
+    writeFileSync(join(testDir, '.env'), envContent);
+
+    const rawEnv = fileManager.readEnvFile();
+
+    // Simulate init guard: check encrypted values against the NEW project's key
+    const encryptedEntries = Object.entries(rawEnv)
+      .filter(([_, value]) => value.startsWith('capy:'));
+    const foreignKeys: string[] = [];
+    for (const [key, value] of encryptedEntries) {
+      try {
+        fileManager.decryptValue(value, orgBKey);
+      } catch {
+        foreignKeys.push(key);
+      }
+    }
+
+    expect(foreignKeys).toEqual(['SECRET']);
+  });
+
+  it('init flow allows .env with capy: values encrypted for the same org', () => {
     const orgAKey = Encryptor.generateKey();
     const encrypted = Encryptor.encrypt('secret', orgAKey);
     const resourceId = deriveResourceId('', 'SECRET');
@@ -113,15 +138,20 @@ describe('Cross-Org Exfiltration Guard', () => {
     const envContent = `SECRET=capy:${resourceId}:${encrypted}\nPLAINTEXT=hello\n`;
     writeFileSync(join(testDir, '.env'), envContent);
 
-    // Read the raw .env (as init flow does)
     const rawEnv = fileManager.readEnvFile();
 
-    // Check for capy: prefixed values (this is the guard logic)
-    const foreignKeys = Object.entries(rawEnv)
-      .filter(([_, value]) => value.startsWith('capy:'))
-      .map(([key]) => key);
+    // Same key — should pass (user lost metadata but re-inited to same project)
+    const encryptedEntries = Object.entries(rawEnv)
+      .filter(([_, value]) => value.startsWith('capy:'));
+    const foreignKeys: string[] = [];
+    for (const [key, value] of encryptedEntries) {
+      try {
+        fileManager.decryptValue(value, orgAKey);
+      } catch {
+        foreignKeys.push(key);
+      }
+    }
 
-    expect(foreignKeys).toEqual(['SECRET']);
-    expect(foreignKeys.length).toBeGreaterThan(0);
+    expect(foreignKeys).toEqual([]);
   });
 });

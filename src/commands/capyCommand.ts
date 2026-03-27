@@ -260,22 +260,41 @@ export class CapyCommand {
       const localVarCount = Object.keys(localEnv).length;
 
       if (localVarCount > 0) {
-        // Cross-org exfiltration guard: reject encrypted values from a different project
-        const foreignKeys = Object.entries(localEnv)
-          .filter(([_, value]) => value.startsWith('capy:'))
-          .map(([key]) => key);
+        // Cross-org exfiltration guard: if .env has encrypted values, verify they
+        // belong to this project's key. This catches the attack where a rogue user
+        // deletes .keep/.capy and re-initializes to a different org. But if the user
+        // lost their metadata and re-inits to the SAME org/project, the key matches
+        // and their secrets are recoverable.
+        const encryptedEntries = Object.entries(localEnv)
+          .filter(([_, value]) => value.startsWith('capy:'));
 
-        if (foreignKeys.length > 0) {
-          console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted for a different project:`);
-          for (const key of foreignKeys) {
-            console.error(`  ${key}`);
+        if (encryptedEntries.length > 0) {
+          const foreignKeys: string[] = [];
+          for (const [key, value] of encryptedEntries) {
+            try {
+              this.fileManager.decryptValue(value, encryptionKey);
+            } catch {
+              foreignKeys.push(key);
+            }
           }
-          console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
-          throw new CapyError(
-            'Cannot push secrets encrypted with a different project\'s key to a new org',
-            ERROR_CODES.PERMISSION_DENIED,
-            { foreignKeys }
-          );
+
+          if (foreignKeys.length > 0) {
+            console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted with a different project's key:`);
+            for (const key of foreignKeys) {
+              console.error(`  ${key}`);
+            }
+            console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
+            throw new CapyError(
+              'Cannot push secrets encrypted with a different project\'s key to a new org',
+              ERROR_CODES.PERMISSION_DENIED,
+              { foreignKeys }
+            );
+          }
+
+          // Values are encrypted but belong to this project — decrypt them for push
+          for (const [key, value] of encryptedEntries) {
+            localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
+          }
         }
 
         console.log(`\nFound existing .env file with ${localVarCount} variable(s)`);
