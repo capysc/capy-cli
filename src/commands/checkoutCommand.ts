@@ -133,7 +133,7 @@ export class CheckoutCommand {
       const { production } = await inquirer.prompt([{
         type: 'confirm',
         name: 'production',
-        message: `Is "${branchName}" a production branch? (Protected, invite-only access)`,
+        message: `Make "${branchName}" a protected branch? \x1b[90m(invite-only)\x1b[0m`,
         default: false,
       }]);
       isProduction = production;
