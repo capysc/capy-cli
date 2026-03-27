@@ -368,21 +368,21 @@ export class CapyCommand {
     const content = [
       `Project:      ${bold(projectName)}`,
       `Organization: ${orgName}`,
+      '',
       shimmer(`Welcome ${userName}`),
     ];
 
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
-    const maxLen = Math.max(...content.map(l => stripAnsi(l).length));
-    const width = maxLen + 2;
+    const maxLen = Math.max(40, ...content.map(l => stripAnsi(l).length + 2));
 
     console.log('');
     console.log(`  ${grey('Capy CLI')}`);
-    console.log(`  ${grey('┌' + '─'.repeat(width) + '┐')}`);
+    console.log(`  ${grey('┌' + '─'.repeat(maxLen) + '┐')}`);
     for (const line of content) {
-      const pad = width - stripAnsi(line).length - 1;
+      const pad = maxLen - stripAnsi(line).length - 1;
       console.log(`  ${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
     }
-    console.log(`  ${grey('└' + '─'.repeat(width) + '┘')}`);
+    console.log(`  ${grey('└' + '─'.repeat(maxLen) + '┘')}`);
     console.log('');
   }
 
