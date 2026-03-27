@@ -392,7 +392,7 @@ export class CapyCommand {
 
     this.displayHeader(
       projectState.projectName || 'unknown',
-      authResult.organization_name || authResult.organization_id || '',
+      authResult.organization_name || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name || authResult.organization_id || '',
       authResult.user_first_name || authResult.user_email || '',
     );
 
