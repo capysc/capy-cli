@@ -1,4 +1,3 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { writeFileSync, mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { Encryptor } from '../../src/crypto/encryptor';
@@ -6,7 +5,7 @@ import { FileManager } from '../../src/files/fileManager';
 import { deriveResourceId } from '../../src/crypto/resourceId';
 
 describe('Cross-Org Exfiltration Guard', () => {
-  const testDir = join(import.meta.dir, '.test-cross-org');
+  const testDir = join(__dirname, '.test-cross-org');
   let fileManager: FileManager;
 
   beforeEach(() => {
