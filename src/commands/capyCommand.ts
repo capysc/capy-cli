@@ -572,7 +572,7 @@ export class CapyCommand {
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
-      message: 'Want to deploy your changes to an environment?',
+      message: 'Want to deploy your secrets to an environment?',
       choices: [
         { name: 'No  - Continue working', value: 'continue' },
         { name: `Yes - Create a deployment PR → "${targetLabel}"`, value: 'pr' },
