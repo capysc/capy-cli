@@ -306,6 +306,34 @@ export class FileManager {
   }
 
   /**
+   * If the .env file contains plaintext secrets (not capy-encrypted),
+   * save a backup as .env.old and add .env.old to .gitignore.
+   */
+  backupPlaintextEnv(path?: string): boolean {
+    const envPath = path || join(this.projectRoot, '.env');
+    if (!existsSync(envPath)) return false;
+
+    const content = readFileSync(envPath, 'utf-8');
+    const lines = content.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+
+    // Check if any values are already encrypted
+    const hasPlaintext = lines.some(line => {
+      const eqIdx = line.indexOf('=');
+      if (eqIdx === -1) return false;
+      const value = line.substring(eqIdx + 1);
+      return !value.startsWith('capy:');
+    });
+
+    if (!hasPlaintext) return false;
+
+    const oldPath = envPath + '.old';
+    writeFileSync(oldPath, content, 'utf-8');
+    this.updateGitignore(['.env.old']);
+    console.log(`Saved plaintext backup to ${oldPath}`);
+    return true;
+  }
+
+  /**
    * Creates a snippet-enhanced encrypted value for better usability
    * Shows partial original value for identification while maintaining security
    */

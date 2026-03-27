@@ -276,6 +276,9 @@ export class CapyCommand {
               synced_variables: Object.keys(localEnv)
             });
 
+            // Backup plaintext .env before encrypting
+            this.fileManager.backupPlaintextEnv(this.options.envPath);
+
             // Encrypt the local .env file
             this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep);
 
