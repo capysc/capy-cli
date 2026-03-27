@@ -115,7 +115,10 @@ export class FileManager {
         encryptedVariables[key] = finalValue;
       }
 
-      const content = Object.entries(encryptedVariables)
+      const header = branch
+        ? `# From Capy: these secrets map to the "${branch}" branch of your project.\n\n`
+        : '';
+      const content = header + Object.entries(encryptedVariables)
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
 
