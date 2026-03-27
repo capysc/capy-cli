@@ -75,7 +75,7 @@ program
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
       const name = b.name || 'no branch';
-      const prot = b.is_production ? '\x1b[90m(protected)\x1b[0m' : '\x1b[90m(unprotected)\x1b[0m';
+      const prot = b.is_production ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === (activeBranch || '');
       const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
