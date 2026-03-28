@@ -3,6 +3,7 @@ import { join } from 'path';
 import { Encryptor } from '../../src/crypto/encryptor';
 import { FileManager } from '../../src/files/fileManager';
 import { deriveResourceId } from '../../src/crypto/resourceId';
+import { generateSeedPhrase, seedPhraseToMasterKey, deriveProjectKey } from '../../src/crypto/keyManager';
 
 describe('Cross-Org Exfiltration Guard', () => {
   const testDir = join(__dirname, '.test-cross-org');
@@ -152,6 +153,173 @@ describe('Cross-Org Exfiltration Guard', () => {
       }
     }
 
+    expect(foreignKeys).toEqual([]);
+  });
+});
+
+describe('Cross-Org Isolation with Real HKDF Keys', () => {
+  const testDir = join(__dirname, '.test-cross-org-hkdf');
+  let fileManager: FileManager;
+
+  beforeEach(() => {
+    mkdirSync(testDir, { recursive: true });
+    fileManager = new FileManager(testDir);
+  });
+
+  afterEach(() => {
+    if (existsSync(testDir)) {
+      rmSync(testDir, { recursive: true });
+    }
+  });
+
+  it('different orgs produce different master keys', () => {
+    const seedA = generateSeedPhrase();
+    const seedB = generateSeedPhrase();
+    const masterA = seedPhraseToMasterKey(seedA);
+    const masterB = seedPhraseToMasterKey(seedB);
+    expect(masterA.equals(masterB)).toBe(false);
+  });
+
+  it('same seed phrase always produces the same master key', () => {
+    const seed = generateSeedPhrase();
+    const m1 = seedPhraseToMasterKey(seed);
+    const m2 = seedPhraseToMasterKey(seed);
+    expect(m1.equals(m2)).toBe(true);
+  });
+
+  it('different orgs produce different project keys via HKDF', () => {
+    const seedA = generateSeedPhrase();
+    const seedB = generateSeedPhrase();
+    const masterA = seedPhraseToMasterKey(seedA);
+    const masterB = seedPhraseToMasterKey(seedB);
+
+    const keyA = deriveProjectKey(masterA, 'same-project', 'org-a');
+    const keyB = deriveProjectKey(masterB, 'same-project', 'org-b');
+    expect(keyA).not.toBe(keyB);
+  });
+
+  it('same org + same project always produces the same project key', () => {
+    const seed = generateSeedPhrase();
+    const master = seedPhraseToMasterKey(seed);
+
+    const key1 = deriveProjectKey(master, 'my-project', 'my-org');
+    const key2 = deriveProjectKey(master, 'my-project', 'my-org');
+    expect(key1).toBe(key2);
+  });
+
+  it('org A encrypted value cannot be decrypted with org B key', () => {
+    const masterA = seedPhraseToMasterKey(generateSeedPhrase());
+    const masterB = seedPhraseToMasterKey(generateSeedPhrase());
+    const keyA = deriveProjectKey(masterA, 'proj', 'org-a');
+    const keyB = deriveProjectKey(masterB, 'proj', 'org-b');
+
+    const encrypted = Encryptor.encrypt('top-secret', keyA);
+    const resourceId = deriveResourceId('', 'SECRET');
+    const capyValue = `capy:${resourceId}:${encrypted}`;
+
+    // Org B's key must NOT decrypt org A's value
+    expect(() => {
+      fileManager.decryptValue(capyValue, keyB);
+    }).toThrow();
+
+    // Org A's key must decrypt its own value
+    expect(fileManager.decryptValue(capyValue, keyA)).toBe('top-secret');
+  });
+
+  it('empty string key cannot decrypt HKDF-derived encrypted values', () => {
+    const master = seedPhraseToMasterKey(generateSeedPhrase());
+    const realKey = deriveProjectKey(master, 'proj', 'org');
+
+    const encrypted = Encryptor.encrypt('my-secret', realKey);
+    const resourceId = deriveResourceId('', 'API_KEY');
+    const capyValue = `capy:${resourceId}:${encrypted}`;
+
+    // Empty string must NOT work as a decryption key
+    expect(() => {
+      fileManager.decryptValue(capyValue, '');
+    }).toThrow();
+  });
+
+  it('HKDF-derived key cannot decrypt values encrypted with empty string key', () => {
+    const master = seedPhraseToMasterKey(generateSeedPhrase());
+    const realKey = deriveProjectKey(master, 'proj', 'org');
+
+    // Legacy: encrypted with empty string
+    const encrypted = Encryptor.encrypt('old-secret', '');
+    const resourceId = deriveResourceId('', 'LEGACY');
+    const capyValue = `capy:${resourceId}:${encrypted}`;
+
+    // Real key must NOT decrypt empty-string-encrypted values
+    expect(() => {
+      fileManager.decryptValue(capyValue, realKey);
+    }).toThrow();
+
+    // But empty string CAN decrypt its own values (proving they are distinct keys)
+    expect(fileManager.decryptValue(capyValue, '')).toBe('old-secret');
+  });
+
+  it('full init-guard simulation: org B rejects org A secrets', () => {
+    const masterA = seedPhraseToMasterKey(generateSeedPhrase());
+    const masterB = seedPhraseToMasterKey(generateSeedPhrase());
+    const keyA = deriveProjectKey(masterA, 'proj-a', 'org-a');
+    const keyB = deriveProjectKey(masterB, 'proj-b', 'org-b');
+
+    // Simulate: .env has secrets encrypted by org A
+    const vars = ['DB_URL', 'API_KEY', 'JWT_SECRET'];
+    const lines = vars.map(name => {
+      const encrypted = Encryptor.encrypt(`value-for-${name}`, keyA);
+      const resourceId = deriveResourceId('', name);
+      return `${name}=capy:${resourceId}:${encrypted}`;
+    });
+    lines.push('PLAINTEXT_VAR=hello');
+    writeFileSync(join(testDir, '.env'), lines.join('\n') + '\n');
+
+    // Read .env as the init flow would
+    const rawEnv = fileManager.readEnvFile();
+
+    // Run the guard with org B's key
+    const encryptedEntries = Object.entries(rawEnv)
+      .filter(([_, value]) => value.startsWith('capy:'));
+    const foreignKeys: string[] = [];
+    for (const [key, value] of encryptedEntries) {
+      try {
+        fileManager.decryptValue(value, keyB);
+      } catch {
+        foreignKeys.push(key);
+      }
+    }
+
+    // All 3 encrypted vars should be flagged as foreign
+    expect(foreignKeys).toEqual(['DB_URL', 'API_KEY', 'JWT_SECRET']);
+
+    // Plaintext should not be in the encrypted entries at all
+    expect(encryptedEntries.find(([k]) => k === 'PLAINTEXT_VAR')).toBeUndefined();
+  });
+
+  it('full init-guard simulation: same org allows recovery', () => {
+    const master = seedPhraseToMasterKey(generateSeedPhrase());
+    const projectKey = deriveProjectKey(master, 'proj', 'org');
+
+    // Simulate: .env has secrets encrypted by the SAME org
+    const encrypted = Encryptor.encrypt('recoverable-secret', projectKey);
+    const resourceId = deriveResourceId('', 'SECRET');
+    writeFileSync(join(testDir, '.env'), `SECRET=capy:${resourceId}:${encrypted}\n`);
+
+    const rawEnv = fileManager.readEnvFile();
+
+    // Run the guard with the same org's key
+    const encryptedEntries = Object.entries(rawEnv)
+      .filter(([_, value]) => value.startsWith('capy:'));
+    const foreignKeys: string[] = [];
+    for (const [varName, value] of encryptedEntries) {
+      try {
+        fileManager.decryptValue(value, projectKey);
+      } catch {
+        foreignKeys.push(varName);
+      }
+    }
+
+    // No foreign keys — recovery allowed
     expect(foreignKeys).toEqual([]);
   });
 });

@@ -188,18 +188,30 @@ program
   .action(async (options) => {
     const { FileManager } = await import('./files/fileManager');
     const { ProjectManager } = await import('./core/projectManager');
+    const { resolveProjectKey } = await import('./crypto/keyResolver');
 
     const fm = new FileManager();
     const pm = new ProjectManager();
-    const decryptKey = pm.readDecryptKey();
+    const keep = pm.readKeepFile();
 
-    if (!decryptKey) {
-      console.error('❌ No .decrypt key found. Run capy-dev first to initialize.');
+    if (!keep) {
+      console.error('No .keep file found. Run capy-dev first to initialize.');
+      process.exit(1);
+    }
+
+    // Resolve key from global keyring (requires prior auth)
+    let encryptionKey: string;
+    try {
+      // Use a placeholder userId — resolveProjectKey only needs it for wrapping key derivation,
+      // and the project key cache should already exist from the init/sync flow
+      encryptionKey = resolveProjectKey(keep.org_id, keep.project_id, '');
+    } catch {
+      console.error('No encryption key found. Run capy-dev first to sync.');
       process.exit(1);
     }
 
     const envPath = options.envPath || '.env';
-    const decrypted = fm.readEncryptedEnvFile(decryptKey.decryption_key, envPath);
+    const decrypted = fm.readEncryptedEnvFile(encryptionKey, envPath);
 
     if (Object.keys(decrypted).length === 0) {
       console.log('No variables found in .env');

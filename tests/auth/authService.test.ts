@@ -85,15 +85,6 @@ describe('AuthService', () => {
       expect(service.getToken()).toBeNull();
     });
 
-    test('should enable mock mode when CAPY_MOCK_AUTH is set and devMode is true', () => {
-      process.env.CAPY_MOCK_AUTH = 'true';
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-
-      new AuthService(undefined, true);
-
-      expect(consoleSpy).toHaveBeenCalledWith('🔫 AuthService: Mock mode enabled (CAPY_MOCK_AUTH=true)');
-      consoleSpy.mockRestore();
-    });
   });
 
   describe('authenticate', () => {
@@ -252,33 +243,6 @@ describe('AuthService', () => {
       });
     });
 
-    test('should use mock authentication when CAPY_MOCK_AUTH is enabled and devMode is true', async () => {
-      process.env.CAPY_MOCK_AUTH = 'true';
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-
-      const service = new AuthService(undefined, true);
-      const result = await service.authenticate('test-org');
-
-      expect(result.success).toBe(true);
-      expect(result.organization_id).toBe('test-org');
-      expect(result.organization_name).toBe('Mock Organization');
-      expect(result.user_id).toBe('mock-user-456');
-      expect(result.user_email).toBe('mock.user@example.com');
-
-      expect(consoleSpy).toHaveBeenCalledWith('🔫 Using mock authentication');
-      consoleSpy.mockRestore();
-    });
-
-    test('should use default organization ID in mock mode', async () => {
-      process.env.CAPY_MOCK_AUTH = 'true';
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-
-      const service = new AuthService(undefined, true);
-      const result = await service.authenticate();
-
-      expect(result.organization_id).toBe('mock-org-123');
-      consoleSpy.mockRestore();
-    });
   });
 
   describe('isAuthenticated', () => {

@@ -378,7 +378,9 @@ export class CapyCommand {
           const pushResult = await this.serviceClient.pushVariables(
             projectResult.project_id,
             localEnv,
-            keep
+            keep,
+            undefined,
+            encryptionKey
           );
 
           if (pushResult.success) {
@@ -498,11 +500,7 @@ export class CapyCommand {
     if (decryptData.env_content) {
       remoteEnvEncrypted = this.fileManager.parseEnvContent(decryptData.env_content);
       for (const [key, value] of Object.entries(remoteEnvEncrypted)) {
-        try {
-          remoteEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
-        } catch {
-          remoteEnv[key] = value;
-        }
+        remoteEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
       }
     }
 
@@ -618,7 +616,8 @@ export class CapyCommand {
       projectState.projectId!,
       finalEnv,
       keep,
-      activeBranch
+      activeBranch,
+      encryptionKey
     );
 
     let finalKeep = keep;

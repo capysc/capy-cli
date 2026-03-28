@@ -411,7 +411,9 @@ describe('CapyCommand', () => {
       expect(mockServiceClient.pushVariables).toHaveBeenCalledWith(
         'proj-123',
         { API_KEY: 'test-key', DB_URL: 'postgres://localhost' },
-        expect.any(Object)
+        expect.any(Object),
+        undefined,
+        'mock-derived-project-key-hex'
       );
       expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
 
@@ -588,7 +590,7 @@ describe('CapyCommand', () => {
       expect(mockPromptEngine.promptForChanges).toHaveBeenCalled();
       expect(mockPromptEngine.confirmSync).toHaveBeenCalled();
       // Push sends the full finalEnv (from applyDecisions), not just changed vars
-      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object), undefined);
+      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object), undefined, 'mock-derived-project-key-hex');
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
       // writeDecryptKey removed — keys now managed via global keyring
     });
