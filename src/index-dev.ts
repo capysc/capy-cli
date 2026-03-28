@@ -203,7 +203,7 @@ program
     const decryptKey = pm.readDecryptKey();
 
     if (!decryptKey) {
-      console.error('❌ No .decrypt key found. Run capy-dev first to initialize.');
+      console.error('No .decrypt key found. Run capy-dev first to initialize.');
       process.exit(1);
     }
 
@@ -232,7 +232,7 @@ program
     const { join } = await import('path');
 
     const capyDir = join(process.cwd(), '.capy');
-    const sessionFiles = ['token', 'decrypt'];
+    const sessionFiles = ['token'];
 
     let cleared = false;
     for (const file of sessionFiles) {
