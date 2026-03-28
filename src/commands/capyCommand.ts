@@ -220,13 +220,15 @@ export class CapyCommand {
       const seedPhrase = generateSeedPhrase();
 
       const rose = (s: string) => `\x1b[38;2;160;107;107m${s}\x1b[0m`;
-      const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+      const red = (s: string) => `\x1b[1;31m${s}\x1b[0m`;
 
-      const phraseLines = [
-        bold('SAVE YOUR RECOVERY PHRASE'),
-        '',
-        seedPhrase,
-        '',
+      console.log('');
+      console.log(red('SAVE YOUR RECOVERY PHRASE'));
+      console.log('');
+      console.log(seedPhrase);
+      console.log('');
+
+      const boxLines = [
         'This recovery phrase is your master key to this',
         'project. This key, and all other keys derived from',
         'it only exists here and now, and cannot be retrieved',
@@ -238,13 +240,11 @@ export class CapyCommand {
         'RECOVER YOUR SECRETS.',
       ];
 
-      const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
-      const maxLen = Math.max(50, ...phraseLines.map(l => stripAnsi(l).length + 2));
+      const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
 
-      console.log('');
       console.log(rose('┌' + '─'.repeat(maxLen) + '┐'));
-      for (const line of phraseLines) {
-        const pad = maxLen - stripAnsi(line).length - 1;
+      for (const line of boxLines) {
+        const pad = maxLen - line.length - 1;
         console.log(`${rose('│')} ${rose(line)}${' '.repeat(Math.max(0, pad))}${rose('│')}`);
       }
       console.log(rose('└' + '─'.repeat(maxLen) + '┘'));
