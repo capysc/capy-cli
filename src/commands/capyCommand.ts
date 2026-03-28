@@ -219,11 +219,10 @@ export class CapyCommand {
     if (!hasOrgKey(selectedOrg.id)) {
       const seedPhrase = generateSeedPhrase();
 
-      // oklch(65.6% 0.241 354.308) ≈ RGB(220, 60, 100)
-      const warn = (s: string) => `\x1b[38;2;220;60;100m${s}\x1b[0m`;
+      const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
 
       const boxLines = [
-        'This recovery phrase generates the master key to',
+        'This recovery phrase generates the master key for',
         'all projects in this organization.',
         '',
         '1) As its owner, only you have it',
