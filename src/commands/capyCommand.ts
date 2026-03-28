@@ -219,16 +219,36 @@ export class CapyCommand {
     if (!hasOrgKey(selectedOrg.id)) {
       const seedPhrase = generateSeedPhrase();
 
-      console.log('\n========================================');
-      console.log('  SAVE YOUR RECOVERY PHRASE');
-      console.log('========================================');
+      const rose = (s: string) => `\x1b[38;2;160;107;107m${s}\x1b[0m`;
+      const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+      const phraseLines = [
+        bold('SAVE YOUR RECOVERY PHRASE'),
+        '',
+        seedPhrase,
+        '',
+        'This recovery phrase is your master key to this',
+        'project. This key, and all other keys derived from',
+        'it only exists here and now, and cannot be retrieved',
+        'when lost.',
+        '',
+        'Capy is a ZERO TRUST secrets platform, which means',
+        'we do not store, and cannot decode your secrets for',
+        'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU',
+        'RECOVER YOUR SECRETS.',
+      ];
+
+      const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+      const maxLen = Math.max(50, ...phraseLines.map(l => stripAnsi(l).length + 2));
+
       console.log('');
-      console.log('  ' + seedPhrase);
+      console.log(rose('┌' + '─'.repeat(maxLen) + '┐'));
+      for (const line of phraseLines) {
+        const pad = maxLen - stripAnsi(line).length - 1;
+        console.log(`${rose('│')} ${rose(line)}${' '.repeat(Math.max(0, pad))}${rose('│')}`);
+      }
+      console.log(rose('└' + '─'.repeat(maxLen) + '┘'));
       console.log('');
-      console.log('  This phrase is the ONLY way to recover');
-      console.log('  your secrets if you lose access.');
-      console.log('  Write it down and store it safely.');
-      console.log('========================================\n');
 
       const { confirmed } = await inquirer.prompt([{
         type: 'confirm',
