@@ -6,6 +6,7 @@ import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import inquirer from 'inquirer';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { resolveProjectKey } from '../crypto/keyResolver';
 
 export class CheckoutCommand {
   private projectManager: ProjectManager;
@@ -62,9 +63,13 @@ export class CheckoutCommand {
     spinner.stop();
 
     const projectId = projectState.projectId!;
+    const orgId = projectState.organizationId!;
+
+    // Resolve encryption key from global keyring
+    const encryptionKey = resolveProjectKey(orgId, projectId, authResult.user_id!);
 
     if (options.create) {
-      await this.createBranch(projectId, branchName, options.production);
+      await this.createBranch(projectId, branchName, encryptionKey, options.production);
     } else {
       // Verify the branch exists
       const branchSpinner = ora(`Switching to ${branchName}...`).start();
@@ -89,22 +94,17 @@ export class CheckoutCommand {
     this.projectManager.writeActiveBranch(branchName);
     const keep = this.projectManager.readKeepFile()!;
 
-    // Sync local .env with the branch's secrets
+    // Pull secrets for the branch
     const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
-    const existingDecryptKey = this.projectManager.readDecryptKey();
-    const encryptionKey = existingDecryptKey?.decryption_key ?? '';
 
     try {
       const decryptData = await this.serviceClient.getDecryptData(projectId, branchName);
       if (decryptData.env_content) {
         const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
+        // Decrypt remote values — fail loudly on wrong key
         const decrypted: Record<string, string> = {};
         for (const [key, value] of Object.entries(remoteEnv)) {
-          try {
-            decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
-          } catch {
-            decrypted[key] = value;
-          }
+          decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
         }
         // Re-encrypt locally for this branch
         this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep, branchName);
@@ -130,6 +130,7 @@ export class CheckoutCommand {
   private async createBranch(
     projectId: string,
     branchName: string,
+    encryptionKey: string,
     isProduction?: boolean,
   ): Promise<void> {
     // Ask about production if not specified
@@ -151,8 +152,6 @@ export class CheckoutCommand {
       // Copy secrets from current branch
       const keep = this.projectManager.readKeepFile()!;
       const currentBranch = this.projectManager.readActiveBranch();
-      const existingDecryptKey = this.projectManager.readDecryptKey();
-      const encryptionKey = existingDecryptKey?.decryption_key ?? '';
 
       try {
         const currentData = await this.serviceClient.getDecryptData(projectId, currentBranch);
@@ -161,13 +160,9 @@ export class CheckoutCommand {
           const currentEnv = this.fileManager.parseEnvContent(currentData.env_content);
           const decrypted: Record<string, string> = {};
           for (const [key, value] of Object.entries(currentEnv)) {
-            try {
-              decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
-            } catch {
-              decrypted[key] = value;
-            }
+            decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
           }
-          await this.serviceClient.pushVariables(projectId, decrypted, keep, branchName);
+          await this.serviceClient.pushVariables(projectId, decrypted, keep, branchName, encryptionKey);
           branchSpinner.stop();
           console.log(`Branch "${branchName}" created with ${Object.keys(decrypted).length} variable(s) copied`);
         } else {
