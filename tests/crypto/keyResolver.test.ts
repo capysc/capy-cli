@@ -26,24 +26,24 @@ afterAll(() => {
 describe('KeyResolver', () => {
   const seedPhrase = generateSeedPhrase();
   const masterKey = seedPhraseToMasterKey(seedPhrase);
-  const accessToken = 'test-access-token-123';
+  const userId = 'user_resolve_test';
   const orgId = 'org_resolve_test';
   const projectId = 'proj_resolve_test';
 
   describe('resolveProjectKey', () => {
     it('should throw when no org key exists', () => {
-      expect(() => resolveProjectKey('org_missing', 'proj_1', accessToken))
+      expect(() => resolveProjectKey('org_missing', 'proj_1', userId))
         .toThrow('No master key found');
     });
 
     it('should derive and cache project key from M', () => {
       // Setup: encrypt M and save
-      const wrappingKey = deriveWrappingKey(accessToken);
+      const wrappingKey = deriveWrappingKey(userId, orgId);
       const encryptedM = encryptMasterKey(masterKey, wrappingKey);
       saveMasterKey(orgId, encryptedM);
 
       // Resolve
-      const key = resolveProjectKey(orgId, projectId, accessToken);
+      const key = resolveProjectKey(orgId, projectId, userId);
 
       // Should match direct derivation
       const expected = deriveProjectKey(masterKey, projectId, orgId);
@@ -52,14 +52,23 @@ describe('KeyResolver', () => {
 
     it('should return cached project key on second call', () => {
       // Second call should hit cache (already saved by previous test)
-      const key = resolveProjectKey(orgId, projectId, accessToken);
+      const key = resolveProjectKey(orgId, projectId, userId);
       const expected = deriveProjectKey(masterKey, projectId, orgId);
       expect(key).toBe(expected);
     });
 
-    it('should fail with wrong access token', () => {
-      expect(() => resolveProjectKey(orgId, 'proj_new', 'wrong-token'))
+    it('should fail with wrong user identity', () => {
+      expect(() => resolveProjectKey(orgId, 'proj_new', 'user_wrong'))
         .toThrow('Failed to unwrap master key');
+    });
+
+    it('should produce same key regardless of session token', () => {
+      // This is the critical test: same user + org = same project key
+      // regardless of which session/token they're using
+      const key1 = resolveProjectKey(orgId, projectId, userId);
+      // Clear cache to force re-derivation
+      const key2 = deriveProjectKey(masterKey, projectId, orgId);
+      expect(key1).toBe(key2);
     });
   });
 

@@ -180,9 +180,10 @@ export function decryptMasterKey(
 }
 
 /**
- * Derives a 32-byte wrapping key from an access token.
- * This is a stepping stone — will be replaced by service co-sign.
+ * Derives a 32-byte wrapping key from stable user identity.
+ * Uses userId + orgId so the wrapping key survives token rotation.
+ * Stepping stone — will be replaced by service co-sign.
  */
-export function deriveWrappingKey(accessToken: string): Buffer {
-  return createHash('sha256').update(accessToken).digest();
+export function deriveWrappingKey(userId: string, orgId: string): Buffer {
+  return createHash('sha256').update(`${userId}:${orgId}`).digest();
 }

@@ -106,7 +106,7 @@ describe('KeyManager', () => {
   describe('encryptMasterKey / decryptMasterKey', () => {
     it('should round-trip correctly', () => {
       const masterKey = seedPhraseToMasterKey(generateSeedPhrase());
-      const wrappingKey = deriveWrappingKey('test-access-token');
+      const wrappingKey = deriveWrappingKey('user_123', 'org_456');
 
       const encrypted = encryptMasterKey(masterKey, wrappingKey);
       const decrypted = decryptMasterKey(encrypted, wrappingKey);
@@ -116,8 +116,8 @@ describe('KeyManager', () => {
 
     it('should fail with wrong wrapping key', () => {
       const masterKey = seedPhraseToMasterKey(generateSeedPhrase());
-      const correctKey = deriveWrappingKey('correct-token');
-      const wrongKey = deriveWrappingKey('wrong-token');
+      const correctKey = deriveWrappingKey('user_123', 'org_456');
+      const wrongKey = deriveWrappingKey('user_999', 'org_other');
 
       const encrypted = encryptMasterKey(masterKey, correctKey);
       expect(() => decryptMasterKey(encrypted, wrongKey)).toThrow();
@@ -125,7 +125,7 @@ describe('KeyManager', () => {
 
     it('should produce different ciphertext each time (random IV)', () => {
       const masterKey = seedPhraseToMasterKey(generateSeedPhrase());
-      const wrappingKey = deriveWrappingKey('test-token');
+      const wrappingKey = deriveWrappingKey('user_123', 'org_456');
 
       const a = encryptMasterKey(masterKey, wrappingKey);
       const b = encryptMasterKey(masterKey, wrappingKey);
@@ -135,14 +135,14 @@ describe('KeyManager', () => {
 
   describe('deriveWrappingKey', () => {
     it('should produce a 32-byte buffer', () => {
-      const key = deriveWrappingKey('some-token');
+      const key = deriveWrappingKey('user_abc', 'org_xyz');
       expect(key).toBeInstanceOf(Buffer);
       expect(key.length).toBe(32);
     });
 
     it('should be deterministic', () => {
-      const a = deriveWrappingKey('same-token');
-      const b = deriveWrappingKey('same-token');
+      const a = deriveWrappingKey('user_same', 'org_same');
+      const b = deriveWrappingKey('user_same', 'org_same');
       expect(a.equals(b)).toBe(true);
     });
   });
