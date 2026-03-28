@@ -217,14 +217,8 @@ export class CapyCommand {
     if (!hasOrgKey(selectedOrg.id)) {
       const seedPhrase = generateSeedPhrase();
 
-      const rose = (s: string) => `\x1b[38;2;160;107;107m${s}\x1b[0m`;
-      const red = (s: string) => `\x1b[1;31m${s}\x1b[0m`;
-
-      console.log('');
-      console.log(red('SAVE YOUR RECOVERY PHRASE'));
-      console.log('');
-      console.log(seedPhrase);
-      console.log('');
+      // oklch(64.5% 0.246 16.439) ≈ RGB(217, 64, 64)
+      const warn = (s: string) => `\x1b[38;2;217;64;64m${s}\x1b[0m`;
 
       const boxLines = [
         'This recovery phrase generates the master key to',
@@ -235,22 +229,35 @@ export class CapyCommand {
         '   retrieved when lost',
         '',
         'Capy is a ZERO TRUST secrets platform, which means',
-        'we do not store, and cannot decode your secrets for',
-        'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU',
-        'RECOVER YOUR SECRETS.',
+        'we do not store and cannot decode your secrets for',
+        'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!',
         '',
         'To learn more about zero-trust:',
         'https://capy.sc/zero-trust',
       ];
 
       const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
+      const title = 'SAVE YOUR RECOVERY PHRASE';
+      const titlePad = Math.max(0, maxLen - title.length);
+      const titleLeft = Math.floor(titlePad / 2);
+      const titleRight = titlePad - titleLeft;
 
-      console.log(rose('┌' + '─'.repeat(maxLen) + '┐'));
+      console.log('');
+      console.log(warn('─'.repeat(maxLen + 2)));
+      console.log(warn(' '.repeat(titleLeft + 1) + title + ' '.repeat(titleRight + 1)));
+      console.log(warn('─'.repeat(maxLen + 2)));
+      console.log('');
+      console.log('');
+      console.log(seedPhrase);
+      console.log('');
+      console.log('');
+
+      console.log(warn('┌' + '─'.repeat(maxLen) + '┐'));
       for (const line of boxLines) {
         const pad = maxLen - line.length - 1;
-        console.log(`${rose('│')} ${rose(line)}${' '.repeat(Math.max(0, pad))}${rose('│')}`);
+        console.log(`${warn('│')} ${warn(line)}${' '.repeat(Math.max(0, pad))}${warn('│')}`);
       }
-      console.log(rose('└' + '─'.repeat(maxLen) + '┘'));
+      console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
       console.log('');
 
       const { confirmed } = await inquirer.prompt([{
