@@ -245,7 +245,7 @@ export class CapyCommand {
       }
 
       const masterKey = seedPhraseToMasterKey(seedPhrase);
-      const wrappingKey = deriveWrappingKey(currentToken!.access_token);
+      const wrappingKey = deriveWrappingKey(authResult.user_id!, selectedOrg.id);
       const encryptedM = encryptMasterKey(masterKey, wrappingKey);
       saveMasterKey(selectedOrg.id, encryptedM);
     }
@@ -256,7 +256,7 @@ export class CapyCommand {
     const encryptionKey = resolveProjectKey(
       selectedOrg.id,
       projectResult.project_id,
-      currentToken!.access_token,
+      authResult.user_id!,
     );
 
     // Create keep file (v2 format)
@@ -458,7 +458,7 @@ export class CapyCommand {
     const encryptionKey = resolveProjectKey(
       projectState.organizationId!,
       projectState.projectId!,
-      token!.access_token,
+      authResult.user_id!,
     );
 
     // Parse remote (encrypted) and decrypt for comparison

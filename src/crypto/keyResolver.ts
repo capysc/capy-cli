@@ -24,7 +24,7 @@ import { CapyError, ERROR_CODES } from '../types/index';
 export function resolveProjectKey(
   orgId: string,
   projectId: string,
-  accessToken: string,
+  userId: string,
 ): string {
   // 1. Check project key cache
   const cached = readProjectKeyCache(orgId, projectId);
@@ -40,7 +40,7 @@ export function resolveProjectKey(
     );
   }
 
-  const wrappingKey = deriveWrappingKey(accessToken);
+  const wrappingKey = deriveWrappingKey(userId, orgId);
   let masterKey: Buffer;
   try {
     masterKey = decryptMasterKey(encryptedM, wrappingKey);
