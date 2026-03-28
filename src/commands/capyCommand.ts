@@ -219,8 +219,8 @@ export class CapyCommand {
     if (!hasOrgKey(selectedOrg.id)) {
       const seedPhrase = generateSeedPhrase();
 
-      // oklch(64.5% 0.246 16.439) ≈ RGB(217, 64, 64)
-      const warn = (s: string) => `\x1b[38;2;217;64;64m${s}\x1b[0m`;
+      // oklch(65.6% 0.241 354.308) ≈ RGB(220, 60, 100)
+      const warn = (s: string) => `\x1b[38;2;220;60;100m${s}\x1b[0m`;
 
       const boxLines = [
         'This recovery phrase generates the master key to',
