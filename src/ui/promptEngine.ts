@@ -30,7 +30,7 @@ export class PromptEngine {
     return projectName;
   }
 
-  async promptForChanges(changeSet: ChangeSet): Promise<UserDecisions> {
+  async promptForChanges(changeSet: ChangeSet, branch?: string): Promise<UserDecisions> {
     const decisions: UserDecisions = {
       pushVariables: [],
       pullVariables: [],
@@ -42,37 +42,37 @@ export class PromptEngine {
 
     // Prompt for new local variables
     if (changeSet.newLocal.length > 0) {
-      console.log('\n⚠ Found ' + changeSet.newLocal.length + ' new local variable(s):');
+      console.log('\nFound ' + changeSet.newLocal.length + ' new local variable(s):');
       this.displayVariableTable(changeSet.newLocal);
 
       const { pushAll } = await inquirer.prompt([
         {
           type: 'confirm',
           name: 'pushAll',
-          message: 'Push all local variables to capy?',
+          message: branch ? `Push all local variables to capy (${branch})?` : 'Push all local variables to capy?',
           default: false
         }
       ]);
 
       if (pushAll) {
         decisions.pushVariables = changeSet.newLocal.map(v => v.name);
-        console.log(`✓ Will push all ${changeSet.newLocal.length} local variables`);
+        console.log(`Will push all ${changeSet.newLocal.length} local variables`);
       } else {
         for (const variable of changeSet.newLocal) {
           const { push } = await inquirer.prompt([
             {
               type: 'confirm',
               name: 'push',
-              message: `${variable.name}: Push to capy?`,
+              message: branch ? `${variable.name}: Push to capy (${branch})?` : `${variable.name}: Push to capy?`,
               default: false
             }
           ]);
 
           if (push) {
             decisions.pushVariables.push(variable.name);
-            console.log(`✓ Will push ${variable.name}`);
+            console.log(`Will push ${variable.name}`);
           } else {
-            console.log(`⚠ Will keep ${variable.name} local only`);
+            console.log(`Will keep ${variable.name} local only`);
           }
         }
       }
@@ -80,7 +80,7 @@ export class PromptEngine {
 
     // Prompt for new remote variables
     if (changeSet.newRemote.length > 0) {
-      console.log('\n⚠ Found ' + changeSet.newRemote.length + ' new remote variable(s):');
+      console.log('\nFound ' + changeSet.newRemote.length + ' new remote variable(s):');
       this.displayVariableTable(changeSet.newRemote);
 
       const { pullAll } = await inquirer.prompt([
@@ -94,7 +94,7 @@ export class PromptEngine {
 
       if (pullAll) {
         decisions.pullVariables = changeSet.newRemote.map(v => v.name);
-        console.log(`✓ Will pull all ${changeSet.newRemote.length} remote variables`);
+        console.log(`Will pull all ${changeSet.newRemote.length} remote variables`);
       } else {
         for (const variable of changeSet.newRemote) {
           const { pull } = await inquirer.prompt([
@@ -115,7 +115,7 @@ export class PromptEngine {
 
     // Prompt for deleted variables
     if (changeSet.deleted.length > 0) {
-      console.log('\n🗑️  Found ' + changeSet.deleted.length + ' deleted variable(s) on remote:');
+      console.log('\nFound ' + changeSet.deleted.length + ' deleted variable(s) on remote:');
       this.displayDeletedVariableTable(changeSet.deleted);
 
       const { batchAction } = await inquirer.prompt([
@@ -134,10 +134,10 @@ export class PromptEngine {
 
       if (batchAction === 'delete_all') {
         decisions.deleteLocal = changeSet.deleted.map(v => v.name);
-        console.log(`✓ Will delete all ${changeSet.deleted.length} variables from local`);
+        console.log(`Will delete all ${changeSet.deleted.length} variables from local`);
       } else if (batchAction === 'restore_all') {
         decisions.pushVariables.push(...changeSet.deleted.map(v => v.name));
-        console.log(`✓ Will restore all ${changeSet.deleted.length} variables to keep`);
+        console.log(`Will restore all ${changeSet.deleted.length} variables to keep`);
       } else {
         for (const variable of changeSet.deleted) {
           const { action } = await inquirer.prompt([
@@ -156,12 +156,12 @@ export class PromptEngine {
 
           if (action === 'delete') {
             decisions.deleteLocal.push(variable.name);
-            console.log(`✓ Will delete ${variable.name} from local`);
+            console.log(`Will delete ${variable.name} from local`);
           } else if (action === 'restore') {
             decisions.pushVariables.push(variable.name);
-            console.log(`✓ Will restore ${variable.name} to keep`);
+            console.log(`Will restore ${variable.name} to keep`);
           } else {
-            console.log(`⚠ Will keep ${variable.name} locally (out of sync with remote)`);
+            console.log(`Will keep ${variable.name} locally (out of sync with remote)`);
           }
         }
       }
@@ -169,7 +169,7 @@ export class PromptEngine {
 
     // Prompt for locally deleted variables
     if (changeSet.deletedLocal.length > 0) {
-      console.log('\n🗑️  Found ' + changeSet.deletedLocal.length + ' variable(s) deleted locally:');
+      console.log('\nFound ' + changeSet.deletedLocal.length + ' variable(s) deleted locally:');
       this.displayLocallyDeletedVariableTable(changeSet.deletedLocal);
 
       const { batchAction } = await inquirer.prompt([
@@ -188,10 +188,10 @@ export class PromptEngine {
 
       if (batchAction === 'delete_all') {
         decisions.deleteRemote = changeSet.deletedLocal.map(v => v.name);
-        console.log(`✓ Will delete all ${changeSet.deletedLocal.length} variables from remote`);
+        console.log(`Will delete all ${changeSet.deletedLocal.length} variables from remote`);
       } else if (batchAction === 'restore_all') {
         decisions.pullVariables.push(...changeSet.deletedLocal.map(v => v.name));
-        console.log(`✓ Will restore all ${changeSet.deletedLocal.length} variables to local`);
+        console.log(`Will restore all ${changeSet.deletedLocal.length} variables to local`);
       } else {
         for (const variable of changeSet.deletedLocal) {
           const { action } = await inquirer.prompt([
@@ -210,12 +210,12 @@ export class PromptEngine {
 
           if (action === 'delete') {
             decisions.deleteRemote.push(variable.name);
-            console.log(`✓ Will delete ${variable.name} from remote`);
+            console.log(`Will delete ${variable.name} from remote`);
           } else if (action === 'restore') {
             decisions.pullVariables.push(variable.name);
-            console.log(`✓ Will restore ${variable.name} to local`);
+            console.log(`Will restore ${variable.name} to local`);
           } else {
-            console.log(`⚠ Will keep ${variable.name} on remote only`);
+            console.log(`Will keep ${variable.name} on remote only`);
           }
         }
       }
@@ -223,7 +223,7 @@ export class PromptEngine {
 
     // Prompt for conflicts — Phase 1: resolve local vs remote for each
     if (changeSet.conflicts.length > 0) {
-      console.log('\n⚠ Found ' + changeSet.conflicts.length + ' conflict(s):');
+      console.log('\nFound ' + changeSet.conflicts.length + ' conflict(s):');
       this.displayConflictTable(changeSet.conflicts);
 
       if (changeSet.conflicts.length > 1) {
@@ -280,14 +280,14 @@ export class PromptEngine {
 
       // Phase 2: for variables kept local, decide which to push
       if (decisions.keepLocal.length > 0) {
-        console.log(`\n${decisions.keepLocal.length} variable(s) kept local. Push to capy?`);
+        console.log(`\n${decisions.keepLocal.length} variable(s) kept local. Push to capy${branch ? ` (${branch})` : ''}?`);
 
         if (decisions.keepLocal.length === 1) {
           const varName = decisions.keepLocal[0];
           const { push } = await inquirer.prompt([{
             type: 'confirm',
             name: 'push',
-            message: `Push ${varName} to capy?`,
+            message: branch ? `Push ${varName} to capy (${branch})?` : `Push ${varName} to capy?`,
             default: true
           }]);
           if (push) {
@@ -297,7 +297,7 @@ export class PromptEngine {
           const { pushChoice } = await inquirer.prompt([{
             type: 'list',
             name: 'pushChoice',
-            message: 'Push local values to capy?',
+            message: branch ? `Push local values to capy (${branch})?` : 'Push local values to capy?',
             choices: [
               { name: 'Push all', value: 'all' },
               { name: 'Choose individually', value: 'individual' },
@@ -344,30 +344,30 @@ export class PromptEngine {
     }
 
     // Show summary for multiple types of changes
-    console.log('\n' + '📋 Summary of changes:');
+    console.log('\n' + 'Summary of changes:');
 
     if (decisions.pushVariables.length > 0) {
-      console.log(`✓ Push ${decisions.pushVariables.length} variable(s) to keep`);
+      console.log(`- Push ${decisions.pushVariables.length} variable(s) to keep`);
     }
 
     if (decisions.pullVariables.length > 0) {
-      console.log(`✓ Pull ${decisions.pullVariables.length} variable(s) from keep`);
+      console.log(`- Pull ${decisions.pullVariables.length} variable(s) from keep`);
     }
 
     if (decisions.deleteLocal.length > 0) {
-      console.log(`✓ Delete ${decisions.deleteLocal.length} variable(s) from local .env`);
+      console.log(`- Delete ${decisions.deleteLocal.length} variable(s) from local .env`);
     }
 
     if (decisions.deleteRemote.length > 0) {
-      console.log(`✓ Delete ${decisions.deleteRemote.length} variable(s) from remote`);
+      console.log(`- Delete ${decisions.deleteRemote.length} variable(s) from remote`);
     }
 
     if (decisions.keepLocal.length > 0) {
-      console.log(`✓ Keep ${decisions.keepLocal.length} local value(s)`);
+      console.log(`- Keep ${decisions.keepLocal.length} local value(s)`);
     }
 
     if (decisions.keepRemote.length > 0) {
-      console.log(`✓ Use ${decisions.keepRemote.length} remote value(s)`);
+      console.log(`- Use ${decisions.keepRemote.length} remote value(s)`);
     }
 
     const { confirm } = await inquirer.prompt([
@@ -806,15 +806,15 @@ export class PromptEngine {
   }
 
   displaySuccess(message: string): void {
-    console.log('✓ ' + message);
+    console.log(message);
   }
 
   displayError(message: string): void {
-    console.log('❌ ' + message);
+    console.log(message);
   }
 
   displayWarning(message: string): void {
-    console.log('⚠ ' + message);
+    console.log(message);
   }
 
   displayInfo(message: string): void {

@@ -455,10 +455,10 @@ describe('SyncEngine', () => {
 
       const result = syncEngine.formatSyncSummary(changeSet);
 
-      expect(result).toContain('📤 2 new local variable(s)');
-      expect(result).toContain('📥 1 new remote variable(s)');
-      expect(result).toContain('⚠️  1 conflict(s)');
-      expect(result).toContain('✓ 3 unchanged');
+      expect(result).toContain('2 new local variable(s)');
+      expect(result).toContain('1 new remote variable(s)');
+      expect(result).toContain('1 conflict(s)');
+      expect(result).toContain('3 unchanged');
     });
 
     test('should handle empty change set', () => {
@@ -488,7 +488,7 @@ describe('SyncEngine', () => {
 
       const result = syncEngine.formatSyncSummary(changeSet);
 
-      expect(result).toBe('📤 1 new local variable(s)');
+      expect(result).toBe('1 new local variable(s)');
     });
   });
 

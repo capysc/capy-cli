@@ -276,11 +276,11 @@ export class SyncEngine {
     const lines: string[] = [];
     
     if (changeSet.newLocal.length > 0) {
-      lines.push(`📤 ${changeSet.newLocal.length} new local variable(s)`);
+      lines.push(`${changeSet.newLocal.length} new local variable(s)`);
     }
     
     if (changeSet.newRemote.length > 0) {
-      lines.push(`📥 ${changeSet.newRemote.length} new remote variable(s)`);
+      lines.push(`${changeSet.newRemote.length} new remote variable(s)`);
     }
     
     if (changeSet.deleted.length > 0) {
@@ -288,11 +288,11 @@ export class SyncEngine {
     }
     
     if (changeSet.conflicts.length > 0) {
-      lines.push(`⚠️  ${changeSet.conflicts.length} conflict(s)`);
+      lines.push(`${changeSet.conflicts.length} conflict(s)`);
     }
     
     if (changeSet.unchanged.length > 0) {
-      lines.push(`✓ ${changeSet.unchanged.length} unchanged`);
+      lines.push(`${changeSet.unchanged.length} unchanged`);
     }
 
     return lines.join('\n');

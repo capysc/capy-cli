@@ -37,6 +37,15 @@ export class CapyCommand {
     this.serviceClient = new ServiceClient(undefined, devMode);
     this.syncEngine = new SyncEngine();
     this.promptEngine = new PromptEngine();
+
+    // Auto-refresh token on 401
+    this.serviceClient.setTokenRefresher(async () => {
+      const refreshed = await this.authService.refreshToken();
+      if (refreshed) {
+        return this.authService.getToken();
+      }
+      return null;
+    });
   }
 
   async execute(): Promise<void> {
@@ -51,18 +60,16 @@ export class CapyCommand {
         await this.syncProject(projectState);
       }
     } catch (error: any) {
-      if (error?.name === 'ExitPromptError') {
-        process.exit(0);
-      }
-      this.handleError(error);
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      displayErrorAndExit(error);
     }
   }
 
   private async initializeProject(): Promise<void> {
-    console.log('⚠  No .keep file found - initializing project...');
+    console.log('No .keep file found - initializing project...');
 
     // Authenticate first
-    const spinner = ora('🔐 Authenticating...').start();
+    const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate();
 
     if (!authResult.success) {
@@ -80,7 +87,7 @@ export class CapyCommand {
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
-        console.log(`\n🔑 Bearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
+        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
     }
 
@@ -98,7 +105,7 @@ export class CapyCommand {
 
     if (orgs.length === 0) {
       // No orgs — prompt to create one
-      console.log('\n🏢 No organization found. Let\'s create one.');
+      console.log('\nNo organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
     } else if (currentOrg) {
       // Authenticated with an org — offer to use it, switch, or create new
@@ -193,7 +200,7 @@ export class CapyCommand {
     );
     initSpinner.succeed(`Project "${projectName}" created`);
 
-    const keySpinner = ora('🔑 Generating encryption keys...').start();
+    const keySpinner = ora('Generating encryption keys...').start();
 
     // Create keep file (v2 format)
     const keep: KeepFile = {
@@ -251,8 +258,45 @@ export class CapyCommand {
       const localVarCount = Object.keys(localEnv).length;
 
       if (localVarCount > 0) {
-        console.log(`\n📋 Found existing .env file with ${localVarCount} variable(s)`);
-        const syncSpinner = ora('🔄 Syncing local variables to keep...').start();
+        // Cross-org exfiltration guard: if .env has encrypted values, verify they
+        // belong to this project's key. This catches the attack where a rogue user
+        // deletes .keep/.capy and re-initializes to a different org. But if the user
+        // lost their metadata and re-inits to the SAME org/project, the key matches
+        // and their secrets are recoverable.
+        const encryptedEntries = Object.entries(localEnv)
+          .filter(([_, value]) => value.startsWith('capy:'));
+
+        if (encryptedEntries.length > 0) {
+          const foreignKeys: string[] = [];
+          for (const [key, value] of encryptedEntries) {
+            try {
+              this.fileManager.decryptValue(value, encryptionKey);
+            } catch {
+              foreignKeys.push(key);
+            }
+          }
+
+          if (foreignKeys.length > 0) {
+            console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted with a different project's key:`);
+            for (const key of foreignKeys) {
+              console.error(`  ${key}`);
+            }
+            console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
+            throw new CapyError(
+              'Cannot push secrets encrypted with a different project\'s key to a new org',
+              ERROR_CODES.PERMISSION_DENIED,
+              { foreignKeys }
+            );
+          }
+
+          // Values are encrypted but belong to this project — decrypt them for push
+          for (const [key, value] of encryptedEntries) {
+            localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
+          }
+        }
+
+        console.log(`\nFound existing .env file with ${localVarCount} variable(s)`);
+        const syncSpinner = ora('Syncing local variables to keep...').start();
 
         try {
           const pushResult = await this.serviceClient.pushVariables(
@@ -268,6 +312,9 @@ export class CapyCommand {
               last_sync: new Date().toISOString(),
               synced_variables: Object.keys(localEnv)
             });
+
+            // Backup plaintext .env before encrypting
+            this.fileManager.backupPlaintextEnv(this.options.envPath);
 
             // Encrypt the local .env file
             this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep);
@@ -287,29 +334,62 @@ export class CapyCommand {
             // Show what was synced
             console.log('');
             for (const varName of Object.keys(localEnv)) {
-              console.log(`  📤 ${varName}`);
+              console.log(`  ${varName}`);
             }
 
-            console.log('\n✓ Ready to work!');
-            await this.promptDeployOrContinue(Object.keys(localEnv));
+            console.log('\nReady to work!');
+            await CapyCommand.createDeployPR(Object.keys(localEnv));
           } else {
             syncSpinner.fail('Failed to sync variables');
           }
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
-          console.log('⚠️  You can run \'capy\' again to retry syncing');
+          console.log('You can run \'capy\' again to retry syncing');
         }
       }
     }
 
-    console.log('\n✓ Ready to work!');
+    console.log('\nReady to work!');
+  }
+
+  private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
+    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+    const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+    // Shimmer effect: gradient through teal/cyan shades
+    const shimmer = (s: string) => {
+      const colors = [43, 44, 45, 80, 81, 116, 117, 152, 153];
+      return s.split('').map((ch, i) => {
+        const color = colors[i % colors.length];
+        return `\x1b[38;5;${color}m${ch}\x1b[0m`;
+      }).join('');
+    };
+
+    const content = [
+      `Project:      ${bold(projectName)}`,
+      `Organization: ${orgName}`,
+      `Branch:       ${branch || grey('none')}`,
+      '',
+      shimmer(`Welcome ${userName}`),
+    ];
+
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const maxLen = Math.max(40, ...content.map(l => stripAnsi(l).length + 2));
+
+    console.log('');
+    console.log(grey('Capy CLI'));
+    console.log(grey('┌' + '─'.repeat(maxLen) + '┐'));
+    for (const line of content) {
+      const pad = maxLen - stripAnsi(line).length - 1;
+      console.log(`${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
+    }
+    console.log(grey('└' + '─'.repeat(maxLen) + '┘'));
+    console.log('');
   }
 
   private async syncProject(projectState: ProjectState): Promise<void> {
-    console.log(`📁 Project: ${projectState.projectName}`);
-
     // Authenticate
-    const spinner = ora('🔐 Authenticating...').start();
+    const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);
 
     if (!authResult.success) {
@@ -320,14 +400,21 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Welcome ${authResult.user_first_name || authResult.user_email}`);
+    spinner.stop();
+
+    this.displayHeader(
+      projectState.projectName || 'unknown',
+      authResult.organization_name || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name || authResult.organization_id || '',
+      authResult.user_first_name || authResult.user_email || '',
+      projectState.activeBranch,
+    );
 
     // Set token for service client
     const token = this.authService.getToken();
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
-        console.log(`\n🔑 Bearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
+        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
     }
 
@@ -393,10 +480,11 @@ export class CapyCommand {
       }
     }
 
-    fetchSpinner.succeed(`Retrieved remote .env (${Object.keys(remoteEnv).length} variables)`);
+    const branchLabel = activeBranch ? ` (${activeBranch})` : '';
+    fetchSpinner.succeed(`Retrieved remote .env${branchLabel} (${Object.keys(remoteEnv).length} variables)`);
 
     if (this.devMode) {
-      console.log('\n📦 Remote .env (dev mode):');
+      console.log(`\nRemote .env${branchLabel} (dev mode):`);
       if (Object.keys(remoteEnvEncrypted).length === 0) {
         console.log('  (empty)');
       } else {
@@ -416,14 +504,21 @@ export class CapyCommand {
           try {
             localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
           } catch {
-            localEnv[key] = value;
+            // Value is encrypted with a different project's key — reject
+            throw new CapyError(
+              `"${key}" is encrypted with a different project's key and cannot be used in this project. ` +
+              `This can happen if you reset project metadata (.keep/.capy) without clearing the .env file.`,
+              ERROR_CODES.PERMISSION_DENIED,
+              { variable: key }
+            );
           }
         } else {
           localEnv[key] = value;
         }
       }
-    } catch {
-      console.warn('⚠️  Failed to read local .env');
+    } catch (error: any) {
+      if (error instanceof CapyError) throw error;
+      console.warn('Failed to read local .env');
       localEnv = {};
     }
 
@@ -465,7 +560,7 @@ export class CapyCommand {
     }
 
     // Prompt for decisions
-    const decisions = await this.promptEngine.promptForChanges(changeSet);
+    const decisions = await this.promptEngine.promptForChanges(changeSet, activeBranch);
 
     // Validate decisions
     const validationErrors = this.syncEngine.validateDecisions(decisions, changeSet);
@@ -486,7 +581,7 @@ export class CapyCommand {
     }
 
     // Perform sync operations
-    const syncSpinner = ora('🔄 Syncing...').start();
+    const syncSpinner = ora('Syncing...').start();
 
     // Apply decisions to create final env (all variables, merged)
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
@@ -516,7 +611,7 @@ export class CapyCommand {
 
     // Write encrypted .env file
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
-    syncSpinner.text = `Updated encrypted .env with ${Object.keys(finalEnv).length} total variables`;
+    syncSpinner.text = `Updated encrypted .env${branchLabel} with ${Object.keys(finalEnv).length} total variables`;
 
     // Update decrypt key
     const decryptKey = this.syncEngine.createDecryptKey(
@@ -550,30 +645,12 @@ export class CapyCommand {
       this.promptEngine.displaySuccess(`Resolved ${result.conflicts.length} conflict(s)`);
     }
 
-    console.log(`\n✓ Total: ${result.totalVariables} variables synchronized`);
+    console.log(`\nTotal: ${result.totalVariables} variables synchronized`);
 
     const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
     if (changedVars.length > 0) {
-      await this.promptDeployOrContinue(changedVars, activeBranch);
+      await CapyCommand.createDeployPR(changedVars);
     }
-  }
-
-  private async promptDeployOrContinue(syncedVars: string[], branch?: string): Promise<void> {
-    const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    const targetLabel = branch || gitBranch;
-    const { action } = await inquirer.prompt([{
-      type: 'list',
-      name: 'action',
-      message: 'Want to deploy your changes to an environment?',
-      choices: [
-        { name: 'Continue working', value: 'continue' },
-        { name: `Create a deployment PR → "${targetLabel}"`, value: 'pr' },
-      ],
-    }]);
-
-    if (action !== 'pr') return;
-
-    await CapyCommand.createDeployPR(syncedVars);
   }
 
   /**
@@ -599,18 +676,20 @@ export class CapyCommand {
     }
 
     const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    const targetBranch = keepFile.active_branch || baseBranch;
+    const targetBranch = pm.readActiveBranch() || baseBranch;
 
-    // Confirmation prompt
     const { confirm } = await inquirer.prompt([{
       type: 'list',
       name: 'confirm',
       message: `Deploy your secrets to a git branch?`,
       choices: [
-        { name: `Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
-        { name: 'Another git branch', value: 'other' },
+        { name: `Yes - Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
+        { name: 'Yes - Another git branch', value: 'other' },
+        { name: 'No  - Continue working', value: 'cancel' },
       ],
     }]);
+
+    if (confirm === 'cancel') return;
 
     if (confirm === 'other') {
       console.log('');
@@ -656,37 +735,11 @@ export class CapyCommand {
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
     } catch (error: any) {
-      if (error?.name === 'ExitPromptError') {
-        process.exit(0);
-      }
-      console.error(`Failed to create PR: ${error.message}`);
+      if (error?.name === 'ExitPromptError') process.exit(0);
+      console.log(`Failed to create PR: ${error.message}`);
     }
   }
 
-  private handleError(error: any): void {
-    if (error instanceof CapyError) {
-      this.promptEngine.displayError(error.message);
-
-      if (error.code === ERROR_CODES.AUTH_FAILED) {
-        console.log('\nPlease ensure:');
-        console.log('1. You have internet connectivity');
-        console.log('2. You have a Capy account');
-      } else if (error.code === ERROR_CODES.PERMISSION_DENIED) {
-        console.log('\nContact your administrator to grant access to this project.');
-      } else if (error.code === ERROR_CODES.NETWORK_ERROR) {
-        console.log('\nWorking offline with local .env file');
-        console.log('Run \'capy\' again when connection is restored');
-      }
-    } else {
-      this.promptEngine.displayError(error.message || 'An unexpected error occurred');
-
-      if (this.options.verbose) {
-        console.error(error);
-      }
-    }
-
-    process.exit(1);
-  }
 
   private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
     const { orgName } = await inquirer.prompt([{

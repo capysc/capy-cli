@@ -18,6 +18,7 @@ export class ServiceClient {
   private apiUrl: string;
   private token: ServiceToken | null = null;
   private mockMode: boolean;
+  private onTokenExpired?: () => Promise<ServiceToken | null>;
 
   constructor(apiUrl?: string, devMode: boolean = false) {
     // Mock mode requires BOTH dev entrypoint AND explicit env var
@@ -32,7 +33,11 @@ export class ServiceClient {
     this.token = token;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number }): Promise<T> {
+  setTokenRefresher(refresher: () => Promise<ServiceToken | null>): void {
+    this.onTokenExpired = refresher;
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -72,6 +77,14 @@ export class ServiceClient {
       const data = await res.json().catch(() => ({})) as Record<string, any>;
 
       if (res.status === 401) {
+        // Try refreshing token once
+        if (!options?._retried && this.onTokenExpired) {
+          const newToken = await this.onTokenExpired();
+          if (newToken) {
+            this.token = newToken;
+            return this.request<T>(method, path, body, { ...options, _retried: true });
+          }
+        }
         const detail = data.error || 'Unknown auth error';
         throw new CapyError(
           `Authentication failed: ${detail}`,
@@ -349,6 +362,18 @@ export class ServiceClient {
     return this.request<Branch>(
       'POST', `/projects/${projectId}/branches`,
       { name, is_production: isProduction },
+    );
+  }
+
+  async deleteBranch(projectId: string, branchId: string): Promise<void> {
+    if (this.mockMode) {
+      console.log(`🔫 Mock: Deleting branch "${branchId}" from project "${projectId}"`);
+      await this.mockDelay();
+      return;
+    }
+
+    await this.request<{ success: boolean }>(
+      'DELETE', `/projects/${projectId}/branches/${branchId}`,
     );
   }
 

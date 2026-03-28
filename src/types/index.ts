@@ -10,7 +10,6 @@ export interface KeepFile {
   org_id: string;
   project_id: string;
   project_name: string;
-  active_branch?: string;
   created_at: string;
   last_sync: string;
   variables: Record<string, KeepVariableEntry[]>;

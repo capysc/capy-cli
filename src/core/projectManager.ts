@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
 import { ProjectState, KeepFile, KeepVariableEntry, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 
@@ -22,8 +22,6 @@ export class ProjectManager {
     let organizationId: string | undefined;
     let projectId: string | undefined;
 
-    let activeBranch: string | undefined;
-
     if (hasKeepFile) {
       try {
         const keepContent = readFileSync(keepPath, 'utf-8');
@@ -32,7 +30,6 @@ export class ProjectManager {
         projectName = keep.project_name;
         organizationId = keep.org_id;
         projectId = keep.project_id;
-        activeBranch = keep.active_branch;
       } catch (error) {
         if (error instanceof CapyError) throw error;
         throw new CapyError(
@@ -51,7 +48,7 @@ export class ProjectManager {
       projectName,
       organizationId,
       projectId,
-      activeBranch,
+      activeBranch: this.readActiveBranch(),
     };
   }
 
@@ -65,6 +62,28 @@ export class ProjectManager {
 
   getDecryptPath(): string {
     return join(this.getCapyDir(), 'decrypt');
+  }
+
+  getActiveBranchPath(): string {
+    return join(this.getCapyDir(), 'branch');
+  }
+
+  readActiveBranch(): string | undefined {
+    const branchPath = this.getActiveBranchPath();
+    if (!existsSync(branchPath)) return undefined;
+    try {
+      const content = readFileSync(branchPath, 'utf-8').trim();
+      return content || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  writeActiveBranch(branch: string | undefined): void {
+    const capyDir = this.getCapyDir();
+    if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
+    const branchPath = this.getActiveBranchPath();
+    writeFileSync(branchPath, branch || '', { encoding: 'utf-8', mode: 0o600 });
   }
 
   getSyncStatePath(): string {

@@ -465,4 +465,102 @@ describe('FileManager', () => {
       expect(mockMkdirSync).not.toHaveBeenCalled();
     });
   });
+
+  describe('backupPlaintextEnv', () => {
+    test('should backup plaintext .env to .env.pre-capy.old with warning header', () => {
+      const envContent = 'DB_URL=postgres://localhost\nAPI_KEY=sk_live_abc123\n';
+      mockExistsSync.mockImplementation((p) => {
+        if (String(p) === join(testRoot, '.env')) return true;
+        return false;
+      });
+      mockReadFileSync.mockReturnValue(envContent);
+
+      const result = fileManager.backupPlaintextEnv();
+
+      expect(result).toBe(true);
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        join(testRoot, '.env.pre-capy.old'),
+        expect.stringContaining('From Capy'),
+        'utf-8'
+      );
+      // Verify the original content is included after the header
+      const writtenContent = (mockWriteFileSync as jest.Mock).mock.calls.find(
+        (c: any[]) => String(c[0]).endsWith('.env.pre-capy.old')
+      )?.[1] as string;
+      expect(writtenContent).toContain('# DB_URL=postgres://localhost');
+      expect(writtenContent).toContain('# API_KEY=sk_live_abc123');
+      expect(writtenContent).toContain('unencrypted');
+    });
+
+    test('should add .env.pre-capy.old to .gitignore', () => {
+      mockExistsSync.mockImplementation((p) => {
+        if (String(p) === join(testRoot, '.env')) return true;
+        return false;
+      });
+      mockReadFileSync.mockReturnValue('KEY=plaintext_value\n');
+
+      fileManager.backupPlaintextEnv();
+
+      expect(mockAppendFileSync).toHaveBeenCalledWith(
+        join(testRoot, '.gitignore'),
+        expect.stringContaining('.env.pre-capy.old'),
+        'utf-8'
+      );
+    });
+
+    test('should return false if .env does not exist', () => {
+      mockExistsSync.mockReturnValue(false);
+
+      const result = fileManager.backupPlaintextEnv();
+
+      expect(result).toBe(false);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    test('should return false if .env is already encrypted', () => {
+      mockExistsSync.mockImplementation((p) => {
+        if (String(p) === join(testRoot, '.env')) return true;
+        return false;
+      });
+      mockReadFileSync.mockReturnValue(
+        'DB_URL=capy:abc12:encrypted_data\nAPI_KEY=capy:def34:encrypted_data\n'
+      );
+
+      const result = fileManager.backupPlaintextEnv();
+
+      expect(result).toBe(false);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    test('should backup if mix of plaintext and encrypted values', () => {
+      mockExistsSync.mockImplementation((p) => {
+        if (String(p) === join(testRoot, '.env')) return true;
+        return false;
+      });
+      mockReadFileSync.mockReturnValue(
+        'DB_URL=capy:abc12:encrypted_data\nNEW_KEY=plaintext_value\n'
+      );
+
+      const result = fileManager.backupPlaintextEnv();
+
+      expect(result).toBe(true);
+    });
+
+    test('should use custom path when provided', () => {
+      const customPath = '/custom/.env';
+      mockExistsSync.mockImplementation((p) => {
+        if (String(p) === customPath) return true;
+        return false;
+      });
+      mockReadFileSync.mockReturnValue('KEY=value\n');
+
+      fileManager.backupPlaintextEnv(customPath);
+
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        '/custom/.env.pre-capy.old',
+        expect.stringContaining('# KEY=value'),
+        'utf-8'
+      );
+    });
+  });
 });

@@ -47,7 +47,14 @@ export class FileManager {
         try {
           decrypted[key] = this.decryptValue(value, decryptionKey);
         } catch (decryptError) {
-          console.warn(`⚠️  Failed to decrypt ${key}, keeping original value`);
+          if (value.startsWith('capy:')) {
+            throw new CapyError(
+              `Cannot decrypt "${key}": encrypted with a different project's key. This value cannot be transferred between orgs.`,
+              ERROR_CODES.PERMISSION_DENIED,
+              { variable: key }
+            );
+          }
+          // Non-capy value that failed — keep as-is (likely plaintext)
           decrypted[key] = value;
         }
       }
@@ -63,7 +70,7 @@ export class FileManager {
 
   writeEnvFile(variables: Record<string, string>, path?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`📝 Writing ${Object.keys(variables).length} variables to ${envPath}`);
+    console.log(`Writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -73,7 +80,7 @@ export class FileManager {
 
       this.ensureDirectoryExists(dirname(envPath));
       writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`✅ Successfully wrote .env file`);
+      console.log(`Successfully wrote .env file`);
 
       if (backup) {
         this.removeBackup(backup);
@@ -92,7 +99,7 @@ export class FileManager {
 
   writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null, branch?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`🔐 Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
+    console.log(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -102,7 +109,16 @@ export class FileManager {
         let finalValue: string;
 
         if (value.startsWith('capy:') || this.isSnippetEncrypted(value)) {
-          // Already encrypted, keep as is
+          // Already encrypted — verify it belongs to THIS project's key
+          try {
+            this.decryptValue(value, encryptionKey);
+          } catch {
+            throw new CapyError(
+              `Cannot write "${key}": encrypted with a different project's key. This value cannot be transferred between orgs.`,
+              ERROR_CODES.PERMISSION_DENIED,
+              { variable: key }
+            );
+          }
           finalValue = value;
         } else {
           // Encrypt the plain text value
@@ -115,13 +131,16 @@ export class FileManager {
         encryptedVariables[key] = finalValue;
       }
 
-      const content = Object.entries(encryptedVariables)
+      const header = branch
+        ? `# From Capy: these secrets map to the "${branch}" branch of your project.\n\n`
+        : '';
+      const content = header + Object.entries(encryptedVariables)
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
 
       this.ensureDirectoryExists(dirname(envPath));
       writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`🔒 Successfully wrote encrypted .env file`);
+      console.log(`Successfully wrote encrypted .env file`);
 
       if (backup) {
         this.removeBackup(backup);
@@ -306,6 +325,44 @@ export class FileManager {
   }
 
   /**
+   * If the .env file contains plaintext secrets (not capy-encrypted),
+   * save a backup as .env.pre-capy.old with all values commented out,
+   * and add .env.pre-capy.old to .gitignore.
+   */
+  backupPlaintextEnv(path?: string): boolean {
+    const envPath = path || join(this.projectRoot, '.env');
+    if (!existsSync(envPath)) return false;
+
+    const content = readFileSync(envPath, 'utf-8');
+    const lines = content.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+
+    // Check if any values are already encrypted
+    const hasPlaintext = lines.some(line => {
+      const eqIdx = line.indexOf('=');
+      if (eqIdx === -1) return false;
+      const value = line.substring(eqIdx + 1);
+      return !value.startsWith('capy:');
+    });
+
+    if (!hasPlaintext) return false;
+
+    // Comment out all lines
+    const commented = content.split('\n').map(line => {
+      if (line.trim() && !line.startsWith('#')) {
+        return `# ${line}`;
+      }
+      return line;
+    }).join('\n');
+
+    const oldPath = envPath.replace(/\.env$/, '.env.pre-capy.old');
+    const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting this file or putting it somewhere safe because the values are unencrypted.\n\n';
+    writeFileSync(oldPath, header + commented, 'utf-8');
+    this.updateGitignore(['.env.pre-capy.old']);
+    console.log(`Saved plaintext backup to ${oldPath}`);
+    return true;
+  }
+
+  /**
    * Creates a snippet-enhanced encrypted value for better usability
    * Shows partial original value for identification while maintaining security
    */
@@ -398,10 +455,6 @@ export class FileManager {
     }
 
     // Try decrypting as raw base64
-    try {
-      return Encryptor.decrypt(payload, decryptionKey);
-    } catch {
-      return value; // Not encrypted, return as-is
-    }
+    return Encryptor.decrypt(payload, decryptionKey);
   }
 }

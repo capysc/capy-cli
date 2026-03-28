@@ -22,16 +22,22 @@ export class CheckoutCommand {
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
     this.syncEngine = new SyncEngine();
+
+    this.serviceClient.setTokenRefresher(async () => {
+      const refreshed = await this.authService.refreshToken();
+      if (refreshed) {
+        return this.authService.getToken();
+      }
+      return null;
+    });
   }
 
   async execute(branchName: string, options: { create?: boolean; production?: boolean } = {}): Promise<void> {
     try {
       await this._execute(branchName, options);
     } catch (error: any) {
-      if (error?.name === 'ExitPromptError') {
-        process.exit(0);
-      }
-      throw error;
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      displayErrorAndExit(error);
     }
   }
 
@@ -79,10 +85,9 @@ export class CheckoutCommand {
       branchSpinner.stop();
     }
 
-    // Update .keep with active_branch
+    // Save active branch to .capy/branch (local state, not committed)
+    this.projectManager.writeActiveBranch(branchName);
     const keep = this.projectManager.readKeepFile()!;
-    keep.active_branch = branchName;
-    this.fileManager.writeKeepFile(keep);
 
     // Pull secrets for the branch
     const pullSpinner = ora(`Pulling secrets for ${branchName}...`).start();
@@ -133,7 +138,7 @@ export class CheckoutCommand {
       const { production } = await inquirer.prompt([{
         type: 'confirm',
         name: 'production',
-        message: `Is "${branchName}" a production branch? (Protected, invite-only access)`,
+        message: `Make "${branchName}" a protected branch? \x1b[90m(invite-only)\x1b[0m`,
         default: false,
       }]);
       isProduction = production;
@@ -146,7 +151,7 @@ export class CheckoutCommand {
 
       // Copy secrets from current branch
       const keep = this.projectManager.readKeepFile()!;
-      const currentBranch = keep.active_branch;
+      const currentBranch = this.projectManager.readActiveBranch();
       const existingDecryptKey = this.projectManager.readDecryptKey();
       const encryptionKey = existingDecryptKey?.decryption_key ?? '';
 
@@ -180,9 +185,8 @@ export class CheckoutCommand {
       }
     } catch (error: any) {
       branchSpinner.stop();
-      const detail = error?.details?.data?.error || error?.message || 'Unknown error';
-      console.log(`Failed to create branch: ${detail}`);
-      process.exit(1);
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      displayErrorAndExit(error);
     }
   }
 }

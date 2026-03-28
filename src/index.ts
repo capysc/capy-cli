@@ -33,8 +33,6 @@ program
       dryRun: options.dryRun
     };
 
-    console.log('\n🔐 Capy CLI\n');
-
     const command = new CapyCommand(cliOptions);
     await command.execute();
   });
@@ -42,7 +40,8 @@ program
 program
   .command('branch')
   .description('List secret branches')
-  .action(async () => {
+  .option('-D <name>', 'Delete a branch')
+  .action(async (options) => {
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -64,40 +63,98 @@ program
     const token = authService.getToken();
     if (token) serviceClient.setToken(token);
 
+    try {
+
+    // Delete branch
+    if (options.D) {
+      const deleteName = options.D;
+      const branches = await serviceClient.listBranches(projectState.projectId!);
+      const branch = branches.find(b => b.name === deleteName);
+
+      if (!branch) {
+        console.log(`Branch "${deleteName}" not found`);
+        process.exit(1);
+      }
+
+      if (branch.name === (projectState.activeBranch || '')) {
+        console.log(`Cannot delete the current branch. Switch first with: capy checkout <other-branch>`);
+        process.exit(1);
+      }
+
+      const inquirer = (await import('inquirer')).default;
+      const { confirm } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirm',
+        message: `Delete branch "${deleteName}"? This will remove all its secrets.`,
+        default: false,
+      }]);
+
+      if (!confirm) return;
+
+      await serviceClient.deleteBranch(projectState.projectId!, branch.id);
+
+      // Remove branch entries from .keep
+      const keep = pm.readKeepFile();
+      if (keep) {
+        const { FileManager } = await import('./files/fileManager');
+        const fm = new FileManager();
+        for (const [varName, entries] of Object.entries(keep.variables)) {
+          keep.variables[varName] = entries.filter(e => e.branch !== deleteName);
+        }
+        fm.writeKeepFile(keep);
+      }
+
+      console.log(`Deleted branch "${deleteName}"`);
+      return;
+    }
+
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
+    const projectName = projectState.projectName || 'project';
 
-    const labels = branches.map(b => {
+    // Tree view
+    console.log('');
+    console.log(`  Project "${projectName}"`);
+    branches.forEach((b, i) => {
+      const isLast = i === branches.length - 1;
+      const connector = isLast ? '└──' : '├──';
       const name = b.name || 'no branch';
-      const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
-      return { name, prod, rawLen: name.length + (b.is_production ? ' (protected)'.length : 0) };
-    });
-    const maxLen = Math.max(...labels.map(l => l.rawLen));
-    const choices = branches.map((b, i) => {
-      const { name, prod, rawLen } = labels[i];
-      const padding = ' '.repeat(maxLen - rawLen + 2);
+      const prot = b.is_production ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === (activeBranch || '');
-      const currentLabel = isCurrent ? `${padding}\x1b[38;5;43m← current\x1b[0m` : '';
-      return {
-        name: `${name}${prod}${currentLabel}`,
-        value: b.name,
-        short: name,
-      };
+      const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
+      console.log(`  ${connector} ${name}  ${prot}${current}`);
     });
+    console.log('');
 
+    // Prompt to switch
     const inquirer = (await import('inquirer')).default;
-    const { selected } = await inquirer.prompt([{
-      type: 'list',
-      name: 'selected',
-      message: 'Switch branch:',
-      choices,
-    }]);
+    const choices = branches
+      .filter(b => b.name !== (activeBranch || ''))
+      .map(b => ({ name: b.name || 'no branch', value: b.name }));
 
-    // If they picked a different branch, check it out
-    if (selected !== (activeBranch || '')) {
-      const { CheckoutCommand } = await import('./commands/checkoutCommand');
-      const cmd = new CheckoutCommand();
-      await cmd.execute(selected, {});
+    if (choices.length > 0) {
+      choices.push({ name: 'Stay on current branch', value: '__stay__' });
+      const { selected } = await inquirer.prompt([{
+        type: 'list',
+        name: 'selected',
+        message: 'Switch branch:',
+        choices,
+      }]);
+
+      if (selected !== '__stay__') {
+        const { CheckoutCommand } = await import('./commands/checkoutCommand');
+        const cmd = new CheckoutCommand();
+        await cmd.execute(selected, {});
+      }
+    }
+
+    } catch (error: any) {
+      const { displayErrorAndExit } = await import('./ui/errorScreen');
+      displayErrorAndExit(error, {
+        projectName: projectState.projectName,
+        projectId: projectState.projectId,
+        branch: projectState.activeBranch,
+      });
     }
   });
 
