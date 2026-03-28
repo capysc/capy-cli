@@ -15,6 +15,20 @@ jest.mock('../../src/auth/authService');
 jest.mock('../../src/service/serviceClient');
 jest.mock('../../src/sync/syncEngine');
 jest.mock('../../src/ui/promptEngine');
+jest.mock('../../src/crypto/keyManager', () => ({
+  generateSeedPhrase: jest.fn().mockReturnValue('abandon '.repeat(23) + 'art'),
+  validateSeedPhrase: jest.fn().mockReturnValue(true),
+  seedPhraseToMasterKey: jest.fn().mockReturnValue(Buffer.alloc(32, 1)),
+  encryptMasterKey: jest.fn().mockReturnValue('encrypted-master-key'),
+  deriveWrappingKey: jest.fn().mockReturnValue(Buffer.alloc(32, 2)),
+}));
+jest.mock('../../src/crypto/keyResolver', () => ({
+  resolveProjectKey: jest.fn().mockReturnValue('mock-derived-project-key-hex'),
+  hasOrgKey: jest.fn().mockReturnValue(true),
+}));
+jest.mock('../../src/config/globalConfig', () => ({
+  saveMasterKey: jest.fn(),
+}));
 jest.mock('inquirer');
 jest.mock('../../src/ui/spinner', () => ({
   __esModule: true,
@@ -289,7 +303,7 @@ describe('CapyCommand', () => {
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-123');
       expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
       expect(mockServiceClient.getDecryptData).toHaveBeenCalledWith('proj-123');
-      expect(mockFileManager.writeDecryptKey).toHaveBeenCalled();
+      // writeDecryptKey removed — keys now managed via global keyring
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
@@ -587,7 +601,7 @@ describe('CapyCommand', () => {
       // Push sends the full finalEnv (from applyDecisions), not just changed vars
       expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object), undefined);
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
-      expect(mockFileManager.writeDecryptKey).toHaveBeenCalled();
+      // writeDecryptKey removed — keys now managed via global keyring
     });
 
     test('should handle no changes scenario', async () => {

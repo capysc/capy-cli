@@ -17,6 +17,18 @@ import {
   CapyError,
   ERROR_CODES
 } from '../types/index';
+import {
+  generateSeedPhrase,
+  validateSeedPhrase,
+  seedPhraseToMasterKey,
+  encryptMasterKey,
+  deriveWrappingKey,
+} from '../crypto/keyManager';
+import {
+  resolveProjectKey,
+  hasOrgKey,
+} from '../crypto/keyResolver';
+import { saveMasterKey } from '../config/globalConfig';
 
 export class CapyCommand {
   private projectManager: ProjectManager;
@@ -200,7 +212,50 @@ export class CapyCommand {
     );
     initSpinner.succeed(`Project "${projectName}" created`);
 
+    // Ensure org has a master key — generate seed phrase if first time
+    const currentToken = this.authService.getToken();
+    if (!hasOrgKey(selectedOrg.id)) {
+      const seedPhrase = generateSeedPhrase();
+
+      console.log('\n========================================');
+      console.log('  SAVE YOUR RECOVERY PHRASE');
+      console.log('========================================');
+      console.log('');
+      console.log('  ' + seedPhrase);
+      console.log('');
+      console.log('  This phrase is the ONLY way to recover');
+      console.log('  your secrets if you lose access.');
+      console.log('  Write it down and store it safely.');
+      console.log('========================================\n');
+
+      const { confirmed } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirmed',
+        message: 'I have saved my recovery phrase',
+        default: false,
+      }]);
+
+      if (!confirmed) {
+        throw new CapyError(
+          'You must save your recovery phrase before continuing.',
+          ERROR_CODES.AUTH_FAILED
+        );
+      }
+
+      const masterKey = seedPhraseToMasterKey(seedPhrase);
+      const wrappingKey = deriveWrappingKey(currentToken!.access_token);
+      const encryptedM = encryptMasterKey(masterKey, wrappingKey);
+      saveMasterKey(selectedOrg.id, encryptedM);
+    }
+
     const keySpinner = ora('Generating encryption keys...').start();
+
+    // Derive project encryption key from master key
+    const encryptionKey = resolveProjectKey(
+      selectedOrg.id,
+      projectResult.project_id,
+      currentToken!.access_token,
+    );
 
     // Create keep file (v2 format)
     const keep: KeepFile = {
@@ -216,25 +271,13 @@ export class CapyCommand {
     this.fileManager.writeKeepFile(keep);
     keySpinner.text = 'Created .keep configuration file';
 
-    // Get decrypt data from service
+    // Get remote data (for existing variables, not for key)
     let remoteData = { env_content: '', decrypt_key: '', expires_at: '' };
     try {
       remoteData = await this.serviceClient.getDecryptData(projectResult.project_id);
     } catch {
       // Service unavailable
     }
-
-    const encryptionKey = remoteData.decrypt_key;
-
-    // Always write decrypt key file so sync can find it later
-    const decryptKey = this.syncEngine.createDecryptKey(
-      projectResult.org_id,
-      projectResult.project_id,
-      authResult.user_id!,
-      encryptionKey,
-      []
-    );
-    this.fileManager.writeDecryptKey(decryptKey);
 
     // If remote has existing variables, pull them
     if (remoteData.env_content) {
@@ -318,16 +361,6 @@ export class CapyCommand {
 
             // Encrypt the local .env file
             this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep);
-
-            // Update decrypt key with variable permissions
-            const finalDecryptKey = this.syncEngine.createDecryptKey(
-              projectResult.org_id,
-              projectResult.project_id,
-              authResult.user_id!,
-              encryptionKey,
-              Object.keys(localEnv)
-            );
-            this.fileManager.writeDecryptKey(finalDecryptKey);
 
             syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s)`);
 
@@ -543,8 +576,11 @@ export class CapyCommand {
         throw error;
       }
     }
-    const existingDecryptKey = this.projectManager.readDecryptKey();
-    const encryptionKey = existingDecryptKey?.decryption_key ?? decryptData.decrypt_key;
+    const encryptionKey = resolveProjectKey(
+      projectState.organizationId!,
+      projectState.projectId!,
+      token!.access_token,
+    );
 
     // Parse remote (encrypted) and decrypt for comparison
     let remoteEnvEncrypted: Record<string, string> = {};
@@ -692,16 +728,6 @@ export class CapyCommand {
     // Write encrypted .env file
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
     syncSpinner.text = `Updated encrypted .env${branchLabel} with ${Object.keys(finalEnv).length} total variables`;
-
-    // Update decrypt key
-    const decryptKey = this.syncEngine.createDecryptKey(
-      projectState.organizationId!,
-      projectState.projectId!,
-      authResult.user_id!,
-      encryptionKey,
-      Object.keys(finalEnv)
-    );
-    this.fileManager.writeDecryptKey(decryptKey);
 
     // Update sync state with current variables
     const newSyncState: SyncState = {
