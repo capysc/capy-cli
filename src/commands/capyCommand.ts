@@ -229,10 +229,11 @@ export class CapyCommand {
       console.log('');
 
       const boxLines = [
-        'This recovery phrase is your master key to this',
-        'project. This key, and all other keys derived from',
-        'it only exists here and now, and cannot be retrieved',
-        'when lost.',
+        'This recovery phrase is the master key to all',
+        'projects in this organization. As its owner, only',
+        'you have it. This key, and all other keys derived',
+        'from it, only exists here and now, and cannot be',
+        'retrieved when lost.',
         '',
         'Capy is a ZERO TRUST secrets platform, which means',
         'we do not store, and cannot decode your secrets for',
