@@ -170,7 +170,7 @@ export class OAuthServer {
           <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
           <script>
             tailwind.config = {
-              darkMode: 'class',
+              darkMode: 'media',
               theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
             }
           </script>
@@ -202,7 +202,7 @@ export class OAuthServer {
           <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
           <script>
             tailwind.config = {
-              darkMode: 'class',
+              darkMode: 'media',
               theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
             }
           </script>
