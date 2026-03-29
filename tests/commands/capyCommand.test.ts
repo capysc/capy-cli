@@ -81,6 +81,7 @@ describe('CapyCommand', () => {
       writeEncryptedEnvFile: jest.fn(),
       readEnvFile: jest.fn().mockReturnValue({}),
       readEncryptedEnvFile: jest.fn().mockReturnValue({}),
+      readEnvMeta: jest.fn().mockReturnValue({}),
       parseEnvContent: jest.fn().mockReturnValue({}),
       ensureCapyGitignore: jest.fn(),
       isSnippetEncrypted: jest.fn().mockReturnValue(false),

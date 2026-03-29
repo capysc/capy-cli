@@ -66,11 +66,19 @@ export class CapyCommand {
       const projectState = await this.projectManager.detectProjectState();
 
       if (!projectState.initialized) {
-        // Automatically initialize if .keep doesn't exist
-        await this.initializeProject();
-      } else {
-        await this.syncProject(projectState);
+        // Check if .env has metadata we can recover from (e.g. .keep was deleted)
+        const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+        if (envMeta.org_id && envMeta.project_id) {
+          projectState.initialized = true;
+          projectState.organizationId = envMeta.org_id;
+          projectState.projectId = envMeta.project_id;
+          projectState.activeBranch = envMeta.branch;
+        } else {
+          await this.initializeProject();
+          return;
+        }
       }
+      await this.syncProject(projectState);
     } catch (error: any) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);

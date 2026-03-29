@@ -31,6 +31,25 @@ export class FileManager {
     }
   }
 
+  readEnvMeta(path?: string): { org_id?: string; project_id?: string; branch?: string } {
+    const envPath = path || join(this.projectRoot, '.env');
+    if (!existsSync(envPath)) return {};
+
+    const content = readFileSync(envPath, 'utf-8');
+    const meta: { org_id?: string; project_id?: string; branch?: string } = {};
+    for (const line of content.split('\n')) {
+      if (!line.startsWith('# capy:')) break;
+      const match = line.match(/^# capy:(\w+)=(.+)$/);
+      if (match) {
+        const [, key, value] = match;
+        if (key === 'org_id' || key === 'project_id' || key === 'branch') {
+          meta[key] = value;
+        }
+      }
+    }
+    return meta;
+  }
+
   readEncryptedEnvFile(decryptionKey: string, path?: string): Record<string, string> {
     const envPath = path || join(this.projectRoot, '.env');
 
@@ -131,9 +150,15 @@ export class FileManager {
         encryptedVariables[key] = finalValue;
       }
 
-      const header = branch
-        ? `# From Capy: these secrets map to the "${branch}" branch of your project.\n\n`
-        : '';
+      const metaLines: string[] = [];
+      if (keep) {
+        metaLines.push(`# capy:org_id=${keep.org_id}`);
+        metaLines.push(`# capy:project_id=${keep.project_id}`);
+      }
+      if (branch) {
+        metaLines.push(`# capy:branch=${branch}`);
+      }
+      const header = metaLines.length > 0 ? metaLines.join('\n') + '\n\n' : '';
       const content = header + Object.entries(encryptedVariables)
         .map(([key, value]) => `${key}=${value}`)
         .join('\n');
