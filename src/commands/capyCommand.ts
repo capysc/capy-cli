@@ -539,6 +539,16 @@ export class CapyCommand {
 
     spinner.stop();
 
+    // Cross-org guard: block if authenticated org doesn't match the project's org
+    if (authResult.organization_id && projectState.organizationId &&
+        authResult.organization_id !== projectState.organizationId) {
+      throw new CapyError(
+        'You do not have access to this project.' + '\n\n' +
+        'Contact your project admin to get access.',
+        ERROR_CODES.PERMISSION_DENIED
+      );
+    }
+
     this.displayHeader(
       projectState.projectName || 'unknown',
       authResult.organization_name || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name || authResult.organization_id || '',
@@ -604,13 +614,6 @@ export class CapyCommand {
           // New project only has default branch — reset active branch
           activeBranch = undefined;
           this.projectManager.writeActiveBranch(undefined);
-
-          // Ensure org has a master key — if switching orgs, need full init
-          if (!hasOrgKey(projectResult.org_id)) {
-            initSpinner.stop();
-            console.log('\nNew organization detected — running full initialization...\n');
-            return this.initializeProject();
-          }
 
           decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
         }
