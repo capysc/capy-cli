@@ -600,9 +600,18 @@ export class CapyCommand {
           this.fileManager.writeKeepFile(keep);
 
           projectState.projectId = projectResult.project_id;
+          projectState.organizationId = projectResult.org_id;
           // New project only has default branch — reset active branch
           activeBranch = undefined;
           this.projectManager.writeActiveBranch(undefined);
+
+          // Ensure org has a master key — if switching orgs, need full init
+          if (!hasOrgKey(projectResult.org_id)) {
+            initSpinner.stop();
+            console.log('\nNew organization detected — running full initialization...\n');
+            return this.initializeProject();
+          }
+
           decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
         }
       } else {

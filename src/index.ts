@@ -180,8 +180,9 @@ program
   .command('logout')
   .description('End the current session')
   .action(async () => {
-    const { existsSync, unlinkSync } = await import('fs');
+    const { existsSync, unlinkSync, rmSync } = await import('fs');
     const { join } = await import('path');
+    const { homedir } = await import('os');
 
     const capyDir = join(process.cwd(), '.capy');
     const sessionFiles = ['token'];
@@ -192,6 +193,27 @@ program
       if (existsSync(filePath)) {
         unlinkSync(filePath);
         cleared = true;
+      }
+    }
+
+    // Clear global auth session and project key caches
+    const globalCapyDir = join(homedir(), '.capy');
+    const authSession = join(globalCapyDir, 'auth', 'session.json');
+    if (existsSync(authSession)) {
+      unlinkSync(authSession);
+      cleared = true;
+    }
+
+    // Clear project key caches (master keys survive logout — they require the seed phrase)
+    const orgsDir = join(globalCapyDir, 'orgs');
+    if (existsSync(orgsDir)) {
+      const { readdirSync } = await import('fs');
+      for (const orgId of readdirSync(orgsDir)) {
+        const projectsDir = join(orgsDir, orgId, 'projects');
+        if (existsSync(projectsDir)) {
+          rmSync(projectsDir, { recursive: true, force: true });
+          cleared = true;
+        }
       }
     }
 
