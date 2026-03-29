@@ -74,10 +74,33 @@ function renderAuthFailed(error: CapyError): string {
 }
 
 function renderPermissionDenied(error: CapyError, ctx: ErrorContext): string {
+  const msg = error.message || '';
+  const variable = error.details?.variable;
+
+  // Wrong encryption key (e.g. after project re-init or org switch)
+  if (msg.includes("different project's key") || error.details?.error?.message?.includes("different project's key")) {
+    const lines = [
+      '',
+      `  ${bold('Cannot decrypt secrets')}`,
+      variable ? `  ${grey(`Variable: ${variable}`)}` : '',
+      '',
+      `  These secrets were encrypted with a different project's key.`,
+      `  This usually happens when:`,
+      `    - The project was re-initialized to a different org`,
+      `    - The .keep/.capy files were reset without clearing .env`,
+      '',
+      `  To fix:`,
+      `    1. Delete ${bold('.env')} and run ${bold('capy')} to pull fresh secrets`,
+      `    2. Or restore .env from your ${bold('.env.pre-capy.old')} backup`,
+      '',
+    ];
+    return lines.filter(l => l !== '').join('\n') + '\n';
+  }
+
   const lines = [
     '',
     `  ${bold('Permission denied')}`,
-    `  You do not have access to this ${ctx.branch ? `branch (${ctx.branch})` : 'project'}.`,
+    `  You do not have access to ${ctx.branch ? `this branch (${ctx.branch})` : 'these secrets'}.`,
     '',
     `  Contact your project admin to get access.`,
     '',

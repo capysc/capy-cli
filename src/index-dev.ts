@@ -220,20 +220,29 @@ if (!keep) {
     }
 
     const envPath = options.envPath || '.env';
-    const decrypted = fm.readEncryptedEnvFile(encryptionKey, envPath);
 
-    if (Object.keys(decrypted).length === 0) {
-      console.log('No variables found in .env');
-      process.exit(0);
+    try {
+      const decrypted = fm.readEncryptedEnvFile(encryptionKey, envPath);
+
+      if (Object.keys(decrypted).length === 0) {
+        console.log('No variables found in .env');
+        process.exit(0);
+      }
+
+      const { writeFileSync } = await import('fs');
+      const content = Object.entries(decrypted)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
+
+      writeFileSync(envPath, content + '\n', 'utf-8');
+      console.log(`Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
+    } catch (error: any) {
+      const { displayErrorAndExit } = await import('./ui/errorScreen');
+      displayErrorAndExit(error, {
+        projectName: keep.project_name,
+        projectId: keep.project_id,
+      });
     }
-
-    const { writeFileSync } = await import('fs');
-    const content = Object.entries(decrypted)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n');
-
-    writeFileSync(envPath, content + '\n', 'utf-8');
-    console.log(`✓ Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
   });
 
 program
