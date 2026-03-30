@@ -125,6 +125,14 @@ export interface DecryptResponse {
   expires_at: string;
 }
 
+export interface OrgKeyFile {
+  version: string;
+  org_id: string;
+  encrypted_master_key: string;
+  wrapping_method: 'auth_token' | 'service_cosign';
+  created_at: string;
+}
+
 export interface ServiceToken {
   access_token: string;
   refresh_token?: string;

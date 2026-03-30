@@ -20,28 +20,15 @@ export class AuthService {
   private serviceApiUrl: string;
   private tokenPath: string;
   private serviceToken: ServiceToken | null = null;
-  private mockMode: boolean;
 
   constructor(serviceApiUrl?: string, devMode: boolean = false) {
     this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
-    // Mock mode requires BOTH dev entrypoint AND explicit env var
-    this.mockMode = devMode && process.env.CAPY_MOCK_AUTH === 'true';
     this.tokenPath = join(process.cwd(), '.capy', 'token');
-
-    if (this.mockMode) {
-      console.log('🔫 AuthService: Mock mode enabled (CAPY_MOCK_AUTH=true)');
-    }
-
     this.loadToken();
   }
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
-      // Mock mode — only when dev entrypoint + CAPY_MOCK_AUTH=true
-      if (this.mockMode) {
-        return this.mockAuthenticate(organizationId);
-      }
-
       // Check for valid cached token
       if (this.isAuthenticated()) {
         const token = this.getToken();
@@ -338,29 +325,4 @@ export class AuthService {
     }
   }
 
-  private mockAuthenticate(organizationId?: string): AuthResult {
-    console.log('🔫 Using mock authentication');
-
-    const mockOrgId = organizationId || 'mock-org-123';
-    const mockUserId = 'mock-user-456';
-
-    this.serviceToken = {
-      access_token: 'mock-access-token-' + Math.random().toString(36).substr(2, 9),
-      refresh_token: 'mock-refresh-token-' + Math.random().toString(36).substr(2, 9),
-      expires_at: Date.now() + (24 * 60 * 60 * 1000),
-      organization_id: mockOrgId,
-      user_id: mockUserId
-    };
-    this.saveToken();
-
-    return {
-      success: true,
-      organization_id: mockOrgId,
-      organization_name: 'Mock Organization',
-      user_id: mockUserId,
-      user_email: 'mock.user@example.com',
-      user_first_name: 'Mock',
-      user_last_name: 'User',
-    };
-  }
 }

@@ -178,7 +178,7 @@ describe('ServiceClient', () => {
 
       mockFetch.mockResolvedValue(mockFetchResponse({ success: true }));
 
-      const result = await serviceClient.pushVariables(projectId, variables);
+      const result = await serviceClient.pushVariables(projectId, variables, null, undefined, 'test-encryption-key');
 
       expect(mockFetch).toHaveBeenCalledWith(
         `${defaultServiceUrl}/secrets/${projectId}`,
@@ -206,8 +206,8 @@ describe('ServiceClient', () => {
         { error: 'Insufficient permissions' }, false, 403
       ));
 
-      await expect(serviceClient.pushVariables('proj_123', {})).rejects.toThrow(CapyError);
-      await expect(serviceClient.pushVariables('proj_123', {})).rejects.toThrow('Access denied');
+      await expect(serviceClient.pushVariables('proj_123', {}, null, undefined, 'test-encryption-key')).rejects.toThrow(CapyError);
+      await expect(serviceClient.pushVariables('proj_123', {}, null, undefined, 'test-encryption-key')).rejects.toThrow('Access denied');
     });
   });
 
@@ -227,43 +227,4 @@ describe('ServiceClient', () => {
     });
   });
 
-  describe('mock mode behavior', () => {
-    let mockServiceClient: ServiceClient;
-
-    beforeEach(() => {
-      // Enable mock mode (requires both devMode=true AND CAPY_MOCK_AUTH=true)
-      process.env.CAPY_MOCK_AUTH = 'true';
-      mockServiceClient = new ServiceClient(undefined, true);
-    });
-
-    afterEach(() => {
-      delete process.env.CAPY_MOCK_AUTH;
-    });
-
-    test('getDecryptData should return empty content for mock.env if it doesn\'t exist during mock mode initialization', async () => {
-      const mockFs = require('fs');
-      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
-
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-
-      const result = await mockServiceClient.getDecryptData('proj_test');
-
-      expect(result.env_content).toBe('');
-      expect(result.decrypt_key).toBe('mock-decrypt-key-persistent');
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('No existing mock.env found - new project with 0 variables'));
-
-      consoleSpy.mockRestore();
-    });
-
-    test('readMockEnvContent should return an empty string if mock.env does not exist', async () => {
-      const mockFs = require('fs');
-      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
-
-      // Call getDecryptData which internally uses readMockEnvContent
-      const result = await mockServiceClient.getDecryptData('proj_test');
-
-      expect(result.env_content).toBe('');
-      expect(result.decrypt_key).toBeDefined();
-    });
-  });
 });

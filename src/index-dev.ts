@@ -197,31 +197,100 @@ program
   .action(async (options) => {
     const { FileManager } = await import('./files/fileManager');
     const { ProjectManager } = await import('./core/projectManager');
+    const { resolveProjectKey } = await import('./crypto/keyResolver');
 
     const fm = new FileManager();
     const pm = new ProjectManager();
-    const decryptKey = pm.readDecryptKey();
+    const keep = pm.readKeepFile();
 
-    if (!decryptKey) {
-      console.error('❌ No .decrypt key found. Run capy-dev first to initialize.');
+if (!keep) {
+      console.error('No .keep file found. Run capy-dev first to initialize.');
+      process.exit(1);
+    }
+
+    // Resolve key from global keyring (requires prior auth)
+    let encryptionKey: string;
+    try {
+      // Use a placeholder userId — resolveProjectKey only needs it for wrapping key derivation,
+      // and the project key cache should already exist from the init/sync flow
+      encryptionKey = resolveProjectKey(keep.org_id, keep.project_id, '');
+    } catch {
+      console.error('No encryption key found. Run capy-dev first to sync.');
       process.exit(1);
     }
 
     const envPath = options.envPath || '.env';
-    const decrypted = fm.readEncryptedEnvFile(decryptKey.decryption_key, envPath);
 
-    if (Object.keys(decrypted).length === 0) {
-      console.log('No variables found in .env');
-      process.exit(0);
+    try {
+      const decrypted = fm.readEncryptedEnvFile(encryptionKey, envPath);
+
+      if (Object.keys(decrypted).length === 0) {
+        console.log('No variables found in .env');
+        process.exit(0);
+      }
+
+      const { writeFileSync } = await import('fs');
+      const content = Object.entries(decrypted)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('\n');
+
+      writeFileSync(envPath, content + '\n', 'utf-8');
+      console.log(`Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
+    } catch (error: any) {
+      const { displayErrorAndExit } = await import('./ui/errorScreen');
+      displayErrorAndExit(error, {
+        projectName: keep.project_name,
+        projectId: keep.project_id,
+      });
+    }
+  });
+
+program
+  .command('logout')
+  .description('End the current session')
+  .action(async () => {
+    const { existsSync, unlinkSync, rmSync } = await import('fs');
+    const { join } = await import('path');
+    const { homedir } = await import('os');
+
+    const capyDir = join(process.cwd(), '.capy');
+    const sessionFiles = ['token'];
+
+    let cleared = false;
+    for (const file of sessionFiles) {
+      const filePath = join(capyDir, file);
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+        cleared = true;
+      }
     }
 
-    const { writeFileSync } = await import('fs');
-    const content = Object.entries(decrypted)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n');
+    // Clear global auth session and project key caches
+    const globalCapyDir = join(homedir(), '.capy');
+    const authSession = join(globalCapyDir, 'auth', 'session.json');
+    if (existsSync(authSession)) {
+      unlinkSync(authSession);
+      cleared = true;
+    }
 
-    writeFileSync(envPath, content + '\n', 'utf-8');
-    console.log(`✓ Decrypted ${Object.keys(decrypted).length} variable(s) in ${envPath}`);
+    // Clear project key caches (master keys survive logout — they require the seed phrase)
+    const orgsDir = join(globalCapyDir, 'orgs');
+    if (existsSync(orgsDir)) {
+      const { readdirSync } = await import('fs');
+      for (const orgId of readdirSync(orgsDir)) {
+        const projectsDir = join(orgsDir, orgId, 'projects');
+        if (existsSync(projectsDir)) {
+          rmSync(projectsDir, { recursive: true, force: true });
+          cleared = true;
+        }
+      }
+    }
+
+    if (cleared) {
+      console.log('Logged out. Session cleared.');
+    } else {
+      console.log('No active session.');
+    }
   });
 
 program.parse(process.argv);

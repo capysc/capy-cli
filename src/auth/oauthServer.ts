@@ -21,6 +21,7 @@ export class OAuthServer {
   private port: number = 0;
   private state: string;
   private server: any;
+  private connections: Set<any> = new Set();
   private authorizationCode: string | null = null;
   private error: string | null = null;
   private pkce: { codeVerifier: string; codeChallenge: string };
@@ -52,6 +53,12 @@ export class OAuthServer {
    */
   async bind(): Promise<void> {
     this.server = createServer(this.handleRequest.bind(this));
+
+    // Track connections so we can force-close them on cleanup
+    this.server.on('connection', (conn: any) => {
+      this.connections.add(conn);
+      conn.on('close', () => this.connections.delete(conn));
+    });
 
     for (const candidate of CALLBACK_PORTS) {
       try {
@@ -170,7 +177,7 @@ export class OAuthServer {
           <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
           <script>
             tailwind.config = {
-              darkMode: 'class',
+              darkMode: 'media',
               theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
             }
           </script>
@@ -202,7 +209,7 @@ export class OAuthServer {
           <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
           <script>
             tailwind.config = {
-              darkMode: 'class',
+              darkMode: 'media',
               theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
             }
           </script>
@@ -225,6 +232,11 @@ export class OAuthServer {
   private cleanup(): void {
     if (this.server) {
       this.server.close();
+      // Destroy all open connections immediately (don't wait for keep-alive timeout)
+      for (const conn of this.connections) {
+        conn.destroy();
+      }
+      this.connections.clear();
       this.server = null;
     }
   }

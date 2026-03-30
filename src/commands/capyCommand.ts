@@ -17,6 +17,18 @@ import {
   CapyError,
   ERROR_CODES
 } from '../types/index';
+import {
+  generateSeedPhrase,
+  validateSeedPhrase,
+  seedPhraseToMasterKey,
+  encryptMasterKey,
+  deriveWrappingKey,
+} from '../crypto/keyManager';
+import {
+  resolveProjectKey,
+  hasOrgKey,
+} from '../crypto/keyResolver';
+import { saveMasterKey } from '../config/globalConfig';
 
 export class CapyCommand {
   private projectManager: ProjectManager;
@@ -54,11 +66,19 @@ export class CapyCommand {
       const projectState = await this.projectManager.detectProjectState();
 
       if (!projectState.initialized) {
-        // Automatically initialize if .keep doesn't exist
-        await this.initializeProject();
-      } else {
-        await this.syncProject(projectState);
+        // Check if .env has metadata we can recover from (e.g. .keep was deleted)
+        const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+        if (envMeta.org_id && envMeta.project_id) {
+          projectState.initialized = true;
+          projectState.organizationId = envMeta.org_id;
+          projectState.projectId = envMeta.project_id;
+          projectState.activeBranch = envMeta.branch;
+        } else {
+          await this.initializeProject();
+          return;
+        }
       }
+      await this.syncProject(projectState);
     } catch (error: any) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
@@ -200,7 +220,81 @@ export class CapyCommand {
     );
     initSpinner.succeed(`Project "${projectName}" created`);
 
+    // Ensure org has a master key — generate seed phrase if first time
+    const currentToken = this.authService.getToken();
+    if (!hasOrgKey(selectedOrg.id)) {
+      const seedPhrase = generateSeedPhrase();
+
+      const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
+
+      const boxLines = [
+        'This recovery phrase generates the master key for',
+        'all projects in this organization.',
+        '',
+        '1) As its owner, only you have it',
+        '2) It only exists here and now, and cannot be',
+        '   retrieved when lost',
+        '',
+        'Capy is a ZERO TRUST secrets platform, which means',
+        'we do not store and cannot decode your secrets for',
+        'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!',
+        '',
+        'To learn more about zero-trust:',
+        'https://capy.sc/zero-trust',
+      ];
+
+      const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
+      const title = 'SAVE YOUR RECOVERY PHRASE';
+      const titlePad = Math.max(0, maxLen - title.length);
+      const titleLeft = Math.floor(titlePad / 2);
+      const titleRight = titlePad - titleLeft;
+
+      console.log('');
+      console.log(warn('─'.repeat(maxLen + 2)));
+      console.log(warn(' '.repeat(titleLeft + 1) + title + ' '.repeat(titleRight + 1)));
+      console.log(warn('─'.repeat(maxLen + 2)));
+      console.log('');
+      console.log('');
+      console.log(seedPhrase);
+      console.log('');
+      console.log('');
+
+      console.log(warn('┌' + '─'.repeat(maxLen) + '┐'));
+      for (const line of boxLines) {
+        const pad = maxLen - line.length - 1;
+        console.log(`${warn('│')} ${warn(line)}${' '.repeat(Math.max(0, pad))}${warn('│')}`);
+      }
+      console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
+      console.log('');
+
+      const { confirmed } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirmed',
+        message: 'I have saved my recovery phrase',
+        default: false,
+      }]);
+
+      if (!confirmed) {
+        throw new CapyError(
+          'You must save your recovery phrase before continuing.',
+          ERROR_CODES.AUTH_FAILED
+        );
+      }
+
+      const masterKey = seedPhraseToMasterKey(seedPhrase);
+      const wrappingKey = deriveWrappingKey(authResult.user_id!, selectedOrg.id);
+      const encryptedM = encryptMasterKey(masterKey, wrappingKey);
+      saveMasterKey(selectedOrg.id, encryptedM);
+    }
+
     const keySpinner = ora('Generating encryption keys...').start();
+
+    // Derive project encryption key from master key
+    const encryptionKey = resolveProjectKey(
+      selectedOrg.id,
+      projectResult.project_id,
+      authResult.user_id!,
+    );
 
     // Create keep file (v2 format)
     const keep: KeepFile = {
@@ -216,25 +310,13 @@ export class CapyCommand {
     this.fileManager.writeKeepFile(keep);
     keySpinner.text = 'Created .keep configuration file';
 
-    // Get decrypt data from service
+    // Get remote data (for existing variables, not for key)
     let remoteData = { env_content: '', decrypt_key: '', expires_at: '' };
     try {
       remoteData = await this.serviceClient.getDecryptData(projectResult.project_id);
     } catch {
       // Service unavailable
     }
-
-    const encryptionKey = remoteData.decrypt_key;
-
-    // Always write decrypt key file so sync can find it later
-    const decryptKey = this.syncEngine.createDecryptKey(
-      projectResult.org_id,
-      projectResult.project_id,
-      authResult.user_id!,
-      encryptionKey,
-      []
-    );
-    this.fileManager.writeDecryptKey(decryptKey);
 
     // If remote has existing variables, pull them
     if (remoteData.env_content) {
@@ -302,7 +384,9 @@ export class CapyCommand {
           const pushResult = await this.serviceClient.pushVariables(
             projectResult.project_id,
             localEnv,
-            keep
+            keep,
+            undefined,
+            encryptionKey
           );
 
           if (pushResult.success) {
@@ -318,16 +402,6 @@ export class CapyCommand {
 
             // Encrypt the local .env file
             this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep);
-
-            // Update decrypt key with variable permissions
-            const finalDecryptKey = this.syncEngine.createDecryptKey(
-              projectResult.org_id,
-              projectResult.project_id,
-              authResult.user_id!,
-              encryptionKey,
-              Object.keys(localEnv)
-            );
-            this.fileManager.writeDecryptKey(finalDecryptKey);
 
             syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s)`);
 
@@ -352,16 +426,87 @@ export class CapyCommand {
     console.log('\nReady to work!');
   }
 
+  /**
+   * Prompt the user to switch branches when their active branch no longer exists.
+   * Returns the selected branch name ('' for default/no branch, or a named branch).
+   */
+  private async promptBranchSwitch(projectId: string, missingBranch: string): Promise<string | undefined> {
+    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+
+    console.log(`\n  Branch "${missingBranch}" cannot be found on Capy.\n`);
+
+    let branches;
+    try {
+      branches = await this.serviceClient.listBranches(projectId);
+    } catch {
+      console.log('  Could not retrieve branches. Falling back to default.');
+      this.projectManager.writeActiveBranch(undefined);
+      return undefined;
+    }
+
+    if (branches.length === 0) {
+      console.log('  No branches found. Using default.');
+      this.projectManager.writeActiveBranch(undefined);
+      return undefined;
+    }
+
+    // Show tree view
+    console.log(`  Available branches:`);
+    branches.forEach((b, i) => {
+      const isLast = i === branches.length - 1;
+      const connector = isLast ? '└──' : '├──';
+      const name = b.name || 'no branch';
+      const prot = b.is_production ? `  ${grey('(protected)')}` : '';
+      console.log(`  ${connector} ${name}${prot}`);
+    });
+    console.log('');
+
+    const choices = branches.map(b => ({
+      name: b.name || 'no branch',
+      value: b.name,
+    }));
+
+    const { selected } = await inquirer.prompt([{
+      type: 'list',
+      name: 'selected',
+      message: 'Switch to:',
+      choices,
+    }]);
+
+    this.projectManager.writeActiveBranch(selected || undefined);
+    return selected || undefined;
+  }
+
   private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
-    // Shimmer effect: gradient through teal/cyan shades
+    // Shimmer effect: continuous gradient matching Capy brand
+    // #3a5555 → #688795 → #a06b6b → #b1aa92 → #3a5555
     const shimmer = (s: string) => {
-      const colors = [43, 44, 45, 80, 81, 116, 117, 152, 153];
-      return s.split('').map((ch, i) => {
-        const color = colors[i % colors.length];
-        return `\x1b[38;5;${color}m${ch}\x1b[0m`;
+      const stops = [
+        [58, 85, 85],    // #3a5555
+        [104, 135, 149], // #688795
+        [160, 107, 107], // #a06b6b
+        [177, 170, 146], // #b1aa92
+        [58, 85, 85],    // #3a5555
+      ];
+      const len = s.replace(/ /g, '').length;
+      let charIdx = 0;
+      return s.split('').map((ch) => {
+        if (ch === ' ') return ch;
+        const t = len > 1 ? charIdx / (len - 1) : 0;
+        // Interpolate between gradient stops
+        const segment = t * (stops.length - 1);
+        const i = Math.floor(segment);
+        const f = segment - i;
+        const a = stops[Math.min(i, stops.length - 1)];
+        const b = stops[Math.min(i + 1, stops.length - 1)];
+        const r = Math.round(a[0] + (b[0] - a[0]) * f);
+        const g = Math.round(a[1] + (b[1] - a[1]) * f);
+        const bl = Math.round(a[2] + (b[2] - a[2]) * f);
+        charIdx++;
+        return `\x1b[38;2;${r};${g};${bl}m${ch}\x1b[0m`;
       }).join('');
     };
 
@@ -402,6 +547,16 @@ export class CapyCommand {
 
     spinner.stop();
 
+    // Cross-org guard: block if authenticated org doesn't match the project's org
+    if (authResult.organization_id && projectState.organizationId &&
+        authResult.organization_id !== projectState.organizationId) {
+      throw new CapyError(
+        'You do not have access to this project.' + '\n\n' +
+        'Contact your project admin to get access.',
+        ERROR_CODES.PERMISSION_DENIED
+      );
+    }
+
     this.displayHeader(
       projectState.projectName || 'unknown',
       authResult.organization_name || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name || authResult.organization_id || '',
@@ -427,44 +582,58 @@ export class CapyCommand {
       decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
     } catch (error: any) {
       if (error instanceof CapyError && error.details?.status === 404) {
+        const errorMsg = error.message || '';
         fetchSpinner.stop();
-        const { recreate } = await inquirer.prompt([{
-          type: 'confirm',
-          name: 'recreate',
-          message: 'Project not found — create a new one and re-sync?',
-          default: true,
-        }]);
 
-        if (!recreate) {
-          console.log('Run capy again after resolving the issue.');
-          return;
+        // Branch not found — prompt to switch
+        if (errorMsg.includes('Branch') || (errorMsg.includes('not found') && activeBranch)) {
+          activeBranch = await this.promptBranchSwitch(projectState.projectId!, activeBranch!);
+          decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch || undefined);
         }
+        // Project not found — offer to recreate
+        else {
+          const { recreate } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'recreate',
+            message: 'Project not found — create a new one and re-sync?',
+            default: true,
+          }]);
 
-        // Re-create the project
-        const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
-        const initSpinner = ora('Re-creating project...').start();
-        const projectResult = await this.serviceClient.initializeProject(
-          projectName,
-          authResult.organization_id || projectState.organizationId!
-        );
-        initSpinner.succeed(`Project "${projectName}" re-created`);
+          if (!recreate) {
+            console.log('Run capy again after resolving the issue.');
+            return;
+          }
 
-        // Update .keep with new project ID
-        const keep = this.projectManager.readKeepFile()!;
-        keep.project_id = projectResult.project_id;
-        keep.org_id = projectResult.org_id;
-        this.fileManager.writeKeepFile(keep);
+          const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
+          const initSpinner = ora('Re-creating project...').start();
+          const projectResult = await this.serviceClient.initializeProject(
+            projectName,
+            authResult.organization_id || projectState.organizationId!
+          );
+          initSpinner.succeed(`Project "${projectName}" re-created`);
 
-        // Retry with new project ID
-        decryptData = await this.serviceClient.getDecryptData(projectResult.project_id, activeBranch);
-        // Update projectState for the rest of the flow
-        projectState.projectId = projectResult.project_id;
+          const keep = this.projectManager.readKeepFile()!;
+          keep.project_id = projectResult.project_id;
+          keep.org_id = projectResult.org_id;
+          this.fileManager.writeKeepFile(keep);
+
+          projectState.projectId = projectResult.project_id;
+          projectState.organizationId = projectResult.org_id;
+          // New project only has default branch — reset active branch
+          activeBranch = undefined;
+          this.projectManager.writeActiveBranch(undefined);
+
+          decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
+        }
       } else {
         throw error;
       }
     }
-    const existingDecryptKey = this.projectManager.readDecryptKey();
-    const encryptionKey = existingDecryptKey?.decryption_key ?? decryptData.decrypt_key;
+    const encryptionKey = resolveProjectKey(
+      projectState.organizationId!,
+      projectState.projectId!,
+      authResult.user_id!,
+    );
 
     // Parse remote (encrypted) and decrypt for comparison
     let remoteEnvEncrypted: Record<string, string> = {};
@@ -472,11 +641,7 @@ export class CapyCommand {
     if (decryptData.env_content) {
       remoteEnvEncrypted = this.fileManager.parseEnvContent(decryptData.env_content);
       for (const [key, value] of Object.entries(remoteEnvEncrypted)) {
-        try {
-          remoteEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
-        } catch {
-          remoteEnv[key] = value;
-        }
+        remoteEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
       }
     }
 
@@ -592,7 +757,8 @@ export class CapyCommand {
       projectState.projectId!,
       finalEnv,
       keep,
-      activeBranch
+      activeBranch,
+      encryptionKey
     );
 
     let finalKeep = keep;
@@ -612,16 +778,6 @@ export class CapyCommand {
     // Write encrypted .env file
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
     syncSpinner.text = `Updated encrypted .env${branchLabel} with ${Object.keys(finalEnv).length} total variables`;
-
-    // Update decrypt key
-    const decryptKey = this.syncEngine.createDecryptKey(
-      projectState.organizationId!,
-      projectState.projectId!,
-      authResult.user_id!,
-      encryptionKey,
-      Object.keys(finalEnv)
-    );
-    this.fileManager.writeDecryptKey(decryptKey);
 
     // Update sync state with current variables
     const newSyncState: SyncState = {
