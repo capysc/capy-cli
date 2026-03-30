@@ -293,4 +293,24 @@ export class ServiceClient {
       return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
     }
   }
+
+  async createInvite(orgId: string, email: string): Promise<{ invite_id: string; org_id: string; email: string }> {
+    return this.request('POST', `/orgs/${orgId}/invite`, { email });
+  }
+
+  async wrapOuterLayer(orgId: string, plaintext: string): Promise<{ ciphertext: string }> {
+    return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext });
+  }
+
+  async coDecrypt(orgId: string, ciphertext: string): Promise<{ plaintext: string }> {
+    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext });
+  }
+
+  async addMember(orgId: string, userId: string, email: string, role: string = 'org_admin'): Promise<void> {
+    await this.request('POST', `/orgs/${orgId}/members`, { userId, email, role });
+  }
+
+  async kickMember(orgId: string, email: string): Promise<void> {
+    await this.request('DELETE', `/orgs/${orgId}/members/${encodeURIComponent(email)}`);
+  }
 }
