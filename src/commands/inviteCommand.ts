@@ -48,11 +48,12 @@ export class InviteCommand {
 
     const userId = authResult.user_id!;
 
-    // Check if inviting yourself
+    // Check if inviting yourself or an existing member
     if (authResult.user_email && authResult.user_email.toLowerCase() === email.toLowerCase()) {
-      console.log('You are already a member of this organization.');
+      console.log(`${email} is already a member of this organization.`);
       return;
     }
+
 
     // Read and unwrap master key
     const encryptedM = readMasterKey(orgId);
