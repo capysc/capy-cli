@@ -87,10 +87,11 @@ export class ServiceClient {
       }
 
       if (res.status === 403) {
+        const detail = data.error || 'You do not have permission to perform this action.';
         throw new CapyError(
-          'Access denied. You do not have permission to access this project.',
+          detail,
           ERROR_CODES.PERMISSION_DENIED,
-          { status: 403 }
+          { status: 403, detail }
         );
       }
 
