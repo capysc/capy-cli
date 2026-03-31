@@ -554,27 +554,14 @@ export class CapyCommand {
 
     spinner.stop();
 
-    // Cross-org guard: if authenticated org doesn't match the project's org,
-    // offer to re-initialize (org may have been recreated)
+    // Cross-org guard: block if authenticated org doesn't match the project's org
     if (authResult.organization_id && projectState.organizationId &&
         authResult.organization_id !== projectState.organizationId) {
-      const { reinit } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'reinit',
-        message: 'Your organization has changed. Re-initialize this project with the new organization?',
-        default: true,
-      }]);
-
-      if (!reinit) {
-        throw new CapyError(
-          'Organization mismatch. The .keep file references a different organization.',
-          ERROR_CODES.PERMISSION_DENIED
-        );
-      }
-
-      // Re-initialize with current org
-      await this.initializeProject();
-      return;
+      throw new CapyError(
+        'You are logged into a different organization than this project belongs to.\n\n' +
+        'To fix: run nuke.sh to reset, or delete .keep and .capy/ to re-initialize.',
+        ERROR_CODES.PERMISSION_DENIED
+      );
     }
 
     const orgName = authResult.organization_name
