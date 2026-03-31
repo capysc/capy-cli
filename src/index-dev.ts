@@ -30,6 +30,8 @@ program
       console.log('    capy-dev                        \x1b[90mSync secrets\x1b[0m');
       console.log('    capy-dev branch                 \x1b[90mList secret branches\x1b[0m');
       console.log('    capy-dev checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
+      console.log('    capy-dev invite <email>         \x1b[90mInvite a teammate\x1b[0m');
+      console.log('    capy-dev redeem <code>          \x1b[90mRedeem an invite code\x1b[0m');
       console.log('    capy-dev deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
       console.log('');
       process.exit(1);
@@ -188,6 +190,24 @@ program
   .action(async () => {
     const { CapyCommand } = await import('./commands/capyCommand');
     await CapyCommand.createDeployPR();
+  });
+
+program
+  .command('invite <email>')
+  .description('Invite a teammate to your organization')
+  .action(async (email) => {
+    const { InviteCommand } = await import('./commands/inviteCommand');
+    const cmd = new InviteCommand();
+    await cmd.execute(email);
+  });
+
+program
+  .command('redeem <code>')
+  .description('Redeem an invite code to join an organization')
+  .action(async (code) => {
+    const { RedeemCommand } = await import('./commands/redeemCommand');
+    const cmd = new RedeemCommand();
+    await cmd.execute(code);
   });
 
 program

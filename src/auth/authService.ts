@@ -29,10 +29,10 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
-      // Check for valid cached token
+      // Check for valid cached token (must match requested org if specified)
       if (this.isAuthenticated()) {
         const token = this.getToken();
-        if (token) {
+        if (token && (!organizationId || token.organization_id === organizationId)) {
           return {
             success: true,
             organization_id: token.organization_id,
