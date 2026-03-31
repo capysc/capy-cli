@@ -34,8 +34,9 @@ export function resolveProjectKey(
   const encryptedM = readMasterKey(orgId);
   if (!encryptedM) {
     throw new CapyError(
-      'No master key found for this organization. Create an org or accept an invite first.',
-      ERROR_CODES.AUTH_FAILED,
+      'You do not have access to this project\'s secrets.\n\n' +
+      'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
+      ERROR_CODES.PERMISSION_DENIED,
       { orgId },
     );
   }
@@ -46,8 +47,9 @@ export function resolveProjectKey(
     masterKey = decryptMasterKey(encryptedM, wrappingKey);
   } catch {
     throw new CapyError(
-      'Failed to unwrap master key. Your auth session may have changed. Please re-authenticate.',
-      ERROR_CODES.AUTH_FAILED,
+      'You do not have access to this project\'s secrets.\n\n' +
+      'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
+      ERROR_CODES.PERMISSION_DENIED,
       { orgId },
     );
   }

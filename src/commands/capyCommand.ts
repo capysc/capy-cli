@@ -554,17 +554,6 @@ export class CapyCommand {
 
     spinner.stop();
 
-    // Cross-org guard: block if authenticated org doesn't match the project's org.
-    // This prevents User B from accessing User A's project secrets.
-    if (authResult.organization_id && projectState.organizationId &&
-        authResult.organization_id !== projectState.organizationId) {
-      throw new CapyError(
-        'You do not have access to this project\'s organization.\n\n' +
-        'Contact your project admin to get access.',
-        ERROR_CODES.PERMISSION_DENIED
-      );
-    }
-
     const orgName = authResult.organization_name
       || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name
       || (authResult.organizations?.length === 0 ? 'not yet created' : authResult.organization_id)
