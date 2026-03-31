@@ -554,14 +554,32 @@ export class CapyCommand {
 
     spinner.stop();
 
-    // Cross-org guard: block if authenticated org doesn't match the project's org
+    // If authenticated org doesn't match the project's org, try to refresh into the project's org
     if (authResult.organization_id && projectState.organizationId &&
         authResult.organization_id !== projectState.organizationId) {
-      throw new CapyError(
-        'You are logged into a different organization than this project belongs to.\n\n' +
-        'To fix: run nuke.sh to reset, or delete .keep and .capy/ to re-initialize.',
-        ERROR_CODES.PERMISSION_DENIED
-      );
+      // Check if user belongs to the project's org
+      const projectOrg = authResult.organizations?.find(o => o.id === projectState.organizationId);
+      if (projectOrg && authResult._refresh_token) {
+        // User is a member — refresh into the project's org
+        const scopedAuth = await this.authService.refreshWithCredentials(
+          authResult._refresh_token,
+          projectState.organizationId,
+          authResult.user_id,
+        );
+        if (scopedAuth.success) {
+          authResult.organization_id = projectState.organizationId;
+          authResult.organization_name = projectOrg.name;
+        }
+      }
+
+      // Still doesn't match — block
+      if (authResult.organization_id !== projectState.organizationId) {
+        throw new CapyError(
+          'You do not have access to this project\'s organization.\n\n' +
+          'Contact your project admin to get access.',
+          ERROR_CODES.PERMISSION_DENIED
+        );
+      }
     }
 
     const orgName = authResult.organization_name
