@@ -565,12 +565,32 @@ export class CapyCommand {
     );
 
     // Set token for service client
-    const token = this.authService.getToken();
+    let token = this.authService.getToken();
+
+    // If auth succeeded but no token (multi-org), refresh with the project's org
+    if (!token && authResult._refresh_token && projectState.organizationId) {
+      const scopedAuth = await this.authService.refreshWithCredentials(
+        authResult._refresh_token,
+        projectState.organizationId,
+        authResult.user_id,
+      );
+      if (scopedAuth.success) {
+        token = this.authService.getToken();
+      }
+    }
+
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
         console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
+    }
+
+    if (!token) {
+      throw new CapyError(
+        'Authentication succeeded but no access token was obtained. Try running capy again.',
+        ERROR_CODES.AUTH_FAILED
+      );
     }
 
     // Get remote environment (branch-aware)
