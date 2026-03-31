@@ -35,7 +35,7 @@ describe('Key stability across sessions', () => {
   beforeAll(() => {
     const wrappingKey = deriveWrappingKey(userId, orgId);
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-    saveMasterKey(orgId, encryptedM);
+    saveMasterKey(orgId, encryptedM, userId);
   });
 
   it('Session 1: seed → M → project key', () => {

@@ -12,7 +12,10 @@ export function getAuthSessionPath(): string {
   return join(GLOBAL_CAPY_DIR, 'auth', 'session.json');
 }
 
-export function getOrgKeyPath(orgId: string): string {
+export function getOrgKeyPath(orgId: string, userId?: string): string {
+  if (userId) {
+    return join(GLOBAL_CAPY_DIR, 'orgs', orgId, 'users', userId, 'key.enc');
+  }
   return join(GLOBAL_CAPY_DIR, 'orgs', orgId, 'key.enc');
 }
 
@@ -43,8 +46,8 @@ function readFileOrNull(filePath: string): string | null {
   }
 }
 
-export function saveMasterKey(orgId: string, encryptedBlob: string): void {
-  const keyPath = getOrgKeyPath(orgId);
+export function saveMasterKey(orgId: string, encryptedBlob: string, userId?: string): void {
+  const keyPath = getOrgKeyPath(orgId, userId);
   const data = {
     version: '1.0',
     org_id: orgId,
@@ -55,15 +58,15 @@ export function saveMasterKey(orgId: string, encryptedBlob: string): void {
   writeSecureFile(keyPath, JSON.stringify(data, null, 2));
 }
 
-export function readMasterKey(orgId: string): string | null {
-  const content = readFileOrNull(getOrgKeyPath(orgId));
+export function readMasterKey(orgId: string, userId?: string): string | null {
+  const content = readFileOrNull(getOrgKeyPath(orgId, userId));
   if (!content) return null;
   const data = JSON.parse(content);
   return data.encrypted_master_key;
 }
 
-export function hasOrgKey(orgId: string): boolean {
-  return existsSync(getOrgKeyPath(orgId));
+export function hasOrgKey(orgId: string, userId?: string): boolean {
+  return existsSync(getOrgKeyPath(orgId, userId));
 }
 
 export function saveProjectKeyCache(

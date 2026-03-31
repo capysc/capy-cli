@@ -56,7 +56,7 @@ export class InviteCommand {
 
 
     // Read and unwrap master key
-    const encryptedM = readMasterKey(orgId);
+    const encryptedM = readMasterKey(orgId, userId);
     if (!encryptedM) {
       console.error('No master key found for this organization. Only the org owner can invite.');
       process.exit(1);
