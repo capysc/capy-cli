@@ -510,9 +510,10 @@ export class CapyCommand {
       }).join('');
     };
 
+    const notCreated = grey('not yet created');
     const content = [
-      `Project:      ${bold(projectName)}`,
-      `Organization: ${orgName}`,
+      `Project:      ${projectName === 'not yet created' ? notCreated : bold(projectName)}`,
+      `Organization: ${orgName === 'not yet created' ? notCreated : orgName}`,
       `Branch:       ${branch || grey('none')}`,
       '',
       shimmer(`Welcome ${userName}`),
