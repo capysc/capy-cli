@@ -33,7 +33,7 @@ describe('KeyResolver', () => {
   describe('resolveProjectKey', () => {
     it('should throw when no org key exists', () => {
       expect(() => resolveProjectKey('org_missing', 'proj_1', userId))
-        .toThrow('No master key found');
+        .toThrow('You do not have access');
     });
 
     it('should derive and cache project key from M', () => {
@@ -59,7 +59,7 @@ describe('KeyResolver', () => {
 
     it('should fail with wrong userId', () => {
       expect(() => resolveProjectKey(orgId, 'proj_new', 'wrong-user'))
-        .toThrow('Failed to unwrap master key');
+        .toThrow('You do not have access');
     });
   });
 
