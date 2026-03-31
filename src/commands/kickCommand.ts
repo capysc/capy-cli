@@ -25,6 +25,23 @@ export class KickCommand {
     const token = authService.getToken();
     if (token) serviceClient.setToken(token);
 
+    // Find the membership by email
+    let membershipId: string;
+    try {
+      const { members } = await serviceClient.listMembers(orgId);
+      const match = members.find((m: any) =>
+        m.userId === email || m.organizationName?.toLowerCase() === email.toLowerCase()
+      );
+      if (!match) {
+        console.error(`No member found matching "${email}".`);
+        process.exit(1);
+      }
+      membershipId = match.id;
+    } catch (err: any) {
+      console.error(`Failed to list members: ${err.message}`);
+      process.exit(1);
+    }
+
     // Confirm
     const inquirer = (await import('inquirer')).default;
     const { confirm } = await inquirer.prompt([{
@@ -40,7 +57,7 @@ export class KickCommand {
     }
 
     try {
-      await serviceClient.kickMember(orgId, email);
+      await serviceClient.kickMember(orgId, membershipId);
     } catch (err: any) {
       console.error(`Failed to remove member: ${err.message}`);
       process.exit(1);

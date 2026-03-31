@@ -1,3 +1,4 @@
+import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -8,6 +9,13 @@ import {
   innerWrap,
   buildRedeemCode,
 } from '../crypto/inviteCrypto';
+
+const ROLES = [
+  { name: 'Member', value: 'member' },
+  { name: 'Project Admin', value: 'org-project-admin' },
+  { name: 'Admin', value: 'admin' },
+  { name: 'Owner', value: 'org-owner' },
+] as const;
 
 export class InviteCommand {
   async execute(email: string): Promise<void> {
@@ -50,6 +58,15 @@ export class InviteCommand {
       process.exit(1);
     }
 
+    // Prompt for role
+    const { role } = await inquirer.prompt([{
+      type: 'list',
+      name: 'role',
+      message: `Select a role for ${email}:`,
+      choices: ROLES,
+      default: 'member',
+    }]);
+
     // 1. Generate invite token T
     const inviteToken = generateInviteToken();
 
@@ -63,17 +80,15 @@ export class InviteCommand {
     );
 
     // 4. Create invite record on service
-    await serviceClient.createInvite(orgId, email);
+    await serviceClient.createInvite(orgId, email, role);
 
-    // 5. Add as org member
-    // Note: In production, this would call WorkOS createUser first to get a userId
-    await serviceClient.addMember(orgId, `pending:${email}`, email, 'org_admin');
-
-    // 6. Build redeem code
+    // 5. Build redeem code
     const redeemCode = buildRedeemCode(inviteToken, outerBlob);
 
+    const roleName = ROLES.find(r => r.value === role)?.name ?? role;
+
     console.log('');
-    console.log(`  Invite created for \x1b[1m${email}\x1b[0m`);
+    console.log(`  Invite created for \x1b[1m${email}\x1b[0m as \x1b[1m${roleName}\x1b[0m`);
     console.log('');
     console.log('  Send them this command:');
     console.log('');

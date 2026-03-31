@@ -294,8 +294,8 @@ export class ServiceClient {
     }
   }
 
-  async createInvite(orgId: string, email: string): Promise<{ invite_id: string; org_id: string; email: string }> {
-    return this.request('POST', `/orgs/${orgId}/invite`, { email });
+  async createInvite(orgId: string, email: string, role?: string): Promise<{ invite_id: string; org_id: string; email: string; role: string; user_id: string }> {
+    return this.request('POST', `/orgs/${orgId}/invite`, { email, role });
   }
 
   async wrapOuterLayer(orgId: string, plaintext: string): Promise<{ ciphertext: string }> {
@@ -306,11 +306,11 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext });
   }
 
-  async addMember(orgId: string, userId: string, email: string, role: string = 'org_admin'): Promise<void> {
-    await this.request('POST', `/orgs/${orgId}/members`, { userId, email, role });
+  async listMembers(orgId: string): Promise<{ members: any[] }> {
+    return this.request('GET', `/orgs/${orgId}/members`);
   }
 
-  async kickMember(orgId: string, email: string): Promise<void> {
-    await this.request('DELETE', `/orgs/${orgId}/members/${encodeURIComponent(email)}`);
+  async kickMember(orgId: string, membershipId: string): Promise<void> {
+    await this.request('DELETE', `/orgs/${orgId}/members/${encodeURIComponent(membershipId)}`);
   }
 }
