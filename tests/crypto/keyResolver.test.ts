@@ -40,7 +40,7 @@ describe('KeyResolver', () => {
       // Setup: encrypt M and save
       const wrappingKey = deriveWrappingKey(userId, orgId);
       const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-      saveMasterKey(orgId, encryptedM);
+      saveMasterKey(orgId, encryptedM, userId);
 
       // Resolve
       const key = resolveProjectKey(orgId, projectId, userId);
@@ -72,12 +72,16 @@ describe('KeyResolver', () => {
   });
 
   describe('hasOrgKey', () => {
-    it('should return true for existing org', () => {
-      expect(hasOrgKey(orgId)).toBe(true);
+    it('should return true for existing org+user', () => {
+      expect(hasOrgKey(orgId, userId)).toBe(true);
     });
 
     it('should return false for missing org', () => {
-      expect(hasOrgKey('org_nope')).toBe(false);
+      expect(hasOrgKey('org_nope', userId)).toBe(false);
+    });
+
+    it('should return false for wrong user', () => {
+      expect(hasOrgKey(orgId, 'wrong-user')).toBe(false);
     });
   });
 });
