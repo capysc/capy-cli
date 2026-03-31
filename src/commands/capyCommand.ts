@@ -602,8 +602,9 @@ export class CapyCommand {
 
     if (!token) {
       throw new CapyError(
-        'Could not obtain an access token. Try deleting .keep and .capy/ then run capy again.',
-        ERROR_CODES.AUTH_FAILED
+        'You do not have access to this project\'s organization.\n\n' +
+        'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
+        ERROR_CODES.PERMISSION_DENIED
       );
     }
 
