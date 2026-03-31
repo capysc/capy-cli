@@ -5,6 +5,12 @@ import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
 import { saveMasterKey } from '../config/globalConfig';
 
 export class RedeemCommand {
+  private apiUrl?: string;
+
+  constructor(apiUrl?: string) {
+    this.apiUrl = apiUrl;
+  }
+
   async execute(code: string): Promise<void> {
     // 1. Parse redeem code → T + double-wrapped ciphertext
     let token: Buffer;
@@ -17,7 +23,7 @@ export class RedeemCommand {
     }
 
     // 2. Authenticate (user must already have a WorkOS account)
-    const authService = new AuthService();
+    const authService = new AuthService(this.apiUrl);
     const authResult = await authService.authenticate();
     if (!authResult.success) {
       console.error('Authentication failed. You need a Capy account to redeem an invite.');

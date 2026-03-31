@@ -18,6 +18,12 @@ const ROLES = [
 ] as const;
 
 export class InviteCommand {
+  private apiUrl?: string;
+
+  constructor(apiUrl?: string) {
+    this.apiUrl = apiUrl;
+  }
+
   async execute(email: string): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
@@ -30,8 +36,8 @@ export class InviteCommand {
     const orgId = projectState.organizationId;
 
     // Authenticate
-    const authService = new AuthService();
-    const serviceClient = new ServiceClient();
+    const authService = new AuthService(this.apiUrl);
+    const serviceClient = new ServiceClient(this.apiUrl);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');
