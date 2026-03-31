@@ -244,7 +244,7 @@ export class CapyCommand {
       ];
 
       const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
-      const title = 'SAVE YOUR RECOVERY PHRASE';
+      const title = '!!!IMPORTANT!!! - SAVE THIS RECOVERY PHRASE';
       const titlePad = Math.max(0, maxLen - title.length);
       const titleLeft = Math.floor(titlePad / 2);
       const titleRight = titlePad - titleLeft;
@@ -255,7 +255,13 @@ export class CapyCommand {
       console.log(warn('─'.repeat(maxLen + 2)));
       console.log('');
       console.log('');
+      console.log('');
+      console.log('');
+      console.log('');
       console.log(seedPhrase);
+      console.log('');
+      console.log('');
+      console.log('');
       console.log('');
       console.log('');
 
@@ -510,9 +516,10 @@ export class CapyCommand {
       }).join('');
     };
 
+    const notCreated = grey('not yet created');
     const content = [
-      `Project:      ${bold(projectName)}`,
-      `Organization: ${orgName}`,
+      `Project:      ${projectName === 'not yet created' ? notCreated : bold(projectName)}`,
+      `Organization: ${orgName === 'not yet created' ? notCreated : orgName}`,
       `Branch:       ${branch || grey('none')}`,
       '',
       shimmer(`Welcome ${userName}`),
@@ -547,30 +554,47 @@ export class CapyCommand {
 
     spinner.stop();
 
-    // Cross-org guard: block if authenticated org doesn't match the project's org
-    if (authResult.organization_id && projectState.organizationId &&
-        authResult.organization_id !== projectState.organizationId) {
-      throw new CapyError(
-        'You do not have access to this project.' + '\n\n' +
-        'Contact your project admin to get access.',
-        ERROR_CODES.PERMISSION_DENIED
-      );
-    }
+    const orgName = authResult.organization_name
+      || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name
+      || (authResult.organizations?.length === 0 ? 'not yet created' : authResult.organization_id)
+      || 'not yet created';
 
     this.displayHeader(
-      projectState.projectName || 'unknown',
-      authResult.organization_name || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name || authResult.organization_id || '',
+      projectState.projectName || 'not yet created',
+      orgName,
       authResult.user_first_name || authResult.user_email || '',
       projectState.activeBranch,
     );
 
     // Set token for service client
-    const token = this.authService.getToken();
+    let token = this.authService.getToken();
+
+    // If auth succeeded but no token (multi-org or 0 orgs), try to get a scoped token
+    // NEVER create orgs or modify .keep during sync — that only happens in initializeProject
+    if (!token && authResult._refresh_token && projectState.organizationId) {
+      const scopedAuth = await this.authService.refreshWithCredentials(
+        authResult._refresh_token,
+        projectState.organizationId,
+        authResult.user_id,
+      );
+      if (scopedAuth.success) {
+        token = this.authService.getToken();
+      }
+    }
+
     if (token) {
       this.serviceClient.setToken(token);
       if (this.devMode) {
         console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
       }
+    }
+
+    if (!token) {
+      throw new CapyError(
+        'You do not have access to this project\'s organization.\n\n' +
+        'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
+        ERROR_CODES.PERMISSION_DENIED
+      );
     }
 
     // Get remote environment (branch-aware)
@@ -590,40 +614,9 @@ export class CapyCommand {
           activeBranch = await this.promptBranchSwitch(projectState.projectId!, activeBranch!);
           decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch || undefined);
         }
-        // Project not found — offer to recreate
+        // Project or branch not found — do not recreate during sync
         else {
-          const { recreate } = await inquirer.prompt([{
-            type: 'confirm',
-            name: 'recreate',
-            message: 'Project not found — create a new one and re-sync?',
-            default: true,
-          }]);
-
-          if (!recreate) {
-            console.log('Run capy again after resolving the issue.');
-            return;
-          }
-
-          const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
-          const initSpinner = ora('Re-creating project...').start();
-          const projectResult = await this.serviceClient.initializeProject(
-            projectName,
-            authResult.organization_id || projectState.organizationId!
-          );
-          initSpinner.succeed(`Project "${projectName}" re-created`);
-
-          const keep = this.projectManager.readKeepFile()!;
-          keep.project_id = projectResult.project_id;
-          keep.org_id = projectResult.org_id;
-          this.fileManager.writeKeepFile(keep);
-
-          projectState.projectId = projectResult.project_id;
-          projectState.organizationId = projectResult.org_id;
-          // New project only has default branch — reset active branch
-          activeBranch = undefined;
-          this.projectManager.writeActiveBranch(undefined);
-
-          decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
+          throw error;
         }
       } else {
         throw error;
