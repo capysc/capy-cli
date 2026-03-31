@@ -557,9 +557,14 @@ export class CapyCommand {
       );
     }
 
+    const orgName = authResult.organization_name
+      || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name
+      || (authResult.organizations?.length === 0 ? 'not yet created' : authResult.organization_id)
+      || 'not yet created';
+
     this.displayHeader(
-      projectState.projectName || 'unknown',
-      authResult.organization_name || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name || authResult.organization_id || '',
+      projectState.projectName || 'not yet created',
+      orgName,
       authResult.user_first_name || authResult.user_email || '',
       projectState.activeBranch,
     );
