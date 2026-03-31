@@ -554,29 +554,25 @@ export class CapyCommand {
 
     spinner.stop();
 
-    // If authenticated org doesn't match the project's org, try to refresh into the project's org
+    // If authenticated org doesn't match .keep's org ID (e.g. DB was reset),
+    // update .keep to the current org if the user only has one org
     if (authResult.organization_id && projectState.organizationId &&
         authResult.organization_id !== projectState.organizationId) {
-      // Check if user belongs to the project's org
-      const projectOrg = authResult.organizations?.find(o => o.id === projectState.organizationId);
-      if (projectOrg && authResult._refresh_token) {
-        // User is a member — refresh into the project's org
-        const scopedAuth = await this.authService.refreshWithCredentials(
-          authResult._refresh_token,
-          projectState.organizationId,
-          authResult.user_id,
-        );
-        if (scopedAuth.success) {
-          authResult.organization_id = projectState.organizationId;
-          authResult.organization_name = projectOrg.name;
-        }
-      }
+      const orgs = authResult.organizations || [];
 
-      // Still doesn't match — block
-      if (authResult.organization_id !== projectState.organizationId) {
+      if (orgs.length === 1 && authResult.organization_id === orgs[0].id) {
+        // Single org user — safe to update .keep to the new org ID
+        const keep = this.projectManager.readKeepFile();
+        if (keep) {
+          keep.org_id = authResult.organization_id;
+          this.fileManager.writeKeepFile(keep);
+          projectState.organizationId = authResult.organization_id;
+        }
+      } else {
+        // Multi-org — can't assume which org the project belongs to
         throw new CapyError(
-          'You do not have access to this project\'s organization.\n\n' +
-          'Contact your project admin to get access.',
+          'You are logged into a different organization than this project belongs to.\n\n' +
+          'Contact your project admin to get access, or delete .keep to re-initialize.',
           ERROR_CODES.PERMISSION_DENIED
         );
       }
