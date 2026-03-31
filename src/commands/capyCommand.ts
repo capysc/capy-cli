@@ -567,15 +567,38 @@ export class CapyCommand {
     // Set token for service client
     let token = this.authService.getToken();
 
-    // If auth succeeded but no token (multi-org), refresh with the project's org
-    if (!token && authResult._refresh_token && projectState.organizationId) {
-      const scopedAuth = await this.authService.refreshWithCredentials(
-        authResult._refresh_token,
-        projectState.organizationId,
-        authResult.user_id,
-      );
-      if (scopedAuth.success) {
+    // If auth succeeded but no token (multi-org or 0 orgs), try to get a scoped token
+    if (!token && authResult._refresh_token) {
+      const orgs = authResult.organizations || [];
+
+      if (orgs.length === 0) {
+        // No orgs — user needs to create one (creates org + saves token)
+        console.log('\nNo organization found. Let\'s create one.');
+        const selectedOrg = await this.createNewOrganization(authResult._refresh_token, authResult.user_id!);
         token = this.authService.getToken();
+
+        // Update .keep with new org
+        const keep = this.projectManager.readKeepFile();
+        if (keep) {
+          keep.org_id = selectedOrg.id;
+          this.fileManager.writeKeepFile(keep);
+          projectState.organizationId = selectedOrg.id;
+        }
+      } else {
+        // Multi-org — try refreshing with the project's org
+        const targetOrgId = projectState.organizationId
+          || orgs[0]?.id; // fall back to first org
+
+        if (targetOrgId) {
+          const scopedAuth = await this.authService.refreshWithCredentials(
+            authResult._refresh_token,
+            targetOrgId,
+            authResult.user_id,
+          );
+          if (scopedAuth.success) {
+            token = this.authService.getToken();
+          }
+        }
       }
     }
 
@@ -588,7 +611,7 @@ export class CapyCommand {
 
     if (!token) {
       throw new CapyError(
-        'Authentication succeeded but no access token was obtained. Try running capy again.',
+        'Could not obtain an access token. Try deleting .keep and .capy/ then run capy again.',
         ERROR_CODES.AUTH_FAILED
       );
     }
