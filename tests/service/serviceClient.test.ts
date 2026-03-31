@@ -207,7 +207,7 @@ describe('ServiceClient', () => {
       ));
 
       await expect(serviceClient.pushVariables('proj_123', {}, null, undefined, 'test-encryption-key')).rejects.toThrow(CapyError);
-      await expect(serviceClient.pushVariables('proj_123', {}, null, undefined, 'test-encryption-key')).rejects.toThrow('Access denied');
+      await expect(serviceClient.pushVariables('proj_123', {}, null, undefined, 'test-encryption-key')).rejects.toThrow('Insufficient permissions');
     });
   });
 

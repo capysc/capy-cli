@@ -18,6 +18,12 @@ const ROLES = [
 ] as const;
 
 export class InviteCommand {
+  private apiUrl?: string;
+
+  constructor(apiUrl?: string) {
+    this.apiUrl = apiUrl;
+  }
+
   async execute(email: string): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
@@ -30,8 +36,8 @@ export class InviteCommand {
     const orgId = projectState.organizationId;
 
     // Authenticate
-    const authService = new AuthService();
-    const serviceClient = new ServiceClient();
+    const authService = new AuthService(this.apiUrl);
+    const serviceClient = new ServiceClient(this.apiUrl);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');
@@ -41,6 +47,13 @@ export class InviteCommand {
     if (token) serviceClient.setToken(token);
 
     const userId = authResult.user_id!;
+
+    // Check if inviting yourself or an existing member
+    if (authResult.user_email && authResult.user_email.toLowerCase() === email.toLowerCase()) {
+      console.log(`${email} is already a member of this organization.`);
+      return;
+    }
+
 
     // Read and unwrap master key
     const encryptedM = readMasterKey(orgId);
