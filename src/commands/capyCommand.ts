@@ -581,37 +581,15 @@ export class CapyCommand {
     let token = this.authService.getToken();
 
     // If auth succeeded but no token (multi-org or 0 orgs), try to get a scoped token
-    if (!token && authResult._refresh_token) {
-      const orgs = authResult.organizations || [];
-
-      if (orgs.length === 0) {
-        // No orgs — user needs to create one (creates org + saves token)
-        console.log('\nNo organization found. Let\'s create one.');
-        const selectedOrg = await this.createNewOrganization(authResult._refresh_token, authResult.user_id!);
+    // NEVER create orgs or modify .keep during sync — that only happens in initializeProject
+    if (!token && authResult._refresh_token && projectState.organizationId) {
+      const scopedAuth = await this.authService.refreshWithCredentials(
+        authResult._refresh_token,
+        projectState.organizationId,
+        authResult.user_id,
+      );
+      if (scopedAuth.success) {
         token = this.authService.getToken();
-
-        // Update .keep with new org
-        const keep = this.projectManager.readKeepFile();
-        if (keep) {
-          keep.org_id = selectedOrg.id;
-          this.fileManager.writeKeepFile(keep);
-          projectState.organizationId = selectedOrg.id;
-        }
-      } else {
-        // Multi-org — try refreshing with the project's org
-        const targetOrgId = projectState.organizationId
-          || orgs[0]?.id; // fall back to first org
-
-        if (targetOrgId) {
-          const scopedAuth = await this.authService.refreshWithCredentials(
-            authResult._refresh_token,
-            targetOrgId,
-            authResult.user_id,
-          );
-          if (scopedAuth.success) {
-            token = this.authService.getToken();
-          }
-        }
       }
     }
 
@@ -646,40 +624,9 @@ export class CapyCommand {
           activeBranch = await this.promptBranchSwitch(projectState.projectId!, activeBranch!);
           decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch || undefined);
         }
-        // Project not found — offer to recreate
+        // Project or branch not found — do not recreate during sync
         else {
-          const { recreate } = await inquirer.prompt([{
-            type: 'confirm',
-            name: 'recreate',
-            message: 'Project not found — create a new one and re-sync?',
-            default: true,
-          }]);
-
-          if (!recreate) {
-            console.log('Run capy again after resolving the issue.');
-            return;
-          }
-
-          const projectName = projectState.projectName || this.projectManager.getDefaultProjectName();
-          const initSpinner = ora('Re-creating project...').start();
-          const projectResult = await this.serviceClient.initializeProject(
-            projectName,
-            authResult.organization_id || projectState.organizationId!
-          );
-          initSpinner.succeed(`Project "${projectName}" re-created`);
-
-          const keep = this.projectManager.readKeepFile()!;
-          keep.project_id = projectResult.project_id;
-          keep.org_id = projectResult.org_id;
-          this.fileManager.writeKeepFile(keep);
-
-          projectState.projectId = projectResult.project_id;
-          projectState.organizationId = projectResult.org_id;
-          // New project only has default branch — reset active branch
-          activeBranch = undefined;
-          this.projectManager.writeActiveBranch(undefined);
-
-          decryptData = await this.serviceClient.getDecryptData(projectResult.project_id);
+          throw error;
         }
       } else {
         throw error;
