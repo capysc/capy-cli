@@ -222,7 +222,7 @@ export class CapyCommand {
 
     // Ensure org has a master key — generate seed phrase if first time
     const currentToken = this.authService.getToken();
-    if (!hasOrgKey(selectedOrg.id)) {
+    if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
       const seedPhrase = generateSeedPhrase();
 
       const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
@@ -290,7 +290,7 @@ export class CapyCommand {
       const masterKey = seedPhraseToMasterKey(seedPhrase);
       const wrappingKey = deriveWrappingKey(authResult.user_id!, selectedOrg.id);
       const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-      saveMasterKey(selectedOrg.id, encryptedM);
+      saveMasterKey(selectedOrg.id, encryptedM, authResult.user_id!);
     }
 
     const keySpinner = ora('Generating encryption keys...').start();

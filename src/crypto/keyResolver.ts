@@ -31,7 +31,7 @@ export function resolveProjectKey(
   if (cached) return cached;
 
   // 2. Unwrap M and derive
-  const encryptedM = readMasterKey(orgId);
+  const encryptedM = readMasterKey(orgId, userId);
   if (!encryptedM) {
     throw new CapyError(
       'You do not have access to this project\'s secrets.\n\n' +
@@ -77,6 +77,6 @@ export function resolveFromSeedPhrase(
 /**
  * Checks whether an org's master key exists on disk.
  */
-export function hasOrgKey(orgId: string): boolean {
-  return globalHasOrgKey(orgId);
+export function hasOrgKey(orgId: string, userId?: string): boolean {
+  return globalHasOrgKey(orgId, userId);
 }

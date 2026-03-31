@@ -61,7 +61,7 @@ export class RedeemCommand {
     // 6. Re-encrypt M under this user's wrapping key and store locally
     const wrappingKey = deriveWrappingKey(userId, orgId);
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-    saveMasterKey(orgId, encryptedM);
+    saveMasterKey(orgId, encryptedM, userId);
 
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');
