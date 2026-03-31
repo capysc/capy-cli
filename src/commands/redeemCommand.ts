@@ -33,7 +33,7 @@ export class RedeemCommand {
     const userId = authResult.user_id!;
     const orgId = authResult.organization_id!;
 
-    const serviceClient = new ServiceClient();
+    const serviceClient = new ServiceClient(this.apiUrl);
     if (serviceToken) serviceClient.setToken(serviceToken);
 
     // 3. Store T + ciphertext locally for every-session co-decryption
