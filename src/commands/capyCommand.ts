@@ -244,7 +244,7 @@ export class CapyCommand {
       ];
 
       const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
-      const title = 'SAVE YOUR RECOVERY PHRASE';
+      const title = '!!!IMPORTANT!!! - SAVE THIS RECOVERY PHRASE';
       const titlePad = Math.max(0, maxLen - title.length);
       const titleLeft = Math.floor(titlePad / 2);
       const titleRight = titlePad - titleLeft;
@@ -255,7 +255,13 @@ export class CapyCommand {
       console.log(warn('─'.repeat(maxLen + 2)));
       console.log('');
       console.log('');
+      console.log('');
+      console.log('');
+      console.log('');
       console.log(seedPhrase);
+      console.log('');
+      console.log('');
+      console.log('');
       console.log('');
       console.log('');
 
@@ -548,14 +554,27 @@ export class CapyCommand {
 
     spinner.stop();
 
-    // Cross-org guard: block if authenticated org doesn't match the project's org
+    // Cross-org guard: if authenticated org doesn't match the project's org,
+    // offer to re-initialize (org may have been recreated)
     if (authResult.organization_id && projectState.organizationId &&
         authResult.organization_id !== projectState.organizationId) {
-      throw new CapyError(
-        'You do not have access to this project.' + '\n\n' +
-        'Contact your project admin to get access.',
-        ERROR_CODES.PERMISSION_DENIED
-      );
+      const { reinit } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'reinit',
+        message: 'Your organization has changed. Re-initialize this project with the new organization?',
+        default: true,
+      }]);
+
+      if (!reinit) {
+        throw new CapyError(
+          'Organization mismatch. The .keep file references a different organization.',
+          ERROR_CODES.PERMISSION_DENIED
+        );
+      }
+
+      // Re-initialize with current org
+      await this.initializeProject();
+      return;
     }
 
     const orgName = authResult.organization_name
