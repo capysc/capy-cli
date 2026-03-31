@@ -554,28 +554,15 @@ export class CapyCommand {
 
     spinner.stop();
 
-    // If authenticated org doesn't match .keep's org ID (e.g. DB was reset),
-    // update .keep to the current org if the user only has one org
+    // Cross-org guard: block if authenticated org doesn't match the project's org.
+    // This prevents User B from accessing User A's project secrets.
     if (authResult.organization_id && projectState.organizationId &&
         authResult.organization_id !== projectState.organizationId) {
-      const orgs = authResult.organizations || [];
-
-      if (orgs.length === 1 && authResult.organization_id === orgs[0].id) {
-        // Single org user — safe to update .keep to the new org ID
-        const keep = this.projectManager.readKeepFile();
-        if (keep) {
-          keep.org_id = authResult.organization_id;
-          this.fileManager.writeKeepFile(keep);
-          projectState.organizationId = authResult.organization_id;
-        }
-      } else {
-        // Multi-org — can't assume which org the project belongs to
-        throw new CapyError(
-          'You are logged into a different organization than this project belongs to.\n\n' +
-          'Contact your project admin to get access, or delete .keep to re-initialize.',
-          ERROR_CODES.PERMISSION_DENIED
-        );
-      }
+      throw new CapyError(
+        'You do not have access to this project\'s organization.\n\n' +
+        'Contact your project admin to get access.',
+        ERROR_CODES.PERMISSION_DENIED
+      );
     }
 
     const orgName = authResult.organization_name
