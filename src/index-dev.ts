@@ -32,6 +32,7 @@ program
       console.log('    capy-dev checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
       console.log('    capy-dev invite <email>         \x1b[90mInvite a teammate\x1b[0m');
       console.log('    capy-dev redeem <code>          \x1b[90mRedeem an invite code\x1b[0m');
+      console.log('    capy-dev kick <email>           \x1b[90mRemove a teammate\x1b[0m');
       console.log('    capy-dev deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
       console.log('');
       process.exit(1);
@@ -208,6 +209,15 @@ program
     const { RedeemCommand } = await import('./commands/redeemCommand');
     const cmd = new RedeemCommand(process.env.CAPY_API_URL);
     await cmd.execute(code);
+  });
+
+program
+  .command('kick <email>')
+  .description('Remove a teammate from this organization')
+  .action(async (email) => {
+    const { KickCommand } = await import('./commands/kickCommand');
+    const cmd = new KickCommand(process.env.CAPY_API_URL);
+    await cmd.execute(email);
   });
 
 program

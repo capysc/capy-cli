@@ -3,6 +3,12 @@ import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 
 export class KickCommand {
+  private apiUrl?: string;
+
+  constructor(apiUrl?: string) {
+    this.apiUrl = apiUrl;
+  }
+
   async execute(email: string): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
@@ -15,8 +21,8 @@ export class KickCommand {
     const orgId = projectState.organizationId;
 
     // Authenticate
-    const authService = new AuthService();
-    const serviceClient = new ServiceClient();
+    const authService = new AuthService(this.apiUrl);
+    const serviceClient = new ServiceClient(this.apiUrl);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');
