@@ -29,7 +29,7 @@ describe('inviteCrypto', () => {
   describe('deriveInnerKey', () => {
     it('derives a 32-byte key', () => {
       const token = generateInviteToken();
-      const key = deriveInnerKey(token, orgId);
+      const key = deriveInnerKey(token, orgId, 'capy:invite');
       expect(key).toBeInstanceOf(Buffer);
       expect(key.length).toBe(32);
     });
@@ -37,15 +37,15 @@ describe('inviteCrypto', () => {
     it('different tokens produce different keys', () => {
       const t1 = generateInviteToken();
       const t2 = generateInviteToken();
-      const k1 = deriveInnerKey(t1, orgId);
-      const k2 = deriveInnerKey(t2, orgId);
+      const k1 = deriveInnerKey(t1, orgId, 'capy:invite');
+      const k2 = deriveInnerKey(t2, orgId, 'capy:invite');
       expect(k1.equals(k2)).toBe(false);
     });
 
     it('different orgIds produce different keys', () => {
       const token = generateInviteToken();
-      const k1 = deriveInnerKey(token, 'org-a');
-      const k2 = deriveInnerKey(token, 'org-b');
+      const k1 = deriveInnerKey(token, 'org-a', 'capy:invite');
+      const k2 = deriveInnerKey(token, 'org-b', 'capy:invite');
       expect(k1.equals(k2)).toBe(false);
     });
   });

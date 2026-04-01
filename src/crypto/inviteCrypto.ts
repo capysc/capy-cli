@@ -18,18 +18,18 @@ export function generateInviteToken(): Buffer {
 }
 
 /**
- * Derives the inner wrapping key from token T and orgId.
- * Uses HKDF-SHA256 with orgId as salt and "capy:invite" as info.
+ * Derives a 32-byte inner wrapping key via HKDF-SHA256.
+ * Parameterized so both invite and deploy flows can reuse it.
  */
-export function deriveInnerKey(token: Buffer, orgId: string): Buffer {
-  const derived = hkdfSync('sha256', token, orgId, 'capy:invite', 32);
+export function deriveInnerKey(token: Buffer, salt: string, info: string): Buffer {
+  const derived = hkdfSync('sha256', token, salt, info, 32);
   return Buffer.from(derived);
 }
 
 /**
  * Encrypts data with AES-256-GCM. Returns base64(iv + ciphertext + authTag).
  */
-function aesEncrypt(plaintext: Buffer, key: Buffer): string {
+export function aesEncrypt(plaintext: Buffer, key: Buffer): string {
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(AES_ALGORITHM, key, iv, {
     authTagLength: AUTH_TAG_LENGTH,
@@ -42,7 +42,7 @@ function aesEncrypt(plaintext: Buffer, key: Buffer): string {
 /**
  * Decrypts AES-256-GCM data. Input is base64(iv + ciphertext + authTag).
  */
-function aesDecrypt(blob: string, key: Buffer): Buffer {
+export function aesDecrypt(blob: string, key: Buffer): Buffer {
   const combined = Buffer.from(blob, 'base64');
   if (combined.length < IV_LENGTH + AUTH_TAG_LENGTH) {
     throw new Error('Encrypted blob too short');
@@ -67,7 +67,7 @@ function aesDecrypt(blob: string, key: Buffer): Buffer {
  * the service to wrap the outer layer.
  */
 export function innerWrap(masterKey: Buffer, token: Buffer, orgId: string): string {
-  const innerKey = deriveInnerKey(token, orgId);
+  const innerKey = deriveInnerKey(token, orgId, 'capy:invite');
   return aesEncrypt(masterKey, innerKey);
 }
 
@@ -77,7 +77,7 @@ export function innerWrap(masterKey: Buffer, token: Buffer, orgId: string): stri
  * Returns the master key M.
  */
 export function innerUnwrap(innerBlob: string, token: Buffer, orgId: string): Buffer {
-  const innerKey = deriveInnerKey(token, orgId);
+  const innerKey = deriveInnerKey(token, orgId, 'capy:invite');
   return aesDecrypt(innerBlob, innerKey);
 }
 
