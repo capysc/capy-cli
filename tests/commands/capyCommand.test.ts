@@ -487,6 +487,116 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('initializeProject — fresh account (no .keep, no .env)', () => {
+    /**
+     * Regression test: a brand-new user with no .keep file and no local .env
+     * should be able to authenticate, create a project, and complete init
+     * without the "No secrets stored" 404 from getDecryptData being treated
+     * as an auth failure.
+     */
+    beforeEach(() => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        organization_name: 'Test Org',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }]
+      });
+
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-123',
+        user_id: 'user-456'
+      });
+
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-123',
+        project_id: 'proj-new',
+        project_name: 'fresh-project',
+        created: true
+      });
+
+      mockPromptEngine.promptForProjectName.mockResolvedValue('fresh-project');
+    });
+
+    test('should complete init when getDecryptData returns empty (no prior secrets)', async () => {
+      // getDecryptData returns empty for a brand-new project (no secrets stored)
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        decrypt_key: '',
+        env_content: '',
+        expires_at: new Date().toISOString()
+      });
+
+      // No local .env file exists
+      const mockFs = require('fs');
+      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
+
+      await (capyCommand as any).initializeProject();
+
+      // Auth should succeed
+      expect(mockAuthService.authenticate).toHaveBeenCalled();
+      expect(mockServiceClient.setToken).toHaveBeenCalled();
+
+      // Project should be created
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('fresh-project', 'org-123');
+
+      // .keep file should be written
+      expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          version: '2.0',
+          org_id: 'org-123',
+          project_id: 'proj-new',
+          project_name: 'fresh-project',
+        })
+      );
+
+      // Should NOT try to write encrypted env (no data to write)
+      expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+
+      // Should still set up gitignore
+      expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+    });
+
+    test('should complete init when getDecryptData throws 404', async () => {
+      // getDecryptData throws a 404 (server returns "No secrets stored")
+      mockServiceClient.getDecryptData.mockRejectedValue(
+        new CapyError('No secrets stored for this project', 'SERVICE_ERROR', { status: 404 })
+      );
+
+      const mockFs = require('fs');
+      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
+
+      await (capyCommand as any).initializeProject();
+
+      // Should still complete — 404 during init is expected for new projects
+      expect(mockAuthService.authenticate).toHaveBeenCalled();
+      expect(mockServiceClient.initializeProject).toHaveBeenCalled();
+      expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
+      expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+    });
+
+    test('should not confuse getDecryptData 404 with auth failure', async () => {
+      // The key scenario: getDecryptData returns empty, auth is fine
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        decrypt_key: '',
+        env_content: '',
+        expires_at: new Date().toISOString()
+      });
+
+      const mockFs = require('fs');
+      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
+
+      // Should NOT throw an auth error
+      await expect((capyCommand as any).initializeProject()).resolves.not.toThrow();
+
+      // Auth service should be called exactly once (no retry loops)
+      expect(mockAuthService.authenticate).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('syncProject', () => {
     const mockProjectState = {
       initialized: true,
