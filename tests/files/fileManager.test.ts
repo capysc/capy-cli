@@ -190,7 +190,7 @@ describe('FileManager', () => {
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -212,7 +212,7 @@ describe('FileManager', () => {
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 

@@ -206,8 +206,7 @@ export class ServiceClient {
           encryptedVars[key] = 'capy:deleted';
           resultVariables[key] = {
             resource_id: deriveResourceId(activeBranch, key),
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
+            changed: true,
           };
         } else if (value.startsWith('capy:')) {
           // Already encrypted — pass through as-is
@@ -215,8 +214,7 @@ export class ServiceClient {
           encryptedVars[key] = value;
           resultVariables[key] = {
             resource_id: existingResourceId,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
+            changed: false,
           };
         } else {
           const resourceId = deriveResourceId(activeBranch, key);
@@ -225,8 +223,7 @@ export class ServiceClient {
           encryptedVars[key] = `capy:${resourceId}:${snippetValue}`;
           resultVariables[key] = {
             resource_id: resourceId,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
+            changed: true,
           };
         }
       }

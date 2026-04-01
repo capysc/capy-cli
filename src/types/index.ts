@@ -11,7 +11,7 @@ export interface KeepFile {
   project_id: string;
   project_name: string;
   created_at: string;
-  last_sync: string;
+  last_updated: string;
   variables: Record<string, KeepVariableEntry[]>;
 }
 

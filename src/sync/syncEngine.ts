@@ -219,7 +219,7 @@ export class SyncEngine {
 
   mergeWithKeep(
     keep: KeepFile,
-    pushedVariables: Record<string, { resource_id: string }>,
+    pushedVariables: Record<string, { resource_id: string; changed?: boolean }>,
     branch?: string
   ): KeepFile {
     const updatedKeep = { ...keep, variables: { ...keep.variables } };
@@ -231,11 +231,14 @@ export class SyncEngine {
         branch ? e.branch === branch : !e.branch
       );
 
+      const existing = existingIdx >= 0 ? entries[existingIdx] : null;
+      const valueChanged = data.changed !== false;
+
       const newEntry: KeepVariableEntry = {
         resource_id: data.resource_id,
         ...(branch ? { branch } : {}),
-        created_at: existingIdx >= 0 ? entries[existingIdx].created_at : now,
-        updated_at: now,
+        created_at: existing ? existing.created_at : now,
+        updated_at: valueChanged ? now : (existing?.updated_at ?? now),
       };
 
       if (existingIdx >= 0) {
@@ -247,7 +250,11 @@ export class SyncEngine {
       updatedKeep.variables[varName] = entries;
     }
 
-    updatedKeep.last_sync = now;
+    // Only update last_updated if any variable actually changed
+    const hasChanges = Object.values(pushedVariables).some(v => v.changed !== false);
+    if (hasChanges) {
+      updatedKeep.last_updated = now;
+    }
     return updatedKeep;
   }
 

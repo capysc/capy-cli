@@ -332,12 +332,12 @@ describe('CapyCommand', () => {
         })
       );
       
-      // Verify that created_at and last_sync are timestamps
+      // Verify that created_at and last_updated are timestamps
       const keepArg = mockFileManager.writeKeepFile.mock.calls[0][0];
       expect(keepArg.created_at).toBeDefined();
-      expect(keepArg.last_sync).toBeDefined();
+      expect(keepArg.last_updated).toBeDefined();
       expect(new Date(keepArg.created_at).toString()).not.toBe('Invalid Date');
-      expect(new Date(keepArg.last_sync).toString()).not.toBe('Invalid Date');
+      expect(new Date(keepArg.last_updated).toString()).not.toBe('Invalid Date');
     });
 
     test('should handle authentication failure', async () => {
@@ -408,7 +408,7 @@ describe('CapyCommand', () => {
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
-        last_sync: new Date().toISOString(),
+        last_updated: new Date().toISOString(),
         variables: {
           API_KEY: [{ resource_id: 'res-1', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }],
           DB_URL: [{ resource_id: 'res-2', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }]
@@ -673,7 +673,7 @@ describe('CapyCommand', () => {
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
-        last_sync: new Date().toISOString(),
+        last_updated: new Date().toISOString(),
         variables: {}
       });
 
@@ -683,7 +683,7 @@ describe('CapyCommand', () => {
         project_id: 'proj-123',
         project_name: 'test-project',
         created_at: new Date().toISOString(),
-        last_sync: new Date().toISOString(),
+        last_updated: new Date().toISOString(),
         variables: {
           LOCAL_VAR: [{
             resource_id: 'res-123',
