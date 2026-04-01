@@ -13,6 +13,20 @@ import {
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 
+export interface MemberDetail {
+  membershipId: string;
+  userId: string;
+  email: string;
+  role: string;
+  status: string;
+  createdAt: string;
+  projects: Array<{
+    id: string;
+    name: string;
+    branches: string[];
+  }>;
+}
+
 export class ServiceClient {
   private apiUrl: string;
   private token: ServiceToken | null = null;
@@ -311,7 +325,64 @@ export class ServiceClient {
     return this.request('GET', `/orgs/${orgId}/members`);
   }
 
+  async listMemberDetails(orgId: string): Promise<{ members: MemberDetail[] }> {
+    return this.request('GET', `/orgs/${orgId}/members/details`);
+  }
+
   async kickMember(orgId: string, membershipId: string): Promise<void> {
     await this.request('DELETE', `/orgs/${orgId}/members/${encodeURIComponent(membershipId)}`);
+  }
+
+  async createDeployToken(orgId: string, deployId: string, projectId: string, innerBlob: string): Promise<{ outer_blob: string }> {
+    return this.request('POST', `/orgs/${orgId}/deploy`, { deploy_id: deployId, project_id: projectId, inner_blob: innerBlob });
+  }
+
+  /**
+   * Decrypt a deploy token (unauthenticated, for CI runtime).
+   * Makes a raw fetch without the auth header.
+   */
+  async deployDecrypt(deployId: string, ciphertext: string): Promise<{ plaintext: string }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.apiUrl}/deploy/${encodeURIComponent(deployId)}/decrypt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ciphertext }),
+        signal: controller.signal,
+      });
+    } catch (err: any) {
+      clearTimeout(timeout);
+      throw new CapyError(
+        'Cannot reach Capy service. Check your internet connection.',
+        ERROR_CODES.NETWORK_ERROR,
+        { code: err.code || err.cause?.code },
+      );
+    }
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({})) as Record<string, any>;
+      const msg = data.error || 'Deploy decrypt failed';
+      if (res.status === 403) {
+        throw new CapyError(msg, ERROR_CODES.PERMISSION_DENIED, { status: 403 });
+      }
+      if (res.status === 404) {
+        throw new CapyError(msg, ERROR_CODES.SERVICE_ERROR, { status: 404 });
+      }
+      throw new CapyError(msg, ERROR_CODES.SERVICE_ERROR, { status: res.status, data });
+    }
+
+    return res.json() as Promise<{ plaintext: string }>;
+  }
+
+  async revokeDeployToken(deployId: string): Promise<void> {
+    await this.request('DELETE', `/deploy/${encodeURIComponent(deployId)}`);
+  }
+
+  async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: Array<{ deploy_id: string; label: string | null; created_by: string; created_at: string; revoked_at: string | null }> }> {
+    return this.request('GET', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/deploy-tokens`);
   }
 }

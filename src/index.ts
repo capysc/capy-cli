@@ -21,10 +21,15 @@ program
       console.log('    capy                        \x1b[90mSync secrets\x1b[0m');
       console.log('    capy branch                 \x1b[90mList secret branches\x1b[0m');
       console.log('    capy checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
-      console.log('    capy deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
+      console.log('    capy deploy pr               \x1b[90mCreate a deployment PR\x1b[0m');
+      console.log('    capy deploy setup            \x1b[90mGenerate a deploy token for CI\x1b[0m');
+      console.log('    capy deploy decrypt          \x1b[90mDecrypt deploy token (CI runtime)\x1b[0m');
+      console.log('    capy deploy revoke <id>      \x1b[90mRevoke a deploy token\x1b[0m');
+      console.log('    capy deploy list             \x1b[90mList deploy tokens\x1b[0m');
     console.log('    capy invite <email>          \x1b[90mInvite a teammate\x1b[0m');
     console.log('    capy redeem <code>           \x1b[90mRedeem an invite code\x1b[0m');
     console.log('    capy kick <email>            \x1b[90mRemove a teammate\x1b[0m');
+    console.log('    capy users                   \x1b[90mList organization members\x1b[0m');
       console.log('');
       process.exit(1);
     }
@@ -172,11 +177,51 @@ program
     await cmd.execute(branch, { create: options.create, production: options.production });
   });
 
-program
+const deploy = program
   .command('deploy')
+  .description('Deploy commands: PR creation, token setup, CI decrypt');
+
+deploy
+  .command('pr')
   .description('Create a deployment PR with the .keep file')
   .action(async () => {
     await CapyCommand.createDeployPR();
+  });
+
+deploy
+  .command('setup')
+  .description('Generate a deploy token for CI/CD')
+  .action(async () => {
+    const { DeploySetupCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeploySetupCommand();
+    await cmd.execute();
+  });
+
+deploy
+  .command('decrypt')
+  .description('Decrypt deploy token and output CAPY_KEY (CI runtime)')
+  .action(async () => {
+    const { DeployDecryptCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployDecryptCommand();
+    await cmd.execute();
+  });
+
+deploy
+  .command('revoke <deployId>')
+  .description('Revoke a deploy token')
+  .action(async (deployId: string) => {
+    const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployRevokeCommand();
+    await cmd.execute(deployId);
+  });
+
+deploy
+  .command('list')
+  .description('List deploy tokens for this project')
+  .action(async () => {
+    const { DeployListCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployListCommand();
+    await cmd.execute();
   });
 
 program
@@ -267,6 +312,15 @@ program
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
     await cmd.execute(email);
+  });
+
+program
+  .command('users')
+  .description('List organization members and their project access')
+  .action(async () => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand();
+    await cmd.execute();
   });
 
 program.parse(process.argv);
