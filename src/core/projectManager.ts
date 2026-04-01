@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, KeepFile, KeepVariableEntry, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -137,34 +137,7 @@ export class ProjectManager {
    * Migrate v1 .keep format (variables as objects) to v2 (variables as arrays).
    */
   private migrateKeepIfNeeded(raw: any): KeepFile {
-    // Rename last_sync → last_updated if present
-    if (raw.last_sync && !raw.last_updated) {
-      raw.last_updated = raw.last_sync;
-      delete raw.last_sync;
-    }
-
-    if (raw.version === '2.0') return raw as KeepFile;
-
-    // v1 → v2: convert each variable from object to single-entry array
-    const migratedVariables: Record<string, KeepVariableEntry[]> = {};
-    if (raw.variables && typeof raw.variables === 'object') {
-      for (const [varName, entry] of Object.entries(raw.variables)) {
-        const v1 = entry as { resource_id: string; created_at: string; updated_at: string };
-        if (v1.resource_id) {
-          migratedVariables[varName] = [{
-            resource_id: v1.resource_id,
-            created_at: v1.created_at,
-            updated_at: v1.updated_at,
-          }];
-        }
-      }
-    }
-
-    return {
-      ...raw,
-      version: '2.0',
-      variables: migratedVariables,
-    };
+    return raw as KeepFile;
   }
 
   private validateKeepFile(keep: any): void {

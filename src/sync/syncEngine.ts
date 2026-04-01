@@ -219,11 +219,12 @@ export class SyncEngine {
 
   mergeWithKeep(
     keep: KeepFile,
-    pushedVariables: Record<string, { resource_id: string; changed?: boolean }>,
+    pushedVariables: Record<string, { resource_id: string; value_hash?: string }>,
     branch?: string
   ): KeepFile {
     const updatedKeep = { ...keep, variables: { ...keep.variables } };
     const now = new Date().toISOString();
+    let hasChanges = false;
 
     for (const [varName, data] of Object.entries(pushedVariables)) {
       const entries = [...(updatedKeep.variables[varName] || [])];
@@ -232,26 +233,30 @@ export class SyncEngine {
       );
 
       const existing = existingIdx >= 0 ? entries[existingIdx] : null;
-      const valueChanged = data.changed !== false;
+      // If value_hash is provided, the value was (re-)encrypted from plaintext.
+      // Compare with existing hash to determine if it actually changed.
+      const newHash = data.value_hash ?? existing?.value_hash ?? '';
+      if (data.value_hash && (!existing || existing.value_hash !== data.value_hash)) {
+        hasChanges = true;
+      }
 
       const newEntry: KeepVariableEntry = {
         resource_id: data.resource_id,
         ...(branch ? { branch } : {}),
         created_at: existing ? existing.created_at : now,
-        updated_at: valueChanged ? now : (existing?.updated_at ?? now),
+        value_hash: newHash,
       };
 
       if (existingIdx >= 0) {
         entries[existingIdx] = newEntry;
       } else {
         entries.push(newEntry);
+        hasChanges = true;
       }
 
       updatedKeep.variables[varName] = entries;
     }
 
-    // Only update last_updated if any variable actually changed
-    const hasChanges = Object.values(pushedVariables).some(v => v.changed !== false);
     if (hasChanges) {
       updatedKeep.last_updated = now;
     }

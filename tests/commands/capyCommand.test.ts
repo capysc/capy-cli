@@ -396,8 +396,8 @@ describe('CapyCommand', () => {
       mockServiceClient.pushVariables.mockResolvedValue({
         success: true,
         variables: {
-          API_KEY: { resource_id: 'res-1', success: true },
-          DB_URL: { resource_id: 'res-2', success: true }
+          API_KEY: { resource_id: 'res-1', value_hash: 'hash1' },
+          DB_URL: { resource_id: 'res-2', value_hash: 'hash2' }
         }
       });
 
@@ -410,8 +410,8 @@ describe('CapyCommand', () => {
         created_at: new Date().toISOString(),
         last_updated: new Date().toISOString(),
         variables: {
-          API_KEY: [{ resource_id: 'res-1', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }],
-          DB_URL: [{ resource_id: 'res-2', created_at: new Date().toISOString(), updated_at: new Date().toISOString() }]
+          API_KEY: [{ resource_id: 'res-1', created_at: new Date().toISOString(), value_hash: 'testhash' }],
+          DB_URL: [{ resource_id: 'res-2', created_at: new Date().toISOString(), value_hash: 'testhash' }]
         }
       });
 
@@ -662,7 +662,7 @@ describe('CapyCommand', () => {
         variables: { 
           LOCAL_VAR: {
             resource_id: 'res-123',
-            success: true
+            value_hash: 'hash123'
           }
         }
       });
@@ -688,7 +688,7 @@ describe('CapyCommand', () => {
           LOCAL_VAR: [{
             resource_id: 'res-123',
             created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
+            value_hash: 'testhash'
           }]
         }
       });

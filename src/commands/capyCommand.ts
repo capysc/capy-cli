@@ -764,7 +764,6 @@ export class CapyCommand {
         delete finalKeep.variables[varName];
       }
 
-      finalKeep.last_updated = new Date().toISOString();
       this.fileManager.writeKeepFile(finalKeep);
     }
 

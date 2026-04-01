@@ -122,7 +122,7 @@ DEBUG=true`;
           API_KEY: [{
             resource_id: 'res_123',
             created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
+            value_hash: 'testhash'
           }]
         }
       };
@@ -224,7 +224,7 @@ DEBUG=true`;
           EXISTING_VAR: [{
             resource_id: 'res_old',
             created_at: '2024-01-01T00:00:00Z',
-            updated_at: '2024-01-01T00:00:00Z'
+            value_hash: 'abc12345'
           }]
         }
       };

@@ -10,6 +10,7 @@ import {
   CapyError,
   ERROR_CODES
 } from '../types/index';
+import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 
@@ -206,15 +207,14 @@ export class ServiceClient {
           encryptedVars[key] = 'capy:deleted';
           resultVariables[key] = {
             resource_id: deriveResourceId(activeBranch, key),
-            changed: true,
+            value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
           };
         } else if (value.startsWith('capy:')) {
-          // Already encrypted — pass through as-is
+          // Already encrypted — pass through as-is, no hash (keep existing)
           const existingResourceId = value.split(':')[1] || deriveResourceId(activeBranch, key);
           encryptedVars[key] = value;
           resultVariables[key] = {
             resource_id: existingResourceId,
-            changed: false,
           };
         } else {
           const resourceId = deriveResourceId(activeBranch, key);
@@ -223,7 +223,7 @@ export class ServiceClient {
           encryptedVars[key] = `capy:${resourceId}:${snippetValue}`;
           resultVariables[key] = {
             resource_id: resourceId,
-            changed: true,
+            value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
           };
         }
       }
