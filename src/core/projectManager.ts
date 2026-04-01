@@ -137,6 +137,12 @@ export class ProjectManager {
    * Migrate v1 .keep format (variables as objects) to v2 (variables as arrays).
    */
   private migrateKeepIfNeeded(raw: any): KeepFile {
+    // Rename last_sync → last_updated if present
+    if (raw.last_sync && !raw.last_updated) {
+      raw.last_updated = raw.last_sync;
+      delete raw.last_sync;
+    }
+
     if (raw.version === '2.0') return raw as KeepFile;
 
     // v1 → v2: convert each variable from object to single-entry array

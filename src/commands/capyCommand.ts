@@ -309,7 +309,7 @@ export class CapyCommand {
       project_id: projectResult.project_id,
       project_name: projectResult.project_name,
       created_at: new Date().toISOString(),
-      last_sync: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
       variables: {}
     };
 
@@ -764,7 +764,7 @@ export class CapyCommand {
         delete finalKeep.variables[varName];
       }
 
-      finalKeep.last_sync = new Date().toISOString();
+      finalKeep.last_updated = new Date().toISOString();
       this.fileManager.writeKeepFile(finalKeep);
     }
 

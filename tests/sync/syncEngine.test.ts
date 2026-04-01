@@ -359,7 +359,7 @@ describe('SyncEngine', () => {
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {
           EXISTING_VAR: [{
             resource_id: 'res_old',
@@ -377,7 +377,7 @@ describe('SyncEngine', () => {
 
       expect(result.variables.EXISTING_VAR[0].resource_id).toBe('res_new');
       expect(result.variables.EXISTING_VAR[0].updated_at).not.toBe('2024-01-01T00:00:00Z');
-      expect(result.last_sync).not.toBe('2024-01-01T00:00:00Z');
+      expect(result.last_updated).not.toBe('2024-01-01T00:00:00Z');
     });
 
     test('should add new variables to keep', () => {
@@ -387,7 +387,7 @@ describe('SyncEngine', () => {
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
