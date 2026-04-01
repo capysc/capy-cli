@@ -883,6 +883,9 @@ export class CapyCommand {
 
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
+
+      const open = (await import('open')).default;
+      open(prUrl).catch(() => {});
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
       console.log(`Failed to create PR: ${error.message}`);
