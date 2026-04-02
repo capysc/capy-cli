@@ -10,15 +10,12 @@ export interface KeepFile {
   org_id: string;
   project_id: string;
   project_name: string;
-  created_at: string;
-  last_updated: string;
   variables: Record<string, KeepVariableEntry[]>;
 }
 
 export interface KeepVariableEntry {
   resource_id: string;
   branch?: string;
-  created_at: string;
   value_hash: string;
 }
 

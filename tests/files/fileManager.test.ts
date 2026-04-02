@@ -185,12 +185,10 @@ describe('FileManager', () => {
   describe('writeKeepFile', () => {
     test('should write keep file with proper formatting', () => {
       const keep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -207,12 +205,10 @@ describe('FileManager', () => {
 
     test('should handle write failure with backup restoration', () => {
       const keep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -229,6 +225,75 @@ describe('FileManager', () => {
       });
 
       expect(() => fileManager.writeKeepFile(keep)).toThrow(CapyError);
+    });
+  });
+
+  describe('writeKeepFile deterministic output', () => {
+    test('should sort variables alphabetically and entries by branch', () => {
+      const keep: KeepFile = {
+        version: '3.0',
+        org_id: 'org_123',
+        project_id: 'proj_456',
+        project_name: 'test-project',
+        variables: {
+          ZEBRA_VAR: [{ resource_id: 'res_z', value_hash: 'hz' }],
+          ALPHA_VAR: [
+            { resource_id: 'res_a_staging', branch: 'staging', value_hash: 'has' },
+            { resource_id: 'res_a', value_hash: 'ha' },
+          ],
+          MIDDLE_VAR: [{ resource_id: 'res_m', value_hash: 'hm' }],
+        }
+      };
+
+      mockExistsSync.mockReturnValue(false);
+      fileManager.writeKeepFile(keep);
+
+      const writtenContent = mockWriteFileSync.mock.calls[0][1] as string;
+      const parsed = JSON.parse(writtenContent);
+
+      // Variables should be sorted alphabetically
+      const varNames = Object.keys(parsed.variables);
+      expect(varNames).toEqual(['ALPHA_VAR', 'MIDDLE_VAR', 'ZEBRA_VAR']);
+
+      // Entries should be sorted: branchless first, then alphabetical
+      expect(parsed.variables.ALPHA_VAR[0].branch).toBeUndefined();
+      expect(parsed.variables.ALPHA_VAR[1].branch).toBe('staging');
+    });
+
+    test('should produce identical output regardless of insertion order', () => {
+      const keepA: KeepFile = {
+        version: '3.0',
+        org_id: 'org_1',
+        project_id: 'proj_1',
+        project_name: 'test',
+        variables: {
+          B_VAR: [{ resource_id: 'rb', value_hash: 'hb' }],
+          A_VAR: [{ resource_id: 'ra', value_hash: 'ha' }],
+        }
+      };
+
+      const keepB: KeepFile = {
+        version: '3.0',
+        org_id: 'org_1',
+        project_id: 'proj_1',
+        project_name: 'test',
+        variables: {
+          A_VAR: [{ resource_id: 'ra', value_hash: 'ha' }],
+          B_VAR: [{ resource_id: 'rb', value_hash: 'hb' }],
+        }
+      };
+
+      mockExistsSync.mockReturnValue(false);
+
+      fileManager.writeKeepFile(keepA);
+      const outputA = mockWriteFileSync.mock.calls[0][1] as string;
+
+      mockWriteFileSync.mockClear();
+
+      fileManager.writeKeepFile(keepB);
+      const outputB = mockWriteFileSync.mock.calls[0][1] as string;
+
+      expect(outputA).toBe(outputB);
     });
   });
 

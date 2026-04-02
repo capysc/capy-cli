@@ -134,9 +134,21 @@ export class ProjectManager {
   }
 
   /**
-   * Migrate v1 .keep format (variables as objects) to v2 (variables as arrays).
+   * Migrate older .keep formats to current v3 (deterministic, no timestamps).
    */
   private migrateKeepIfNeeded(raw: any): KeepFile {
+    if (raw.version === '2.0') {
+      delete raw.created_at;
+      delete raw.last_updated;
+      if (raw.variables) {
+        for (const entries of Object.values(raw.variables) as any[]) {
+          for (const entry of entries) {
+            delete entry.created_at;
+          }
+        }
+      }
+      raw.version = '3.0';
+    }
     return raw as KeepFile;
   }
 

@@ -354,16 +354,13 @@ describe('SyncEngine', () => {
   describe('mergeWithKeep', () => {
     test('should update existing variables in keep', () => {
       const keep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {
           EXISTING_VAR: [{
             resource_id: 'res_old',
-            created_at: '2024-01-01T00:00:00Z',
             value_hash: 'abc12345'
           }]
         }
@@ -377,17 +374,14 @@ describe('SyncEngine', () => {
 
       expect(result.variables.EXISTING_VAR[0].resource_id).toBe('res_new');
       expect(result.variables.EXISTING_VAR[0].value_hash).toBe('newhash123');
-      expect(result.last_updated).not.toBe('2024-01-01T00:00:00Z');
     });
 
     test('should add new variables to keep', () => {
       const keep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -399,7 +393,6 @@ describe('SyncEngine', () => {
 
       expect(result.variables.NEW_VAR).toBeDefined();
       expect(result.variables.NEW_VAR[0].resource_id).toBe('res_123');
-      expect(result.variables.NEW_VAR[0].created_at).toBeDefined();
       expect(result.variables.NEW_VAR[0].value_hash).toBe('');
     });
   });

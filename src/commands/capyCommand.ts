@@ -302,14 +302,12 @@ export class CapyCommand {
       authResult.user_id!,
     );
 
-    // Create keep file (v2 format)
+    // Create keep file (v3 format — deterministic, no timestamps)
     const keep: KeepFile = {
-      version: '2.0',
+      version: '3.0',
       org_id: projectResult.org_id,
       project_id: projectResult.project_id,
       project_name: projectResult.project_name,
-      created_at: new Date().toISOString(),
-      last_updated: new Date().toISOString(),
       variables: {}
     };
 
@@ -336,6 +334,13 @@ export class CapyCommand {
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
     this.promptEngine.displaySuccess('Updated .gitignore to protect secrets');
+
+    // Stage .keep in git so collaborators don't hit "untracked file" errors on pull
+    try {
+      execSync('git add .keep', { stdio: 'pipe' });
+    } catch {
+      // Not a git repo — fine
+    }
 
     // Check if there's an existing .env file with variables to sync
     const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
@@ -807,7 +812,9 @@ export class CapyCommand {
    */
   static async createDeployPR(syncedVars?: string[]): Promise<void> {
     const { ProjectManager } = await import('../core/projectManager');
+    const { FileManager } = await import('../files/fileManager');
     const pm = new ProjectManager();
+    const fm = new FileManager();
     const projectName = pm.getDefaultProjectName();
     const keepFile = pm.readKeepFile();
 
@@ -831,9 +838,10 @@ export class CapyCommand {
       name: 'confirm',
       message: `Deploy your secrets to a git branch?`,
       choices: [
-        { name: `Yes - Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
-        { name: 'Yes - Another git branch', value: 'other' },
-        { name: 'No  - Continue working', value: 'cancel' },
+        { name: `Push directly to "${targetBranch}"`, value: 'push' },
+        { name: `Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
+        { name: 'Deploy to another branch', value: 'other' },
+        { name: 'Continue working', value: 'cancel' },
       ],
     }]);
 
@@ -849,6 +857,35 @@ export class CapyCommand {
       return;
     }
 
+    const title = `chore: sync ${vars.length} ${projectName} secret${vars.length === 1 ? '' : 's'} via capy`;
+    const varList = vars.map(v => `- ${v}`).join('\n');
+    const fullMessage = `${title}\n\nSynced variables:\n${varList}`;
+    const { writeFileSync: writeTmp, unlinkSync: unlinkTmp } = require('fs');
+    const { join: joinTmp } = require('path');
+    const tmpMsg = joinTmp(require('os').tmpdir(), `capy-commit-msg-${Date.now()}`);
+    writeTmp(tmpMsg, fullMessage, 'utf-8');
+
+    // Direct push: commit .keep and push to target branch
+    if (confirm === 'push') {
+      const pushSpinner = ora(`Pushing to ${targetBranch}...`).start();
+      try {
+        execSync('git add .keep', { stdio: 'pipe' });
+        execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
+        unlinkTmp(tmpMsg);
+        execSync(`git push origin HEAD:${targetBranch}`, { stdio: 'pipe' });
+        pushSpinner.succeed(`Pushed .keep to ${targetBranch}`);
+        return;
+      } catch (pushErr: any) {
+        unlinkTmp(tmpMsg);
+        // Undo the local commit so the working tree is clean
+        try { execSync('git reset HEAD~1', { stdio: 'pipe' }); } catch {}
+        pushSpinner.fail(`Cannot push directly to "${targetBranch}" (likely protected)`);
+        console.log('  Creating a deployment PR instead...\n');
+        // Fall through to PR path
+      }
+    }
+
+    // PR path: create a deploy branch, commit .keep, push, switch back
     const deployBranch = `capy/sync-${projectName}-${Date.now()}`;
 
     try {
@@ -857,19 +894,14 @@ export class CapyCommand {
       execSync(`git checkout -b ${deployBranch}`, { stdio: 'pipe' });
       execSync('git add .keep', { stdio: 'pipe' });
 
-      const title = `chore: sync ${vars.length} ${projectName} secret${vars.length === 1 ? '' : 's'} via capy`;
-      const varList = vars.map(v => `- ${v}`).join('\n');
-      const fullMessage = `${title}\n\nSynced variables:\n${varList}`;
-      const { writeFileSync: writeTmp, unlinkSync: unlinkTmp } = require('fs');
-      const { join: joinTmp } = require('path');
-      const tmpMsg = joinTmp(require('os').tmpdir(), `capy-commit-msg-${Date.now()}`);
       writeTmp(tmpMsg, fullMessage, 'utf-8');
       execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
       unlinkTmp(tmpMsg);
       execSync(`git push -u origin ${deployBranch}`, { stdio: 'pipe' });
 
-      // Switch back to original branch
+      // Switch back to original branch and restore .keep
       execSync(`git checkout ${baseBranch}`, { stdio: 'pipe' });
+      fm.writeKeepFile(keepFile);
 
       // Build GitHub PR URL
       const remoteUrl = execSync('git remote get-url origin', { stdio: 'pipe', encoding: 'utf-8' }).trim();
@@ -887,6 +919,9 @@ export class CapyCommand {
       open(prUrl).catch(() => {});
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
+      // Ensure we're back on baseBranch and .keep is restored
+      try { execSync(`git checkout ${baseBranch}`, { stdio: 'pipe' }); } catch {}
+      fm.writeKeepFile(keepFile);
       console.log(`Failed to create PR: ${error.message}`);
     }
   }

@@ -39,12 +39,10 @@ describe('ProjectManager', () => {
 
     test('should detect initialized project with valid .keep file', async () => {
       const mockKeep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -94,16 +92,13 @@ describe('ProjectManager', () => {
 
     test('should read and validate .keep file successfully', () => {
       const mockKeep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {
           'API_KEY': [{
             resource_id: 'res_789',
-            created_at: '2024-01-01T00:00:00Z',
             value_hash: 'abc12345'
           }]
         }
@@ -128,7 +123,7 @@ describe('ProjectManager', () => {
 
     test('should throw CapyError for missing required fields', () => {
       const invalidKeep = {
-        version: '2.0',
+        version: '3.0',
         // Missing required fields
         project_name: 'test'
       };
@@ -141,12 +136,10 @@ describe('ProjectManager', () => {
 
     test('should throw CapyError for invalid variables structure', () => {
       const invalidKeep = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: 'invalid' // Should be object
       };
 
@@ -198,7 +191,7 @@ describe('ProjectManager', () => {
   describe('validateKeepFile', () => {
     test('should validate required fields', () => {
       const validKeep = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -221,7 +214,7 @@ describe('ProjectManager', () => {
 
     test('should throw for missing org_id', () => {
       const invalidKeep = {
-        version: '2.0',
+        version: '3.0',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {}
@@ -232,7 +225,7 @@ describe('ProjectManager', () => {
 
     test('should throw for invalid variables type', () => {
       const invalidKeep = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -240,6 +233,50 @@ describe('ProjectManager', () => {
       };
 
       expect(() => (projectManager as any).validateKeepFile(invalidKeep)).toThrow('Invalid variables structure');
+    });
+  });
+
+  describe('migrateKeepIfNeeded', () => {
+    test('should migrate v2 keep to v3 by stripping timestamps', () => {
+      const v2Keep = {
+        version: '2.0',
+        org_id: 'org_123',
+        project_id: 'proj_456',
+        project_name: 'test-project',
+        created_at: '2024-01-01T00:00:00Z',
+        last_updated: '2024-06-15T12:00:00Z',
+        variables: {
+          API_KEY: [{
+            resource_id: 'res_abc',
+            created_at: '2024-01-01T00:00:00Z',
+            value_hash: 'hash123'
+          }]
+        }
+      };
+
+      const result = (projectManager as any).migrateKeepIfNeeded(v2Keep);
+
+      expect(result.version).toBe('3.0');
+      expect(result.created_at).toBeUndefined();
+      expect(result.last_updated).toBeUndefined();
+      expect(result.variables.API_KEY[0].created_at).toBeUndefined();
+      expect(result.variables.API_KEY[0].resource_id).toBe('res_abc');
+      expect(result.variables.API_KEY[0].value_hash).toBe('hash123');
+    });
+
+    test('should leave v3 keep unchanged', () => {
+      const v3Keep = {
+        version: '3.0',
+        org_id: 'org_123',
+        project_id: 'proj_456',
+        project_name: 'test-project',
+        variables: {}
+      };
+
+      const result = (projectManager as any).migrateKeepIfNeeded(v3Keep);
+
+      expect(result.version).toBe('3.0');
+      expect(result).toEqual(v3Keep);
     });
   });
 

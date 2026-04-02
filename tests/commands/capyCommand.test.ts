@@ -324,20 +324,13 @@ describe('CapyCommand', () => {
 
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
-          version: '2.0',
+          version: '3.0',
           org_id: 'capy-123',
           project_id: 'proj-123',
           project_name: 'test-project',
           variables: {}
         })
       );
-      
-      // Verify that created_at and last_updated are timestamps
-      const keepArg = mockFileManager.writeKeepFile.mock.calls[0][0];
-      expect(keepArg.created_at).toBeDefined();
-      expect(keepArg.last_updated).toBeDefined();
-      expect(new Date(keepArg.created_at).toString()).not.toBe('Invalid Date');
-      expect(new Date(keepArg.last_updated).toString()).not.toBe('Invalid Date');
     });
 
     test('should handle authentication failure', async () => {
@@ -403,15 +396,13 @@ describe('CapyCommand', () => {
 
       // Mock mergeWithKeep to return an updated keep
       mockSyncEngine.mergeWithKeep.mockReturnValue({
-        version: '2.0',
+        version: '3.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
-        created_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
         variables: {
-          API_KEY: [{ resource_id: 'res-1', created_at: new Date().toISOString(), value_hash: 'testhash' }],
-          DB_URL: [{ resource_id: 'res-2', created_at: new Date().toISOString(), value_hash: 'testhash' }]
+          API_KEY: [{ resource_id: 'res-1', value_hash: 'testhash' }],
+          DB_URL: [{ resource_id: 'res-2', value_hash: 'testhash' }]
         }
       });
 
@@ -546,7 +537,7 @@ describe('CapyCommand', () => {
       // .keep file should be written
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
-          version: '2.0',
+          version: '3.0',
           org_id: 'org-123',
           project_id: 'proj-new',
           project_name: 'fresh-project',
@@ -668,26 +659,21 @@ describe('CapyCommand', () => {
       });
 
       mockProjectManager.readKeepFile.mockReturnValue({
-        version: '2.0',
+        version: '3.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
-        created_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
         variables: {}
       });
 
       mockSyncEngine.mergeWithKeep.mockReturnValue({
-        version: '2.0',
+        version: '3.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
-        created_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
         variables: {
           LOCAL_VAR: [{
             resource_id: 'res-123',
-            created_at: new Date().toISOString(),
             value_hash: 'testhash'
           }]
         }
