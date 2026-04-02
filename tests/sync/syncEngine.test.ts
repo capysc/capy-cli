@@ -359,25 +359,25 @@ describe('SyncEngine', () => {
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {
           EXISTING_VAR: [{
             resource_id: 'res_old',
             created_at: '2024-01-01T00:00:00Z',
-            updated_at: '2024-01-01T00:00:00Z'
+            value_hash: 'abc12345'
           }]
         }
       };
 
       const pushedVariables = {
-        EXISTING_VAR: { resource_id: 'res_new' }
+        EXISTING_VAR: { resource_id: 'res_new', value_hash: 'newhash123' }
       };
 
       const result = syncEngine.mergeWithKeep(keep, pushedVariables);
 
       expect(result.variables.EXISTING_VAR[0].resource_id).toBe('res_new');
-      expect(result.variables.EXISTING_VAR[0].updated_at).not.toBe('2024-01-01T00:00:00Z');
-      expect(result.last_sync).not.toBe('2024-01-01T00:00:00Z');
+      expect(result.variables.EXISTING_VAR[0].value_hash).toBe('newhash123');
+      expect(result.last_updated).not.toBe('2024-01-01T00:00:00Z');
     });
 
     test('should add new variables to keep', () => {
@@ -387,7 +387,7 @@ describe('SyncEngine', () => {
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -400,7 +400,7 @@ describe('SyncEngine', () => {
       expect(result.variables.NEW_VAR).toBeDefined();
       expect(result.variables.NEW_VAR[0].resource_id).toBe('res_123');
       expect(result.variables.NEW_VAR[0].created_at).toBeDefined();
-      expect(result.variables.NEW_VAR[0].updated_at).toBeDefined();
+      expect(result.variables.NEW_VAR[0].value_hash).toBe('');
     });
   });
 

@@ -65,7 +65,7 @@ describe('CLI Integration Tests', () => {
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -117,12 +117,12 @@ DEBUG=true`;
         project_id: 'proj_456',
         project_name: 'integration-test',
         created_at: new Date().toISOString(),
-        last_sync: new Date().toISOString(),
+        last_updated: new Date().toISOString(),
         variables: {
           API_KEY: [{
             resource_id: 'res_123',
             created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
+            value_hash: 'testhash'
           }]
         }
       };
@@ -219,12 +219,12 @@ DEBUG=true`;
         project_id: 'proj_456',
         project_name: 'test',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {
           EXISTING_VAR: [{
             resource_id: 'res_old',
             created_at: '2024-01-01T00:00:00Z',
-            updated_at: '2024-01-01T00:00:00Z'
+            value_hash: 'abc12345'
           }]
         }
       };
@@ -239,7 +239,7 @@ DEBUG=true`;
       expect(updatedKeep.variables.NEW_VAR).toBeDefined();
       expect(updatedKeep.variables.NEW_VAR[0].resource_id).toBe('res_new');
       expect(updatedKeep.variables.EXISTING_VAR[0].resource_id).toBe('res_updated');
-      expect(updatedKeep.last_sync).not.toBe(originalKeep.last_sync);
+      expect(updatedKeep.last_updated).not.toBe(originalKeep.last_updated);
     });
 
     test('should validate user decisions correctly', () => {

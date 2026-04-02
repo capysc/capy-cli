@@ -34,15 +34,15 @@ export class KickCommand {
     // Find the membership by email
     let membershipId: string;
     try {
-      const { members } = await serviceClient.listMembers(orgId);
-      const match = members.find((m: any) =>
-        m.userId === email || m.organizationName?.toLowerCase() === email.toLowerCase()
+      const { members } = await serviceClient.listMemberDetails(orgId);
+      const match = members.find(m =>
+        m.email.toLowerCase() === email.toLowerCase()
       );
       if (!match) {
         console.error(`No member found matching "${email}".`);
         process.exit(1);
       }
-      membershipId = match.id;
+      membershipId = match.membershipId;
     } catch (err: any) {
       console.error(`Failed to list members: ${err.message}`);
       process.exit(1);

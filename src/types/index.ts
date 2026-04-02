@@ -11,7 +11,7 @@ export interface KeepFile {
   project_id: string;
   project_name: string;
   created_at: string;
-  last_sync: string;
+  last_updated: string;
   variables: Record<string, KeepVariableEntry[]>;
 }
 
@@ -19,14 +19,7 @@ export interface KeepVariableEntry {
   resource_id: string;
   branch?: string;
   created_at: string;
-  updated_at: string;
-}
-
-/** @deprecated v1 format — auto-migrated to KeepVariableEntry[] on read */
-export interface KeepVariable {
-  resource_id: string;
-  created_at: string;
-  updated_at: string;
+  value_hash: string;
 }
 
 export interface DecryptKey {
@@ -163,8 +156,7 @@ export interface PushResult {
   success: boolean;
   variables: Record<string, {
     resource_id: string;
-    success: boolean;
-    error?: string;
+    value_hash?: string;
   }>;
 }
 

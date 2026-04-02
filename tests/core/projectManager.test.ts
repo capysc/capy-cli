@@ -44,7 +44,7 @@ describe('ProjectManager', () => {
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -99,12 +99,12 @@ describe('ProjectManager', () => {
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: {
           'API_KEY': [{
             resource_id: 'res_789',
             created_at: '2024-01-01T00:00:00Z',
-            updated_at: '2024-01-01T00:00:00Z'
+            value_hash: 'abc12345'
           }]
         }
       };
@@ -146,7 +146,7 @@ describe('ProjectManager', () => {
         project_id: 'proj_456',
         project_name: 'test-project',
         created_at: '2024-01-01T00:00:00Z',
-        last_sync: '2024-01-01T00:00:00Z',
+        last_updated: '2024-01-01T00:00:00Z',
         variables: 'invalid' // Should be object
       };
 

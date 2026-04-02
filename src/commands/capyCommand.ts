@@ -309,7 +309,7 @@ export class CapyCommand {
       project_id: projectResult.project_id,
       project_name: projectResult.project_name,
       created_at: new Date().toISOString(),
-      last_sync: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
       variables: {}
     };
 
@@ -764,7 +764,6 @@ export class CapyCommand {
         delete finalKeep.variables[varName];
       }
 
-      finalKeep.last_sync = new Date().toISOString();
       this.fileManager.writeKeepFile(finalKeep);
     }
 
@@ -883,6 +882,9 @@ export class CapyCommand {
 
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
+
+      const open = (await import('open')).default;
+      open(prUrl).catch(() => {});
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
       console.log(`Failed to create PR: ${error.message}`);
