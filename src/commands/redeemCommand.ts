@@ -34,10 +34,12 @@ export class RedeemCommand {
     let userId = authResult.user_id!;
     let orgId = authResult.organization_id!;
 
-    // 3. If logged into a different org, switch to the invite's org
+    // 3. If logged into a different org, switch to the invite's org (in-memory only)
+    //    We must NOT persist the switched token — it would overwrite the project's
+    //    shared .capy/token file and break auth for other users in this directory.
+    const originalToken = authService.getToken();
     if (orgId !== targetOrgId) {
-      const serviceToken = authService.getToken();
-      const refreshToken = serviceToken?.refresh_token;
+      const refreshToken = originalToken?.refresh_token;
       if (!refreshToken) {
         console.error('Cannot switch to the invited organization. Please log out and try again.');
         process.exit(1);
@@ -88,6 +90,11 @@ export class RedeemCommand {
     const wrappingKey = deriveWrappingKey(userId, orgId);
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
     saveMasterKey(orgId, encryptedM, userId);
+
+    // 7. Restore original token so the project's .capy/token isn't left as the switched user
+    if (originalToken && originalToken.organization_id !== orgId) {
+      authService.restoreToken(originalToken);
+    }
 
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');

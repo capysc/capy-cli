@@ -256,6 +256,15 @@ export class AuthService {
     return this.serviceToken?.organization_id || null;
   }
 
+  /**
+   * Restores a previously saved token and persists it to disk.
+   * Used to undo an in-memory org switch after a transient operation (e.g. redeem).
+   */
+  restoreToken(token: ServiceToken): void {
+    this.serviceToken = token;
+    this.saveToken();
+  }
+
   private loadToken(): void {
     if (!existsSync(this.tokenPath)) return;
 
