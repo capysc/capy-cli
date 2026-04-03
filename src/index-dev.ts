@@ -33,6 +33,7 @@ program
       console.log('    capy-dev invite <email>         \x1b[90mInvite a teammate\x1b[0m');
       console.log('    capy-dev redeem <code>          \x1b[90mRedeem an invite code\x1b[0m');
       console.log('    capy-dev kick <email>           \x1b[90mRemove a teammate\x1b[0m');
+      console.log('    capy-dev users                  \x1b[90mList organization members\x1b[0m');
       console.log('    capy-dev deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
       console.log('');
       process.exit(1);
@@ -321,6 +322,15 @@ program
     } else {
       console.log('No active session.');
     }
+  });
+
+program
+  .command('users')
+  .description('List organization members and their project access')
+  .action(async () => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand(process.env.CAPY_API_URL);
+    await cmd.execute();
   });
 
 program.parse(process.argv);

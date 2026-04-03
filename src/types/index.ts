@@ -135,6 +135,22 @@ export interface ServiceToken {
   organizations?: Organization[];
 }
 
+export interface OrgSession {
+  access_token: string;
+  expires_at: number;
+}
+
+export interface SessionStore {
+  version: 2;
+  user_id: string;
+  user_email?: string;
+  user_first_name?: string | null;
+  user_last_name?: string | null;
+  refresh_token: string;
+  organizations: Organization[];
+  sessions: Record<string, OrgSession>;
+}
+
 export interface CliOptions {
   envPath?: string;
   verbose?: boolean;

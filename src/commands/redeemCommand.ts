@@ -34,17 +34,10 @@ export class RedeemCommand {
     let userId = authResult.user_id!;
     let orgId = authResult.organization_id!;
 
-    // 3. If logged into a different org, switch to the invite's org (in-memory only)
-    //    We must NOT persist the switched token — it would overwrite the project's
-    //    shared .capy/token file and break auth for other users in this directory.
-    const originalToken = authService.getToken();
+    // 3. If logged into a different org, authenticate for the invite's org.
+    //    Multi-org sessions let both orgs coexist — no save/restore needed.
     if (orgId !== targetOrgId) {
-      const refreshToken = originalToken?.refresh_token;
-      if (!refreshToken) {
-        console.error('Cannot switch to the invited organization. Please log out and try again.');
-        process.exit(1);
-      }
-      const switched = await authService.refreshWithCredentials(refreshToken, targetOrgId, userId);
+      const switched = await authService.authenticate(targetOrgId);
       if (!switched.success) {
         console.error('Failed to switch to the invited organization. You may not have access.');
         process.exit(1);
@@ -64,14 +57,7 @@ export class RedeemCommand {
     const serviceClient = new ServiceClient(this.apiUrl);
     if (serviceToken) serviceClient.setToken(serviceToken);
 
-    // 3. Store T + ciphertext locally for every-session co-decryption
-    //    On each `capy` run, CLI sends ciphertext to service → service strips outer
-    //    layer → CLI uses T to strip inner layer → M in memory → HKDF → project key
-    //
-    //    For now, we do the full round-trip at redeem time to verify it works,
-    //    then re-encrypt M under the user's own wrapping key for local storage.
-
-    // 4. Service redeems invite (strips outer KMS layer + validates recipient email)
+    // 5. Service redeems invite (strips outer KMS layer + validates recipient email)
     let innerBlob: string;
     try {
       const result = await serviceClient.redeemInvite(orgId, ciphertext);
@@ -96,11 +82,6 @@ export class RedeemCommand {
     const wrappingKey = deriveWrappingKey(userId, orgId);
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
     saveMasterKey(orgId, encryptedM, userId);
-
-    // 7. Restore original token so the project's .capy/token isn't left as the switched user
-    if (originalToken && originalToken.organization_id !== orgId) {
-      authService.restoreToken(originalToken);
-    }
 
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');
