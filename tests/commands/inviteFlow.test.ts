@@ -66,12 +66,13 @@ describe('Invite Flow E2E', () => {
       const outerBlob = simulateServiceWrap(innerBlobBytes);
 
       // 4. Build redeem code
-      const redeemCode = buildRedeemCode(token, outerBlob);
+      const redeemCode = buildRedeemCode(token, outerBlob, orgId);
 
       // === INVITEE SIDE (capy redeem) ===
 
       // 5. Parse redeem code
-      const { token: parsedToken, ciphertext } = parseRedeemCode(redeemCode);
+      const { token: parsedToken, orgId: parsedOrgId, ciphertext } = parseRedeemCode(redeemCode);
+      expect(parsedOrgId).toBe(orgId);
       expect(parsedToken.equals(token)).toBe(true);
 
       // 6. Service co-decrypts (strips outer layer)
@@ -158,7 +159,7 @@ describe('Invite Flow E2E', () => {
     it('redeem code is a single base64 string', () => {
       const token = generateInviteToken();
       const outerBlob = randomBytes(80).toString('base64');
-      const code = buildRedeemCode(token, outerBlob);
+      const code = buildRedeemCode(token, outerBlob, orgId);
 
       // Should be valid base64
       expect(() => Buffer.from(code, 'base64')).not.toThrow();
@@ -170,7 +171,7 @@ describe('Invite Flow E2E', () => {
       const token = generateInviteToken();
       const innerBlob = innerWrap(masterKey, token, orgId);
       const outerBlob = simulateServiceWrap(Buffer.from(innerBlob, 'base64'));
-      const code = buildRedeemCode(token, outerBlob);
+      const code = buildRedeemCode(token, outerBlob, orgId);
 
       // No shell-unsafe characters (base64 is [A-Za-z0-9+/=])
       expect(code).toMatch(/^[A-Za-z0-9+/=]+$/);

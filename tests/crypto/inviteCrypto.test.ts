@@ -73,12 +73,13 @@ describe('inviteCrypto', () => {
   });
 
   describe('buildRedeemCode / parseRedeemCode', () => {
-    it('round-trips token and ciphertext', () => {
+    it('round-trips token, orgId, and ciphertext', () => {
       const token = generateInviteToken();
       const outerBlob = randomBytes(64).toString('base64');
-      const code = buildRedeemCode(token, outerBlob);
+      const code = buildRedeemCode(token, outerBlob, orgId);
       const parsed = parseRedeemCode(code);
       expect(parsed.token.equals(token)).toBe(true);
+      expect(parsed.orgId).toBe(orgId);
       expect(parsed.ciphertext).toBe(outerBlob);
     });
 
@@ -104,10 +105,11 @@ describe('inviteCrypto', () => {
       const outerBlob = Buffer.concat([iv, enc, tag]).toString('base64');
 
       // 3. Build redeem code
-      const code = buildRedeemCode(token, outerBlob);
+      const code = buildRedeemCode(token, outerBlob, orgId);
 
       // 4. Recipient parses redeem code
-      const { token: parsedToken, ciphertext } = parseRedeemCode(code);
+      const { token: parsedToken, orgId: parsedOrgId, ciphertext } = parseRedeemCode(code);
+      expect(parsedOrgId).toBe(orgId);
 
       // 5. Service co-decrypts (strips outer layer)
       const outerCombined = Buffer.from(ciphertext, 'base64');
