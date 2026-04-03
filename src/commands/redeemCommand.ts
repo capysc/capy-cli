@@ -2,7 +2,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
 import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
-import { saveMasterKey } from '../config/globalConfig';
+import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
 
 export class RedeemCommand {
   private apiUrl?: string;
@@ -52,6 +52,12 @@ export class RedeemCommand {
       orgId = targetOrgId;
       userId = switched.user_id!;
       console.log(`  Switched to organization \x1b[1m${targetOrgId}\x1b[0m`);
+    }
+
+    // 4. Reject if user already has the master key for this org
+    if (hasOrgKey(orgId, userId)) {
+      console.error('You are already a member of this organization.');
+      process.exit(1);
     }
 
     const serviceToken = authService.getToken();
