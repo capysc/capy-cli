@@ -572,20 +572,7 @@ export class CapyCommand {
     );
 
     // Set token for service client
-    let token = this.authService.getToken();
-
-    // If auth succeeded but no token (multi-org or 0 orgs), try to get a scoped token
-    // NEVER create orgs or modify .keep during sync — that only happens in initializeProject
-    if (!token && authResult._refresh_token && projectState.organizationId) {
-      const scopedAuth = await this.authService.refreshWithCredentials(
-        authResult._refresh_token,
-        projectState.organizationId,
-        authResult.user_id,
-      );
-      if (scopedAuth.success) {
-        token = this.authService.getToken();
-      }
-    }
+    const token = this.authService.getToken();
 
     if (token) {
       this.serviceClient.setToken(token);
