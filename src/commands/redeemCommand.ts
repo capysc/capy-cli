@@ -65,14 +65,14 @@ export class RedeemCommand {
     //    For now, we do the full round-trip at redeem time to verify it works,
     //    then re-encrypt M under the user's own wrapping key for local storage.
 
-    // 4. Service co-decrypts (strips outer KMS layer)
+    // 4. Service redeems invite (strips outer KMS layer + validates recipient email)
     let innerBlob: string;
     try {
-      const result = await serviceClient.coDecrypt(orgId, ciphertext);
+      const result = await serviceClient.redeemInvite(orgId, ciphertext);
       innerBlob = result.plaintext;
     } catch (err: any) {
-      console.error(`Co-decryption failed: ${err.message}`);
-      console.error('You may not be a member of this organization, or the invite has been revoked.');
+      console.error(`Redeem failed: ${err.message}`);
+      console.error('You may not be the intended recipient, or the invite has been revoked.');
       process.exit(1);
     }
 

@@ -88,9 +88,17 @@ export class InviteCommand {
       const innerBlob = innerWrap(masterKey, inviteToken, orgId);
 
       // 3. Service outer wraps (KMS layer)
+      //    Embed the intended recipient email inside the outer envelope so
+      //    the service can verify the redeemer's identity on co-decrypt.
+      const innerBlobBuf = Buffer.from(innerBlob, 'base64');
+      const emailBuf = Buffer.from(email.toLowerCase(), 'utf8');
+      const emailLenBuf = Buffer.alloc(2);
+      emailLenBuf.writeUInt16BE(emailBuf.length, 0);
+      const payloadToWrap = Buffer.concat([emailLenBuf, emailBuf, innerBlobBuf]);
+
       const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
         orgId,
-        Buffer.from(innerBlob, 'base64').toString('base64'),
+        payloadToWrap.toString('base64'),
       );
 
       // 4. Create invite record on service
