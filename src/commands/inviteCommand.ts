@@ -84,21 +84,14 @@ export class InviteCommand {
       // 1. Generate invite token T
       const inviteToken = generateInviteToken();
 
-      // 2. Inner wrap M with HKDF(T, orgId)
-      const innerBlob = innerWrap(masterKey, inviteToken, orgId);
+      // 2. Inner wrap M with HKDF(T, salt=orgId:email)
+      //    The recipient email is bound into the HKDF salt so only they can unwrap.
+      const innerBlob = innerWrap(masterKey, inviteToken, orgId, email);
 
       // 3. Service outer wraps (KMS layer)
-      //    Embed the intended recipient email inside the outer envelope so
-      //    the service can verify the redeemer's identity on co-decrypt.
-      const innerBlobBuf = Buffer.from(innerBlob, 'base64');
-      const emailBuf = Buffer.from(email.toLowerCase(), 'utf8');
-      const emailLenBuf = Buffer.alloc(2);
-      emailLenBuf.writeUInt16BE(emailBuf.length, 0);
-      const payloadToWrap = Buffer.concat([emailLenBuf, emailBuf, innerBlobBuf]);
-
       const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
         orgId,
-        payloadToWrap.toString('base64'),
+        Buffer.from(innerBlob, 'base64').toString('base64'),
       );
 
       // 4. Create invite record on service

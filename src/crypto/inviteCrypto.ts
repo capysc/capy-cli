@@ -60,14 +60,18 @@ export function aesDecrypt(blob: string, key: Buffer): Buffer {
 
 /**
  * Double-wraps the master key M.
- * Inner layer: AES-256-GCM with HKDF(T, salt=orgId, info="capy:invite")
+ * Inner layer: AES-256-GCM with HKDF(T, salt=orgId:email, info="capy:invite")
  * Outer layer: provided by the service via KMS (caller handles this)
+ *
+ * The recipient email is bound into the HKDF salt so that only the
+ * intended recipient can derive the correct inner key to unwrap M.
  *
  * Returns the inner-wrapped blob (base64). Caller must then request
  * the service to wrap the outer layer.
  */
-export function innerWrap(masterKey: Buffer, token: Buffer, orgId: string): string {
-  const innerKey = deriveInnerKey(token, orgId, 'capy:invite');
+export function innerWrap(masterKey: Buffer, token: Buffer, orgId: string, email: string): string {
+  const salt = `${orgId}:${email.toLowerCase()}`;
+  const innerKey = deriveInnerKey(token, salt, 'capy:invite');
   return aesEncrypt(masterKey, innerKey);
 }
 
@@ -76,8 +80,9 @@ export function innerWrap(masterKey: Buffer, token: Buffer, orgId: string): stri
  * Input is the inner-wrapped blob (after service stripped outer layer).
  * Returns the master key M.
  */
-export function innerUnwrap(innerBlob: string, token: Buffer, orgId: string): Buffer {
-  const innerKey = deriveInnerKey(token, orgId, 'capy:invite');
+export function innerUnwrap(innerBlob: string, token: Buffer, orgId: string, email: string): Buffer {
+  const salt = `${orgId}:${email.toLowerCase()}`;
+  const innerKey = deriveInnerKey(token, salt, 'capy:invite');
   return aesDecrypt(innerBlob, innerKey);
 }
 

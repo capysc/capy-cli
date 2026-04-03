@@ -59,7 +59,7 @@ describe('Invite Flow E2E', () => {
       expect(token.length).toBe(32);
 
       // 2. Inner wrap M with HKDF(T, orgId)
-      const innerBlob = innerWrap(masterKey, token, orgId);
+      const innerBlob = innerWrap(masterKey, token, orgId, 'alice@example.com');
 
       // 3. Service outer wraps (simulate KMS)
       const innerBlobBytes = Buffer.from(innerBlob, 'base64');
@@ -83,6 +83,7 @@ describe('Invite Flow E2E', () => {
         innerBlobRecovered.toString('base64'),
         parsedToken,
         orgId,
+        'alice@example.com',
       );
       expect(recoveredM.equals(masterKey)).toBe(true);
 
@@ -106,14 +107,14 @@ describe('Invite Flow E2E', () => {
     it('wrong token cannot unwrap inner layer', () => {
       const token = generateInviteToken();
       const wrongToken = generateInviteToken();
-      const innerBlob = innerWrap(masterKey, token, orgId);
+      const innerBlob = innerWrap(masterKey, token, orgId, 'alice@example.com');
 
-      expect(() => innerUnwrap(innerBlob, wrongToken, orgId)).toThrow();
+      expect(() => innerUnwrap(innerBlob, wrongToken, orgId, 'alice@example.com')).toThrow();
     });
 
     it('service cannot recover M (only has outer layer key)', () => {
       const token = generateInviteToken();
-      const innerBlob = innerWrap(masterKey, token, orgId);
+      const innerBlob = innerWrap(masterKey, token, orgId, 'alice@example.com');
       const outerBlob = simulateServiceWrap(Buffer.from(innerBlob, 'base64'));
 
       // Service strips outer layer
@@ -130,7 +131,7 @@ describe('Invite Flow E2E', () => {
       // This test validates the concept: if service refuses co-decrypt,
       // the stored ciphertext is inert
       const token = generateInviteToken();
-      const innerBlob = innerWrap(masterKey, token, orgId);
+      const innerBlob = innerWrap(masterKey, token, orgId, 'alice@example.com');
       const outerBlob = simulateServiceWrap(Buffer.from(innerBlob, 'base64'));
 
       // Invitee has token + outerBlob stored locally
@@ -138,7 +139,7 @@ describe('Invite Flow E2E', () => {
       // Without service stripping outer layer, innerUnwrap is impossible
       // because the input to innerUnwrap would still be double-encrypted
       expect(() => {
-        innerUnwrap(outerBlob, token, orgId);
+        innerUnwrap(outerBlob, token, orgId, 'alice@example.com');
       }).toThrow();
     });
 
@@ -169,7 +170,7 @@ describe('Invite Flow E2E', () => {
 
     it('can be used as a CLI argument', () => {
       const token = generateInviteToken();
-      const innerBlob = innerWrap(masterKey, token, orgId);
+      const innerBlob = innerWrap(masterKey, token, orgId, 'alice@example.com');
       const outerBlob = simulateServiceWrap(Buffer.from(innerBlob, 'base64'));
       const code = buildRedeemCode(token, outerBlob, orgId);
 

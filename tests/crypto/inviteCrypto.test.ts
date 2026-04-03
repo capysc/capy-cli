@@ -11,6 +11,7 @@ import {
 describe('inviteCrypto', () => {
   const masterKey = randomBytes(32);
   const orgId = 'test-org-123';
+  const email = 'alice@example.com';
 
   describe('generateInviteToken', () => {
     it('generates a 32-byte token', () => {
@@ -53,22 +54,35 @@ describe('inviteCrypto', () => {
   describe('innerWrap / innerUnwrap', () => {
     it('round-trips master key', () => {
       const token = generateInviteToken();
-      const wrapped = innerWrap(masterKey, token, orgId);
-      const unwrapped = innerUnwrap(wrapped, token, orgId);
+      const wrapped = innerWrap(masterKey, token, orgId, email);
+      const unwrapped = innerUnwrap(wrapped, token, orgId, email);
       expect(unwrapped.equals(masterKey)).toBe(true);
     });
 
     it('fails with wrong token', () => {
       const token = generateInviteToken();
       const wrongToken = generateInviteToken();
-      const wrapped = innerWrap(masterKey, token, orgId);
-      expect(() => innerUnwrap(wrapped, wrongToken, orgId)).toThrow();
+      const wrapped = innerWrap(masterKey, token, orgId, email);
+      expect(() => innerUnwrap(wrapped, wrongToken, orgId, email)).toThrow();
     });
 
     it('fails with wrong orgId', () => {
       const token = generateInviteToken();
-      const wrapped = innerWrap(masterKey, token, orgId);
-      expect(() => innerUnwrap(wrapped, token, 'wrong-org')).toThrow();
+      const wrapped = innerWrap(masterKey, token, orgId, email);
+      expect(() => innerUnwrap(wrapped, token, 'wrong-org', email)).toThrow();
+    });
+
+    it('fails with wrong email', () => {
+      const token = generateInviteToken();
+      const wrapped = innerWrap(masterKey, token, orgId, email);
+      expect(() => innerUnwrap(wrapped, token, orgId, 'eve@example.com')).toThrow();
+    });
+
+    it('email check is case-insensitive', () => {
+      const token = generateInviteToken();
+      const wrapped = innerWrap(masterKey, token, orgId, 'Alice@Example.COM');
+      const unwrapped = innerUnwrap(wrapped, token, orgId, 'alice@example.com');
+      expect(unwrapped.equals(masterKey)).toBe(true);
     });
   });
 
@@ -91,9 +105,9 @@ describe('inviteCrypto', () => {
 
   describe('full double-wrap flow', () => {
     it('simulates invite -> redeem -> co-decrypt -> unwrap', () => {
-      // 1. Owner generates token and inner-wraps M
+      // 1. Owner generates token and inner-wraps M (bound to recipient email)
       const token = generateInviteToken();
-      const innerBlob = innerWrap(masterKey, token, orgId);
+      const innerBlob = innerWrap(masterKey, token, orgId, email);
 
       // 2. Simulate outer wrap (local dev: simple AES)
       const { createCipheriv, createDecipheriv } = require('crypto');
@@ -120,8 +134,8 @@ describe('inviteCrypto', () => {
       decipher.setAuthTag(oTag);
       const innerBlobRecovered = Buffer.concat([decipher.update(oEnc), decipher.final()]).toString('base64');
 
-      // 6. Recipient strips inner layer with T
-      const recoveredM = innerUnwrap(innerBlobRecovered, parsedToken, orgId);
+      // 6. Recipient strips inner layer with T (must know correct email)
+      const recoveredM = innerUnwrap(innerBlobRecovered, parsedToken, orgId, email);
       expect(recoveredM.equals(masterKey)).toBe(true);
     });
   });

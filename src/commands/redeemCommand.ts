@@ -57,24 +57,27 @@ export class RedeemCommand {
     const serviceClient = new ServiceClient(this.apiUrl);
     if (serviceToken) serviceClient.setToken(serviceToken);
 
-    // 5. Service redeems invite (strips outer KMS layer + validates recipient email)
+    // 5. Service co-decrypts (strips outer KMS layer)
     let innerBlob: string;
     try {
-      const result = await serviceClient.redeemInvite(orgId, ciphertext);
+      const result = await serviceClient.coDecrypt(orgId, ciphertext);
       innerBlob = result.plaintext;
     } catch (err: any) {
-      console.error(`Redeem failed: ${err.message}`);
-      console.error('You may not be the intended recipient, or the invite has been revoked.');
+      console.error(`Co-decryption failed: ${err.message}`);
+      console.error('You may not be a member of this organization, or the invite has been revoked.');
       process.exit(1);
     }
 
-    // 5. Strip inner layer with T → recover M
+    // 6. Strip inner layer with T → recover M
+    //    The HKDF salt includes the recipient's email, so this fails
+    //    cryptographically if the wrong user tries to unwrap.
+    const userEmail = authResult.user_email || '';
     let masterKey: Buffer;
     try {
       const { innerUnwrap } = await import('../crypto/inviteCrypto');
-      masterKey = innerUnwrap(innerBlob, token, orgId);
+      masterKey = innerUnwrap(innerBlob, token, orgId, userEmail);
     } catch {
-      console.error('Failed to unwrap invite. The redeem code may be corrupted.');
+      console.error('Failed to unwrap invite. The redeem code may not be intended for your account.');
       process.exit(1);
     }
 

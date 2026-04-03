@@ -318,9 +318,6 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext });
   }
 
-  async redeemInvite(orgId: string, ciphertext: string): Promise<{ plaintext: string }> {
-    return this.request('POST', `/orgs/${orgId}/redeem-invite`, { ciphertext });
-  }
 
   async listMembers(orgId: string): Promise<{ members: any[] }> {
     return this.request('GET', `/orgs/${orgId}/members`);
