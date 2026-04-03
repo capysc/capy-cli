@@ -12,11 +12,12 @@ export class RedeemCommand {
   }
 
   async execute(code: string): Promise<void> {
-    // 1. Parse redeem code → T + double-wrapped ciphertext
+    // 1. Parse redeem code → T + target org + double-wrapped ciphertext
     let token: Buffer;
     let ciphertext: string;
+    let targetOrgId: string;
     try {
-      ({ token, ciphertext } = parseRedeemCode(code));
+      ({ token, orgId: targetOrgId, ciphertext } = parseRedeemCode(code));
     } catch (err: any) {
       console.error(`Invalid redeem code: ${err.message}`);
       process.exit(1);
@@ -29,10 +30,29 @@ export class RedeemCommand {
       console.error('Authentication failed. You need a Capy account to redeem an invite.');
       process.exit(1);
     }
-    const serviceToken = authService.getToken();
-    const userId = authResult.user_id!;
-    const orgId = authResult.organization_id!;
 
+    let userId = authResult.user_id!;
+    let orgId = authResult.organization_id!;
+
+    // 3. If logged into a different org, switch to the invite's org
+    if (orgId !== targetOrgId) {
+      const serviceToken = authService.getToken();
+      const refreshToken = serviceToken?.refresh_token;
+      if (!refreshToken) {
+        console.error('Cannot switch to the invited organization. Please log out and try again.');
+        process.exit(1);
+      }
+      const switched = await authService.refreshWithCredentials(refreshToken, targetOrgId, userId);
+      if (!switched.success) {
+        console.error('Failed to switch to the invited organization. You may not have access.');
+        process.exit(1);
+      }
+      orgId = targetOrgId;
+      userId = switched.user_id!;
+      console.log(`  Switched to organization \x1b[1m${targetOrgId}\x1b[0m`);
+    }
+
+    const serviceToken = authService.getToken();
     const serviceClient = new ServiceClient(this.apiUrl);
     if (serviceToken) serviceClient.setToken(serviceToken);
 

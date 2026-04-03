@@ -82,23 +82,31 @@ export function innerUnwrap(innerBlob: string, token: Buffer, orgId: string): Bu
 }
 
 /**
- * Constructs the redeem code: base64(T + outerWrappedBlob)
- * T is 32 bytes, the rest is the double-wrapped ciphertext.
+ * Constructs the redeem code: base64(T + orgIdLen(2 bytes BE) + orgId(utf8) + outerWrappedBlob)
+ * T is 32 bytes, orgIdLen is a uint16 BE length prefix, then the org ID, then the ciphertext.
  */
-export function buildRedeemCode(token: Buffer, outerWrappedBlob: string): string {
+export function buildRedeemCode(token: Buffer, outerWrappedBlob: string, orgId: string): string {
   const outerBuf = Buffer.from(outerWrappedBlob, 'base64');
-  return Buffer.concat([token, outerBuf]).toString('base64');
+  const orgIdBuf = Buffer.from(orgId, 'utf8');
+  const lenBuf = Buffer.alloc(2);
+  lenBuf.writeUInt16BE(orgIdBuf.length, 0);
+  return Buffer.concat([token, lenBuf, orgIdBuf, outerBuf]).toString('base64');
 }
 
 /**
- * Parses a redeem code back into T and the outer-wrapped ciphertext.
+ * Parses a redeem code back into T, orgId, and the outer-wrapped ciphertext.
  */
-export function parseRedeemCode(redeemCode: string): { token: Buffer; ciphertext: string } {
+export function parseRedeemCode(redeemCode: string): { token: Buffer; orgId: string; ciphertext: string } {
   const buf = Buffer.from(redeemCode, 'base64');
-  if (buf.length <= TOKEN_LENGTH) {
+  if (buf.length <= TOKEN_LENGTH + 2) {
     throw new Error('Invalid redeem code: too short');
   }
   const token = buf.subarray(0, TOKEN_LENGTH);
-  const ciphertext = buf.subarray(TOKEN_LENGTH).toString('base64');
-  return { token, ciphertext };
+  const orgIdLen = buf.readUInt16BE(TOKEN_LENGTH);
+  if (buf.length < TOKEN_LENGTH + 2 + orgIdLen) {
+    throw new Error('Invalid redeem code: truncated org ID');
+  }
+  const orgId = buf.subarray(TOKEN_LENGTH + 2, TOKEN_LENGTH + 2 + orgIdLen).toString('utf8');
+  const ciphertext = buf.subarray(TOKEN_LENGTH + 2 + orgIdLen).toString('base64');
+  return { token, orgId, ciphertext };
 }

@@ -97,7 +97,7 @@ export class InviteCommand {
       await serviceClient.createInvite(orgId, email, role);
 
       // 5. Build redeem code
-      const redeemCode = buildRedeemCode(inviteToken, outerBlob);
+      const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId);
 
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
 
