@@ -60,12 +60,10 @@ describe('CLI Integration Tests', () => {
 
     test('should correctly detect initialized project state', async () => {
       const mockKeep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {}
       };
 
@@ -112,16 +110,13 @@ DEBUG=true`;
 
     test('should create proper keep file structure', () => {
       const mockKeep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'integration-test',
-        created_at: new Date().toISOString(),
-        last_updated: new Date().toISOString(),
         variables: {
           API_KEY: [{
             resource_id: 'res_123',
-            created_at: new Date().toISOString(),
             value_hash: 'testhash'
           }]
         }
@@ -214,16 +209,13 @@ DEBUG=true`;
 
     test('should merge keep file with pushed variables', () => {
       const originalKeep: KeepFile = {
-        version: '2.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-01-01T00:00:00Z',
         variables: {
           EXISTING_VAR: [{
             resource_id: 'res_old',
-            created_at: '2024-01-01T00:00:00Z',
             value_hash: 'abc12345'
           }]
         }
@@ -239,7 +231,6 @@ DEBUG=true`;
       expect(updatedKeep.variables.NEW_VAR).toBeDefined();
       expect(updatedKeep.variables.NEW_VAR[0].resource_id).toBe('res_new');
       expect(updatedKeep.variables.EXISTING_VAR[0].resource_id).toBe('res_updated');
-      expect(updatedKeep.last_updated).not.toBe(originalKeep.last_updated);
     });
 
     test('should validate user decisions correctly', () => {
@@ -293,7 +284,7 @@ DEBUG=true`;
 
     test('should handle missing required keep file fields', () => {
       const invalidKeep = {
-        version: '2.0',
+        version: '3.0',
         // Missing required fields
         project_name: 'test'
       };

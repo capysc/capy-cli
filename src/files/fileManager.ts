@@ -191,7 +191,20 @@ export class FileManager {
     const backup = this.createBackup(keepPath);
 
     try {
-      const content = JSON.stringify(keep, null, 2);
+      // Deterministic output: fixed key order, sorted variables
+      const sorted: Record<string, any> = {
+        version: keep.version,
+        org_id: keep.org_id,
+        project_id: keep.project_id,
+        project_name: keep.project_name,
+        variables: {} as Record<string, any[]>,
+      };
+      for (const key of Object.keys(keep.variables).sort()) {
+        sorted.variables[key] = [...keep.variables[key]].sort((a, b) =>
+          (a.branch ?? '').localeCompare(b.branch ?? '')
+        );
+      }
+      const content = JSON.stringify(sorted, null, 2);
       writeFileSync(keepPath, content + '\n', 'utf-8');
 
       if (backup) {
