@@ -256,11 +256,7 @@ export class CapyCommand {
       console.log('');
       console.log('');
       console.log('');
-      console.log('');
-      console.log('');
       console.log(seedPhrase);
-      console.log('');
-      console.log('');
       console.log('');
       console.log('');
       console.log('');
