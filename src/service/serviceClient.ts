@@ -337,6 +337,7 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext });
   }
 
+
   async listMembers(orgId: string): Promise<{ members: any[] }> {
     return this.request('GET', `/orgs/${orgId}/members`);
   }
