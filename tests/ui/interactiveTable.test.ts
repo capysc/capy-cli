@@ -40,9 +40,9 @@ const MEMBERS: MemberDetail[] = [
   }),
 ];
 
-// Strip ANSI escape codes for assertion readability
+// Strip ANSI escape codes (colors, clear-to-EOL, etc.) for assertion readability
 function stripAnsi(str: string): string {
-  return str.replace(/\x1b\[[0-9;]*m/g, '');
+  return str.replace(/\x1b\[[0-9;]*[mKJH]/g, '');
 }
 
 describe('InteractiveTable', () => {
@@ -172,6 +172,34 @@ describe('InteractiveTable', () => {
 
       expect(plain).toContain('Organization Members (1 user)');
       expect(plain).not.toContain('1 users');
+    });
+  });
+
+  describe('width consistency', () => {
+    it('all bordered lines have the same visual width', () => {
+      for (const termWidth of [50, 80, 120, 130, 200]) {
+        const output = table.renderTable(MEMBERS, termWidth, 30);
+        const lines = stripAnsi(output).split('\n');
+        const borderedLines = lines.filter(l => l.startsWith('┌') || l.startsWith('│') || l.startsWith('├') || l.startsWith('└'));
+        const widths = borderedLines.map(l => l.length);
+        const expected = widths[0];
+        for (let i = 1; i < widths.length; i++) {
+          expect(widths[i]).toBe(expected);
+        }
+      }
+    });
+
+    it('all bordered lines match with expanded rows', () => {
+      // Expand first member
+      (table as any).expandedIndices.add(0);
+      const output = table.renderTable(MEMBERS, 100, 40);
+      const lines = stripAnsi(output).split('\n');
+      const borderedLines = lines.filter(l => l.startsWith('┌') || l.startsWith('│') || l.startsWith('├') || l.startsWith('└'));
+      const widths = borderedLines.map(l => l.length);
+      const expected = widths[0];
+      for (let i = 1; i < widths.length; i++) {
+        expect(widths[i]).toBe(expected);
+      }
     });
   });
 

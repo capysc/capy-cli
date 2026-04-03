@@ -5,7 +5,10 @@ const ESC = '\x1b';
 const HIDE_CURSOR = `${ESC}[?25l`;
 const SHOW_CURSOR = `${ESC}[?25h`;
 const MOVE_HOME = `${ESC}[H`;
-const CLEAR_BELOW = `${ESC}[J`;
+const CLEAR_SCREEN = `${ESC}[2J`;
+const CLEAR_EOL = `${ESC}[K`;
+const ENTER_ALT_SCREEN = `${ESC}[?1049h`;
+const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
 const INVERSE = `${ESC}[7m`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
@@ -54,6 +57,7 @@ export class InteractiveTable {
    * Returns widths array parallel to COLUMNS, or null if terminal is too narrow for the "Added" column.
    */
   computeColumnWidths(termWidth: number): { widths: number[]; showAdded: boolean } {
+    termWidth = Math.min(termWidth, 130);
     const padding = 3; // "│ " prefix + " " suffix per cell
     const showAdded = termWidth >= 60;
     const cols = showAdded ? COLUMNS : COLUMNS.filter(c => c.label !== 'Added');
@@ -111,7 +115,7 @@ export class InteractiveTable {
     if (member.projects.length === 0) {
       const totalWidth = this.totalRowWidth(widths, showAdded);
       const line = `${BOX.v}   ${DIM}No project access${RESET}`;
-      return [line + ' '.repeat(Math.max(0, totalWidth - 20)) + ` ${BOX.v}`];
+      return [line + ' '.repeat(Math.max(0, totalWidth - this.visLen(line) - 2)) + ` ${BOX.v}`];
     }
 
     const totalWidth = this.totalRowWidth(widths, showAdded);
@@ -122,7 +126,7 @@ export class InteractiveTable {
       const isLastProject = pi === member.projects.length - 1;
       const projPrefix = isLastProject ? TREE.last : TREE.branch;
       const projLine = `${BOX.v}   ${projPrefix} ${project.name}`;
-      lines.push(projLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(projLine))) + ` ${BOX.v}`);
+      lines.push(projLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(projLine) - 2)) + ` ${BOX.v}`);
 
       const childPipe = isLastProject ? TREE.space : TREE.pipe;
       for (let bi = 0; bi < project.branches.length; bi++) {
@@ -130,7 +134,7 @@ export class InteractiveTable {
         const isLastBranch = bi === project.branches.length - 1;
         const branchPrefix = isLastBranch ? TREE.childLast : TREE.childBranch;
         const branchLine = `${BOX.v}   ${childPipe} ${branchPrefix} ${DIM}${branch}${RESET}`;
-        lines.push(branchLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(branchLine))) + ` ${BOX.v}`);
+        lines.push(branchLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(branchLine) - 2)) + ` ${BOX.v}`);
       }
     }
 
@@ -208,7 +212,7 @@ export class InteractiveTable {
     output.push('');
     output.push(`  ${DIM}↑↓ navigate  Enter expand/collapse  q quit${RESET}`);
 
-    return output.join('\n');
+    return output.map(line => line + CLEAR_EOL).join('\n');
   }
 
   /**
@@ -238,8 +242,8 @@ export class InteractiveTable {
     this.cleanedUp = false;
 
     return new Promise<void>((resolve) => {
-      // Enter raw mode
-      process.stdout.write(HIDE_CURSOR);
+      // Enter alternate screen + raw mode
+      process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
       }
@@ -271,7 +275,7 @@ export class InteractiveTable {
     const termWidth = process.stdout.columns || 80;
     const termHeight = process.stdout.rows || 24;
     const output = this.renderTable(this.members, termWidth, termHeight);
-    process.stdout.write(MOVE_HOME + CLEAR_BELOW + output);
+    process.stdout.write(CLEAR_SCREEN + MOVE_HOME + output);
   }
 
   private handleKeypress(data: Buffer, resolve: () => void): void {
@@ -326,8 +330,7 @@ export class InteractiveTable {
     this.cleanedUp = true;
     this.running = false;
 
-    process.stdout.write(SHOW_CURSOR);
-    process.stdout.write('\n');
+    process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
@@ -342,9 +345,8 @@ export class InteractiveTable {
 
   // --- Helpers ---
 
-  private totalRowWidth(widths: number[], showAdded: boolean): number {
+  private totalRowWidth(widths: number[], _showAdded: boolean): number {
     // Each cell: "│ " + content + " " = width + 3 per cell, plus final "│"
-    const cols = showAdded ? widths.length : widths.length;
     return widths.reduce((sum, w) => sum + w + 3, 0) + 1;
   }
 
