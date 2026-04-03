@@ -602,20 +602,37 @@ export class CapyCommand {
       );
     }
 
-    // Get remote environment (branch-aware)
+    // Get remote environment (branch-aware, pinned to .keep version)
     let activeBranch = projectState.activeBranch;
     const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
 
+    // Compute keepHash if .keep has variables (version pinning)
+    const currentKeep = this.projectManager.readKeepFile();
+    const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
+    const keepHash = hasVariables
+      ? SyncEngine.computeKeepHash(currentKeep!, activeBranch)
+      : undefined;
+
     let decryptData;
     try {
-      decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+      decryptData = await this.serviceClient.getDecryptData(
+        projectState.projectId!,
+        activeBranch,
+        keepHash,
+        keepHash ? true : false, // include_latest_hash when pinning
+      );
     } catch (error: any) {
       if (error instanceof CapyError && error.details?.status === 404) {
         const errorMsg = error.message || '';
         fetchSpinner.stop();
 
+        // Snapshot not found — fall back to latest
+        if (errorMsg.includes('Snapshot not found')) {
+          console.log('\n  Pinned version no longer exists in S3. Fetching latest...');
+          decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+        }
         // Branch not found — prompt to switch
-        if (errorMsg.includes('Branch') || (errorMsg.includes('not found') && activeBranch)) {
+        else if (errorMsg.includes('Branch') || (errorMsg.includes('not found') && activeBranch)) {
           activeBranch = await this.promptBranchSwitch(projectState.projectId!, activeBranch!);
           decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch || undefined);
         }
@@ -625,6 +642,23 @@ export class CapyCommand {
         }
       } else {
         throw error;
+      }
+    }
+
+    // Check if newer versions are available
+    if (keepHash && decryptData.latest_keep_hash && keepHash !== decryptData.latest_keep_hash) {
+      fetchSpinner.stop();
+      const { pullLatest } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'pullLatest',
+        message: 'Newer secret versions are available. Pull latest?',
+        default: true,
+      }]);
+
+      if (pullLatest) {
+        const latestSpinner = ora('Fetching latest...').start();
+        decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+        latestSpinner.succeed('Fetched latest');
       }
     }
     const encryptionKey = resolveProjectKey(
