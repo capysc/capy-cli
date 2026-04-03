@@ -5,7 +5,10 @@ const ESC = '\x1b';
 const HIDE_CURSOR = `${ESC}[?25l`;
 const SHOW_CURSOR = `${ESC}[?25h`;
 const MOVE_HOME = `${ESC}[H`;
-const CLEAR_BELOW = `${ESC}[J`;
+const CLEAR_SCREEN = `${ESC}[2J`;
+const CLEAR_EOL = `${ESC}[K`;
+const ENTER_ALT_SCREEN = `${ESC}[?1049h`;
+const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
 const INVERSE = `${ESC}[7m`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
@@ -209,7 +212,7 @@ export class InteractiveTable {
     output.push('');
     output.push(`  ${DIM}↑↓ navigate  Enter expand/collapse  q quit${RESET}`);
 
-    return output.join('\n');
+    return output.map(line => line + CLEAR_EOL).join('\n');
   }
 
   /**
@@ -239,8 +242,8 @@ export class InteractiveTable {
     this.cleanedUp = false;
 
     return new Promise<void>((resolve) => {
-      // Enter raw mode
-      process.stdout.write(HIDE_CURSOR);
+      // Enter alternate screen + raw mode
+      process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
       }
@@ -272,7 +275,7 @@ export class InteractiveTable {
     const termWidth = process.stdout.columns || 80;
     const termHeight = process.stdout.rows || 24;
     const output = this.renderTable(this.members, termWidth, termHeight);
-    process.stdout.write(MOVE_HOME + CLEAR_BELOW + output);
+    process.stdout.write(CLEAR_SCREEN + MOVE_HOME + output);
   }
 
   private handleKeypress(data: Buffer, resolve: () => void): void {
@@ -327,8 +330,7 @@ export class InteractiveTable {
     this.cleanedUp = true;
     this.running = false;
 
-    process.stdout.write(SHOW_CURSOR);
-    process.stdout.write('\n');
+    process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
@@ -343,9 +345,8 @@ export class InteractiveTable {
 
   // --- Helpers ---
 
-  private totalRowWidth(widths: number[], showAdded: boolean): number {
+  private totalRowWidth(widths: number[], _showAdded: boolean): number {
     // Each cell: "│ " + content + " " = width + 3 per cell, plus final "│"
-    const cols = showAdded ? widths.length : widths.length;
     return widths.reduce((sum, w) => sum + w + 3, 0) + 1;
   }
 
