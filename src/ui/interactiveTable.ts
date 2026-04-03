@@ -54,6 +54,7 @@ export class InteractiveTable {
    * Returns widths array parallel to COLUMNS, or null if terminal is too narrow for the "Added" column.
    */
   computeColumnWidths(termWidth: number): { widths: number[]; showAdded: boolean } {
+    termWidth = Math.min(termWidth, 130);
     const padding = 3; // "│ " prefix + " " suffix per cell
     const showAdded = termWidth >= 60;
     const cols = showAdded ? COLUMNS : COLUMNS.filter(c => c.label !== 'Added');
@@ -111,7 +112,7 @@ export class InteractiveTable {
     if (member.projects.length === 0) {
       const totalWidth = this.totalRowWidth(widths, showAdded);
       const line = `${BOX.v}   ${DIM}No project access${RESET}`;
-      return [line + ' '.repeat(Math.max(0, totalWidth - 20)) + ` ${BOX.v}`];
+      return [line + ' '.repeat(Math.max(0, totalWidth - this.visLen(line) - 2)) + ` ${BOX.v}`];
     }
 
     const totalWidth = this.totalRowWidth(widths, showAdded);
@@ -122,7 +123,7 @@ export class InteractiveTable {
       const isLastProject = pi === member.projects.length - 1;
       const projPrefix = isLastProject ? TREE.last : TREE.branch;
       const projLine = `${BOX.v}   ${projPrefix} ${project.name}`;
-      lines.push(projLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(projLine))) + ` ${BOX.v}`);
+      lines.push(projLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(projLine) - 2)) + ` ${BOX.v}`);
 
       const childPipe = isLastProject ? TREE.space : TREE.pipe;
       for (let bi = 0; bi < project.branches.length; bi++) {
@@ -130,7 +131,7 @@ export class InteractiveTable {
         const isLastBranch = bi === project.branches.length - 1;
         const branchPrefix = isLastBranch ? TREE.childLast : TREE.childBranch;
         const branchLine = `${BOX.v}   ${childPipe} ${branchPrefix} ${DIM}${branch}${RESET}`;
-        lines.push(branchLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(branchLine))) + ` ${BOX.v}`);
+        lines.push(branchLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(branchLine) - 2)) + ` ${BOX.v}`);
       }
     }
 
