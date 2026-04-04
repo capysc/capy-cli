@@ -385,7 +385,6 @@ export class AuthService {
   }
 
   private loadSession(): void {
-    if (!this.sessionUserId) return; // No user ID — require fresh login
     try {
       const data = readAuthSession(this.sessionUserId) as SessionStore | null;
       if (data && data.version === 2) {

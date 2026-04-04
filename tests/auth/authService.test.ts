@@ -152,6 +152,7 @@ describe('AuthService', () => {
             'org-B': expect.objectContaining({ access_token: 'org-b-token' }),
           }),
         }),
+        'user-456',
       );
     });
 
@@ -201,6 +202,7 @@ describe('AuthService', () => {
             'org-123': expect.objectContaining({ access_token: 'new-token' }),
           }),
         }),
+        'user-456',
       );
     });
 
@@ -375,6 +377,7 @@ describe('AuthService', () => {
             'org-abc': expect.objectContaining({ access_token: 'org-token' }),
           }),
         }),
+        'user-456',
       );
     });
 
@@ -401,6 +404,7 @@ describe('AuthService', () => {
             'org-B': expect.objectContaining({ access_token: 'org-b-token' }),
           }),
         }),
+        'user-456',
       );
     });
 
