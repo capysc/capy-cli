@@ -20,12 +20,20 @@ async function postJson<T>(url: string, body: Record<string, unknown>): Promise<
 
 export class AuthService {
   private serviceApiUrl: string;
+  private sessionUserId: string | undefined;
   private session: SessionStore | null = null;
   private currentOrgId: string | null = null;
 
-  constructor(serviceApiUrl?: string, devMode: boolean = false) {
+  constructor(serviceApiUrl?: string, devMode: boolean = false, sessionUserId?: string) {
     this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
+    this.sessionUserId = sessionUserId;
     this.loadSession();
+  }
+
+  setSessionUserId(userId: string): void {
+    if (this.sessionUserId === userId) return;
+    this.sessionUserId = userId;
+    this.loadSession(); // Reload from the user-scoped file
   }
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
@@ -142,8 +150,16 @@ export class AuthService {
       };
     }
 
-    // No JWT yet — user must select an org (0 or >1 orgs)
+    // No JWT yet — multi-org user. If a specific org was requested, refresh into it.
     this.saveSession();
+
+    if (organizationId && this.session.refresh_token) {
+      const refreshed = await this.refreshForOrg(organizationId);
+      if (refreshed) {
+        return this.buildAuthResult('refreshed');
+      }
+    }
+
     return {
       success: true,
       organization_id: '',
@@ -200,7 +216,8 @@ export class AuthService {
   private async refreshForOrg(orgId: string): Promise<boolean> {
     if (!this.session?.refresh_token) return false;
 
-    const sessionPath = getAuthSessionPath();
+    const userId = this.sessionUserId || this.session.user_id;
+    const sessionPath = getAuthSessionPath(userId);
     let release: (() => void) | null = null;
 
     try {
@@ -213,7 +230,7 @@ export class AuthService {
 
       // Re-read session from disk in case another process updated it
       if (release) {
-        const freshSession = readAuthSession() as SessionStore | null;
+        const freshSession = readAuthSession(userId) as SessionStore | null;
         if (freshSession?.version === 2) {
           // Check if another process already refreshed this org
           const existing = freshSession.sessions[orgId];
@@ -336,10 +353,11 @@ export class AuthService {
   }
 
   clearSession(): void {
+    const userId = this.sessionUserId || this.session?.user_id;
     this.session = null;
     this.currentOrgId = null;
     try {
-      const sessionPath = getAuthSessionPath();
+      const sessionPath = getAuthSessionPath(userId);
       if (existsSync(sessionPath)) {
         unlinkSync(sessionPath);
       }
@@ -367,8 +385,9 @@ export class AuthService {
   }
 
   private loadSession(): void {
+    if (!this.sessionUserId) return; // No user ID — require fresh login
     try {
-      const data = readAuthSession() as SessionStore | null;
+      const data = readAuthSession(this.sessionUserId) as SessionStore | null;
       if (data && data.version === 2) {
         this.session = data;
       }
@@ -380,7 +399,9 @@ export class AuthService {
   private saveSession(): void {
     if (!this.session) return;
     try {
-      saveAuthSession(this.session);
+      // Save to user-scoped path once we know the user ID
+      const userId = this.sessionUserId || this.session.user_id;
+      saveAuthSession(this.session, userId);
     } catch {
       // Failed to save session
     }

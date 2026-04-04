@@ -33,7 +33,7 @@ export class DeploySetupCommand {
       const projectId = projectState.projectId;
 
       // Authenticate
-      const authService = new AuthService(this.apiUrl);
+      const authService = new AuthService(this.apiUrl, false, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
@@ -189,7 +189,7 @@ export class DeployRevokeCommand {
 
       const orgId = projectState.organizationId;
 
-      const authService = new AuthService(this.apiUrl);
+      const authService = new AuthService(this.apiUrl, false, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
@@ -229,7 +229,7 @@ export class DeployListCommand {
       const orgId = projectState.organizationId;
       const projectId = projectState.projectId;
 
-      const authService = new AuthService(this.apiUrl);
+      const authService = new AuthService(this.apiUrl, false, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {

@@ -66,7 +66,7 @@ program
       process.exit(1);
     }
 
-    const authService = new AuthService(undefined, true);
+    const authService = new AuthService(undefined, true, projectState.userId);
     const serviceClient = new ServiceClient(undefined, true);
     serviceClient.setTokenRefresher(async () => {
       const refreshed = await authService.refreshToken();
@@ -322,6 +322,15 @@ program
     } else {
       console.log('No active session.');
     }
+  });
+
+program
+  .command('info')
+  .description('Show current session info')
+  .action(async () => {
+    const { InfoCommand } = await import('./commands/infoCommand');
+    const cmd = new InfoCommand(process.env.CAPY_API_URL);
+    await cmd.execute();
   });
 
 program

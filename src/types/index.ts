@@ -38,6 +38,7 @@ export interface ProjectState {
   organizationId?: string;
   projectId?: string;
   activeBranch?: string;
+  userId?: string;
 }
 
 export interface Branch {
@@ -69,6 +70,7 @@ export interface ChangeSet {
 export interface SyncState {
   last_sync: string;
   synced_variables: string[];
+  user_id?: string;
 }
 
 export interface ConflictVariable {

@@ -50,6 +50,11 @@ export class CheckoutCommand {
       process.exit(1);
     }
 
+    // Load user-scoped session
+    if (projectState.userId) {
+      this.authService.setSessionUserId(projectState.userId);
+    }
+
     // Authenticate
     const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);

@@ -24,15 +24,16 @@ export class InfoCommand {
 
     const orgId = projectState.organizationId;
 
-    const authService = new AuthService(this.apiUrl);
+    const authService = new AuthService(this.apiUrl, false, projectState.userId);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);
     }
 
-    const orgName = authResult.organization_name
-      || authResult.organizations?.find(o => o.id === orgId)?.name;
+    const org = authResult.organizations?.find(o => o.id === orgId);
+    const orgName = authResult.organization_name || org?.name;
+    const workosOrgId = org?.workos_org_id;
     const branch = projectState.activeBranch || 'default';
 
     const rows: [string, string][] = [
@@ -40,6 +41,7 @@ export class InfoCommand {
       ['User ID', authResult.user_id || '—'],
       ['Organization', orgName || '—'],
       ['Org ID', orgId],
+      ['WorkOS Org ID', workosOrgId || '—'],
       ['Project', projectState.projectName || '—'],
       ['Project ID', projectState.projectId || '—'],
       ['Branch', branch],

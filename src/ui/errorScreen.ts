@@ -126,6 +126,19 @@ function renderServiceError(error: CapyError, ctx: ErrorContext): string {
   const status = error.details?.status;
   const serverMsg = error.details?.data?.error || error.message;
 
+  // Membership revoked (kicked from org)
+  if (status === 403 && serverMsg?.includes('no longer a member')) {
+    const lines = [
+      '',
+      `  ${bold('Access revoked')}`,
+      `  ${grey('You are no longer a member of this organization.')}`,
+      '',
+      `  To regain access, ask an org admin to re-invite you.`,
+      '',
+    ];
+    return lines.join('\n') + '\n';
+  }
+
   // Project not found — special layout
   if (status === 404 && serverMsg?.includes('Project not found')) {
     const lines = [

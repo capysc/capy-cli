@@ -8,7 +8,10 @@ export function getGlobalCapyDir(): string {
   return GLOBAL_CAPY_DIR;
 }
 
-export function getAuthSessionPath(): string {
+export function getAuthSessionPath(userId?: string): string {
+  if (userId) {
+    return join(GLOBAL_CAPY_DIR, 'auth', 'sessions', `${userId}.json`);
+  }
   return join(GLOBAL_CAPY_DIR, 'auth', 'session.json');
 }
 
@@ -85,12 +88,12 @@ export function readProjectKeyCache(
   return readFileOrNull(getProjectKeyCachePath(orgId, projectId));
 }
 
-export function saveAuthSession(token: object): void {
-  writeSecureFile(getAuthSessionPath(), JSON.stringify(token, null, 2));
+export function saveAuthSession(token: object, userId?: string): void {
+  writeSecureFile(getAuthSessionPath(userId), JSON.stringify(token, null, 2));
 }
 
-export function readAuthSession(): object | null {
-  const content = readFileOrNull(getAuthSessionPath());
+export function readAuthSession(userId?: string): object | null {
+  const content = readFileOrNull(getAuthSessionPath(userId));
   if (!content) return null;
   return JSON.parse(content);
 }
