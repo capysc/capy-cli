@@ -4,9 +4,14 @@
  * Enables mock authentication for local testing.
  * This file is NOT included in production builds or npm packages.
  */
+import { config } from 'dotenv';
+import { resolve } from 'path';
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
+
+// Load .env from the CLI package directory (not the user's project cwd)
+config({ path: resolve(__dirname, '..', '.env') });
 
 // Default to localhost for dev builds
 if (!process.env.CAPY_API_URL) {
