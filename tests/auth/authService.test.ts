@@ -82,7 +82,7 @@ describe('AuthService', () => {
       const session = makeSession();
       mockReadAuthSession.mockReturnValue(session);
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       // Session is loaded but no currentOrgId yet until authenticate() is called
       expect((service as any).session).toEqual(session);
     });
@@ -106,7 +106,7 @@ describe('AuthService', () => {
     test('should return cached session for matching org', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate('org-123');
 
       expect(result).toEqual({
@@ -132,7 +132,7 @@ describe('AuthService', () => {
         user: { id: 'user-456', email: 'test@example.com', first_name: 'Test', last_name: 'User' },
       }));
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate('org-B');
 
       expect(result.success).toBe(true);
@@ -152,13 +152,14 @@ describe('AuthService', () => {
             'org-B': expect.objectContaining({ access_token: 'org-b-token' }),
           }),
         }),
+        expect.any(String),
       );
     });
 
     test('should use any valid session when no org specified', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate();
 
       expect(result.success).toBe(true);
@@ -201,6 +202,7 @@ describe('AuthService', () => {
             'org-123': expect.objectContaining({ access_token: 'new-token' }),
           }),
         }),
+        expect.any(String),
       );
     });
 
@@ -259,7 +261,7 @@ describe('AuthService', () => {
         expires_in: 3600,
       }));
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate('org-123');
 
       expect(result.success).toBe(true);
@@ -276,14 +278,14 @@ describe('AuthService', () => {
 
     test('should return false when no currentOrgId is set', () => {
       mockReadAuthSession.mockReturnValue(makeSession());
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       // Session loaded but currentOrgId not set until authenticate()
       expect(service.isAuthenticated()).toBe(false);
     });
 
     test('should return true after authenticating with valid session', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       await service.authenticate('org-123');
       expect(service.isAuthenticated()).toBe(true);
     });
@@ -297,7 +299,7 @@ describe('AuthService', () => {
 
     test('should assemble ServiceToken from session after authenticate', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       await service.authenticate('org-123');
 
       const token = service.getToken();
@@ -323,7 +325,7 @@ describe('AuthService', () => {
 
     test('should return currentOrgId after authenticate', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       await service.authenticate('org-123');
       expect(service.getOrganizationId()).toBe('org-123');
     });
@@ -337,7 +339,7 @@ describe('AuthService', () => {
       const { unlinkSync } = require('fs');
       const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>;
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       await service.authenticate('org-123');
       expect(service.getToken()).not.toBeNull();
 
@@ -375,6 +377,7 @@ describe('AuthService', () => {
             'org-abc': expect.objectContaining({ access_token: 'org-token' }),
           }),
         }),
+        expect.any(String),
       );
     });
 
@@ -387,7 +390,7 @@ describe('AuthService', () => {
         expires_in: 3600,
       }));
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       const result = await service.refreshWithCredentials('explicit-refresh', 'org-B', 'user-456');
 
       expect(result.success).toBe(true);
@@ -401,6 +404,7 @@ describe('AuthService', () => {
             'org-B': expect.objectContaining({ access_token: 'org-b-token' }),
           }),
         }),
+        expect.any(String),
       );
     });
 
@@ -425,7 +429,7 @@ describe('AuthService', () => {
         expires_in: 3600,
       }));
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
 
       // First authenticate with org-123 (cached)
       await service.authenticate('org-123');
@@ -459,7 +463,7 @@ describe('AuthService', () => {
       });
       mockReadAuthSession.mockReturnValue(session);
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
 
       await service.authenticate('org-A');
       expect(service.getToken()?.access_token).toBe('token-A');
@@ -477,7 +481,7 @@ describe('AuthService', () => {
     test('should refresh the current org session', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, 'user-456');
       await service.authenticate('org-123');
 
       mockFetch.mockResolvedValueOnce(mockFetchResponse({
