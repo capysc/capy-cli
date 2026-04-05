@@ -30,6 +30,7 @@ program
     console.log('    capy redeem <code>           \x1b[90mRedeem an invite code\x1b[0m');
     console.log('    capy kick <email>            \x1b[90mRemove a teammate\x1b[0m');
     console.log('    capy users                   \x1b[90mList organization members\x1b[0m');
+    console.log('    capy info                    \x1b[90mShow current session info\x1b[0m');
       console.log('');
       process.exit(1);
     }
@@ -61,7 +62,7 @@ program
       process.exit(1);
     }
 
-    const authService = new AuthService();
+    const authService = new AuthService(undefined, false, projectState.userId);
     const serviceClient = new ServiceClient();
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
@@ -312,6 +313,15 @@ program
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
     await cmd.execute(email);
+  });
+
+program
+  .command('info')
+  .description('Show current session info')
+  .action(async () => {
+    const { InfoCommand } = await import('./commands/infoCommand');
+    const cmd = new InfoCommand();
+    await cmd.execute();
   });
 
 program

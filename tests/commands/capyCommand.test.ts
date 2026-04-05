@@ -71,7 +71,8 @@ describe('CapyCommand', () => {
       readKeepFile: jest.fn(),
       readDecryptKey: jest.fn(),
       readSyncState: jest.fn().mockReturnValue(null),
-      readActiveBranch: jest.fn().mockReturnValue(null)
+      readActiveBranch: jest.fn().mockReturnValue(null),
+      writeSyncStateUserId: jest.fn()
     } as any;
 
     mockFileManager = {

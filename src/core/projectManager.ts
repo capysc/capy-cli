@@ -40,6 +40,8 @@ export class ProjectManager {
       }
     }
 
+    const syncState = this.readSyncState();
+
     return {
       initialized: hasKeepFile,
       hasKeepFile,
@@ -49,6 +51,7 @@ export class ProjectManager {
       organizationId,
       projectId,
       activeBranch: this.readActiveBranch(),
+      userId: syncState?.user_id,
     };
   }
 
@@ -195,6 +198,15 @@ export class ProjectManager {
       // If sync state is corrupted, return null (will be recreated)
       return null;
     }
+  }
+
+  writeSyncStateUserId(userId: string): void {
+    const syncStatePath = this.getSyncStatePath();
+    const capyDir = this.getCapyDir();
+    if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
+    const existing = this.readSyncState() || { last_sync: '', synced_variables: [] };
+    existing.user_id = userId;
+    writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
   }
 
   isGitRepository(): boolean {

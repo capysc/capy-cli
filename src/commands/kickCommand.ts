@@ -21,7 +21,7 @@ export class KickCommand {
     const orgId = projectState.organizationId;
 
     // Authenticate
-    const authService = new AuthService(this.apiUrl);
+    const authService = new AuthService(this.apiUrl, false, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
@@ -71,6 +71,7 @@ export class KickCommand {
 
     console.log('');
     console.log(`  \x1b[33m${email}\x1b[0m has been removed from the organization.`);
+    console.log(`  \x1b[90mMembership ${membershipId} deleted.\x1b[0m`);
     console.log('  \x1b[90mThey can no longer co-decrypt secrets.\x1b[0m');
     console.log('');
   }

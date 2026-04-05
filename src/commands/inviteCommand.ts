@@ -37,7 +37,7 @@ export class InviteCommand {
       const orgId = projectState.organizationId;
 
       // Authenticate
-      const authService = new AuthService(this.apiUrl);
+      const authService = new AuthService(this.apiUrl, false, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {

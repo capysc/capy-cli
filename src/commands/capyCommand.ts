@@ -256,11 +256,7 @@ export class CapyCommand {
       console.log('');
       console.log('');
       console.log('');
-      console.log('');
-      console.log('');
       console.log(seedPhrase);
-      console.log('');
-      console.log('');
       console.log('');
       console.log('');
       console.log('');
@@ -405,7 +401,8 @@ export class CapyCommand {
             this.fileManager.writeKeepFile(updatedKeep);
             this.fileManager.writeSyncState({
               last_sync: new Date().toISOString(),
-              synced_variables: Object.keys(localEnv)
+              synced_variables: Object.keys(localEnv),
+              user_id: authResult.user_id,
             });
 
             // Backup plaintext .env before encrypting
@@ -545,6 +542,11 @@ export class CapyCommand {
   }
 
   private async syncProject(projectState: ProjectState): Promise<void> {
+    // Load user-scoped session if we know who last synced this project
+    if (projectState.userId) {
+      this.authService.setSessionUserId(projectState.userId);
+    }
+
     // Authenticate
     const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);
@@ -555,6 +557,11 @@ export class CapyCommand {
         authResult.error || 'Authentication failed',
         ERROR_CODES.AUTH_FAILED
       );
+    }
+
+    // Persist user ID to sync state immediately so future runs load the right session
+    if (authResult.user_id) {
+      this.projectManager.writeSyncStateUserId(authResult.user_id);
     }
 
     spinner.stop();
@@ -800,7 +807,8 @@ export class CapyCommand {
     // Update sync state with current variables
     const newSyncState: SyncState = {
       last_sync: new Date().toISOString(),
-      synced_variables: Object.keys(finalEnv)
+      synced_variables: Object.keys(finalEnv),
+      user_id: authResult.user_id,
     };
     this.fileManager.writeSyncState(newSyncState);
 

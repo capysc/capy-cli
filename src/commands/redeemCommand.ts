@@ -23,9 +23,9 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 2. Authenticate (user must already have a WorkOS account)
+    // 2. Authenticate, scoped to the invite's org so WorkOS skips org selection
     const authService = new AuthService(this.apiUrl);
-    const authResult = await authService.authenticate();
+    const authResult = await authService.authenticate(targetOrgId);
     if (!authResult.success) {
       console.error('Authentication failed. You need a Capy account to redeem an invite.');
       process.exit(1);
@@ -47,10 +47,13 @@ export class RedeemCommand {
       console.log(`  Switched to organization \x1b[1m${targetOrgId}\x1b[0m`);
     }
 
-    // 4. Reject if user already has the master key for this org
+    // 4. If user already has the master key, they're already set up
     if (hasOrgKey(orgId, userId)) {
-      console.error('You are already a member of this organization.');
-      process.exit(1);
+      console.log('');
+      console.log('  \x1b[32mYou already have access to this organization.\x1b[0m');
+      console.log(`  Run \x1b[1mcapy\x1b[0m in a project directory to sync secrets.`);
+      console.log('');
+      return;
     }
 
     const serviceToken = authService.getToken();
