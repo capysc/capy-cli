@@ -94,6 +94,7 @@ describe('CapyCommand', () => {
       authenticate: jest.fn(),
       getToken: jest.fn(),
       setOrganizationId: jest.fn(),
+      setSessionUserId: jest.fn(),
       createOrganization: jest.fn()
     } as any;
 

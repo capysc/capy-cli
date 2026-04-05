@@ -6,9 +6,16 @@ import { SessionStore } from '../../src/types/index';
 
 // Mock dependencies
 jest.mock('fs');
-jest.mock('proper-lockfile');
+jest.mock('proper-lockfile', () => ({
+  lockSync: jest.fn(),
+  unlockSync: jest.fn(),
+}));
 jest.mock('../../src/auth/oauthServer');
-jest.mock('../../src/config/globalConfig');
+jest.mock('../../src/config/globalConfig', () => ({
+  readAuthSession: jest.fn().mockReturnValue(null),
+  saveAuthSession: jest.fn(),
+  getAuthSessionPath: jest.fn().mockReturnValue('/home/test/.capy/auth/session.json'),
+}));
 
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const MockOAuthServer = OAuthServer as jest.MockedClass<typeof OAuthServer>;
