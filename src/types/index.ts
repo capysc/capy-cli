@@ -45,7 +45,7 @@ export interface Branch {
   id: string;
   name: string;
   project_id: string;
-  is_production: boolean;
+  is_protected: boolean;
   created_at?: string;
 }
 
