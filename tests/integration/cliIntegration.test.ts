@@ -1,4 +1,4 @@
-import { jest } from '@jest/globals';
+import { spyOn, jest, describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { CapyCommand } from '../../src/commands/capyCommand';
 import { ProjectManager } from '../../src/core/projectManager';
 import { FileManager } from '../../src/files/fileManager';
@@ -7,6 +7,7 @@ import { PromptEngine } from '../../src/ui/promptEngine';
 import { AuthService } from '../../src/auth/authService';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { CapyError, KeepFile, DecryptKey } from '../../src/types/index';
+import * as fs from 'fs';
 
 // Integration tests - testing components working together without full mocking
 describe('CLI Integration Tests', () => {
@@ -41,7 +42,7 @@ describe('CLI Integration Tests', () => {
   describe('Project State Detection Integration', () => {
     test('should correctly detect uninitialized project state', async () => {
       // Mock file system operations since we're not actually creating files
-      jest.spyOn(require('fs'), 'existsSync').mockImplementation((path: any) => {
+      spyOn(fs, 'existsSync').mockImplementation((path: any) => {
         if (path.includes('.keep')) return false;
         if (path.includes('.capy/decrypt')) return false;
         if (path.includes('.env')) return true;
@@ -67,14 +68,14 @@ describe('CLI Integration Tests', () => {
         variables: {}
       };
 
-      jest.spyOn(require('fs'), 'existsSync').mockImplementation((path: any) => {
+      spyOn(fs, 'existsSync').mockImplementation((path: any) => {
         if (path.includes('.keep')) return true;
         if (path.includes('.capy/decrypt')) return true;
         if (path.includes('.env')) return true;
         return false;
       });
 
-      jest.spyOn(require('fs'), 'readFileSync').mockReturnValue(JSON.stringify(mockKeep));
+      spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockKeep));
 
       const state = await projectManager.detectProjectState();
 
@@ -122,7 +123,7 @@ DEBUG=true`;
         }
       };
 
-      const writeFileSyncSpy = jest.spyOn(require('fs'), 'writeFileSync').mockImplementation(() => {});
+      const writeFileSyncSpy = spyOn(fs, 'writeFileSync').mockImplementation(() => {});
 
       fileManager.writeKeepFile(mockKeep);
 
@@ -144,7 +145,7 @@ DEBUG=true`;
         permissions: ['API_KEY', 'DB_URL']
       };
 
-      const writeFileSyncSpy = jest.spyOn(require('fs'), 'writeFileSync').mockImplementation(() => {});
+      const writeFileSyncSpy = spyOn(fs, 'writeFileSync').mockImplementation(() => {});
 
       fileManager.writeDecryptKey(mockDecryptKey);
 
@@ -275,8 +276,8 @@ DEBUG=true`;
 
   describe('Error Handling Integration', () => {
     test('should handle malformed keep file gracefully', () => {
-      jest.spyOn(require('fs'), 'existsSync').mockReturnValue(true);
-      jest.spyOn(require('fs'), 'readFileSync').mockReturnValue('invalid json');
+      spyOn(fs, 'existsSync').mockReturnValue(true);
+      spyOn(fs, 'readFileSync').mockReturnValue('invalid json');
 
       expect(() => projectManager.readKeepFile()).toThrow(CapyError);
       expect(() => projectManager.readKeepFile()).toThrow('Failed to read .keep file');
@@ -289,8 +290,8 @@ DEBUG=true`;
         project_name: 'test'
       };
 
-      jest.spyOn(require('fs'), 'existsSync').mockReturnValue(true);
-      jest.spyOn(require('fs'), 'readFileSync').mockReturnValue(JSON.stringify(invalidKeep));
+      spyOn(fs, 'existsSync').mockReturnValue(true);
+      spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(invalidKeep));
 
       expect(() => projectManager.readKeepFile()).toThrow(CapyError);
     });
@@ -371,6 +372,6 @@ DEBUG=true`;
 
   afterEach(() => {
     // Clean up mocks
-    jest.restoreAllMocks();
+    jest.restoreAllMocks(); // Bun supports this via jest global
   });
 });

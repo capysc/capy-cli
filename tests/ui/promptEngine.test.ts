@@ -1,10 +1,16 @@
-import { jest } from '@jest/globals';
-import inquirer from 'inquirer';
+import { mock, spyOn, jest, describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
 import { PromptEngine } from '../../src/ui/promptEngine';
 
-// Mock inquirer
-jest.mock('inquirer');
-const mockInquirer = inquirer as jest.Mocked<typeof inquirer>;
+const mockPrompt = jest.fn();
+mock.module('inquirer', () => ({
+  __esModule: true,
+  default: { prompt: mockPrompt },
+  prompt: mockPrompt,
+}));
+
+afterAll(() => { mock.restore(); });
+
+const mockInquirer = { prompt: mockPrompt } as any;
 
 describe('PromptEngine', () => {
   let promptEngine: PromptEngine;
@@ -76,11 +82,11 @@ describe('PromptEngine', () => {
 
     beforeEach(() => {
       // Mock console.log to prevent output during tests
-      jest.spyOn(console, 'log').mockImplementation(() => {});
+      spyOn(console, 'log').mockImplementation(() => {});
     });
 
     afterEach(() => {
-      (console.log as jest.Mock).mockRestore();
+      (console.log as any).mockRestore();
     });
 
     test('should handle new local variables', async () => {
@@ -98,7 +104,7 @@ describe('PromptEngine', () => {
         .mockResolvedValueOnce({ pushAll: false })  // Don't push all
         .mockResolvedValueOnce({ push: true });      // Push this one
 
-      const spyDisplayTable = jest.spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
+      const spyDisplayTable = spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
 
       const result = await promptEngine.promptForChanges(changeSet);
 
@@ -123,7 +129,7 @@ describe('PromptEngine', () => {
 
       mockInquirer.prompt.mockResolvedValueOnce({ pullAll: true });
 
-      const spyDisplayTable = jest.spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
+      const spyDisplayTable = spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
 
       const result = await promptEngine.promptForChanges(changeSet);
 
@@ -158,7 +164,7 @@ describe('PromptEngine', () => {
         .mockResolvedValueOnce({ pull: true })
         .mockResolvedValueOnce({ pull: false });
 
-      const spyDisplayTable = jest.spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
+      const spyDisplayTable = spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
 
       const result = await promptEngine.promptForChanges(changeSet);
 
@@ -182,7 +188,7 @@ describe('PromptEngine', () => {
         .mockResolvedValueOnce({ resolution: 'local' })
         .mockResolvedValueOnce({ push: true });
 
-      const spyDisplayConflictTable = jest.spyOn(promptEngine as any, 'displayConflictTable').mockImplementation(() => {});
+      const spyDisplayConflictTable = spyOn(promptEngine as any, 'displayConflictTable').mockImplementation(() => {});
 
       const result = await promptEngine.promptForChanges(changeSet);
 
@@ -204,7 +210,7 @@ describe('PromptEngine', () => {
 
       mockInquirer.prompt.mockResolvedValueOnce({ resolution: 'remote' });
 
-      const spyDisplayConflictTable = jest.spyOn(promptEngine as any, 'displayConflictTable').mockImplementation(() => {});
+      const spyDisplayConflictTable = spyOn(promptEngine as any, 'displayConflictTable').mockImplementation(() => {});
 
       const result = await promptEngine.promptForChanges(changeSet);
 
@@ -227,8 +233,8 @@ describe('PromptEngine', () => {
         .mockResolvedValueOnce({ resolution: 'local' })
         .mockResolvedValueOnce({ pushLocal: false });
 
-      const spyDisplayVariableTable = jest.spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
-      const spyDisplayConflictTable = jest.spyOn(promptEngine as any, 'displayConflictTable').mockImplementation(() => {});
+      const spyDisplayVariableTable = spyOn(promptEngine as any, 'displayVariableTable').mockImplementation(() => {});
+      const spyDisplayConflictTable = spyOn(promptEngine as any, 'displayConflictTable').mockImplementation(() => {});
 
       const result = await promptEngine.promptForChanges(mockChangeSet);
 
@@ -259,7 +265,7 @@ describe('PromptEngine', () => {
 
       mockInquirer.prompt.mockResolvedValue({ confirm: true });
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       const result = await promptEngine.confirmSync(decisions);
 
@@ -293,7 +299,7 @@ describe('PromptEngine', () => {
       deleteRemote: []
       };
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       const result = await promptEngine.confirmSync(decisions);
 
@@ -312,7 +318,7 @@ describe('PromptEngine', () => {
         { name: 'VERY_LONG_VARIABLE_NAME', value: 'This is a very long value that should be truncated when displayed' }
       ];
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       (promptEngine as any).displayVariableTable(variables);
 
@@ -335,7 +341,7 @@ describe('PromptEngine', () => {
         { name: 'CONFLICT_VAR', localValue: 'local_value', remoteValue: 'remote_value' }
       ];
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       (promptEngine as any).displayConflictTable(conflicts);
 
@@ -547,7 +553,7 @@ describe('PromptEngine', () => {
         { name: 'VERY_LONG_VARIABLE_NAME', value: 'short', source: 'local' as const, encrypted: false }
       ];
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
       (promptEngine as any).displayVariableTable(variables);
 
       const calls = consoleSpy.mock.calls.map(call => call[0]);
@@ -568,7 +574,7 @@ describe('PromptEngine', () => {
         { name: 'TEST_VAR', value: 'test_value', source: 'local' as const, encrypted: false }
       ];
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
       (promptEngine as any).displayVariableTable(variables);
 
       const calls = consoleSpy.mock.calls.map(call => call[0]);
@@ -592,7 +598,7 @@ describe('PromptEngine', () => {
         { name: 'EXTREMELY_LONG_VARIABLE_NAME_THAT_EXCEEDS_LIMIT', value: 'y', source: 'local' as const, encrypted: false }
       ];
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
       (promptEngine as any).displayVariableTable(variables);
 
       const calls = consoleSpy.mock.calls.map(call => call[0]);
@@ -627,7 +633,7 @@ describe('PromptEngine', () => {
         { name: 'EXTREMELY_LONG_CONFLICT_VARIABLE_NAME_FOR_TESTING', localValue: 'x', remoteValue: 'y' }
       ];
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
       (promptEngine as any).displayConflictTable(conflicts);
 
       const calls = consoleSpy.mock.calls.map(call => call[0]);
@@ -660,7 +666,7 @@ describe('PromptEngine', () => {
     let consoleSpy: any;
 
     beforeEach(() => {
-      consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
     });
 
     afterEach(() => {

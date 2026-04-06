@@ -1,4 +1,57 @@
-import { jest } from '@jest/globals';
+import { mock, spyOn, beforeEach, afterEach, afterAll, describe, test, expect } from 'bun:test';
+
+// Mock all dependencies — must come before imports of mocked modules
+mock.module('../../src/core/projectManager', () => ({
+  ProjectManager: mock(() => ({})),
+}));
+mock.module('../../src/files/fileManager', () => ({
+  FileManager: mock(() => ({})),
+}));
+mock.module('../../src/auth/authService', () => ({
+  AuthService: mock(() => ({})),
+}));
+mock.module('../../src/service/serviceClient', () => ({
+  ServiceClient: mock(() => ({})),
+}));
+mock.module('../../src/sync/syncEngine', () => ({
+  SyncEngine: mock(() => ({})),
+}));
+mock.module('../../src/ui/promptEngine', () => ({
+  PromptEngine: mock(() => ({})),
+}));
+mock.module('../../src/crypto/keyManager', () => ({
+  generateSeedPhrase: mock(() => 'abandon '.repeat(23) + 'art'),
+  validateSeedPhrase: mock(() => true),
+  seedPhraseToMasterKey: mock(() => Buffer.alloc(32, 1)),
+  encryptMasterKey: mock(() => 'encrypted-master-key'),
+  deriveWrappingKey: mock(() => Buffer.alloc(32, 2)),
+}));
+mock.module('../../src/crypto/keyResolver', () => ({
+  resolveProjectKey: mock(() => 'mock-derived-project-key-hex'),
+  hasOrgKey: mock(() => true),
+}));
+mock.module('../../src/config/globalConfig', () => ({
+  saveMasterKey: mock(() => undefined),
+}));
+mock.module('inquirer', () => ({
+  default: {
+    prompt: mock(() => Promise.resolve({ orgId: 'org-123', orgName: 'Test Org' })),
+    Separator: class Separator { constructor() {} },
+  },
+}));
+mock.module('../../src/ui/spinner', () => ({
+  default: (text: string) => ({
+    start: () => ({
+      fail: mock(() => undefined),
+      succeed: mock(() => undefined),
+      stop: mock(() => undefined),
+      text: ''
+    })
+  })
+}));
+
+afterAll(() => { mock.restore(); });
+
 import { CapyCommand } from '../../src/commands/capyCommand';
 import { ProjectManager } from '../../src/core/projectManager';
 import { FileManager } from '../../src/files/fileManager';
@@ -7,130 +60,89 @@ import { ServiceClient } from '../../src/service/serviceClient';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { PromptEngine } from '../../src/ui/promptEngine';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
+import * as fs from 'fs';
 
-// Mock all dependencies
-jest.mock('../../src/core/projectManager');
-jest.mock('../../src/files/fileManager');
-jest.mock('../../src/auth/authService');
-jest.mock('../../src/service/serviceClient');
-jest.mock('../../src/sync/syncEngine');
-jest.mock('../../src/ui/promptEngine');
-jest.mock('../../src/crypto/keyManager', () => ({
-  generateSeedPhrase: jest.fn().mockReturnValue('abandon '.repeat(23) + 'art'),
-  validateSeedPhrase: jest.fn().mockReturnValue(true),
-  seedPhraseToMasterKey: jest.fn().mockReturnValue(Buffer.alloc(32, 1)),
-  encryptMasterKey: jest.fn().mockReturnValue('encrypted-master-key'),
-  deriveWrappingKey: jest.fn().mockReturnValue(Buffer.alloc(32, 2)),
-}));
-jest.mock('../../src/crypto/keyResolver', () => ({
-  resolveProjectKey: jest.fn().mockReturnValue('mock-derived-project-key-hex'),
-  hasOrgKey: jest.fn().mockReturnValue(true),
-}));
-jest.mock('../../src/config/globalConfig', () => ({
-  saveMasterKey: jest.fn(),
-}));
-jest.mock('inquirer');
-jest.mock('../../src/ui/spinner', () => ({
-  __esModule: true,
-  default: (text: string) => ({
-    start: () => ({
-      fail: jest.fn(),
-      succeed: jest.fn(),
-      stop: jest.fn(),
-      text: ''
-    })
-  })
-}));
-
-const MockProjectManager = ProjectManager as jest.MockedClass<typeof ProjectManager>;
-const MockFileManager = FileManager as jest.MockedClass<typeof FileManager>;
-const MockAuthService = AuthService as jest.MockedClass<typeof AuthService>;
-const MockServiceClient = ServiceClient as jest.MockedClass<typeof ServiceClient>;
-const MockSyncEngine = SyncEngine as jest.MockedClass<typeof SyncEngine>;
-const MockPromptEngine = PromptEngine as jest.MockedClass<typeof PromptEngine>;
+const MockProjectManager = ProjectManager as any;
+const MockFileManager = FileManager as any;
+const MockAuthService = AuthService as any;
+const MockServiceClient = ServiceClient as any;
+const MockSyncEngine = SyncEngine as any;
+const MockPromptEngine = PromptEngine as any;
 
 describe('CapyCommand', () => {
   let capyCommand: CapyCommand;
-  let mockProjectManager: jest.Mocked<ProjectManager>;
-  let mockFileManager: jest.Mocked<FileManager>;
-  let mockAuthService: jest.Mocked<AuthService>;
-  let mockServiceClient: jest.Mocked<ServiceClient>;
-  let mockSyncEngine: jest.Mocked<SyncEngine>;
-  let mockPromptEngine: jest.Mocked<PromptEngine>;
+  let mockProjectManager: any;
+  let mockFileManager: any;
+  let mockAuthService: any;
+  let mockServiceClient: any;
+  let mockSyncEngine: any;
+  let mockPromptEngine: any;
 
   beforeEach(() => {
-    jest.clearAllMocks();
     // Mock process.exit globally to prevent child process crashes
-    jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    spyOn(process, 'exit').mockImplementation(() => undefined as never);
 
     // Create mock instances
     mockProjectManager = {
-      detectProjectState: jest.fn(),
-      getDefaultProjectName: jest.fn().mockReturnValue('test-project'),
-      getEnvPath: jest.fn().mockReturnValue('.env'),
-      readKeepFile: jest.fn(),
-      readDecryptKey: jest.fn(),
-      readSyncState: jest.fn().mockReturnValue(null),
-      readActiveBranch: jest.fn().mockReturnValue(null),
-      writeSyncStateUserId: jest.fn()
+      detectProjectState: mock(() => undefined),
+      getDefaultProjectName: mock(() => 'test-project'),
+      getEnvPath: mock(() => '.env'),
+      readKeepFile: mock(() => undefined),
+      readDecryptKey: mock(() => undefined),
+      readSyncState: mock(() => null),
+      readActiveBranch: mock(() => null),
+      writeSyncStateUserId: mock(() => undefined)
     } as any;
 
     mockFileManager = {
-      writeKeepFile: jest.fn(),
-      writeDecryptKey: jest.fn(),
-      writeSyncState: jest.fn(),
-      writeEncryptedEnvFile: jest.fn(),
-      readEnvFile: jest.fn().mockReturnValue({}),
-      readEncryptedEnvFile: jest.fn().mockReturnValue({}),
-      readEnvMeta: jest.fn().mockReturnValue({}),
-      parseEnvContent: jest.fn().mockReturnValue({}),
-      ensureCapyGitignore: jest.fn(),
-      isSnippetEncrypted: jest.fn().mockReturnValue(false),
-      isEncrypted: jest.fn().mockReturnValue(false),
-      decryptValue: jest.fn((value) => value)
+      writeKeepFile: mock(() => undefined),
+      writeDecryptKey: mock(() => undefined),
+      writeSyncState: mock(() => undefined),
+      writeEncryptedEnvFile: mock(() => undefined),
+      readEnvFile: mock(() => ({})),
+      readEncryptedEnvFile: mock(() => ({})),
+      readEnvMeta: mock(() => ({})),
+      parseEnvContent: mock(() => ({})),
+      ensureCapyGitignore: mock(() => undefined),
+      isSnippetEncrypted: mock(() => false),
+      isEncrypted: mock(() => false),
+      decryptValue: mock((value: any) => value)
     } as any;
 
     mockAuthService = {
-      authenticate: jest.fn(),
-      getToken: jest.fn(),
-      setOrganizationId: jest.fn(),
-      setSessionUserId: jest.fn(),
-      createOrganization: jest.fn()
+      authenticate: mock(() => undefined),
+      getToken: mock(() => undefined),
+      setOrganizationId: mock(() => undefined),
+      setSessionUserId: mock(() => undefined),
+      createOrganization: mock(() => undefined)
     } as any;
 
     mockServiceClient = {
-      setToken: jest.fn(),
-      setTokenRefresher: jest.fn(),
-      initializeProject: jest.fn(),
-      getDecryptData: jest.fn(),
-      pushVariables: jest.fn()
+      setToken: mock(() => undefined),
+      setTokenRefresher: mock(() => undefined),
+      initializeProject: mock(() => undefined),
+      getDecryptData: mock(() => undefined),
+      pushVariables: mock(() => undefined)
     } as any;
 
     mockSyncEngine = {
-      createDecryptKey: jest.fn().mockReturnValue('mock-decrypt-key'),
-      compareEnvironments: jest.fn(),
-      formatSyncSummary: jest.fn(),
-      validateDecisions: jest.fn().mockReturnValue([]),
-      applyDecisions: jest.fn(),
-      mergeWithKeep: jest.fn(),
-      generateSyncResult: jest.fn()
+      createDecryptKey: mock(() => 'mock-decrypt-key'),
+      compareEnvironments: mock(() => undefined),
+      formatSyncSummary: mock(() => undefined),
+      validateDecisions: mock(() => []),
+      applyDecisions: mock(() => undefined),
+      mergeWithKeep: mock(() => undefined),
+      generateSyncResult: mock(() => undefined)
     } as any;
 
     mockPromptEngine = {
-      promptForProjectName: jest.fn(),
-      promptForChanges: jest.fn(),
-      confirmSync: jest.fn<() => Promise<boolean>>().mockResolvedValue(true),
-      displaySuccess: jest.fn(),
-      displayError: jest.fn(),
-      displayWarning: jest.fn()
+      promptForProjectName: mock(() => undefined),
+      promptForChanges: mock(() => undefined),
+      confirmSync: mock(() => Promise.resolve(true) as any),
+      displaySuccess: mock(() => undefined),
+      displayError: mock(() => undefined),
+      displayWarning: mock(() => undefined)
     } as any;
-
-    // Mock inquirer to auto-answer org selection prompts
-    const mockInquirer = require('inquirer');
-    mockInquirer.default = {
-      prompt: (jest.fn() as any).mockResolvedValue({ orgId: 'org-123', orgName: 'Test Org' }),
-      Separator: class Separator { constructor() {} },
-    };
 
     // Mock constructors
     MockProjectManager.mockImplementation(() => mockProjectManager);
@@ -146,7 +158,12 @@ describe('CapyCommand', () => {
   describe('constructor', () => {
     test('should initialize all dependencies', () => {
       // Reset call counts since we already have one capyCommand instance from beforeEach
-      jest.clearAllMocks();
+      MockProjectManager.mockClear();
+      MockFileManager.mockClear();
+      MockAuthService.mockClear();
+      MockServiceClient.mockClear();
+      MockSyncEngine.mockClear();
+      MockPromptEngine.mockClear();
       
       const command = new CapyCommand();
       
@@ -178,7 +195,7 @@ describe('CapyCommand', () => {
         organizationId: undefined
       });
 
-      const spy = jest.spyOn(capyCommand as any, 'initializeProject').mockResolvedValue(undefined);
+      const spy = spyOn(capyCommand as any, 'initializeProject').mockResolvedValue(undefined);
 
       await capyCommand.execute();
 
@@ -198,7 +215,7 @@ describe('CapyCommand', () => {
       };
 
       mockProjectManager.detectProjectState.mockResolvedValue(projectState);
-      const spy = jest.spyOn(capyCommand as any, 'syncProject').mockResolvedValue(undefined);
+      const spy = spyOn(capyCommand as any, 'syncProject').mockResolvedValue(undefined);
 
       await capyCommand.execute();
 
@@ -217,8 +234,8 @@ describe('CapyCommand', () => {
         organizationId: 'org-123'
       });
 
-      const initSpy = jest.spyOn(capyCommand as any, 'initializeProject').mockResolvedValue(undefined);
-      const syncSpy = jest.spyOn(capyCommand as any, 'syncProject').mockResolvedValue(undefined);
+      const initSpy = spyOn(capyCommand as any, 'initializeProject').mockResolvedValue(undefined);
+      const syncSpy = spyOn(capyCommand as any, 'syncProject').mockResolvedValue(undefined);
 
       await capyCommand.execute();
 
@@ -231,8 +248,8 @@ describe('CapyCommand', () => {
       mockProjectManager.detectProjectState.mockRejectedValue(new Error('Test error'));
 
       // Mock process.exit to prevent actual exit during tests
-      const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const exitSpy = spyOn(process, 'exit').mockImplementation(() => undefined as never);
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       await capyCommand.execute();
 
@@ -248,8 +265,8 @@ describe('CapyCommand', () => {
         new CapyError('Failed to detect project state', ERROR_CODES.INVALID_FORMAT)
       );
 
-      const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const exitSpy = spyOn(process, 'exit').mockImplementation(() => undefined as never);
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       await capyCommand.execute();
 
@@ -312,7 +329,7 @@ describe('CapyCommand', () => {
     });
 
     test('should log correct message when .keep file is not found', async () => {
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       await (capyCommand as any).initializeProject();
 
@@ -370,11 +387,10 @@ describe('CapyCommand', () => {
 
     test('should auto-sync variables from an existing non-empty .env file during project initialization', async () => {
       // Mock projectManager.getEnvPath to return a path
-      (mockProjectManager.getEnvPath as jest.Mock) = jest.fn().mockReturnValue('/test/path/.env');
+      (mockProjectManager.getEnvPath as any) = mock(() => '/test/path/.env');
       
       // Mock that .env file exists and has variables
-      const mockFs = require('fs');
-      const existsSyncSpy = jest.spyOn(mockFs, 'existsSync').mockReturnValue(true);
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(true as any);
       
       mockFileManager.readEnvFile.mockReturnValue({
         API_KEY: 'test-key',
@@ -408,7 +424,7 @@ describe('CapyCommand', () => {
         }
       });
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       await (capyCommand as any).initializeProject();
 
@@ -428,11 +444,10 @@ describe('CapyCommand', () => {
 
     test('should not attempt to sync if an existing .env file is empty', async () => {
       // Mock projectManager.getEnvPath to return a path
-      (mockProjectManager.getEnvPath as jest.Mock) = jest.fn().mockReturnValue('/test/path/.env');
+      (mockProjectManager.getEnvPath as any) = mock(() => '/test/path/.env');
       
       // Mock that .env file exists but is empty
-      const mockFs = require('fs');
-      const existsSyncSpy = jest.spyOn(mockFs, 'existsSync').mockReturnValue(true);
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(true as any);
       
       mockFileManager.readEnvFile.mockReturnValue({});
 
@@ -447,11 +462,10 @@ describe('CapyCommand', () => {
 
     test('should complete initialization even if auto-sync fails', async () => {
       // Mock projectManager.getEnvPath to return a path
-      (mockProjectManager.getEnvPath as jest.Mock) = jest.fn().mockReturnValue('/test/path/.env');
+      (mockProjectManager.getEnvPath as any) = mock(() => '/test/path/.env');
       
       // Mock that .env file exists and has variables
-      const mockFs = require('fs');
-      const existsSyncSpy = jest.spyOn(mockFs, 'existsSync').mockReturnValue(true);
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(true as any);
       
       mockFileManager.readEnvFile.mockReturnValue({
         API_KEY: 'test-key'
@@ -467,7 +481,7 @@ describe('CapyCommand', () => {
       // Mock sync failure
       mockServiceClient.pushVariables.mockRejectedValue(new Error('Network error'));
 
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       await (capyCommand as any).initializeProject();
 
@@ -524,8 +538,7 @@ describe('CapyCommand', () => {
       });
 
       // No local .env file exists
-      const mockFs = require('fs');
-      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
+      spyOn(fs, 'existsSync').mockReturnValue(false as any);
 
       await (capyCommand as any).initializeProject();
 
@@ -559,8 +572,7 @@ describe('CapyCommand', () => {
         new CapyError('No secrets stored for this project', 'SERVICE_ERROR', { status: 404 })
       );
 
-      const mockFs = require('fs');
-      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
+      spyOn(fs, 'existsSync').mockReturnValue(false as any);
 
       await (capyCommand as any).initializeProject();
 
@@ -579,11 +591,10 @@ describe('CapyCommand', () => {
         expires_at: new Date().toISOString()
       });
 
-      const mockFs = require('fs');
-      jest.spyOn(mockFs, 'existsSync').mockReturnValue(false);
+      spyOn(fs, 'existsSync').mockReturnValue(false as any);
 
       // Should NOT throw an auth error
-      await expect((capyCommand as any).initializeProject()).resolves.not.toThrow();
+      await (capyCommand as any).initializeProject(); // will throw if it rejects
 
       // Auth service should be called exactly once (no retry loops)
       expect(mockAuthService.authenticate).toHaveBeenCalledTimes(1);
@@ -783,7 +794,7 @@ describe('CapyCommand', () => {
         throw new Error('Read failed');
       });
 
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const consoleSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
       await (capyCommand as any).syncProject(mockProjectState);
 
@@ -800,8 +811,8 @@ describe('CapyCommand', () => {
       // We verify that errors don't propagate unhandled
       mockProjectManager.detectProjectState.mockRejectedValue(new Error('Test error'));
 
-      const exitSpy = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-      const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const exitSpy = spyOn(process, 'exit').mockImplementation(() => undefined as never);
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       // execute() catches errors and calls displayErrorAndExit which calls process.exit
       await capyCommand.execute();

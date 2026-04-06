@@ -21,7 +21,7 @@
     "dev": "tsc --watch",
     "capy-dev": "bun run build && node bin/capy-dev",
     "prepublishOnly": "npm pkg delete bin.capy-dev",
-    "test": "jest",
+    "test": "bash tests/run-tests.sh",
     "typecheck": "tsc --noEmit",
     "test:e2e": "bun run tests/e2e/e2e.ts",
     "clean": "rm -rf dist"
@@ -35,11 +35,8 @@
   },
   "devDependencies": {
     "@types/inquirer": "^9.0.0",
-    "@types/jest": "^29.5.0",
     "@types/node": "^20.0.0",
     "@types/proper-lockfile": "^4.1.4",
-    "jest": "^29.5.0",
-    "ts-jest": "^29.1.0",
     "typescript": "^5.0.0"
   },
   "engines": {
