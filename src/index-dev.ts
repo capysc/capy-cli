@@ -204,7 +204,7 @@ program
   .description('Invite a teammate to your organization')
   .action(async (email) => {
     const { InviteCommand } = await import('./commands/inviteCommand');
-    const cmd = new InviteCommand(process.env.CAPY_API_URL);
+    const cmd = new InviteCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(email);
   });
 
@@ -213,7 +213,7 @@ program
   .description('Redeem an invite code to join an organization')
   .action(async (code) => {
     const { RedeemCommand } = await import('./commands/redeemCommand');
-    const cmd = new RedeemCommand(process.env.CAPY_API_URL);
+    const cmd = new RedeemCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(code);
   });
 
@@ -222,7 +222,7 @@ program
   .description('Remove a teammate from this organization')
   .action(async (email) => {
     const { KickCommand } = await import('./commands/kickCommand');
-    const cmd = new KickCommand(process.env.CAPY_API_URL);
+    const cmd = new KickCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(email);
   });
 
