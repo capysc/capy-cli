@@ -309,6 +309,13 @@ program
       cleared = true;
     }
 
+    // Clear per-user session files
+    const sessionsDir = join(globalCapyDir, 'auth', 'sessions');
+    if (existsSync(sessionsDir)) {
+      rmSync(sessionsDir, { recursive: true, force: true });
+      cleared = true;
+    }
+
     // Clear project key caches (master keys survive logout — they require the seed phrase)
     const orgsDir = join(globalCapyDir, 'orgs');
     if (existsSync(orgsDir)) {
