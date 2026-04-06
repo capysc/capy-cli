@@ -279,10 +279,10 @@ export class ServiceClient {
     }
   }
 
-  async createBranch(projectId: string, name: string, isProduction: boolean = false): Promise<Branch> {
+  async createBranch(projectId: string, name: string, isProtected: boolean = false): Promise<Branch> {
     return this.request<Branch>(
       'POST', `/projects/${projectId}/branches`,
-      { name, is_production: isProduction },
+      { name, is_protected: isProtected },
     );
   }
 

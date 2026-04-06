@@ -464,7 +464,7 @@ export class CapyCommand {
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
       const name = b.name || 'no branch';
-      const prot = b.is_production ? `  ${grey('(protected)')}` : '';
+      const prot = b.is_protected ? `  ${grey('(protected)')}` : '';
       console.log(`  ${connector} ${name}${prot}`);
     });
     console.log('');
