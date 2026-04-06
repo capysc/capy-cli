@@ -1,10 +1,10 @@
-import { jest } from '@jest/globals';
+import { jest, describe, test, expect, beforeEach } from 'bun:test';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { ServiceToken, CapyError, ERROR_CODES } from '../../src/types/index';
 
 // Mock global fetch
-const mockFetch = jest.fn() as jest.MockedFunction<typeof fetch>;
-global.fetch = mockFetch;
+const mockFetch = jest.fn();
+global.fetch = mockFetch as any;
 
 function mockFetchResponse(data: any, ok = true, status = 200) {
   return {
