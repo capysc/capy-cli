@@ -6,9 +6,11 @@ import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
 
 export class RedeemCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(code: string): Promise<void> {
@@ -24,7 +26,7 @@ export class RedeemCommand {
     }
 
     // 2. Authenticate, scoped to the invite's org so WorkOS skips org selection
-    const authService = new AuthService(this.apiUrl);
+    const authService = new AuthService(this.apiUrl, this.devMode);
     const authResult = await authService.authenticate(targetOrgId);
     if (!authResult.success) {
       console.error('Authentication failed. You need a Capy account to redeem an invite.');
