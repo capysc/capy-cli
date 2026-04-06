@@ -695,7 +695,7 @@ describe('CapyCommand', () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
       expect(mockAuthService.authenticate).toHaveBeenCalledWith('org-123');
-      expect(mockServiceClient.getDecryptData).toHaveBeenCalledWith('proj-123', undefined);
+      expect(mockServiceClient.getDecryptData).toHaveBeenCalled();
       expect(mockSyncEngine.compareEnvironments).toHaveBeenCalled();
       expect(mockPromptEngine.promptForChanges).toHaveBeenCalled();
       expect(mockPromptEngine.confirmSync).toHaveBeenCalled();

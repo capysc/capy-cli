@@ -150,23 +150,42 @@ export class ServiceClient {
     }
   }
 
-  async getDecryptData(projectId: string, branch?: string): Promise<DecryptResponse> {
+  async getDecryptData(
+    projectId: string,
+    branch?: string,
+    keepHash?: string,
+    includeLatestHash?: boolean,
+  ): Promise<DecryptResponse> {
     try {
-      const query = branch ? `?branch=${encodeURIComponent(branch)}` : '';
-      const data = await this.request<{ env_file?: string; permissions: string[] }>(
+      const params: string[] = [];
+      if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
+      if (keepHash) params.push(`keep_hash=${encodeURIComponent(keepHash)}`);
+      if (includeLatestHash) params.push('include_latest_hash=true');
+      const query = params.length ? `?${params.join('&')}` : '';
+      const data = await this.request<{
+        env_file?: string;
+        permissions: string[];
+        keep_hash?: string;
+        latest_keep_hash?: string;
+      }>(
         'GET', `/secrets/${projectId}${query}`,
       );
 
       return {
         env_content: data.env_file || '',
         decrypt_key: '', // Key is managed client-side via keyResolver
-        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        keep_hash: data.keep_hash,
+        latest_keep_hash: data.latest_keep_hash,
       };
     } catch (error: any) {
-      // 404 with "No secrets" is normal for a new project — return empty
+      // 404 with "No secrets" or "Snapshot not found" — return empty for secrets, propagate snapshot miss
       // 404 with "Project not found" or "Branch not found" should propagate
       if (error instanceof CapyError && error.details?.status === 404) {
         const msg = error.message || '';
+        if (msg.includes('Snapshot not found')) {
+          throw error; // Pinned version missing — caller must handle
+        }
         if (msg.includes('not found') && !msg.includes('No secrets')) {
           throw error; // Project or branch not found — let caller handle
         }

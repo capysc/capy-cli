@@ -13,6 +13,7 @@ import {
   Organization,
   ProjectState,
   KeepFile,
+  KeepVariableEntry,
   SyncState,
   CapyError,
   ERROR_CODES
@@ -420,7 +421,7 @@ export class CapyCommand {
             }
 
             console.log('\nReady to work!');
-            await CapyCommand.createDeployPR(Object.keys(localEnv));
+            await CapyCommand.createDeployPR(Object.keys(localEnv), this.serviceClient);
           } else {
             syncSpinner.fail('Failed to sync variables');
           }
@@ -596,20 +597,37 @@ export class CapyCommand {
       );
     }
 
-    // Get remote environment (branch-aware)
+    // Get remote environment (branch-aware, pinned to .keep version)
     let activeBranch = projectState.activeBranch;
     const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
 
+    // Compute keepHash if .keep has variables (version pinning)
+    const currentKeep = this.projectManager.readKeepFile();
+    const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
+    const keepHash = hasVariables
+      ? SyncEngine.computeKeepHash(currentKeep!, activeBranch)
+      : undefined;
+
     let decryptData;
     try {
-      decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+      decryptData = await this.serviceClient.getDecryptData(
+        projectState.projectId!,
+        activeBranch,
+        keepHash,
+        keepHash ? true : false, // include_latest_hash when pinning
+      );
     } catch (error: any) {
       if (error instanceof CapyError && error.details?.status === 404) {
         const errorMsg = error.message || '';
         fetchSpinner.stop();
 
+        // Snapshot not found — fall back to latest
+        if (errorMsg.includes('Snapshot not found')) {
+          console.log('\n  Pinned version no longer exists in S3. Fetching latest...');
+          decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+        }
         // Branch not found — prompt to switch
-        if (errorMsg.includes('Branch') || (errorMsg.includes('not found') && activeBranch)) {
+        else if (errorMsg.includes('Branch') || (errorMsg.includes('not found') && activeBranch)) {
           activeBranch = await this.promptBranchSwitch(projectState.projectId!, activeBranch!);
           decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch || undefined);
         }
@@ -619,6 +637,23 @@ export class CapyCommand {
         }
       } else {
         throw error;
+      }
+    }
+
+    // Check if newer versions are available
+    if (keepHash && decryptData.latest_keep_hash && keepHash !== decryptData.latest_keep_hash) {
+      fetchSpinner.stop();
+      const { pullLatest } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'pullLatest',
+        message: 'Newer secret versions are available. Pull latest?',
+        default: true,
+      }]);
+
+      if (pullLatest) {
+        const latestSpinner = ora('Fetching latest...').start();
+        decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
+        latestSpinner.succeed('Fetched latest');
       }
     }
     const encryptionKey = resolveProjectKey(
@@ -797,15 +832,18 @@ export class CapyCommand {
 
     const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
     if (changedVars.length > 0) {
-      await CapyCommand.createDeployPR(changedVars);
+      await CapyCommand.createDeployPR(changedVars, this.serviceClient);
     }
   }
 
   /**
    * Create a deployment PR with the .keep file.
    * Can be called directly via `capy deploy` or after a sync.
+   * When deploying, the .keep entries are targeted to a Capy branch matching
+   * the current git branch name. If that Capy branch doesn't exist, it is
+   * auto-created with secrets copied from the active Capy branch.
    */
-  static async createDeployPR(syncedVars?: string[]): Promise<void> {
+  static async createDeployPR(syncedVars?: string[], client?: ServiceClient): Promise<void> {
     const { ProjectManager } = await import('../core/projectManager');
     const { FileManager } = await import('../files/fileManager');
     const pm = new ProjectManager();
@@ -825,31 +863,113 @@ export class CapyCommand {
       return;
     }
 
-    const baseBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    const targetBranch = pm.readActiveBranch() || baseBranch;
+    const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const capyBranch = gitBranch; // Deploy always targets a Capy branch matching the git branch
 
     const { confirm } = await inquirer.prompt([{
       type: 'list',
       name: 'confirm',
-      message: `Deploy your secrets to a git branch?`,
+      message: `Deploy secrets to Capy branch "${capyBranch}" on git branch "${gitBranch}"?`,
       choices: [
-        { name: `Push directly to "${targetBranch}"`, value: 'push' },
-        { name: `Create a deployment PR → "${targetBranch}"`, value: 'deploy' },
-        { name: 'Deploy to another branch', value: 'other' },
+        { name: `Push directly to "${gitBranch}"`, value: 'push' },
+        { name: `Create a deployment PR → "${gitBranch}"`, value: 'deploy' },
         { name: 'Continue working', value: 'cancel' },
       ],
     }]);
 
     if (confirm === 'cancel') return;
 
-    if (confirm === 'other') {
-      console.log('');
-      console.log('  To deploy to a different branch:');
-      console.log('');
-      console.log('    1. Switch branches:  capy checkout -b <branch-name>');
-      console.log('    2. Deploy:           capy deploy');
-      console.log('');
+    // Ensure we have an authenticated service client for branch operations
+    if (!client) {
+      const { AuthService } = await import('../auth/authService');
+      const authService = new AuthService();
+      client = new ServiceClient();
+
+      // Load user-scoped session if available
+      const syncState = pm.readSyncState();
+      if (syncState?.user_id) {
+        authService.setSessionUserId(syncState.user_id);
+      }
+
+      const authSpinner = ora('Authenticating...').start();
+      const authResult = await authService.authenticate(keepFile.org_id);
+      if (!authResult.success) {
+        authSpinner.fail('Authentication failed');
+        console.error('Cannot deploy without authentication.');
+        return;
+      }
+      authSpinner.succeed('Authenticated');
+
+      const token = authService.getToken();
+      if (token) {
+        client.setToken(token);
+        client.setTokenRefresher(async () => {
+          const refreshed = await authService.refreshToken();
+          return refreshed ? authService.getToken() : null;
+        });
+      }
+    }
+
+    // Ensure the Capy branch exists, auto-create if needed
+    const branchSpinner = ora(`Checking Capy branch "${capyBranch}"...`).start();
+    try {
+      const branches = await client.listBranches(keepFile.project_id);
+      const branchExists = branches.some(b => b.name === capyBranch);
+
+      if (!branchExists) {
+        branchSpinner.text = `Creating Capy branch "${capyBranch}"...`;
+        await client.createBranch(keepFile.project_id, capyBranch);
+
+        // Copy secrets from the active Capy branch to the new one
+        const activeBranch = pm.readActiveBranch();
+        try {
+          const currentData = await client.getDecryptData(keepFile.project_id, activeBranch);
+          if (currentData.env_content) {
+            const syncState = pm.readSyncState();
+            const encryptionKey = resolveProjectKey(keepFile.org_id, keepFile.project_id, syncState?.user_id || '');
+            const currentEnv = fm.parseEnvContent(currentData.env_content);
+            const decrypted: Record<string, string> = {};
+            for (const [key, value] of Object.entries(currentEnv)) {
+              decrypted[key] = fm.decryptValue(value, encryptionKey);
+            }
+            await client.pushVariables(keepFile.project_id, decrypted, keepFile, capyBranch, encryptionKey);
+            branchSpinner.succeed(`Created Capy branch "${capyBranch}" with ${Object.keys(decrypted).length} variable(s) copied`);
+          } else {
+            branchSpinner.succeed(`Created Capy branch "${capyBranch}" (empty)`);
+          }
+        } catch {
+          branchSpinner.succeed(`Created Capy branch "${capyBranch}" (no secrets to copy)`);
+        }
+      } else {
+        branchSpinner.succeed(`Capy branch "${capyBranch}" exists`);
+      }
+    } catch (error: any) {
+      branchSpinner.fail(`Failed to verify Capy branch: ${error.message}`);
       return;
+    }
+
+    // Update .keep entries to reference the deploy Capy branch
+    const deployKeep = { ...keepFile, variables: { ...keepFile.variables } };
+    for (const varName of Object.keys(deployKeep.variables)) {
+      const entries = deployKeep.variables[varName];
+      if (!entries || entries.length === 0) continue;
+
+      // Find the entry for the active Capy branch (or default) and retarget it
+      const activeBranch = pm.readActiveBranch();
+      const sourceEntry = entries.find(e =>
+        activeBranch ? e.branch === activeBranch : !e.branch
+      ) || entries[0];
+
+      // Replace with an entry targeting the deploy branch
+      const deployEntry: KeepVariableEntry = {
+        resource_id: sourceEntry.resource_id,
+        branch: capyBranch,
+        value_hash: sourceEntry.value_hash,
+      };
+
+      // Keep other branch entries, replace/add the one for capyBranch
+      const otherEntries = entries.filter(e => e.branch !== capyBranch);
+      deployKeep.variables[varName] = [...otherEntries, deployEntry];
     }
 
     const title = `chore: sync ${vars.length} ${projectName} secret${vars.length === 1 ? '' : 's'} via capy`;
@@ -860,42 +980,49 @@ export class CapyCommand {
     const tmpMsg = joinTmp(require('os').tmpdir(), `capy-commit-msg-${Date.now()}`);
     writeTmp(tmpMsg, fullMessage, 'utf-8');
 
-    // Direct push: commit .keep and push to target branch
+    // Write the deploy-targeted .keep before committing
+    fm.writeKeepFile(deployKeep);
+
+    // Direct push: commit .keep and push to git branch
     if (confirm === 'push') {
-      const pushSpinner = ora(`Pushing to ${targetBranch}...`).start();
+      const pushSpinner = ora(`Pushing to ${gitBranch}...`).start();
       try {
         execSync('git add .keep', { stdio: 'pipe' });
         execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
         unlinkTmp(tmpMsg);
-        execSync(`git push origin HEAD:${targetBranch}`, { stdio: 'pipe' });
-        pushSpinner.succeed(`Pushed .keep to ${targetBranch}`);
+        execSync(`git push origin HEAD:${gitBranch}`, { stdio: 'pipe' });
+        pushSpinner.succeed(`Pushed .keep to ${gitBranch}`);
         return;
       } catch (pushErr: any) {
         unlinkTmp(tmpMsg);
         // Undo the local commit so the working tree is clean
         try { execSync('git reset HEAD~1', { stdio: 'pipe' }); } catch {}
-        pushSpinner.fail(`Cannot push directly to "${targetBranch}" (likely protected)`);
+        // Restore original .keep
+        fm.writeKeepFile(keepFile);
+        pushSpinner.fail(`Cannot push directly to "${gitBranch}" (likely protected)`);
         console.log('  Creating a deployment PR instead...\n');
+        // Re-write deploy keep for PR path
+        fm.writeKeepFile(deployKeep);
         // Fall through to PR path
       }
     }
 
     // PR path: create a deploy branch, commit .keep, push, switch back
-    const deployBranch = `capy/sync-${projectName}-${Date.now()}`;
+    const deployGitBranch = `capy/sync-${projectName}-${Date.now()}`;
 
     try {
       const prSpinner = ora('Creating PR...').start();
 
-      execSync(`git checkout -b ${deployBranch}`, { stdio: 'pipe' });
+      execSync(`git checkout -b ${deployGitBranch}`, { stdio: 'pipe' });
       execSync('git add .keep', { stdio: 'pipe' });
 
       writeTmp(tmpMsg, fullMessage, 'utf-8');
       execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
       unlinkTmp(tmpMsg);
-      execSync(`git push -u origin ${deployBranch}`, { stdio: 'pipe' });
+      execSync(`git push -u origin ${deployGitBranch}`, { stdio: 'pipe' });
 
-      // Switch back to original branch and restore .keep
-      execSync(`git checkout ${baseBranch}`, { stdio: 'pipe' });
+      // Switch back to original branch and restore original .keep
+      execSync(`git checkout ${gitBranch}`, { stdio: 'pipe' });
       fm.writeKeepFile(keepFile);
 
       // Build GitHub PR URL
@@ -905,7 +1032,7 @@ export class CapyCommand {
         .replace(/^https:\/\/github\.com\//, '')
         .replace(/\.git$/, '');
 
-      const prUrl = `https://github.com/${repoPath}/compare/${baseBranch}...${deployBranch}?expand=1&title=${encodeURIComponent(title)}`;
+      const prUrl = `https://github.com/${repoPath}/compare/${gitBranch}...${deployGitBranch}?expand=1&title=${encodeURIComponent(title)}`;
 
       prSpinner.succeed('Branch pushed');
       console.log(`\nCreate PR: ${prUrl}`);
@@ -914,8 +1041,8 @@ export class CapyCommand {
       open(prUrl).catch(() => {});
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
-      // Ensure we're back on baseBranch and .keep is restored
-      try { execSync(`git checkout ${baseBranch}`, { stdio: 'pipe' }); } catch {}
+      // Ensure we're back on gitBranch and original .keep is restored
+      try { execSync(`git checkout ${gitBranch}`, { stdio: 'pipe' }); } catch {}
       fm.writeKeepFile(keepFile);
       console.log(`Failed to create PR: ${error.message}`);
     }

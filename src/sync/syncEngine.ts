@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import {
   EnvVariable,
   ChangeSet,
@@ -337,5 +338,23 @@ export class SyncEngine {
     }
 
     return errors;
+  }
+
+  /**
+   * Compute a content-addressed hash from a .keep file's value_hashes.
+   * Per-branch: only includes entries matching the specified branch.
+   * Deterministic: sorted by variable name, then by value_hash.
+   */
+  static computeKeepHash(keep: KeepFile, branch?: string): string {
+    const hashes: string[] = [];
+    for (const key of Object.keys(keep.variables).sort()) {
+      const entries = keep.variables[key]
+        .filter(e => branch ? e.branch === branch : !e.branch)
+        .sort((a, b) => a.value_hash.localeCompare(b.value_hash));
+      for (const entry of entries) {
+        hashes.push(`${key}:${entry.value_hash}`);
+      }
+    }
+    return createHash('sha256').update(hashes.join('\n')).digest('hex');
   }
 }

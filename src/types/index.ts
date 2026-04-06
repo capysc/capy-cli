@@ -115,6 +115,8 @@ export interface DecryptResponse {
   env_content: string;
   decrypt_key: string;
   expires_at: string;
+  keep_hash?: string;
+  latest_keep_hash?: string;
 }
 
 export interface OrgKeyFile {
