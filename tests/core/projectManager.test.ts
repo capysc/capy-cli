@@ -1,13 +1,19 @@
-import { jest } from '@jest/globals';
-import { existsSync, readFileSync } from 'fs';
+import { mock, jest, describe, test, expect, beforeEach, afterAll } from 'bun:test';
+
+const mockExistsSync = jest.fn();
+const mockReadFileSync = jest.fn();
+mock.module('fs', () => ({
+  existsSync: mockExistsSync,
+  readFileSync: mockReadFileSync,
+  writeFileSync: jest.fn(),
+  mkdirSync: jest.fn(),
+}));
+
+afterAll(() => { mock.restore(); });
+
 import { join } from 'path';
 import { ProjectManager } from '../../src/core/projectManager';
 import { CapyError, ERROR_CODES, KeepFile } from '../../src/types/index';
-
-// Mock fs module
-jest.mock('fs');
-const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
-const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 
 describe('ProjectManager', () => {
   let projectManager: ProjectManager;

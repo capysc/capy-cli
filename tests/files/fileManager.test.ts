@@ -1,19 +1,27 @@
-import { jest } from '@jest/globals';
-import { existsSync, readFileSync, writeFileSync, appendFileSync, chmodSync, mkdirSync, unlinkSync } from 'fs';
+import { mock, jest, describe, test, expect, beforeEach, afterAll } from 'bun:test';
+
+const mockExistsSync = jest.fn();
+const mockReadFileSync = jest.fn();
+const mockWriteFileSync = jest.fn();
+const mockAppendFileSync = jest.fn();
+const mockChmodSync = jest.fn();
+const mockMkdirSync = jest.fn();
+const mockUnlinkSync = jest.fn();
+mock.module('fs', () => ({
+  existsSync: mockExistsSync,
+  readFileSync: mockReadFileSync,
+  writeFileSync: mockWriteFileSync,
+  appendFileSync: mockAppendFileSync,
+  chmodSync: mockChmodSync,
+  mkdirSync: mockMkdirSync,
+  unlinkSync: mockUnlinkSync,
+}));
+
+afterAll(() => { mock.restore(); });
+
 import { join, dirname } from 'path';
 import { FileManager } from '../../src/files/fileManager';
 import { KeepFile, DecryptKey, CapyError, ERROR_CODES } from '../../src/types/index';
-
-// Mock fs module
-jest.mock('fs');
-
-const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
-const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
-const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
-const mockAppendFileSync = appendFileSync as jest.MockedFunction<typeof appendFileSync>;
-const mockChmodSync = chmodSync as jest.MockedFunction<typeof chmodSync>;
-const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
-const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>;
 
 describe('FileManager', () => {
   let fileManager: FileManager;
@@ -549,7 +557,7 @@ describe('FileManager', () => {
         'utf-8'
       );
       // Verify the original content is included after the header
-      const writtenContent = (mockWriteFileSync as jest.Mock).mock.calls.find(
+      const writtenContent = (mockWriteFileSync as any).mock.calls.find(
         (c: any[]) => String(c[0]).endsWith('.env.pre-capy.old')
       )?.[1] as string;
       expect(writtenContent).toContain('# DB_URL=postgres://localhost');

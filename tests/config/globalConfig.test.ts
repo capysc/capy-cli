@@ -1,26 +1,41 @@
+import { mock, describe, it, expect, afterAll, beforeAll } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 
-// Mock homedir to use a temp directory
-const tempHome = mkdtempSync(join(tmpdir(), 'capy-test-'));
-jest.mock('os', () => ({
-  ...jest.requireActual('os'),
-  homedir: () => tempHome,
-}));
+// Mock homedir to use a temp directory — must come before any import that uses os.homedir()
+const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-test-'));
+mock.module('os', () => {
+  const actual = require('os');
+  return { ...actual, homedir: () => tempHome };
+});
 
-import {
-  getGlobalCapyDir,
-  getOrgKeyPath,
-  getProjectKeyCachePath,
-  saveMasterKey,
-  readMasterKey,
-  hasOrgKey,
-  saveProjectKeyCache,
-  readProjectKeyCache,
-  saveAuthSession,
-  readAuthSession,
-} from '../../src/config/globalConfig';
+afterAll(() => { mock.restore(); });
+
+// Use dynamic import so globalConfig sees the mocked os module
+let getGlobalCapyDir: typeof import('../../src/config/globalConfig').getGlobalCapyDir;
+let getOrgKeyPath: typeof import('../../src/config/globalConfig').getOrgKeyPath;
+let getProjectKeyCachePath: typeof import('../../src/config/globalConfig').getProjectKeyCachePath;
+let saveMasterKey: typeof import('../../src/config/globalConfig').saveMasterKey;
+let readMasterKey: typeof import('../../src/config/globalConfig').readMasterKey;
+let hasOrgKey: typeof import('../../src/config/globalConfig').hasOrgKey;
+let saveProjectKeyCache: typeof import('../../src/config/globalConfig').saveProjectKeyCache;
+let readProjectKeyCache: typeof import('../../src/config/globalConfig').readProjectKeyCache;
+let saveAuthSession: typeof import('../../src/config/globalConfig').saveAuthSession;
+let readAuthSession: typeof import('../../src/config/globalConfig').readAuthSession;
+
+beforeAll(async () => {
+  const mod = await import('../../src/config/globalConfig');
+  getGlobalCapyDir = mod.getGlobalCapyDir;
+  getOrgKeyPath = mod.getOrgKeyPath;
+  getProjectKeyCachePath = mod.getProjectKeyCachePath;
+  saveMasterKey = mod.saveMasterKey;
+  readMasterKey = mod.readMasterKey;
+  hasOrgKey = mod.hasOrgKey;
+  saveProjectKeyCache = mod.saveProjectKeyCache;
+  readProjectKeyCache = mod.readProjectKeyCache;
+  saveAuthSession = mod.saveAuthSession;
+  readAuthSession = mod.readAuthSession;
+});
 
 afterAll(() => {
   rmSync(tempHome, { recursive: true, force: true });
