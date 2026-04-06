@@ -1,33 +1,58 @@
-import { jest } from '@jest/globals';
-import { existsSync } from 'fs';
+import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll, jest } from 'bun:test';
+
+// Mock dependencies - must come BEFORE imports that use them
+mock.module('fs', () => ({
+  existsSync: mock(() => false),
+  readFileSync: mock(() => ''),
+  writeFileSync: mock(() => undefined),
+  mkdirSync: mock(() => undefined),
+  unlinkSync: mock(() => undefined),
+}));
+
+mock.module('proper-lockfile', () => ({
+  lockSync: mock(() => undefined),
+  unlockSync: mock(() => undefined),
+}));
+
+const mockOAuthServerConstructor = mock(() => ({}));
+mock.module('../../src/auth/oauthServer', () => ({
+  OAuthServer: mockOAuthServerConstructor,
+}));
+
+const mockReadAuthSession = mock(() => null);
+const mockSaveAuthSession = mock(() => undefined);
+const mockGetAuthSessionPath = mock(() => '/home/test/.capy/auth/session.json');
+mock.module('../../src/config/globalConfig', () => ({
+  readAuthSession: mockReadAuthSession,
+  saveAuthSession: mockSaveAuthSession,
+  getAuthSessionPath: mockGetAuthSessionPath,
+  getGlobalCapyDir: mock(() => '/home/test/.capy'),
+  getOrgKeyPath: mock(() => '/home/test/.capy/keys/org'),
+  getProjectKeyCachePath: mock(() => '/home/test/.capy/keys/project'),
+  getGlobalConfigPath: mock(() => '/home/test/.capy/config.json'),
+  saveMasterKey: mock(() => undefined),
+  readMasterKey: mock(() => null),
+  hasOrgKey: mock(() => false),
+  saveProjectKeyCache: mock(() => undefined),
+  readProjectKeyCache: mock(() => null),
+  saveAuthSession: mockSaveAuthSession,
+  readAuthSession: mockReadAuthSession,
+  getAuthSessionPath: mockGetAuthSessionPath,
+}));
+
+afterAll(() => { mock.restore(); });
+
+import { existsSync, unlinkSync } from 'fs';
 import { AuthService } from '../../src/auth/authService';
 import { OAuthServer } from '../../src/auth/oauthServer';
 import { SessionStore } from '../../src/types/index';
 
-// Mock dependencies
-jest.mock('fs');
-jest.mock('proper-lockfile', () => ({
-  lockSync: jest.fn(),
-  unlockSync: jest.fn(),
-}));
-jest.mock('../../src/auth/oauthServer');
-jest.mock('../../src/config/globalConfig', () => ({
-  readAuthSession: jest.fn().mockReturnValue(null),
-  saveAuthSession: jest.fn(),
-  getAuthSessionPath: jest.fn().mockReturnValue('/home/test/.capy/auth/session.json'),
-}));
-
-const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
-const MockOAuthServer = OAuthServer as jest.MockedClass<typeof OAuthServer>;
-
-// Import mocked globalConfig functions
-import { readAuthSession, saveAuthSession, getAuthSessionPath } from '../../src/config/globalConfig';
-const mockReadAuthSession = readAuthSession as jest.MockedFunction<typeof readAuthSession>;
-const mockSaveAuthSession = saveAuthSession as jest.MockedFunction<typeof saveAuthSession>;
-const mockGetAuthSessionPath = getAuthSessionPath as jest.MockedFunction<typeof getAuthSessionPath>;
+const mockExistsSync = existsSync as any;
+const MockOAuthServer = OAuthServer as any;
+const mockUnlinkSync = unlinkSync as any;
 
 // Mock global fetch
-const mockFetch = jest.fn() as jest.MockedFunction<typeof fetch>;
+const mockFetch = mock(() => Promise.resolve(new Response())) as any;
 global.fetch = mockFetch;
 
 function mockFetchResponse(data: any, ok = true, status = 200) {
@@ -186,12 +211,12 @@ describe('AuthService', () => {
         }));
 
       const mockOAuthInstance = {
-        bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-        getState: jest.fn().mockReturnValue('mock-state'),
-        getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
-        getCodeChallenge: jest.fn().mockReturnValue('mock-code-challenge'),
-        getCodeVerifier: jest.fn().mockReturnValue('mock-code-verifier'),
-        startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123'),
+        bind: mock(() => Promise.resolve(undefined)),
+        getState: mock(() => 'mock-state'),
+        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
+        getCodeChallenge: mock(() => 'mock-code-challenge'),
+        getCodeVerifier: mock(() => 'mock-code-verifier'),
+        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
 
@@ -217,12 +242,12 @@ describe('AuthService', () => {
       const service = new AuthService();
 
       const mockOAuthInstance = {
-        bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-        getState: jest.fn().mockReturnValue('mock-state'),
-        getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
-        getCodeChallenge: jest.fn().mockReturnValue('mock-code-challenge'),
-        getCodeVerifier: jest.fn().mockReturnValue('mock-code-verifier'),
-        startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123'),
+        bind: mock(() => Promise.resolve(undefined)),
+        getState: mock(() => 'mock-state'),
+        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
+        getCodeChallenge: mock(() => 'mock-code-challenge'),
+        getCodeVerifier: mock(() => 'mock-code-verifier'),
+        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
 
@@ -239,12 +264,12 @@ describe('AuthService', () => {
       const service = new AuthService();
 
       const mockOAuthInstance = {
-        bind: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-        getState: jest.fn().mockReturnValue('mock-state'),
-        getRedirectUri: jest.fn().mockReturnValue('http://localhost:19420/callback'),
-        getCodeChallenge: jest.fn().mockReturnValue('mock-code-challenge'),
-        getCodeVerifier: jest.fn().mockReturnValue('mock-code-verifier'),
-        startAuthFlow: jest.fn<() => Promise<string>>().mockResolvedValue('auth-code-123'),
+        bind: mock(() => Promise.resolve(undefined)),
+        getState: mock(() => 'mock-state'),
+        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
+        getCodeChallenge: mock(() => 'mock-code-challenge'),
+        getCodeVerifier: mock(() => 'mock-code-verifier'),
+        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
       };
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
 
@@ -342,9 +367,6 @@ describe('AuthService', () => {
     test('should clear session and delete file', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
       mockExistsSync.mockReturnValue(true);
-
-      const { unlinkSync } = require('fs');
-      const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>;
 
       const service = new AuthService(undefined, false, 'user-456');
       await service.authenticate('org-123');

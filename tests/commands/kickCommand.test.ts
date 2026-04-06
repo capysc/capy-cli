@@ -1,27 +1,27 @@
-import { jest } from '@jest/globals';
+import { mock, spyOn, jest, describe, test, it, expect, beforeEach, afterAll } from 'bun:test';
 
 // Mock dependencies before importing KickCommand
-const mockDetectProjectState = jest.fn<any>();
-const mockAuthenticate = jest.fn<any>();
-const mockGetToken = jest.fn<any>();
-const mockSetToken = jest.fn<any>();
-const mockListMemberDetails = jest.fn<any>();
-const mockKickMember = jest.fn<any>();
+const mockDetectProjectState = jest.fn();
+const mockAuthenticate = jest.fn();
+const mockGetToken = jest.fn();
+const mockSetToken = jest.fn();
+const mockListMemberDetails = jest.fn();
+const mockKickMember = jest.fn();
 
-jest.mock('../../src/core/projectManager', () => ({
+mock.module('../../src/core/projectManager', () => ({
   ProjectManager: jest.fn().mockImplementation(() => ({
     detectProjectState: mockDetectProjectState,
   })),
 }));
 
-jest.mock('../../src/auth/authService', () => ({
+mock.module('../../src/auth/authService', () => ({
   AuthService: jest.fn().mockImplementation(() => ({
     authenticate: mockAuthenticate,
     getToken: mockGetToken,
   })),
 }));
 
-jest.mock('../../src/service/serviceClient', () => ({
+mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: jest.fn().mockImplementation(() => ({
     setToken: mockSetToken,
     listMemberDetails: mockListMemberDetails,
@@ -29,19 +29,19 @@ jest.mock('../../src/service/serviceClient', () => ({
   })),
 }));
 
-jest.mock('inquirer', () => {
-  const promptFn = jest.fn<any>().mockResolvedValue({ confirm: true });
-  return {
-    __esModule: true,
-    default: { prompt: promptFn },
-    prompt: promptFn,
-  };
-});
+const mockPromptFn = jest.fn().mockResolvedValue({ confirm: true });
+mock.module('inquirer', () => ({
+  __esModule: true,
+  default: { prompt: mockPromptFn },
+  prompt: mockPromptFn,
+}));
+
+afterAll(() => { mock.restore(); });
 
 import { KickCommand } from '../../src/commands/kickCommand';
 
 describe('KickCommand', () => {
-  const mockExit = jest.spyOn(process, 'exit').mockImplementation((() => {
+  const mockExit = spyOn(process, 'exit').mockImplementation((() => {
     throw new Error('process.exit');
   }) as any);
 

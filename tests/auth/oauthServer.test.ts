@@ -1,26 +1,32 @@
-import { jest } from '@jest/globals';
+import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll, jest } from 'bun:test';
+
+// Mock dependencies - must come BEFORE imports that use them
+const mockCreateServer = mock(() => ({}));
+mock.module('http', () => ({
+  createServer: mockCreateServer,
+}));
+
+mock.module('crypto', () => ({
+  randomBytes: mock(() => Buffer.from('mock-random-bytes-32-characters-long')),
+  createHash: mock(() => ({
+    update: mock(() => ({
+      digest: mock(() => 'mock-code-challenge'),
+    })),
+  })),
+}));
+
+const mockOpen = mock(() => Promise.resolve({}));
+mock.module('open', () => ({
+  __esModule: true,
+  default: mockOpen,
+}));
+
+afterAll(() => { mock.restore(); });
+
 import { createServer } from 'http';
 import { OAuthServer } from '../../src/auth/oauthServer';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 import open from 'open';
-
-// Mock dependencies
-jest.mock('http');
-jest.mock('crypto', () => ({
-  randomBytes: jest.fn().mockReturnValue(Buffer.from('mock-random-bytes-32-characters-long')),
-  createHash: jest.fn().mockReturnValue({
-    update: jest.fn().mockReturnValue({
-      digest: jest.fn().mockReturnValue('mock-code-challenge'),
-    }),
-  }),
-}));
-jest.mock('open', () => ({
-  __esModule: true,
-  default: jest.fn()
-}));
-
-const mockCreateServer = createServer as jest.MockedFunction<typeof createServer>;
-const mockOpen = open as jest.MockedFunction<typeof open>;
 
 describe('OAuthServer', () => {
   let oauthServer: OAuthServer;
@@ -32,16 +38,16 @@ describe('OAuthServer', () => {
 
     // Mock HTTP server
     mockServer = {
-      listen: jest.fn((port: number, callback: () => void) => callback()),
-      close: jest.fn(),
-      on: jest.fn(),
-      once: jest.fn(),
-      removeListener: jest.fn()
+      listen: mock((port: number, callback: () => void) => callback()),
+      close: mock(() => undefined),
+      on: mock(() => undefined),
+      once: mock(() => undefined),
+      removeListener: mock(() => undefined),
     };
-    mockCreateServer.mockReturnValue(mockServer);
+    (mockCreateServer as any).mockReturnValue(mockServer);
 
     // Mock open
-    mockOpen.mockResolvedValue({} as any);
+    (mockOpen as any).mockResolvedValue({} as any);
 
     oauthServer = new OAuthServer();
   });
@@ -49,7 +55,7 @@ describe('OAuthServer', () => {
   describe('generateState', () => {
     test('should generate cryptographically secure state parameter', () => {
       const server = new OAuthServer();
-      // The mock is already set up in the jest.mock call
+      // The mock is already set up in the mock.module call
     });
   });
 
@@ -94,7 +100,7 @@ describe('OAuthServer', () => {
 
     test('should handle browser open failure gracefully', async () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
-      mockOpen.mockRejectedValue(new Error('Browser failed'));
+      (mockOpen as any).mockRejectedValue(new Error('Browser failed'));
 
       // Manually set the server (as bind() would)
       (oauthServer as any).server = mockServer;
@@ -153,8 +159,8 @@ describe('OAuthServer', () => {
     test('should validate state parameter for CSRF protection', () => {
       const url = new URL('http://localhost:3001/callback?code=test&state=invalid-state');
       const mockRes = {
-        writeHead: jest.fn(),
-        end: jest.fn()
+        writeHead: mock(() => undefined),
+        end: mock(() => undefined),
       };
 
       (oauthServer as any).handleCallback(url, mockRes);
@@ -167,8 +173,8 @@ describe('OAuthServer', () => {
       const validState = (oauthServer as any).state;
       const url = new URL(`http://localhost:3001/callback?error=access_denied&error_description=User denied&state=${validState}`);
       const mockRes = {
-        writeHead: jest.fn(),
-        end: jest.fn()
+        writeHead: mock(() => undefined),
+        end: mock(() => undefined),
       };
 
       (oauthServer as any).handleCallback(url, mockRes);
@@ -181,8 +187,8 @@ describe('OAuthServer', () => {
       const validState = (oauthServer as any).state;
       const url = new URL(`http://localhost:3001/callback?state=${validState}`);
       const mockRes = {
-        writeHead: jest.fn(),
-        end: jest.fn()
+        writeHead: mock(() => undefined),
+        end: mock(() => undefined),
       };
 
       (oauthServer as any).handleCallback(url, mockRes);
@@ -194,8 +200,8 @@ describe('OAuthServer', () => {
       const validState = (oauthServer as any).state;
       const url = new URL(`http://localhost:3001/callback?code=test-auth-code&state=${validState}`);
       const mockRes = {
-        writeHead: jest.fn(),
-        end: jest.fn()
+        writeHead: mock(() => undefined),
+        end: mock(() => undefined),
       };
 
       (oauthServer as any).handleCallback(url, mockRes);
@@ -208,8 +214,8 @@ describe('OAuthServer', () => {
   describe('sendSuccessResponse', () => {
     test('should send professional success page with auto-close', () => {
       const mockRes = {
-        writeHead: jest.fn(),
-        end: jest.fn()
+        writeHead: mock(() => undefined),
+        end: mock(() => undefined),
       };
 
       (oauthServer as any).sendSuccessResponse(mockRes);
@@ -223,8 +229,8 @@ describe('OAuthServer', () => {
   describe('sendErrorResponse', () => {
     test('should send error page without exposing raw error string (XSS prevention)', () => {
       const mockRes = {
-        writeHead: jest.fn(),
-        end: jest.fn()
+        writeHead: mock(() => undefined),
+        end: mock(() => undefined),
       };
       const errorMessage = '<script>alert("xss")</script>';
 
