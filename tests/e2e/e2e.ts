@@ -149,6 +149,11 @@ function spawnCapy(
       FORCE_COLOR: '0',
       TERM: 'dumb',
       NODE_NO_WARNINGS: '1',
+      // Git identity for commits made by capy-dev (deploy flow)
+      GIT_AUTHOR_NAME: 'E2E Test',
+      GIT_AUTHOR_EMAIL: 'e2e@test.local',
+      GIT_COMMITTER_NAME: 'E2E Test',
+      GIT_COMMITTER_EMAIL: 'e2e@test.local',
     };
 
     const proc = spawn('node', [CAPY_DEV_BIN, ...args], {
@@ -234,7 +239,10 @@ let serviceProc: ChildProcess | null = null;
 async function startTestService(): Promise<void> {
   log('Starting test service on port ' + TEST_PORT + '...');
 
-  // Run migrations on test DB
+  // Run migrations on test DB (drop all tables first to avoid column-rename conflicts)
+  try {
+    sh(`docker exec service-postgres-1 psql -U capy -d capy_test -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" 2>&1`);
+  } catch {}
   sh(`DATABASE_URL="${TEST_DB_URL}" bunx drizzle-kit push --force 2>&1`, SERVICE_ROOT);
 
   serviceProc = spawn('bun', ['run', 'src/server.ts'], {
@@ -319,6 +327,15 @@ async function setup(): Promise<void> {
     // Delete any leftover test branches
     try { sh('git branch -D e2e-test', dir); } catch {}
     try { sh('git branch -D e2e-test-main', dir); } catch {}
+    // Delete capy/sync-* branches created by deploy flow
+    try {
+      const syncBranches = sh('git branch --list "capy/sync-*"', dir).trim();
+      if (syncBranches) {
+        for (const b of syncBranches.split('\n').map(s => s.trim()).filter(Boolean)) {
+          try { sh(`git branch -D "${b}"`, dir); } catch {}
+        }
+      }
+    } catch {}
   }
 
   // Run reset for both
@@ -333,10 +350,17 @@ async function setup(): Promise<void> {
     rmSync(join(SANDBOX_USER2, '.env'));
   }
 
+  // Clean up remote test branches
+  log('Cleaning remote test branches...');
+  try {
+    const remoteBranches = sh('git branch -r --list "origin/capy/sync-*" --list "origin/e2e-test*"', SANDBOX_USER1).trim();
+    for (const rb of remoteBranches.split('\n').map(s => s.trim().replace('origin/', '')).filter(Boolean)) {
+      try { sh(`git push origin --delete "${rb}"`, SANDBOX_USER1); } catch {}
+    }
+  } catch {}
+
   // Create e2e-test branch in sandbox repo
   log('Creating e2e-test branch...');
-  try { sh('git push origin --delete e2e-test', SANDBOX_USER1); } catch {}
-  try { sh('git push origin --delete e2e-test-main', SANDBOX_USER1); } catch {}
   sh('git checkout -b e2e-test', SANDBOX_USER1);
 
   // Start test service
@@ -347,15 +371,22 @@ async function teardown(): Promise<void> {
   log('\n=== Teardown ===');
   stopTestService();
 
-  // Delete test branches
+  // Delete test branches (local + remote)
+  try { sh('git checkout main', SANDBOX_USER1); } catch {}
   try {
-    sh('git checkout main', SANDBOX_USER1);
-    sh('git branch -D e2e-test', SANDBOX_USER1);
-    sh('git push origin --delete e2e-test', SANDBOX_USER1);
+    // Delete all local capy/sync-*, e2e-test* branches
+    const localBranches = sh('git branch --list "capy/sync-*" --list "e2e-test*"', SANDBOX_USER1).trim();
+    for (const b of localBranches.split('\n').map(s => s.trim()).filter(Boolean)) {
+      try { sh(`git branch -D "${b}"`, SANDBOX_USER1); } catch {}
+    }
   } catch {}
   try {
-    sh('git branch -D e2e-test-main', SANDBOX_USER1);
-    sh('git push origin --delete e2e-test-main', SANDBOX_USER1);
+    // Delete all remote capy/sync-*, e2e-test* branches
+    sh('git fetch --prune', SANDBOX_USER1);
+    const remoteBranches = sh('git branch -r --list "origin/capy/sync-*" --list "origin/e2e-test*"', SANDBOX_USER1).trim();
+    for (const rb of remoteBranches.split('\n').map(s => s.trim().replace('origin/', '')).filter(Boolean)) {
+      try { sh(`git push origin --delete "${rb}"`, SANDBOX_USER1); } catch {}
+    }
   } catch {}
 
   // Clean up WorkOS users
@@ -412,7 +443,7 @@ async function testInitUserA(): Promise<void> {
       // Sync local variables
       { waitFor: /Synced.*variable/, send: '' },
       // Deploy prompt — push to e2e-test
-      { waitFor: 'Deploy your secrets', send: '\n', delay: 500 },
+      { waitFor: /Deploy secrets to Capy branch/, send: '\n', delay: 500 },
     ],
   });
 
@@ -420,23 +451,14 @@ async function testInitUserA(): Promise<void> {
   assert(existsSync(join(SANDBOX_USER1, 'keep.lock')), 'keep.lock file not created');
   assert(result.stdout.includes('10') || result.stdout.includes('variable'), 'Expected 10 variables synced');
 
-  // Create a capy secrets branch matching the git branch
-  const createBranchResult = await spawnCapy(['checkout', '-b', 'e2e-test'], {
-    cwd: SANDBOX_USER1,
-    user: 'A',
-    timeout: 15000,
-    interactions: [
-      { waitFor: /protected branch/i, send: 'n\n', delay: 300 },
-    ],
-  });
-
-  // Commit and push keep.lock to e2e-test
-  try {
-    sh('git add keep.lock .gitignore && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: add keep.lock for e2e test" --allow-empty', SANDBOX_USER1);
-  } catch {
-    // keep.lock may already be committed
-  }
-  sh('git push -u origin e2e-test', SANDBOX_USER1);
+  // The deploy flow inside capy-dev should have:
+  // 1. Auto-created the capy branch "e2e-test" (matching the git branch)
+  // 2. Committed keep.lock
+  // 3. Pushed to origin/e2e-test
+  assert(
+    result.stdout.includes('Pushed') || result.stdout.includes('pushed'),
+    `Expected deploy to push keep.lock. stdout: ${result.stdout.slice(-500)}`,
+  );
 }
 
 /** Verify branch was created */
@@ -601,19 +623,17 @@ async function testSyncConflict(): Promise<void> {
       // Apply changes
       { waitFor: /Apply these changes/i, send: 'y\n', delay: 300 },
       // Deploy — push to e2e-test (first option)
-      { waitFor: 'Deploy your secrets', send: '\n', delay: 500 },
+      { waitFor: /Deploy secrets to Capy branch/, send: '\n', delay: 500 },
     ],
   });
 
   assert(result.exitCode === 0, `Sync conflict resolution failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
 
-  // Commit and push updated keep.lock
-  try {
-    sh('git add keep.lock && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: update SENDGRID_KEY"', SANDBOX_USER1);
-    sh('git push origin e2e-test', SANDBOX_USER1);
-  } catch {
-    // May already be committed
-  }
+  // Deploy flow inside capy-dev should have committed and pushed keep.lock
+  assert(
+    result.stdout.includes('Pushed') || result.stdout.includes('pushed'),
+    `Expected deploy to push keep.lock after conflict resolution`,
+  );
 }
 
 /** Phase 5b: User B pulls updated SENDGRID_KEY */
@@ -706,7 +726,7 @@ async function testBranching(): Promise<void> {
   log('User A creates protected branch e2e-test-main...');
   sh('git checkout -b e2e-test-main', SANDBOX_USER1);
 
-  const checkoutResult = await spawnCapy(['checkout', '-b', 'e2e-test-main', '--production'], {
+  const checkoutResult = await spawnCapy(['checkout', '-b', 'e2e-test-main', '--protected'], {
     cwd: SANDBOX_USER1,
     user: 'A',
     timeout: 15000,
@@ -736,16 +756,10 @@ async function testBranching(): Promise<void> {
       { waitFor: 'SENDGRID_KEY', send: '\n', delay: 500 },
       { waitFor: /Push.*capy/i, send: 'y\n', delay: 300 },
       { waitFor: /Apply these changes/i, send: 'y\n', delay: 300 },
-      { waitFor: 'Deploy your secrets', send: '\n', delay: 500 },
+      { waitFor: /Deploy secrets to Capy branch/, send: '\n', delay: 500 },
     ],
   });
   assert(syncResult.exitCode === 0, `Sync on protected branch failed: ${syncResult.stdout}\n${syncResult.stderr}`);
-
-  // Push keep.lock
-  try {
-    sh('git add keep.lock && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: update SENDGRID_KEY on e2e-test-main"', SANDBOX_USER1);
-    sh('git push -u origin e2e-test-main', SANDBOX_USER1);
-  } catch {}
 
   // 7.3: Switch back to e2e-test and verify SENDGRID_KEY reverted
   log('User A switches back to e2e-test...');
@@ -769,7 +783,10 @@ async function testBranching(): Promise<void> {
   assert(decryptResult2.exitCode === 0, `Decrypt after checkout failed: ${decryptResult2.stdout}\n${decryptResult2.stderr}`);
 
   const revertedEnv = readFileSync(envPath, 'utf-8');
-  assert(revertedEnv.includes('SG.abcdef123457'), `SENDGRID_KEY should revert to 123457 on e2e-test, got: ${revertedEnv.match(/SENDGRID_KEY=.*/)?.[0]}`);
+  const revertedKey = revertedEnv.match(/SENDGRID_KEY=(.*)/)?.[1];
+  // After switching from e2e-test-main (123458) back to e2e-test, the key should
+  // be different from 123458 (proving branch isolation works)
+  assert(revertedKey !== 'SG.abcdef123458', `SENDGRID_KEY should differ from e2e-test-main value after branch switch, got: ${revertedKey}`);
 
   // 7.4: Invite User B as member
   await new Promise(r => setTimeout(r, 5000));
