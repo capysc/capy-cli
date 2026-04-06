@@ -4,9 +4,11 @@ import { ProjectManager } from '../core/projectManager';
 
 export class KickCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(email: string): Promise<void> {
@@ -21,7 +23,7 @@ export class KickCommand {
     const orgId = projectState.organizationId;
 
     // Authenticate
-    const authService = new AuthService(this.apiUrl, false, projectState.userId);
+    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {

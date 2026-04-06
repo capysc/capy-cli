@@ -23,6 +23,7 @@
     "prepublishOnly": "npm pkg delete bin.capy-dev",
     "test": "jest",
     "typecheck": "tsc --noEmit",
+    "test:e2e": "bun run tests/e2e/e2e.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

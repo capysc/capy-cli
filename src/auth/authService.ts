@@ -20,11 +20,13 @@ async function postJson<T>(url: string, body: Record<string, unknown>): Promise<
 
 export class AuthService {
   private serviceApiUrl: string;
+  private devMode: boolean;
   private sessionUserId: string | undefined;
   private session: SessionStore | null = null;
   private currentOrgId: string | null = null;
 
   constructor(serviceApiUrl?: string, devMode: boolean = false, sessionUserId?: string) {
+    this.devMode = devMode;
     this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
     this.sessionUserId = sessionUserId;
     this.loadSession();
@@ -73,6 +75,10 @@ export class AuthService {
         }
       }
 
+      // Try password auth (E2E testing only — requires devMode + env vars)
+      const pwResult = await this.tryPasswordAuth(organizationId);
+      if (pwResult) return pwResult;
+
       // Full OAuth flow
       return await this.startOAuthFlow(organizationId);
     } catch (error: any) {
@@ -101,7 +107,7 @@ export class AuthService {
 
     const code = await oauthServer.startAuthFlow(auth_url);
 
-    const { token, user, organizations } = await postJson<{
+    const response = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
       user: { id: string; email: string; first_name: string | null; last_name: string | null };
       organizations: Organization[];
@@ -110,6 +116,42 @@ export class AuthService {
       code_verifier: oauthServer.getCodeVerifier(),
     });
 
+    return this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+  }
+
+  /**
+   * Authenticate with email + password (E2E testing only).
+   * Requires devMode=true AND CAPY_TEST_EMAIL/CAPY_TEST_PASSWORD env vars.
+   */
+  private async tryPasswordAuth(organizationId?: string): Promise<AuthResult | null> {
+    if (!this.devMode) return null;
+
+    const email = process.env.CAPY_TEST_EMAIL;
+    const password = process.env.CAPY_TEST_PASSWORD;
+    if (!email || !password) return null;
+
+    const response = await postJson<{
+      token: { access_token: string | null; refresh_token: string; expires_in: number };
+      user: { id: string; email: string; first_name: string | null; last_name: string | null };
+      organizations: Organization[];
+    }>(`${this.serviceApiUrl}/auth/password-login`, {
+      email,
+      password,
+      ...(organizationId ? { organization_id: organizationId } : {}),
+    });
+
+    return this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+  }
+
+  /**
+   * Shared session-storage logic used by both OAuth and password auth flows.
+   */
+  private async processExchangeResponse(
+    token: { access_token: string | null; refresh_token: string; expires_in: number },
+    user: { id: string; email: string; first_name: string | null; last_name: string | null },
+    organizations: Organization[],
+    organizationId?: string,
+  ): Promise<AuthResult> {
     // Initialize or update session
     this.session = {
       version: 2,
@@ -147,6 +189,8 @@ export class AuthService {
         user_first_name: user.first_name,
         user_last_name: user.last_name,
         organizations: organizations || [],
+        // Include refresh_token for org creation when user has no orgs yet
+        ...(!resolvedOrgId ? { _refresh_token: token.refresh_token } : {}),
       };
     }
 
