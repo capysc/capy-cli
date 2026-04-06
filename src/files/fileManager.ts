@@ -187,7 +187,7 @@ export class FileManager {
   }
 
   writeKeepFile(keep: KeepFile): void {
-    const keepPath = join(this.projectRoot, '.keep');
+    const keepPath = join(this.projectRoot, 'keep.lock');
     const backup = this.createBackup(keepPath);
 
     try {
@@ -215,7 +215,7 @@ export class FileManager {
         this.restoreBackup(backup, keepPath);
       }
       throw new CapyError(
-        'Failed to write .keep file',
+        'Failed to write keep.lock file',
         ERROR_CODES.PERMISSION_DENIED,
         { error, path: keepPath }
       );

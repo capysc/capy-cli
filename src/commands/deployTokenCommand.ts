@@ -25,7 +25,7 @@ export class DeploySetupCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error('No .keep file found. Run capy first to initialize.');
+        console.error('No keep.lock file found. Run capy first to initialize.');
         process.exit(1);
       }
 
@@ -145,13 +145,13 @@ export class DeployDecryptCommand {
       process.exit(1);
     }
 
-    // Read project ID from .keep or .env headers to use as HKDF salt
+    // Read project ID from keep.lock or .env headers to use as HKDF salt
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     const projectId = projectState.projectId;
 
     if (!projectId) {
-      console.error('No .keep file found. Cannot determine project ID for key derivation.');
+      console.error('No keep.lock file found. Cannot determine project ID for key derivation.');
       process.exit(1);
     }
 
@@ -183,7 +183,7 @@ export class DeployRevokeCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId) {
-        console.error('No .keep file found. Run capy first to initialize.');
+        console.error('No keep.lock file found. Run capy first to initialize.');
         process.exit(1);
       }
 
@@ -222,7 +222,7 @@ export class DeployListCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error('No .keep file found. Run capy first to initialize.');
+        console.error('No keep.lock file found. Run capy first to initialize.');
         process.exit(1);
       }
 

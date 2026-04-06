@@ -197,7 +197,7 @@ describe('FileManager', () => {
       fileManager.writeKeepFile(keep);
 
       expect(mockWriteFileSync).toHaveBeenCalledWith(
-        join(testRoot, '.keep'),
+        join(testRoot, 'keep.lock'),
         JSON.stringify(keep, null, 2) + '\n',
         'utf-8'
       );
@@ -212,7 +212,7 @@ describe('FileManager', () => {
         variables: {}
       };
 
-      const keepPath = join(testRoot, '.keep');
+      const keepPath = join(testRoot, 'keep.lock');
       mockExistsSync.mockImplementation((path) => path === keepPath);
       mockReadFileSync.mockReturnValue('old keep content');
 

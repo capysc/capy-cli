@@ -87,7 +87,7 @@ function renderPermissionDenied(error: CapyError, ctx: ErrorContext): string {
       `  These secrets were encrypted with a different project's key.`,
       `  This usually happens when:`,
       `    - The project was re-initialized to a different org`,
-      `    - The .keep/.capy files were reset without clearing .env`,
+      `    - The keep.lock/.capy files were reset without clearing .env`,
       '',
       `  To fix:`,
       `    1. Delete ${bold('.env')} and run ${bold('capy')} to pull fresh secrets`,
@@ -150,10 +150,10 @@ function renderServiceError(error: CapyError, ctx: ErrorContext): string {
       `  This can happen when:`,
       `    - The database was reset`,
       `    - The project was deleted`,
-      `    - The .keep file is from a different environment`,
+      `    - The keep.lock file is from a different environment`,
       '',
       `  To fix:`,
-      `    1. Delete ${bold('.keep')} and ${bold('.capy/')} then run ${bold('capy')} to re-initialize`,
+      `    1. Delete ${bold('keep.lock')} and ${bold('.capy/')} then run ${bold('capy')} to re-initialize`,
       `    2. Or run ${bold('capy')} — it will offer to recreate the project`,
       '',
     ];
@@ -189,7 +189,7 @@ function renderInvalidFormat(error: CapyError): string {
     `  ${bold('Invalid file format')}`,
     `  ${grey(error.message)}`,
     '',
-    `  Try deleting ${bold('.keep')} and ${bold('.capy/')} then run ${bold('capy')} to re-initialize.`,
+    `  Try deleting ${bold('keep.lock')} and ${bold('.capy/')} then run ${bold('capy')} to re-initialize.`,
     '',
   ];
   return lines.join('\n');
@@ -198,7 +198,7 @@ function renderInvalidFormat(error: CapyError): string {
 function renderNoKeepFile(): string {
   const lines = [
     '',
-    `  ${bold('No .keep file found')}`,
+    `  ${bold('No keep.lock file found')}`,
     `  ${grey('This project has not been initialized with Capy yet.')}`,
     '',
     `  Run ${bold('capy')} to initialize.`,
