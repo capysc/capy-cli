@@ -118,6 +118,10 @@ export class ServiceClient {
       );
     }
 
+    if (res.status === 204) {
+      return undefined as T;
+    }
+
     return res.json() as Promise<T>;
   }
 
@@ -275,10 +279,10 @@ export class ServiceClient {
     }
   }
 
-  async createBranch(projectId: string, name: string, isProduction: boolean = false): Promise<Branch> {
+  async createBranch(projectId: string, name: string, isProtected: boolean = false): Promise<Branch> {
     return this.request<Branch>(
       'POST', `/projects/${projectId}/branches`,
-      { name, is_production: isProduction },
+      { name, is_protected: isProtected },
     );
   }
 
@@ -336,6 +340,7 @@ export class ServiceClient {
   async coDecrypt(orgId: string, ciphertext: string): Promise<{ plaintext: string }> {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext });
   }
+
 
   async listMembers(orgId: string): Promise<{ members: any[] }> {
     return this.request('GET', `/orgs/${orgId}/members`);

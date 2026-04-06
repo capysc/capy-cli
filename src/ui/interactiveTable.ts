@@ -15,24 +15,14 @@ const DIM = `${ESC}[90m`;
 const GREEN = `${ESC}[32m`;
 const YELLOW = `${ESC}[33m`;
 
-// Box-drawing chars
-const BOX = {
-  tl: '┌', tr: '┐', bl: '└', br: '┘',
-  h: '─', v: '│',
-  tDown: '┬', tUp: '┴', tRight: '├', tLeft: '┤',
-  cross: '┼',
-};
-
-// Tree chars for expanded details
-const TREE = {
-  branch: '├─', last: '└─', pipe: '│ ', space: '  ',
-  childBranch: '├──', childLast: '└──',
-};
+const MARGIN = 2;
+const GAP = '   ';
+const ALL_ACCESS_ROLES = ['owner', 'admin', 'org-admin'];
 
 interface ColumnConfig {
   label: string;
   minWidth: number;
-  flex?: boolean; // Gets remaining space
+  flex?: boolean;
 }
 
 const COLUMNS: ColumnConfig[] = [
@@ -42,34 +32,34 @@ const COLUMNS: ColumnConfig[] = [
   { label: 'Projects', minWidth: 8 },
 ];
 
+export interface NavItem {
+  type: 'member' | 'project';
+  memberIndex: number;
+  projectIndex?: number;
+}
+
 export class InteractiveTable {
   private members: MemberDetail[] = [];
-  private selectedIndex = 0;
-  private expandedIndices = new Set<number>();
+  private cursorIndex = 0;
+  private expandedMembers = new Set<number>();
+  private expandedProjects = new Set<string>();
   private scrollOffset = 0;
   private running = false;
   private onDataHandler: ((data: Buffer) => void) | null = null;
   private onResizeHandler: (() => void) | null = null;
   private cleanedUp = false;
 
-  /**
-   * Compute column widths based on terminal width.
-   * Returns widths array parallel to COLUMNS, or null if terminal is too narrow for the "Added" column.
-   */
   computeColumnWidths(termWidth: number): { widths: number[]; showAdded: boolean } {
-    termWidth = Math.min(termWidth, 130);
-    const padding = 3; // "│ " prefix + " " suffix per cell
-    const showAdded = termWidth >= 60;
+    const available = Math.min(termWidth, 130) - MARGIN * 2;
+    const showAdded = available >= 60;
     const cols = showAdded ? COLUMNS : COLUMNS.filter(c => c.label !== 'Added');
 
-    const fixedTotal = cols
-      .filter(c => !c.flex)
-      .reduce((sum, c) => sum + c.minWidth + padding, 0);
+    const fixedTotal = cols.filter(c => !c.flex).reduce((sum, c) => sum + c.minWidth, 0);
+    const gapTotal = (cols.length - 1) * GAP.length;
 
-    const flexCol = cols.find(c => c.flex);
     const flexWidth = Math.max(
-      flexCol?.minWidth || 20,
-      termWidth - fixedTotal - padding - 1, // -1 for trailing │
+      cols.find(c => c.flex)?.minWidth || 20,
+      available - fixedTotal - gapTotal,
     );
 
     return {
@@ -78,171 +68,216 @@ export class InteractiveTable {
     };
   }
 
-  /**
-   * Render a single member row (collapsed).
-   */
-  renderRow(member: MemberDetail, index: number, widths: number[], showAdded: boolean): string {
-    const isSelected = index === this.selectedIndex;
-    const isExpanded = this.expandedIndices.has(index);
-    const pointer = isExpanded ? '▾' : '▸';
-    const prefix = isSelected ? pointer : ' ';
-
-    const email = this.truncate(`${prefix} ${member.email}`, widths[0]);
-    const roleColor = ['owner', 'admin'].includes(member.role) ? GREEN
-      : member.role === 'project-admin' ? YELLOW
-      : '';
-    const roleReset = roleColor ? RESET : '';
-    const role = this.pad(member.role, widths[1]);
-    const projCount = this.pad(String(member.projects.length), showAdded ? widths[3] : widths[2]);
-
-    let cells = `${BOX.v} ${this.pad(email, widths[0])} ${BOX.v} ${roleColor}${role}${roleReset}`;
-    if (showAdded) {
-      const added = this.pad(this.formatDate(member.createdAt), widths[2]);
-      cells += ` ${BOX.v} ${added}`;
+  buildNavItems(): NavItem[] {
+    const items: NavItem[] = [];
+    for (let mi = 0; mi < this.members.length; mi++) {
+      items.push({ type: 'member', memberIndex: mi });
+      if (this.expandedMembers.has(mi)) {
+        const member = this.members[mi];
+        if (!ALL_ACCESS_ROLES.includes(member.role)) {
+          for (let pi = 0; pi < member.projects.length; pi++) {
+            if (member.projects[pi].branches.length > 0) {
+              items.push({ type: 'project', memberIndex: mi, projectIndex: pi });
+            }
+          }
+        }
+      }
     }
-    cells += ` ${BOX.v} ${projCount} ${BOX.v}`;
-
-    if (isSelected) {
-      return `${INVERSE}${cells}${RESET}`;
-    }
-    return cells;
+    return items;
   }
 
-  /**
-   * Render the expanded detail lines for a member (project + branch tree).
-   */
-  renderExpandedDetail(member: MemberDetail, widths: number[], showAdded: boolean): string[] {
-    if (member.projects.length === 0) {
-      const totalWidth = this.totalRowWidth(widths, showAdded);
-      const line = `${BOX.v}   ${DIM}No project access${RESET}`;
-      return [line + ' '.repeat(Math.max(0, totalWidth - this.visLen(line) - 2)) + ` ${BOX.v}`];
+  renderMemberRow(
+    member: MemberDetail,
+    isSelected: boolean,
+    isExpanded: boolean,
+    widths: number[],
+    showAdded: boolean,
+    totalWidth: number,
+  ): string {
+    const pointer = isExpanded ? '▾' : '▸';
+    const prefix = isSelected ? pointer : ' ';
+    const email = this.truncate(`${prefix} ${member.email}`, widths[0]);
+
+    const isGreenRole = ALL_ACCESS_ROLES.includes(member.role);
+    const isYellowRole = member.role === 'project-admin';
+
+    let row = this.pad(email, widths[0]);
+
+    if (isGreenRole) {
+      row += '  ' + GREEN + ' ' + this.pad(member.role, widths[1]) + RESET;
+    } else if (isYellowRole) {
+      row += GAP + YELLOW + this.pad(member.role, widths[1]) + RESET;
+    } else {
+      row += GAP + this.pad(member.role, widths[1]);
     }
 
-    const totalWidth = this.totalRowWidth(widths, showAdded);
+    if (showAdded) {
+      row += GAP + this.pad(this.formatDate(member.createdAt), widths[2]);
+    }
+
+    const projIdx = showAdded ? 3 : 2;
+    row += GAP + this.pad(String(member.projects.length), widths[projIdx]);
+
+    if (isSelected) {
+      return `${INVERSE}${this.padToWidth(row, totalWidth)}${RESET}`;
+    }
+    return row;
+  }
+
+  renderExpandedDetail(
+    member: MemberDetail,
+    memberIndex: number,
+    totalWidth: number,
+    selectedProjectOrigIdx: number | null,
+  ): string[] {
     const lines: string[] = [];
+
+    if (ALL_ACCESS_ROLES.includes(member.role)) {
+      lines.push(`    ${DIM}Access to all branches${RESET}`);
+      return lines;
+    }
+
+    if (member.projects.length === 0) {
+      lines.push(`    ${DIM}No project access${RESET}`);
+      return lines;
+    }
 
     for (let pi = 0; pi < member.projects.length; pi++) {
       const project = member.projects[pi];
-      const isLastProject = pi === member.projects.length - 1;
-      const projPrefix = isLastProject ? TREE.last : TREE.branch;
-      const projLine = `${BOX.v}   ${projPrefix} ${project.name}`;
-      lines.push(projLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(projLine) - 2)) + ` ${BOX.v}`);
+      const hasBranches = project.branches.length > 0;
 
-      const childPipe = isLastProject ? TREE.space : TREE.pipe;
-      for (let bi = 0; bi < project.branches.length; bi++) {
-        const branch = project.branches[bi];
-        const isLastBranch = bi === project.branches.length - 1;
-        const branchPrefix = isLastBranch ? TREE.childLast : TREE.childBranch;
-        const branchLine = `${BOX.v}   ${childPipe} ${branchPrefix} ${DIM}${branch}${RESET}`;
-        lines.push(branchLine + ' '.repeat(Math.max(0, totalWidth - this.visLen(branchLine) - 2)) + ` ${BOX.v}`);
+      if (hasBranches) {
+        const projKey = `${memberIndex}-${pi}`;
+        const isExpanded = this.expandedProjects.has(projKey);
+        const isSelected = selectedProjectOrigIdx === pi;
+        const pointer = isExpanded ? '▾' : '▸';
+        const projLine = `    ${pointer} ${project.name}`;
+
+        if (isSelected) {
+          lines.push(`${INVERSE}${this.padToWidth(projLine, totalWidth)}${RESET}`);
+        } else {
+          lines.push(projLine);
+        }
+
+        if (isExpanded) {
+          for (const branch of project.branches) {
+            lines.push(`        ${DIM}${branch}${RESET}`);
+          }
+        }
+      } else {
+        lines.push(`    ${DIM}${project.name}${RESET}`);
       }
     }
 
     return lines;
   }
 
-  /**
-   * Render the full table to a string (for testing and display).
-   */
   renderTable(members: MemberDetail[], termWidth: number, termHeight: number): string {
     const { widths, showAdded } = this.computeColumnWidths(termWidth);
-    const totalWidth = this.totalRowWidth(widths, showAdded);
-    const visibleRows = termHeight - 6; // title + header + separator + footer + padding
+    const activeCols = showAdded ? COLUMNS : COLUMNS.filter(c => c.label !== 'Added');
+    const totalWidth = widths.reduce((sum, w) => sum + w, 0) + (activeCols.length - 1) * GAP.length;
+    const visibleRows = termHeight - 6;
+
+    const navItems = this.buildNavItems();
 
     // Build all visual lines
     const allLines: string[] = [];
-    for (let i = 0; i < members.length; i++) {
-      allLines.push(this.renderRow(members[i], i, widths, showAdded));
-      if (this.expandedIndices.has(i)) {
-        allLines.push(...this.renderExpandedDetail(members[i], widths, showAdded));
-      }
-    }
+    let cursorLineIndex = 0;
 
-    // Find the line index where the selected member's row starts
-    let selectedLine = 0;
-    for (let i = 0; i < this.selectedIndex; i++) {
-      selectedLine++;
-      if (this.expandedIndices.has(i)) {
-        selectedLine += this.renderExpandedDetail(members[i], widths, showAdded).length;
+    for (let mi = 0; mi < members.length; mi++) {
+      const member = members[mi];
+      const memberNavIdx = navItems.findIndex(n => n.type === 'member' && n.memberIndex === mi);
+      const isSelected = memberNavIdx === this.cursorIndex;
+      const isExpanded = this.expandedMembers.has(mi);
+
+      if (isSelected) cursorLineIndex = allLines.length;
+
+      allLines.push(this.renderMemberRow(member, isSelected, isExpanded, widths, showAdded, totalWidth));
+
+      if (isExpanded) {
+        // Find if cursor is on a project under this member
+        let selectedProjOrigIdx: number | null = null;
+        const curNav = navItems[this.cursorIndex];
+        if (curNav?.type === 'project' && curNav.memberIndex === mi) {
+          selectedProjOrigIdx = curNav.projectIndex!;
+          // Find line index for this project, matching renderExpandedDetail output order
+          let lineOffset = 0;
+          for (let pi = 0; pi < member.projects.length; pi++) {
+            const proj = member.projects[pi];
+            if (pi === selectedProjOrigIdx) {
+              cursorLineIndex = allLines.length + lineOffset;
+              break;
+            }
+            lineOffset++; // project line (both branched and branchless emit one line)
+            if (proj.branches.length > 0 && this.expandedProjects.has(`${mi}-${pi}`)) {
+              lineOffset += proj.branches.length;
+            }
+          }
+        }
+
+        allLines.push(...this.renderExpandedDetail(member, mi, totalWidth, selectedProjOrigIdx));
       }
     }
 
     // Adjust scroll to keep selection visible
-    if (selectedLine < this.scrollOffset) {
-      this.scrollOffset = selectedLine;
-    } else if (selectedLine >= this.scrollOffset + visibleRows) {
-      this.scrollOffset = selectedLine - visibleRows + 1;
+    if (cursorLineIndex < this.scrollOffset) {
+      this.scrollOffset = cursorLineIndex;
+    } else if (cursorLineIndex >= this.scrollOffset + visibleRows) {
+      this.scrollOffset = cursorLineIndex - visibleRows + 1;
     }
 
     const visibleLines = allLines.slice(this.scrollOffset, this.scrollOffset + visibleRows);
 
-    // Build table
+    // Build output
+    const m = ' '.repeat(MARGIN);
+    const rule = '─'.repeat(totalWidth);
     const output: string[] = [];
     output.push('');
-    output.push(`  Organization Members (${members.length} user${members.length !== 1 ? 's' : ''})`);
+    output.push(`${m}Organization Members (${members.length} user${members.length !== 1 ? 's' : ''})`);
     output.push('');
 
     // Header
-    const activeCols = showAdded ? COLUMNS : COLUMNS.filter(c => c.label !== 'Added');
-    let headerTop = BOX.tl;
-    let headerRow = BOX.v;
-    let headerSep = BOX.tRight;
+    let headerRow = '';
     for (let ci = 0; ci < activeCols.length; ci++) {
-      const w = widths[ci];
-      headerTop += BOX.h.repeat(w + 2) + (ci < activeCols.length - 1 ? BOX.tDown : BOX.tr);
-      headerRow += ` ${this.pad(activeCols[ci].label, w)} ${BOX.v}`;
-      headerSep += BOX.h.repeat(w + 2) + (ci < activeCols.length - 1 ? BOX.cross : BOX.tLeft);
+      if (ci > 0) headerRow += GAP;
+      headerRow += this.pad(activeCols[ci].label, widths[ci]);
     }
-    output.push(headerTop);
-    output.push(headerRow);
-    output.push(headerSep);
+    output.push(m + headerRow);
+    output.push(m + rule);
 
     // Body
     for (const line of visibleLines) {
-      output.push(line);
+      output.push(m + line);
     }
 
     // Footer
-    let footerRow = BOX.bl;
-    for (let ci = 0; ci < activeCols.length; ci++) {
-      const w = widths[ci];
-      footerRow += BOX.h.repeat(w + 2) + (ci < activeCols.length - 1 ? BOX.tUp : BOX.br);
-    }
-    output.push(footerRow);
+    output.push(m + rule);
     output.push('');
-    output.push(`  ${DIM}↑↓ navigate  Enter expand/collapse  q quit${RESET}`);
+    output.push(`${m} ${DIM}↑↓ navigate  Enter expand/collapse  q quit${RESET}`);
 
     return output.map(line => line + CLEAR_EOL).join('\n');
   }
 
-  /**
-   * Render a static (non-interactive) table for piped output.
-   */
   renderStatic(members: MemberDetail[]): string {
     const termWidth = process.stdout.columns || 80;
-    // Temporarily set no selection
-    const savedIndex = this.selectedIndex;
-    this.selectedIndex = -1;
-    const table = this.renderTable(members, termWidth, members.length + 10);
-    this.selectedIndex = savedIndex;
-    // Remove the footer hint line
+    const savedCursor = this.cursorIndex;
+    this.cursorIndex = -1;
+    const table = this.renderTable(members, termWidth, members.length + 20);
+    this.cursorIndex = savedCursor;
     const lines = table.split('\n');
     return lines.filter(l => !l.includes('navigate')).join('\n');
   }
 
-  /**
-   * Run the interactive TUI. Returns a promise that resolves when the user quits.
-   */
   run(members: MemberDetail[]): Promise<void> {
     this.members = members;
-    this.selectedIndex = 0;
-    this.expandedIndices.clear();
+    this.cursorIndex = 0;
+    this.expandedMembers.clear();
+    this.expandedProjects.clear();
     this.scrollOffset = 0;
     this.running = true;
     this.cleanedUp = false;
 
     return new Promise<void>((resolve) => {
-      // Enter alternate screen + raw mode
       process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
@@ -261,7 +296,6 @@ export class InteractiveTable {
       };
       process.on('SIGWINCH', this.onResizeHandler);
 
-      // Cleanup handlers
       const exitHandler = () => {
         this.cleanup();
         resolve();
@@ -281,24 +315,24 @@ export class InteractiveTable {
   private handleKeypress(data: Buffer, resolve: () => void): void {
     const key = data.toString();
 
-    // Ctrl+C
     if (key === '\x03') {
       this.cleanup();
       resolve();
       return;
     }
 
-    // q
     if (key === 'q' || key === 'Q') {
       this.cleanup();
       resolve();
       return;
     }
 
+    const navItems = this.buildNavItems();
+
     // Arrow up
     if (key === `${ESC}[A`) {
-      if (this.selectedIndex > 0) {
-        this.selectedIndex--;
+      if (this.cursorIndex > 0) {
+        this.cursorIndex--;
         this.draw();
       }
       return;
@@ -306,8 +340,8 @@ export class InteractiveTable {
 
     // Arrow down
     if (key === `${ESC}[B`) {
-      if (this.selectedIndex < this.members.length - 1) {
-        this.selectedIndex++;
+      if (this.cursorIndex < navItems.length - 1) {
+        this.cursorIndex++;
         this.draw();
       }
       return;
@@ -315,11 +349,34 @@ export class InteractiveTable {
 
     // Enter — toggle expand/collapse
     if (key === '\r' || key === '\n') {
-      if (this.expandedIndices.has(this.selectedIndex)) {
-        this.expandedIndices.delete(this.selectedIndex);
-      } else {
-        this.expandedIndices.add(this.selectedIndex);
+      const item = navItems[this.cursorIndex];
+      if (!item) return;
+
+      if (item.type === 'member') {
+        if (this.expandedMembers.has(item.memberIndex)) {
+          this.expandedMembers.delete(item.memberIndex);
+          // Clean up any expanded projects under this member
+          for (const key of this.expandedProjects) {
+            if (key.startsWith(`${item.memberIndex}-`)) {
+              this.expandedProjects.delete(key);
+            }
+          }
+        } else {
+          this.expandedMembers.add(item.memberIndex);
+        }
+      } else if (item.type === 'project') {
+        const projKey = `${item.memberIndex}-${item.projectIndex}`;
+        if (this.expandedProjects.has(projKey)) {
+          this.expandedProjects.delete(projKey);
+        } else {
+          this.expandedProjects.add(projKey);
+        }
       }
+
+      // Clamp cursor after nav items change
+      const newNavItems = this.buildNavItems();
+      this.cursorIndex = Math.min(this.cursorIndex, newNavItems.length - 1);
+
       this.draw();
       return;
     }
@@ -345,11 +402,6 @@ export class InteractiveTable {
 
   // --- Helpers ---
 
-  private totalRowWidth(widths: number[], _showAdded: boolean): number {
-    // Each cell: "│ " + content + " " = width + 3 per cell, plus final "│"
-    return widths.reduce((sum, w) => sum + w + 3, 0) + 1;
-  }
-
   private truncate(str: string, maxLen: number): string {
     if (str.length <= maxLen) return str;
     return str.slice(0, maxLen - 1) + '…';
@@ -360,17 +412,22 @@ export class InteractiveTable {
     return str + ' '.repeat(width - str.length);
   }
 
+  private padToWidth(str: string, totalWidth: number): string {
+    const vis = this.visLen(str);
+    if (vis >= totalWidth) return str;
+    return str + ' '.repeat(totalWidth - vis);
+  }
+
   private formatDate(isoDate: string): string {
     if (!isoDate) return '—';
     try {
       const d = new Date(isoDate);
-      return d.toISOString().slice(0, 10); // YYYY-MM-DD
+      return d.toISOString().slice(0, 10);
     } catch {
       return '—';
     }
   }
 
-  /** Visual length of a string (strips ANSI escape codes). */
   private visLen(str: string): number {
     return str.replace(/\x1b\[[0-9;]*m/g, '').length;
   }

@@ -38,13 +38,14 @@ export interface ProjectState {
   organizationId?: string;
   projectId?: string;
   activeBranch?: string;
+  userId?: string;
 }
 
 export interface Branch {
   id: string;
   name: string;
   project_id: string;
-  is_production: boolean;
+  is_protected: boolean;
   created_at?: string;
 }
 
@@ -69,6 +70,7 @@ export interface ChangeSet {
 export interface SyncState {
   last_sync: string;
   synced_variables: string[];
+  user_id?: string;
 }
 
 export interface ConflictVariable {
@@ -135,6 +137,22 @@ export interface ServiceToken {
   user_first_name?: string | null;
   user_last_name?: string | null;
   organizations?: Organization[];
+}
+
+export interface OrgSession {
+  access_token: string;
+  expires_at: number;
+}
+
+export interface SessionStore {
+  version: 2;
+  user_id: string;
+  user_email?: string;
+  user_first_name?: string | null;
+  user_last_name?: string | null;
+  refresh_token: string;
+  organizations: Organization[];
+  sessions: Record<string, OrgSession>;
 }
 
 export interface CliOptions {

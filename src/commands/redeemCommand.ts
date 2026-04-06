@@ -2,7 +2,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
 import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
-import { saveMasterKey } from '../config/globalConfig';
+import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
 
 export class RedeemCommand {
   private apiUrl?: string;
@@ -23,9 +23,9 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 2. Authenticate (user must already have a WorkOS account)
+    // 2. Authenticate, scoped to the invite's org so WorkOS skips org selection
     const authService = new AuthService(this.apiUrl);
-    const authResult = await authService.authenticate();
+    const authResult = await authService.authenticate(targetOrgId);
     if (!authResult.success) {
       console.error('Authentication failed. You need a Capy account to redeem an invite.');
       process.exit(1);
@@ -34,17 +34,10 @@ export class RedeemCommand {
     let userId = authResult.user_id!;
     let orgId = authResult.organization_id!;
 
-    // 3. If logged into a different org, switch to the invite's org (in-memory only)
-    //    We must NOT persist the switched token — it would overwrite the project's
-    //    shared .capy/token file and break auth for other users in this directory.
-    const originalToken = authService.getToken();
+    // 3. If logged into a different org, authenticate for the invite's org.
+    //    Multi-org sessions let both orgs coexist — no save/restore needed.
     if (orgId !== targetOrgId) {
-      const refreshToken = originalToken?.refresh_token;
-      if (!refreshToken) {
-        console.error('Cannot switch to the invited organization. Please log out and try again.');
-        process.exit(1);
-      }
-      const switched = await authService.refreshWithCredentials(refreshToken, targetOrgId, userId);
+      const switched = await authService.authenticate(targetOrgId);
       if (!switched.success) {
         console.error('Failed to switch to the invited organization. You may not have access.');
         process.exit(1);
@@ -54,18 +47,20 @@ export class RedeemCommand {
       console.log(`  Switched to organization \x1b[1m${targetOrgId}\x1b[0m`);
     }
 
+    // 4. If user already has the master key, they're already set up
+    if (hasOrgKey(orgId, userId)) {
+      console.log('');
+      console.log('  \x1b[32mYou already have access to this organization.\x1b[0m');
+      console.log(`  Run \x1b[1mcapy\x1b[0m in a project directory to sync secrets.`);
+      console.log('');
+      return;
+    }
+
     const serviceToken = authService.getToken();
     const serviceClient = new ServiceClient(this.apiUrl);
     if (serviceToken) serviceClient.setToken(serviceToken);
 
-    // 3. Store T + ciphertext locally for every-session co-decryption
-    //    On each `capy` run, CLI sends ciphertext to service → service strips outer
-    //    layer → CLI uses T to strip inner layer → M in memory → HKDF → project key
-    //
-    //    For now, we do the full round-trip at redeem time to verify it works,
-    //    then re-encrypt M under the user's own wrapping key for local storage.
-
-    // 4. Service co-decrypts (strips outer KMS layer)
+    // 5. Service co-decrypts (strips outer KMS layer)
     let innerBlob: string;
     try {
       const result = await serviceClient.coDecrypt(orgId, ciphertext);
@@ -76,13 +71,16 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 5. Strip inner layer with T → recover M
+    // 6. Strip inner layer with T → recover M
+    //    The HKDF salt includes the recipient's email, so this fails
+    //    cryptographically if the wrong user tries to unwrap.
+    const userEmail = authResult.user_email || '';
     let masterKey: Buffer;
     try {
       const { innerUnwrap } = await import('../crypto/inviteCrypto');
-      masterKey = innerUnwrap(innerBlob, token, orgId);
+      masterKey = innerUnwrap(innerBlob, token, orgId, userEmail);
     } catch {
-      console.error('Failed to unwrap invite. The redeem code may be corrupted.');
+      console.error('Failed to unwrap invite. The redeem code may not be intended for your account.');
       process.exit(1);
     }
 
@@ -90,11 +88,6 @@ export class RedeemCommand {
     const wrappingKey = deriveWrappingKey(userId, orgId);
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
     saveMasterKey(orgId, encryptedM, userId);
-
-    // 7. Restore original token so the project's .capy/token isn't left as the switched user
-    if (originalToken && originalToken.organization_id !== orgId) {
-      authService.restoreToken(originalToken);
-    }
 
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');

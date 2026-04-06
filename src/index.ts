@@ -30,6 +30,7 @@ program
     console.log('    capy redeem <code>           \x1b[90mRedeem an invite code\x1b[0m');
     console.log('    capy kick <email>            \x1b[90mRemove a teammate\x1b[0m');
     console.log('    capy users                   \x1b[90mList organization members\x1b[0m');
+    console.log('    capy info                    \x1b[90mShow current session info\x1b[0m');
       console.log('');
       process.exit(1);
     }
@@ -61,7 +62,7 @@ program
       process.exit(1);
     }
 
-    const authService = new AuthService();
+    const authService = new AuthService(undefined, false, projectState.userId);
     const serviceClient = new ServiceClient();
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
@@ -127,7 +128,7 @@ program
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
       const name = b.name || 'no branch';
-      const prot = b.is_production ? '  \x1b[90m(protected)\x1b[0m' : '';
+      const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === (activeBranch || '');
       const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
@@ -170,11 +171,11 @@ program
   .command('checkout <branch>')
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
-  .option('--production', 'Mark as a production branch (protected, invite-only)')
+  .option('--protected', 'Mark as a protected branch (invite-only)')
   .action(async (branch, options) => {
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand();
-    await cmd.execute(branch, { create: options.create, production: options.production });
+    await cmd.execute(branch, { create: options.create, protected: options.protected });
   });
 
 const deploy = program
@@ -312,6 +313,15 @@ program
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
     await cmd.execute(email);
+  });
+
+program
+  .command('info')
+  .description('Show current session info')
+  .action(async () => {
+    const { InfoCommand } = await import('./commands/infoCommand');
+    const cmd = new InfoCommand();
+    await cmd.execute();
   });
 
 program

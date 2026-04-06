@@ -4,9 +4,14 @@
  * Enables mock authentication for local testing.
  * This file is NOT included in production builds or npm packages.
  */
+import { config } from 'dotenv';
+import { resolve } from 'path';
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
+
+// Load .env from the CLI package directory (not the user's project cwd)
+config({ path: resolve(__dirname, '..', '.env') });
 
 // Default to localhost for dev builds
 if (!process.env.CAPY_API_URL) {
@@ -66,7 +71,7 @@ program
       process.exit(1);
     }
 
-    const authService = new AuthService(undefined, true);
+    const authService = new AuthService(undefined, true, projectState.userId);
     const serviceClient = new ServiceClient(undefined, true);
     serviceClient.setTokenRefresher(async () => {
       const refreshed = await authService.refreshToken();
@@ -136,7 +141,7 @@ program
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
       const name = b.name || 'no branch';
-      const prot = b.is_production ? '  \x1b[90m(protected)\x1b[0m' : '';
+      const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === (activeBranch || '');
       const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
@@ -179,11 +184,11 @@ program
   .command('checkout <branch>')
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
-  .option('--production', 'Mark as a production branch (protected, invite-only)')
+  .option('--protected', 'Mark as a protected branch (invite-only)')
   .action(async (branch, options) => {
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
-    await cmd.execute(branch, { create: options.create, production: options.production });
+    await cmd.execute(branch, { create: options.create, protected: options.protected });
   });
 
 program
@@ -322,6 +327,15 @@ program
     } else {
       console.log('No active session.');
     }
+  });
+
+program
+  .command('info')
+  .description('Show current session info')
+  .action(async () => {
+    const { InfoCommand } = await import('./commands/infoCommand');
+    const cmd = new InfoCommand(process.env.CAPY_API_URL);
+    await cmd.execute();
   });
 
 program

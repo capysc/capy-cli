@@ -33,7 +33,7 @@ export class CheckoutCommand {
     });
   }
 
-  async execute(branchName: string, options: { create?: boolean; production?: boolean } = {}): Promise<void> {
+  async execute(branchName: string, options: { create?: boolean; protected?: boolean } = {}): Promise<void> {
     try {
       await this._execute(branchName, options);
     } catch (error: any) {
@@ -42,12 +42,17 @@ export class CheckoutCommand {
     }
   }
 
-  private async _execute(branchName: string, options: { create?: boolean; production?: boolean }): Promise<void> {
+  private async _execute(branchName: string, options: { create?: boolean; protected?: boolean }): Promise<void> {
     // Read .keep — must be initialized
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       console.error('No .keep file found. Run capy first to initialize the project.');
       process.exit(1);
+    }
+
+    // Load user-scoped session
+    if (projectState.userId) {
+      this.authService.setSessionUserId(projectState.userId);
     }
 
     // Authenticate
@@ -69,7 +74,7 @@ export class CheckoutCommand {
     const encryptionKey = resolveProjectKey(orgId, projectId, authResult.user_id!);
 
     if (options.create) {
-      await this.createBranch(projectId, branchName, encryptionKey, options.production);
+      await this.createBranch(projectId, branchName, encryptionKey, options.protected);
     } else {
       // Verify the branch exists
       const branchSpinner = ora(`Switching to ${branchName}...`).start();
@@ -81,7 +86,7 @@ export class CheckoutCommand {
         console.log('Available branches:');
         for (const b of branches) {
           const label = b.name || 'no branch';
-          const prod = b.is_production ? ' \x1b[90m(protected)\x1b[0m' : '';
+          const prod = b.is_protected ? ' \x1b[90m(protected)\x1b[0m' : '';
           console.log(`  ${label}${prod}`);
         }
         console.log(`\nCreate it with: capy checkout -b ${branchName}`);
@@ -131,23 +136,22 @@ export class CheckoutCommand {
     projectId: string,
     branchName: string,
     encryptionKey: string,
-    isProduction?: boolean,
+    isProtected?: boolean,
   ): Promise<void> {
-    // Ask about production if not specified
-    if (isProduction === undefined) {
-      const { production } = await inquirer.prompt([{
+    if (isProtected === undefined) {
+      const { protect } = await inquirer.prompt([{
         type: 'confirm',
-        name: 'production',
+        name: 'protect',
         message: `Make "${branchName}" a protected branch? \x1b[90m(invite-only)\x1b[0m`,
         default: false,
       }]);
-      isProduction = production;
+      isProtected = protect;
     }
 
     const branchSpinner = ora(`Creating branch ${branchName}...`).start();
 
     try {
-      await this.serviceClient.createBranch(projectId, branchName, isProduction);
+      await this.serviceClient.createBranch(projectId, branchName, isProtected);
 
       // Copy secrets from current branch
       const keep = this.projectManager.readKeepFile()!;
@@ -174,8 +178,8 @@ export class CheckoutCommand {
         console.log(`Branch "${branchName}" created (no secrets to copy)`);
       }
 
-      if (isProduction) {
-        console.log(`\n"${branchName}" is a production branch — access is invite-only`);
+      if (isProtected) {
+        console.log(`\n"${branchName}" is a protected branch — access is invite-only`);
       }
     } catch (error: any) {
       branchSpinner.stop();
