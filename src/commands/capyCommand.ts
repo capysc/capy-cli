@@ -67,7 +67,7 @@ export class CapyCommand {
       const projectState = await this.projectManager.detectProjectState();
 
       if (!projectState.initialized) {
-        // Check if .env has metadata we can recover from (e.g. .keep was deleted)
+        // Check if .env has metadata we can recover from (e.g. keep.lock was deleted)
         const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
         if (envMeta.org_id && envMeta.project_id) {
           projectState.initialized = true;
@@ -87,7 +87,7 @@ export class CapyCommand {
   }
 
   private async initializeProject(): Promise<void> {
-    console.log('No .keep file found - initializing project...');
+    console.log('No keep.lock file found - initializing project...');
 
     // Authenticate first
     const spinner = ora('Authenticating...').start();
@@ -309,7 +309,7 @@ export class CapyCommand {
     };
 
     this.fileManager.writeKeepFile(keep);
-    keySpinner.text = 'Created .keep configuration file';
+    keySpinner.text = 'Created keep.lock configuration file';
 
     // Get remote data (for existing variables, not for key)
     let remoteData = { env_content: '', decrypt_key: '', expires_at: '' };
@@ -332,9 +332,9 @@ export class CapyCommand {
     this.fileManager.ensureCapyGitignore();
     this.promptEngine.displaySuccess('Updated .gitignore to protect secrets');
 
-    // Stage .keep in git so collaborators don't hit "untracked file" errors on pull
+    // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
     try {
-      execSync('git add .keep', { stdio: 'pipe' });
+      execSync('git add keep.lock', { stdio: 'pipe' });
     } catch {
       // Not a git repo — fine
     }
@@ -350,7 +350,7 @@ export class CapyCommand {
       if (localVarCount > 0) {
         // Cross-org exfiltration guard: if .env has encrypted values, verify they
         // belong to this project's key. This catches the attack where a rogue user
-        // deletes .keep/.capy and re-initializes to a different org. But if the user
+        // deletes keep.lock/.capy and re-initializes to a different org. But if the user
         // lost their metadata and re-inits to the SAME org/project, the key matches
         // and their secrets are recoverable.
         const encryptedEntries = Object.entries(localEnv)
@@ -597,11 +597,11 @@ export class CapyCommand {
       );
     }
 
-    // Get remote environment (branch-aware, pinned to .keep version)
+    // Get remote environment (branch-aware, pinned to keep.lock version)
     let activeBranch = projectState.activeBranch;
     const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
 
-    // Compute keepHash if .keep has variables (version pinning)
+    // Compute keepHash if keep.lock has variables (version pinning)
     const currentKeep = this.projectManager.readKeepFile();
     const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
     const keepHash = hasVariables
@@ -699,7 +699,7 @@ export class CapyCommand {
             // Value is encrypted with a different project's key — reject
             throw new CapyError(
               `"${key}" is encrypted with a different project's key and cannot be used in this project. ` +
-              `This can happen if you reset project metadata (.keep/.capy) without clearing the .env file.`,
+              `This can happen if you reset project metadata (keep.lock/.capy) without clearing the .env file.`,
               ERROR_CODES.PERMISSION_DENIED,
               { variable: key }
             );
@@ -837,9 +837,9 @@ export class CapyCommand {
   }
 
   /**
-   * Create a deployment PR with the .keep file.
+   * Create a deployment PR with the keep.lock file.
    * Can be called directly via `capy deploy` or after a sync.
-   * When deploying, the .keep entries are targeted to a Capy branch matching
+   * When deploying, the keep.lock entries are targeted to a Capy branch matching
    * the current git branch name. If that Capy branch doesn't exist, it is
    * auto-created with secrets copied from the active Capy branch.
    */
@@ -852,11 +852,11 @@ export class CapyCommand {
     const keepFile = pm.readKeepFile();
 
     if (!keepFile) {
-      console.error('No .keep file found. Run capy first to initialize.');
+      console.error('No keep.lock file found. Run capy first to initialize.');
       process.exit(1);
     }
 
-    // If no vars specified, use all variables from .keep
+    // If no vars specified, use all variables from keep.lock
     const vars = syncedVars || Object.keys(keepFile.variables);
     if (vars.length === 0) {
       console.error('No variables to deploy.');
@@ -948,7 +948,7 @@ export class CapyCommand {
       return;
     }
 
-    // Update .keep entries to reference the deploy Capy branch
+    // Update keep.lock entries to reference the deploy Capy branch
     const deployKeep = { ...keepFile, variables: { ...keepFile.variables } };
     for (const varName of Object.keys(deployKeep.variables)) {
       const entries = deployKeep.variables[varName];
@@ -980,24 +980,24 @@ export class CapyCommand {
     const tmpMsg = joinTmp(require('os').tmpdir(), `capy-commit-msg-${Date.now()}`);
     writeTmp(tmpMsg, fullMessage, 'utf-8');
 
-    // Write the deploy-targeted .keep before committing
+    // Write the deploy-targeted keep.lock before committing
     fm.writeKeepFile(deployKeep);
 
-    // Direct push: commit .keep and push to git branch
+    // Direct push: commit keep.lock and push to git branch
     if (confirm === 'push') {
       const pushSpinner = ora(`Pushing to ${gitBranch}...`).start();
       try {
-        execSync('git add .keep', { stdio: 'pipe' });
+        execSync('git add keep.lock', { stdio: 'pipe' });
         execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
         unlinkTmp(tmpMsg);
         execSync(`git push origin HEAD:${gitBranch}`, { stdio: 'pipe' });
-        pushSpinner.succeed(`Pushed .keep to ${gitBranch}`);
+        pushSpinner.succeed(`Pushed keep.lock to ${gitBranch}`);
         return;
       } catch (pushErr: any) {
         unlinkTmp(tmpMsg);
         // Undo the local commit so the working tree is clean
         try { execSync('git reset HEAD~1', { stdio: 'pipe' }); } catch {}
-        // Restore original .keep
+        // Restore original keep.lock
         fm.writeKeepFile(keepFile);
         pushSpinner.fail(`Cannot push directly to "${gitBranch}" (likely protected)`);
         console.log('  Creating a deployment PR instead...\n');
@@ -1007,21 +1007,21 @@ export class CapyCommand {
       }
     }
 
-    // PR path: create a deploy branch, commit .keep, push, switch back
+    // PR path: create a deploy branch, commit keep.lock, push, switch back
     const deployGitBranch = `capy/sync-${projectName}-${Date.now()}`;
 
     try {
       const prSpinner = ora('Creating PR...').start();
 
       execSync(`git checkout -b ${deployGitBranch}`, { stdio: 'pipe' });
-      execSync('git add .keep', { stdio: 'pipe' });
+      execSync('git add keep.lock', { stdio: 'pipe' });
 
       writeTmp(tmpMsg, fullMessage, 'utf-8');
       execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
       unlinkTmp(tmpMsg);
       execSync(`git push -u origin ${deployGitBranch}`, { stdio: 'pipe' });
 
-      // Switch back to original branch and restore original .keep
+      // Switch back to original branch and restore original keep.lock
       execSync(`git checkout ${gitBranch}`, { stdio: 'pipe' });
       fm.writeKeepFile(keepFile);
 
@@ -1041,7 +1041,7 @@ export class CapyCommand {
       open(prUrl).catch(() => {});
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
-      // Ensure we're back on gitBranch and original .keep is restored
+      // Ensure we're back on gitBranch and original keep.lock is restored
       try { execSync(`git checkout ${gitBranch}`, { stdio: 'pipe' }); } catch {}
       fm.writeKeepFile(keepFile);
       console.log(`Failed to create PR: ${error.message}`);

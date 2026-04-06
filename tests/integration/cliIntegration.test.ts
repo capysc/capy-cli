@@ -42,7 +42,7 @@ describe('CLI Integration Tests', () => {
     test('should correctly detect uninitialized project state', async () => {
       // Mock file system operations since we're not actually creating files
       jest.spyOn(require('fs'), 'existsSync').mockImplementation((path: any) => {
-        if (path.includes('.keep')) return false;
+        if (path.includes('keep.lock')) return false;
         if (path.includes('.capy/decrypt')) return false;
         if (path.includes('.env')) return true;
         return false;
@@ -68,7 +68,7 @@ describe('CLI Integration Tests', () => {
       };
 
       jest.spyOn(require('fs'), 'existsSync').mockImplementation((path: any) => {
-        if (path.includes('.keep')) return true;
+        if (path.includes('keep.lock')) return true;
         if (path.includes('.capy/decrypt')) return true;
         if (path.includes('.env')) return true;
         return false;
@@ -127,7 +127,7 @@ DEBUG=true`;
       fileManager.writeKeepFile(mockKeep);
 
       expect(writeFileSyncSpy).toHaveBeenCalledWith(
-        expect.stringContaining('.keep'),
+        expect.stringContaining('keep.lock'),
         JSON.stringify(mockKeep, null, 2) + '\n',
         'utf-8'
       );
@@ -279,7 +279,7 @@ DEBUG=true`;
       jest.spyOn(require('fs'), 'readFileSync').mockReturnValue('invalid json');
 
       expect(() => projectManager.readKeepFile()).toThrow(CapyError);
-      expect(() => projectManager.readKeepFile()).toThrow('Failed to read .keep file');
+      expect(() => projectManager.readKeepFile()).toThrow('Failed to read keep.lock file');
     });
 
     test('should handle missing required keep file fields', () => {

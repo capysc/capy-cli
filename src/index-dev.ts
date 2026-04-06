@@ -67,7 +67,7 @@ program
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     if (!projectState.initialized) {
-      console.error('No .keep file found. Run capy-dev first to initialize.');
+      console.error('No keep.lock file found. Run capy-dev first to initialize.');
       process.exit(1);
     }
 
@@ -115,7 +115,7 @@ program
 
       await serviceClient.deleteBranch(projectState.projectId!, branch.id);
 
-      // Remove branch entries from .keep
+      // Remove branch entries from keep.lock
       const keep = pm.readKeepFile();
       if (keep) {
         const { FileManager } = await import('./files/fileManager');
@@ -193,7 +193,7 @@ program
 
 program
   .command('deploy')
-  .description('Create a deployment PR with the .keep file')
+  .description('Create a deployment PR with the keep.lock file')
   .action(async () => {
     const { CapyCommand } = await import('./commands/capyCommand');
     await CapyCommand.createDeployPR();
@@ -240,7 +240,7 @@ program
     const keep = pm.readKeepFile();
 
 if (!keep) {
-      console.error('No .keep file found. Run capy-dev first to initialize.');
+      console.error('No keep.lock file found. Run capy-dev first to initialize.');
       process.exit(1);
     }
 

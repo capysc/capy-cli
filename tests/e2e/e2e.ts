@@ -417,7 +417,7 @@ async function testInitUserA(): Promise<void> {
   });
 
   assert(result.exitCode === 0, `User A init failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
-  assert(existsSync(join(SANDBOX_USER1, '.keep')), '.keep file not created');
+  assert(existsSync(join(SANDBOX_USER1, 'keep.lock')), 'keep.lock file not created');
   assert(result.stdout.includes('10') || result.stdout.includes('variable'), 'Expected 10 variables synced');
 
   // Create a capy secrets branch matching the git branch
@@ -430,11 +430,11 @@ async function testInitUserA(): Promise<void> {
     ],
   });
 
-  // Commit and push .keep to e2e-test
+  // Commit and push keep.lock to e2e-test
   try {
-    sh('git add .keep .gitignore && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: add .keep for e2e test" --allow-empty', SANDBOX_USER1);
+    sh('git add keep.lock .gitignore && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: add keep.lock for e2e test" --allow-empty', SANDBOX_USER1);
   } catch {
-    // .keep may already be committed
+    // keep.lock may already be committed
   }
   sh('git push -u origin e2e-test', SANDBOX_USER1);
 }
@@ -478,7 +478,7 @@ async function testInitUserB(): Promise<void> {
   });
 
   assert(result.exitCode === 0, `User B init failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
-  assert(existsSync(join(SANDBOX_USER2, '.keep')), 'User B .keep file not created');
+  assert(existsSync(join(SANDBOX_USER2, 'keep.lock')), 'User B keep.lock file not created');
 }
 
 /** Phase 2: User A invites User B as Admin */
@@ -509,8 +509,8 @@ async function testInviteUserB(): Promise<string> {
 async function testUserBSyncFails(): Promise<void> {
   log('User B attempts sync (should fail without master key)...');
 
-  // User B needs the .keep from User A's project to attempt sync
-  // Stash User B's own .keep, switch to e2e-test with User A's .keep
+  // User B needs the keep.lock from User A's project to attempt sync
+  // Stash User B's own keep.lock, switch to e2e-test with User A's keep.lock
   try { sh('git stash --include-untracked', SANDBOX_USER2); } catch {}
   sh('git fetch origin e2e-test', SANDBOX_USER2);
   sh('git checkout e2e-test', SANDBOX_USER2);
@@ -607,9 +607,9 @@ async function testSyncConflict(): Promise<void> {
 
   assert(result.exitCode === 0, `Sync conflict resolution failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
 
-  // Commit and push updated .keep
+  // Commit and push updated keep.lock
   try {
-    sh('git add .keep && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: update SENDGRID_KEY"', SANDBOX_USER1);
+    sh('git add keep.lock && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: update SENDGRID_KEY"', SANDBOX_USER1);
     sh('git push origin e2e-test', SANDBOX_USER1);
   } catch {
     // May already be committed
@@ -741,9 +741,9 @@ async function testBranching(): Promise<void> {
   });
   assert(syncResult.exitCode === 0, `Sync on protected branch failed: ${syncResult.stdout}\n${syncResult.stderr}`);
 
-  // Push .keep
+  // Push keep.lock
   try {
-    sh('git add .keep && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: update SENDGRID_KEY on e2e-test-main"', SANDBOX_USER1);
+    sh('git add keep.lock && git -c user.name="E2E Test" -c user.email="e2e@test.local" commit -m "chore: update SENDGRID_KEY on e2e-test-main"', SANDBOX_USER1);
     sh('git push -u origin e2e-test-main', SANDBOX_USER1);
   } catch {}
 

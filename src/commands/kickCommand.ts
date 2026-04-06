@@ -16,7 +16,7 @@ export class KickCommand {
     const projectState = await pm.detectProjectState();
 
     if (!projectState.initialized || !projectState.organizationId) {
-      console.error('No .keep file found. Run capy first to initialize.');
+      console.error('No keep.lock file found. Run capy first to initialize.');
       process.exit(1);
     }
 
