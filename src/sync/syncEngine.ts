@@ -341,7 +341,7 @@ export class SyncEngine {
   }
 
   /**
-   * Compute a content-addressed hash from a .keep file's value_hashes.
+   * Compute a content-addressed hash from a keep.lock file's value_hashes.
    * Per-branch: only includes entries matching the specified branch.
    * Deterministic: sorted by variable name, then by value_hash.
    */

@@ -6,7 +6,7 @@ const ID_LENGTH = 5;
 
 /**
  * Derives a deterministic 5-character resource ID from a branch and variable name.
- * Used in .keep files to reference encrypted variables.
+ * Used in keep.lock files to reference encrypted variables.
  *
  * - Same (branch, variableName) always produces the same ID regardless of encryption key
  * - Different variable names produce different IDs

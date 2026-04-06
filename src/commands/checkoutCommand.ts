@@ -43,10 +43,10 @@ export class CheckoutCommand {
   }
 
   private async _execute(branchName: string, options: { create?: boolean; protected?: boolean }): Promise<void> {
-    // Read .keep — must be initialized
+    // Read keep.lock — must be initialized
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
-      console.error('No .keep file found. Run capy first to initialize the project.');
+      console.error('No keep.lock file found. Run capy first to initialize the project.');
       process.exit(1);
     }
 

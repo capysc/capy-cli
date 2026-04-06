@@ -33,7 +33,7 @@ export class ProjectManager {
       } catch (error) {
         if (error instanceof CapyError) throw error;
         throw new CapyError(
-          'Invalid .keep file format',
+          'Invalid keep.lock file format',
           ERROR_CODES.INVALID_FORMAT,
           { error, path: keepPath }
         );
@@ -56,7 +56,7 @@ export class ProjectManager {
   }
 
   getKeepPath(): string {
-    return join(this.projectRoot, '.keep');
+    return join(this.projectRoot, 'keep.lock');
   }
 
   getCapyDir(): string {
@@ -129,7 +129,7 @@ export class ProjectManager {
         throw error;
       }
       throw new CapyError(
-        'Failed to read .keep file',
+        'Failed to read keep.lock file',
         ERROR_CODES.INVALID_FORMAT,
         { error, path: keepPath }
       );
@@ -137,7 +137,7 @@ export class ProjectManager {
   }
 
   /**
-   * Migrate older .keep formats to current v3 (deterministic, no timestamps).
+   * Migrate older keep.lock formats to current v3 (deterministic, no timestamps).
    */
   private migrateKeepIfNeeded(raw: any): KeepFile {
     if (raw.version === '2.0') {
@@ -221,14 +221,14 @@ export class ProjectManager {
 
     if (!state.organizationId) {
       throw new CapyError(
-        'Invalid .keep file: missing organization ID',
+        'Invalid keep.lock file: missing organization ID',
         ERROR_CODES.INVALID_FORMAT
       );
     }
 
     if (!state.projectId) {
       throw new CapyError(
-        'Invalid .keep file: missing project ID',
+        'Invalid keep.lock file: missing project ID',
         ERROR_CODES.INVALID_FORMAT
       );
     }

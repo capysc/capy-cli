@@ -44,7 +44,7 @@ For local development setup, see the [root README](../../README.md#local-develop
 
 ### First-Time Project Setup
 
-When you run `capy` in a directory without a `.keep` file:
+When you run `capy` in a directory without a `keep.lock` file:
 
 ```bash
 $ capy
@@ -158,11 +158,11 @@ capy --force
 The CLI creates and manages these files:
 
 - **`.env`** - Your plaintext environment variables (gitignored)
-- **`.keep`** - Project metadata only, no secrets (committed to git)
+- **`keep.lock`** - Project metadata only, no secrets (committed to git)
 - **`.decrypt`** - User-specific decryption key (gitignored)
 - **`.gitignore`** - Automatically updated to exclude secrets
 
-Only `.keep` is committed to version control - it contains no secrets, just project metadata.
+Only `keep.lock` is committed to version control - it contains no secrets, just project metadata.
 
 ## Security Model
 
@@ -179,7 +179,7 @@ Only `.keep` is committed to version control - it contains no secrets, just proj
 | Location | What's Stored | Committed to Git |
 |----------|---------------|------------------|
 | `.env` | Plaintext secrets | ❌ Never |
-| `.keep` | Project metadata only | ✅ Always |
+| `keep.lock` | Project metadata only | ✅ Always |
 | `.decrypt` | User-specific key | ❌ Never |
 | Capy Service | Encrypted secrets in KMS | N/A |
 

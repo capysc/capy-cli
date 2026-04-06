@@ -19,9 +19,9 @@ describe('ProjectManager', () => {
   });
 
   describe('detectProjectState', () => {
-    test('should detect uninitialized project when no .keep file exists', async () => {
+    test('should detect uninitialized project when no keep.lock file exists', async () => {
       mockExistsSync.mockImplementation((path) => {
-        if (path === join(testRoot, '.keep')) return false;
+        if (path === join(testRoot, 'keep.lock')) return false;
         if (path === join(testRoot, '.capy/decrypt')) return false;
         if (path === join(testRoot, '.env')) return true;
         return false;
@@ -37,7 +37,7 @@ describe('ProjectManager', () => {
       });
     });
 
-    test('should detect initialized project with valid .keep file', async () => {
+    test('should detect initialized project with valid keep.lock file', async () => {
       const mockKeep: KeepFile = {
         version: '3.0',
         org_id: 'org_123',
@@ -47,7 +47,7 @@ describe('ProjectManager', () => {
       };
 
       mockExistsSync.mockImplementation((path) => {
-        if (path === join(testRoot, '.keep')) return true;
+        if (path === join(testRoot, 'keep.lock')) return true;
         if (path === join(testRoot, '.capy/decrypt')) return true;
         if (path === join(testRoot, '.env')) return true;
         return false;
@@ -68,21 +68,21 @@ describe('ProjectManager', () => {
       });
     });
 
-    test('should throw CapyError for invalid .keep file', async () => {
+    test('should throw CapyError for invalid keep.lock file', async () => {
       mockExistsSync.mockImplementation((path) => {
-        if (path === join(testRoot, '.keep')) return true;
+        if (path === join(testRoot, 'keep.lock')) return true;
         return false;
       });
 
       mockReadFileSync.mockReturnValue('invalid json');
 
       await expect(projectManager.detectProjectState()).rejects.toThrow(CapyError);
-      await expect(projectManager.detectProjectState()).rejects.toThrow('Invalid .keep file format');
+      await expect(projectManager.detectProjectState()).rejects.toThrow('Invalid keep.lock file format');
     });
   });
 
   describe('readKeepFile', () => {
-    test('should return null when .keep file does not exist', () => {
+    test('should return null when keep.lock file does not exist', () => {
       mockExistsSync.mockReturnValue(false);
 
       const result = projectManager.readKeepFile();
@@ -90,7 +90,7 @@ describe('ProjectManager', () => {
       expect(result).toBeNull();
     });
 
-    test('should read and validate .keep file successfully', () => {
+    test('should read and validate keep.lock file successfully', () => {
       const mockKeep: KeepFile = {
         version: '3.0',
         org_id: 'org_123',
@@ -110,7 +110,7 @@ describe('ProjectManager', () => {
       const result = projectManager.readKeepFile();
 
       expect(result).toEqual(mockKeep);
-      expect(mockReadFileSync).toHaveBeenCalledWith(join(testRoot, '.keep'), 'utf-8');
+      expect(mockReadFileSync).toHaveBeenCalledWith(join(testRoot, 'keep.lock'), 'utf-8');
     });
 
     test('should throw CapyError for malformed JSON', () => {
@@ -118,7 +118,7 @@ describe('ProjectManager', () => {
       mockReadFileSync.mockReturnValue('invalid json');
 
       expect(() => projectManager.readKeepFile()).toThrow(CapyError);
-      expect(() => projectManager.readKeepFile()).toThrow('Failed to read .keep file');
+      expect(() => projectManager.readKeepFile()).toThrow('Failed to read keep.lock file');
     });
 
     test('should throw CapyError for missing required fields', () => {
@@ -283,7 +283,7 @@ describe('ProjectManager', () => {
   describe('file path utilities', () => {
     test('should return correct keep path', () => {
       const path = (projectManager as any).getKeepPath();
-      expect(path).toBe(join(testRoot, '.keep'));
+      expect(path).toBe(join(testRoot, 'keep.lock'));
     });
 
     test('should return correct decrypt path', () => {

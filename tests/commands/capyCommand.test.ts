@@ -206,7 +206,7 @@ describe('CapyCommand', () => {
       expect(spy).toHaveBeenCalledWith(projectState);
     });
 
-    test('should not initialize project if .keep file already exists', async () => {
+    test('should not initialize project if keep.lock file already exists', async () => {
       mockProjectManager.detectProjectState.mockResolvedValue({
         initialized: true,
         hasKeepFile: true,
@@ -311,17 +311,17 @@ describe('CapyCommand', () => {
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
 
-    test('should log correct message when .keep file is not found', async () => {
+    test('should log correct message when keep.lock file is not found', async () => {
       const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
       await (capyCommand as any).initializeProject();
 
-      expect(consoleSpy).toHaveBeenCalledWith('No .keep file found - initializing project...');
+      expect(consoleSpy).toHaveBeenCalledWith('No keep.lock file found - initializing project...');
       
       consoleSpy.mockRestore();
     });
 
-    test('should create .keep file with correct structure', async () => {
+    test('should create keep.lock file with correct structure', async () => {
       await (capyCommand as any).initializeProject();
 
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
@@ -480,9 +480,9 @@ describe('CapyCommand', () => {
     });
   });
 
-  describe('initializeProject — fresh account (no .keep, no .env)', () => {
+  describe('initializeProject — fresh account (no keep.lock, no .env)', () => {
     /**
-     * Regression test: a brand-new user with no .keep file and no local .env
+     * Regression test: a brand-new user with no keep.lock file and no local .env
      * should be able to authenticate, create a project, and complete init
      * without the "No secrets stored" 404 from getDecryptData being treated
      * as an auth failure.
@@ -536,7 +536,7 @@ describe('CapyCommand', () => {
       // Project should be created
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('fresh-project', 'org-123');
 
-      // .keep file should be written
+      // keep.lock file should be written
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
           version: '3.0',
