@@ -386,19 +386,53 @@ export class CapyCommand {
         }
 
         console.log(`\nFound existing .env file with ${localVarCount} variable(s)`);
-        const syncSpinner = ora('Syncing local variables to keep...').start();
+
+        // Select environment branch for storing secrets
+        const CUSTOM_BRANCH = '__custom__';
+        const { envBranch } = await inquirer.prompt([{
+          type: 'list',
+          name: 'envBranch',
+          message: `Select the branch for saving the current ${localVarCount} variable(s):`,
+          choices: [
+            { name: 'development (default)', value: 'development' },
+            { name: 'staging', value: 'staging' },
+            { name: 'production', value: 'production' },
+            { name: 'custom branch', value: CUSTOM_BRANCH },
+          ],
+        }]);
+
+        let initBranch: string = envBranch;
+        if (envBranch === CUSTOM_BRANCH) {
+          const { customName } = await inquirer.prompt([{
+            type: 'input',
+            name: 'customName',
+            message: 'Enter branch name:',
+            validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+          }]);
+          initBranch = customName.trim();
+        }
+
+        // Create the capy branch on the service
+        try {
+          await this.serviceClient.createBranch(projectResult.project_id, initBranch);
+        } catch {
+          // Branch may already exist
+        }
+        this.projectManager.writeActiveBranch(initBranch);
+
+        const syncSpinner = ora(`Syncing local variables to keep (${initBranch})...`).start();
 
         try {
           const pushResult = await this.serviceClient.pushVariables(
             projectResult.project_id,
             localEnv,
             keep,
-            undefined,
+            initBranch,
             encryptionKey
           );
 
           if (pushResult.success) {
-            const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables);
+            const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables, initBranch);
             this.fileManager.writeKeepFile(updatedKeep);
             this.fileManager.writeSyncState({
               last_sync: new Date().toISOString(),
@@ -410,9 +444,9 @@ export class CapyCommand {
             this.fileManager.backupPlaintextEnv(this.options.envPath);
 
             // Encrypt the local .env file
-            this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep);
+            this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep, initBranch);
 
-            syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s)`);
+            syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s) (${initBranch})`);
 
             // Show what was synced
             console.log('');
@@ -420,8 +454,7 @@ export class CapyCommand {
               console.log(`  ${varName}`);
             }
 
-            console.log('\nReady to work!');
-            await CapyCommand.createDeployPR(Object.keys(localEnv), this.serviceClient);
+            console.log(`\nTo deploy these secrets, run \x1b[1mcapy deploy\x1b[0m`);
           } else {
             syncSpinner.fail('Failed to sync variables');
           }
@@ -597,32 +630,33 @@ export class CapyCommand {
       );
     }
 
-    // Check if current git branch matches a Capy secrets branch
+    // Capy branches track environments (development/staging/production), not git branches.
+    // The active branch is set explicitly via `capy checkout` or during init.
     let activeBranch = projectState.activeBranch;
-    try {
-      const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-      if (gitBranch && gitBranch !== 'HEAD' && gitBranch !== (activeBranch || '')) {
-        const branches = await this.serviceClient.listBranches(projectState.projectId!);
-        const matchingBranch = branches.find(b => b.name === gitBranch);
-        if (matchingBranch) {
-          const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
-          const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-          console.log(`  Git branch ${bold(gitBranch)} matches Capy secrets branch ${bold(matchingBranch.name)}${matchingBranch.is_protected ? ` ${grey('(protected)')}` : ''}`);
-          const { switchBranch } = await inquirer.prompt([{
-            type: 'confirm',
-            name: 'switchBranch',
-            message: `Switch to secrets branch "${gitBranch}"?`,
-            default: true,
-          }]);
-          if (switchBranch) {
-            activeBranch = gitBranch;
-            this.projectManager.writeActiveBranch(activeBranch);
-            console.log(`  Switched to secrets branch: ${bold(activeBranch)}\n`);
-          }
-        }
+
+    // If no branch selected, prompt user to pick one
+    if (!activeBranch) {
+      const branches = await this.serviceClient.listBranches(projectState.projectId!);
+      if (branches.length > 0) {
+        const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+
+        const choices = branches.map(b => {
+          const name = b.name || 'default';
+          const prot = b.is_protected ? ` ${grey('(protected)')}` : '';
+          const age = b.created_at ? ` ${grey(new Date(b.created_at).toLocaleDateString())}` : '';
+          return { name: `${name}${prot}${age}`, value: b.name };
+        });
+
+        const { selectedBranch } = await inquirer.prompt([{
+          type: 'list',
+          name: 'selectedBranch',
+          message: 'Select a secrets branch:',
+          choices,
+        }]);
+
+        activeBranch = selectedBranch || undefined;
+        this.projectManager.writeActiveBranch(activeBranch);
       }
-    } catch {
-      // Not a git repo or git not available — skip branch matching
     }
 
     // Get remote environment (branch-aware, pinned to keep.lock version)
@@ -864,11 +898,12 @@ export class CapyCommand {
   }
 
   /**
-   * Create a deployment PR with the keep.lock file.
-   * Can be called directly via `capy deploy` or after a sync.
-   * When deploying, the keep.lock entries are targeted to a Capy branch matching
-   * the current git branch name. If that Capy branch doesn't exist, it is
-   * auto-created with secrets copied from the active Capy branch.
+   * Deploy secrets to a git branch.
+   *
+   * Two-step flow:
+   * 1. Ask whether to deploy or continue working
+   * 2. If deploying, ask which git branch to target
+   * 3. Push directly or create a PR
    */
   static async createDeployPR(syncedVars?: string[], client?: ServiceClient): Promise<void> {
     const { ProjectManager } = await import('../core/projectManager');
@@ -890,111 +925,70 @@ export class CapyCommand {
       return;
     }
 
-    const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    const capyBranch = gitBranch; // Deploy always targets a Capy branch matching the git branch
+    const capyBranch = pm.readActiveBranch() || 'default';
 
-    const { confirm } = await inquirer.prompt([{
+    // Step 1: Deploy or continue?
+    console.log('');
+    const { action } = await inquirer.prompt([{
       type: 'list',
-      name: 'confirm',
-      message: `Deploy secrets to Capy branch "${capyBranch}" on git branch "${gitBranch}"?`,
+      name: 'action',
+      message: `To deploy these "${capyBranch}" secrets into an environment, you will need to select a git branch to attach these secrets to:`,
       choices: [
-        { name: `Push directly to "${gitBranch}"`, value: 'push' },
-        { name: `Create a deployment PR → "${gitBranch}"`, value: 'deploy' },
+        { name: 'Create a deployment PR', value: 'deploy' },
         { name: 'Continue working', value: 'cancel' },
       ],
     }]);
 
-    if (confirm === 'cancel') return;
+    if (action === 'cancel') return;
 
-    // Ensure we have an authenticated service client for branch operations
-    if (!client) {
-      const { AuthService } = await import('../auth/authService');
-      const authService = new AuthService();
-      client = new ServiceClient();
-
-      // Load user-scoped session if available
-      const syncState = pm.readSyncState();
-      if (syncState?.user_id) {
-        authService.setSessionUserId(syncState.user_id);
-      }
-
-      const authSpinner = ora('Authenticating...').start();
-      const authResult = await authService.authenticate(keepFile.org_id);
-      if (!authResult.success) {
-        authSpinner.fail('Authentication failed');
-        console.error('Cannot deploy without authentication.');
-        return;
-      }
-      authSpinner.succeed('Authenticated');
-
-      const token = authService.getToken();
-      if (token) {
-        client.setToken(token);
-        client.setTokenRefresher(async () => {
-          const refreshed = await authService.refreshToken();
-          return refreshed ? authService.getToken() : null;
-        });
-      }
-    }
-
-    // Ensure the Capy branch exists, auto-create if needed
-    const branchSpinner = ora(`Checking Capy branch "${capyBranch}"...`).start();
+    // Step 2: Which git branch?
+    let defaultGitBranch = '';
     try {
-      const branches = await client.listBranches(keepFile.project_id);
-      const branchExists = branches.some(b => b.name === capyBranch);
+      defaultGitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+      if (defaultGitBranch === 'HEAD') defaultGitBranch = '';
+    } catch {}
 
-      if (!branchExists) {
-        branchSpinner.text = `Creating Capy branch "${capyBranch}"...`;
-        await client.createBranch(keepFile.project_id, capyBranch);
+    const { targetBranch } = await inquirer.prompt([{
+      type: 'input',
+      name: 'targetBranch',
+      message: `Enter the git branch name you want to deploy these "${capyBranch}" secrets to:`,
+      default: defaultGitBranch || undefined,
+      validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+    }]);
 
-        // Copy secrets from the active Capy branch to the new one
-        const activeBranch = pm.readActiveBranch();
-        try {
-          const currentData = await client.getDecryptData(keepFile.project_id, activeBranch);
-          if (currentData.env_content) {
-            const syncState = pm.readSyncState();
-            const encryptionKey = resolveProjectKey(keepFile.org_id, keepFile.project_id, syncState?.user_id || '');
-            const currentEnv = fm.parseEnvContent(currentData.env_content);
-            const decrypted: Record<string, string> = {};
-            for (const [key, value] of Object.entries(currentEnv)) {
-              decrypted[key] = fm.decryptValue(value, encryptionKey);
-            }
-            await client.pushVariables(keepFile.project_id, decrypted, keepFile, capyBranch, encryptionKey);
-            branchSpinner.succeed(`Created Capy branch "${capyBranch}" with ${Object.keys(decrypted).length} variable(s) copied`);
-          } else {
-            branchSpinner.succeed(`Created Capy branch "${capyBranch}" (empty)`);
-          }
-        } catch {
-          branchSpinner.succeed(`Created Capy branch "${capyBranch}" (no secrets to copy)`);
-        }
-      } else {
-        branchSpinner.succeed(`Capy branch "${capyBranch}" exists`);
-      }
-    } catch (error: any) {
-      branchSpinner.fail(`Failed to verify Capy branch: ${error.message}`);
-      return;
-    }
+    const gitBranch = targetBranch.trim();
 
-    // Update keep.lock entries to reference the deploy Capy branch
+    // Step 3: How to deploy?
+    const { deployMethod } = await inquirer.prompt([{
+      type: 'list',
+      name: 'deployMethod',
+      message: 'How would you like to deploy?',
+      choices: [
+        { name: `Deploy directly to "${gitBranch}"`, value: 'push' },
+        { name: `Create a deployment PR → "${gitBranch}"`, value: 'pr' },
+        { name: 'Do not deploy', value: 'cancel' },
+      ],
+    }]);
+
+    if (deployMethod === 'cancel') return;
+
+    // Update keep.lock entries to reference the capy branch
     const deployKeep = { ...keepFile, variables: { ...keepFile.variables } };
+    const activeBranch = pm.readActiveBranch();
     for (const varName of Object.keys(deployKeep.variables)) {
       const entries = deployKeep.variables[varName];
       if (!entries || entries.length === 0) continue;
 
-      // Find the entry for the active Capy branch (or default) and retarget it
-      const activeBranch = pm.readActiveBranch();
       const sourceEntry = entries.find(e =>
         activeBranch ? e.branch === activeBranch : !e.branch
       ) || entries[0];
 
-      // Replace with an entry targeting the deploy branch
       const deployEntry: KeepVariableEntry = {
         resource_id: sourceEntry.resource_id,
         branch: capyBranch,
         value_hash: sourceEntry.value_hash,
       };
 
-      // Keep other branch entries, replace/add the one for capyBranch
       const otherEntries = entries.filter(e => e.branch !== capyBranch);
       deployKeep.variables[varName] = [...otherEntries, deployEntry];
     }
@@ -1010,8 +1004,8 @@ export class CapyCommand {
     // Write the deploy-targeted keep.lock before committing
     fm.writeKeepFile(deployKeep);
 
-    // Direct push: commit keep.lock and push to git branch
-    if (confirm === 'push') {
+    // Direct push
+    if (deployMethod === 'push') {
       const pushSpinner = ora(`Pushing to ${gitBranch}...`).start();
       try {
         execSync('git add keep.lock', { stdio: 'pipe' });
@@ -1022,19 +1016,17 @@ export class CapyCommand {
         return;
       } catch (pushErr: any) {
         unlinkTmp(tmpMsg);
-        // Undo the local commit so the working tree is clean
         try { execSync('git reset HEAD~1', { stdio: 'pipe' }); } catch {}
-        // Restore original keep.lock
         fm.writeKeepFile(keepFile);
         pushSpinner.fail(`Cannot push directly to "${gitBranch}" (likely protected)`);
         console.log('  Creating a deployment PR instead...\n');
-        // Re-write deploy keep for PR path
         fm.writeKeepFile(deployKeep);
         // Fall through to PR path
       }
     }
 
-    // PR path: create a deploy branch, commit keep.lock, push, switch back
+    // PR path
+    const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
     const deployGitBranch = `capy/sync-${projectName}-${Date.now()}`;
 
     try {
@@ -1048,11 +1040,9 @@ export class CapyCommand {
       unlinkTmp(tmpMsg);
       execSync(`git push -u origin ${deployGitBranch}`, { stdio: 'pipe' });
 
-      // Switch back to original branch and restore original keep.lock
-      execSync(`git checkout ${gitBranch}`, { stdio: 'pipe' });
+      execSync(`git checkout ${currentBranch}`, { stdio: 'pipe' });
       fm.writeKeepFile(keepFile);
 
-      // Build GitHub PR URL
       const remoteUrl = execSync('git remote get-url origin', { stdio: 'pipe', encoding: 'utf-8' }).trim();
       const repoPath = remoteUrl
         .replace(/^git@github\.com:/, '')
@@ -1068,8 +1058,7 @@ export class CapyCommand {
       open(prUrl).catch(() => {});
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
-      // Ensure we're back on gitBranch and original keep.lock is restored
-      try { execSync(`git checkout ${gitBranch}`, { stdio: 'pipe' }); } catch {}
+      try { execSync(`git checkout ${currentBranch}`, { stdio: 'pipe' }); } catch {}
       fm.writeKeepFile(keepFile);
       console.log(`Failed to create PR: ${error.message}`);
     }
