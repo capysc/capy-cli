@@ -591,7 +591,9 @@ async function testUserBSyncAfterRedeem(): Promise<void> {
     user: 'B',
     timeout: 30000,
     interactions: [
-      // Sync result — no branch-switch prompt (capy branches are environment-scoped)
+      // No branch selected — prompt to pick one (select "development", first option)
+      { waitFor: /Select a secrets branch/, send: '\n', delay: 300 },
+      // Sync result
       { waitFor: /up to date|variable|conflict|Pull|Sync completed|Deploy|Continue/, send: '\n', delay: 300 },
       { waitFor: /Sync completed|up to date|Deploy|Continue/, send: '' },
     ],
@@ -655,8 +657,10 @@ async function testUserBGetsUpdatedKey(): Promise<void> {
     user: 'B',
     timeout: 30000,
     interactions: [
+      // May need to select branch if not persisted, or conflict prompt
+      { waitFor: /Select a secrets branch|SENDGRID_KEY/, send: '\n', delay: 500 },
       // Conflict or pull prompt — use remote value
-      { waitFor: 'SENDGRID_KEY', send: '\x1b[B\n', delay: 500 },  // arrow down to "Use remote" then enter
+      { waitFor: /SENDGRID_KEY|up to date|Everything/, send: '\x1b[B\n', delay: 500 },
       // Push confirmation
       { waitFor: /Push.*capy|up to date/i, send: 'y\n', delay: 300 },
       // Apply changes
@@ -838,8 +842,8 @@ async function testBranching(): Promise<void> {
     user: 'B',
     timeout: 60000,
     interactions: [
-      // No branch-switch prompt — capy branches are environment-scoped
-      { waitFor: /SENDGRID_KEY|up to date|Everything|Push.*capy|Apply|Deploy|Continue|conflict/i, send: '\n', delay: 500 },
+      // May need to select branch, then handle sync
+      { waitFor: /Select a secrets branch|SENDGRID_KEY|up to date|Everything|Push.*capy|Apply|Deploy|Continue|conflict/i, send: '\n', delay: 500 },
       { waitFor: /Push.*capy|Apply|Deploy|Continue|up to date|Sync completed/i, send: 'y\n', delay: 300 },
       { waitFor: /Apply|Deploy|Continue|up to date|Sync completed/i, send: 'y\n', delay: 300 },
       { waitFor: /Deploy|Continue|up to date|Sync completed/i, send: '', delay: 300 },
@@ -888,8 +892,8 @@ async function testBranching(): Promise<void> {
     user: 'B',
     timeout: 30000,
     interactions: [
-      // May have conflicts or be up to date
-      { waitFor: /SENDGRID_KEY|up to date|Everything/, send: '\n', delay: 500 },
+      // May need to select branch, then handle sync
+      { waitFor: /Select a secrets branch|SENDGRID_KEY|up to date|Everything/, send: '\n', delay: 500 },
       { waitFor: /Push.*capy|up to date|Sync completed/i, send: 'y\n', delay: 300 },
       { waitFor: /Apply these changes|Sync completed|up to date/i, send: 'y\n', delay: 300 },
       { waitFor: /Deploy|Continue|completed|up to date/, send: '' },

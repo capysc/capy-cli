@@ -634,6 +634,31 @@ export class CapyCommand {
     // The active branch is set explicitly via `capy checkout` or during init.
     let activeBranch = projectState.activeBranch;
 
+    // If no branch selected, prompt user to pick one
+    if (!activeBranch) {
+      const branches = await this.serviceClient.listBranches(projectState.projectId!);
+      if (branches.length > 0) {
+        const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+
+        const choices = branches.map(b => {
+          const name = b.name || 'default';
+          const prot = b.is_protected ? ` ${grey('(protected)')}` : '';
+          const age = b.created_at ? ` ${grey(new Date(b.created_at).toLocaleDateString())}` : '';
+          return { name: `${name}${prot}${age}`, value: b.name };
+        });
+
+        const { selectedBranch } = await inquirer.prompt([{
+          type: 'list',
+          name: 'selectedBranch',
+          message: 'Select a secrets branch:',
+          choices,
+        }]);
+
+        activeBranch = selectedBranch || undefined;
+        this.projectManager.writeActiveBranch(activeBranch);
+      }
+    }
+
     // Get remote environment (branch-aware, pinned to keep.lock version)
     const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
 
