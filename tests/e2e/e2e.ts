@@ -644,9 +644,8 @@ async function testSyncConflict(): Promise<void> {
 async function testUserBGetsUpdatedKey(): Promise<void> {
   log('User B pulls updated SENDGRID_KEY...');
 
-  try { sh('git stash --include-untracked', SANDBOX_USER2); } catch {}
-  sh('git pull origin e2e-test', SANDBOX_USER2);
-  try { sh('git stash pop', SANDBOX_USER2); } catch {}
+  // Accept remote keep.lock (User A pushed the updated version)
+  sh('git checkout origin/e2e-test -- keep.lock', SANDBOX_USER2);
 
   const result = await spawnCapy([], {
     cwd: SANDBOX_USER2,

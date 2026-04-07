@@ -386,19 +386,39 @@ export class CapyCommand {
         }
 
         console.log(`\nFound existing .env file with ${localVarCount} variable(s)`);
-        const syncSpinner = ora('Syncing local variables to keep...').start();
+
+        // Detect git branch and create a matching capy branch for the initial push
+        let initBranch: string | undefined;
+        try {
+          const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+          if (gitBranch && gitBranch !== 'HEAD') {
+            initBranch = gitBranch;
+            // Create the capy branch on the service
+            try {
+              await this.serviceClient.createBranch(projectResult.project_id, initBranch);
+            } catch {
+              // Branch may already exist
+            }
+            this.projectManager.writeActiveBranch(initBranch);
+          }
+        } catch {
+          // Not a git repo — push to default branch
+        }
+
+        const branchLabel = initBranch ? ` (${initBranch})` : '';
+        const syncSpinner = ora(`Syncing local variables to keep${branchLabel}...`).start();
 
         try {
           const pushResult = await this.serviceClient.pushVariables(
             projectResult.project_id,
             localEnv,
             keep,
-            undefined,
+            initBranch,
             encryptionKey
           );
 
           if (pushResult.success) {
-            const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables);
+            const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables, initBranch);
             this.fileManager.writeKeepFile(updatedKeep);
             this.fileManager.writeSyncState({
               last_sync: new Date().toISOString(),
@@ -410,9 +430,9 @@ export class CapyCommand {
             this.fileManager.backupPlaintextEnv(this.options.envPath);
 
             // Encrypt the local .env file
-            this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep);
+            this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep, initBranch);
 
-            syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s)`);
+            syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s)${branchLabel}`);
 
             // Show what was synced
             console.log('');
