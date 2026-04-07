@@ -52,7 +52,7 @@ export class RedeemCommand {
     // 4. If user already has the master key, they're already set up
     if (hasOrgKey(orgId, userId)) {
       console.log('');
-      console.log('  \x1b[32mYou already have access to this organization.\x1b[0m');
+      console.log('  \x1b[32mYou\'re all set — your encryption keys are configured for this organization.\x1b[0m');
       console.log(`  Run \x1b[1mcapy\x1b[0m in a project directory to sync secrets.`);
       console.log('');
       return;

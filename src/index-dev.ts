@@ -341,7 +341,7 @@ program
   .description('Show current session info')
   .action(async () => {
     const { InfoCommand } = await import('./commands/infoCommand');
-    const cmd = new InfoCommand(process.env.CAPY_API_URL);
+    const cmd = new InfoCommand(process.env.CAPY_API_URL, true);
     await cmd.execute();
   });
 
@@ -350,7 +350,7 @@ program
   .description('List organization members and their project access')
   .action(async () => {
     const { UsersCommand } = await import('./commands/usersCommand');
-    const cmd = new UsersCommand(process.env.CAPY_API_URL);
+    const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
     await cmd.execute();
   });
 
