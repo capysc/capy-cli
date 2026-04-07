@@ -434,31 +434,40 @@ async function testInitUserA(): Promise<void> {
     user: 'A',
     timeout: 30000,
     interactions: [
-      // Create new org (first option in org selection — only shows "Create new" for new user)
+      // Create new org
       { waitFor: 'Organization name:', send: 'e2e-test-org\n' },
       // Project name
       { waitFor: 'Project name', send: 'user1\n' },
       // Recovery phrase confirmation
       { waitFor: 'I have saved my recovery phrase', send: 'y\n' },
-      // Sync local variables
-      { waitFor: /Synced.*variable/, send: '' },
-      // Deploy prompt — push to e2e-test
-      { waitFor: /Deploy secrets to Capy branch/, send: '\n', delay: 500 },
+      // Select environment branch — pick "development" (default, first option)
+      { waitFor: 'Select the branch', send: '\n' },
+      // Wait for completion
+      { waitFor: /capy deploy|Ready to work/, send: '' },
     ],
   });
 
   assert(result.exitCode === 0, `User A init failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
   assert(existsSync(join(SANDBOX_USER1, 'keep.lock')), 'keep.lock file not created');
   assert(result.stdout.includes('10') || result.stdout.includes('variable'), 'Expected 10 variables synced');
+  assert(result.stdout.includes('capy deploy'), 'Expected deploy hint in output');
 
-  // The deploy flow inside capy-dev should have:
-  // 1. Auto-created the capy branch "e2e-test" (matching the git branch)
-  // 2. Committed keep.lock
-  // 3. Pushed to origin/e2e-test
-  assert(
-    result.stdout.includes('Pushed') || result.stdout.includes('pushed'),
-    `Expected deploy to push keep.lock. stdout: ${result.stdout.slice(-500)}`,
-  );
+  // Deploy to e2e-test git branch
+  log('Deploying User A secrets to e2e-test...');
+  const deployResult = await spawnCapy(['deploy'], {
+    cwd: SANDBOX_USER1,
+    user: 'A',
+    timeout: 30000,
+    interactions: [
+      // Step 1: Create a deployment PR (first option)
+      { waitFor: /Create a deployment PR/, send: '\n', delay: 500 },
+      // Step 2: Enter git branch
+      { waitFor: /Enter the git branch/, send: 'e2e-test\n', delay: 300 },
+      // Step 3: Deploy directly
+      { waitFor: /Deploy directly/, send: '\n', delay: 500 },
+    ],
+  });
+  assert(deployResult.exitCode === 0, `Deploy failed: ${deployResult.stdout}\n${deployResult.stderr}`);
 }
 
 /** Verify branch was created */
@@ -582,9 +591,7 @@ async function testUserBSyncAfterRedeem(): Promise<void> {
     user: 'B',
     timeout: 30000,
     interactions: [
-      // Auto-branch-switch prompt: git branch e2e-test matches capy branch
-      { waitFor: /Switch to secrets branch|up to date|variable|conflict|Pull/, send: 'y\n', delay: 300 },
-      // Sync result
+      // Sync result — no branch-switch prompt (capy branches are environment-scoped)
       { waitFor: /up to date|variable|conflict|Pull|Sync completed|Deploy|Continue/, send: '\n', delay: 300 },
       { waitFor: /Sync completed|up to date|Deploy|Continue/, send: '' },
     ],
@@ -618,26 +625,22 @@ async function testSyncConflict(): Promise<void> {
     user: 'A',
     timeout: 30000,
     interactions: [
-      // May prompt to switch to e2e-test capy branch (if .capy/branch not set yet)
-      { waitFor: /Switch to secrets branch|SENDGRID_KEY/, send: 'y\n', delay: 500 },
       // Conflict resolution — use local (first option, just press enter)
-      { waitFor: /SENDGRID_KEY|up to date/, send: '\n', delay: 500 },
+      { waitFor: 'SENDGRID_KEY', send: '\n', delay: 500 },
       // Confirm push to capy
       { waitFor: /Push.*capy/i, send: 'y\n', delay: 300 },
       // Apply changes
       { waitFor: /Apply these changes/i, send: 'y\n', delay: 300 },
-      // Deploy — push to e2e-test (first option)
-      { waitFor: /Deploy secrets to Capy branch/, send: '\n', delay: 500 },
+      // Deploy step 1: Create a deployment PR (first option)
+      { waitFor: /Create a deployment PR/, send: '\n', delay: 500 },
+      // Deploy step 2: Enter git branch (accept default)
+      { waitFor: /Enter the git branch/, send: '\n', delay: 300 },
+      // Deploy step 3: Deploy directly (first option)
+      { waitFor: /Deploy directly/, send: '\n', delay: 500 },
     ],
   });
 
   assert(result.exitCode === 0, `Sync conflict resolution failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
-
-  // Deploy flow inside capy-dev should have committed and pushed keep.lock
-  assert(
-    result.stdout.includes('Pushed') || result.stdout.includes('pushed'),
-    `Expected deploy to push keep.lock after conflict resolution`,
-  );
 }
 
 /** Phase 5b: User B pulls updated SENDGRID_KEY */
@@ -761,16 +764,21 @@ async function testBranching(): Promise<void> {
       { waitFor: 'SENDGRID_KEY', send: '\n', delay: 500 },
       { waitFor: /Push.*capy/i, send: 'y\n', delay: 300 },
       { waitFor: /Apply these changes/i, send: 'y\n', delay: 300 },
-      { waitFor: /Deploy secrets to Capy branch/, send: '\n', delay: 500 },
+      // Deploy step 1: Create a deployment PR
+      { waitFor: /Create a deployment PR/, send: '\n', delay: 500 },
+      // Deploy step 2: Enter git branch (accept default)
+      { waitFor: /Enter the git branch/, send: '\n', delay: 300 },
+      // Deploy step 3: Deploy directly
+      { waitFor: /Deploy directly/, send: '\n', delay: 500 },
     ],
   });
   assert(syncResult.exitCode === 0, `Sync on protected branch failed: ${syncResult.stdout}\n${syncResult.stderr}`);
 
-  // 7.3: Switch back to e2e-test and verify SENDGRID_KEY reverted
-  log('User A switches back to e2e-test...');
+  // 7.3: Switch back to development and verify SENDGRID_KEY reverted
+  log('User A switches back to development...');
   sh('git checkout e2e-test', SANDBOX_USER1);
 
-  const checkoutResult2 = await spawnCapy(['checkout', 'e2e-test'], {
+  const checkoutResult2 = await spawnCapy(['checkout', 'development'], {
     cwd: SANDBOX_USER1,
     user: 'A',
     timeout: 15000,
@@ -830,9 +838,7 @@ async function testBranching(): Promise<void> {
     user: 'B',
     timeout: 60000,
     interactions: [
-      // Accept branch switch prompt (git e2e-test-main matches capy branch)
-      { waitFor: /Switch to secrets branch/, send: 'y\n', delay: 500 },
-      // Sync: handle any prompt (conflict, push, apply, deploy)
+      // No branch-switch prompt — capy branches are environment-scoped
       { waitFor: /SENDGRID_KEY|up to date|Everything|Push.*capy|Apply|Deploy|Continue|conflict/i, send: '\n', delay: 500 },
       { waitFor: /Push.*capy|Apply|Deploy|Continue|up to date|Sync completed/i, send: 'y\n', delay: 300 },
       { waitFor: /Apply|Deploy|Continue|up to date|Sync completed/i, send: 'y\n', delay: 300 },
@@ -894,23 +900,14 @@ async function testBranching(): Promise<void> {
     `Admin sync on protected branch failed (exit ${adminSyncResult.exitCode}): ${adminSyncResult.stdout}\n${adminSyncResult.stderr}`,
   );
 
-  // 7.8: User B switches to e2e-test — should be prompted to switch capy branch
-  log('User B switches to e2e-test (should prompt branch switch)...');
+  // 7.8: User B switches to development capy branch
+  log('User B switches to development capy branch...');
   sh('git checkout e2e-test', SANDBOX_USER2);
-
-  const branchSwitchResult = await spawnCapy([], {
+  const switchResult = await spawnCapy(['checkout', 'development'], {
     cwd: SANDBOX_USER2,
     user: 'B',
-    timeout: 30000,
-    interactions: [
-      // Should prompt to switch capy branch since git branch matches
-      { waitFor: /Switch to secrets branch|switch/i, send: 'y\n', delay: 300 },
-      // May have conflicts or be up to date
-      { waitFor: /SENDGRID_KEY|up to date|Everything/, send: '\n', delay: 500 },
-      { waitFor: /Push.*capy|up to date|Sync completed/i, send: 'y\n', delay: 300 },
-      { waitFor: /Apply these changes|Sync completed|up to date/i, send: 'y\n', delay: 300 },
-      { waitFor: /Deploy|Continue|completed|up to date/, send: '' },
-    ],
+    timeout: 15000,
+    interactions: [],
   });
 
   // Verify SENDGRID_KEY reverted to 123457
