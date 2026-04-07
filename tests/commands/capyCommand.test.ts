@@ -2,7 +2,14 @@ import { mock, spyOn, beforeEach, afterEach, afterAll, describe, test, expect } 
 
 // Mock all dependencies — must come before imports of mocked modules
 mock.module('../../src/core/projectManager', () => ({
-  ProjectManager: mock(() => ({})),
+  ProjectManager: mock(() => ({
+    readKeepFile: () => null,
+    readActiveBranch: () => null,
+    readSyncState: () => null,
+    getDefaultProjectName: () => 'test-project',
+    writeActiveBranch: () => undefined,
+    writeSyncStateUserId: () => undefined,
+  })),
 }));
 mock.module('../../src/files/fileManager', () => ({
   FileManager: mock(() => ({})),
@@ -35,7 +42,15 @@ mock.module('../../src/config/globalConfig', () => ({
 }));
 mock.module('inquirer', () => ({
   default: {
-    prompt: mock(() => Promise.resolve({ orgId: 'org-123', orgName: 'Test Org' })),
+    prompt: mock(() => Promise.resolve({
+      orgId: 'org-123',
+      orgName: 'Test Org',
+      envBranch: 'development',
+      confirmed: true,
+      action: 'cancel',
+      targetBranch: 'main',
+      deployMethod: 'cancel',
+    })),
     Separator: class Separator { constructor() {} },
   },
 }));
@@ -91,6 +106,7 @@ describe('CapyCommand', () => {
       readDecryptKey: mock(() => undefined),
       readSyncState: mock(() => null),
       readActiveBranch: mock(() => null),
+      writeActiveBranch: mock(() => undefined),
       writeSyncStateUserId: mock(() => undefined)
     } as any;
 
@@ -122,7 +138,9 @@ describe('CapyCommand', () => {
       setTokenRefresher: mock(() => undefined),
       initializeProject: mock(() => undefined),
       getDecryptData: mock(() => undefined),
-      pushVariables: mock(() => undefined)
+      pushVariables: mock(() => undefined),
+      createBranch: mock(() => undefined),
+      listBranches: mock(() => [])
     } as any;
 
     mockSyncEngine = {
@@ -433,7 +451,7 @@ describe('CapyCommand', () => {
         'proj-123',
         { API_KEY: 'test-key', DB_URL: 'postgres://localhost' },
         expect.any(Object),
-        undefined,
+        'development',
         'mock-derived-project-key-hex'
       );
       expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
