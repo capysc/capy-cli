@@ -91,6 +91,11 @@ export class RedeemCommand {
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
     saveMasterKey(orgId, encryptedM, userId);
 
+    // Write user ID to sync-state so next `capy` run loads the right session
+    const { ProjectManager } = await import('../core/projectManager');
+    const pm = new ProjectManager();
+    pm.writeSyncStateUserId(userId);
+
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');
     console.log('');
