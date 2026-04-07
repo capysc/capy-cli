@@ -8,9 +8,11 @@ const YELLOW = '\x1b[33m';
 
 export class InfoCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(): Promise<void> {
@@ -24,7 +26,7 @@ export class InfoCommand {
 
     const orgId = projectState.organizationId;
 
-    const authService = new AuthService(this.apiUrl, false, projectState.userId);
+    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');

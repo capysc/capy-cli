@@ -14,9 +14,11 @@ import {
 
 export class DeploySetupCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(): Promise<void> {
@@ -33,7 +35,7 @@ export class DeploySetupCommand {
       const projectId = projectState.projectId;
 
       // Authenticate
-      const authService = new AuthService(this.apiUrl, false, projectState.userId);
+      const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
@@ -109,9 +111,11 @@ export class DeploySetupCommand {
 
 export class DeployDecryptCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(): Promise<void> {
@@ -172,9 +176,11 @@ export class DeployDecryptCommand {
 
 export class DeployRevokeCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(deployIdPrefix: string): Promise<void> {
@@ -189,7 +195,7 @@ export class DeployRevokeCommand {
 
       const orgId = projectState.organizationId;
 
-      const authService = new AuthService(this.apiUrl, false, projectState.userId);
+      const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
@@ -211,9 +217,11 @@ export class DeployRevokeCommand {
 
 export class DeployListCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(): Promise<void> {
@@ -229,7 +237,7 @@ export class DeployListCommand {
       const orgId = projectState.organizationId;
       const projectId = projectState.projectId;
 
-      const authService = new AuthService(this.apiUrl, false, projectState.userId);
+      const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {

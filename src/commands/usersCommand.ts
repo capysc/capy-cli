@@ -6,9 +6,11 @@ import { Spinner } from '../ui/spinner';
 
 export class UsersCommand {
   private apiUrl?: string;
+  private devMode: boolean;
 
-  constructor(apiUrl?: string) {
+  constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl;
+    this.devMode = devMode;
   }
 
   async execute(): Promise<void> {
@@ -23,7 +25,7 @@ export class UsersCommand {
     const orgId = projectState.organizationId;
 
     // Authenticate
-    const authService = new AuthService(this.apiUrl, false, projectState.userId);
+    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl);
     const authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
