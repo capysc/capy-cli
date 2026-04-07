@@ -597,8 +597,35 @@ export class CapyCommand {
       );
     }
 
-    // Get remote environment (branch-aware, pinned to keep.lock version)
+    // Check if current git branch matches a Capy secrets branch
     let activeBranch = projectState.activeBranch;
+    try {
+      const gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+      if (gitBranch && gitBranch !== 'HEAD' && gitBranch !== (activeBranch || '')) {
+        const branches = await this.serviceClient.listBranches(projectState.projectId!);
+        const matchingBranch = branches.find(b => b.name === gitBranch);
+        if (matchingBranch) {
+          const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+          const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+          console.log(`  Git branch ${bold(gitBranch)} matches Capy secrets branch ${bold(matchingBranch.name)}${matchingBranch.is_protected ? ` ${grey('(protected)')}` : ''}`);
+          const { switchBranch } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'switchBranch',
+            message: `Switch to secrets branch "${gitBranch}"?`,
+            default: true,
+          }]);
+          if (switchBranch) {
+            activeBranch = gitBranch;
+            this.projectManager.writeActiveBranch(activeBranch);
+            console.log(`  Switched to secrets branch: ${bold(activeBranch)}\n`);
+          }
+        }
+      }
+    } catch {
+      // Not a git repo or git not available — skip branch matching
+    }
+
+    // Get remote environment (branch-aware, pinned to keep.lock version)
     const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
 
     // Compute keepHash if keep.lock has variables (version pinning)
