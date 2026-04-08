@@ -354,15 +354,15 @@ describe('SyncEngine', () => {
   describe('mergeWithKeep', () => {
     test('should update existing variables in keep', () => {
       const keep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         variables: {
-          EXISTING_VAR: [{
+          EXISTING_VAR: {
             resource_id: 'res_old',
-            value_hash: 'abc12345'
-          }]
+            local: 'abc12345',
+          }
         }
       };
 
@@ -370,10 +370,10 @@ describe('SyncEngine', () => {
         EXISTING_VAR: { resource_id: 'res_new', value_hash: 'newhash123' }
       };
 
-      const result = syncEngine.mergeWithKeep(keep, pushedVariables);
+      const result = syncEngine.mergeWithKeep(keep, pushedVariables, 'local');
 
-      expect(result.variables.EXISTING_VAR[0].resource_id).toBe('res_new');
-      expect(result.variables.EXISTING_VAR[0].value_hash).toBe('newhash123');
+      expect(result.variables.EXISTING_VAR.resource_id).toBe('res_new');
+      expect(result.variables.EXISTING_VAR.local).toBe('newhash123');
     });
 
     test('should add new variables to keep', () => {
