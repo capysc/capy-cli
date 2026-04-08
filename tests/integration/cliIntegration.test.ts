@@ -210,15 +210,15 @@ DEBUG=true`;
 
     test('should merge keep file with pushed variables', () => {
       const originalKeep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         variables: {
-          EXISTING_VAR: [{
+          EXISTING_VAR: {
             resource_id: 'res_old',
-            value_hash: 'abc12345'
-          }]
+            local: 'abc12345',
+          }
         }
       };
 
@@ -227,11 +227,11 @@ DEBUG=true`;
         EXISTING_VAR: { resource_id: 'res_updated' }
       };
 
-      const updatedKeep = syncEngine.mergeWithKeep(originalKeep, pushedVariables);
+      const updatedKeep = syncEngine.mergeWithKeep(originalKeep, pushedVariables, 'local');
 
       expect(updatedKeep.variables.NEW_VAR).toBeDefined();
-      expect(updatedKeep.variables.NEW_VAR[0].resource_id).toBe('res_new');
-      expect(updatedKeep.variables.EXISTING_VAR[0].resource_id).toBe('res_updated');
+      expect(updatedKeep.variables.NEW_VAR.resource_id).toBe('res_new');
+      expect(updatedKeep.variables.EXISTING_VAR.resource_id).toBe('res_updated');
     });
 
     test('should validate user decisions correctly', () => {
