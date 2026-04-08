@@ -97,16 +97,16 @@ describe('ProjectManager', () => {
     });
 
     test('should read and validate keep.lock file successfully', () => {
-      const mockKeep: KeepFile = {
-        version: '3.0',
+      const mockKeep = {
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {
-          'API_KEY': [{
+          'API_KEY': {
             resource_id: 'res_789',
-            value_hash: 'abc12345'
-          }]
+            local: 'abc12345',
+          }
         }
       };
 
