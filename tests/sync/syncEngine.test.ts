@@ -378,7 +378,7 @@ describe('SyncEngine', () => {
 
     test('should add new variables to keep', () => {
       const keep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
@@ -389,11 +389,10 @@ describe('SyncEngine', () => {
         NEW_VAR: { resource_id: 'res_123' }
       };
 
-      const result = syncEngine.mergeWithKeep(keep, pushedVariables);
+      const result = syncEngine.mergeWithKeep(keep, pushedVariables, 'local');
 
       expect(result.variables.NEW_VAR).toBeDefined();
-      expect(result.variables.NEW_VAR[0].resource_id).toBe('res_123');
-      expect(result.variables.NEW_VAR[0].value_hash).toBe('');
+      expect(result.variables.NEW_VAR.resource_id).toBe('res_123');
     });
   });
 
