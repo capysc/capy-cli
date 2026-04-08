@@ -142,7 +142,7 @@ describe('ProjectManager', () => {
 
     test('should throw CapyError for invalid variables structure', () => {
       const invalidKeep = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
