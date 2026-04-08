@@ -237,19 +237,16 @@ describe('FileManager', () => {
   });
 
   describe('writeKeepFile deterministic output', () => {
-    test('should sort variables alphabetically and entries by branch', () => {
+    test('should sort variables alphabetically with v4 flat objects', () => {
       const keep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {
-          ZEBRA_VAR: [{ resource_id: 'res_z', value_hash: 'hz' }],
-          ALPHA_VAR: [
-            { resource_id: 'res_a_staging', branch: 'staging', value_hash: 'has' },
-            { resource_id: 'res_a', value_hash: 'ha' },
-          ],
-          MIDDLE_VAR: [{ resource_id: 'res_m', value_hash: 'hm' }],
+          ZEBRA_VAR: { resource_id: 'res_z', local: 'hz' },
+          ALPHA_VAR: { resource_id: 'res_a', local: 'ha', staging: 'has' },
+          MIDDLE_VAR: { resource_id: 'res_m', local: 'hm' },
         }
       };
 
@@ -263,9 +260,10 @@ describe('FileManager', () => {
       const varNames = Object.keys(parsed.variables);
       expect(varNames).toEqual(['ALPHA_VAR', 'MIDDLE_VAR', 'ZEBRA_VAR']);
 
-      // Entries should be sorted: branchless first, then alphabetical
-      expect(parsed.variables.ALPHA_VAR[0].branch).toBeUndefined();
-      expect(parsed.variables.ALPHA_VAR[1].branch).toBe('staging');
+      // v4: flat objects with environments in canonical order
+      expect(parsed.variables.ALPHA_VAR.resource_id).toBe('res_a');
+      expect(parsed.variables.ALPHA_VAR.local).toBe('ha');
+      expect(parsed.variables.ALPHA_VAR.staging).toBe('has');
     });
 
     test('should produce identical output regardless of insertion order', () => {
@@ -445,7 +443,7 @@ describe('FileManager', () => {
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '.env\n.capy\n',
+        '.env\n.env.staging\n.env.production\n.capy\n',
         'utf-8'
       );
     });
