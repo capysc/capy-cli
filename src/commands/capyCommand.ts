@@ -210,18 +210,6 @@ export class CapyCommand {
       this.serviceClient.setToken(updatedToken);
     }
 
-    // Prompt for project name
-    const defaultName = this.projectManager.getDefaultProjectName();
-    const projectName = await this.promptEngine.promptForProjectName(defaultName);
-
-    // Initialize project on service
-    const initSpinner = ora('Creating project...').start();
-    const projectResult = await this.serviceClient.initializeProject(
-      projectName,
-      selectedOrg.id
-    );
-    initSpinner.succeed(`Project "${projectName}" created`);
-
     // Ensure org has a master key — generate seed phrase if first time
     const currentToken = this.authService.getToken();
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
@@ -290,6 +278,18 @@ export class CapyCommand {
       const encryptedM = encryptMasterKey(masterKey, wrappingKey);
       saveMasterKey(selectedOrg.id, encryptedM, authResult.user_id!);
     }
+
+    // Prompt for project name
+    const defaultName = this.projectManager.getDefaultProjectName();
+    const projectName = await this.promptEngine.promptForProjectName(defaultName);
+
+    // Initialize project on service
+    const initSpinner = ora('Creating project...').start();
+    const projectResult = await this.serviceClient.initializeProject(
+      projectName,
+      selectedOrg.id
+    );
+    initSpinner.succeed(`Project "${projectName}" created`);
 
     const keySpinner = ora('Generating encryption keys...').start();
 
