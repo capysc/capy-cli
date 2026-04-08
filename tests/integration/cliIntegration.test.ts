@@ -111,15 +111,15 @@ DEBUG=true`;
 
     test('should create proper keep file structure', () => {
       const mockKeep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'integration-test',
         variables: {
-          API_KEY: [{
+          API_KEY: {
             resource_id: 'res_123',
-            value_hash: 'testhash'
-          }]
+            local: 'testhash',
+          }
         }
       };
 
