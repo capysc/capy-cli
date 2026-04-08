@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { ProjectState, KeepFile, KeepV4Variable, DecryptKey, SyncState, CapyError, ERROR_CODES, Environment } from '../types/index';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -50,6 +50,7 @@ export class ProjectManager {
       projectName,
       organizationId,
       projectId,
+      activeEnvironment: this.readActiveEnvironment(),
       activeBranch: this.readActiveBranch(),
       userId: syncState?.user_id,
     };
@@ -71,6 +72,10 @@ export class ProjectManager {
     return join(this.getCapyDir(), 'branch');
   }
 
+  getActiveEnvironmentPath(): string {
+    return join(this.getCapyDir(), 'environment');
+  }
+
   readActiveBranch(): string | undefined {
     const branchPath = this.getActiveBranchPath();
     if (!existsSync(branchPath)) return undefined;
@@ -87,6 +92,27 @@ export class ProjectManager {
     if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
     const branchPath = this.getActiveBranchPath();
     writeFileSync(branchPath, branch || '', { encoding: 'utf-8', mode: 0o600 });
+  }
+
+  readActiveEnvironment(): Environment | undefined {
+    const envPath = this.getActiveEnvironmentPath();
+    if (!existsSync(envPath)) return undefined;
+    try {
+      const content = readFileSync(envPath, 'utf-8').trim();
+      if (content === 'local' || content === 'staging' || content === 'production') {
+        return content;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  writeActiveEnvironment(environment: Environment): void {
+    const capyDir = this.getCapyDir();
+    if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
+    const envPath = this.getActiveEnvironmentPath();
+    writeFileSync(envPath, environment, { encoding: 'utf-8', mode: 0o600 });
   }
 
   getSyncStatePath(): string {
@@ -137,7 +163,9 @@ export class ProjectManager {
   }
 
   /**
-   * Migrate older keep.lock formats to current v3 (deterministic, no timestamps).
+   * Migrate older keep.lock formats to current v4 (environments).
+   * v2 → v3: remove timestamps
+   * v3 → v4: convert branch-based arrays to per-environment flat objects
    */
   private migrateKeepIfNeeded(raw: any): KeepFile {
     if (raw.version === '2.0') {
@@ -152,6 +180,42 @@ export class ProjectManager {
       }
       raw.version = '3.0';
     }
+
+    if (raw.version === '3.0') {
+      // Convert v3 branch-based arrays to v4 environment flat objects
+      const newVars: Record<string, KeepV4Variable> = {};
+      if (raw.variables) {
+        for (const [varName, entries] of Object.entries(raw.variables) as [string, any[]][]) {
+          if (!Array.isArray(entries)) {
+            // Already v4 format somehow
+            newVars[varName] = entries;
+            continue;
+          }
+          const v4: KeepV4Variable = { resource_id: entries[0]?.resource_id || '' };
+          for (const entry of entries) {
+            // Map branch names to environments
+            const branch = entry.branch || '';
+            let env: Environment;
+            if (!branch || branch === 'development') {
+              env = 'local';
+            } else if (branch === 'staging') {
+              env = 'staging';
+            } else if (branch === 'production') {
+              env = 'production';
+            } else {
+              // Default unknown branches to local
+              env = 'local';
+            }
+            v4[env] = entry.value_hash;
+            if (!v4.resource_id) v4.resource_id = entry.resource_id;
+          }
+          newVars[varName] = v4;
+        }
+      }
+      raw.variables = newVars;
+      raw.version = '4.0';
+    }
+
     return raw as KeepFile;
   }
 

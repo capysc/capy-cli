@@ -13,10 +13,11 @@ import {
   Organization,
   ProjectState,
   KeepFile,
-  KeepVariableEntry,
+  KeepV4Variable,
   SyncState,
   CapyError,
-  ERROR_CODES
+  ERROR_CODES,
+  Environment,
 } from '../types/index';
 import {
   generateSeedPhrase,
@@ -299,9 +300,9 @@ export class CapyCommand {
       authResult.user_id!,
     );
 
-    // Create keep file (v3 format — deterministic, no timestamps)
+    // Create keep file (v4 format — environments)
     const keep: KeepFile = {
-      version: '3.0',
+      version: '4.0',
       org_id: projectResult.org_id,
       project_id: projectResult.project_id,
       project_name: projectResult.project_name,
@@ -311,22 +312,7 @@ export class CapyCommand {
     this.fileManager.writeKeepFile(keep);
     keySpinner.text = 'Created keep.lock configuration file';
 
-    // Get remote data (for existing variables, not for key)
-    let remoteData = { env_content: '', decrypt_key: '', expires_at: '' };
-    try {
-      remoteData = await this.serviceClient.getDecryptData(projectResult.project_id);
-    } catch {
-      // Service unavailable
-    }
-
-    // If remote has existing variables, pull them
-    if (remoteData.env_content) {
-      const envVars = this.fileManager.parseEnvContent(remoteData.env_content);
-      this.fileManager.writeEncryptedEnvFile(envVars, encryptionKey, undefined, keep);
-      keySpinner.succeed(`Retrieved and encrypted ${Object.keys(envVars).length} variables`);
-    } else {
-      keySpinner.succeed('Project initialized');
-    }
+    keySpinner.succeed('Project initialized');
 
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
@@ -387,77 +373,80 @@ export class CapyCommand {
 
         console.log(`\nFound existing .env file with ${localVarCount} variable(s)`);
 
-        // Select environment branch for storing secrets
-        const CUSTOM_BRANCH = '__custom__';
-        const { envBranch } = await inquirer.prompt([{
+        // Select environment for storing secrets
+        const { selectedEnv } = await inquirer.prompt([{
           type: 'list',
-          name: 'envBranch',
-          message: `Select the branch for saving the current ${localVarCount} variable(s):`,
+          name: 'selectedEnv',
+          message: `Select the environment for saving the current ${localVarCount} variable(s):`,
           choices: [
-            { name: 'development (default)', value: 'development' },
+            { name: 'local (default)', value: 'local' },
             { name: 'staging', value: 'staging' },
             { name: 'production', value: 'production' },
-            { name: 'custom branch', value: CUSTOM_BRANCH },
           ],
         }]);
 
-        let initBranch: string = envBranch;
-        if (envBranch === CUSTOM_BRANCH) {
-          const { customName } = await inquirer.prompt([{
-            type: 'input',
-            name: 'customName',
-            message: 'Enter branch name:',
-            validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-          }]);
-          initBranch = customName.trim();
-        }
+        const initEnvironment: Environment = selectedEnv;
+        this.projectManager.writeActiveEnvironment(initEnvironment);
 
-        // Create the capy branch on the service
-        try {
-          await this.serviceClient.createBranch(projectResult.project_id, initBranch);
-        } catch {
-          // Branch may already exist
-        }
-        this.projectManager.writeActiveBranch(initBranch);
-
-        const syncSpinner = ora(`Syncing local variables to keep (${initBranch})...`).start();
+        const syncSpinner = ora(`Syncing local variables to keep (${initEnvironment})...`).start();
 
         try {
-          const pushResult = await this.serviceClient.pushVariables(
+          const { createHash } = await import('crypto');
+          const { deriveResourceIdV4: deriveResourceId } = await import('../crypto/resourceId');
+          const { Encryptor } = await import('../crypto/encryptor');
+
+          // Build encrypted env blob and keep.lock hashes
+          const encrypted: Record<string, string> = {};
+          const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
+          for (const [key, value] of Object.entries(localEnv)) {
+            const resourceId = deriveResourceId(key);
+            const enc = Encryptor.encrypt(value, encryptionKey);
+            encrypted[key] = `capy:${resourceId}:${enc}`;
+            pushedVars[key] = {
+              resource_id: resourceId,
+              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+            };
+          }
+
+          const envBlob = Object.entries(encrypted)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n');
+
+          const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initEnvironment);
+          const keepJson = JSON.stringify(updatedKeep);
+
+          await this.serviceClient.pushEnvironments(
             projectResult.project_id,
-            localEnv,
-            keep,
-            initBranch,
-            encryptionKey
+            keepJson,
+            { [initEnvironment]: envBlob },
           );
 
-          if (pushResult.success) {
-            const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables, initBranch);
-            this.fileManager.writeKeepFile(updatedKeep);
-            this.fileManager.writeSyncState({
-              last_sync: new Date().toISOString(),
-              synced_variables: Object.keys(localEnv),
-              user_id: authResult.user_id,
-            });
+          this.fileManager.writeKeepFile(updatedKeep);
+          this.fileManager.writeSyncState({
+            last_sync: new Date().toISOString(),
+            synced_variables: Object.keys(localEnv),
+            user_id: authResult.user_id,
+          });
 
-            // Backup plaintext .env before encrypting
-            this.fileManager.backupPlaintextEnv(this.options.envPath);
+          // Backup plaintext .env before encrypting
+          this.fileManager.backupPlaintextEnv(this.options.envPath);
 
-            // Encrypt the local .env file
-            this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, updatedKeep, initBranch);
+          // Encrypt the local .env file
+          const envFilePath = this.fileManager.getEnvPathForEnvironment(initEnvironment);
+          this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, envFilePath, updatedKeep);
 
-            syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s) (${initBranch})`);
+          syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s) (${initEnvironment})`);
 
-            // Show what was synced
-            console.log('');
-            for (const varName of Object.keys(localEnv)) {
-              console.log(`  ${varName}`);
-            }
+          // Install git hooks
+          this.installGitHooks();
 
-            console.log(`\nTo deploy these secrets, run \x1b[1mcapy deploy\x1b[0m`);
-          } else {
-            syncSpinner.fail('Failed to sync variables');
+          // Show what was synced
+          console.log('');
+          for (const varName of Object.keys(localEnv)) {
+            console.log(`  ${varName}`);
           }
+
+          console.log(`\nTo deploy these secrets, run \x1b[1mcapy deploy\x1b[0m`);
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
           console.log('You can run \'capy\' again to retry syncing');
@@ -466,6 +455,69 @@ export class CapyCommand {
     }
 
     console.log('\nReady to work!');
+  }
+
+  /**
+   * Install git hooks (post-checkout, post-merge, pre-push).
+   * Idempotent: checks for existing marker before appending.
+   */
+  private installGitHooks(): void {
+    try {
+      const gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+      const hooksDir = `${gitDir}/hooks`;
+      const { mkdirSync, readFileSync: readFs, writeFileSync: writeFs, chmodSync } = require('fs');
+      const { existsSync: exists } = require('fs');
+
+      if (!exists(hooksDir)) {
+        mkdirSync(hooksDir, { recursive: true });
+      }
+
+      const MARKER = '# --- capy auto-sync (do not remove) ---';
+      const END_MARKER = '# --- end capy ---';
+
+      const hooks: Record<string, string> = {
+        'post-checkout': [
+          MARKER,
+          'if [ "$3" = "1" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-merge" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-apply" ]; then',
+          '  command -v capy >/dev/null 2>&1 && capy',
+          'fi',
+          END_MARKER,
+        ].join('\n'),
+        'post-merge': [
+          MARKER,
+          'command -v capy >/dev/null 2>&1 && capy',
+          END_MARKER,
+        ].join('\n'),
+        'pre-push': [
+          MARKER,
+          'while read local_ref local_sha remote_ref remote_sha; do',
+          '  if [ "$local_sha" != "0000000000000000000000000000000000000000" ] && \\',
+          '     git diff --name-only "$remote_sha" "$local_sha" 2>/dev/null | grep -q "keep.lock"; then',
+          '    command -v capy >/dev/null 2>&1 && capy push',
+          '    break',
+          '  fi',
+          'done',
+          END_MARKER,
+        ].join('\n'),
+      };
+
+      for (const [hookName, content] of Object.entries(hooks)) {
+        const hookPath = `${hooksDir}/${hookName}`;
+        let existing = '';
+        if (exists(hookPath)) {
+          existing = readFs(hookPath, 'utf-8');
+          // Already installed — skip
+          if (existing.includes(MARKER)) continue;
+        }
+
+        const shebang = existing ? '' : '#!/bin/sh\n';
+        const separator = existing && !existing.endsWith('\n') ? '\n' : '';
+        writeFs(hookPath, `${existing}${separator}${shebang}${content}\n`, 'utf-8');
+        chmodSync(hookPath, 0o755);
+      }
+    } catch {
+      // Not a git repo or hooks dir inaccessible — silently skip
+    }
   }
 
   /**
@@ -519,7 +571,7 @@ export class CapyCommand {
     return selected || undefined;
   }
 
-  private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
+  private displayHeader(projectName: string, orgName: string, userName: string, environment?: string, branch?: string): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -556,7 +608,7 @@ export class CapyCommand {
     const content = [
       `Project:      ${projectName === 'not yet created' ? notCreated : bold(projectName)}`,
       `Organization: ${orgName === 'not yet created' ? notCreated : orgName}`,
-      `Branch:       ${branch || grey('none')}`,
+      `Environment:  ${environment || grey('local')}`,
       '',
       shimmer(`Welcome ${userName}`),
     ];
@@ -609,6 +661,7 @@ export class CapyCommand {
       projectState.projectName || 'not yet created',
       orgName,
       authResult.user_first_name || authResult.user_email || '',
+      projectState.activeEnvironment,
       projectState.activeBranch,
     );
 
@@ -630,112 +683,83 @@ export class CapyCommand {
       );
     }
 
-    // Capy branches track environments (development/staging/production), not git branches.
-    // The active branch is set explicitly via `capy checkout` or during init.
-    let activeBranch = projectState.activeBranch;
+    // v4: Environments track secrets, not branches.
+    // If no environment selected, prompt.
+    let activeEnvironment: Environment = projectState.activeEnvironment || 'local';
 
-    // Get remote environment (branch-aware, pinned to keep.lock version)
-    const fetchSpinner = ora(activeBranch ? `Retrieving remote .env (${activeBranch})...` : 'Retrieving remote .env...').start();
-
-    // Compute keepHash if keep.lock has variables (version pinning)
-    const currentKeep = this.projectManager.readKeepFile();
-    const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
-    const keepHash = hasVariables
-      ? SyncEngine.computeKeepHash(currentKeep!, activeBranch)
-      : undefined;
-
-    let decryptData;
-    try {
-      decryptData = await this.serviceClient.getDecryptData(
-        projectState.projectId!,
-        activeBranch,
-        keepHash,
-        keepHash ? true : false, // include_latest_hash when pinning
-      );
-    } catch (error: any) {
-      if (error instanceof CapyError && error.details?.status === 404) {
-        const errorMsg = error.message || '';
-        fetchSpinner.stop();
-
-        // Snapshot not found — fall back to latest
-        if (errorMsg.includes('Snapshot not found')) {
-          console.log('\n  Pinned version no longer exists in S3. Fetching latest...');
-          decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
-        }
-        // Branch not found — prompt to switch
-        else if (errorMsg.includes('Branch') || (errorMsg.includes('not found') && activeBranch)) {
-          activeBranch = await this.promptBranchSwitch(projectState.projectId!, activeBranch!);
-          decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch || undefined);
-        }
-        // Project or branch not found — do not recreate during sync
-        else {
-          throw error;
-        }
-      } else {
-        throw error;
-      }
-    }
-
-    // Check if newer versions are available
-    if (keepHash && decryptData.latest_keep_hash && keepHash !== decryptData.latest_keep_hash) {
-      fetchSpinner.stop();
-      const { pullLatest } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'pullLatest',
-        message: 'Newer secret versions are available. Pull latest?',
-        default: true,
+    if (!projectState.activeEnvironment) {
+      const { selectedEnv } = await inquirer.prompt([{
+        type: 'list',
+        name: 'selectedEnv',
+        message: 'Select environment:',
+        choices: [
+          { name: 'local (default)', value: 'local' },
+          { name: 'staging', value: 'staging' },
+          { name: 'production', value: 'production' },
+        ],
       }]);
-
-      if (pullLatest) {
-        const latestSpinner = ora('Fetching latest...').start();
-        decryptData = await this.serviceClient.getDecryptData(projectState.projectId!, activeBranch);
-        latestSpinner.succeed('Fetched latest');
-      }
+      activeEnvironment = selectedEnv;
+      this.projectManager.writeActiveEnvironment(activeEnvironment);
     }
+
     const encryptionKey = resolveProjectKey(
       projectState.organizationId!,
       projectState.projectId!,
       authResult.user_id!,
     );
 
-    // Parse remote (encrypted) and decrypt for comparison
-    let remoteEnvEncrypted: Record<string, string> = {};
-    let remoteEnv: Record<string, string> = {};
-    if (decryptData.env_content) {
-      remoteEnvEncrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-      for (const [key, value] of Object.entries(remoteEnvEncrypted)) {
-        remoteEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
-      }
-    }
+    // Compute keepHash for content-addressed fetch
+    const currentKeep = this.projectManager.readKeepFile();
+    const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
+    const keepHash = hasVariables
+      ? SyncEngine.computeKeepHash(currentKeep!)
+      : undefined;
 
-    const branchLabel = activeBranch ? ` (${activeBranch})` : '';
-    fetchSpinner.succeed(`Retrieved remote .env${branchLabel} (${Object.keys(remoteEnv).length} variables)`);
+    // Fetch all three environment blobs from S3
+    const fetchSpinner = ora(`Retrieving remote secrets (${activeEnvironment})...`).start();
 
-    if (this.devMode) {
-      console.log(`\nRemote .env${branchLabel} (dev mode):`);
-      if (Object.keys(remoteEnvEncrypted).length === 0) {
-        console.log('  (empty)');
-      } else {
-        for (const [key, value] of Object.entries(remoteEnvEncrypted)) {
-          console.log(`  ${key}=${value}`);
+    const remoteEnvs: Partial<Record<Environment, Record<string, string>>> = {};
+
+    if (keepHash) {
+      for (const env of ['local', 'staging', 'production'] as const) {
+        try {
+          const blob = await this.serviceClient.getEnvironmentBlob(
+            projectState.projectId!,
+            keepHash,
+            env,
+          );
+          if (blob?.env_file) {
+            const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+            const decrypted: Record<string, string> = {};
+            for (const [key, value] of Object.entries(encrypted)) {
+              decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
+            }
+            remoteEnvs[env] = decrypted;
+          }
+        } catch {
+          // Environment blob not found — ok, just means it doesn't exist yet
         }
       }
-      console.log('');
+    } else {
+      // No keep_hash — no variables in keep.lock yet, nothing to fetch
     }
 
-    // Get local environment — decrypt if encrypted, read as-is if plaintext
+    const remoteEnv = remoteEnvs[activeEnvironment] || {};
+    const envLabel = ` (${activeEnvironment})`;
+    fetchSpinner.succeed(`Retrieved remote .env${envLabel} (${Object.keys(remoteEnv).length} variables)`);
+
+    // Read local environment file for active environment
+    const envFilePath = this.fileManager.getEnvPathForEnvironment(activeEnvironment);
     let localEnv: Record<string, string> = {};
     try {
-      const rawLocal = this.fileManager.readEnvFile(this.options.envPath);
+      const rawLocal = this.fileManager.readEnvFile(envFilePath);
       for (const [key, value] of Object.entries(rawLocal)) {
         if (value.startsWith('capy:')) {
           try {
             localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
           } catch {
-            // Value is encrypted with a different project's key — reject
             throw new CapyError(
-              `"${key}" is encrypted with a different project's key and cannot be used in this project. ` +
-              `This can happen if you reset project metadata (keep.lock/.capy) without clearing the .env file.`,
+              `"${key}" is encrypted with a different project's key and cannot be used in this project.`,
               ERROR_CODES.PERMISSION_DENIED,
               { variable: key }
             );
@@ -746,12 +770,10 @@ export class CapyCommand {
       }
     } catch (error: any) {
       if (error instanceof CapyError) throw error;
-      console.warn('Failed to read local .env');
       localEnv = {};
     }
 
     // Read sync state for deletion detection
-    // BUT: if local .env is missing/empty, ignore sync state and pull everything from remote
     const localEnvExists = Object.keys(localEnv).length > 0;
     const syncState = localEnvExists ? this.projectManager.readSyncState() : null;
 
@@ -780,15 +802,17 @@ export class CapyCommand {
 
     if (!hasChanges) {
       this.promptEngine.displaySuccess('Everything is up to date!');
-
-      // Always re-encrypt local .env (e.g. after `capy decrypt`)
+      // Always re-encrypt local .env
       const finalKeep = this.projectManager.readKeepFile();
-      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
+      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, envFilePath, finalKeep);
+
+      // Install hooks on every run (idempotent)
+      this.installGitHooks();
       return;
     }
 
     // Prompt for decisions
-    const decisions = await this.promptEngine.promptForChanges(changeSet, activeBranch);
+    const decisions = await this.promptEngine.promptForChanges(changeSet, activeEnvironment);
 
     // Validate decisions
     const validationErrors = this.syncEngine.validateDecisions(decisions, changeSet);
@@ -808,26 +832,27 @@ export class CapyCommand {
       return;
     }
 
-    // Perform sync operations
+    // v4: `capy` is pull-only. Apply decisions to update local .env files.
     const syncSpinner = ora('Syncing...').start();
 
-    // Apply decisions to create final env (all variables, merged)
+    // Apply decisions to create final env (merged)
     const finalEnv = this.syncEngine.applyDecisions(localEnv, remoteEnv, decisions);
 
-    // Push the full state to remote (branch-aware, replaces entire blob)
+    // Update keep.lock with new hashes for the active environment
     const keep = this.projectManager.readKeepFile();
-    const pushResult = await this.serviceClient.pushVariables(
-      projectState.projectId!,
-      finalEnv,
-      keep,
-      activeBranch,
-      encryptionKey
-    );
+    if (keep) {
+      const { createHash } = await import('crypto');
+      const { deriveResourceIdV4 } = await import('../crypto/resourceId');
 
-    let finalKeep = keep;
-    if (pushResult.success) {
-      // Update keep with resource_ids from push
-      finalKeep = this.syncEngine.mergeWithKeep(keep!, pushResult.variables, activeBranch);
+      const pushedVars: Record<string, { resource_id: string; value_hash?: string }> = {};
+      for (const [key, value] of Object.entries(finalEnv)) {
+        pushedVars[key] = {
+          resource_id: deriveResourceIdV4(key),
+          value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+        };
+      }
+
+      const finalKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, activeEnvironment);
 
       // Remove deleted variables from keep
       for (const varName of decisions.deleteRemote) {
@@ -837,11 +862,11 @@ export class CapyCommand {
       this.fileManager.writeKeepFile(finalKeep);
     }
 
-    // Write encrypted .env file
-    this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, this.options.envPath, finalKeep, activeBranch);
-    syncSpinner.text = `Updated encrypted .env${branchLabel} with ${Object.keys(finalEnv).length} total variables`;
+    // Write encrypted .env file for active environment
+    this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, envFilePath, keep);
+    syncSpinner.text = `Updated encrypted .env${envLabel} with ${Object.keys(finalEnv).length} total variables`;
 
-    // Update sync state with current variables
+    // Update sync state
     const newSyncState: SyncState = {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
@@ -854,9 +879,6 @@ export class CapyCommand {
     // Generate result
     const result = this.syncEngine.generateSyncResult(changeSet, decisions);
 
-    if (result.pushed.length > 0) {
-      this.promptEngine.displaySuccess(`Pushed ${result.pushed.length} variable(s) to keep`);
-    }
     if (result.pulled.length > 0) {
       this.promptEngine.displaySuccess(`Pulled ${result.pulled.length} variable(s) from keep`);
     }
@@ -866,10 +888,8 @@ export class CapyCommand {
 
     console.log(`\nTotal: ${result.totalVariables} variables synchronized`);
 
-    const changedVars = [...decisions.pushVariables, ...decisions.deleteRemote];
-    if (changedVars.length > 0) {
-      await CapyCommand.createDeployPR(changedVars, this.serviceClient);
-    }
+    // Install hooks on every run (idempotent)
+    this.installGitHooks();
   }
 
   /**
@@ -947,26 +967,8 @@ export class CapyCommand {
 
     if (deployMethod === 'cancel') return;
 
-    // Update keep.lock entries to reference the capy branch
+    // v4: keep.lock uses flat environment objects, no branch manipulation needed
     const deployKeep = { ...keepFile, variables: { ...keepFile.variables } };
-    const activeBranch = pm.readActiveBranch();
-    for (const varName of Object.keys(deployKeep.variables)) {
-      const entries = deployKeep.variables[varName];
-      if (!entries || entries.length === 0) continue;
-
-      const sourceEntry = entries.find(e =>
-        activeBranch ? e.branch === activeBranch : !e.branch
-      ) || entries[0];
-
-      const deployEntry: KeepVariableEntry = {
-        resource_id: sourceEntry.resource_id,
-        branch: capyBranch,
-        value_hash: sourceEntry.value_hash,
-      };
-
-      const otherEntries = entries.filter(e => e.branch !== capyBranch);
-      deployKeep.variables[varName] = [...otherEntries, deployEntry];
-    }
 
     const title = `chore: sync ${vars.length} ${projectName} secret${vars.length === 1 ? '' : 's'} via capy`;
     const varList = vars.map(v => `- ${v}`).join('\n');
