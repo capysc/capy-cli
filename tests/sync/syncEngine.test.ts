@@ -580,13 +580,13 @@ describe('SyncEngine', () => {
   describe('computeKeepHash', () => {
     it('produces deterministic hash', () => {
       const keep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org1',
         project_id: 'proj1',
         project_name: 'test',
         variables: {
-          DB_URL: [{ resource_id: 'abc', value_hash: 'hash1' }],
-          API_KEY: [{ resource_id: 'def', value_hash: 'hash2' }],
+          DB_URL: { resource_id: 'abc', local: 'hash1', staging: 'hash2' },
+          API_KEY: { resource_id: 'def', local: 'hash3' },
         },
       };
       expect(SyncEngine.computeKeepHash(keep)).toBe(SyncEngine.computeKeepHash(keep));
@@ -594,17 +594,17 @@ describe('SyncEngine', () => {
 
     it('is order-independent on variable keys', () => {
       const keepA: KeepFile = {
-        version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
+        version: '4.0', org_id: 'o', project_id: 'p', project_name: 't',
         variables: {
-          API_KEY: [{ resource_id: 'def', value_hash: 'h2' }],
-          DB_URL: [{ resource_id: 'abc', value_hash: 'h1' }],
+          API_KEY: { resource_id: 'def', local: 'h2', staging: 'h3' },
+          DB_URL: { resource_id: 'abc', local: 'h1' },
         },
       };
       const keepB: KeepFile = {
-        version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
+        version: '4.0', org_id: 'o', project_id: 'p', project_name: 't',
         variables: {
-          DB_URL: [{ resource_id: 'abc', value_hash: 'h1' }],
-          API_KEY: [{ resource_id: 'def', value_hash: 'h2' }],
+          DB_URL: { resource_id: 'abc', local: 'h1' },
+          API_KEY: { resource_id: 'def', local: 'h2', staging: 'h3' },
         },
       };
       expect(SyncEngine.computeKeepHash(keepA)).toBe(SyncEngine.computeKeepHash(keepB));
@@ -628,16 +628,16 @@ describe('SyncEngine', () => {
 
     it('returns 64-char hex for empty variables', () => {
       const keep: KeepFile = {
-        version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
+        version: '4.0', org_id: 'o', project_id: 'p', project_name: 't',
         variables: {},
       };
       expect(SyncEngine.computeKeepHash(keep)).toHaveLength(64);
     });
 
-    it('changes when value_hash changes', () => {
+    it('changes when environment hash changes', () => {
       const makeKeep = (hash: string): KeepFile => ({
-        version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
-        variables: { DB_URL: [{ resource_id: 'abc', value_hash: hash }] },
+        version: '4.0', org_id: 'o', project_id: 'p', project_name: 't',
+        variables: { DB_URL: { resource_id: 'abc', local: hash } },
       });
       expect(SyncEngine.computeKeepHash(makeKeep('a'))).not.toBe(SyncEngine.computeKeepHash(makeKeep('b')));
     });
