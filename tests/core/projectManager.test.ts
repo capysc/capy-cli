@@ -262,27 +262,31 @@ describe('ProjectManager', () => {
 
       const result = (projectManager as any).migrateKeepIfNeeded(v2Keep);
 
-      expect(result.version).toBe('3.0');
+      // v2 → v3 → v4: timestamps stripped, arrays converted to v4 flat objects
+      expect(result.version).toBe('4.0');
       expect(result.created_at).toBeUndefined();
       expect(result.last_updated).toBeUndefined();
-      expect(result.variables.API_KEY[0].created_at).toBeUndefined();
-      expect(result.variables.API_KEY[0].resource_id).toBe('res_abc');
-      expect(result.variables.API_KEY[0].value_hash).toBe('hash123');
+      // v4: variables are flat objects with env hashes, not arrays
+      expect(result.variables.API_KEY.resource_id).toBe('res_abc');
+      expect(result.variables.API_KEY.local).toBe('hash123');
     });
 
-    test('should leave v3 keep unchanged', () => {
+    test('should migrate v3 keep to v4', () => {
       const v3Keep = {
         version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
-        variables: {}
+        variables: {
+          DB_URL: [{ resource_id: 'r1', value_hash: 'h1' }],
+        }
       };
 
       const result = (projectManager as any).migrateKeepIfNeeded(v3Keep);
 
-      expect(result.version).toBe('3.0');
-      expect(result).toEqual(v3Keep);
+      expect(result.version).toBe('4.0');
+      expect(result.variables.DB_URL.resource_id).toBe('r1');
+      expect(result.variables.DB_URL.local).toBe('h1');
     });
   });
 
