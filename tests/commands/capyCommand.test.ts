@@ -343,7 +343,7 @@ describe('CapyCommand', () => {
 
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
-          version: '3.0',
+          version: '4.0',
           org_id: 'capy-123',
           project_id: 'proj-123',
           project_name: 'test-project',
