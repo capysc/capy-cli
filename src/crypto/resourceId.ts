@@ -5,13 +5,11 @@ const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 const ID_LENGTH = 5;
 
 /**
- * Derives a deterministic 5-character resource ID from a branch and variable name.
+ * Derives a deterministic 5-character resource ID from a variable name.
  * Used in keep.lock files to reference encrypted variables.
  *
- * - Same (branch, variableName) always produces the same ID regardless of encryption key
- * - Different variable names produce different IDs
- * - Different branches produce different IDs for the same variable
- * - branch='' for branchless (environment-agnostic) variables
+ * v4: Resource IDs are per-variable (environment-agnostic).
+ * The branch parameter is kept for backward compat but defaults to ''.
  */
 export function deriveResourceId(branch: string, variableName: string): string {
   const hash = createHash('sha256').update(`${branch}:${variableName}`).digest();
@@ -20,4 +18,11 @@ export function deriveResourceId(branch: string, variableName: string): string {
     id += ALPHABET[hash[i] % ALPHABET.length];
   }
   return id;
+}
+
+/**
+ * v4: Derives a resource ID from just the variable name (no branch/environment).
+ */
+export function deriveResourceIdV4(variableName: string): string {
+  return deriveResourceId('', variableName);
 }

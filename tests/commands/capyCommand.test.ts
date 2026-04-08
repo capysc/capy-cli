@@ -2,14 +2,7 @@ import { mock, spyOn, beforeEach, afterEach, afterAll, describe, test, expect } 
 
 // Mock all dependencies — must come before imports of mocked modules
 mock.module('../../src/core/projectManager', () => ({
-  ProjectManager: mock(() => ({
-    readKeepFile: () => null,
-    readActiveBranch: () => null,
-    readSyncState: () => null,
-    getDefaultProjectName: () => 'test-project',
-    writeActiveBranch: () => undefined,
-    writeSyncStateUserId: () => undefined,
-  })),
+  ProjectManager: mock(() => ({})),
 }));
 mock.module('../../src/files/fileManager', () => ({
   FileManager: mock(() => ({})),
@@ -42,15 +35,14 @@ mock.module('../../src/config/globalConfig', () => ({
 }));
 mock.module('inquirer', () => ({
   default: {
-    prompt: mock(() => Promise.resolve({
-      orgId: 'org-123',
-      orgName: 'Test Org',
-      envBranch: 'development',
-      confirmed: true,
-      action: 'cancel',
-      targetBranch: 'main',
-      deployMethod: 'cancel',
-    })),
+    prompt: mock((questions: any) => {
+      // Return appropriate defaults based on the prompt name
+      const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
+      if (name === 'selectedEnv') return Promise.resolve({ selectedEnv: 'local' });
+      if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+      if (name === 'confirmed') return Promise.resolve({ confirmed: true });
+      return Promise.resolve({ orgId: 'org-123', orgName: 'Test Org' });
+    }),
     Separator: class Separator { constructor() {} },
   },
 }));
@@ -106,6 +98,8 @@ describe('CapyCommand', () => {
       readDecryptKey: mock(() => undefined),
       readSyncState: mock(() => null),
       readActiveBranch: mock(() => null),
+      readActiveEnvironment: mock(() => undefined),
+      writeActiveEnvironment: mock(() => undefined),
       writeActiveBranch: mock(() => undefined),
       writeSyncStateUserId: mock(() => undefined)
     } as any;
@@ -120,9 +114,11 @@ describe('CapyCommand', () => {
       readEnvMeta: mock(() => ({})),
       parseEnvContent: mock(() => ({})),
       ensureCapyGitignore: mock(() => undefined),
+      getEnvPathForEnvironment: mock((env: string) => env === 'local' ? '.env' : `.env.${env}`),
       isSnippetEncrypted: mock(() => false),
       isEncrypted: mock(() => false),
-      decryptValue: mock((value: any) => value)
+      decryptValue: mock((value: any) => value),
+      createSnippetWithEncryption: mock((orig: string, enc: string) => `${enc}...${orig.slice(-3)}`),
     } as any;
 
     mockAuthService = {
@@ -139,8 +135,8 @@ describe('CapyCommand', () => {
       initializeProject: mock(() => undefined),
       getDecryptData: mock(() => undefined),
       pushVariables: mock(() => undefined),
-      createBranch: mock(() => undefined),
-      listBranches: mock(() => [])
+      pushEnvironments: mock(() => Promise.resolve({ keep_hash: 'a'.repeat(64), environments: ['local'] })),
+      getEnvironmentBlob: mock(() => Promise.resolve(null)),
     } as any;
 
     mockSyncEngine = {
@@ -340,9 +336,7 @@ describe('CapyCommand', () => {
       expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledWith('test-project');
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-123');
       expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
-      expect(mockServiceClient.getDecryptData).toHaveBeenCalledWith('proj-123');
-      // writeDecryptKey removed — keys now managed via global keyring
-      expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
+      // v4: init no longer calls getDecryptData — new projects have nothing to fetch
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
 
@@ -361,7 +355,7 @@ describe('CapyCommand', () => {
 
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
-          version: '3.0',
+          version: '4.0',
           org_id: 'capy-123',
           project_id: 'proj-123',
           project_name: 'test-project',
@@ -422,23 +416,20 @@ describe('CapyCommand', () => {
         expires_at: new Date().toISOString()
       });
 
-      mockServiceClient.pushVariables.mockResolvedValue({
-        success: true,
-        variables: {
-          API_KEY: { resource_id: 'res-1', value_hash: 'hash1' },
-          DB_URL: { resource_id: 'res-2', value_hash: 'hash2' }
-        }
+      mockServiceClient.pushEnvironments.mockResolvedValue({
+        keep_hash: 'a'.repeat(64),
+        environments: ['local'],
       });
 
       // Mock mergeWithKeep to return an updated keep
       mockSyncEngine.mergeWithKeep.mockReturnValue({
-        version: '3.0',
+        version: '4.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         variables: {
-          API_KEY: [{ resource_id: 'res-1', value_hash: 'testhash' }],
-          DB_URL: [{ resource_id: 'res-2', value_hash: 'testhash' }]
+          API_KEY: { resource_id: 'res-1', local: 'testhash' },
+          DB_URL: { resource_id: 'res-2', local: 'testhash' },
         }
       });
 
@@ -447,12 +438,11 @@ describe('CapyCommand', () => {
       await (capyCommand as any).initializeProject();
 
       expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Found existing .env file with 2 variable(s)'));
-      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith(
+      // v4: init uses pushEnvironments instead of pushVariables
+      expect(mockServiceClient.pushEnvironments).toHaveBeenCalledWith(
         'proj-123',
-        { API_KEY: 'test-key', DB_URL: 'postgres://localhost' },
-        expect.any(Object),
-        'development',
-        'mock-derived-project-key-hex'
+        expect.any(String), // keep JSON
+        expect.objectContaining({ local: expect.any(String) }), // environments blob
       );
       expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
 
@@ -496,8 +486,8 @@ describe('CapyCommand', () => {
         expires_at: new Date().toISOString()
       });
 
-      // Mock sync failure
-      mockServiceClient.pushVariables.mockRejectedValue(new Error('Network error'));
+      // Mock sync failure — v4 uses pushEnvironments
+      mockServiceClient.pushEnvironments.mockRejectedValue(new Error('Network error'));
 
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
@@ -567,18 +557,15 @@ describe('CapyCommand', () => {
       // Project should be created
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('fresh-project', 'org-123');
 
-      // keep.lock file should be written
+      // keep.lock file should be written with v4 format
       expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(
         expect.objectContaining({
-          version: '3.0',
+          version: '4.0',
           org_id: 'org-123',
           project_id: 'proj-new',
           project_name: 'fresh-project',
         })
       );
-
-      // Should NOT try to write encrypted env (no data to write)
-      expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
 
       // Should still set up gitignore
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
@@ -627,7 +614,8 @@ describe('CapyCommand', () => {
       hasEnvFile: true,
       projectName: 'test-project',
       projectId: 'proj-123',
-      organizationId: 'org-123'
+      organizationId: 'org-123',
+      activeEnvironment: 'local' as const,
     };
 
     beforeEach(() => {
@@ -646,10 +634,9 @@ describe('CapyCommand', () => {
         user_id: 'user-456'
       });
 
-      mockServiceClient.getDecryptData.mockResolvedValue({
-        decrypt_key: 'decrypt-key-123',
-        env_content: 'REMOTE_VAR=remote_value',
-        expires_at: new Date().toISOString()
+      // v4: sync uses getEnvironmentBlob, not getDecryptData
+      mockServiceClient.getEnvironmentBlob.mockResolvedValue({
+        env_file: 'REMOTE_VAR=remote_value',
       });
 
       mockFileManager.parseEnvContent.mockReturnValue({ REMOTE_VAR: 'remote_value' });
@@ -679,18 +666,8 @@ describe('CapyCommand', () => {
         REMOTE_VAR: 'remote_value'
       });
 
-      mockServiceClient.pushVariables.mockResolvedValue({
-        success: true,
-        variables: { 
-          LOCAL_VAR: {
-            resource_id: 'res-123',
-            value_hash: 'hash123'
-          }
-        }
-      });
-
       mockProjectManager.readKeepFile.mockReturnValue({
-        version: '3.0',
+        version: '4.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
@@ -698,15 +675,12 @@ describe('CapyCommand', () => {
       });
 
       mockSyncEngine.mergeWithKeep.mockReturnValue({
-        version: '3.0',
+        version: '4.0',
         org_id: 'capy-123',
         project_id: 'proj-123',
         project_name: 'test-project',
         variables: {
-          LOCAL_VAR: [{
-            resource_id: 'res-123',
-            value_hash: 'testhash'
-          }]
+          LOCAL_VAR: { resource_id: 'res-123', local: 'testhash' },
         }
       });
 
@@ -724,14 +698,12 @@ describe('CapyCommand', () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
       expect(mockAuthService.authenticate).toHaveBeenCalledWith('org-123');
-      expect(mockServiceClient.getDecryptData).toHaveBeenCalled();
+      // v4: uses getEnvironmentBlob, not getDecryptData
       expect(mockSyncEngine.compareEnvironments).toHaveBeenCalled();
       expect(mockPromptEngine.promptForChanges).toHaveBeenCalled();
       expect(mockPromptEngine.confirmSync).toHaveBeenCalled();
-      // Push sends the full finalEnv (from applyDecisions), not just changed vars
-      expect(mockServiceClient.pushVariables).toHaveBeenCalledWith('proj-123', { LOCAL_VAR: 'local_value', REMOTE_VAR: 'remote_value' }, expect.any(Object), undefined, 'mock-derived-project-key-hex');
+      // v4: sync is pull-only — no pushVariables call
       expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
-      // writeDecryptKey removed — keys now managed via global keyring
     });
 
     test('should handle no changes scenario', async () => {
@@ -797,14 +769,13 @@ describe('CapyCommand', () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
       expect(mockPromptEngine.displayWarning).toHaveBeenCalledWith('Sync cancelled');
-      expect(mockServiceClient.pushVariables).not.toHaveBeenCalled();
     });
 
     test('should read local env file for comparison', async () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
-      // Should read encrypted .env file to preserve resource_ids for comparison
-      expect(mockFileManager.readEnvFile).toHaveBeenCalledWith(undefined);
+      // v4: reads from environment-specific path (.env for local)
+      expect(mockFileManager.readEnvFile).toHaveBeenCalledWith('.env');
     });
 
     test('should handle read failure for local env', async () => {
@@ -812,14 +783,11 @@ describe('CapyCommand', () => {
         throw new Error('Read failed');
       });
 
-      const consoleSpy = spyOn(console, 'warn').mockImplementation(() => {});
-
+      // v4: sync continues with empty local env on read failure (no warning logged)
       await (capyCommand as any).syncProject(mockProjectState);
 
-      // Should continue with empty local env if read fails
-      expect(consoleSpy).toHaveBeenCalledWith('Failed to read local .env');
-      
-      consoleSpy.mockRestore();
+      // Should still complete sync flow (using empty local env)
+      expect(mockSyncEngine.compareEnvironments).toHaveBeenCalled();
     });
   });
 

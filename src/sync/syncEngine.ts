@@ -6,9 +6,11 @@ import {
   UserDecisions,
   SyncResult,
   KeepFile,
-  KeepVariableEntry,
+  KeepV4Variable,
   DecryptKey,
-  SyncState
+  SyncState,
+  Environment,
+  ENVIRONMENTS,
 } from '../types/index';
 
 export class SyncEngine {
@@ -218,37 +220,29 @@ export class SyncEngine {
     };
   }
 
+  /**
+   * Merge pushed variables into a v4 keep.lock file.
+   * Updates the value hash for the specified environment.
+   */
   mergeWithKeep(
     keep: KeepFile,
     pushedVariables: Record<string, { resource_id: string; value_hash?: string }>,
-    branch?: string
+    environment?: Environment | string,
   ): KeepFile {
     const updatedKeep = { ...keep, variables: { ...keep.variables } };
+    const env = (environment || 'local') as Environment;
 
     for (const [varName, data] of Object.entries(pushedVariables)) {
-      const entries = [...(updatedKeep.variables[varName] || [])];
-      const existingIdx = entries.findIndex(e =>
-        branch ? e.branch === branch : !e.branch
-      );
+      const existing = updatedKeep.variables[varName];
+      const newHash = data.value_hash ?? existing?.[env] ?? '';
 
-      const existing = existingIdx >= 0 ? entries[existingIdx] : null;
-      // If value_hash is provided, the value was (re-)encrypted from plaintext.
-      // Compare with existing hash to determine if it actually changed.
-      const newHash = data.value_hash ?? existing?.value_hash ?? '';
-
-      const newEntry: KeepVariableEntry = {
+      const updated: KeepV4Variable = {
+        ...(existing || {}),
         resource_id: data.resource_id,
-        ...(branch ? { branch } : {}),
-        value_hash: newHash,
+        [env]: newHash || undefined,
       };
 
-      if (existingIdx >= 0) {
-        entries[existingIdx] = newEntry;
-      } else {
-        entries.push(newEntry);
-      }
-
-      updatedKeep.variables[varName] = entries;
+      updatedKeep.variables[varName] = updated;
     }
 
     return updatedKeep;
@@ -341,20 +335,20 @@ export class SyncEngine {
   }
 
   /**
-   * Compute a content-addressed hash from a keep.lock file's value_hashes.
-   * Per-branch: only includes entries matching the specified branch.
-   * Deterministic: sorted by variable name, then by value_hash.
+   * v4: Compute a content-addressed hash from keep.lock.
+   * Derived from sorted variable names + resource IDs + all environment hashes.
+   * Changes when variables are added/removed OR when any environment's value changes.
    */
-  static computeKeepHash(keep: KeepFile, branch?: string): string {
-    const hashes: string[] = [];
+  static computeKeepHash(keep: KeepFile): string {
+    const entries: string[] = [];
     for (const key of Object.keys(keep.variables).sort()) {
-      const entries = keep.variables[key]
-        .filter(e => branch ? e.branch === branch : !e.branch)
-        .sort((a, b) => a.value_hash.localeCompare(b.value_hash));
-      for (const entry of entries) {
-        hashes.push(`${key}:${entry.value_hash}`);
-      }
+      const v = keep.variables[key];
+      const envHashes = (ENVIRONMENTS as readonly string[])
+        .filter(env => (v as any)[env])
+        .map(env => `${env}:${(v as any)[env]}`)
+        .join(',');
+      entries.push(`${key}:${v.resource_id}:${envHashes}`);
     }
-    return createHash('sha256').update(hashes.join('\n')).digest('hex');
+    return createHash('sha256').update(entries.join('\n')).digest('hex');
   }
 }

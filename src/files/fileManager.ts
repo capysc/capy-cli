@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, chmodSync, mkdirSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
-import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES, Environment } from '../types/index';
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
@@ -197,12 +197,19 @@ export class FileManager {
         org_id: keep.org_id,
         project_id: keep.project_id,
         project_name: keep.project_name,
-        variables: {} as Record<string, any[]>,
+        variables: {} as Record<string, any>,
       };
+      // v4 format: variables are flat objects { resource_id, local?, staging?, production? }
       for (const key of Object.keys(keep.variables).sort()) {
-        sorted.variables[key] = [...keep.variables[key]].sort((a, b) =>
-          (a.branch ?? '').localeCompare(b.branch ?? '')
-        );
+        const v = keep.variables[key];
+        const entry: Record<string, string> = { resource_id: v.resource_id };
+        // Add environment hashes in canonical order
+        for (const env of ['local', 'staging', 'production'] as const) {
+          if (v[env]) {
+            entry[env] = v[env]!;
+          }
+        }
+        sorted.variables[key] = entry;
       }
       const content = JSON.stringify(sorted, null, 2);
       writeFileSync(keepPath, content + '\n', 'utf-8');
@@ -357,8 +364,19 @@ export class FileManager {
     }
   }
 
+  /**
+   * Get the .env file path for an environment.
+   * local → .env, staging → .env.staging, production → .env.production
+   */
+  getEnvPathForEnvironment(environment: Environment): string {
+    if (environment === 'local') {
+      return join(this.projectRoot, '.env');
+    }
+    return join(this.projectRoot, `.env.${environment}`);
+  }
+
   ensureCapyGitignore(): void {
-    const requiredEntries = ['.env', '.capy'];
+    const requiredEntries = ['.env', '.env.staging', '.env.production', '.capy'];
     this.updateGitignore(requiredEntries);
   }
 

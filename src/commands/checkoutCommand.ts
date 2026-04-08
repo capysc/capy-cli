@@ -99,22 +99,28 @@ export class CheckoutCommand {
     this.projectManager.writeActiveBranch(branchName);
     const keep = this.projectManager.readKeepFile()!;
 
-    // Pull secrets for the branch
-    const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
+    // Pull secrets for the active environment at this keep_hash
+    const activeEnv = this.projectManager.readActiveEnvironment() || 'local';
+    const syncSpinner = ora(`Syncing secrets for ${branchName} (${activeEnv})...`).start();
 
     try {
-      const decryptData = await this.serviceClient.getDecryptData(projectId, branchName);
-      if (decryptData.env_content) {
-        const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
-        // Decrypt remote values — fail loudly on wrong key
-        const decrypted: Record<string, string> = {};
-        for (const [key, value] of Object.entries(remoteEnv)) {
-          decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
+      const hasVars = keep && Object.keys(keep.variables).length > 0;
+      if (hasVars) {
+        const keepHash = SyncEngine.computeKeepHash(keep);
+        const blob = await this.serviceClient.getEnvironmentBlob(projectId, keepHash, activeEnv as any);
+        if (blob?.env_file) {
+          const remoteEnv = this.fileManager.parseEnvContent(blob.env_file);
+          const decrypted: Record<string, string> = {};
+          for (const [key, value] of Object.entries(remoteEnv)) {
+            decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
+          }
+          this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep);
+          syncSpinner.stop();
+          console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
+        } else {
+          syncSpinner.stop();
+          console.log(`No secrets yet for ${branchName}`);
         }
-        // Re-encrypt locally for this branch
-        this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep, branchName);
-        syncSpinner.stop();
-        console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
       } else {
         syncSpinner.stop();
         console.log(`No secrets yet for ${branchName}`);
@@ -157,26 +163,10 @@ export class CheckoutCommand {
       const keep = this.projectManager.readKeepFile()!;
       const currentBranch = this.projectManager.readActiveBranch();
 
-      try {
-        const currentData = await this.serviceClient.getDecryptData(projectId, currentBranch);
-        if (currentData.env_content) {
-          // Push current secrets to the new branch
-          const currentEnv = this.fileManager.parseEnvContent(currentData.env_content);
-          const decrypted: Record<string, string> = {};
-          for (const [key, value] of Object.entries(currentEnv)) {
-            decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
-          }
-          await this.serviceClient.pushVariables(projectId, decrypted, keep, branchName, encryptionKey);
-          branchSpinner.stop();
-          console.log(`Branch "${branchName}" created with ${Object.keys(decrypted).length} variable(s) copied`);
-        } else {
-          branchSpinner.stop();
-          console.log(`Branch "${branchName}" created (empty)`);
-        }
-      } catch {
-        branchSpinner.stop();
-        console.log(`Branch "${branchName}" created (no secrets to copy)`);
-      }
+      // In v4, secrets are stored by environment, not branch.
+      // Branch registration is for git branch tracking only.
+      branchSpinner.stop();
+      console.log(`Branch "${branchName}" registered`);
 
       if (isProtected) {
         console.log(`\n"${branchName}" is a protected branch — access is invite-only`);
