@@ -610,17 +610,20 @@ describe('SyncEngine', () => {
       expect(SyncEngine.computeKeepHash(keepA)).toBe(SyncEngine.computeKeepHash(keepB));
     });
 
-    it('filters by branch', () => {
-      const keep: KeepFile = {
-        version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
+    it('produces different hashes for different environments', () => {
+      const keepLocal: KeepFile = {
+        version: '4.0', org_id: 'o', project_id: 'p', project_name: 't',
         variables: {
-          DB_URL: [
-            { resource_id: 'abc', value_hash: 'h1' },
-            { resource_id: 'def', branch: 'staging', value_hash: 'h2' },
-          ],
+          DB_URL: { resource_id: 'abc', local: 'h1' },
         },
       };
-      expect(SyncEngine.computeKeepHash(keep)).not.toBe(SyncEngine.computeKeepHash(keep, 'staging'));
+      const keepStaging: KeepFile = {
+        version: '4.0', org_id: 'o', project_id: 'p', project_name: 't',
+        variables: {
+          DB_URL: { resource_id: 'abc', staging: 'h1' },
+        },
+      };
+      expect(SyncEngine.computeKeepHash(keepLocal)).not.toBe(SyncEngine.computeKeepHash(keepStaging));
     });
 
     it('returns 64-char hex for empty variables', () => {
