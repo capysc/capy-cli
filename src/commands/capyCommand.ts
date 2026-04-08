@@ -312,22 +312,7 @@ export class CapyCommand {
     this.fileManager.writeKeepFile(keep);
     keySpinner.text = 'Created keep.lock configuration file';
 
-    // Get remote data (for existing variables, not for key)
-    let remoteData = { env_content: '', decrypt_key: '', expires_at: '' };
-    try {
-      remoteData = await this.serviceClient.getDecryptData(projectResult.project_id);
-    } catch {
-      // Service unavailable
-    }
-
-    // If remote has existing variables, pull them
-    if (remoteData.env_content) {
-      const envVars = this.fileManager.parseEnvContent(remoteData.env_content);
-      this.fileManager.writeEncryptedEnvFile(envVars, encryptionKey, undefined, keep);
-      keySpinner.succeed(`Retrieved and encrypted ${Object.keys(envVars).length} variables`);
-    } else {
-      keySpinner.succeed('Project initialized');
-    }
+    keySpinner.succeed('Project initialized');
 
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
@@ -406,45 +391,62 @@ export class CapyCommand {
         const syncSpinner = ora(`Syncing local variables to keep (${initEnvironment})...`).start();
 
         try {
-          const pushResult = await this.serviceClient.pushVariables(
+          const { createHash } = await import('crypto');
+          const { deriveResourceIdV4: deriveResourceId } = await import('../crypto/resourceId');
+          const { Encryptor } = await import('../crypto/encryptor');
+
+          // Build encrypted env blob and keep.lock hashes
+          const encrypted: Record<string, string> = {};
+          const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
+          for (const [key, value] of Object.entries(localEnv)) {
+            const resourceId = deriveResourceId(key);
+            const enc = Encryptor.encrypt(value, encryptionKey);
+            encrypted[key] = `capy:${resourceId}:${enc}`;
+            pushedVars[key] = {
+              resource_id: resourceId,
+              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+            };
+          }
+
+          const envBlob = Object.entries(encrypted)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n');
+
+          const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initEnvironment);
+          const keepJson = JSON.stringify(updatedKeep);
+
+          await this.serviceClient.pushEnvironments(
             projectResult.project_id,
-            localEnv,
-            keep,
-            undefined, // no branch
-            encryptionKey
+            keepJson,
+            { [initEnvironment]: envBlob },
           );
 
-          if (pushResult.success) {
-            const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushResult.variables, initEnvironment);
-            this.fileManager.writeKeepFile(updatedKeep);
-            this.fileManager.writeSyncState({
-              last_sync: new Date().toISOString(),
-              synced_variables: Object.keys(localEnv),
-              user_id: authResult.user_id,
-            });
+          this.fileManager.writeKeepFile(updatedKeep);
+          this.fileManager.writeSyncState({
+            last_sync: new Date().toISOString(),
+            synced_variables: Object.keys(localEnv),
+            user_id: authResult.user_id,
+          });
 
-            // Backup plaintext .env before encrypting
-            this.fileManager.backupPlaintextEnv(this.options.envPath);
+          // Backup plaintext .env before encrypting
+          this.fileManager.backupPlaintextEnv(this.options.envPath);
 
-            // Encrypt the local .env file
-            const envFilePath = this.fileManager.getEnvPathForEnvironment(initEnvironment);
-            this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, envFilePath, updatedKeep);
+          // Encrypt the local .env file
+          const envFilePath = this.fileManager.getEnvPathForEnvironment(initEnvironment);
+          this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, envFilePath, updatedKeep);
 
-            syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s) (${initEnvironment})`);
+          syncSpinner.succeed(`Synced and encrypted ${localVarCount} variable(s) (${initEnvironment})`);
 
-            // Install git hooks
-            this.installGitHooks();
+          // Install git hooks
+          this.installGitHooks();
 
-            // Show what was synced
-            console.log('');
-            for (const varName of Object.keys(localEnv)) {
-              console.log(`  ${varName}`);
-            }
-
-            console.log(`\nTo deploy these secrets, run \x1b[1mcapy deploy\x1b[0m`);
-          } else {
-            syncSpinner.fail('Failed to sync variables');
+          // Show what was synced
+          console.log('');
+          for (const varName of Object.keys(localEnv)) {
+            console.log(`  ${varName}`);
           }
+
+          console.log(`\nTo deploy these secrets, run \x1b[1mcapy deploy\x1b[0m`);
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
           console.log('You can run \'capy\' again to retry syncing');
@@ -739,23 +741,7 @@ export class CapyCommand {
         }
       }
     } else {
-      // No keep_hash yet — try legacy path for existing projects
-      try {
-        const decryptData = await this.serviceClient.getDecryptData(
-          projectState.projectId!,
-          projectState.activeBranch,
-        );
-        if (decryptData.env_content) {
-          const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-          const decrypted: Record<string, string> = {};
-          for (const [key, value] of Object.entries(encrypted)) {
-            decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
-          }
-          remoteEnvs[activeEnvironment] = decrypted;
-        }
-      } catch {
-        // No remote data yet
-      }
+      // No keep_hash — no variables in keep.lock yet, nothing to fetch
     }
 
     const remoteEnv = remoteEnvs[activeEnvironment] || {};
