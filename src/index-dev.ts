@@ -115,16 +115,8 @@ program
 
       await serviceClient.deleteBranch(projectState.projectId!, branch.id);
 
-      // Remove branch entries from keep.lock
+      // v4: branches no longer stored in keep.lock, no cleanup needed
       const keep = pm.readKeepFile();
-      if (keep) {
-        const { FileManager } = await import('./files/fileManager');
-        const fm = new FileManager();
-        for (const [varName, entries] of Object.entries(keep.variables)) {
-          keep.variables[varName] = entries.filter(e => e.branch !== deleteName);
-        }
-        fm.writeKeepFile(keep);
-      }
 
       console.log(`Deleted branch "${deleteName}"`);
       return;
@@ -189,6 +181,34 @@ program
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
     await cmd.execute(branch, { create: options.create, protected: options.protected });
+  });
+
+program
+  .command('push')
+  .description('Push encrypted values to S3')
+  .action(async () => {
+    const { PushCommand } = await import('./commands/pushCommand');
+    const cmd = new PushCommand(true);
+    await cmd.execute();
+  });
+
+program
+  .command('env [environment]')
+  .description('Switch the active environment (local/staging/production)')
+  .action(async (environment?: string) => {
+    const { EnvCommand } = await import('./commands/envCommand');
+    const cmd = new EnvCommand();
+    await cmd.execute(environment);
+  });
+
+program
+  .command('run <command...>')
+  .description('Run a command with secrets injected as environment variables')
+  .allowUnknownOption(true)
+  .action(async (command: string[]) => {
+    const { RunCommand } = await import('./commands/runCommand');
+    const cmd = new RunCommand();
+    await cmd.execute(command);
   });
 
 program

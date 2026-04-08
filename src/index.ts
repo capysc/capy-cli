@@ -18,9 +18,10 @@ program
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
-      console.log('    capy                        \x1b[90mSync secrets\x1b[0m');
-      console.log('    capy branch                 \x1b[90mList secret branches\x1b[0m');
-      console.log('    capy checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
+      console.log('    capy                        \x1b[90mSync secrets (pull)\x1b[0m');
+      console.log('    capy push                   \x1b[90mPush encrypted values to S3\x1b[0m');
+      console.log('    capy env                    \x1b[90mSwitch environment\x1b[0m');
+      console.log('    capy run <command>          \x1b[90mRun with injected secrets\x1b[0m');
       console.log('    capy deploy pr               \x1b[90mCreate a deployment PR\x1b[0m');
       console.log('    capy deploy setup            \x1b[90mGenerate a deploy token for CI\x1b[0m');
       console.log('    capy deploy decrypt          \x1b[90mDecrypt deploy token (CI runtime)\x1b[0m');
@@ -102,16 +103,8 @@ program
 
       await serviceClient.deleteBranch(projectState.projectId!, branch.id);
 
-      // Remove branch entries from keep.lock
+      // v4: branches no longer stored in keep.lock, no cleanup needed
       const keep = pm.readKeepFile();
-      if (keep) {
-        const { FileManager } = await import('./files/fileManager');
-        const fm = new FileManager();
-        for (const [varName, entries] of Object.entries(keep.variables)) {
-          keep.variables[varName] = entries.filter(e => e.branch !== deleteName);
-        }
-        fm.writeKeepFile(keep);
-      }
 
       console.log(`Deleted branch "${deleteName}"`);
       return;
@@ -176,6 +169,34 @@ program
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand();
     await cmd.execute(branch, { create: options.create, protected: options.protected });
+  });
+
+program
+  .command('push')
+  .description('Push encrypted values to S3')
+  .action(async () => {
+    const { PushCommand } = await import('./commands/pushCommand');
+    const cmd = new PushCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('env [environment]')
+  .description('Switch the active environment (local/staging/production)')
+  .action(async (environment?: string) => {
+    const { EnvCommand } = await import('./commands/envCommand');
+    const cmd = new EnvCommand();
+    await cmd.execute(environment);
+  });
+
+program
+  .command('run <command...>')
+  .description('Run a command with secrets injected as environment variables')
+  .allowUnknownOption(true)
+  .action(async (command: string[]) => {
+    const { RunCommand } = await import('./commands/runCommand');
+    const cmd = new RunCommand();
+    await cmd.execute(command);
   });
 
 const deploy = program
