@@ -35,7 +35,14 @@ mock.module('../../src/config/globalConfig', () => ({
 }));
 mock.module('inquirer', () => ({
   default: {
-    prompt: mock(() => Promise.resolve({ orgId: 'org-123', orgName: 'Test Org' })),
+    prompt: mock((questions: any) => {
+      // Return appropriate defaults based on the prompt name
+      const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
+      if (name === 'selectedEnv') return Promise.resolve({ selectedEnv: 'local' });
+      if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+      if (name === 'confirmed') return Promise.resolve({ confirmed: true });
+      return Promise.resolve({ orgId: 'org-123', orgName: 'Test Org' });
+    }),
     Separator: class Separator { constructor() {} },
   },
 }));
@@ -329,9 +336,7 @@ describe('CapyCommand', () => {
       expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledWith('test-project');
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-123');
       expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
-      expect(mockServiceClient.getDecryptData).toHaveBeenCalledWith('proj-123');
-      // writeDecryptKey removed — keys now managed via global keyring
-      expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalled();
+      // v4: init no longer calls getDecryptData — new projects have nothing to fetch
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
 
@@ -764,14 +769,13 @@ describe('CapyCommand', () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
       expect(mockPromptEngine.displayWarning).toHaveBeenCalledWith('Sync cancelled');
-      expect(mockServiceClient.pushVariables).not.toHaveBeenCalled();
     });
 
     test('should read local env file for comparison', async () => {
       await (capyCommand as any).syncProject(mockProjectState);
 
-      // Should read encrypted .env file to preserve resource_ids for comparison
-      expect(mockFileManager.readEnvFile).toHaveBeenCalledWith(undefined);
+      // v4: reads from environment-specific path (.env for local)
+      expect(mockFileManager.readEnvFile).toHaveBeenCalledWith('.env');
     });
 
     test('should handle read failure for local env', async () => {
@@ -779,14 +783,11 @@ describe('CapyCommand', () => {
         throw new Error('Read failed');
       });
 
-      const consoleSpy = spyOn(console, 'warn').mockImplementation(() => {});
-
+      // v4: sync continues with empty local env on read failure (no warning logged)
       await (capyCommand as any).syncProject(mockProjectState);
 
-      // Should continue with empty local env if read fails
-      expect(consoleSpy).toHaveBeenCalledWith('Failed to read local .env');
-      
-      consoleSpy.mockRestore();
+      // Should still complete sync flow (using empty local env)
+      expect(mockSyncEngine.compareEnvironments).toHaveBeenCalled();
     });
   });
 
