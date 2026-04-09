@@ -436,6 +436,31 @@ export class ServiceClient {
     return res.json() as Promise<{ plaintext: string }>;
   }
 
+  /**
+   * Fetch platform-specific deploy instructions (unauthenticated).
+   */
+  async fetchDeployInstructions(platform: string): Promise<{ platform: string; markdown: string }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.apiUrl}/deploy/instructions/${encodeURIComponent(platform)}`, {
+        signal: controller.signal,
+      });
+    } catch {
+      clearTimeout(timeout);
+      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
+    }
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
+    }
+
+    return res.json() as Promise<{ platform: string; markdown: string }>;
+  }
+
   async revokeDeployToken(deployId: string): Promise<void> {
     await this.request('DELETE', `/deploy/${encodeURIComponent(deployId)}`);
   }

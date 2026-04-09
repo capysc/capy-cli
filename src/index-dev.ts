@@ -203,12 +203,31 @@ program
     await cmd.execute();
   });
 
-program
+const deploy = program
   .command('deploy')
-  .description('Create a deployment PR with the keep.lock file')
+  .description('Set up secret delivery to a deployment platform')
   .action(async () => {
-    const { CapyCommand } = await import('./commands/capyCommand');
-    await CapyCommand.createDeployPR();
+    const { DeployCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute();
+  });
+
+deploy
+  .command('revoke <deployId>')
+  .description('Revoke a deploy token')
+  .action(async (deployId: string) => {
+    const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployRevokeCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute(deployId);
+  });
+
+deploy
+  .command('list')
+  .description('List deploy tokens for this project')
+  .action(async () => {
+    const { DeployListCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployListCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute();
   });
 
 program

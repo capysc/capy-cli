@@ -40,8 +40,7 @@ program
       console.log(`    ${B('capy')}                        \x1b[90mSync secrets\x1b[0m`);
       console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
       console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to S3\x1b[0m`);
-      console.log(`    ${B('capy')} deploy pr              \x1b[90mCreate a deployment PR\x1b[0m`);
-      console.log(`    ${B('capy')} deploy setup           \x1b[90mGenerate a deploy token for CI\x1b[0m`);
+      console.log(`    ${B('capy')} deploy                 \x1b[90mSet up deploy credentials\x1b[0m`);
       console.log(`    ${B('capy')} deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m`);
       console.log(`    ${B('capy')} deploy list            \x1b[90mList deploy tokens\x1b[0m`);
       console.log(`    ${B('capy')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
@@ -205,21 +204,10 @@ program
 
 const deploy = program
   .command('deploy')
-  .description('Deploy commands: PR creation, token setup, CI decrypt');
-
-deploy
-  .command('pr')
-  .description('Create a deployment PR with the keep.lock file')
+  .description('Set up secret delivery to a deployment platform')
   .action(async () => {
-    await CapyCommand.createDeployPR();
-  });
-
-deploy
-  .command('setup')
-  .description('Generate a deploy token for CI/CD')
-  .action(async () => {
-    const { DeploySetupCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeploySetupCommand();
+    const { DeployCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployCommand();
     await cmd.execute();
   });
 
