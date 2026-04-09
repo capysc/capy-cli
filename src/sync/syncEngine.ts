@@ -6,11 +6,9 @@ import {
   UserDecisions,
   SyncResult,
   KeepFile,
-  KeepV4Variable,
+  KeepVariableEntry,
   DecryptKey,
   SyncState,
-  Environment,
-  ENVIRONMENTS,
 } from '../types/index';
 
 export class SyncEngine {
@@ -37,7 +35,7 @@ export class SyncEngine {
     const localKeys = new Set(Object.keys(local));
     const remoteKeys = new Set(Object.keys(remote));
     const syncedKeys = syncState ? new Set(syncState.synced_variables) : new Set();
-    
+
     const newLocal: EnvVariable[] = [];
     const newRemote: EnvVariable[] = [];
     const conflicts: ConflictVariable[] = [];
@@ -67,18 +65,15 @@ export class SyncEngine {
         // Conflict - check if resource_ids differ using encrypted versions
         const localEncryptedValue = localEncrypted ? localEncrypted[key] : local[key];
         const remoteEncryptedValue = remoteEncrypted ? remoteEncrypted[key] : remote[key];
-        
+
         const localResourceId = this.extractResourceId(localEncryptedValue);
         const remoteResourceId = this.extractResourceId(remoteEncryptedValue);
-        
-        // Mark as NEW if:
-        // 1. Both have resource_ids and they differ (local value changed)
-        // 2. Remote has resource_id but local is plaintext (user manually edited to plaintext)
-        const isNew = (localResourceId !== null && 
-                       remoteResourceId !== null && 
+
+        const isNew = (localResourceId !== null &&
+                       remoteResourceId !== null &&
                        localResourceId !== remoteResourceId) ||
                       (localResourceId === null && remoteResourceId !== null);
-        
+
         conflicts.push({
           name: key,
           localValue: local[key],
@@ -179,8 +174,6 @@ export class SyncEngine {
       }
     }
 
-    // Keep remote values for conflicts resolved as "keep remote" (already in result from base)
-
     // Delete variables the user confirmed for deletion
     for (const varName of decisions.deleteLocal) {
       delete result[varName];
@@ -221,28 +214,39 @@ export class SyncEngine {
   }
 
   /**
-   * Merge pushed variables into a v4 keep.lock file.
-   * Updates the value hash for the specified environment.
+   * Merge pushed variables into a v3 keep.lock file.
+   * Updates the value hash for the specified branch.
    */
   mergeWithKeep(
     keep: KeepFile,
     pushedVariables: Record<string, { resource_id: string; value_hash?: string }>,
-    environment?: Environment | string,
+    branch?: string,
   ): KeepFile {
     const updatedKeep = { ...keep, variables: { ...keep.variables } };
-    const env = (environment || 'local') as Environment;
 
     for (const [varName, data] of Object.entries(pushedVariables)) {
-      const existing = updatedKeep.variables[varName];
-      const newHash = data.value_hash ?? existing?.[env] ?? '';
+      const existing = updatedKeep.variables[varName] || [];
+      // Clone existing entries
+      const entries = existing.map(e => ({ ...e }));
 
-      const updated: KeepV4Variable = {
-        ...(existing || {}),
+      // Find existing entry for this branch
+      const idx = entries.findIndex(e =>
+        branch ? e.branch === branch : !e.branch
+      );
+
+      const entry: KeepVariableEntry = {
         resource_id: data.resource_id,
-        [env]: newHash || undefined,
+        value_hash: data.value_hash || '',
+        ...(branch ? { branch } : {}),
       };
 
-      updatedKeep.variables[varName] = updated;
+      if (idx >= 0) {
+        entries[idx] = entry;
+      } else {
+        entries.push(entry);
+      }
+
+      updatedKeep.variables[varName] = entries;
     }
 
     return updatedKeep;
@@ -271,23 +275,23 @@ export class SyncEngine {
 
   formatSyncSummary(changeSet: ChangeSet): string {
     const lines: string[] = [];
-    
+
     if (changeSet.newLocal.length > 0) {
       lines.push(`${changeSet.newLocal.length} new local variable(s)`);
     }
-    
+
     if (changeSet.newRemote.length > 0) {
       lines.push(`${changeSet.newRemote.length} new remote variable(s)`);
     }
-    
+
     if (changeSet.deleted.length > 0) {
-      lines.push(`🗑️  ${changeSet.deleted.length} deleted variable(s)`);
+      lines.push(`${changeSet.deleted.length} deleted variable(s)`);
     }
-    
+
     if (changeSet.conflicts.length > 0) {
       lines.push(`${changeSet.conflicts.length} conflict(s)`);
     }
-    
+
     if (changeSet.unchanged.length > 0) {
       lines.push(`${changeSet.unchanged.length} unchanged`);
     }
@@ -297,8 +301,7 @@ export class SyncEngine {
 
   validateDecisions(decisions: UserDecisions, changeSet: ChangeSet): string[] {
     const errors: string[] = [];
-    
-    // Validate push variables exist in newLocal OR are conflict variables being kept local OR are deleted variables being restored
+
     const localVarNames = changeSet.newLocal.map(v => v.name);
     const conflictNames = changeSet.conflicts.map(c => c.name);
     const deletedVarNames = changeSet.deleted.map(v => v.name);
@@ -308,7 +311,6 @@ export class SyncEngine {
       }
     }
 
-    // Validate pull variables exist in newRemote OR deletedLocal (for restore)
     const remoteVarNames = changeSet.newRemote.map(v => v.name);
     const deletedLocalVarNames = changeSet.deletedLocal.map(v => v.name);
     for (const varName of decisions.pullVariables) {
@@ -317,7 +319,6 @@ export class SyncEngine {
       }
     }
 
-    // Validate conflict resolutions
     const allResolutions = [...decisions.keepLocal, ...decisions.keepRemote];
     for (const varName of allResolutions) {
       if (!conflictNames.includes(varName)) {
@@ -325,7 +326,6 @@ export class SyncEngine {
       }
     }
 
-    // Check for duplicate resolutions
     const resolutionSet = new Set(allResolutions);
     if (resolutionSet.size !== allResolutions.length) {
       errors.push('Duplicate conflict resolutions detected');
@@ -335,19 +335,20 @@ export class SyncEngine {
   }
 
   /**
-   * v4: Compute a content-addressed hash from keep.lock.
-   * Derived from sorted variable names + resource IDs + all environment hashes.
-   * Changes when variables are added/removed OR when any environment's value changes.
+   * v3: Compute a content-addressed hash from keep.lock.
+   * Filters by branch, then hashes sorted variable names + value hashes.
    */
-  static computeKeepHash(keep: KeepFile): string {
+  static computeKeepHash(keep: KeepFile, branch?: string): string {
     const entries: string[] = [];
     for (const key of Object.keys(keep.variables).sort()) {
-      const v = keep.variables[key];
-      const envHashes = (ENVIRONMENTS as readonly string[])
-        .filter(env => (v as any)[env])
-        .map(env => `${env}:${(v as any)[env]}`)
-        .join(',');
-      entries.push(`${key}:${v.resource_id}:${envHashes}`);
+      const varEntries = keep.variables[key];
+      // Find entry for specified branch (or default if no branch)
+      const entry = varEntries.find(e =>
+        branch ? e.branch === branch : !e.branch
+      );
+      if (entry) {
+        entries.push(`${key}:${entry.resource_id}:${entry.value_hash}`);
+      }
     }
     return createHash('sha256').update(entries.join('\n')).digest('hex');
   }

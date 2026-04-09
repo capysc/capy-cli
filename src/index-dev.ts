@@ -193,22 +193,12 @@ program
   });
 
 program
-  .command('env [environment]')
-  .description('Switch the active environment (local/staging/production)')
-  .action(async (environment?: string) => {
-    const { EnvCommand } = await import('./commands/envCommand');
-    const cmd = new EnvCommand();
-    await cmd.execute(environment);
-  });
-
-program
-  .command('run <command...>')
-  .description('Run a command with secrets injected as environment variables')
-  .allowUnknownOption(true)
-  .action(async (command: string[]) => {
-    const { RunCommand } = await import('./commands/runCommand');
-    const cmd = new RunCommand();
-    await cmd.execute(command);
+  .command('status')
+  .description('Show secret drift between local, pinned, and remote')
+  .action(async () => {
+    const { StatusCommand } = await import('./commands/statusCommand');
+    const cmd = new StatusCommand();
+    await cmd.execute();
   });
 
 program

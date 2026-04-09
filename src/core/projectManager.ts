@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES, Environment } from '../types/index';
+import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -25,7 +25,7 @@ export class ProjectManager {
     if (hasKeepFile) {
       try {
         const keepContent = readFileSync(keepPath, 'utf-8');
-        const keep = this.migrateKeepIfNeeded(JSON.parse(keepContent));
+        const keep = this.parseKeepFile(JSON.parse(keepContent));
         this.validateKeepFile(keep);
         projectName = keep.project_name;
         organizationId = keep.org_id;
@@ -50,7 +50,6 @@ export class ProjectManager {
       projectName,
       organizationId,
       projectId,
-      activeEnvironment: this.readActiveEnvironment(),
       activeBranch: this.readActiveBranch(),
       userId: syncState?.user_id,
     };
@@ -72,10 +71,6 @@ export class ProjectManager {
     return join(this.getCapyDir(), 'branch');
   }
 
-  getActiveEnvironmentPath(): string {
-    return join(this.getCapyDir(), 'environment');
-  }
-
   readActiveBranch(): string | undefined {
     const branchPath = this.getActiveBranchPath();
     if (!existsSync(branchPath)) return undefined;
@@ -92,27 +87,6 @@ export class ProjectManager {
     if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
     const branchPath = this.getActiveBranchPath();
     writeFileSync(branchPath, branch || '', { encoding: 'utf-8', mode: 0o600 });
-  }
-
-  readActiveEnvironment(): Environment | undefined {
-    const envPath = this.getActiveEnvironmentPath();
-    if (!existsSync(envPath)) return undefined;
-    try {
-      const content = readFileSync(envPath, 'utf-8').trim();
-      if (content === 'local' || content === 'staging' || content === 'production') {
-        return content;
-      }
-      return undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  writeActiveEnvironment(environment: Environment): void {
-    const capyDir = this.getCapyDir();
-    if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
-    const envPath = this.getActiveEnvironmentPath();
-    writeFileSync(envPath, environment, { encoding: 'utf-8', mode: 0o600 });
   }
 
   getSyncStatePath(): string {
@@ -147,7 +121,7 @@ export class ProjectManager {
     try {
       const content = readFileSync(keepPath, 'utf-8');
       const raw = JSON.parse(content);
-      const keep = this.migrateKeepIfNeeded(raw);
+      const keep = this.parseKeepFile(raw);
       this.validateKeepFile(keep);
       return keep;
     } catch (error) {
@@ -162,8 +136,8 @@ export class ProjectManager {
     }
   }
 
-  private migrateKeepIfNeeded(raw: any): KeepFile {
-    if (raw.version !== '4.0') {
+  private parseKeepFile(raw: any): KeepFile {
+    if (raw.version !== '3.0') {
       throw new CapyError(
         `Unsupported keep.lock version: ${raw.version}. Please update your CLI.`,
         ERROR_CODES.INVALID_FORMAT

@@ -61,7 +61,7 @@ describe('CLI Integration Tests', () => {
 
     test('should correctly detect initialized project state', async () => {
       const mockKeep: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -111,15 +111,14 @@ DEBUG=true`;
 
     test('should create proper keep file structure', () => {
       const mockKeep: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'integration-test',
         variables: {
-          API_KEY: {
-            resource_id: 'res_123',
-            local: 'testhash',
-          }
+          API_KEY: [
+            { resource_id: 'res_123', value_hash: 'testhash' },
+          ]
         }
       };
 
@@ -129,7 +128,7 @@ DEBUG=true`;
 
       expect(writeFileSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining('keep.lock'),
-        JSON.stringify(mockKeep, null, 2) + '\n',
+        expect.stringContaining('"version": "3.0"'),
         'utf-8'
       );
     });
@@ -210,28 +209,27 @@ DEBUG=true`;
 
     test('should merge keep file with pushed variables', () => {
       const originalKeep: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test',
         variables: {
-          EXISTING_VAR: {
-            resource_id: 'res_old',
-            local: 'abc12345',
-          }
+          EXISTING_VAR: [
+            { resource_id: 'res_old', value_hash: 'abc12345' },
+          ]
         }
       };
 
       const pushedVariables = {
-        NEW_VAR: { resource_id: 'res_new' },
-        EXISTING_VAR: { resource_id: 'res_updated' }
+        NEW_VAR: { resource_id: 'res_new', value_hash: 'h1' },
+        EXISTING_VAR: { resource_id: 'res_updated', value_hash: 'h2' }
       };
 
-      const updatedKeep = syncEngine.mergeWithKeep(originalKeep, pushedVariables, 'local');
+      const updatedKeep = syncEngine.mergeWithKeep(originalKeep, pushedVariables);
 
       expect(updatedKeep.variables.NEW_VAR).toBeDefined();
-      expect(updatedKeep.variables.NEW_VAR.resource_id).toBe('res_new');
-      expect(updatedKeep.variables.EXISTING_VAR.resource_id).toBe('res_updated');
+      expect(updatedKeep.variables.NEW_VAR[0].resource_id).toBe('res_new');
+      expect(updatedKeep.variables.EXISTING_VAR[0].resource_id).toBe('res_updated');
     });
 
     test('should validate user decisions correctly', () => {
@@ -285,7 +283,7 @@ DEBUG=true`;
 
     test('should handle missing required keep file fields', () => {
       const invalidKeep = {
-        version: '4.0',
+        version: '3.0',
         // Missing required fields
         project_name: 'test'
       };

@@ -8,11 +8,9 @@ import { createHash } from 'crypto';
 import {
   CapyError,
   ERROR_CODES,
-  Environment,
-  ENVIRONMENTS,
 } from '../types/index';
 import { resolveProjectKey } from '../crypto/keyResolver';
-import { deriveResourceIdV4 } from '../crypto/resourceId';
+import { deriveResourceId } from '../crypto/resourceId';
 
 export class PushCommand {
   private projectManager: ProjectManager;
@@ -82,72 +80,61 @@ export class PushCommand {
       process.exit(1);
     }
 
-    // Read and encrypt all environment files
+    const branch = projectState.activeBranch;
+
+    // Read and encrypt .env file
     const pushSpinner = ora('Pushing secrets to S3...').start();
-    const environmentBlobs: Partial<Record<Environment, string>> = {};
 
-    for (const env of ENVIRONMENTS) {
-      const envFilePath = this.fileManager.getEnvPathForEnvironment(env);
-      try {
-        const rawLocal = this.fileManager.readEnvFile(envFilePath);
-        if (Object.keys(rawLocal).length === 0) continue;
-
-        // Encrypt all values
-        const encrypted: Record<string, string> = {};
-        for (const [key, value] of Object.entries(rawLocal)) {
-          if (value.startsWith('capy:')) {
-            encrypted[key] = value; // Already encrypted
-          } else {
-            const { Encryptor } = await import('../crypto/encryptor');
-            const enc = Encryptor.encrypt(value, encryptionKey);
-            const resourceId = deriveResourceIdV4(key);
-            encrypted[key] = `capy:${resourceId}:${enc}`;
-          }
-        }
-
-        const blob = Object.entries(encrypted)
-          .map(([key, value]) => `${key}=${value}`)
-          .join('\n');
-
-        environmentBlobs[env] = blob;
-
-        // Update keep.lock hashes for this environment
-        for (const [key, value] of Object.entries(rawLocal)) {
-          const plaintext = value.startsWith('capy:')
-            ? this.fileManager.decryptValue(value, encryptionKey)
-            : value;
-          const valueHash = createHash('sha256').update(plaintext).digest('hex').slice(0, 16);
-          const resourceId = deriveResourceIdV4(key);
-
-          if (!keep.variables[key]) {
-            keep.variables[key] = { resource_id: resourceId };
-          }
-          keep.variables[key][env] = valueHash;
-          keep.variables[key].resource_id = resourceId;
-        }
-      } catch {
-        // Environment file doesn't exist or can't be read — skip
-      }
-    }
-
-    if (Object.keys(environmentBlobs).length === 0) {
-      pushSpinner.fail('No environment files to push');
+    const rawLocal = this.fileManager.readEnvFile();
+    if (Object.keys(rawLocal).length === 0) {
+      pushSpinner.fail('No .env file to push');
       return;
     }
 
+    // Encrypt all values
+    const { Encryptor } = await import('../crypto/encryptor');
+    const encrypted: Record<string, string> = {};
+    for (const [key, value] of Object.entries(rawLocal)) {
+      if (value.startsWith('capy:')) {
+        encrypted[key] = value; // Already encrypted
+      } else {
+        const enc = Encryptor.encrypt(value, encryptionKey);
+        const resourceId = deriveResourceId(branch || '', key);
+        encrypted[key] = `capy:${resourceId}:${enc}`;
+      }
+    }
+
+    const envBlob = Object.entries(encrypted)
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n');
+
+    // Update keep.lock hashes for the active branch
+    const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
+    for (const [key, value] of Object.entries(rawLocal)) {
+      const plaintext = value.startsWith('capy:')
+        ? this.fileManager.decryptValue(value, encryptionKey)
+        : value;
+      const valueHash = createHash('sha256').update(plaintext).digest('hex').slice(0, 16);
+      const resourceId = deriveResourceId(branch || '', key);
+      pushedVars[key] = { resource_id: resourceId, value_hash: valueHash };
+    }
+
+    const syncEngine = new SyncEngine();
+    const updatedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
+
     // Push to S3
-    const keepFileContent = JSON.stringify(keep);
-    const result = await this.serviceClient.pushEnvironments(
+    const keepFileContent = JSON.stringify(updatedKeep);
+    const result = await this.serviceClient.pushSecrets(
       projectState.projectId!,
       keepFileContent,
-      environmentBlobs,
+      envBlob,
     );
 
     // Update keep.lock with new state
-    this.fileManager.writeKeepFile(keep);
+    this.fileManager.writeKeepFile(updatedKeep);
 
     pushSpinner.succeed(
-      `Pushed ${Object.keys(environmentBlobs).length} environment(s) to S3 (keep_hash: ${result.keep_hash.slice(0, 8)}...)`
+      `Pushed ${Object.keys(rawLocal).length} secret(s) to S3 (keep_hash: ${result.keep_hash.slice(0, 8)}...)`
     );
   }
 }

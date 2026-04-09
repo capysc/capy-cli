@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, chmodSync, mkdirSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
-import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES, Environment } from '../types/index';
+import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
@@ -60,7 +60,7 @@ export class FileManager {
     try {
       const content = readFileSync(envPath, 'utf-8');
       const parsed = parseDotenv(content);
-      
+
       const decrypted: Record<string, string> = {};
       for (const [key, value] of Object.entries(parsed)) {
         try {
@@ -146,7 +146,7 @@ export class FileManager {
           const resourceId = deriveResourceId(branch || '', key);
           finalValue = `capy:${resourceId}:${snippetValue}`;
         }
-        
+
         encryptedVariables[key] = finalValue;
       }
 
@@ -199,17 +199,17 @@ export class FileManager {
         project_name: keep.project_name,
         variables: {} as Record<string, any>,
       };
-      // v4 format: variables are flat objects { resource_id, local?, staging?, production? }
+      // v3 format: variables are arrays of { resource_id, branch?, value_hash }
       for (const key of Object.keys(keep.variables).sort()) {
-        const v = keep.variables[key];
-        const entry: Record<string, string> = { resource_id: v.resource_id };
-        // Add environment hashes in canonical order
-        for (const env of ['local', 'staging', 'production'] as const) {
-          if (v[env]) {
-            entry[env] = v[env]!;
+        const entries = keep.variables[key];
+        sorted.variables[key] = entries.map(e => {
+          const obj: Record<string, string> = { resource_id: e.resource_id };
+          if (e.branch) {
+            obj.branch = e.branch;
           }
-        }
-        sorted.variables[key] = entry;
+          obj.value_hash = e.value_hash;
+          return obj;
+        });
       }
       const content = JSON.stringify(sorted, null, 2);
       writeFileSync(keepPath, content + '\n', 'utf-8');
@@ -232,7 +232,7 @@ export class FileManager {
   writeDecryptKey(decryptKey: DecryptKey): void {
     const capyDir = join(this.projectRoot, '.capy');
     this.ensureDirectoryExists(capyDir);
-    
+
     const decryptPath = join(capyDir, 'decrypt');
     const backup = this.createBackup(decryptPath);
 
@@ -258,7 +258,7 @@ export class FileManager {
   writeSyncState(syncState: SyncState): void {
     const capyDir = join(this.projectRoot, '.capy');
     this.ensureDirectoryExists(capyDir);
-    
+
     const syncStatePath = join(capyDir, 'sync-state');
     const backup = this.createBackup(syncStatePath);
 
@@ -364,19 +364,8 @@ export class FileManager {
     }
   }
 
-  /**
-   * Get the .env file path for an environment.
-   * local → .env, staging → .env.staging, production → .env.production
-   */
-  getEnvPathForEnvironment(environment: Environment): string {
-    if (environment === 'local') {
-      return join(this.projectRoot, '.env');
-    }
-    return join(this.projectRoot, `.env.${environment}`);
-  }
-
   ensureCapyGitignore(): void {
-    const requiredEntries = ['.env', '.env.staging', '.env.production', '.capy'];
+    const requiredEntries = ['.env', '.capy'];
     this.updateGitignore(requiredEntries);
   }
 
@@ -420,32 +409,26 @@ export class FileManager {
 
   /**
    * Creates a snippet-enhanced encrypted value for better usability
-   * Shows partial original value for identification while maintaining security
    */
   private createSnippetWithEncryption(originalValue: string, encryptedValue: string): string {
     const valueLength = originalValue.length;
-    
+
     if (valueLength <= 4) {
-      // ≤4 chars: ...X (last 1 char)
       const snippet = originalValue.slice(-1);
       return `${encryptedValue}...${snippet}`;
     } else if (valueLength <= 8) {
-      // ≤8 chars: X...X (first 1 char, last 1 char)
       const firstSnippet = originalValue.slice(0, 1);
       const lastSnippet = originalValue.slice(-1);
       return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
     } else if (valueLength <= 16) {
-      // 9-16 chars: X...XXX (first 1 char, last 3 chars)
       const firstSnippet = originalValue.slice(0, 1);
       const lastSnippet = originalValue.slice(-3);
       return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
     } else if (valueLength <= 24) {
-      // 16-24 chars: XX...XXXXXX (first 2...last 6)
       const firstSnippet = originalValue.slice(0, 2);
       const lastSnippet = originalValue.slice(-6);
       return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
     } else {
-      // >24 chars: XXXX...XXXXXX (first 4...last 6)
       const firstSnippet = originalValue.slice(0, 4);
       const lastSnippet = originalValue.slice(-6);
       return `${firstSnippet}...${encryptedValue}...${lastSnippet}`;
@@ -465,7 +448,7 @@ export class FileManager {
    */
   private extractEncryptedFromSnippet(value: string): string | null {
     const parts = value.split('...');
-    
+
     if (parts.length === 2) {
       // Format: encryptedData...snippet
       return parts[0];
@@ -473,7 +456,7 @@ export class FileManager {
       // Format: snippet...encryptedData...snippet
       return parts[1];
     }
-    
+
     return null; // Invalid format
   }
 

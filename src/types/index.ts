@@ -1,19 +1,8 @@
-export type Environment = 'local' | 'staging' | 'production';
-export const ENVIRONMENTS: Environment[] = ['local', 'staging', 'production'];
-
-export interface EnvVariable {
-  name: string;
-  value: string;
-  source: 'local' | 'remote' | 'both';
-  encrypted: boolean;
-}
-
-/** v4 keep.lock variable entry — flat object with per-environment value hashes */
-export interface KeepV4Variable {
+/** v3 keep.lock variable entry — per-branch value hashes */
+export interface KeepVariableEntry {
   resource_id: string;
-  local?: string;
-  staging?: string;
-  production?: string;
+  branch?: string;
+  value_hash: string;
 }
 
 export interface KeepFile {
@@ -21,14 +10,14 @@ export interface KeepFile {
   org_id: string;
   project_id: string;
   project_name: string;
-  variables: Record<string, KeepV4Variable>;
+  variables: Record<string, KeepVariableEntry[]>;
 }
 
-/** @deprecated v3 format — kept for migration */
-export interface KeepVariableEntry {
-  resource_id: string;
-  branch?: string;
-  value_hash: string;
+export interface EnvVariable {
+  name: string;
+  value: string;
+  source: 'local' | 'remote' | 'both';
+  encrypted: boolean;
 }
 
 export interface DecryptKey {
@@ -49,7 +38,6 @@ export interface ProjectState {
   projectName?: string;
   organizationId?: string;
   projectId?: string;
-  activeEnvironment?: Environment;
   activeBranch?: string;
   userId?: string;
 }

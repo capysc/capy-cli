@@ -99,22 +99,21 @@ export class CheckoutCommand {
     this.projectManager.writeActiveBranch(branchName);
     const keep = this.projectManager.readKeepFile()!;
 
-    // Pull secrets for the active environment at this keep_hash
-    const activeEnv = this.projectManager.readActiveEnvironment() || 'local';
-    const syncSpinner = ora(`Syncing secrets for ${branchName} (${activeEnv})...`).start();
+    // Pull secrets for this branch from S3
+    const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
 
     try {
       const hasVars = keep && Object.keys(keep.variables).length > 0;
       if (hasVars) {
-        const keepHash = SyncEngine.computeKeepHash(keep);
-        const blob = await this.serviceClient.getEnvironmentBlob(projectId, keepHash, activeEnv as any);
+        const keepHash = SyncEngine.computeKeepHash(keep, branchName);
+        const blob = await this.serviceClient.getSecrets(projectId, keepHash);
         if (blob?.env_file) {
           const remoteEnv = this.fileManager.parseEnvContent(blob.env_file);
           const decrypted: Record<string, string> = {};
           for (const [key, value] of Object.entries(remoteEnv)) {
             decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
           }
-          this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep);
+          this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep, branchName);
           syncSpinner.stop();
           console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
         } else {
@@ -158,13 +157,6 @@ export class CheckoutCommand {
 
     try {
       await this.serviceClient.createBranch(projectId, branchName, isProtected);
-
-      // Copy secrets from current branch
-      const keep = this.projectManager.readKeepFile()!;
-      const currentBranch = this.projectManager.readActiveBranch();
-
-      // In v4, secrets are stored by environment, not branch.
-      // Branch registration is for git branch tracking only.
       branchSpinner.stop();
       console.log(`Branch "${branchName}" registered`);
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-// Removed chalk for now to fix ES module issues
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 
@@ -36,20 +35,18 @@ program
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
-      console.log('    capy                        \x1b[90mSync secrets (pull)\x1b[0m');
+      console.log('    capy                        \x1b[90mSync secrets\x1b[0m');
+      console.log('    capy status                 \x1b[90mShow secret drift\x1b[0m');
       console.log('    capy push                   \x1b[90mPush encrypted values to S3\x1b[0m');
-      console.log('    capy env                    \x1b[90mSwitch environment\x1b[0m');
-      console.log('    capy run <command>          \x1b[90mRun with injected secrets\x1b[0m');
-      console.log('    capy deploy pr               \x1b[90mCreate a deployment PR\x1b[0m');
-      console.log('    capy deploy setup            \x1b[90mGenerate a deploy token for CI\x1b[0m');
-      console.log('    capy deploy decrypt          \x1b[90mDecrypt deploy token (CI runtime)\x1b[0m');
-      console.log('    capy deploy revoke <id>      \x1b[90mRevoke a deploy token\x1b[0m');
-      console.log('    capy deploy list             \x1b[90mList deploy tokens\x1b[0m');
-    console.log('    capy invite <email>          \x1b[90mInvite a teammate\x1b[0m');
-    console.log('    capy redeem <code>           \x1b[90mRedeem an invite code\x1b[0m');
-    console.log('    capy kick <email>            \x1b[90mRemove a teammate\x1b[0m');
-    console.log('    capy users                   \x1b[90mList organization members\x1b[0m');
-    console.log('    capy info                    \x1b[90mShow current session info\x1b[0m');
+      console.log('    capy deploy pr              \x1b[90mCreate a deployment PR\x1b[0m');
+      console.log('    capy deploy setup           \x1b[90mGenerate a deploy token for CI\x1b[0m');
+      console.log('    capy deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m');
+      console.log('    capy deploy list            \x1b[90mList deploy tokens\x1b[0m');
+      console.log('    capy invite <email>         \x1b[90mInvite a teammate\x1b[0m');
+      console.log('    capy redeem <code>          \x1b[90mRedeem an invite code\x1b[0m');
+      console.log('    capy kick <email>           \x1b[90mRemove a teammate\x1b[0m');
+      console.log('    capy users                  \x1b[90mList organization members\x1b[0m');
+      console.log('    capy info                   \x1b[90mShow current session info\x1b[0m');
       console.log('');
       process.exit(1);
     }
@@ -63,6 +60,15 @@ program
 
     const command = new CapyCommand(cliOptions);
     await command.execute();
+  });
+
+program
+  .command('status')
+  .description('Show secret drift between local, pinned, and remote')
+  .action(async () => {
+    const { StatusCommand } = await import('./commands/statusCommand');
+    const cmd = new StatusCommand();
+    await cmd.execute();
   });
 
 program
@@ -120,9 +126,6 @@ program
       if (!confirm) return;
 
       await serviceClient.deleteBranch(projectState.projectId!, branch.id);
-
-      // v4: branches no longer stored in keep.lock, no cleanup needed
-      const keep = pm.readKeepFile();
 
       console.log(`Deleted branch "${deleteName}"`);
       return;
@@ -198,25 +201,6 @@ program
     await cmd.execute();
   });
 
-program
-  .command('env [environment]')
-  .description('Switch the active environment (local/staging/production)')
-  .action(async (environment?: string) => {
-    const { EnvCommand } = await import('./commands/envCommand');
-    const cmd = new EnvCommand();
-    await cmd.execute(environment);
-  });
-
-program
-  .command('run <command...>')
-  .description('Run a command with secrets injected as environment variables')
-  .allowUnknownOption(true)
-  .action(async (command: string[]) => {
-    const { RunCommand } = await import('./commands/runCommand');
-    const cmd = new RunCommand();
-    await cmd.execute(command);
-  });
-
 const deploy = program
   .command('deploy')
   .description('Deploy commands: PR creation, token setup, CI decrypt');
@@ -234,15 +218,6 @@ deploy
   .action(async () => {
     const { DeploySetupCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeploySetupCommand();
-    await cmd.execute();
-  });
-
-deploy
-  .command('decrypt')
-  .description('Decrypt deploy token and output CAPY_KEY (CI runtime)')
-  .action(async () => {
-    const { DeployDecryptCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployDecryptCommand();
     await cmd.execute();
   });
 

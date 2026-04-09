@@ -9,8 +9,6 @@ import {
   Branch,
   CapyError,
   ERROR_CODES,
-  Environment,
-  ENVIRONMENTS,
 } from '../types/index';
 import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
@@ -282,17 +280,16 @@ export class ServiceClient {
   }
 
   /**
-   * v4: Fetch an encrypted env blob for a specific environment at a specific keep_hash.
+   * v3: Fetch an encrypted env blob by keep_hash (no environment param).
    */
-  async getEnvironmentBlob(
+  async getSecrets(
     projectId: string,
     keepHash: string,
-    environment: Environment,
   ): Promise<{ env_file: string } | null> {
     try {
       const data = await this.request<{ env_file: string }>(
         'GET',
-        `/secrets/${projectId}?keep_hash=${encodeURIComponent(keepHash)}&environment=${encodeURIComponent(environment)}`,
+        `/secrets/${projectId}?keep_hash=${encodeURIComponent(keepHash)}`,
       );
       return data;
     } catch (error: any) {
@@ -304,17 +301,16 @@ export class ServiceClient {
   }
 
   /**
-   * v4: Push environment blobs to content-addressed S3.
-   * Each environment blob is stored at {org}/{project}/{keep_hash}/{environment}.
+   * v3: Push a single env blob to content-addressed S3.
    */
-  async pushEnvironments(
+  async pushSecrets(
     projectId: string,
     keepFile: string,
-    environments: Partial<Record<Environment, string>>,
-  ): Promise<{ keep_hash: string; environments: string[] }> {
+    envBlob: string,
+  ): Promise<{ keep_hash: string }> {
     return this.request('POST', `/secrets/${projectId}`, {
       keep_file: keepFile,
-      environments,
+      env_blob: envBlob,
     });
   }
 

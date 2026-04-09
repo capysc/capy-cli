@@ -193,7 +193,7 @@ describe('FileManager', () => {
   describe('writeKeepFile', () => {
     test('should write keep file with proper formatting', () => {
       const keep: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -213,7 +213,7 @@ describe('FileManager', () => {
 
     test('should handle write failure with backup restoration', () => {
       const keep: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -237,16 +237,16 @@ describe('FileManager', () => {
   });
 
   describe('writeKeepFile deterministic output', () => {
-    test('should sort variables alphabetically with v4 flat objects', () => {
+    test('should sort variables alphabetically with v3 arrays', () => {
       const keep: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {
-          ZEBRA_VAR: { resource_id: 'res_z', local: 'hz' },
-          ALPHA_VAR: { resource_id: 'res_a', local: 'ha', staging: 'has' },
-          MIDDLE_VAR: { resource_id: 'res_m', local: 'hm' },
+          ZEBRA_VAR: [{ resource_id: 'res_z', value_hash: 'hz' }],
+          ALPHA_VAR: [{ resource_id: 'res_a', value_hash: 'ha' }, { resource_id: 'res_a', branch: 'staging', value_hash: 'has' }],
+          MIDDLE_VAR: [{ resource_id: 'res_m', value_hash: 'hm' }],
         }
       };
 
@@ -260,32 +260,32 @@ describe('FileManager', () => {
       const varNames = Object.keys(parsed.variables);
       expect(varNames).toEqual(['ALPHA_VAR', 'MIDDLE_VAR', 'ZEBRA_VAR']);
 
-      // v4: flat objects with environments in canonical order
-      expect(parsed.variables.ALPHA_VAR.resource_id).toBe('res_a');
-      expect(parsed.variables.ALPHA_VAR.local).toBe('ha');
-      expect(parsed.variables.ALPHA_VAR.staging).toBe('has');
+      // v3: arrays of { resource_id, branch?, value_hash }
+      expect(parsed.variables.ALPHA_VAR[0].resource_id).toBe('res_a');
+      expect(parsed.variables.ALPHA_VAR[0].value_hash).toBe('ha');
+      expect(parsed.variables.ALPHA_VAR[1].branch).toBe('staging');
     });
 
     test('should produce identical output regardless of insertion order', () => {
       const keepA: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_1',
         project_id: 'proj_1',
         project_name: 'test',
         variables: {
-          B_VAR: { resource_id: 'rb', local: 'hb' },
-          A_VAR: { resource_id: 'ra', local: 'ha' },
+          B_VAR: [{ resource_id: 'rb', value_hash: 'hb' }],
+          A_VAR: [{ resource_id: 'ra', value_hash: 'ha' }],
         }
       };
 
       const keepB: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_1',
         project_id: 'proj_1',
         project_name: 'test',
         variables: {
-          A_VAR: { resource_id: 'ra', local: 'ha' },
-          B_VAR: { resource_id: 'rb', local: 'hb' },
+          A_VAR: [{ resource_id: 'ra', value_hash: 'ha' }],
+          B_VAR: [{ resource_id: 'rb', value_hash: 'hb' }],
         }
       };
 
@@ -443,7 +443,7 @@ describe('FileManager', () => {
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '.env\n.env.staging\n.env.production\n.capy\n',
+        '.env\n.capy\n',
         'utf-8'
       );
     });

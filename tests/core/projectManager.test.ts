@@ -45,7 +45,7 @@ describe('ProjectManager', () => {
 
     test('should detect initialized project with valid keep.lock file', async () => {
       const mockKeep: KeepFile = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -98,7 +98,7 @@ describe('ProjectManager', () => {
 
     test('should read and validate keep.lock file successfully', () => {
       const mockKeep = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -129,7 +129,7 @@ describe('ProjectManager', () => {
 
     test('should throw CapyError for missing required fields', () => {
       const invalidKeep = {
-        version: '4.0',
+        version: '3.0',
         // Missing required fields
         project_name: 'test'
       };
@@ -142,7 +142,7 @@ describe('ProjectManager', () => {
 
     test('should throw CapyError for invalid variables structure', () => {
       const invalidKeep = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -197,7 +197,7 @@ describe('ProjectManager', () => {
   describe('validateKeepFile', () => {
     test('should validate required fields', () => {
       const validKeep = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -220,7 +220,7 @@ describe('ProjectManager', () => {
 
     test('should throw for missing org_id', () => {
       const invalidKeep = {
-        version: '4.0',
+        version: '3.0',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {}
@@ -231,7 +231,7 @@ describe('ProjectManager', () => {
 
     test('should throw for invalid variables type', () => {
       const invalidKeep = {
-        version: '4.0',
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -242,34 +242,34 @@ describe('ProjectManager', () => {
     });
   });
 
-  describe('migrateKeepIfNeeded', () => {
+  describe('parseKeepFile', () => {
     test('should reject unsupported keep.lock versions', () => {
-      const v3Keep = {
-        version: '3.0',
+      const v4Keep = {
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {}
       };
 
-      expect(() => (projectManager as any).migrateKeepIfNeeded(v3Keep)).toThrow('Unsupported keep.lock version');
+      expect(() => (projectManager as any).parseKeepFile(v4Keep)).toThrow('Unsupported keep.lock version');
     });
 
-    test('should pass through v4 keep files', () => {
-      const v4Keep = {
-        version: '4.0',
+    test('should pass through v3 keep files', () => {
+      const v3Keep = {
+        version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {
-          API_KEY: { resource_id: 'res_abc', local: 'hash123' },
+          API_KEY: [{ resource_id: 'res_abc', value_hash: 'hash123' }],
         }
       };
 
-      const result = (projectManager as any).migrateKeepIfNeeded(v4Keep);
-      expect(result.version).toBe('4.0');
-      expect(result.variables.API_KEY.resource_id).toBe('res_abc');
-      expect(result.variables.API_KEY.local).toBe('hash123');
+      const result = (projectManager as any).parseKeepFile(v3Keep);
+      expect(result.version).toBe('3.0');
+      expect(result.variables.API_KEY[0].resource_id).toBe('res_abc');
+      expect(result.variables.API_KEY[0].value_hash).toBe('hash123');
     });
   });
 
