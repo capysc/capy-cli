@@ -1051,9 +1051,9 @@ export class CapyCommand {
         } else if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
           result[variable] = remotePlaintext[variable];
         }
-      } else if (choice === 'local') {
+      } else if (choice === 'local' && localPlaintext[variable] !== undefined) {
         result[variable] = localPlaintext[variable];
-      } else if (choice === 'remote') {
+      } else if (choice === 'remote' && remotePlaintext[variable] !== undefined) {
         result[variable] = remotePlaintext[variable];
       }
       // 'delete' — don't add to result
