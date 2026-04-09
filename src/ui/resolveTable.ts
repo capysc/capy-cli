@@ -135,6 +135,7 @@ export class ResolveTable {
           this.confirmed.add(this.rowIndex);
 
           if (this.confirmed.size === this.rows.length) {
+            this.draw();
             this.cleanup(onData);
             const choices: Record<string, ColumnKey> = {};
             for (let i = 0; i < this.rows.length; i++) {
@@ -144,7 +145,9 @@ export class ResolveTable {
             return;
           }
 
-          for (let i = this.rowIndex + 1; i < this.rows.length; i++) {
+          // Find next unconfirmed row, wrapping around
+          for (let offset = 1; offset < this.rows.length; offset++) {
+            const i = (this.rowIndex + offset) % this.rows.length;
             if (!this.confirmed.has(i)) {
               this.rowIndex = i;
               const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
