@@ -193,7 +193,7 @@ describe('FileManager', () => {
   describe('writeKeepFile', () => {
     test('should write keep file with proper formatting', () => {
       const keep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -213,7 +213,7 @@ describe('FileManager', () => {
 
     test('should handle write failure with backup restoration', () => {
       const keep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -268,24 +268,24 @@ describe('FileManager', () => {
 
     test('should produce identical output regardless of insertion order', () => {
       const keepA: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_1',
         project_id: 'proj_1',
         project_name: 'test',
         variables: {
-          B_VAR: [{ resource_id: 'rb', value_hash: 'hb' }],
-          A_VAR: [{ resource_id: 'ra', value_hash: 'ha' }],
+          B_VAR: { resource_id: 'rb', local: 'hb' },
+          A_VAR: { resource_id: 'ra', local: 'ha' },
         }
       };
 
       const keepB: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_1',
         project_id: 'proj_1',
         project_name: 'test',
         variables: {
-          A_VAR: [{ resource_id: 'ra', value_hash: 'ha' }],
-          B_VAR: [{ resource_id: 'rb', value_hash: 'hb' }],
+          A_VAR: { resource_id: 'ra', local: 'ha' },
+          B_VAR: { resource_id: 'rb', local: 'hb' },
         }
       };
 

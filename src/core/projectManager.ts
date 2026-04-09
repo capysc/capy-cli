@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, KeepFile, KeepV4Variable, DecryptKey, SyncState, CapyError, ERROR_CODES, Environment } from '../types/index';
+import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES, Environment } from '../types/index';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -162,60 +162,13 @@ export class ProjectManager {
     }
   }
 
-  /**
-   * Migrate older keep.lock formats to current v4 (environments).
-   * v2 → v3: remove timestamps
-   * v3 → v4: convert branch-based arrays to per-environment flat objects
-   */
   private migrateKeepIfNeeded(raw: any): KeepFile {
-    if (raw.version === '2.0') {
-      delete raw.created_at;
-      delete raw.last_updated;
-      if (raw.variables) {
-        for (const entries of Object.values(raw.variables) as any[]) {
-          for (const entry of entries) {
-            delete entry.created_at;
-          }
-        }
-      }
-      raw.version = '3.0';
+    if (raw.version !== '4.0') {
+      throw new CapyError(
+        `Unsupported keep.lock version: ${raw.version}. Please update your CLI.`,
+        ERROR_CODES.INVALID_FORMAT
+      );
     }
-
-    if (raw.version === '3.0') {
-      // Convert v3 branch-based arrays to v4 environment flat objects
-      const newVars: Record<string, KeepV4Variable> = {};
-      if (raw.variables) {
-        for (const [varName, entries] of Object.entries(raw.variables) as [string, any[]][]) {
-          if (!Array.isArray(entries)) {
-            // Already v4 format somehow
-            newVars[varName] = entries;
-            continue;
-          }
-          const v4: KeepV4Variable = { resource_id: entries[0]?.resource_id || '' };
-          for (const entry of entries) {
-            // Map branch names to environments
-            const branch = entry.branch || '';
-            let env: Environment;
-            if (!branch || branch === 'development') {
-              env = 'local';
-            } else if (branch === 'staging') {
-              env = 'staging';
-            } else if (branch === 'production') {
-              env = 'production';
-            } else {
-              // Default unknown branches to local
-              env = 'local';
-            }
-            v4[env] = entry.value_hash;
-            if (!v4.resource_id) v4.resource_id = entry.resource_id;
-          }
-          newVars[varName] = v4;
-        }
-      }
-      raw.variables = newVars;
-      raw.version = '4.0';
-    }
-
     return raw as KeepFile;
   }
 
