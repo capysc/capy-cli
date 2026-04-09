@@ -798,7 +798,7 @@ export class CapyCommand {
       finalEnv = { ...localPlaintext };
     } else {
       // Individual resolution
-      finalEnv = await this.resolveIndividually(diffs, pinned, localPlaintext, remotePlaintext);
+      finalEnv = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
     }
 
     // Update keep.lock
@@ -943,57 +943,52 @@ export class CapyCommand {
 
   private async resolveIndividually(
     diffs: { variable: string; type: string; pinned?: string; local?: string; remote?: string }[],
+    showLocal: boolean,
+    showRemote: boolean,
     pinned: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
   ): Promise<Record<string, string>> {
+    const { ResolveTable } = await import('../ui/resolveTable');
+    type Row = import('../ui/resolveTable').ResolveRow;
+
+    const rows: Row[] = diffs.map(diff => ({
+      variable: diff.variable,
+      pinned: pinned[diff.variable]
+        ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
+        : null,
+      local: localPlaintext[diff.variable]
+        ? formatSnippet(localPlaintext[diff.variable])
+        : null,
+      remote: remotePlaintext[diff.variable]
+        ? formatSnippet(remotePlaintext[diff.variable])
+        : null,
+    }));
+
+    const table = new ResolveTable(rows, showLocal, showRemote);
+    const { choices, cancelled } = await table.run();
+
+    if (cancelled) {
+      // Return current local state unchanged
+      return { ...localPlaintext };
+    }
+
     const result: Record<string, string> = {};
 
-    for (const diff of diffs) {
-      const choices: { name: string; value: string }[] = [];
-
-      if (pinned[diff.variable]) {
-        choices.push({
-          name: `Pinned (${formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))})`,
-          value: 'pinned',
-        });
-      }
-      if (localPlaintext[diff.variable]) {
-        choices.push({
-          name: `Local (${formatSnippet(localPlaintext[diff.variable])})`,
-          value: 'local',
-        });
-      }
-      if (remotePlaintext[diff.variable]) {
-        choices.push({
-          name: `Remote (${formatSnippet(remotePlaintext[diff.variable])})`,
-          value: 'remote',
-        });
-      }
-      choices.push({ name: 'Delete this secret', value: 'delete' });
-
-      const { resolution } = await inquirer.prompt([{
-        type: 'list',
-        name: 'resolution',
-        message: `${diff.variable}:`,
-        choices,
-      }]);
-
-      if (resolution === 'pinned') {
-        // Need to find the pinned plaintext value
-        const pinnedHash = pinned[diff.variable];
-        if (localPlaintext[diff.variable] && hashValue(localPlaintext[diff.variable]) === pinnedHash) {
-          result[diff.variable] = localPlaintext[diff.variable];
-        } else if (remotePlaintext[diff.variable] && hashValue(remotePlaintext[diff.variable]) === pinnedHash) {
-          result[diff.variable] = remotePlaintext[diff.variable];
+    for (const [variable, choice] of Object.entries(choices)) {
+      if (choice === 'pinned') {
+        const pinnedHash = pinned[variable];
+        if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinnedHash) {
+          result[variable] = localPlaintext[variable];
+        } else if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
+          result[variable] = remotePlaintext[variable];
         }
-        // If we can't find the pinned plaintext, skip (requires fetch from S3)
-      } else if (resolution === 'local') {
-        result[diff.variable] = localPlaintext[diff.variable];
-      } else if (resolution === 'remote') {
-        result[diff.variable] = remotePlaintext[diff.variable];
+      } else if (choice === 'local') {
+        result[variable] = localPlaintext[variable];
+      } else if (choice === 'remote') {
+        result[variable] = remotePlaintext[variable];
       }
-      // 'delete' — just don't add to result
+      // 'delete' — don't add to result
     }
 
     // Add unchanged variables from local
