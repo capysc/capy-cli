@@ -968,7 +968,7 @@ export class CapyCommand {
     // Print header
     const headerLine = headers.map((h, i) => h.padEnd(colWidths[i])).join('');
     console.log(`  ${headerLine}`);
-    console.log(`  ${'-'.repeat(colWidths.reduce((a, b) => a + b, 0))}`);
+    console.log(`  ${'─'.repeat(colWidths.reduce((a, b) => a + b, 0))}`);
 
     // Print rows
     for (const diff of diffs) {

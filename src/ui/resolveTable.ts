@@ -200,7 +200,7 @@ export class ResolveTable {
     // Header
     const header = visibleCols.map((h, i) => this.pad(h, colWidths[i])).join('');
     lines.push(m + header);
-    lines.push(m + '-'.repeat(colWidths.reduce((a, b) => a + b, 0)));
+    lines.push(m + '─'.repeat(colWidths.reduce((a, b) => a + b, 0)));
 
     // Rows
     for (let ri = 0; ri < this.rows.length; ri++) {
@@ -231,21 +231,21 @@ export class ResolveTable {
       cellKeys.push(null);
       const choiceColIdx = cells.length - 1;
 
-      // Format each cell
+      // Format each cell — active row always shows selection box, even if confirmed
       const formatted = cells.map((cell, ci) => {
         const key = cellKeys[ci];
         const width = colWidths[ci];
 
         // Choice column
         if (ci === choiceColIdx) {
-          if (isConfirmed) return GREEN + this.pad(cell, width) + RESET;
+          if (isConfirmed && !isActive) return GREEN + this.pad(cell, width) + RESET;
           if (isActive) return DIM + this.pad(cell, width) + RESET;
           return this.pad(cell, width);
         }
 
         // Variable name column
         if (ci === 0) {
-          if (isConfirmed) return GREEN + this.pad(cell, width) + RESET;
+          if (isConfirmed && !isActive) return GREEN + this.pad(cell, width) + RESET;
           return this.pad(cell, width);
         }
 
@@ -253,17 +253,17 @@ export class ResolveTable {
 
         const isSelected = key === selection;
 
-        if (isConfirmed && isSelected) {
-          return GREEN + this.pad(cell, width) + RESET;
-        }
         if (isActive && isSelected) {
           return BG_SELECT + this.pad(cell, width) + RESET;
         }
-        if (isConfirmed) {
-          return DIM + this.pad(cell, width) + RESET;
-        }
         if (isActive) {
           return this.pad(cell, width);
+        }
+        if (isConfirmed && isSelected) {
+          return GREEN + this.pad(cell, width) + RESET;
+        }
+        if (isConfirmed) {
+          return DIM + this.pad(cell, width) + RESET;
         }
         return this.pad(cell, width);
       });
