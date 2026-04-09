@@ -590,6 +590,62 @@ export class CapyCommand {
     return selected || undefined;
   }
 
+  private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
+    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+    const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+    // Shimmer effect: continuous gradient matching Capy brand
+    // #3a5555 → #688795 → #a06b6b → #b1aa92 → #3a5555
+    const shimmer = (s: string) => {
+      const stops = [
+        [58, 85, 85],    // #3a5555
+        [104, 135, 149], // #688795
+        [160, 107, 107], // #a06b6b
+        [177, 170, 146], // #b1aa92
+        [58, 85, 85],    // #3a5555
+      ];
+      const len = s.replace(/ /g, '').length;
+      let charIdx = 0;
+      return s.split('').map((ch) => {
+        if (ch === ' ') return ch;
+        const t = len > 1 ? charIdx / (len - 1) : 0;
+        // Interpolate between gradient stops
+        const segment = t * (stops.length - 1);
+        const i = Math.floor(segment);
+        const f = segment - i;
+        const a = stops[Math.min(i, stops.length - 1)];
+        const b = stops[Math.min(i + 1, stops.length - 1)];
+        const r = Math.round(a[0] + (b[0] - a[0]) * f);
+        const g = Math.round(a[1] + (b[1] - a[1]) * f);
+        const bl = Math.round(a[2] + (b[2] - a[2]) * f);
+        charIdx++;
+        return `\x1b[38;2;${r};${g};${bl}m${ch}\x1b[0m`;
+      }).join('');
+    };
+
+    const notCreated = grey('not yet created');
+    const content = [
+      `Project:      ${projectName === 'not yet created' ? notCreated : bold(projectName)}`,
+      `Organization: ${orgName === 'not yet created' ? notCreated : orgName}`,
+      `Branch:       ${branch || grey('none')}`,
+      '',
+      shimmer(`Welcome ${userName}`),
+    ];
+
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const maxLen = Math.max(40, ...content.map(l => stripAnsi(l).length + 2));
+
+    console.log('');
+    console.log(grey('Capy CLI'));
+    console.log(grey('┌' + '─'.repeat(maxLen) + '┐'));
+    for (const line of content) {
+      const pad = maxLen - stripAnsi(line).length - 1;
+      console.log(`${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
+    }
+    console.log(grey('└' + '─'.repeat(maxLen) + '┘'));
+    console.log('');
+  }
+
   private async syncProject(projectState: ProjectState): Promise<void> {
     // Load user-scoped session if we know who last synced this project
     if (projectState.userId) {
@@ -615,10 +671,19 @@ export class CapyCommand {
 
     spinner.stop();
 
-    const branch = projectState.activeBranch;
-    const branchLabel = branch || 'development';
+    const orgName = authResult.organization_name
+      || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name
+      || (authResult.organizations?.length === 0 ? 'not yet created' : authResult.organization_id)
+      || 'not yet created';
 
-    console.log(`${B('capy')}: ${projectState.projectName} (${branchLabel})\n`);
+    const branch = projectState.activeBranch;
+
+    this.displayHeader(
+      projectState.projectName || 'not yet created',
+      orgName,
+      authResult.user_first_name || authResult.user_email || '',
+      branch,
+    );
 
     // Set token for service client
     const token = this.authService.getToken();
