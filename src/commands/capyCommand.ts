@@ -302,6 +302,10 @@ export class CapyCommand {
     };
 
     this.fileManager.writeKeepFile(keep);
+
+    // Create the default development branch on the service
+    await this.serviceClient.createBranch(projectResult.project_id, 'development');
+
     keySpinner.succeed('keep.lock created (pinned to development, 0 secrets)');
 
     // Update gitignore
@@ -386,7 +390,6 @@ export class CapyCommand {
           }]);
           initBranch = branchName.trim();
 
-          // Create the branch on the service
           await this.serviceClient.createBranch(projectResult.project_id, initBranch!);
           this.projectManager.writeActiveBranch(initBranch);
         }
