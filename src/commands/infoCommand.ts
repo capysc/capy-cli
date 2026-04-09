@@ -5,6 +5,7 @@ const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
 const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 export class InfoCommand {
   private apiUrl?: string;
@@ -20,7 +21,7 @@ export class InfoCommand {
     const projectState = await pm.detectProjectState();
 
     if (!projectState.initialized || !projectState.organizationId) {
-      console.error('No keep.lock file found. Run capy first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
       process.exit(1);
     }
 
