@@ -112,7 +112,7 @@ function renderNetworkError(error: CapyError): string {
   const lines = [
     '',
     `  ${bold('Connection failed')}`,
-    `  ${grey('Could not reach the Capy service.')}`,
+    `  ${grey(`Could not reach the ${bold('Capy')} service.`)}`,
     '',
     `  Check:`,
     `    1. Your internet connection`,
@@ -199,7 +199,7 @@ function renderNoKeepFile(): string {
   const lines = [
     '',
     `  ${bold('No keep.lock file found')}`,
-    `  ${grey('This project has not been initialized with Capy yet.')}`,
+    `  ${grey(`This project has not been initialized with ${bold('Capy')} yet.`)}`,
     '',
     `  Run ${bold('capy')} to initialize.`,
     '',

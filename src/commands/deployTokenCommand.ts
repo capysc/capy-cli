@@ -12,6 +12,8 @@ import {
   parseDeployCode,
 } from '../crypto/deployCrypto';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class DeploySetupCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -27,7 +29,7 @@ export class DeploySetupCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error('No keep.lock file found. Run capy first to initialize.');
+        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 
@@ -98,7 +100,7 @@ export class DeploySetupCommand {
       console.log('  Add this to your GitHub Actions workflow:');
       console.log('');
       console.log('    - name: Decrypt secrets');
-      console.log('      run: eval $(capy deploy decrypt)');
+      console.log(`      run: eval $(${B('capy')} deploy decrypt)`);
       console.log('      env:');
       console.log('        CAPY_DEPLOY_CODE: ${{ secrets.CAPY_DEPLOY_CODE }}');
       console.log('');
@@ -189,7 +191,7 @@ export class DeployRevokeCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId) {
-        console.error('No keep.lock file found. Run capy first to initialize.');
+        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 
@@ -230,7 +232,7 @@ export class DeployListCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error('No keep.lock file found. Run capy first to initialize.');
+        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 

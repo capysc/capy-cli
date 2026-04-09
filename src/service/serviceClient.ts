@@ -14,6 +14,8 @@ import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export interface MemberDetail {
   membershipId: string;
   userId: string;
@@ -68,13 +70,13 @@ export class ServiceClient {
       clearTimeout(timeout);
       if (err.name === 'AbortError') {
         throw new CapyError(
-          'Failed to connect to Capy service. Please check your internet connection.',
+          `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
           ERROR_CODES.NETWORK_ERROR,
           { code: 'ETIMEDOUT' }
         );
       }
       throw new CapyError(
-        'Failed to connect to Capy service. Please check your internet connection.',
+        `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
         ERROR_CODES.NETWORK_ERROR,
         { code: err.code || err.cause?.code }
       );
@@ -412,7 +414,7 @@ export class ServiceClient {
     } catch (err: any) {
       clearTimeout(timeout);
       throw new CapyError(
-        'Cannot reach Capy service. Check your internet connection.',
+        `Cannot reach ${B('Capy')} service. Check your internet connection.`,
         ERROR_CODES.NETWORK_ERROR,
         { code: err.code || err.cause?.code },
       );

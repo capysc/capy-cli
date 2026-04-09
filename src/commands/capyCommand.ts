@@ -32,6 +32,8 @@ import {
 import { saveMasterKey } from '../config/globalConfig';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class CapyCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
@@ -441,20 +443,20 @@ export class CapyCommand {
           // Install git hooks
           this.installGitHooks();
 
-          console.log('\nRun `capy push` to share your secrets with teammates.');
+          console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
-          console.log('You can run \'capy\' again to retry syncing');
+          console.log(`You can run ${B('capy')} again to retry syncing`);
         }
       } else {
-        console.log('\nNo .env file found. Add secrets to .env, then run `capy push`');
+        console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
         console.log('to share them with your team.');
 
         // Install git hooks
         this.installGitHooks();
       }
     } else {
-      console.log('\nNo .env file found. Add secrets to .env, then run `capy push`');
+      console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
       console.log('to share them with your team.');
 
       // Install git hooks
@@ -613,7 +615,7 @@ export class CapyCommand {
     const branch = projectState.activeBranch;
     const branchLabel = branch || 'development';
 
-    console.log(`capy: ${projectState.projectName} (${branchLabel})\n`);
+    console.log(`${B('capy')}: ${projectState.projectName} (${branchLabel})\n`);
 
     // Set token for service client
     const token = this.authService.getToken();
@@ -1016,7 +1018,7 @@ export class CapyCommand {
     const keepFile = pm.readKeepFile();
 
     if (!keepFile) {
-      console.error('No keep.lock file found. Run capy first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
       process.exit(1);
     }
 

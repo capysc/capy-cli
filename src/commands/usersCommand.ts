@@ -4,6 +4,8 @@ import { ProjectManager } from '../core/projectManager';
 import { InteractiveTable } from '../ui/interactiveTable';
 import { Spinner } from '../ui/spinner';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class UsersCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -18,7 +20,7 @@ export class UsersCommand {
     const projectState = await pm.detectProjectState();
 
     if (!projectState.initialized || !projectState.organizationId) {
-      console.error('No keep.lock file found. Run capy first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
       process.exit(1);
     }
 

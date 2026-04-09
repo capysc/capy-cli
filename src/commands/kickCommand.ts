@@ -2,6 +2,8 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class KickCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -16,7 +18,7 @@ export class KickCommand {
     const projectState = await pm.detectProjectState();
 
     if (!projectState.initialized || !projectState.organizationId) {
-      console.error('No keep.lock file found. Run capy first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
       process.exit(1);
     }
 
