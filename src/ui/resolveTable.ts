@@ -12,8 +12,8 @@ const CLEAR_EOL = `${ESC}[K`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
 const GREEN = `${ESC}[32m`;
-// Blue background matching the Capy brand
-const BG_BLUE = `${ESC}[48;5;24m${ESC}[37m`; // dark blue bg + white text
+// White background selection box
+const BG_SELECT = `${ESC}[47m${ESC}[30m`; // white bg + black text
 
 export interface ResolveRow {
   variable: string;
@@ -49,11 +49,10 @@ export class ResolveTable {
     this.selections = rows.map(row => this.getAvailableColumns(row)[0]);
   }
 
-  private getAvailableColumns(row: ResolveRow): ColumnKey[] {
-    const cols: ColumnKey[] = [];
-    if (row.pinned !== null) cols.push('pinned');
-    if (this.showLocal && row.local !== null) cols.push('local');
-    if (this.showRemote && row.remote !== null) cols.push('remote');
+  private getAvailableColumns(_row: ResolveRow): ColumnKey[] {
+    const cols: ColumnKey[] = ['pinned'];
+    if (this.showLocal) cols.push('local');
+    if (this.showRemote) cols.push('remote');
     cols.push('delete');
     return cols;
   }
@@ -99,7 +98,7 @@ export class ResolveTable {
             this.rowIndex--;
             const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
             this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-            if (this.colIndex < 0) this.colIndex = 0;
+            this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
             this.draw();
           }
           return;
@@ -110,15 +109,15 @@ export class ResolveTable {
             this.rowIndex++;
             const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
             this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-            if (this.colIndex < 0) this.colIndex = 0;
+            this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
             this.draw();
           }
           return;
         }
 
         if (key === `${ESC}[D`) {
-          if (!this.confirmed.has(this.rowIndex) && this.colIndex > 0) {
-            this.colIndex--;
+          if (!this.confirmed.has(this.rowIndex)) {
+            this.colIndex = Math.max(0, this.colIndex - 1);
             this.selections[this.rowIndex] = availCols[this.colIndex];
             this.draw();
           }
@@ -126,8 +125,8 @@ export class ResolveTable {
         }
 
         if (key === `${ESC}[C`) {
-          if (!this.confirmed.has(this.rowIndex) && this.colIndex < availCols.length - 1) {
-            this.colIndex++;
+          if (!this.confirmed.has(this.rowIndex)) {
+            this.colIndex = Math.min(availCols.length - 1, this.colIndex + 1);
             this.selections[this.rowIndex] = availCols[this.colIndex];
             this.draw();
           }
@@ -152,7 +151,7 @@ export class ResolveTable {
               this.rowIndex = i;
               const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
               this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-              if (this.colIndex < 0) this.colIndex = 0;
+              this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
               break;
             }
           }
@@ -260,7 +259,7 @@ export class ResolveTable {
           return GREEN + this.pad(cell, width) + RESET;
         }
         if (isActive && isSelected) {
-          return BG_BLUE + this.pad(cell, width) + RESET;
+          return BG_SELECT + this.pad(cell, width) + RESET;
         }
         if (isConfirmed) {
           return DIM + this.pad(cell, width) + RESET;
