@@ -4,6 +4,24 @@ import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 
+// Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
+process.on('uncaughtException', (error: any) => {
+  if (error?.name === 'ExitPromptError') {
+    console.log('\nCancelled.');
+    process.exit(0);
+  }
+  console.error(error);
+  process.exit(1);
+});
+process.on('unhandledRejection', (error: any) => {
+  if (error?.name === 'ExitPromptError') {
+    console.log('\nCancelled.');
+    process.exit(0);
+  }
+  console.error(error);
+  process.exit(1);
+});
+
 const program = new Command();
 
 program
