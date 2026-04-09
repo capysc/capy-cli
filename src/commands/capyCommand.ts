@@ -480,6 +480,8 @@ export class CapyCommand {
 
       const MARKER = '# --- capy auto-sync (do not remove) ---';
       const END_MARKER = '# --- end capy ---';
+      const escMarker = MARKER.replace(/[()]/g, '\\$&');
+      const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
       const cmd = this.devMode ? 'capy-dev' : 'capy';
 
       const hooks: Record<string, string> = {
@@ -502,7 +504,7 @@ export class CapyCommand {
       if (exists(prePushPath)) {
         const prePushContent = readFs(prePushPath, 'utf-8');
         if (prePushContent.includes(MARKER)) {
-          const re = new RegExp(`${MARKER}[\\s\\S]*?${END_MARKER}\\n?`);
+          const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
           const updated = prePushContent.replace(re, '');
           writeFs(prePushPath, updated, 'utf-8');
         }
@@ -515,7 +517,7 @@ export class CapyCommand {
           existing = readFs(hookPath, 'utf-8');
           if (existing.includes(MARKER)) {
             // Replace existing capy block (e.g. switching between capy/capy-dev)
-            const re = new RegExp(`${MARKER}[\\s\\S]*?${END_MARKER}\\n?`);
+            const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
             const updated = existing.replace(re, `${content}\n`);
             if (updated !== existing) {
               writeFs(hookPath, updated, 'utf-8');
