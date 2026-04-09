@@ -1,9 +1,11 @@
-import { randomBytes } from 'crypto';
+import { randomBytes, createCipheriv, hkdfSync } from 'crypto';
 import { deriveInnerKey, aesEncrypt, aesDecrypt } from './inviteCrypto';
 
 const DEPLOY_ID_LENGTH = 32;
 const DT_LENGTH = 32;
 const DEPLOY_HKDF_INFO = 'capy:deploy';
+const IV_LENGTH = 12;
+const AUTH_TAG_LENGTH = 16;
 
 /**
  * Generates a random 32-byte deploy ID.
@@ -62,4 +64,37 @@ export function parseDeployCode(deployCode: string): {
   const dt = buf.subarray(DEPLOY_ID_LENGTH, DEPLOY_ID_LENGTH + DT_LENGTH);
   const outerBlob = buf.subarray(DEPLOY_ID_LENGTH + DT_LENGTH).toString('base64');
   return { deployId, dt, outerBlob };
+}
+
+/**
+ * Encrypts all env vars into a single blob using the project key.
+ * Format: AES-256-GCM(envBlob, PK) where envBlob is KEY=value\n lines.
+ */
+export function encryptEnvBlob(envVars: Record<string, string>, projectKey: Buffer): Buffer {
+  const envBlob = Object.entries(envVars)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
+  const plaintext = Buffer.from(envBlob, 'utf-8');
+
+  const iv = randomBytes(IV_LENGTH);
+  const cipher = createCipheriv('aes-256-gcm', projectKey, iv, {
+    authTagLength: AUTH_TAG_LENGTH,
+  });
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return Buffer.concat([iv, encrypted, authTag]);
+}
+
+/**
+ * Builds a SECRETS_BLOB: base64(deploy_id[32] || outer_blob_len[4, big-endian] || outer_blob || encrypted_vars)
+ */
+export function buildSecretsBlob(
+  deployId: Buffer,
+  outerBlob: string,
+  encryptedVars: Buffer,
+): string {
+  const outerBuf = Buffer.from(outerBlob, 'base64');
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32BE(outerBuf.length, 0);
+  return Buffer.concat([deployId, lenBuf, outerBuf, encryptedVars]).toString('base64');
 }
