@@ -45,7 +45,7 @@ describe('ProjectManager', () => {
 
     test('should detect initialized project with valid keep.lock file', async () => {
       const mockKeep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -129,7 +129,7 @@ describe('ProjectManager', () => {
 
     test('should throw CapyError for missing required fields', () => {
       const invalidKeep = {
-        version: '3.0',
+        version: '4.0',
         // Missing required fields
         project_name: 'test'
       };
@@ -197,7 +197,7 @@ describe('ProjectManager', () => {
   describe('validateKeepFile', () => {
     test('should validate required fields', () => {
       const validKeep = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -220,7 +220,7 @@ describe('ProjectManager', () => {
 
     test('should throw for missing org_id', () => {
       const invalidKeep = {
-        version: '3.0',
+        version: '4.0',
         project_id: 'proj_456',
         project_name: 'test-project',
         variables: {}
@@ -231,7 +231,7 @@ describe('ProjectManager', () => {
 
     test('should throw for invalid variables type', () => {
       const invalidKeep = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -243,50 +243,33 @@ describe('ProjectManager', () => {
   });
 
   describe('migrateKeepIfNeeded', () => {
-    test('should migrate v2 keep to v3 by stripping timestamps', () => {
-      const v2Keep = {
-        version: '2.0',
-        org_id: 'org_123',
-        project_id: 'proj_456',
-        project_name: 'test-project',
-        created_at: '2024-01-01T00:00:00Z',
-        last_updated: '2024-06-15T12:00:00Z',
-        variables: {
-          API_KEY: [{
-            resource_id: 'res_abc',
-            created_at: '2024-01-01T00:00:00Z',
-            value_hash: 'hash123'
-          }]
-        }
-      };
-
-      const result = (projectManager as any).migrateKeepIfNeeded(v2Keep);
-
-      // v2 → v3 → v4: timestamps stripped, arrays converted to v4 flat objects
-      expect(result.version).toBe('4.0');
-      expect(result.created_at).toBeUndefined();
-      expect(result.last_updated).toBeUndefined();
-      // v4: variables are flat objects with env hashes, not arrays
-      expect(result.variables.API_KEY.resource_id).toBe('res_abc');
-      expect(result.variables.API_KEY.local).toBe('hash123');
-    });
-
-    test('should migrate v3 keep to v4', () => {
+    test('should reject unsupported keep.lock versions', () => {
       const v3Keep = {
         version: '3.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
+        variables: {}
+      };
+
+      expect(() => (projectManager as any).migrateKeepIfNeeded(v3Keep)).toThrow('Unsupported keep.lock version');
+    });
+
+    test('should pass through v4 keep files', () => {
+      const v4Keep = {
+        version: '4.0',
+        org_id: 'org_123',
+        project_id: 'proj_456',
+        project_name: 'test-project',
         variables: {
-          DB_URL: [{ resource_id: 'r1', value_hash: 'h1' }],
+          API_KEY: { resource_id: 'res_abc', local: 'hash123' },
         }
       };
 
-      const result = (projectManager as any).migrateKeepIfNeeded(v3Keep);
-
+      const result = (projectManager as any).migrateKeepIfNeeded(v4Keep);
       expect(result.version).toBe('4.0');
-      expect(result.variables.DB_URL.resource_id).toBe('r1');
-      expect(result.variables.DB_URL.local).toBe('h1');
+      expect(result.variables.API_KEY.resource_id).toBe('res_abc');
+      expect(result.variables.API_KEY.local).toBe('hash123');
     });
   });
 

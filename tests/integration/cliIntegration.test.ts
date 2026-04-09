@@ -61,7 +61,7 @@ describe('CLI Integration Tests', () => {
 
     test('should correctly detect initialized project state', async () => {
       const mockKeep: KeepFile = {
-        version: '3.0',
+        version: '4.0',
         org_id: 'org_123',
         project_id: 'proj_456',
         project_name: 'test-project',
@@ -285,7 +285,7 @@ DEBUG=true`;
 
     test('should handle missing required keep file fields', () => {
       const invalidKeep = {
-        version: '3.0',
+        version: '4.0',
         // Missing required fields
         project_name: 'test'
       };

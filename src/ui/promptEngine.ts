@@ -755,17 +755,11 @@ export class PromptEngine {
   }
 
   /**
-   * Strip capy: prefix (and optional resource_id) from value if present
+   * Strip capy: prefix from encrypted value if present
    */
-  private stripResourceIdPrefix(value: string): string {
+  private stripCapyPrefix(value: string): string {
     if (value.startsWith('capy:')) {
-      const parts = value.split(':');
-      if (parts.length >= 3) {
-        // Format: capy:{resource_id}:{encrypted_value}
-        return parts.slice(2).join(':');
-      }
-      // Format: capy:{base64_data} (GCM format)
-      return parts.slice(1).join(':');
+      return value.slice(5);
     }
     return value;
   }
@@ -775,7 +769,7 @@ export class PromptEngine {
    */
   private applySnippetObfuscation(value: string): string {
     // Strip resource_id prefix before obfuscation
-    const valueWithoutPrefix = this.stripResourceIdPrefix(value);
+    const valueWithoutPrefix = this.stripCapyPrefix(value);
     const valueLength = valueWithoutPrefix.length;
 
     if (valueLength <= 4) {
