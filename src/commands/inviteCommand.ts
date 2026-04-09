@@ -14,7 +14,6 @@ const ROLES = [
   { name: 'Member', value: 'member' },
   { name: 'Project Admin', value: 'project-admin' },
   { name: 'Admin', value: 'admin' },
-  { name: 'Owner', value: 'owner' },
 ] as const;
 
 export class InviteCommand {
