@@ -810,7 +810,6 @@ export class CapyCommand {
     if (!hasPinned) {
       // No pinned values — only offer commit or skip
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Continue working', value: 'skip' });
     } else if (showLocal && !showRemote) {
       // Local differs from pinned, remote matches pinned
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
