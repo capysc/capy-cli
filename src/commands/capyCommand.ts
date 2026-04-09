@@ -805,8 +805,13 @@ export class CapyCommand {
 
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
+    const hasPinned = Object.keys(pinned).length > 0;
 
-    if (showLocal && !showRemote) {
+    if (!hasPinned) {
+      // No pinned values — only offer commit or skip
+      menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
+      menuChoices.push({ name: 'Continue working', value: 'skip' });
+    } else if (showLocal && !showRemote) {
       // Local differs from pinned, remote matches pinned
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
@@ -823,6 +828,8 @@ export class CapyCommand {
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
     }
+
+    menuChoices.push({ name: 'Continue working', value: 'skip' });
 
     const { action } = await inquirer.prompt([{
       type: 'list',
@@ -864,6 +871,8 @@ export class CapyCommand {
       finalEnv = { ...remotePlaintext };
     } else if (action === 'commit_local') {
       finalEnv = { ...localPlaintext };
+    } else if (action === 'skip') {
+      return;
     } else {
       // Individual resolution
       finalEnv = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
@@ -921,7 +930,7 @@ export class CapyCommand {
     console.log(`\n> keep.lock updated (${diffs.length} changes)`);
 
     if (action === 'commit_local') {
-      console.log('\nRun `capy push` to share your changes with teammates.');
+      console.log(`\nRun ${B('capy push')} to share your changes with teammates.`);
     }
 
     // Install hooks on every run (idempotent)
