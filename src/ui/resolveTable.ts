@@ -116,20 +116,18 @@ export class ResolveTable {
         }
 
         if (key === `${ESC}[D`) {
-          if (!this.confirmed.has(this.rowIndex)) {
-            this.colIndex = Math.max(0, this.colIndex - 1);
-            this.selections[this.rowIndex] = availCols[this.colIndex];
-            this.draw();
-          }
+          this.confirmed.delete(this.rowIndex);
+          this.colIndex = Math.max(0, this.colIndex - 1);
+          this.selections[this.rowIndex] = availCols[this.colIndex];
+          this.draw();
           return;
         }
 
         if (key === `${ESC}[C`) {
-          if (!this.confirmed.has(this.rowIndex)) {
-            this.colIndex = Math.min(availCols.length - 1, this.colIndex + 1);
-            this.selections[this.rowIndex] = availCols[this.colIndex];
-            this.draw();
-          }
+          this.confirmed.delete(this.rowIndex);
+          this.colIndex = Math.min(availCols.length - 1, this.colIndex + 1);
+          this.selections[this.rowIndex] = availCols[this.colIndex];
+          this.draw();
           return;
         }
 
@@ -195,7 +193,7 @@ export class ResolveTable {
     const lines: string[] = [];
 
     // Instructions above the table
-    lines.push(m + DIM + '←→ select value   ↑↓ move between rows   Enter confirm   q cancel' + RESET);
+    lines.push(m + DIM + '← → select value   ↑ ↓ move between rows   Enter confirm   q cancel' + RESET);
     lines.push(m + `Resolved: ${this.confirmed.size}/${this.rows.length}`);
     lines.push('');
 
