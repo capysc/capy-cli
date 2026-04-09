@@ -474,18 +474,19 @@ export class CapyCommand {
 
       const MARKER = '# --- capy auto-sync (do not remove) ---';
       const END_MARKER = '# --- end capy ---';
+      const cmd = this.devMode ? 'capy-dev' : 'capy';
 
       const hooks: Record<string, string> = {
         'post-checkout': [
           MARKER,
           'if [ "$3" = "1" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-merge" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-apply" ]; then',
-          '  command -v capy >/dev/null 2>&1 && capy',
+          `  command -v ${cmd} >/dev/null 2>&1 && ${cmd}`,
           'fi',
           END_MARKER,
         ].join('\n'),
         'post-merge': [
           MARKER,
-          'command -v capy >/dev/null 2>&1 && capy',
+          `command -v ${cmd} >/dev/null 2>&1 && ${cmd}`,
           END_MARKER,
         ].join('\n'),
         'pre-push': [
@@ -493,7 +494,7 @@ export class CapyCommand {
           'while read local_ref local_sha remote_ref remote_sha; do',
           '  if [ "$local_sha" != "0000000000000000000000000000000000000000" ] && \\',
           '     git diff --name-only "$remote_sha" "$local_sha" 2>/dev/null | grep -q "keep.lock"; then',
-          '    command -v capy >/dev/null 2>&1 && capy push',
+          `    command -v ${cmd} >/dev/null 2>&1 && ${cmd} push`,
           '    break',
           '  fi',
           'done',
@@ -506,8 +507,15 @@ export class CapyCommand {
         let existing = '';
         if (exists(hookPath)) {
           existing = readFs(hookPath, 'utf-8');
-          // Already installed — skip
-          if (existing.includes(MARKER)) continue;
+          if (existing.includes(MARKER)) {
+            // Replace existing capy block (e.g. switching between capy/capy-dev)
+            const re = new RegExp(`${MARKER}[\\s\\S]*?${END_MARKER}\\n?`);
+            const updated = existing.replace(re, `${content}\n`);
+            if (updated !== existing) {
+              writeFs(hookPath, updated, 'utf-8');
+            }
+            continue;
+          }
         }
 
         const shebang = existing ? '' : '#!/bin/sh\n';
