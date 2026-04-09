@@ -6,6 +6,8 @@ import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { KeepFile } from '../types/index';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export interface DiffResult {
   variable: string;
   type: 'new' | 'changed' | 'deleted';
@@ -132,7 +134,7 @@ export class StatusCommand {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       if (this.terse) return;
-      console.log('No keep.lock found. Run `capy` to initialize.');
+      console.log(`No keep.lock found. Run ${B('capy')} to initialize.`);
       return;
     }
 
@@ -223,12 +225,12 @@ export class StatusCommand {
       if (diffs.length === 0) return; // Silent when synced
       const count = diffs.length;
       const word = count === 1 ? 'secret differs' : 'secrets differ';
-      console.log(`capy: ${count} ${word} from remote. Run \`capy\` to sync.`);
+      console.log(`${B('capy')}: ${count} ${word} from remote. Run ${B('capy')} to sync.`);
       return;
     }
 
     // Full output
-    console.log(`capy: ${keep.project_name} (${branchLabel})`);
+    console.log(`${B('capy')}: ${keep.project_name} (${branchLabel})`);
     console.log('');
 
     if (diffs.length === 0) {
@@ -284,6 +286,6 @@ export class StatusCommand {
     }
 
     console.log('');
-    console.log('Run `capy` to sync your secrets.');
+    console.log(`Run ${B('capy')} to sync your secrets.`);
   }
 }

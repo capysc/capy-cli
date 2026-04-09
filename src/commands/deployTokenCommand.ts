@@ -16,6 +16,8 @@ import {
 import ora from '../ui/spinner';
 import inquirer from 'inquirer';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 const PLATFORMS = [
   { name: 'Vercel', value: 'vercel' },
   { name: 'GitHub Actions', value: 'github-actions' },
@@ -172,7 +174,7 @@ export class DeployCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error('No keep.lock file found. Run capy first to initialize.');
+        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 
@@ -328,7 +330,7 @@ export class DeployCommand {
       }
 
       console.log('');
-      console.log('  Run `capy deploy list` to see active tokens, `capy deploy revoke` to kill old ones.');
+      console.log(`  Run ${B('capy deploy list')} to see active tokens, ${B('capy deploy revoke')} to kill old ones.`);
       console.log('');
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
@@ -353,7 +355,7 @@ export class DeployRevokeCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId) {
-        console.error('No keep.lock file found. Run capy first to initialize.');
+        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 
@@ -394,7 +396,7 @@ export class DeployListCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error('No keep.lock file found. Run capy first to initialize.');
+        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 

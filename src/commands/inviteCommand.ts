@@ -16,6 +16,8 @@ const ROLES = [
   { name: 'Admin', value: 'admin' },
 ] as const;
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class InviteCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -31,7 +33,7 @@ export class InviteCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId) {
-        console.error('No keep.lock file found. Run capy first to initialize.');
+        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 
@@ -108,7 +110,7 @@ export class InviteCommand {
       console.log('');
       console.log('  Send them this command:');
       console.log('');
-      console.log(`    capy redeem ${redeemCode}`);
+      console.log(`    ${B('capy')} redeem ${redeemCode}`);
       console.log('');
       console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
       console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');

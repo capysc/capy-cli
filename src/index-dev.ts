@@ -10,6 +10,8 @@ import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 // Load .env from the CLI package directory (not the user's project cwd)
 config({ path: resolve(__dirname, '..', '.env') });
 
@@ -32,14 +34,14 @@ program
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
-      console.log('    capy-dev                        \x1b[90mSync secrets\x1b[0m');
-      console.log('    capy-dev branch                 \x1b[90mList secret branches\x1b[0m');
-      console.log('    capy-dev checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m');
-      console.log('    capy-dev invite <email>         \x1b[90mInvite a teammate\x1b[0m');
-      console.log('    capy-dev redeem <code>          \x1b[90mRedeem an invite code\x1b[0m');
-      console.log('    capy-dev kick <email>           \x1b[90mRemove a teammate\x1b[0m');
-      console.log('    capy-dev users                  \x1b[90mList organization members\x1b[0m');
-      console.log('    capy-dev deploy                 \x1b[90mCreate a deployment PR\x1b[0m');
+      console.log(`    ${B('capy-dev')}                        \x1b[90mSync secrets\x1b[0m`);
+      console.log(`    ${B('capy-dev')} branch                 \x1b[90mList secret branches\x1b[0m`);
+      console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
+      console.log(`    ${B('capy-dev')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
+      console.log(`    ${B('capy-dev')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
+      console.log(`    ${B('capy-dev')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
+      console.log(`    ${B('capy-dev')} users                  \x1b[90mList organization members\x1b[0m`);
+      console.log(`    ${B('capy-dev')} deploy                 \x1b[90mCreate a deployment PR\x1b[0m`);
       console.log('');
       process.exit(1);
     }
@@ -67,7 +69,7 @@ program
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     if (!projectState.initialized) {
-      console.error('No keep.lock file found. Run capy-dev first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy-dev')} first to initialize.`);
       process.exit(1);
     }
 
@@ -99,7 +101,7 @@ program
       }
 
       if (branch.name === (projectState.activeBranch || '')) {
-        console.log(`Cannot delete the current branch. Switch first with: capy-dev checkout <other-branch>`);
+        console.log(`Cannot delete the current branch. Switch first with: ${B('capy-dev checkout <other-branch>')}`);
         process.exit(1);
       }
 
@@ -269,7 +271,7 @@ program
     const keep = pm.readKeepFile();
 
 if (!keep) {
-      console.error('No keep.lock file found. Run capy-dev first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy-dev')} first to initialize.`);
       process.exit(1);
     }
 
@@ -280,7 +282,7 @@ if (!keep) {
       // and the project key cache should already exist from the init/sync flow
       encryptionKey = resolveProjectKey(keep.org_id, keep.project_id, '');
     } catch {
-      console.error('No encryption key found. Run capy-dev first to sync.');
+      console.error(`No encryption key found. Run ${B('capy-dev')} first to sync.`);
       process.exit(1);
     }
 
@@ -381,6 +383,56 @@ program
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
     await cmd.execute();
+  });
+
+program
+  .command('cleanup')
+  .description('Remove Capy git hooks from this repository')
+  .action(async () => {
+    const { execSync } = await import('child_process');
+    const { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync } = await import('fs');
+
+    let gitDir: string;
+    try {
+      gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    } catch {
+      console.log('Not a git repository.');
+      return;
+    }
+
+    const hooksDir = `${gitDir}/hooks`;
+    const MARKER = '# --- capy auto-sync (do not remove) ---';
+    const END_MARKER = '# --- end capy ---';
+    const hookNames = ['post-checkout', 'post-merge', 'pre-push'];
+    let removed = false;
+
+    for (const hookName of hookNames) {
+      const hookPath = `${hooksDir}/${hookName}`;
+      if (!existsSync(hookPath)) continue;
+
+      const content = readFileSync(hookPath, 'utf-8');
+      if (!content.includes(MARKER)) continue;
+
+      const escMarker = MARKER.replace(/[()]/g, '\\$&');
+      const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
+      const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
+      const updated = content.replace(re, '').trim();
+
+      if (!updated || /^#!.*sh$/.test(updated)) {
+        unlinkSync(hookPath);
+      } else {
+        writeFileSync(hookPath, updated + '\n', 'utf-8');
+        chmodSync(hookPath, 0o755);
+      }
+      removed = true;
+      console.log(`Removed ${B('Capy')} hook from ${hookName}`);
+    }
+
+    if (removed) {
+      console.log(`${B('Capy')} git hooks removed.`);
+    } else {
+      console.log(`No ${B('Capy')} hooks found.`);
+    }
   });
 
 program.parse(process.argv);

@@ -12,6 +12,8 @@ import {
 import { resolveProjectKey } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class PushCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
@@ -47,7 +49,7 @@ export class PushCommand {
   private async _execute(): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
-      console.error('No keep.lock file found. Run capy first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
       process.exit(1);
     }
 
