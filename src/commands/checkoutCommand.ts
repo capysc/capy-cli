@@ -8,6 +8,8 @@ import inquirer from 'inquirer';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { resolveProjectKey } from '../crypto/keyResolver';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class CheckoutCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
@@ -46,7 +48,7 @@ export class CheckoutCommand {
     // Read keep.lock — must be initialized
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
-      console.error('No keep.lock file found. Run capy first to initialize the project.');
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize the project.`);
       process.exit(1);
     }
 
@@ -89,7 +91,7 @@ export class CheckoutCommand {
           const prod = b.is_protected ? ' \x1b[90m(protected)\x1b[0m' : '';
           console.log(`  ${label}${prod}`);
         }
-        console.log(`\nCreate it with: capy checkout -b ${branchName}`);
+        console.log(`\nCreate it with: ${B(`capy checkout -b ${branchName}`)}`);
         process.exit(1);
       }
       branchSpinner.stop();

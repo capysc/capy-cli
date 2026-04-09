@@ -14,6 +14,8 @@ import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export interface MemberDetail {
   membershipId: string;
   userId: string;
@@ -68,13 +70,13 @@ export class ServiceClient {
       clearTimeout(timeout);
       if (err.name === 'AbortError') {
         throw new CapyError(
-          'Failed to connect to Capy service. Please check your internet connection.',
+          `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
           ERROR_CODES.NETWORK_ERROR,
           { code: 'ETIMEDOUT' }
         );
       }
       throw new CapyError(
-        'Failed to connect to Capy service. Please check your internet connection.',
+        `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
         ERROR_CODES.NETWORK_ERROR,
         { code: err.code || err.cause?.code }
       );
@@ -412,7 +414,7 @@ export class ServiceClient {
     } catch (err: any) {
       clearTimeout(timeout);
       throw new CapyError(
-        'Cannot reach Capy service. Check your internet connection.',
+        `Cannot reach ${B('Capy')} service. Check your internet connection.`,
         ERROR_CODES.NETWORK_ERROR,
         { code: err.code || err.cause?.code },
       );
@@ -432,6 +434,31 @@ export class ServiceClient {
     }
 
     return res.json() as Promise<{ plaintext: string }>;
+  }
+
+  /**
+   * Fetch platform-specific deploy instructions (unauthenticated).
+   */
+  async fetchDeployInstructions(platform: string): Promise<{ platform: string; markdown: string }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.apiUrl}/deploy/instructions/${encodeURIComponent(platform)}`, {
+        signal: controller.signal,
+      });
+    } catch {
+      clearTimeout(timeout);
+      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
+    }
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
+    }
+
+    return res.json() as Promise<{ platform: string; markdown: string }>;
   }
 
   async revokeDeployToken(deployId: string): Promise<void> {

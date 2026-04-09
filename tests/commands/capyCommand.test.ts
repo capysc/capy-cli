@@ -493,7 +493,7 @@ describe('CapyCommand', () => {
       await (capyCommand as any).initializeProject();
 
       // Should complete initialization despite sync failure
-      expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('You can run \'capy\' again to retry syncing'));
+      expect(consoleSpy).toHaveBeenCalledWith(expect.stringMatching(/You can run .*capy.* again to retry syncing/));
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
 
       existsSyncSpy.mockRestore();

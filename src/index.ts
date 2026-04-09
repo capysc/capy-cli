@@ -3,6 +3,8 @@ import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
 process.on('uncaughtException', (error: any) => {
   if (error?.name === 'ExitPromptError') {
@@ -35,18 +37,17 @@ program
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
-      console.log('    capy                        \x1b[90mSync secrets\x1b[0m');
-      console.log('    capy status                 \x1b[90mShow secret drift\x1b[0m');
-      console.log('    capy push                   \x1b[90mPush encrypted values to S3\x1b[0m');
-      console.log('    capy deploy pr              \x1b[90mCreate a deployment PR\x1b[0m');
-      console.log('    capy deploy setup           \x1b[90mGenerate a deploy token for CI\x1b[0m');
-      console.log('    capy deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m');
-      console.log('    capy deploy list            \x1b[90mList deploy tokens\x1b[0m');
-      console.log('    capy invite <email>         \x1b[90mInvite a teammate\x1b[0m');
-      console.log('    capy redeem <code>          \x1b[90mRedeem an invite code\x1b[0m');
-      console.log('    capy kick <email>           \x1b[90mRemove a teammate\x1b[0m');
-      console.log('    capy users                  \x1b[90mList organization members\x1b[0m');
-      console.log('    capy info                   \x1b[90mShow current session info\x1b[0m');
+      console.log(`    ${B('capy')}                        \x1b[90mSync secrets\x1b[0m`);
+      console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
+      console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to S3\x1b[0m`);
+      console.log(`    ${B('capy')} deploy                 \x1b[90mSet up deploy credentials\x1b[0m`);
+      console.log(`    ${B('capy')} deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m`);
+      console.log(`    ${B('capy')} deploy list            \x1b[90mList deploy tokens\x1b[0m`);
+      console.log(`    ${B('capy')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
+      console.log(`    ${B('capy')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
+      console.log(`    ${B('capy')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
+      console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
+      console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
       console.log('');
       process.exit(1);
     }
@@ -83,7 +84,7 @@ program
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     if (!projectState.initialized) {
-      console.error('No keep.lock file found. Run capy first to initialize.');
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
       process.exit(1);
     }
 
@@ -111,7 +112,7 @@ program
       }
 
       if (branch.name === (projectState.activeBranch || '')) {
-        console.log(`Cannot delete the current branch. Switch first with: capy checkout <other-branch>`);
+        console.log(`Cannot delete the current branch. Switch first with: ${B('capy checkout <other-branch>')}`);
         process.exit(1);
       }
 
@@ -203,21 +204,10 @@ program
 
 const deploy = program
   .command('deploy')
-  .description('Deploy commands: PR creation, token setup, CI decrypt');
-
-deploy
-  .command('pr')
-  .description('Create a deployment PR with the keep.lock file')
+  .description('Set up secret delivery to a deployment platform')
   .action(async () => {
-    await CapyCommand.createDeployPR();
-  });
-
-deploy
-  .command('setup')
-  .description('Generate a deploy token for CI/CD')
-  .action(async () => {
-    const { DeploySetupCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeploySetupCommand();
+    const { DeployCommand } = await import('./commands/deployTokenCommand');
+    const cmd = new DeployCommand();
     await cmd.execute();
   });
 
@@ -295,6 +285,57 @@ program
   });
 
 program
+  .command('cleanup')
+  .description('Remove Capy git hooks from this repository')
+  .action(async () => {
+    const { execSync } = await import('child_process');
+    const { existsSync, readFileSync, writeFileSync, unlinkSync } = await import('fs');
+
+    let gitDir: string;
+    try {
+      gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    } catch {
+      console.log('Not a git repository.');
+      return;
+    }
+
+    const hooksDir = `${gitDir}/hooks`;
+    const MARKER = '# --- capy auto-sync (do not remove) ---';
+    const END_MARKER = '# --- end capy ---';
+    const hookNames = ['post-checkout', 'post-merge', 'pre-push'];
+    let removed = false;
+
+    for (const hookName of hookNames) {
+      const hookPath = `${hooksDir}/${hookName}`;
+      if (!existsSync(hookPath)) continue;
+
+      const content = readFileSync(hookPath, 'utf-8');
+      if (!content.includes(MARKER)) continue;
+
+      const escMarker = MARKER.replace(/[()]/g, '\\$&');
+      const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
+      const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
+      const updated = content.replace(re, '').trim();
+
+      if (!updated || /^#!.*sh$/.test(updated)) {
+        unlinkSync(hookPath);
+      } else {
+        writeFileSync(hookPath, updated + '\n', 'utf-8');
+        const { chmodSync } = await import('fs');
+        chmodSync(hookPath, 0o755);
+      }
+      removed = true;
+      console.log(`Removed ${B('Capy')} hook from ${hookName}`);
+    }
+
+    if (removed) {
+      console.log(`${B('Capy')} git hooks removed.`);
+    } else {
+      console.log(`No ${B('Capy')} hooks found.`);
+    }
+  });
+
+program
   .command('help')
   .description('Show help information')
   .action(() => {
@@ -305,7 +346,7 @@ program
   .command('version')
   .description('Show version information')
   .action(() => {
-    console.log('Capy CLI v1.0.0');
+    console.log(`${B('Capy')} CLI v1.0.0`);
   });
 
 

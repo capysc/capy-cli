@@ -32,6 +32,8 @@ import {
 import { saveMasterKey } from '../config/globalConfig';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class CapyCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
@@ -441,20 +443,20 @@ export class CapyCommand {
           // Install git hooks
           this.installGitHooks();
 
-          console.log('\nRun `capy push` to share your secrets with teammates.');
+          console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
-          console.log('You can run \'capy\' again to retry syncing');
+          console.log(`You can run ${B('capy')} again to retry syncing`);
         }
       } else {
-        console.log('\nNo .env file found. Add secrets to .env, then run `capy push`');
+        console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
         console.log('to share them with your team.');
 
         // Install git hooks
         this.installGitHooks();
       }
     } else {
-      console.log('\nNo .env file found. Add secrets to .env, then run `capy push`');
+      console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
       console.log('to share them with your team.');
 
       // Install git hooks
@@ -480,6 +482,8 @@ export class CapyCommand {
 
       const MARKER = '# --- capy auto-sync (do not remove) ---';
       const END_MARKER = '# --- end capy ---';
+      const escMarker = MARKER.replace(/[()]/g, '\\$&');
+      const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
       const cmd = this.devMode ? 'capy-dev' : 'capy';
 
       const hooks: Record<string, string> = {
@@ -502,7 +506,7 @@ export class CapyCommand {
       if (exists(prePushPath)) {
         const prePushContent = readFs(prePushPath, 'utf-8');
         if (prePushContent.includes(MARKER)) {
-          const re = new RegExp(`${MARKER}[\\s\\S]*?${END_MARKER}\\n?`);
+          const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
           const updated = prePushContent.replace(re, '');
           writeFs(prePushPath, updated, 'utf-8');
         }
@@ -515,7 +519,7 @@ export class CapyCommand {
           existing = readFs(hookPath, 'utf-8');
           if (existing.includes(MARKER)) {
             // Replace existing capy block (e.g. switching between capy/capy-dev)
-            const re = new RegExp(`${MARKER}[\\s\\S]*?${END_MARKER}\\n?`);
+            const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
             const updated = existing.replace(re, `${content}\n`);
             if (updated !== existing) {
               writeFs(hookPath, updated, 'utf-8');
@@ -611,7 +615,7 @@ export class CapyCommand {
     const branch = projectState.activeBranch;
     const branchLabel = branch || 'development';
 
-    console.log(`capy: ${projectState.projectName} (${branchLabel})\n`);
+    console.log(`${B('capy')}: ${projectState.projectName} (${branchLabel})\n`);
 
     // Set token for service client
     const token = this.authService.getToken();
@@ -996,142 +1000,6 @@ export class CapyCommand {
 
     return result;
   }
-
-  /**
-   * Deploy secrets to a git branch.
-   */
-  static async createDeployPR(syncedVars?: string[], client?: ServiceClient): Promise<void> {
-    const { ProjectManager } = await import('../core/projectManager');
-    const { FileManager } = await import('../files/fileManager');
-    const pm = new ProjectManager();
-    const fm = new FileManager();
-    const projectName = pm.getDefaultProjectName();
-    const keepFile = pm.readKeepFile();
-
-    if (!keepFile) {
-      console.error('No keep.lock file found. Run capy first to initialize.');
-      process.exit(1);
-    }
-
-    const vars = syncedVars || Object.keys(keepFile.variables);
-    if (vars.length === 0) {
-      console.error('No variables to deploy.');
-      return;
-    }
-
-    const capyBranch = pm.readActiveBranch() || 'default';
-
-    console.log('');
-    const { action } = await inquirer.prompt([{
-      type: 'list',
-      name: 'action',
-      message: `To deploy these "${capyBranch}" secrets into an environment, you will need to select a git branch to attach these secrets to:`,
-      choices: [
-        { name: 'Create a deployment PR', value: 'deploy' },
-        { name: 'Continue working', value: 'cancel' },
-      ],
-    }]);
-
-    if (action === 'cancel') return;
-
-    let defaultGitBranch = '';
-    try {
-      defaultGitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-      if (defaultGitBranch === 'HEAD') defaultGitBranch = '';
-    } catch {}
-
-    const { targetBranch } = await inquirer.prompt([{
-      type: 'input',
-      name: 'targetBranch',
-      message: `Enter the git branch name you want to deploy these "${capyBranch}" secrets to:`,
-      default: defaultGitBranch || undefined,
-      validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-    }]);
-
-    const gitBranch = targetBranch.trim();
-
-    const { deployMethod } = await inquirer.prompt([{
-      type: 'list',
-      name: 'deployMethod',
-      message: 'How would you like to deploy?',
-      choices: [
-        { name: `Deploy directly to "${gitBranch}"`, value: 'push' },
-        { name: `Create a deployment PR → "${gitBranch}"`, value: 'pr' },
-        { name: 'Do not deploy', value: 'cancel' },
-      ],
-    }]);
-
-    if (deployMethod === 'cancel') return;
-
-    const deployKeep = { ...keepFile, variables: { ...keepFile.variables } };
-
-    const title = `chore: sync ${vars.length} ${projectName} secret${vars.length === 1 ? '' : 's'} via capy`;
-    const varList = vars.map(v => `- ${v}`).join('\n');
-    const fullMessage = `${title}\n\nSynced variables:\n${varList}`;
-    const { writeFileSync: writeTmp, unlinkSync: unlinkTmp } = require('fs');
-    const { join: joinTmp } = require('path');
-    const tmpMsg = joinTmp(require('os').tmpdir(), `capy-commit-msg-${Date.now()}`);
-    writeTmp(tmpMsg, fullMessage, 'utf-8');
-
-    fm.writeKeepFile(deployKeep);
-
-    if (deployMethod === 'push') {
-      const pushSpinner = ora(`Pushing to ${gitBranch}...`).start();
-      try {
-        execSync('git add keep.lock', { stdio: 'pipe' });
-        execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
-        unlinkTmp(tmpMsg);
-        execSync(`git push origin HEAD:${gitBranch}`, { stdio: 'pipe' });
-        pushSpinner.succeed(`Pushed keep.lock to ${gitBranch}`);
-        return;
-      } catch (pushErr: any) {
-        unlinkTmp(tmpMsg);
-        try { execSync('git reset HEAD~1', { stdio: 'pipe' }); } catch {}
-        fm.writeKeepFile(keepFile);
-        pushSpinner.fail(`Cannot push directly to "${gitBranch}" (likely protected)`);
-        console.log('  Creating a deployment PR instead...\n');
-        fm.writeKeepFile(deployKeep);
-      }
-    }
-
-    const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    const deployGitBranch = `capy/sync-${projectName}-${Date.now()}`;
-
-    try {
-      const prSpinner = ora('Creating PR...').start();
-
-      execSync(`git checkout -b ${deployGitBranch}`, { stdio: 'pipe' });
-      execSync('git add keep.lock', { stdio: 'pipe' });
-
-      writeTmp(tmpMsg, fullMessage, 'utf-8');
-      execSync(`git commit -F "${tmpMsg}"`, { stdio: 'pipe' });
-      unlinkTmp(tmpMsg);
-      execSync(`git push -u origin ${deployGitBranch}`, { stdio: 'pipe' });
-
-      execSync(`git checkout ${currentBranch}`, { stdio: 'pipe' });
-      fm.writeKeepFile(keepFile);
-
-      const remoteUrl = execSync('git remote get-url origin', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-      const repoPath = remoteUrl
-        .replace(/^git@github\.com:/, '')
-        .replace(/^https:\/\/github\.com\//, '')
-        .replace(/\.git$/, '');
-
-      const prUrl = `https://github.com/${repoPath}/compare/${gitBranch}...${deployGitBranch}?expand=1&title=${encodeURIComponent(title)}`;
-
-      prSpinner.succeed('Branch pushed');
-      console.log(`\nCreate PR: ${prUrl}`);
-
-      const open = (await import('open')).default;
-      open(prUrl).catch(() => {});
-    } catch (error: any) {
-      if (error?.name === 'ExitPromptError') process.exit(0);
-      try { execSync(`git checkout ${currentBranch}`, { stdio: 'pipe' }); } catch {}
-      fm.writeKeepFile(keepFile);
-      console.log(`Failed to create PR: ${error.message}`);
-    }
-  }
-
 
   private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
     const { orgName } = await inquirer.prompt([{

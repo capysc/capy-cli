@@ -105,7 +105,7 @@ describe('ServiceClient', () => {
       mockFetch.mockRejectedValue(networkError);
 
       await expect(serviceClient.getDecryptData('proj_123')).rejects.toThrow(CapyError);
-      await expect(serviceClient.getDecryptData('proj_123')).rejects.toThrow('Failed to connect to Capy service');
+      await expect(serviceClient.getDecryptData('proj_123')).rejects.toThrow(/Failed to connect to .*Capy.*service/);
     });
   });
 

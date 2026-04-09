@@ -4,6 +4,8 @@ import { parseRedeemCode } from '../crypto/inviteCrypto';
 import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
 import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
 
+const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
 export class RedeemCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -29,7 +31,7 @@ export class RedeemCommand {
     const authService = new AuthService(this.apiUrl, this.devMode);
     const authResult = await authService.authenticate(targetOrgId);
     if (!authResult.success) {
-      console.error('Authentication failed. You need a Capy account to redeem an invite.');
+      console.error(`Authentication failed. You need a ${B('Capy')} account to redeem an invite.`);
       process.exit(1);
     }
 
@@ -46,14 +48,14 @@ export class RedeemCommand {
       }
       orgId = targetOrgId;
       userId = switched.user_id!;
-      console.log(`  Switched to organization \x1b[1m${targetOrgId}\x1b[0m`);
+      console.log(`  Switched to organization ${B(targetOrgId)}`);
     }
 
     // 4. If user already has the master key, they're already set up
     if (hasOrgKey(orgId, userId)) {
       console.log('');
       console.log('  \x1b[32mYou\'re all set — your encryption keys are configured for this organization.\x1b[0m');
-      console.log(`  Run \x1b[1mcapy\x1b[0m in a project directory to sync secrets.`);
+      console.log(`  Run ${B('capy')} in a project directory to sync secrets.`);
       console.log('');
       return;
     }
@@ -99,8 +101,8 @@ export class RedeemCommand {
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');
     console.log('');
-    console.log(`  You now have access to org \x1b[1m${orgId}\x1b[0m.`);
-    console.log('  Run \x1b[1mcapy\x1b[0m in a project directory to sync secrets.');
+    console.log(`  You now have access to org ${B(orgId)}.`);
+    console.log(`  Run ${B('capy')} in a project directory to sync secrets.`);
     console.log('');
   }
 }
