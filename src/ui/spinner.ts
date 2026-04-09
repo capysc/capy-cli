@@ -55,6 +55,11 @@ export class Spinner {
     this.stop();
     console.log(`\x1b[31m✗\x1b[0m ${text || this.text}`); // Red X
   }
+
+  warn(text?: string): void {
+    this.stop();
+    console.log(`\x1b[33m⚠\x1b[0m ${text || this.text}`); // Yellow warning
+  }
 }
 
 /**
