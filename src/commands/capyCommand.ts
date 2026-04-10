@@ -787,7 +787,7 @@ export class CapyCommand {
     const { diffs, showLocal, showRemote } = compareSecrets(
       pinned,
       localHashes,
-      networkAvailable ? remoteHashes : pinned, // If offline, treat remote as matching pinned
+      networkAvailable ? remoteHashes : {}, // If offline, pass empty so compareSecrets treats as matching pinned
     );
 
     if (diffs.length === 0) {
