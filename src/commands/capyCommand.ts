@@ -1018,8 +1018,8 @@ export class CapyCommand {
     if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
       return remotePlaintext[variable];
     }
-    // Can't resolve snippet — show hash prefix
-    return pinnedHash ? pinnedHash.slice(0, 6) + '...' : '-';
+    // Can't resolve plaintext — no source has the matching value
+    return '-';
   }
 
   private async resolveIndividually(
