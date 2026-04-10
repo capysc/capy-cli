@@ -299,11 +299,7 @@ export class StatusCommand {
     }
 
     console.log('');
-    if (!hasRemote) {
-      console.log(`  Run ${B('capy push')} to share these secrets with your team.`);
-    } else {
-      console.log(`  Run ${B('capy')} to sync these changes.`);
-    }
+    console.log(`  Run ${B('capy')} to sync these changes.`);
     process.exit(0);
   }
 }
