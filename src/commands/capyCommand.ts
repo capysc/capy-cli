@@ -952,12 +952,17 @@ export class CapyCommand {
     remotePlaintext: Record<string, string>,
   ): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const padCell = (s: string, width: number) => {
+      const visible = stripAnsi(s).length;
+      return visible >= width ? s : s + ' '.repeat(width - visible);
+    };
 
     // Check if any pinned value can be resolved to plaintext
     const showPinned = diffs.some(diff => {
       if (!pinned[diff.variable]) return false;
       const snippet = this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext);
-      return snippet !== '-';
+      return !snippet.includes('unresolvable');
     });
 
     // Build header
@@ -981,7 +986,7 @@ export class CapyCommand {
         cols.push(remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : '-');
       }
       cols.forEach((c, i) => {
-        colWidths[i] = Math.max(colWidths[i] || 0, c.length);
+        colWidths[i] = Math.max(colWidths[i] || 0, stripAnsi(c).length);
       });
     }
 
@@ -1008,7 +1013,7 @@ export class CapyCommand {
       if (showRemote) {
         cols.push(remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : '-');
       }
-      const row = cols.map((c, i) => c.padEnd(colWidths[i])).join('');
+      const row = cols.map((c, i) => padCell(c, colWidths[i])).join('');
       console.log(`  ${row}`);
     }
   }
@@ -1032,7 +1037,7 @@ export class CapyCommand {
       return remotePlaintext[variable];
     }
     // Can't resolve plaintext — no source has the matching value
-    return '-';
+    return '\x1b[3munresolvable\x1b[0m';
   }
 
   private async resolveIndividually(
