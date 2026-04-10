@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { createServer } from 'http';
+import { execSync } from 'child_process';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -49,16 +50,68 @@ function writeConfig(projectRoot: string, config: CapyConfig): void {
   writeFileSync(join(capyDir, 'config'), JSON.stringify(config, null, 2), 'utf-8');
 }
 
+/**
+ * Opens a URL in a minimal popup window (no tabs, no URL bar).
+ * Tries Chrome/Chromium --app mode first, falls back to regular browser open.
+ */
+async function openPopupWindow(url: string): Promise<void> {
+  const platform = process.platform;
+
+  // Chrome/Chromium --app mode opens a clean, borderless window
+  const chromePaths: string[] = platform === 'darwin'
+    ? [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      ]
+    : platform === 'win32'
+    ? [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      ]
+    : [
+        'google-chrome',
+        'google-chrome-stable',
+        'chromium',
+        'chromium-browser',
+        'brave-browser',
+        'microsoft-edge',
+      ];
+
+  for (const browserPath of chromePaths) {
+    try {
+      const quotedPath = `"${browserPath}"`;
+      const args = `--app=${url} --window-size=640,800`;
+      if (platform === 'win32') {
+        execSync(`start "" ${quotedPath} ${args}`, { stdio: 'ignore' });
+      } else {
+        execSync(`${quotedPath} ${args} &`, { stdio: 'ignore', shell: '/bin/sh' });
+      }
+      return;
+    } catch {
+      continue;
+    }
+  }
+
+  // Fallback: regular browser open
+  const open = (await import('open')).default;
+  open(url).catch(() => {});
+}
+
+const CAPY_LOGO_SVG = `<svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
+
 function generateDeployHtml(
   secretsBlob: string,
   projectKey: string,
   platformName: string,
   instructionMarkdown: string,
 ): string {
-  // Escape values for safe embedding in HTML
   const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  // Simple markdown to HTML conversion (handles ## headers, ```code blocks```, numbered lists, backtick inline)
+  // Convert markdown to Tailwind-styled HTML
   const mdToHtml = (md: string): string => {
     const lines = md.split('\n');
     const out: string[] = [];
@@ -69,7 +122,7 @@ function generateDeployHtml(
           out.push('</code></pre>');
           inCode = false;
         } else {
-          out.push('<pre><code>');
+          out.push('<pre class="bg-neutral-100 dark:bg-neutral-800 p-3 rounded-md overflow-x-auto my-2 text-sm"><code class="font-mono">');
           inCode = true;
         }
         continue;
@@ -79,14 +132,14 @@ function generateDeployHtml(
         continue;
       }
       if (line.startsWith('## ')) {
-        out.push(`<h2>${escHtml(line.slice(3))}</h2>`);
+        out.push(`<h2 class="text-lg font-semibold mt-6 mb-3 dark:text-white">${escHtml(line.slice(3))}</h2>`);
       } else if (/^\d+\.\s/.test(line)) {
         const content = line.replace(/^\d+\.\s/, '');
-        out.push(`<p style="margin:4px 0 4px 16px">${content.replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`);
+        out.push(`<p class="ml-4 my-1 text-neutral-700 dark:text-neutral-300">${content.replace(/`([^`]+)`/g, '<code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-sm font-mono">$1</code>')}</p>`);
       } else if (line.trim() === '') {
-        out.push('<br>');
+        out.push('<div class="h-2"></div>');
       } else {
-        out.push(`<p>${line.replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`);
+        out.push(`<p class="my-1 text-neutral-700 dark:text-neutral-300">${line.replace(/`([^`]+)`/g, '<code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-sm font-mono">$1</code>')}</p>`);
       }
     }
     if (inCode) out.push('</code></pre>');
@@ -99,56 +152,65 @@ function generateDeployHtml(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Capy Deploy — ${escHtml(platformName)}</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; background: #fafafa; }
-    h1 { font-size: 24px; margin-bottom: 24px; }
-    h2 { font-size: 18px; margin: 24px 0 12px; }
-    .credential { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-    .credential label { font-weight: 600; display: block; margin-bottom: 8px; font-size: 14px; }
-    .credential .value-row { display: flex; gap: 8px; }
-    .credential textarea { flex: 1; font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 12px; padding: 8px; border: 1px solid #d0d0d0; border-radius: 4px; resize: vertical; min-height: 48px; background: #f8f8f8; }
-    .credential button { padding: 8px 16px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; white-space: nowrap; }
-    .credential button:hover { background: #1d4ed8; }
-    .credential button.copied { background: #16a34a; }
-    .instructions { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 24px; margin-top: 24px; }
-    .instructions code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 13px; }
-    .instructions pre { background: #f0f0f0; padding: 12px; border-radius: 4px; overflow-x: auto; margin: 8px 0; }
-    .instructions pre code { background: none; padding: 0; }
-    p { line-height: 1.6; }
-  </style>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'media',
+      theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
+    }
+  </script>
 </head>
-<body>
-  <h1>Capy Deploy</h1>
+<body class="min-h-screen bg-white dark:bg-neutral-950 font-geist text-neutral-900 dark:text-white">
+  <div class="max-w-2xl mx-auto px-5 py-12">
 
-  <div class="credential">
-    <label>SECRETS_BLOB</label>
-    <div class="value-row">
-      <textarea id="secrets-blob" readonly rows="3">${escHtml(secretsBlob)}</textarea>
-      <button onclick="copyValue('secrets-blob', this)">Copy</button>
+    <div class="flex items-center gap-3 mb-8">
+      <div class="dark:invert">${CAPY_LOGO_SVG}</div>
+      <h1 class="text-xl font-semibold">Deploy</h1>
     </div>
-  </div>
 
-  <div class="credential">
-    <label>PROJECT_KEY</label>
-    <div class="value-row">
-      <textarea id="project-key" readonly rows="1">${escHtml(projectKey)}</textarea>
-      <button onclick="copyValue('project-key', this)">Copy</button>
+    <div class="space-y-4 mb-8">
+      <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
+        <label class="block text-sm font-medium mb-2 text-neutral-600 dark:text-neutral-400">SECRETS_BLOB</label>
+        <div class="flex gap-2">
+          <textarea id="secrets-blob" readonly rows="3" class="flex-1 font-mono text-xs p-2.5 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-200 resize-y">${escHtml(secretsBlob)}</textarea>
+          <button onclick="copyValue('secrets-blob', this)" class="self-start px-3 py-2 text-sm font-medium rounded-md bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:bg-neutral-700 dark:hover:bg-neutral-200 transition-colors">Copy</button>
+        </div>
+      </div>
+
+      <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
+        <label class="block text-sm font-medium mb-2 text-neutral-600 dark:text-neutral-400">PROJECT_KEY</label>
+        <div class="flex gap-2">
+          <textarea id="project-key" readonly rows="1" class="flex-1 font-mono text-xs p-2.5 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-200 resize-y">${escHtml(projectKey)}</textarea>
+          <button onclick="copyValue('project-key', this)" class="self-start px-3 py-2 text-sm font-medium rounded-md bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:bg-neutral-700 dark:hover:bg-neutral-200 transition-colors">Copy</button>
+        </div>
+      </div>
     </div>
-  </div>
 
-  <div class="instructions">
-    ${mdToHtml(instructionMarkdown)}
+    <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-6">
+      ${mdToHtml(instructionMarkdown)}
+    </div>
+
+    <p class="mt-6 text-sm text-neutral-500">Run <code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs font-mono">capy deploy list</code> to see active tokens, <code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs font-mono">capy deploy revoke</code> to kill old ones.</p>
   </div>
 
   <script>
     async function copyValue(id, btn) {
       const el = document.getElementById(id);
+      const original = btn.textContent;
       try {
         await navigator.clipboard.writeText(el.value);
         btn.textContent = 'Copied!';
-        btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+        btn.classList.add('bg-green-600', 'dark:bg-green-500');
+        btn.classList.remove('bg-neutral-900', 'dark:bg-white', 'dark:text-neutral-900');
+        btn.classList.add('text-white', 'dark:text-white');
+        setTimeout(() => {
+          btn.textContent = original;
+          btn.classList.remove('bg-green-600', 'dark:bg-green-500', 'dark:text-white');
+          btn.classList.add('bg-neutral-900', 'dark:bg-white', 'dark:text-neutral-900');
+        }, 2000);
       } catch {
         el.select();
       }
@@ -290,8 +352,7 @@ export class DeployCommand {
           console.log(`\n  Deploy page opened at ${url}`);
           console.log('  Press Ctrl+C to close.\n');
 
-          const open = (await import('open')).default;
-          open(url).catch(() => {});
+          await openPopupWindow(url);
           serverStarted = true;
 
           // Auto-shutdown after 5 minutes
