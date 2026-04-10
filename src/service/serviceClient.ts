@@ -303,16 +303,18 @@ export class ServiceClient {
   }
 
   /**
-   * v3: Push a single env blob to content-addressed S3.
+   * v3: Push a single env blob to content-addressed storage.
    */
   async pushSecrets(
     projectId: string,
     keepFile: string,
     envBlob: string,
+    branch: string,
   ): Promise<{ keep_hash: string }> {
     return this.request('POST', `/secrets/${projectId}`, {
       keep_file: keepFile,
       env_blob: envBlob,
+      branch,
     });
   }
 

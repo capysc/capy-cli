@@ -360,7 +360,7 @@ describe('SyncEngine', () => {
         project_name: 'test',
         variables: {
           EXISTING_VAR: [
-            { resource_id: 'res_old', value_hash: 'abc12345' },
+            { resource_id: 'res_old', value_hash: 'abc12345', branch: 'development' },
           ]
         }
       };
@@ -584,8 +584,8 @@ describe('SyncEngine', () => {
         project_id: 'proj1',
         project_name: 'test',
         variables: {
-          DB_URL: [{ resource_id: 'abc', value_hash: 'hash1' }],
-          API_KEY: [{ resource_id: 'def', value_hash: 'hash3' }],
+          DB_URL: [{ resource_id: 'abc', value_hash: 'hash1', branch: 'development' }],
+          API_KEY: [{ resource_id: 'def', value_hash: 'hash3', branch: 'development' }],
         },
       };
       expect(SyncEngine.computeKeepHash(keep)).toBe(SyncEngine.computeKeepHash(keep));
@@ -595,15 +595,15 @@ describe('SyncEngine', () => {
       const keepA: KeepFile = {
         version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
         variables: {
-          API_KEY: [{ resource_id: 'def', value_hash: 'h2' }],
-          DB_URL: [{ resource_id: 'abc', value_hash: 'h1' }],
+          API_KEY: [{ resource_id: 'def', value_hash: 'h2', branch: 'development' }],
+          DB_URL: [{ resource_id: 'abc', value_hash: 'h1', branch: 'development' }],
         },
       };
       const keepB: KeepFile = {
         version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
         variables: {
-          DB_URL: [{ resource_id: 'abc', value_hash: 'h1' }],
-          API_KEY: [{ resource_id: 'def', value_hash: 'h2' }],
+          DB_URL: [{ resource_id: 'abc', value_hash: 'h1', branch: 'development' }],
+          API_KEY: [{ resource_id: 'def', value_hash: 'h2', branch: 'development' }],
         },
       };
       expect(SyncEngine.computeKeepHash(keepA)).toBe(SyncEngine.computeKeepHash(keepB));
@@ -614,7 +614,7 @@ describe('SyncEngine', () => {
         version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
         variables: {
           DB_URL: [
-            { resource_id: 'abc', value_hash: 'h1' },
+            { resource_id: 'abc', value_hash: 'h1', branch: 'development' },
             { resource_id: 'abc', branch: 'staging', value_hash: 'h2' },
           ],
         },
@@ -634,7 +634,7 @@ describe('SyncEngine', () => {
     it('changes when value_hash changes', () => {
       const makeKeep = (hash: string): KeepFile => ({
         version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
-        variables: { DB_URL: [{ resource_id: 'abc', value_hash: hash }] },
+        variables: { DB_URL: [{ resource_id: 'abc', value_hash: hash, branch: 'development' }] },
       });
       expect(SyncEngine.computeKeepHash(makeKeep('a'))).not.toBe(SyncEngine.computeKeepHash(makeKeep('b')));
     });

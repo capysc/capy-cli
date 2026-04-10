@@ -37,7 +37,7 @@ export class InfoCommand {
     const org = authResult.organizations?.find(o => o.id === orgId);
     const orgName = authResult.organization_name || org?.name;
     const workosOrgId = org?.workos_org_id;
-    const branch = projectState.activeBranch || 'default';
+    const branch = projectState.activeBranch;
 
     const rows: [string, string][] = [
       ['User', authResult.user_email || '—'],

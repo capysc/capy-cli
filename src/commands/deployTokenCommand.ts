@@ -257,18 +257,19 @@ export class DeployCommand {
 
       const userId = authResult.user_id!;
 
-      // Step 1: Platform selection (saved to .capy/config, skipped on re-run)
-      let config = readConfig(projectRoot);
-      let platform = config.platform;
+      // Step 1: Platform selection (always prompt)
+      const config = readConfig(projectRoot);
+      const defaultPlatform = config.platform;
 
-      if (!platform) {
-        const answer = await inquirer.prompt([{
-          type: 'list',
-          name: 'platform',
-          message: 'Where does this project deploy?',
-          choices: PLATFORMS,
-        }]);
-        platform = answer.platform;
+      const answer = await inquirer.prompt([{
+        type: 'list',
+        name: 'platform',
+        message: 'Where does this project deploy?',
+        choices: PLATFORMS,
+        default: defaultPlatform,
+      }]);
+      const platform = answer.platform;
+      if (platform !== config.platform) {
         config.platform = platform;
         writeConfig(projectRoot, config);
       }

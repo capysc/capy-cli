@@ -51,11 +51,12 @@ describe('CLI Integration Tests', () => {
 
       const state = await projectManager.detectProjectState();
 
-      expect(state).toEqual({
+      expect(state).toMatchObject({
         initialized: false,
         hasKeepFile: false,
         hasDecryptKey: false,
-        hasEnvFile: true
+        hasEnvFile: true,
+        activeBranch: 'development',
       });
     });
 
@@ -79,14 +80,15 @@ describe('CLI Integration Tests', () => {
 
       const state = await projectManager.detectProjectState();
 
-      expect(state).toEqual({
+      expect(state).toMatchObject({
         initialized: true,
         hasKeepFile: true,
         hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
         organizationId: 'org_123',
-        projectId: 'proj_456'
+        projectId: 'proj_456',
+        activeBranch: 'development',
       });
     });
   });
@@ -215,7 +217,7 @@ DEBUG=true`;
         project_name: 'test',
         variables: {
           EXISTING_VAR: [
-            { resource_id: 'res_old', value_hash: 'abc12345' },
+            { resource_id: 'res_old', value_hash: 'abc12345', branch: 'development' },
           ]
         }
       };

@@ -71,14 +71,14 @@ export class ProjectManager {
     return join(this.getCapyDir(), 'branch');
   }
 
-  readActiveBranch(): string | undefined {
+  readActiveBranch(): string {
     const branchPath = this.getActiveBranchPath();
-    if (!existsSync(branchPath)) return undefined;
+    if (!existsSync(branchPath)) return 'development';
     try {
       const content = readFileSync(branchPath, 'utf-8').trim();
-      return content || undefined;
+      return content || 'development';
     } catch {
-      return undefined;
+      return 'development';
     }
   }
 

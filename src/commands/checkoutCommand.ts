@@ -101,7 +101,7 @@ export class CheckoutCommand {
     this.projectManager.writeActiveBranch(branchName);
     const keep = this.projectManager.readKeepFile()!;
 
-    // Pull secrets for this branch from S3
+    // Pull secrets for this branch from Keep
     const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
 
     try {

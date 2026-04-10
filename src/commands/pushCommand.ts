@@ -85,7 +85,7 @@ export class PushCommand {
     const branch = projectState.activeBranch;
 
     // Read and encrypt .env file
-    const pushSpinner = ora('Pushing secrets to S3...').start();
+    const pushSpinner = ora('Pushing secrets to Keep...').start();
 
     const rawLocal = this.fileManager.readEnvFile();
     if (Object.keys(rawLocal).length === 0) {
@@ -101,7 +101,7 @@ export class PushCommand {
         encrypted[key] = value; // Already encrypted
       } else {
         const enc = Encryptor.encrypt(value, encryptionKey);
-        const resourceId = deriveResourceId(branch || '', key);
+        const resourceId = deriveResourceId(branch, key);
         encrypted[key] = `capy:${resourceId}:${enc}`;
       }
     }
@@ -117,26 +117,27 @@ export class PushCommand {
         ? this.fileManager.decryptValue(value, encryptionKey)
         : value;
       const valueHash = createHash('sha256').update(plaintext).digest('hex').slice(0, 16);
-      const resourceId = deriveResourceId(branch || '', key);
+      const resourceId = deriveResourceId(branch, key);
       pushedVars[key] = { resource_id: resourceId, value_hash: valueHash };
     }
 
     const syncEngine = new SyncEngine();
     const updatedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
 
-    // Push to S3
+    // Push to Keep
     const keepFileContent = JSON.stringify(updatedKeep);
     const result = await this.serviceClient.pushSecrets(
       projectState.projectId!,
       keepFileContent,
       envBlob,
+      branch,
     );
 
     // Update keep.lock with new state
     this.fileManager.writeKeepFile(updatedKeep);
 
     pushSpinner.succeed(
-      `Pushed ${Object.keys(rawLocal).length} secret(s) to S3 (keep_hash: ${result.keep_hash.slice(0, 8)}...)`
+      `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
     );
   }
 }
