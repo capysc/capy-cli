@@ -958,6 +958,12 @@ export class CapyCommand {
       return visible >= width ? s : s + ' '.repeat(width - visible);
     };
 
+    const pinnedSnippetFor = (variable: string): string => {
+      if (!pinned[variable]) return '-';
+      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
+      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+    };
+
     // Check if any pinned value can be resolved to plaintext
     const showPinned = diffs.some(diff => {
       if (!pinned[diff.variable]) return false;
@@ -976,7 +982,7 @@ export class CapyCommand {
     for (const diff of diffs) {
       const cols = [diff.variable];
       if (showPinned) {
-        const pinnedSnippet = pinned[diff.variable] ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext)) : '-';
+        const pinnedSnippet = pinnedSnippetFor(diff.variable);
         cols.push(pinnedSnippet);
       }
       if (showLocal) {
@@ -1051,17 +1057,21 @@ export class CapyCommand {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
 
+    const pinnedSnippetFor = (variable: string): string | null => {
+      if (!pinned[variable]) return null;
+      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
+      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+    };
+
     const rows: Row[] = diffs.map(diff => ({
       variable: diff.variable,
-      pinned: pinned[diff.variable]
-        ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-        : null,
-      local: localPlaintext[diff.variable]
-        ? formatSnippet(localPlaintext[diff.variable])
-        : null,
-      remote: remotePlaintext[diff.variable]
-        ? formatSnippet(remotePlaintext[diff.variable])
-        : null,
+      pinned: pinnedSnippetFor(diff.variable),
+        local: localPlaintext[diff.variable]
+          ? formatSnippet(localPlaintext[diff.variable])
+          : null,
+        remote: remotePlaintext[diff.variable]
+          ? formatSnippet(remotePlaintext[diff.variable])
+          : null,
     }));
 
     const table = new ResolveTable(rows, showLocal, showRemote);

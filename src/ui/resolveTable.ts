@@ -176,16 +176,17 @@ export class ResolveTable {
 
     // Calculate column widths
     const colWidths: number[] = visibleCols.map(h => h.length);
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
     for (const row of this.rows) {
       colWidths[0] = Math.max(colWidths[0], row.variable.length);
-      colWidths[1] = Math.max(colWidths[1], (row.pinned || '-').length);
+      colWidths[1] = Math.max(colWidths[1], stripAnsi(row.pinned || '-').length);
       let ci = 2;
       if (this.showLocal) {
-        colWidths[ci] = Math.max(colWidths[ci] || 0, (row.local || '-').length);
+        colWidths[ci] = Math.max(colWidths[ci] || 0, stripAnsi(row.local || '-').length);
         ci++;
       }
       if (this.showRemote) {
-        colWidths[ci] = Math.max(colWidths[ci] || 0, (row.remote || '-').length);
+        colWidths[ci] = Math.max(colWidths[ci] || 0, stripAnsi(row.remote || '-').length);
         ci++;
       }
       // Choice column
