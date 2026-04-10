@@ -816,7 +816,6 @@ export class CapyCommand {
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
     } else if (!hasRemote) {
       // No remote values — local vs pinned only
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
     } else if (showLocal && !showRemote) {
