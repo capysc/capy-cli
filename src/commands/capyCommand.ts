@@ -104,15 +104,12 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name}`);
+    spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
     // Set token for service client
     const token = this.authService.getToken();
     if (token) {
       this.serviceClient.setToken(token);
-      if (this.devMode) {
-        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
-      }
     }
 
     // Resolve organization
@@ -669,7 +666,7 @@ export class CapyCommand {
       this.projectManager.writeSyncStateUserId(authResult.user_id);
     }
 
-    spinner.stop();
+    spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
     const orgName = authResult.organization_name
       || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name
@@ -690,9 +687,6 @@ export class CapyCommand {
 
     if (token) {
       this.serviceClient.setToken(token);
-      if (this.devMode) {
-        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
-      }
     }
 
     if (!token) {
