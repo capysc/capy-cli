@@ -784,12 +784,13 @@ export class CapyCommand {
 
     // 3-way comparison
     const hasRemoteSecrets = Object.keys(remotePlaintext).length > 0;
+    // If offline or remote is empty, treat remote as matching pinned so it doesn't generate false diffs
+    const effectiveRemote = (networkAvailable && hasRemoteSecrets) ? remoteHashes : pinned;
     const { diffs, showLocal, showRemote: rawShowRemote } = compareSecrets(
       pinned,
       localHashes,
-      networkAvailable ? remoteHashes : pinned, // If offline, treat remote as matching pinned
+      effectiveRemote,
     );
-    // Don't show remote column if there are no remote values
     const showRemote = rawShowRemote && hasRemoteSecrets;
 
     if (diffs.length === 0) {
