@@ -25,10 +25,12 @@ export function compareSecrets(
   local: Record<string, string>,   // variable -> plaintext value (hashed for comparison)
   remote: Record<string, string>,  // variable -> plaintext value (hashed for comparison)
 ): { diffs: DiffResult[]; showLocal: boolean; showRemote: boolean } {
+  const hasRemote = Object.keys(remote).length > 0;
+
   const allVars = new Set([
     ...Object.keys(pinned),
     ...Object.keys(local),
-    ...Object.keys(remote),
+    ...(hasRemote ? Object.keys(remote) : []),
   ]);
 
   const diffs: DiffResult[] = [];
@@ -38,7 +40,9 @@ export function compareSecrets(
   for (const variable of allVars) {
     const pinnedHash = pinned[variable];
     const localHash = local[variable];
-    const remoteHash = remote[variable];
+    // If remote has no data at all, treat each variable as matching pinned.
+    // If remote has data but this variable is missing, it's a real absence.
+    const remoteHash = hasRemote ? remote[variable] : pinnedHash;
 
     // Track if local or remote differs from pinned at all
     if (localHash !== pinnedHash) localDiffersFromPinned = true;
@@ -218,11 +222,8 @@ export class StatusCommand {
       }
     }
 
-    // If remote is empty, treat it as matching pinned to avoid false diffs
     const hasRemote = Object.keys(remoteHashes).length > 0;
-    const effectiveRemote = hasRemote ? remoteHashes : pinned;
-    const { diffs, showLocal, showRemote: rawShowRemote } = compareSecrets(pinned, localHashes, effectiveRemote);
-    const showRemote = rawShowRemote && hasRemote;
+    const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
 
     if (this.terse) {
       // Terse mode for git hooks

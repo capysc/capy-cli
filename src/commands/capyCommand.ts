@@ -783,15 +783,12 @@ export class CapyCommand {
     }
 
     // 3-way comparison
-    const hasRemoteSecrets = Object.keys(remotePlaintext).length > 0;
-    // If offline or remote is empty, treat remote as matching pinned so it doesn't generate false diffs
-    const effectiveRemote = (networkAvailable && hasRemoteSecrets) ? remoteHashes : pinned;
-    const { diffs, showLocal, showRemote: rawShowRemote } = compareSecrets(
+    const hasRemote = Object.keys(remotePlaintext).length > 0;
+    const { diffs, showLocal, showRemote } = compareSecrets(
       pinned,
       localHashes,
-      effectiveRemote,
+      networkAvailable ? remoteHashes : pinned, // If offline, treat remote as matching pinned
     );
-    const showRemote = rawShowRemote && hasRemoteSecrets;
 
     if (diffs.length === 0) {
       console.log('Everything is up to date!');
@@ -810,7 +807,6 @@ export class CapyCommand {
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
-    const hasRemote = Object.keys(remotePlaintext).length > 0;
 
     if (!hasPinned) {
       // No pinned values — only offer commit or skip
