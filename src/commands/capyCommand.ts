@@ -953,17 +953,27 @@ export class CapyCommand {
   ): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
 
+    // Check if any pinned value can be resolved to plaintext
+    const showPinned = diffs.some(diff => {
+      if (!pinned[diff.variable]) return false;
+      const snippet = this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext);
+      return snippet !== '-';
+    });
+
     // Build header
     const headers: string[] = ['Variable'];
-    headers.push('Pinned');
+    if (showPinned) headers.push('Pinned');
     if (showLocal) headers.push('Local');
     if (showRemote) headers.push('Remote');
 
     // Calculate column widths
     const colWidths = headers.map(h => h.length);
     for (const diff of diffs) {
-      const pinnedSnippet = pinned[diff.variable] ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext)) : '-';
-      const cols = [diff.variable, pinnedSnippet];
+      const cols = [diff.variable];
+      if (showPinned) {
+        const pinnedSnippet = pinned[diff.variable] ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext)) : '-';
+        cols.push(pinnedSnippet);
+      }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
       }
@@ -985,10 +995,13 @@ export class CapyCommand {
 
     // Print rows
     for (const diff of diffs) {
-      const pinnedVal = pinned[diff.variable]
-        ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-        : '-';
-      const cols = [diff.variable, pinnedVal];
+      const cols = [diff.variable];
+      if (showPinned) {
+        const pinnedVal = pinned[diff.variable]
+          ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
+          : '-';
+        cols.push(pinnedVal);
+      }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
       }
