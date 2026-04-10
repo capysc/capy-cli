@@ -621,7 +621,17 @@ export class CapyCommand {
     };
 
     const notCreated = grey('not yet created');
-    const content = [
+    const capy = [
+      '    \u2588\u2584 ',
+      '  \u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2584',
+      ' \u2588\u2588\u2588\u2588\u2584\u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588',
+      '\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588',
+      '\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2580',
+      '\u2588\u2588\u2588\u2588\u2588\u2588\u2580',
+      '\u2588\u2588\u2588\u2588\u2588\u2588',
+    ];
+
+    const info = [
       `Project:      ${projectName === 'not yet created' ? notCreated : bold(projectName)}`,
       `Organization: ${orgName === 'not yet created' ? notCreated : orgName}`,
       `Branch:       ${branch || grey('none')}`,
@@ -630,16 +640,25 @@ export class CapyCommand {
     ];
 
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
-    const maxLen = Math.max(40, ...content.map(l => stripAnsi(l).length + 2));
+    const capyWidth = Math.max(...capy.map(l => l.length));
+    const infoWidth = Math.max(...info.map(l => stripAnsi(l).length));
+    const gap = 4;
+    const maxLen = infoWidth + gap + capyWidth + 2;
 
     console.log('');
     console.log(grey('Capy CLI'));
-    console.log(grey('┌' + '─'.repeat(maxLen) + '┐'));
-    for (const line of content) {
-      const pad = maxLen - stripAnsi(line).length - 1;
-      console.log(`${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
+    console.log(grey('\u250c' + '\u2500'.repeat(maxLen) + '\u2510'));
+
+    const totalRows = Math.max(info.length, capy.length);
+    for (let i = 0; i < totalRows; i++) {
+      const left = i < info.length ? info[i] : '';
+      const right = i < capy.length ? capy[i] : '';
+      const leftPad = infoWidth - stripAnsi(left).length;
+      const rightPad = capyWidth - right.length;
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${grey(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
-    console.log(grey('└' + '─'.repeat(maxLen) + '┘'));
+
+    console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
     console.log('');
   }
 
