@@ -622,12 +622,11 @@ export class CapyCommand {
 
     const notCreated = grey('not yet created');
     const capy = [
-      '     \u2584',
-      '    \u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2584',
-      '   \u2588\u2588\u2588\u2588\u2584\u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2584\u2588',
-      '  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588',
-      ' \u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2580',
-      '\u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2580',
+      '  █▄▄▄▄▄▄▄█',
+      '  ▄▄█████▄▄',
+      ' ▄█████████▄',
+      '▄█████ █████▄',
+      '█████▄█▄█████',
     ];
 
     const info = [
@@ -654,7 +653,8 @@ export class CapyCommand {
       const right = i < capy.length ? capy[i] : '';
       const leftPad = infoWidth - stripAnsi(left).length;
       const rightPad = capyWidth - right.length;
-      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${grey(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+      const mutedBrown = (s: string) => `\x1b[38;2;150;120;90m${s}\x1b[0m`;
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${mutedBrown(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
@@ -863,7 +863,7 @@ export class CapyCommand {
     let finalEnv: Record<string, string>;
 
     if (action === 'retrieve_pinned') {
-      // Fetch pinned values from S3
+      // Fetch pinned values from Keep
       finalEnv = { ...localPlaintext };
       if (currentKeep && Object.keys(pinned).length > 0) {
         const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
