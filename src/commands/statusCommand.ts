@@ -108,12 +108,12 @@ export class StatusCommand {
   private serviceClient: ServiceClient;
   private terse: boolean;
 
-  constructor(terse: boolean = false) {
+  constructor(terse: boolean = false, devMode: boolean = false) {
     this.terse = terse;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
-    this.authService = new AuthService();
-    this.serviceClient = new ServiceClient();
+    this.authService = new AuthService(undefined, devMode);
+    this.serviceClient = new ServiceClient(undefined, devMode);
 
     this.serviceClient.setTokenRefresher(async () => {
       const refreshed = await this.authService.refreshToken();
