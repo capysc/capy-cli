@@ -245,7 +245,7 @@ export class StatusCommand {
       if (!hasRemote) {
         console.log('! Remote is empty.');
         console.log('');
-        console.log(`Run ${B('capy push')} to share these secrets with your team.`);
+        console.log(`  Run ${B('capy push')} to share these secrets with your team.`);
       } else {
         console.log('> Remote is up to date.');
       }
@@ -300,9 +300,9 @@ export class StatusCommand {
 
     console.log('');
     if (!hasRemote) {
-      console.log(`Run ${B('capy push')} to share these secrets with your team.`);
+      console.log(`  Run ${B('capy push')} to share these secrets with your team.`);
     } else {
-      console.log(`Run ${B('capy')} to sync your secrets.`);
+      console.log(`  Run ${B('capy')} to sync these changes.`);
     }
     process.exit(0);
   }
