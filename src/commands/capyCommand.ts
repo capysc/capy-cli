@@ -802,7 +802,10 @@ export class CapyCommand {
     // Display comparison table
     this.displayComparisonTable(diffs, showLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
 
-    console.log(`\n  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+    const DIM = '\x1b[90m';
+    const RST = '\x1b[0m';
+    console.log(`\n  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.`);
+    console.log(`  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
@@ -814,23 +817,23 @@ export class CapyCommand {
     } else if (!hasRemote) {
       // No remote values — local vs pinned only
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (showLocal && !showRemote) {
       // Local differs from pinned, remote matches pinned
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (!showLocal && showRemote) {
       // Remote differs from pinned, local matches pinned
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
-      menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else {
       // Both differ — show all 4 options
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     }
 
     menuChoices.push({ name: 'Continue working', value: 'skip' });
