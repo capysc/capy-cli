@@ -841,7 +841,7 @@ export class CapyCommand {
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
-      message: '',
+      message: ' ',
       choices: menuChoices,
     }]);
 
