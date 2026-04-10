@@ -246,8 +246,6 @@ export class StatusCommand {
         console.log(`Run ${B('capy push')} to share these secrets with your team.`);
       } else {
         console.log('> Remote is up to date.');
-        console.log('');
-        console.log('Nothing to sync.');
       }
       process.exit(0);
     }
