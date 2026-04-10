@@ -12,8 +12,8 @@ const CLEAR_EOL = `${ESC}[K`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
 const GREEN = `${ESC}[32m`;
-// Blue background matching the Capy brand
-const BG_BLUE = `${ESC}[48;5;24m${ESC}[37m`; // dark blue bg + white text
+// White background selection box
+const BG_SELECT = `${ESC}[47m${ESC}[30m`; // white bg + black text
 
 export interface ResolveRow {
   variable: string;
@@ -49,11 +49,10 @@ export class ResolveTable {
     this.selections = rows.map(row => this.getAvailableColumns(row)[0]);
   }
 
-  private getAvailableColumns(row: ResolveRow): ColumnKey[] {
-    const cols: ColumnKey[] = [];
-    if (row.pinned !== null) cols.push('pinned');
-    if (this.showLocal && row.local !== null) cols.push('local');
-    if (this.showRemote && row.remote !== null) cols.push('remote');
+  private getAvailableColumns(_row: ResolveRow): ColumnKey[] {
+    const cols: ColumnKey[] = ['pinned'];
+    if (this.showLocal) cols.push('local');
+    if (this.showRemote) cols.push('remote');
     cols.push('delete');
     return cols;
   }
@@ -99,7 +98,7 @@ export class ResolveTable {
             this.rowIndex--;
             const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
             this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-            if (this.colIndex < 0) this.colIndex = 0;
+            this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
             this.draw();
           }
           return;
@@ -110,27 +109,25 @@ export class ResolveTable {
             this.rowIndex++;
             const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
             this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-            if (this.colIndex < 0) this.colIndex = 0;
+            this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
             this.draw();
           }
           return;
         }
 
         if (key === `${ESC}[D`) {
-          if (!this.confirmed.has(this.rowIndex) && this.colIndex > 0) {
-            this.colIndex--;
-            this.selections[this.rowIndex] = availCols[this.colIndex];
-            this.draw();
-          }
+          this.confirmed.delete(this.rowIndex);
+          this.colIndex = Math.max(0, this.colIndex - 1);
+          this.selections[this.rowIndex] = availCols[this.colIndex];
+          this.draw();
           return;
         }
 
         if (key === `${ESC}[C`) {
-          if (!this.confirmed.has(this.rowIndex) && this.colIndex < availCols.length - 1) {
-            this.colIndex++;
-            this.selections[this.rowIndex] = availCols[this.colIndex];
-            this.draw();
-          }
+          this.confirmed.delete(this.rowIndex);
+          this.colIndex = Math.min(availCols.length - 1, this.colIndex + 1);
+          this.selections[this.rowIndex] = availCols[this.colIndex];
+          this.draw();
           return;
         }
 
@@ -138,6 +135,7 @@ export class ResolveTable {
           this.confirmed.add(this.rowIndex);
 
           if (this.confirmed.size === this.rows.length) {
+            this.draw();
             this.cleanup(onData);
             const choices: Record<string, ColumnKey> = {};
             for (let i = 0; i < this.rows.length; i++) {
@@ -147,12 +145,14 @@ export class ResolveTable {
             return;
           }
 
-          for (let i = this.rowIndex + 1; i < this.rows.length; i++) {
+          // Find next unconfirmed row, wrapping around
+          for (let offset = 1; offset < this.rows.length; offset++) {
+            const i = (this.rowIndex + offset) % this.rows.length;
             if (!this.confirmed.has(i)) {
               this.rowIndex = i;
               const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
               this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-              if (this.colIndex < 0) this.colIndex = 0;
+              this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
               break;
             }
           }
@@ -176,16 +176,17 @@ export class ResolveTable {
 
     // Calculate column widths
     const colWidths: number[] = visibleCols.map(h => h.length);
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
     for (const row of this.rows) {
       colWidths[0] = Math.max(colWidths[0], row.variable.length);
-      colWidths[1] = Math.max(colWidths[1], (row.pinned || '-').length);
+      colWidths[1] = Math.max(colWidths[1], stripAnsi(row.pinned || '-').length);
       let ci = 2;
       if (this.showLocal) {
-        colWidths[ci] = Math.max(colWidths[ci] || 0, (row.local || '-').length);
+        colWidths[ci] = Math.max(colWidths[ci] || 0, stripAnsi(row.local || '-').length);
         ci++;
       }
       if (this.showRemote) {
-        colWidths[ci] = Math.max(colWidths[ci] || 0, (row.remote || '-').length);
+        colWidths[ci] = Math.max(colWidths[ci] || 0, stripAnsi(row.remote || '-').length);
         ci++;
       }
       // Choice column
@@ -196,14 +197,14 @@ export class ResolveTable {
     const lines: string[] = [];
 
     // Instructions above the table
-    lines.push(m + DIM + '←→ select value   ↑↓ move between rows   Enter confirm   q cancel' + RESET);
+    lines.push(m + DIM + '← → select value   ↑ ↓ move between rows   Enter confirm   q cancel' + RESET);
     lines.push(m + `Resolved: ${this.confirmed.size}/${this.rows.length}`);
     lines.push('');
 
     // Header
     const header = visibleCols.map((h, i) => this.pad(h, colWidths[i])).join('');
     lines.push(m + header);
-    lines.push(m + '-'.repeat(colWidths.reduce((a, b) => a + b, 0)));
+    lines.push(m + '─'.repeat(colWidths.reduce((a, b) => a + b, 0)));
 
     // Rows
     for (let ri = 0; ri < this.rows.length; ri++) {
@@ -234,21 +235,21 @@ export class ResolveTable {
       cellKeys.push(null);
       const choiceColIdx = cells.length - 1;
 
-      // Format each cell
+      // Format each cell — active row always shows selection box, even if confirmed
       const formatted = cells.map((cell, ci) => {
         const key = cellKeys[ci];
         const width = colWidths[ci];
 
         // Choice column
         if (ci === choiceColIdx) {
-          if (isConfirmed) return GREEN + this.pad(cell, width) + RESET;
+          if (isConfirmed && !isActive) return GREEN + this.pad(cell, width) + RESET;
           if (isActive) return DIM + this.pad(cell, width) + RESET;
           return this.pad(cell, width);
         }
 
         // Variable name column
         if (ci === 0) {
-          if (isConfirmed) return GREEN + this.pad(cell, width) + RESET;
+          if (isConfirmed && !isActive) return GREEN + this.pad(cell, width) + RESET;
           return this.pad(cell, width);
         }
 
@@ -256,17 +257,17 @@ export class ResolveTable {
 
         const isSelected = key === selection;
 
-        if (isConfirmed && isSelected) {
-          return GREEN + this.pad(cell, width) + RESET;
-        }
         if (isActive && isSelected) {
-          return BG_BLUE + this.pad(cell, width) + RESET;
-        }
-        if (isConfirmed) {
-          return DIM + this.pad(cell, width) + RESET;
+          return BG_SELECT + this.pad(cell, width) + RESET;
         }
         if (isActive) {
           return this.pad(cell, width);
+        }
+        if (isConfirmed && isSelected) {
+          return GREEN + this.pad(cell, width) + RESET;
+        }
+        if (isConfirmed) {
+          return DIM + this.pad(cell, width) + RESET;
         }
         return this.pad(cell, width);
       });

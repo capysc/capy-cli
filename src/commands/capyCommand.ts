@@ -104,15 +104,12 @@ export class CapyCommand {
       );
     }
 
-    spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name}`);
+    spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
     // Set token for service client
     const token = this.authService.getToken();
     if (token) {
       this.serviceClient.setToken(token);
-      if (this.devMode) {
-        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
-      }
     }
 
     // Resolve organization
@@ -624,7 +621,15 @@ export class CapyCommand {
     };
 
     const notCreated = grey('not yet created');
-    const content = [
+    const capy = [
+      '  █▄▄▄▄▄▄▄█',
+      '  ▄▄█████▄▄',
+      ' ▄█████████▄',
+      '▄█████ █████▄',
+      '█████▄█▄█████',
+    ];
+
+    const info = [
       `Project:      ${projectName === 'not yet created' ? notCreated : bold(projectName)}`,
       `Organization: ${orgName === 'not yet created' ? notCreated : orgName}`,
       `Branch:       ${branch || grey('none')}`,
@@ -633,16 +638,26 @@ export class CapyCommand {
     ];
 
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
-    const maxLen = Math.max(40, ...content.map(l => stripAnsi(l).length + 2));
+    const capyWidth = Math.max(...capy.map(l => l.length));
+    const infoWidth = Math.max(...info.map(l => stripAnsi(l).length));
+    const gap = 3;
+    const maxLen = infoWidth + gap + capyWidth + 2;
 
     console.log('');
     console.log(grey('Capy CLI'));
-    console.log(grey('┌' + '─'.repeat(maxLen) + '┐'));
-    for (const line of content) {
-      const pad = maxLen - stripAnsi(line).length - 1;
-      console.log(`${grey('│')} ${line}${' '.repeat(Math.max(0, pad))}${grey('│')}`);
+    console.log(grey('\u250c' + '\u2500'.repeat(maxLen) + '\u2510'));
+
+    const totalRows = Math.max(info.length, capy.length);
+    for (let i = 0; i < totalRows; i++) {
+      const left = i < info.length ? info[i] : '';
+      const right = i < capy.length ? capy[i] : '';
+      const leftPad = infoWidth - stripAnsi(left).length;
+      const rightPad = capyWidth - right.length;
+      const mutedBrown = (s: string) => `\x1b[38;2;150;120;90m${s}\x1b[0m`;
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${mutedBrown(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
-    console.log(grey('└' + '─'.repeat(maxLen) + '┘'));
+
+    console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
     console.log('');
   }
 
@@ -669,7 +684,7 @@ export class CapyCommand {
       this.projectManager.writeSyncStateUserId(authResult.user_id);
     }
 
-    spinner.stop();
+    spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
     const orgName = authResult.organization_name
       || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name
@@ -690,9 +705,6 @@ export class CapyCommand {
 
     if (token) {
       this.serviceClient.setToken(token);
-      if (this.devMode) {
-        console.log(`\nBearer token (${authResult._auth_method || 'oauth'}):\n${token.access_token}\n`);
-      }
     }
 
     if (!token) {
@@ -783,10 +795,11 @@ export class CapyCommand {
     }
 
     // 3-way comparison
+    const hasRemote = Object.keys(remotePlaintext).length > 0;
     const { diffs, showLocal, showRemote } = compareSecrets(
       pinned,
       localHashes,
-      networkAvailable ? remoteHashes : pinned, // If offline, treat remote as matching pinned
+      networkAvailable ? remoteHashes : {}, // If offline, pass empty so compareSecrets treats as matching pinned
     );
 
     if (diffs.length === 0) {
@@ -798,36 +811,51 @@ export class CapyCommand {
       return;
     }
 
+    const DIM = '\x1b[90m';
+    const RST = '\x1b[0m';
+
+    console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+
     // Display comparison table
     this.displayComparisonTable(diffs, showLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
 
-    console.log(`\n  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+    console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
+    const hasPinned = Object.keys(pinned).length > 0;
 
-    if (showLocal && !showRemote) {
+    if (!hasPinned) {
+      // No pinned values — only offer commit or skip
+      menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
+    } else if (!hasRemote) {
+      // No remote values — local vs pinned only
+      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
+    } else if (showLocal && !showRemote) {
       // Local differs from pinned, remote matches pinned
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (!showLocal && showRemote) {
       // Remote differs from pinned, local matches pinned
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
-      menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else {
       // Both differ — show all 4 options
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Individually resolve values', value: 'individual' });
+      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     }
+
+    menuChoices.push({ name: 'Continue working', value: 'skip' });
 
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
-      message: '',
+      message: ' ',
       choices: menuChoices,
     }]);
 
@@ -835,7 +863,7 @@ export class CapyCommand {
     let finalEnv: Record<string, string>;
 
     if (action === 'retrieve_pinned') {
-      // Fetch pinned values from S3
+      // Fetch pinned values from Keep
       finalEnv = { ...localPlaintext };
       if (currentKeep && Object.keys(pinned).length > 0) {
         const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
@@ -864,9 +892,13 @@ export class CapyCommand {
       finalEnv = { ...remotePlaintext };
     } else if (action === 'commit_local') {
       finalEnv = { ...localPlaintext };
+    } else if (action === 'skip') {
+      return;
     } else {
       // Individual resolution
-      finalEnv = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      if (!resolved) return; // Cancelled
+      finalEnv = resolved;
     }
 
     // Update keep.lock
@@ -921,7 +953,7 @@ export class CapyCommand {
     console.log(`\n> keep.lock updated (${diffs.length} changes)`);
 
     if (action === 'commit_local') {
-      console.log('\nRun `capy push` to share your changes with teammates.');
+      console.log(`\nRun ${B('capy push')} to share your changes with teammates.`);
     }
 
     // Install hooks on every run (idempotent)
@@ -939,18 +971,39 @@ export class CapyCommand {
     remotePlaintext: Record<string, string>,
   ): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const padCell = (s: string, width: number) => {
+      const visible = stripAnsi(s).length;
+      return visible >= width ? s : s + ' '.repeat(width - visible);
+    };
+
+    const pinnedSnippetFor = (variable: string): string => {
+      if (!pinned[variable]) return '-';
+      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
+      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+    };
+
+    // Check if any pinned value can be resolved to plaintext
+    const showPinned = diffs.some(diff => {
+      if (!pinned[diff.variable]) return false;
+      const snippet = this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext);
+      return !snippet.includes('unresolvable');
+    });
 
     // Build header
     const headers: string[] = ['Variable'];
-    headers.push('Pinned');
+    if (showPinned) headers.push('Pinned');
     if (showLocal) headers.push('Local');
     if (showRemote) headers.push('Remote');
 
     // Calculate column widths
     const colWidths = headers.map(h => h.length);
     for (const diff of diffs) {
-      const pinnedSnippet = pinned[diff.variable] ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext)) : '-';
-      const cols = [diff.variable, pinnedSnippet];
+      const cols = [diff.variable];
+      if (showPinned) {
+        const pinnedSnippet = pinnedSnippetFor(diff.variable);
+        cols.push(pinnedSnippet);
+      }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
       }
@@ -958,7 +1011,7 @@ export class CapyCommand {
         cols.push(remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : '-');
       }
       cols.forEach((c, i) => {
-        colWidths[i] = Math.max(colWidths[i] || 0, c.length);
+        colWidths[i] = Math.max(colWidths[i] || 0, stripAnsi(c).length);
       });
     }
 
@@ -968,21 +1021,24 @@ export class CapyCommand {
     // Print header
     const headerLine = headers.map((h, i) => h.padEnd(colWidths[i])).join('');
     console.log(`  ${headerLine}`);
-    console.log(`  ${'-'.repeat(colWidths.reduce((a, b) => a + b, 0))}`);
+    console.log(`  ${'─'.repeat(colWidths.reduce((a, b) => a + b, 0))}`);
 
     // Print rows
     for (const diff of diffs) {
-      const pinnedVal = pinned[diff.variable]
-        ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-        : '-';
-      const cols = [diff.variable, pinnedVal];
+      const cols = [diff.variable];
+      if (showPinned) {
+        const pinnedVal = pinned[diff.variable]
+          ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
+          : '-';
+        cols.push(pinnedVal);
+      }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
       }
       if (showRemote) {
         cols.push(remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : '-');
       }
-      const row = cols.map((c, i) => c.padEnd(colWidths[i])).join('');
+      const row = cols.map((c, i) => padCell(c, colWidths[i])).join('');
       console.log(`  ${row}`);
     }
   }
@@ -1005,8 +1061,8 @@ export class CapyCommand {
     if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
       return remotePlaintext[variable];
     }
-    // Can't resolve snippet — show hash prefix
-    return pinnedHash ? pinnedHash.slice(0, 6) + '...' : '-';
+    // Can't resolve plaintext — no source has the matching value
+    return '\x1b[3munresolvable\x1b[0m';
   }
 
   private async resolveIndividually(
@@ -1016,29 +1072,32 @@ export class CapyCommand {
     pinned: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
-  ): Promise<Record<string, string>> {
+  ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
 
+    const pinnedSnippetFor = (variable: string): string | null => {
+      if (!pinned[variable]) return null;
+      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
+      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+    };
+
     const rows: Row[] = diffs.map(diff => ({
       variable: diff.variable,
-      pinned: pinned[diff.variable]
-        ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-        : null,
-      local: localPlaintext[diff.variable]
-        ? formatSnippet(localPlaintext[diff.variable])
-        : null,
-      remote: remotePlaintext[diff.variable]
-        ? formatSnippet(remotePlaintext[diff.variable])
-        : null,
+      pinned: pinnedSnippetFor(diff.variable),
+        local: localPlaintext[diff.variable]
+          ? formatSnippet(localPlaintext[diff.variable])
+          : null,
+        remote: remotePlaintext[diff.variable]
+          ? formatSnippet(remotePlaintext[diff.variable])
+          : null,
     }));
 
     const table = new ResolveTable(rows, showLocal, showRemote);
     const { choices, cancelled } = await table.run();
 
     if (cancelled) {
-      // Return current local state unchanged
-      return { ...localPlaintext };
+      return null;
     }
 
     const result: Record<string, string> = {};
@@ -1051,9 +1110,9 @@ export class CapyCommand {
         } else if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
           result[variable] = remotePlaintext[variable];
         }
-      } else if (choice === 'local') {
+      } else if (choice === 'local' && localPlaintext[variable] !== undefined) {
         result[variable] = localPlaintext[variable];
-      } else if (choice === 'remote') {
+      } else if (choice === 'remote' && remotePlaintext[variable] !== undefined) {
         result[variable] = remotePlaintext[variable];
       }
       // 'delete' — don't add to result
