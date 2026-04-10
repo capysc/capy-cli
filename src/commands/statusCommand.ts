@@ -238,8 +238,10 @@ export class StatusCommand {
     console.log(`${B('capy')}: ${keep.project_name} (${branchLabel})`);
     console.log('');
 
+    const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
+
     if (diffs.length === 0) {
-      console.log('> Local secrets match pinned branch.');
+      console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);
       if (!hasRemote) {
         console.log('! Remote is empty.');
         console.log('');
@@ -255,7 +257,7 @@ export class StatusCommand {
     const remoteMatchesPinned = !showRemote;
 
     if (localMatchesPinned) {
-      console.log('> Local secrets match pinned branch.');
+      console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);
     } else {
       const localDiffs = diffs.filter(d => d.local !== d.pinned);
       console.log(`x Local has changes (${localDiffs.length} difference${localDiffs.length !== 1 ? 's' : ''})`);
