@@ -89,6 +89,44 @@ export class AuthService {
     }
   }
 
+  /**
+   * Try to authenticate using only cached/refreshed tokens.
+   * Never triggers interactive OAuth — returns failure instead.
+   */
+  async authenticateSilent(organizationId?: string): Promise<AuthResult> {
+    if (this.session && organizationId) {
+      const orgSession = this.session.sessions[organizationId];
+      if (orgSession && orgSession.expires_at > Date.now()) {
+        this.currentOrgId = organizationId;
+        return this.buildAuthResult('cached');
+      }
+      if (this.session.refresh_token) {
+        const refreshed = await this.refreshForOrg(organizationId);
+        if (refreshed) {
+          return this.buildAuthResult('refreshed');
+        }
+      }
+    }
+
+    if (this.session && !organizationId) {
+      for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
+        if (orgSession.expires_at > Date.now()) {
+          this.currentOrgId = orgId;
+          return this.buildAuthResult('cached');
+        }
+      }
+      if (this.session.refresh_token && this.session.organizations.length > 0) {
+        const firstOrg = this.session.organizations[0];
+        const refreshed = await this.refreshForOrg(firstOrg.id);
+        if (refreshed) {
+          return this.buildAuthResult('refreshed');
+        }
+      }
+    }
+
+    return { success: false, error: 'No valid session available' };
+  }
+
   private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
     const oauthServer = new OAuthServer();
     await oauthServer.bind();
