@@ -879,7 +879,9 @@ export class CapyCommand {
       return;
     } else {
       // Individual resolution
-      finalEnv = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      if (!resolved) return; // Cancelled
+      finalEnv = resolved;
     }
 
     // Update keep.lock
@@ -1053,7 +1055,7 @@ export class CapyCommand {
     pinned: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
-  ): Promise<Record<string, string>> {
+  ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
 
@@ -1078,8 +1080,7 @@ export class CapyCommand {
     const { choices, cancelled } = await table.run();
 
     if (cancelled) {
-      // Return current local state unchanged
-      return { ...localPlaintext };
+      return null;
     }
 
     const result: Record<string, string> = {};
