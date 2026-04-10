@@ -11,6 +11,7 @@ import {
 } from '../types/index';
 import { resolveProjectKey } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
+import { writeKeepCache } from '../config/globalConfig';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -132,6 +133,9 @@ export class PushCommand {
       envBlob,
       branch,
     );
+
+    // Cache encrypted blob locally
+    writeKeepCache(result.keep_hash, envBlob);
 
     // Update keep.lock with new state
     this.fileManager.writeKeepFile(updatedKeep);

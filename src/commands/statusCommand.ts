@@ -5,6 +5,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { KeepFile } from '../types/index';
+import { fetchSecretsWithCache } from '../config/globalConfig';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -201,7 +202,8 @@ export class StatusCommand {
         const hasVariables = Object.keys(pinned).length > 0;
         if (hasVariables) {
           const keepHash = SyncEngine.computeKeepHash(keep, branch);
-          const blob = await this.serviceClient.getSecrets(
+          const blob = await fetchSecretsWithCache(
+            this.serviceClient,
             projectState.projectId!,
             keepHash,
           );

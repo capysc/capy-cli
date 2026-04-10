@@ -29,7 +29,7 @@ import {
   resolveProjectKey,
   hasOrgKey,
 } from '../crypto/keyResolver';
-import { saveMasterKey } from '../config/globalConfig';
+import { saveMasterKey, writeKeepCache, fetchSecretsWithCache } from '../config/globalConfig';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -427,6 +427,11 @@ export class CapyCommand {
           );
 
           this.fileManager.writeKeepFile(updatedKeep);
+
+          // Cache encrypted blob locally
+          const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
+          writeKeepCache(initKeepHash, envBlob);
+
           this.fileManager.writeSyncState({
             last_sync: new Date().toISOString(),
             synced_variables: Object.keys(localEnv),
@@ -780,7 +785,8 @@ export class CapyCommand {
       const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
       if (hasVariables) {
         const keepHash = SyncEngine.computeKeepHash(currentKeep!, branch);
-        const blob = await this.serviceClient.getSecrets(
+        const blob = await fetchSecretsWithCache(
+          this.serviceClient,
           projectState.projectId!,
           keepHash,
         );
@@ -877,7 +883,8 @@ export class CapyCommand {
       if (currentKeep && Object.keys(pinned).length > 0) {
         const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
         try {
-          const blob = await this.serviceClient.getSecrets(
+          const blob = await fetchSecretsWithCache(
+            this.serviceClient,
             projectState.projectId!,
             keepHash,
           );
@@ -947,6 +954,20 @@ export class CapyCommand {
     }
 
     this.fileManager.writeKeepFile(finalKeep);
+
+    // Cache encrypted blob locally
+    {
+      const { Encryptor } = await import('../crypto/encryptor');
+      const cacheKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
+      const cacheBlob = Object.entries(finalEnv)
+        .map(([k, v]) => {
+          const resourceId = deriveResourceId(branch, k);
+          const enc = Encryptor.encrypt(v, encryptionKey);
+          return `${k}=capy:${resourceId}:${enc}`;
+        })
+        .join('\n');
+      writeKeepCache(cacheKeepHash, cacheBlob);
+    }
 
     // Encrypt and write .env
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, undefined, finalKeep, branch);
