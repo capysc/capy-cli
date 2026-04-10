@@ -799,13 +799,15 @@ export class CapyCommand {
       return;
     }
 
+    const DIM = '\x1b[90m';
+    const RST = '\x1b[0m';
+
+    console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+
     // Display comparison table
     this.displayComparisonTable(diffs, showLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
 
-    const DIM = '\x1b[90m';
-    const RST = '\x1b[0m';
-    console.log(`\n  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.`);
-    console.log(`  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
+    console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
