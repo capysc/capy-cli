@@ -218,7 +218,11 @@ export class StatusCommand {
       }
     }
 
-    const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
+    // If remote is empty, treat it as matching pinned to avoid false diffs
+    const hasRemote = Object.keys(remoteHashes).length > 0;
+    const effectiveRemote = hasRemote ? remoteHashes : pinned;
+    const { diffs, showLocal, showRemote: rawShowRemote } = compareSecrets(pinned, localHashes, effectiveRemote);
+    const showRemote = rawShowRemote && hasRemote;
 
     if (this.terse) {
       // Terse mode for git hooks
@@ -238,7 +242,7 @@ export class StatusCommand {
       console.log('> Remote is up to date.');
       console.log('');
       console.log('Nothing to sync.');
-      return;
+      process.exit(0);
     }
 
     // Check local vs pinned
@@ -252,11 +256,13 @@ export class StatusCommand {
       console.log(`x Local has changes (${localDiffs.length} difference${localDiffs.length !== 1 ? 's' : ''})`);
     }
 
-    if (remoteMatchesPinned) {
-      console.log('> Remote is up to date.');
-    } else {
-      const remoteDiffs = diffs.filter(d => d.remote !== d.pinned);
-      console.log(`x Remote has changes (${remoteDiffs.length} difference${remoteDiffs.length !== 1 ? 's' : ''})`);
+    if (hasRemote) {
+      if (remoteMatchesPinned) {
+        console.log('> Remote is up to date.');
+      } else {
+        const remoteDiffs = diffs.filter(d => d.remote !== d.pinned);
+        console.log(`x Remote has changes (${remoteDiffs.length} difference${remoteDiffs.length !== 1 ? 's' : ''})`);
+      }
     }
 
     console.log('');
@@ -287,5 +293,6 @@ export class StatusCommand {
 
     console.log('');
     console.log(`Run ${B('capy')} to sync your secrets.`);
+    process.exit(0);
   }
 }
