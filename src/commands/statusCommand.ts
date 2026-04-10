@@ -166,7 +166,7 @@ export class StatusCommand {
         this.authService.setSessionUserId(projectState.userId);
       }
       const { resolveProjectKey } = await import('../crypto/keyResolver');
-      const authResult = await this.authService.authenticate(projectState.organizationId);
+      const authResult = await this.authService.authenticateSilent(projectState.organizationId);
       if (!authResult.success) throw new Error('auth failed');
 
       const token = this.authService.getToken();
