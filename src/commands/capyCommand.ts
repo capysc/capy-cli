@@ -642,7 +642,7 @@ export class CapyCommand {
     const capyWidth = Math.max(...capy.map(l => l.length));
     const infoWidth = Math.max(...info.map(l => stripAnsi(l).length));
     const gap = 3;
-    const maxLen = capyWidth + gap + infoWidth + 2;
+    const maxLen = capyWidth + gap + infoWidth + 1;
 
     console.log('');
     console.log(grey('Capy CLI'));
@@ -654,7 +654,7 @@ export class CapyCommand {
       const right = i < info.length ? info[i] : '';
       const leftPad = capyWidth - left.length;
       const rightPad = infoWidth - stripAnsi(right).length;
-      console.log(`${grey('\u2502')} ${grey(left)}${' '.repeat(leftPad)}${' '.repeat(gap)}${right}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+      console.log(`${grey('\u2502')}${grey(left)}${' '.repeat(leftPad)}${' '.repeat(gap)}${right}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
