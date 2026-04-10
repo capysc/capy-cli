@@ -39,7 +39,7 @@ program
       console.log('  Available commands:\n');
       console.log(`    ${B('capy')}                        \x1b[90mSync secrets\x1b[0m`);
       console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
-      console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to S3\x1b[0m`);
+      console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to Keep\x1b[0m`);
       console.log(`    ${B('capy')} deploy                 \x1b[90mSet up deploy credentials\x1b[0m`);
       console.log(`    ${B('capy')} deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m`);
       console.log(`    ${B('capy')} deploy list            \x1b[90mList deploy tokens\x1b[0m`);
@@ -111,7 +111,7 @@ program
         process.exit(1);
       }
 
-      if (branch.name === (projectState.activeBranch || '')) {
+      if (branch.name === projectState.activeBranch) {
         console.log(`Cannot delete the current branch. Switch first with: ${B('capy checkout <other-branch>')}`);
         process.exit(1);
       }
@@ -144,7 +144,7 @@ program
       const connector = isLast ? '└──' : '├──';
       const name = b.name || 'no branch';
       const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
-      const isCurrent = b.name === (activeBranch || '');
+      const isCurrent = b.name === activeBranch;
       const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
     });
@@ -153,7 +153,7 @@ program
     // Prompt to switch
     const inquirer = (await import('inquirer')).default;
     const choices = branches
-      .filter(b => b.name !== (activeBranch || ''))
+      .filter(b => b.name !== activeBranch)
       .map(b => ({ name: b.name || 'no branch', value: b.name }));
 
     if (choices.length > 0) {
@@ -195,7 +195,7 @@ program
 
 program
   .command('push')
-  .description('Push encrypted values to S3')
+  .description('Push encrypted values to Keep')
   .action(async () => {
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand();

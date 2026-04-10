@@ -17,7 +17,7 @@ export interface DiffResult {
 }
 
 /**
- * Compare three sources: pinned (keep.lock hashes), local (.env values), remote (S3 values).
+ * Compare three sources: pinned (keep.lock hashes), local (.env values), remote (Keep values).
  * Returns diff results and column visibility flags.
  */
 export function compareSecrets(
@@ -142,12 +142,12 @@ export class StatusCommand {
     if (!keep) return;
 
     const branch = projectState.activeBranch;
-    const branchLabel = branch || 'development';
+    const branchLabel = branch;
 
     // Build pinned hashes from keep.lock for active branch
     const pinned: Record<string, string> = {};
     for (const [varName, entries] of Object.entries(keep.variables)) {
-      const entry = entries.find(e => branch ? e.branch === branch : !e.branch);
+      const entry = entries.find(e => e.branch === branch);
       if (entry) {
         pinned[varName] = entry.value_hash;
       }
@@ -190,7 +190,7 @@ export class StatusCommand {
       // (no remote comparison)
     }
 
-    // Build remote hashes (fetch from S3)
+    // Build remote hashes (fetch from Keep)
     const remoteHashes: Record<string, string> = {};
     if (encryptionKey) {
       try {

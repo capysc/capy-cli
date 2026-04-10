@@ -76,7 +76,7 @@ export class CapyCommand {
           projectState.initialized = true;
           projectState.organizationId = envMeta.org_id;
           projectState.projectId = envMeta.project_id;
-          projectState.activeBranch = envMeta.branch;
+          projectState.activeBranch = envMeta.branch || 'development';
         } else {
           await this.initializeProject();
           return;
@@ -380,7 +380,7 @@ export class CapyCommand {
           ],
         }]);
 
-        let initBranch: string | undefined;
+        let initBranch: string;
         if (initChoice === 'other') {
           const { branchName } = await inquirer.prompt([{
             type: 'input',
@@ -389,10 +389,11 @@ export class CapyCommand {
             validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
           }]);
           initBranch = branchName.trim();
-
-          await this.serviceClient.createBranch(projectResult.project_id, initBranch!);
-          this.projectManager.writeActiveBranch(initBranch);
+          await this.serviceClient.createBranch(projectResult.project_id, initBranch);
+        } else {
+          initBranch = 'development';
         }
+        this.projectManager.writeActiveBranch(initBranch);
 
         const syncSpinner = ora('Syncing local variables...').start();
 
@@ -405,7 +406,7 @@ export class CapyCommand {
           const encrypted: Record<string, string> = {};
           const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
           for (const [key, value] of Object.entries(localEnv)) {
-            const resourceId = deriveResourceId(initBranch || '', key);
+            const resourceId = deriveResourceId(initBranch, key);
             const enc = Encryptor.encrypt(value, encryptionKey);
             encrypted[key] = `capy:${resourceId}:${enc}`;
             pushedVars[key] = {
@@ -425,6 +426,7 @@ export class CapyCommand {
             projectResult.project_id,
             keepJson,
             envBlob,
+            initBranch,
           );
 
           this.fileManager.writeKeepFile(updatedKeep);
@@ -440,8 +442,7 @@ export class CapyCommand {
           // Encrypt the local .env file
           this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
 
-          const branchLabel = initBranch || 'development';
-          syncSpinner.succeed(`keep.lock created (pinned to ${branchLabel}, ${localVarCount} secrets)`);
+          syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
 
           // Install git hooks
           this.installGitHooks();
@@ -590,6 +591,80 @@ export class CapyCommand {
     return selected || undefined;
   }
 
+  private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
+    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+    const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+    // Shimmer effect: continuous gradient matching Capy brand
+    // #3a5555 → #688795 → #a06b6b → #b1aa92 → #3a5555
+    const shimmer = (s: string) => {
+      const stops = [
+        [58, 85, 85],    // #3a5555
+        [104, 135, 149], // #688795
+        [160, 107, 107], // #a06b6b
+        [177, 170, 146], // #b1aa92
+        [58, 85, 85],    // #3a5555
+      ];
+      const len = s.replace(/ /g, '').length;
+      let charIdx = 0;
+      return s.split('').map((ch) => {
+        if (ch === ' ') return ch;
+        const t = len > 1 ? charIdx / (len - 1) : 0;
+        // Interpolate between gradient stops
+        const segment = t * (stops.length - 1);
+        const i = Math.floor(segment);
+        const f = segment - i;
+        const a = stops[Math.min(i, stops.length - 1)];
+        const b = stops[Math.min(i + 1, stops.length - 1)];
+        const r = Math.round(a[0] + (b[0] - a[0]) * f);
+        const g = Math.round(a[1] + (b[1] - a[1]) * f);
+        const bl = Math.round(a[2] + (b[2] - a[2]) * f);
+        charIdx++;
+        return `\x1b[38;2;${r};${g};${bl}m${ch}\x1b[0m`;
+      }).join('');
+    };
+
+    const notCreated = grey('not yet created');
+    const capy = [
+      '  █▄▄▄▄▄▄▄█',
+      '  ▄▄█████▄▄',
+      ' ▄█████████▄',
+      '▄█████ █████▄',
+      '█████▄█▄█████',
+    ];
+
+    const info = [
+      `Project:      ${projectName === 'not yet created' ? notCreated : bold(projectName)}`,
+      `Organization: ${orgName === 'not yet created' ? notCreated : orgName}`,
+      `Branch:       ${branch}`,
+      '',
+      shimmer(`Welcome ${userName}`),
+    ];
+
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const capyWidth = Math.max(...capy.map(l => l.length));
+    const infoWidth = Math.max(...info.map(l => stripAnsi(l).length));
+    const gap = 3;
+    const maxLen = infoWidth + gap + capyWidth + 2;
+
+    console.log('');
+    console.log(grey('Capy CLI'));
+    console.log(grey('\u250c' + '\u2500'.repeat(maxLen) + '\u2510'));
+
+    const totalRows = Math.max(info.length, capy.length);
+    for (let i = 0; i < totalRows; i++) {
+      const left = i < info.length ? info[i] : '';
+      const right = i < capy.length ? capy[i] : '';
+      const leftPad = infoWidth - stripAnsi(left).length;
+      const rightPad = capyWidth - right.length;
+      const mutedBrown = (s: string) => `\x1b[38;2;150;120;90m${s}\x1b[0m`;
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${mutedBrown(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+    }
+
+    console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
+    console.log('');
+  }
+
   private async syncProject(projectState: ProjectState): Promise<void> {
     // Load user-scoped session if we know who last synced this project
     if (projectState.userId) {
@@ -651,7 +726,7 @@ export class CapyCommand {
     const pinned: Record<string, string> = {};
     if (currentKeep) {
       for (const [varName, entries] of Object.entries(currentKeep.variables)) {
-        const entry = entries.find(e => branch ? e.branch === branch : !e.branch);
+        const entry = entries.find(e => e.branch === branch);
         if (entry) {
           pinned[varName] = entry.value_hash;
         }
@@ -819,7 +894,7 @@ export class CapyCommand {
     const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
     for (const [key, value] of Object.entries(finalEnv)) {
       pushedVars[key] = {
-        resource_id: deriveResourceId(branch || '', key),
+        resource_id: deriveResourceId(branch, key),
         value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
       };
     }
@@ -830,7 +905,7 @@ export class CapyCommand {
     for (const varName of Object.keys(finalKeep.variables)) {
       if (!(varName in finalEnv)) {
         const entries = finalKeep.variables[varName].filter(e =>
-          branch ? e.branch !== branch : !!e.branch
+          e.branch !== branch
         );
         if (entries.length > 0) {
           finalKeep.variables[varName] = entries;

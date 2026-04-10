@@ -230,14 +230,13 @@ export class SyncEngine {
       const entries = existing.map(e => ({ ...e }));
 
       // Find existing entry for this branch
-      const idx = entries.findIndex(e =>
-        branch ? e.branch === branch : !e.branch
-      );
+      const targetBranch = branch || SyncEngine.DEFAULT_BRANCH;
+      const idx = entries.findIndex(e => e.branch === targetBranch);
 
       const entry: KeepVariableEntry = {
         resource_id: data.resource_id,
         value_hash: data.value_hash || '',
-        ...(branch ? { branch } : {}),
+        branch: targetBranch,
       };
 
       if (idx >= 0) {
@@ -334,18 +333,18 @@ export class SyncEngine {
     return errors;
   }
 
+  static readonly DEFAULT_BRANCH = 'development';
+
   /**
    * v3: Compute a content-addressed hash from keep.lock.
    * Filters by branch, then hashes sorted variable names + value hashes.
    */
   static computeKeepHash(keep: KeepFile, branch?: string): string {
+    const targetBranch = branch || SyncEngine.DEFAULT_BRANCH;
     const entries: string[] = [];
     for (const key of Object.keys(keep.variables).sort()) {
       const varEntries = keep.variables[key];
-      // Find entry for specified branch (or default if no branch)
-      const entry = varEntries.find(e =>
-        branch ? e.branch === branch : !e.branch
-      );
+      const entry = varEntries.find(e => e.branch === targetBranch);
       if (entry) {
         entries.push(`${key}:${entry.resource_id}:${entry.value_hash}`);
       }

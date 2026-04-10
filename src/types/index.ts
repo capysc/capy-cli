@@ -38,7 +38,7 @@ export interface ProjectState {
   projectName?: string;
   organizationId?: string;
   projectId?: string;
-  activeBranch?: string;
+  activeBranch: string;
   userId?: string;
 }
 
