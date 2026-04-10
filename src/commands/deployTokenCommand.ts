@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { createServer } from 'http';
+import { execSync } from 'child_process';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -47,6 +48,57 @@ function writeConfig(projectRoot: string, config: CapyConfig): void {
   const capyDir = join(projectRoot, '.capy');
   if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
   writeFileSync(join(capyDir, 'config'), JSON.stringify(config, null, 2), 'utf-8');
+}
+
+/**
+ * Opens a URL in a minimal popup window (no tabs, no URL bar).
+ * Tries Chrome/Chromium --app mode first, falls back to regular browser open.
+ */
+async function openPopupWindow(url: string): Promise<void> {
+  const platform = process.platform;
+
+  // Chrome/Chromium --app mode opens a clean, borderless window
+  const chromePaths: string[] = platform === 'darwin'
+    ? [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      ]
+    : platform === 'win32'
+    ? [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      ]
+    : [
+        'google-chrome',
+        'google-chrome-stable',
+        'chromium',
+        'chromium-browser',
+        'brave-browser',
+        'microsoft-edge',
+      ];
+
+  for (const browserPath of chromePaths) {
+    try {
+      const quotedPath = `"${browserPath}"`;
+      const args = `--app=${url} --window-size=640,800`;
+      if (platform === 'win32') {
+        execSync(`start "" ${quotedPath} ${args}`, { stdio: 'ignore' });
+      } else {
+        execSync(`${quotedPath} ${args} &`, { stdio: 'ignore', shell: '/bin/sh' });
+      }
+      return;
+    } catch {
+      continue;
+    }
+  }
+
+  // Fallback: regular browser open
+  const open = (await import('open')).default;
+  open(url).catch(() => {});
 }
 
 const CAPY_LOGO_SVG = `<svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
@@ -299,8 +351,7 @@ export class DeployCommand {
           console.log(`\n  Deploy page opened at ${url}`);
           console.log('  Press Ctrl+C to close.\n');
 
-          const open = (await import('open')).default;
-          open(url).catch(() => {});
+          await openPopupWindow(url);
           serverStarted = true;
 
           // Auto-shutdown after 5 minutes
