@@ -360,7 +360,7 @@ describe('SyncEngine', () => {
         project_name: 'test',
         variables: {
           EXISTING_VAR: [
-            { resource_id: 'res_old', value_hash: 'abc12345' },
+            { resource_id: 'res_old', value_hash: 'abc12345', branch: 'development' },
           ]
         }
       };
@@ -634,7 +634,7 @@ describe('SyncEngine', () => {
     it('changes when value_hash changes', () => {
       const makeKeep = (hash: string): KeepFile => ({
         version: '3.0', org_id: 'o', project_id: 'p', project_name: 't',
-        variables: { DB_URL: [{ resource_id: 'abc', value_hash: hash }] },
+        variables: { DB_URL: [{ resource_id: 'abc', value_hash: hash, branch: 'development' }] },
       });
       expect(SyncEngine.computeKeepHash(makeKeep('a'))).not.toBe(SyncEngine.computeKeepHash(makeKeep('b')));
     });
