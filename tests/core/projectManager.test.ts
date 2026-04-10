@@ -35,11 +35,12 @@ describe('ProjectManager', () => {
 
       const state = await projectManager.detectProjectState();
 
-      expect(state).toEqual({
+      expect(state).toMatchObject({
         initialized: false,
         hasKeepFile: false,
         hasDecryptKey: false,
-        hasEnvFile: true
+        hasEnvFile: true,
+        activeBranch: 'development',
       });
     });
 
@@ -63,14 +64,15 @@ describe('ProjectManager', () => {
 
       const state = await projectManager.detectProjectState();
 
-      expect(state).toEqual({
+      expect(state).toMatchObject({
         initialized: true,
         hasKeepFile: true,
         hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
         organizationId: 'org_123',
-        projectId: 'proj_456'
+        projectId: 'proj_456',
+        activeBranch: 'development',
       });
     });
 

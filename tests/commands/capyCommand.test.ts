@@ -442,6 +442,7 @@ describe('CapyCommand', () => {
         'proj-123',
         expect.any(String), // keep JSON
         expect.any(String), // env_blob
+        expect.any(String), // branch
       );
       expect(mockSyncEngine.mergeWithKeep).toHaveBeenCalled();
 
