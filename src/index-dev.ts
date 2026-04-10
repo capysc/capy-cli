@@ -199,7 +199,7 @@ program
   .description('Show secret drift between local, pinned, and remote')
   .action(async () => {
     const { StatusCommand } = await import('./commands/statusCommand');
-    const cmd = new StatusCommand();
+    const cmd = new StatusCommand(false, true);
     await cmd.execute();
   });
 

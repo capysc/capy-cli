@@ -25,10 +25,12 @@ export function compareSecrets(
   local: Record<string, string>,   // variable -> plaintext value (hashed for comparison)
   remote: Record<string, string>,  // variable -> plaintext value (hashed for comparison)
 ): { diffs: DiffResult[]; showLocal: boolean; showRemote: boolean } {
+  const hasRemote = Object.keys(remote).length > 0;
+
   const allVars = new Set([
     ...Object.keys(pinned),
     ...Object.keys(local),
-    ...Object.keys(remote),
+    ...(hasRemote ? Object.keys(remote) : []),
   ]);
 
   const diffs: DiffResult[] = [];
@@ -38,7 +40,9 @@ export function compareSecrets(
   for (const variable of allVars) {
     const pinnedHash = pinned[variable];
     const localHash = local[variable];
-    const remoteHash = remote[variable];
+    // If remote has no data at all, treat each variable as matching pinned.
+    // If remote has data but this variable is missing, it's a real absence.
+    const remoteHash = hasRemote ? remote[variable] : pinnedHash;
 
     // Track if local or remote differs from pinned at all
     if (localHash !== pinnedHash) localDiffersFromPinned = true;
@@ -104,12 +108,12 @@ export class StatusCommand {
   private serviceClient: ServiceClient;
   private terse: boolean;
 
-  constructor(terse: boolean = false) {
+  constructor(terse: boolean = false, devMode: boolean = false) {
     this.terse = terse;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
-    this.authService = new AuthService();
-    this.serviceClient = new ServiceClient();
+    this.authService = new AuthService(undefined, devMode);
+    this.serviceClient = new ServiceClient(undefined, devMode);
 
     this.serviceClient.setTokenRefresher(async () => {
       const refreshed = await this.authService.refreshToken();
@@ -218,6 +222,7 @@ export class StatusCommand {
       }
     }
 
+    const hasRemote = Object.keys(remoteHashes).length > 0;
     const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
 
     if (this.terse) {
@@ -233,12 +238,18 @@ export class StatusCommand {
     console.log(`${B('capy')}: ${keep.project_name} (${branchLabel})`);
     console.log('');
 
+    const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
+
     if (diffs.length === 0) {
-      console.log('> Local secrets match pinned branch.');
-      console.log('> Remote is up to date.');
-      console.log('');
-      console.log('Nothing to sync.');
-      return;
+      console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);
+      if (!hasRemote) {
+        console.log('! Remote is empty.');
+        console.log('');
+        console.log(`  Run ${B('capy push')} to share these secrets with your team.`);
+      } else {
+        console.log('> Remote is up to date.');
+      }
+      process.exit(0);
     }
 
     // Check local vs pinned
@@ -246,13 +257,15 @@ export class StatusCommand {
     const remoteMatchesPinned = !showRemote;
 
     if (localMatchesPinned) {
-      console.log('> Local secrets match pinned branch.');
+      console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);
     } else {
       const localDiffs = diffs.filter(d => d.local !== d.pinned);
       console.log(`x Local has changes (${localDiffs.length} difference${localDiffs.length !== 1 ? 's' : ''})`);
     }
 
-    if (remoteMatchesPinned) {
+    if (!hasRemote) {
+      console.log('! Remote is empty.');
+    } else if (remoteMatchesPinned) {
       console.log('> Remote is up to date.');
     } else {
       const remoteDiffs = diffs.filter(d => d.remote !== d.pinned);
@@ -272,9 +285,9 @@ export class StatusCommand {
         else desc = '(new)';
       } else if (diff.type === 'deleted') {
         prefix = '-';
-        if (!diff.remote && diff.pinned) desc = '(deleted on remote)';
-        else if (!diff.local && diff.pinned) desc = '(deleted locally)';
-        else desc = '(deleted)';
+        if (!diff.remote && diff.pinned) desc = '(missing from remote)';
+        else if (!diff.local && diff.pinned) desc = '(missing locally)';
+        else desc = '(missing)';
       } else {
         prefix = '~';
         if (diff.local !== diff.pinned && diff.remote === diff.pinned) desc = '(changed locally)';
@@ -286,6 +299,7 @@ export class StatusCommand {
     }
 
     console.log('');
-    console.log(`Run ${B('capy')} to sync your secrets.`);
+    console.log(`  Run ${B('capy')} to sync these changes.`);
+    process.exit(0);
   }
 }
