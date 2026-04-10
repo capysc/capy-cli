@@ -623,11 +623,11 @@ export class CapyCommand {
 
     const notCreated = grey('not yet created');
     const capy = [
-      '  █▄▄▅▅▅▄▄█',
-      '  ▅▅█████▅▅',
-      ' ▟█████████▙',
-      '▟█████ █████▙',
-      '█████▄█▄█████',
+      '   █▄▄▅▅▅▄▄█',
+      '   ▅▅█████▅▅',
+      '  ▟█████████▙',
+      ' ▟█████ █████▙',
+      '▐█████▄█▄█████▌',
     ];
 
     const info = [
@@ -654,8 +654,16 @@ export class CapyCommand {
       const right = i < capy.length ? capy[i] : '';
       const leftPad = infoWidth - stripAnsi(left).length;
       const rightPad = capyWidth - right.length;
-      const mutedBrown = (s: string) => `\x1b[38;2;150;120;90m${s}\x1b[0m`;
-      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${mutedBrown(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+      // Per-character brown variation for fur texture
+      const furry = (s: string) => s.split('').map((ch) => {
+        if (ch === ' ') return ch;
+        const v = Math.random() * 40 - 20; // ±20 variation
+        const r = Math.round(150 + v);
+        const g = Math.round(115 + v * 0.7);
+        const b = Math.round(80 + v * 0.5);
+        return `\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
+      }).join('');
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
