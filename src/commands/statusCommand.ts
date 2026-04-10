@@ -160,6 +160,7 @@ export class StatusCommand {
     // Build local hashes from .env
     const localHashes: Record<string, string> = {};
     let encryptionKey: string | undefined;
+    let remoteSkipReason: string | undefined;
     try {
       if (projectState.userId) {
         this.authService.setSessionUserId(projectState.userId);
@@ -189,9 +190,9 @@ export class StatusCommand {
         }
         localHashes[key] = hashValue(plaintext);
       }
-    } catch {
+    } catch (err: any) {
       // Auth or key resolution failed — compare pinned vs local only
-      // (no remote comparison)
+      remoteSkipReason = err?.message || 'auth or key resolution failed';
     }
 
     // Build remote hashes (fetch from Keep)
@@ -215,10 +216,12 @@ export class StatusCommand {
                 // Skip values we can't decrypt
               }
             }
+          } else {
+            remoteSkipReason = 'no data at this keep_hash';
           }
         }
-      } catch {
-        // Network unreachable — skip remote comparison
+      } catch (err: any) {
+        remoteSkipReason = err?.message || 'network error';
       }
     }
 
@@ -243,9 +246,13 @@ export class StatusCommand {
     if (diffs.length === 0) {
       console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);
       if (!hasRemote) {
-        console.log('! Remote is empty.');
-        console.log('');
-        console.log(`  Run ${B('capy push')} to share these secrets with your team.`);
+        if (remoteSkipReason) {
+          console.log(`! Could not reach remote: ${remoteSkipReason}`);
+        } else {
+          console.log('! Remote is empty.');
+          console.log('');
+          console.log(`  Run ${B('capy push')} to share these secrets with your team.`);
+        }
       } else {
         console.log('> Remote is up to date.');
       }
@@ -264,7 +271,11 @@ export class StatusCommand {
     }
 
     if (!hasRemote) {
-      console.log('! Remote is empty.');
+      if (remoteSkipReason) {
+        console.log(`! Could not reach remote: ${remoteSkipReason}`);
+      } else {
+        console.log('! Remote is empty.');
+      }
     } else if (remoteMatchesPinned) {
       console.log('> Remote is up to date.');
     } else {
