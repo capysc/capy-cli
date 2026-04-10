@@ -278,9 +278,9 @@ export class StatusCommand {
         else desc = '(new)';
       } else if (diff.type === 'deleted') {
         prefix = '-';
-        if (!diff.remote && diff.pinned) desc = '(deleted on remote)';
-        else if (!diff.local && diff.pinned) desc = '(deleted locally)';
-        else desc = '(deleted)';
+        if (!diff.remote && diff.pinned) desc = '(missing from remote)';
+        else if (!diff.local && diff.pinned) desc = '(missing locally)';
+        else desc = '(missing)';
       } else {
         prefix = '~';
         if (diff.local !== diff.pinned && diff.remote === diff.pinned) desc = '(changed locally)';
