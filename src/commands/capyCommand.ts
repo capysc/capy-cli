@@ -623,11 +623,11 @@ export class CapyCommand {
     const notCreated = grey('not yet created');
     const capy = [
       '     \u2588\u2584 ',
-      '   \u2584\u2588\u2588\u2580\u2580\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2584',
-      '   \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588',
-      '  \u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588',
-      '  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2580\u2580',
-      ' \u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2584',
+      '    \u2584\u2588\u2588\u2580\u2580\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2584',
+      '   \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2584\u2588',
+      '  \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588',
+      ' \u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2580',
+      '\u2584\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2580',
     ];
 
     const info = [
@@ -642,7 +642,7 @@ export class CapyCommand {
     const capyWidth = Math.max(...capy.map(l => l.length));
     const infoWidth = Math.max(...info.map(l => stripAnsi(l).length));
     const gap = 3;
-    const maxLen = capyWidth + gap + infoWidth + 2;
+    const maxLen = infoWidth + gap + capyWidth + 2;
 
     console.log('');
     console.log(grey('Capy CLI'));
@@ -650,11 +650,11 @@ export class CapyCommand {
 
     const totalRows = Math.max(info.length, capy.length);
     for (let i = 0; i < totalRows; i++) {
-      const left = i < capy.length ? capy[i] : '';
-      const right = i < info.length ? info[i] : '';
-      const leftPad = capyWidth - left.length;
-      const rightPad = infoWidth - stripAnsi(right).length;
-      console.log(`${grey('\u2502')}${grey(left)}${' '.repeat(leftPad)}${' '.repeat(gap)}${right}${' '.repeat(rightPad + 2)}${grey('\u2502')}`);
+      const left = i < info.length ? info[i] : '';
+      const right = i < capy.length ? capy[i] : '';
+      const leftPad = infoWidth - stripAnsi(left).length;
+      const rightPad = capyWidth - right.length;
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${grey(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
