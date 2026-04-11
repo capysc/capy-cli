@@ -38,17 +38,56 @@ export class PushCommand {
     });
   }
 
+  private debug(msg: string, data?: unknown): void {
+    if (!this.devMode) return;
+    const ts = new Date().toISOString();
+    const prefix = `\x1b[90m[debug ${ts}]\x1b[0m`;
+    if (data !== undefined) {
+      const serialized = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+      console.error(`${prefix} push: ${msg} ${serialized}`);
+    } else {
+      console.error(`${prefix} push: ${msg}`);
+    }
+  }
+
+  private debugError(label: string, err: unknown): void {
+    if (!this.devMode) return;
+    if (err instanceof CapyError) {
+      this.debug(`${label}: CapyError`, {
+        message: err.message,
+        code: err.code,
+        details: err.details,
+        stack: err.stack,
+      });
+    } else if (err instanceof Error) {
+      this.debug(`${label}: ${err.name}`, { message: err.message, stack: err.stack });
+    } else {
+      this.debug(`${label}: unknown`, String(err));
+    }
+  }
+
   async execute(): Promise<void> {
     try {
       await this._execute();
     } catch (error: any) {
+      this.debugError('push execute caught', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
     }
   }
 
   private async _execute(): Promise<void> {
+    this.debug('starting push command');
+    this.debug('cwd', process.cwd());
+
     const projectState = await this.projectManager.detectProjectState();
+    this.debug('projectState', {
+      initialized: projectState.initialized,
+      organizationId: projectState.organizationId,
+      projectId: projectState.projectId,
+      activeBranch: projectState.activeBranch,
+      userId: projectState.userId,
+    });
     if (!projectState.initialized) {
       console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
       process.exit(1);
@@ -61,6 +100,11 @@ export class PushCommand {
     // Authenticate
     const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);
+    this.debug('authResult', {
+      success: authResult.success,
+      user_id: authResult.user_id,
+      _auth_method: authResult._auth_method,
+    });
     if (!authResult.success) {
       spinner.fail('Authentication failed');
       throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
@@ -75,20 +119,30 @@ export class PushCommand {
       projectState.projectId!,
       authResult.user_id!,
     );
+    this.debug('encryptionKey resolved', { length: encryptionKey.length });
 
     // Read keep.lock
     const keep = this.projectManager.readKeepFile();
+    this.debug('keep.lock', keep ? {
+      version: keep.version,
+      org_id: keep.org_id,
+      project_id: keep.project_id,
+      variableCount: Object.keys(keep.variables).length,
+      variables: Object.keys(keep.variables),
+    } : 'NOT FOUND');
     if (!keep) {
       console.error('No keep.lock file found.');
       process.exit(1);
     }
 
     const branch = projectState.activeBranch;
+    this.debug('active branch', branch);
 
     // Read and encrypt .env file
     const pushSpinner = ora('Pushing secrets to Keep...').start();
 
     const rawLocal = this.fileManager.readEnvFile();
+    this.debug('.env raw keys', Object.keys(rawLocal));
     if (Object.keys(rawLocal).length === 0) {
       pushSpinner.fail('No .env file to push');
       return;
@@ -99,17 +153,20 @@ export class PushCommand {
     const encrypted: Record<string, string> = {};
     for (const [key, value] of Object.entries(rawLocal)) {
       if (value.startsWith('capy:')) {
+        this.debug(`${key}: already encrypted, passing through`);
         encrypted[key] = value; // Already encrypted
       } else {
         const enc = Encryptor.encrypt(value, encryptionKey);
         const resourceId = deriveResourceId(branch, key);
         encrypted[key] = `capy:${resourceId}:${enc}`;
+        this.debug(`${key}: encrypted`, { resourceId, encLength: enc.length });
       }
     }
 
     const envBlob = Object.entries(encrypted)
       .map(([key, value]) => `${key}=${value}`)
       .join('\n');
+    this.debug('envBlob length', envBlob.length);
 
     // Update keep.lock hashes for the active branch
     const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
@@ -121,24 +178,34 @@ export class PushCommand {
       const resourceId = deriveResourceId(branch, key);
       pushedVars[key] = { resource_id: resourceId, value_hash: valueHash };
     }
+    this.debug('pushedVars', pushedVars);
 
     const syncEngine = new SyncEngine();
     const updatedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
 
     // Push to Keep
     const keepFileContent = JSON.stringify(updatedKeep);
+    this.debug('pushSecrets request', {
+      projectId: projectState.projectId,
+      branch,
+      keepFileLength: keepFileContent.length,
+      envBlobLength: envBlob.length,
+    });
     const result = await this.serviceClient.pushSecrets(
       projectState.projectId!,
       keepFileContent,
       envBlob,
       branch,
     );
+    this.debug('pushSecrets response', result);
 
     // Cache encrypted blob locally
     writeKeepCache(result.keep_hash, envBlob);
+    this.debug('keep cache written');
 
     // Update keep.lock with new state
     this.fileManager.writeKeepFile(updatedKeep);
+    this.debug('keep.lock written to disk');
 
     pushSpinner.succeed(
       `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`

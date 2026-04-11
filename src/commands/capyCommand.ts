@@ -64,6 +64,43 @@ export class CapyCommand {
     });
   }
 
+  /**
+   * Emit a dev-mode debug line to stderr. Active whenever the CLI is run
+   * via `capy-dev` (devMode=true). Safe to sprinkle throughout the sync
+   * flow — silent in production.
+   */
+  private debug(msg: string, data?: unknown): void {
+    if (!this.devMode) return;
+    const ts = new Date().toISOString();
+    const prefix = `\x1b[90m[debug ${ts}]\x1b[0m`;
+    if (data !== undefined) {
+      const serialized = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+      console.error(`${prefix} ${msg} ${serialized}`);
+    } else {
+      console.error(`${prefix} ${msg}`);
+    }
+  }
+
+  /** Format any caught error for debug output, preserving stack and CapyError details. */
+  private debugError(label: string, err: unknown): void {
+    if (!this.devMode) return;
+    if (err instanceof CapyError) {
+      this.debug(`${label}: CapyError`, {
+        message: err.message,
+        code: err.code,
+        details: err.details,
+        stack: err.stack,
+      });
+    } else if (err instanceof Error) {
+      this.debug(`${label}: ${err.name}`, {
+        message: err.message,
+        stack: err.stack,
+      });
+    } else {
+      this.debug(`${label}: unknown`, String(err));
+    }
+  }
+
   async execute(): Promise<void> {
     try {
       // Detect project state
@@ -84,17 +121,27 @@ export class CapyCommand {
       }
       await this.syncProject(projectState);
     } catch (error: any) {
+      this.debugError('execute caught error', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
     }
   }
 
   private async initializeProject(): Promise<void> {
+    this.debug('initializeProject start', { cwd: process.cwd() });
     console.log('Welcome to Capy\n');
 
     // Authenticate first
     const spinner = ora('Logging in...').start();
     const authResult = await this.authService.authenticate();
+    this.debug('init authResult', {
+      success: authResult.success,
+      user_id: authResult.user_id,
+      organization_id: authResult.organization_id,
+      orgCount: authResult.organizations?.length || 0,
+      _auth_method: authResult._auth_method,
+      error: authResult.error,
+    });
 
     if (!authResult.success) {
       spinner.fail('Authentication failed');
@@ -286,7 +333,9 @@ export class CapyCommand {
       const listSpinner = ora('Looking for existing projects...').start();
       existingProjects = await this.serviceClient.listProjects();
       listSpinner.stop();
-    } catch {
+      this.debug('listProjects response', existingProjects);
+    } catch (err) {
+      this.debugError('listProjects failed', err);
       // Network or auth issue — fall through to new-project flow
       existingProjects = [];
     }
@@ -711,7 +760,8 @@ export class CapyCommand {
     let branches;
     try {
       branches = await this.serviceClient.listBranches(projectId);
-    } catch {
+    } catch (err) {
+      this.debugError('listBranches failed', err);
       console.log('  Could not retrieve branches. Falling back to default.');
       this.projectManager.writeActiveBranch(undefined);
       return undefined;
@@ -832,6 +882,16 @@ export class CapyCommand {
   }
 
   private async syncProject(projectState: ProjectState): Promise<void> {
+    this.debug('syncProject start', {
+      initialized: projectState.initialized,
+      organizationId: projectState.organizationId,
+      projectId: projectState.projectId,
+      projectName: projectState.projectName,
+      activeBranch: projectState.activeBranch,
+      userId: projectState.userId,
+      cwd: process.cwd(),
+    });
+
     // Load user-scoped session if we know who last synced this project
     if (projectState.userId) {
       this.authService.setSessionUserId(projectState.userId);
@@ -840,6 +900,13 @@ export class CapyCommand {
     // Authenticate
     const spinner = ora('Authenticating...').start();
     const authResult = await this.authService.authenticate(projectState.organizationId);
+    this.debug('authResult', {
+      success: authResult.success,
+      user_id: authResult.user_id,
+      organization_id: authResult.organization_id,
+      _auth_method: authResult._auth_method,
+      error: authResult.error,
+    });
 
     if (!authResult.success) {
       spinner.fail('Authentication failed');
@@ -898,6 +965,13 @@ export class CapyCommand {
     // actually fetches the value shown in the Pinned column.
     let currentKeep = this.projectManager.readKeepFile();
     const originalKeep = currentKeep ? JSON.parse(JSON.stringify(currentKeep)) as KeepFile : null;
+    this.debug('keep.lock', currentKeep ? {
+      version: currentKeep.version,
+      org_id: currentKeep.org_id,
+      project_id: currentKeep.project_id,
+      variableCount: Object.keys(currentKeep.variables).length,
+      variables: Object.keys(currentKeep.variables),
+    } : 'NOT FOUND');
 
     const rebuildPinned = (keep: KeepFile | null) => {
       const next: Record<string, string> = {};
@@ -912,18 +986,21 @@ export class CapyCommand {
       return next;
     };
     const pinned = rebuildPinned(currentKeep);
+    this.debug('pinned (pre-self-heal)', pinned);
 
     // Read local .env and compute hashes
     const localPlaintext: Record<string, string> = {};
     const localHashes: Record<string, string> = {};
     try {
       const rawLocal = this.fileManager.readEnvFile(this.options.envPath);
+      this.debug('.env keys', Object.keys(rawLocal));
       for (const [key, value] of Object.entries(rawLocal)) {
         let plaintext = value;
         if (value.startsWith('capy:')) {
           try {
             plaintext = this.fileManager.decryptValue(value, encryptionKey);
-          } catch {
+          } catch (decryptErr) {
+            this.debugError(`decrypt failed for ${key}`, decryptErr);
             throw new CapyError(
               `"${key}" is encrypted with a different project's key and cannot be used in this project.`,
               ERROR_CODES.PERMISSION_DENIED,
@@ -934,9 +1011,10 @@ export class CapyCommand {
         localPlaintext[key] = plaintext;
         localHashes[key] = hashValue(plaintext);
       }
+      this.debug('local hashes', localHashes);
     } catch (error: any) {
       if (error instanceof CapyError) throw error;
-      // No .env or unreadable
+      this.debugError('.env read failed', error);
     }
 
     // Fetch remote secrets
@@ -949,12 +1027,24 @@ export class CapyCommand {
       // Always ask for the latest remote blob for this branch (no keep_hash).
       // The server returns the env_blob AND the latest keep.json — the client
       // uses keep.json to self-heal a stale local keep.lock.
+      this.debug('getDecryptData request', {
+        projectId: projectState.projectId,
+        branch,
+        keepHash: undefined,
+        includeLatestHash: true,
+      });
       const decryptData = await this.serviceClient.getDecryptData(
         projectState.projectId!,
         branch,
         undefined, // no keep_hash — get latest for this branch
         true,      // includeLatestHash
       );
+      this.debug('getDecryptData response', {
+        hasEnvContent: !!decryptData.env_content,
+        envContentLength: decryptData.env_content?.length || 0,
+        keepHash: decryptData.keep_hash,
+        hasKeepFile: !!decryptData.keep_file,
+      });
 
       if (decryptData.env_content) {
         const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
@@ -963,11 +1053,12 @@ export class CapyCommand {
             const plaintext = this.fileManager.decryptValue(value, encryptionKey);
             remotePlaintext[key] = plaintext;
             remoteHashes[key] = hashValue(plaintext);
-          } catch {
-            // Skip undecryptable
+          } catch (decryptErr) {
+            this.debugError(`remote decrypt failed for ${key}`, decryptErr);
           }
         }
       }
+      this.debug('remote hashes', remoteHashes);
 
       // Self-heal: if the server returned a keep_file and it differs from local,
       // overwrite local keep.lock with the server's version and use it as the
@@ -979,12 +1070,16 @@ export class CapyCommand {
         const localSerialized = currentKeep ? JSON.stringify(currentKeep) : '';
         const serverSerialized = JSON.stringify(serverKeep);
         if (localSerialized !== serverSerialized) {
+          this.debug('self-heal: local keep.lock differs from server, overwriting');
           this.fileManager.writeKeepFile(serverKeep);
           currentKeep = serverKeep;
+        } else {
+          this.debug('self-heal: local keep.lock matches server, no change');
         }
       }
       fetchSpinner.stop();
     } catch (err: any) {
+      this.debugError('remote fetch failed', err);
       // Auth/permission errors are hard failures (e.g. user was kicked from org).
       // Network errors fall back to local-only mode.
       if (err instanceof CapyError) {
@@ -1000,11 +1095,24 @@ export class CapyCommand {
 
     // 3-way comparison
     const hasRemote = Object.keys(remotePlaintext).length > 0;
+    this.debug('compareSecrets inputs', {
+      networkAvailable,
+      hasRemote,
+      pinnedKeys: Object.keys(pinned),
+      localKeys: Object.keys(localHashes),
+      remoteKeys: Object.keys(remoteHashes),
+    });
     const { diffs, showLocal, showRemote } = compareSecrets(
       pinned,
       localHashes,
       networkAvailable ? remoteHashes : {}, // If offline, pass empty so compareSecrets treats as matching pinned
     );
+    this.debug('compareSecrets result', {
+      diffCount: diffs.length,
+      showLocal,
+      showRemote,
+      diffs,
+    });
 
     if (diffs.length === 0) {
       console.log('Everything is up to date!');
@@ -1087,12 +1195,13 @@ export class CapyCommand {
             for (const [key, value] of Object.entries(encrypted)) {
               try {
                 finalEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
-              } catch {
-                // Skip
+              } catch (decryptErr) {
+                this.debugError(`retrieve_pinned decrypt failed for ${key}`, decryptErr);
               }
             }
           }
-        } catch {
+        } catch (err) {
+          this.debugError('retrieve_pinned fetch failed', err);
           console.log('Could not fetch pinned values from remote.');
           return;
         }
