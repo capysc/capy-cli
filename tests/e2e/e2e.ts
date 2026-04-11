@@ -668,10 +668,11 @@ async function testUserBGetsUpdatedKey(): Promise<void> {
     user: 'B',
     timeout: 30000,
     interactions: [
-      // Diff table appears. Local stale .env vs self-healed pinned (=latest from server).
-      // Menu order for showLocal && !showRemote:
-      //   1. Commit all local values   (would push the STALE value — bad)
-      //   2. Retrieve all pinned values (the latest, post-self-heal — what we want)
+      // Diff table shows true 3-way: Pinned (User B's old hash), Local (matches
+      // pinned, unedited), Remote (User A's new value). showLocal=false,
+      // showRemote=true. Menu order for !showLocal && showRemote:
+      //   1. Retrieve all pinned values   (= old value, undo)
+      //   2. Retrieve all remote values   (= User A's new value — what we want)
       //   3. Individually resolve
       // Arrow-down once, then Enter, to pick option 2.
       { waitFor: /select value/, send: '\x1b[B\n', delay: 500 },
