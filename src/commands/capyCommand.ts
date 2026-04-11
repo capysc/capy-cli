@@ -784,14 +784,16 @@ export class CapyCommand {
     try {
       const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
       if (hasVariables) {
-        const keepHash = SyncEngine.computeKeepHash(currentKeep!, branch);
-        const blob = await fetchSecretsWithCache(
-          this.serviceClient,
+        // Fetch the latest remote blob (not pinned to local keep_hash)
+        // so we can detect remote changes from other team members
+        const decryptData = await this.serviceClient.getDecryptData(
           projectState.projectId!,
-          keepHash,
+          branch,
+          undefined, // no keep_hash — get latest for this branch
+          true,      // includeLatestHash
         );
-        if (blob?.env_file) {
-          const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+        if (decryptData.env_content) {
+          const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
           for (const [key, value] of Object.entries(encrypted)) {
             try {
               const plaintext = this.fileManager.decryptValue(value, encryptionKey);
@@ -849,8 +851,8 @@ export class CapyCommand {
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (showLocal && !showRemote) {
       // Local differs from pinned, remote matches pinned
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (!showLocal && showRemote) {
       // Remote differs from pinned, local matches pinned
@@ -859,9 +861,9 @@ export class CapyCommand {
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else {
       // Both differ — show all 4 options
+      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     }
 
