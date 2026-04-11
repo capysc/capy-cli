@@ -67,11 +67,16 @@ export class RedeemCommand {
       }
     }
 
-    // 4. If user already has the master key, they're already set up
+    // 4. Regardless of whether crypto setup is needed, always update local
+    //    state so the next `capy` run targets the redeemed org.
+    this.switchLocalContext(orgId, userId);
+
+    // 5. If user already has the master key, they're done
     if (hasOrgKey(orgId, userId)) {
+      const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
       console.log('');
       console.log('  \x1b[32mYou\'re all set — your encryption keys are configured for this organization.\x1b[0m');
-      console.log(`  Run ${B('capy')} in a project directory to sync secrets.`);
+      console.log(`  Run ${B('capy')} to sync secrets.`);
       console.log('');
       return;
     }
@@ -80,7 +85,7 @@ export class RedeemCommand {
     const serviceClient = new ServiceClient(this.apiUrl);
     if (serviceToken) serviceClient.setToken(serviceToken);
 
-    // 5. Service co-decrypts (strips outer KMS layer)
+    // 6. Service co-decrypts (strips outer KMS layer)
     let innerBlob: string;
     try {
       const result = await serviceClient.coDecrypt(orgId, ciphertext);
@@ -91,7 +96,7 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 6. Strip inner layer with T → recover M
+    // 7. Strip inner layer with T → recover M
     //    The HKDF salt includes the recipient's email, so this fails
     //    cryptographically if the wrong user tries to unwrap.
     const userEmail = authResult.user_email || '';
@@ -104,35 +109,10 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 7. Re-encrypt M under this user's wrapping key and store locally
+    // 8. Re-encrypt M under this user's wrapping key and store locally
     const wrappingKey = deriveWrappingKey(userId, orgId);
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
     saveMasterKey(orgId, encryptedM, userId);
-
-    // 8. Write sync-state with the redeemed org so the next `capy` init
-    //    auto-selects the right organization.
-    const fileManager = new FileManager();
-    fileManager.writeSyncState({
-      last_sync: '',
-      synced_variables: [],
-      user_id: userId,
-      org_id: orgId,
-    });
-
-    // 9. If keep.lock points to a different org, delete it so the next `capy`
-    //    run goes through the full init flow (which writes a proper keep.lock).
-    const keepPath = join(process.cwd(), 'keep.lock');
-    if (existsSync(keepPath)) {
-      try {
-        const keepContent = JSON.parse(readFileSync(keepPath, 'utf-8'));
-        if (keepContent.org_id !== orgId) {
-          unlinkSync(keepPath);
-        }
-      } catch {
-        // Malformed keep.lock — delete it
-        unlinkSync(keepPath);
-      }
-    }
 
     const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
     console.log('');
@@ -141,5 +121,32 @@ export class RedeemCommand {
     console.log(`  You now have access to ${B(orgName)}.`);
     console.log(`  Run ${B('capy')} to sync secrets.`);
     console.log('');
+  }
+
+  /**
+   * Update sync-state to point to the redeemed org, and delete keep.lock
+   * if it points to a different org. This ensures the next `capy` run goes
+   * through init for the correct org instead of syncing a stale project.
+   */
+  private switchLocalContext(orgId: string, userId: string): void {
+    const fileManager = new FileManager();
+    fileManager.writeSyncState({
+      last_sync: '',
+      synced_variables: [],
+      user_id: userId,
+      org_id: orgId,
+    });
+
+    const keepPath = join(process.cwd(), 'keep.lock');
+    if (existsSync(keepPath)) {
+      try {
+        const keepContent = JSON.parse(readFileSync(keepPath, 'utf-8'));
+        if (keepContent.org_id !== orgId) {
+          unlinkSync(keepPath);
+        }
+      } catch {
+        unlinkSync(keepPath);
+      }
+    }
   }
 }
