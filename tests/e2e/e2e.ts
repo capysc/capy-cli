@@ -495,6 +495,30 @@ async function testInitUserB(): Promise<void> {
   assert(existsSync(join(SANDBOX_USER2, 'keep.lock')), 'User B keep.lock file not created');
 }
 
+/** Phase 1c: Second run after init must use cached session.
+ *  Regression test: init previously never wrote user_id to sync-state, so
+ *  the next `capy` run could not find the user-scoped auth session and
+ *  went back through the full login flow. */
+async function testSessionCachedAfterInit(): Promise<void> {
+  log('Second capy run after User B init should use cached session...');
+
+  const result = await spawnCapy([], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 20000,
+    // No interactions — session should be cached and sync should complete silently
+    interactions: [
+      { waitFor: /Everything is up to date|up to date|keep\.lock updated|capy push/, send: '' },
+    ],
+  });
+
+  assert(result.exitCode === 0, `Second capy run failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+  assert(
+    /\((cached|refreshed)\)/.test(result.stdout),
+    `Expected cached/refreshed auth after init, got: ${result.stdout}`,
+  );
+}
+
 /** Phase 2: User A invites User B as Admin */
 async function testInviteUserB(): Promise<string> {
   log('User A invites User B as Admin...');
@@ -668,10 +692,11 @@ async function testUserBGetsUpdatedKey(): Promise<void> {
     user: 'B',
     timeout: 30000,
     interactions: [
-      // Diff table appears. Local stale .env vs self-healed pinned (=latest from server).
-      // Menu order for showLocal && !showRemote:
-      //   1. Commit all local values   (would push the STALE value — bad)
-      //   2. Retrieve all pinned values (the latest, post-self-heal — what we want)
+      // Diff table shows true 3-way: Pinned (User B's old hash), Local (matches
+      // pinned, unedited), Remote (User A's new value). showLocal=false,
+      // showRemote=true. Menu order for !showLocal && showRemote:
+      //   1. Retrieve all pinned values   (= old value, undo)
+      //   2. Retrieve all remote values   (= User A's new value — what we want)
       //   3. Individually resolve
       // Arrow-down once, then Enter, to pick option 2.
       { waitFor: /select value/, send: '\x1b[B\n', delay: 500 },
@@ -742,28 +767,34 @@ async function testKickedUserCantSync(): Promise<void> {
   );
 }
 
-/** Phase 7: Branching — protected branches and role-based access */
+/** Phase 7: Branching — capy branches, isolation, and role-based access.
+ *
+ *  Capy branches are now decoupled from git branches, so this test uses ONLY
+ *  capy commands and direct file operations — no git checkouts.
+ *
+ *  Starting state (from previous tests):
+ *  - User A: development branch, SENDGRID_KEY=SG.abcdef123457, in user1 dir
+ *  - User B: kicked from User A's org, has stale keep.lock in user2 dir
+ */
 async function testBranching(): Promise<void> {
-  // Wait for WorkOS rate limit window to reset from earlier invite/kick/redeem cycles
+  // Wait for WorkOS rate limit window to reset from earlier invite/kick cycles
   log('Waiting for rate limit cooldown...');
-  await new Promise(r => setTimeout(r, 15000));
+  await new Promise(r => setTimeout(r, 60000));
   log('=== Branching Tests ===');
 
-  // 7.1: User A creates protected branch e2e-test-main
-  log('User A creates protected branch e2e-test-main...');
-  sh('git checkout -b e2e-test-main', SANDBOX_USER1);
-
+  // 7.1: User A creates protected branch e2e-test-main on Capy
+  log('User A creates protected capy branch e2e-test-main...');
   const checkoutResult = await spawnCapy(['checkout', '-b', 'e2e-test-main', '--protected'], {
     cwd: SANDBOX_USER1,
     user: 'A',
     timeout: 15000,
     interactions: [],
   });
-  assert(checkoutResult.exitCode === 0, `Checkout failed: ${checkoutResult.stdout}\n${checkoutResult.stderr}`);
+  assert(checkoutResult.exitCode === 0, `Checkout -b failed: ${checkoutResult.stdout}\n${checkoutResult.stderr}`);
 
-  // 7.2: User A updates SENDGRID_KEY on this branch
+  // 7.2: User A modifies SENDGRID_KEY on the new branch
   log('User A updates SENDGRID_KEY on e2e-test-main...');
-  const decryptResult = await spawnCapy(['decrypt'], {
+  await spawnCapy(['decrypt'], {
     cwd: SANDBOX_USER1,
     user: 'A',
     timeout: 10000,
@@ -775,52 +806,54 @@ async function testBranching(): Promise<void> {
   envContent = envContent.replace(/SENDGRID_KEY=.*/, 'SENDGRID_KEY=SG.abcdef123458');
   writeFileSync(envPath, envContent);
 
+  // Run capy on the new branch — keep.lock has no entries for e2e-test-main yet,
+  // so this is a "no pinned values" case → menu has only "Commit and push all local"
   const syncResult = await spawnCapy([], {
     cwd: SANDBOX_USER1,
     user: 'A',
     timeout: 30000,
     interactions: [
-      { waitFor: 'SENDGRID_KEY', send: '\n', delay: 500 },
-      { waitFor: /Push.*capy/i, send: 'y\n', delay: 300 },
-      { waitFor: /Apply these changes/i, send: 'y\n', delay: 300 },
-      // Deploy step 1: Generate a deployment
-      { waitFor: /Generate a deployment/, send: '\n', delay: 500 },
-      // Deploy step 2: Enter git branch (accept default)
-      { waitFor: /Enter the git branch/, send: '\n', delay: 300 },
-      // Deploy step 3: Deploy directly
-      { waitFor: /Deploy directly/, send: '\n', delay: 500 },
+      { waitFor: /select value|Commit and push|Commit all local/, send: '\n', delay: 500 },
+      { waitFor: /keep\.lock updated|capy push/, send: '' },
     ],
   });
   assert(syncResult.exitCode === 0, `Sync on protected branch failed: ${syncResult.stdout}\n${syncResult.stderr}`);
 
-  // 7.3: Switch back to development and verify SENDGRID_KEY reverted
-  log('User A switches back to development...');
-  sh('git checkout e2e-test', SANDBOX_USER1);
-
-  const checkoutResult2 = await spawnCapy(['checkout', 'development'], {
+  // Push the new branch's secrets to the server so other users can pull
+  const pushResult = await spawnCapy(['push'], {
     cwd: SANDBOX_USER1,
     user: 'A',
     timeout: 15000,
     interactions: [],
   });
-  assert(checkoutResult2.exitCode === 0, `Checkout e2e-test failed: ${checkoutResult2.stdout}\n${checkoutResult2.stderr}`);
+  assert(pushResult.exitCode === 0, `Push to protected branch failed: ${pushResult.stdout}\n${pushResult.stderr}`);
 
-  // Checkout already pulls secrets — just decrypt and verify
-  const decryptResult2 = await spawnCapy(['decrypt'], {
+  // 7.3: User A switches back to development — SENDGRID_KEY should be the
+  // development value (123457), proving branch isolation
+  log('User A switches back to development...');
+  const checkoutDev = await spawnCapy(['checkout', 'development'], {
+    cwd: SANDBOX_USER1,
+    user: 'A',
+    timeout: 15000,
+    interactions: [],
+  });
+  assert(checkoutDev.exitCode === 0, `Checkout development failed: ${checkoutDev.stdout}\n${checkoutDev.stderr}`);
+
+  await spawnCapy(['decrypt'], {
     cwd: SANDBOX_USER1,
     user: 'A',
     timeout: 10000,
     interactions: [],
   });
-  assert(decryptResult2.exitCode === 0, `Decrypt after checkout failed: ${decryptResult2.stdout}\n${decryptResult2.stderr}`);
 
-  const revertedEnv = readFileSync(envPath, 'utf-8');
-  const revertedKey = revertedEnv.match(/SENDGRID_KEY=(.*)/)?.[1];
-  // After switching from e2e-test-main (123458) back to e2e-test, the key should
-  // be different from 123458 (proving branch isolation works)
-  assert(revertedKey !== 'SG.abcdef123458', `SENDGRID_KEY should differ from e2e-test-main value after branch switch, got: ${revertedKey}`);
+  const devEnv = readFileSync(envPath, 'utf-8');
+  const devKey = devEnv.match(/SENDGRID_KEY=(.*)/)?.[1];
+  assert(
+    devKey === 'SG.abcdef123457',
+    `After switching back to development, SENDGRID_KEY should be SG.abcdef123457, got: ${devKey}`,
+  );
 
-  // 7.4: Invite User B as member
+  // 7.4: User A re-invites User B as Member (was kicked in earlier test)
   await new Promise(r => setTimeout(r, 5000));
   log('User A re-invites User B as Member...');
   const inviteResult = await spawnCapy(['invite', USER_B_EMAIL], {
@@ -828,7 +861,7 @@ async function testBranching(): Promise<void> {
     user: 'A',
     timeout: 20000,
     interactions: [
-      // Select Member (first option — just press enter)
+      // Select Member (first option)
       { waitFor: 'Select a role', send: '\n', delay: 300 },
     ],
   });
@@ -838,36 +871,51 @@ async function testBranching(): Promise<void> {
   const redeemMatch = redeemStripped.match(/capy redeem\s+(\S+)/);
   assert(redeemMatch !== null, 'Could not extract redeem code');
 
-  // 7.5: User B redeems and tries protected branch
-  log('User B redeems and attempts protected branch...');
+  // 7.5: User B redeems and accesses the protected branch.
+  // TODO: Protected branch enforcement on the service side is not implemented.
+  // For now, this just verifies that the branch switch works and User B can
+  // pull the value via self-heal in checkoutCommand.
+  log('User B redeems and attempts protected branch as Member...');
   const redeemResult = await spawnCapy(['redeem', redeemMatch![1]], {
     cwd: SANDBOX_USER2,
     user: 'B',
     timeout: 20000,
     interactions: [],
   });
+  assert(redeemResult.exitCode === 0, `Redeem failed: ${redeemResult.stdout}\n${redeemResult.stderr}`);
 
-  sh('git fetch origin e2e-test-main && git checkout e2e-test-main', SANDBOX_USER2);
-
-  // User B tries to sync protected branch as member — should fail
-  log('User B (member) tries protected branch (should fail)...');
-  // TODO: Protected branch enforcement on the service side needs investigation.
-  // For now, just verify User B can reach the branch (branch-switch works).
-  const protectedResult = await spawnCapy([], {
+  // User B's existing keep.lock (from earlier bootstrap) is on development.
+  // They switch to e2e-test-main — checkoutCommand fetches latest from the
+  // server and self-heals their keep.lock.
+  const memberCheckout = await spawnCapy(['checkout', 'e2e-test-main'], {
     cwd: SANDBOX_USER2,
     user: 'B',
-    timeout: 60000,
-    interactions: [
-      // No branch-switch prompt — capy branches are environment-scoped
-      { waitFor: /SENDGRID_KEY|up to date|Everything|Push.*capy|Apply|Deploy|Continue|conflict/i, send: '\n', delay: 500 },
-      { waitFor: /Push.*capy|Apply|Deploy|Continue|up to date|Sync completed/i, send: 'y\n', delay: 300 },
-      { waitFor: /Apply|Deploy|Continue|up to date|Sync completed/i, send: 'y\n', delay: 300 },
-      { waitFor: /Deploy|Continue|up to date|Sync completed/i, send: '', delay: 300 },
-    ],
+    timeout: 20000,
+    interactions: [],
   });
+  assert(
+    memberCheckout.exitCode === 0,
+    `Member checkout of e2e-test-main failed: ${memberCheckout.stdout}\n${memberCheckout.stderr}`,
+  );
 
-  // 7.6: Kick and re-invite as Admin
-  await new Promise(r => setTimeout(r, 5000));
+  // Verify User B got SENDGRID_KEY=123458 on the protected branch
+  const memberDecrypt = await spawnCapy(['decrypt'], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 10000,
+    interactions: [],
+  });
+  assert(memberDecrypt.exitCode === 0, `Member decrypt failed: ${memberDecrypt.stdout}\n${memberDecrypt.stderr}`);
+
+  const memberEnv = readFileSync(join(SANDBOX_USER2, '.env'), 'utf-8');
+  const memberKey = memberEnv.match(/SENDGRID_KEY=(.*)/)?.[1];
+  assert(
+    memberKey === 'SG.abcdef123458',
+    `User B (member) on e2e-test-main should see SENDGRID_KEY=SG.abcdef123458, got: ${memberKey}`,
+  );
+
+  // 7.6: User A kicks User B and re-invites as Admin
+  await new Promise(r => setTimeout(r, 10000));
   log('User A kicks and re-invites User B as Admin...');
   const kickResult = await spawnCapy(['kick', USER_B_EMAIL], {
     cwd: SANDBOX_USER1,
@@ -877,8 +925,9 @@ async function testBranching(): Promise<void> {
       { waitFor: 'Remove', send: 'y\n' },
     ],
   });
+  assert(kickResult.exitCode === 0, `Kick failed: ${kickResult.stdout}\n${kickResult.stderr}`);
 
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise(r => setTimeout(r, 10000));
   const adminInviteResult = await spawnCapy(['invite', USER_B_EMAIL], {
     cwd: SANDBOX_USER1,
     user: 'A',
@@ -894,57 +943,52 @@ async function testBranching(): Promise<void> {
   const adminRedeemMatch = adminStripped.match(/capy redeem\s+(\S+)/);
   assert(adminRedeemMatch !== null, 'Could not extract admin redeem code');
 
-  // 7.7: User B redeems as Admin and syncs protected branch
+  // 7.7: User B redeems as Admin and accesses the protected branch
   await new Promise(r => setTimeout(r, 5000));
-  log('User B redeems as Admin and syncs protected branch...');
+  log('User B redeems as Admin and accesses protected branch...');
   const adminRedeemResult = await spawnCapy(['redeem', adminRedeemMatch![1]], {
     cwd: SANDBOX_USER2,
     user: 'B',
     timeout: 20000,
     interactions: [],
   });
+  assert(adminRedeemResult.exitCode === 0, `Admin redeem failed: ${adminRedeemResult.stdout}\n${adminRedeemResult.stderr}`);
 
-  const adminSyncResult = await spawnCapy([], {
+  const adminCheckout = await spawnCapy(['checkout', 'e2e-test-main'], {
     cwd: SANDBOX_USER2,
     user: 'B',
-    timeout: 30000,
-    interactions: [
-      // May have conflicts or be up to date
-      { waitFor: /SENDGRID_KEY|up to date|Everything/, send: '\n', delay: 500 },
-      { waitFor: /Push.*capy|up to date|Sync completed/i, send: 'y\n', delay: 300 },
-      { waitFor: /Apply these changes|Sync completed|up to date/i, send: 'y\n', delay: 300 },
-      { waitFor: /Deploy|Continue|completed|up to date/, send: '' },
-    ],
+    timeout: 20000,
+    interactions: [],
   });
   assert(
-    adminSyncResult.exitCode === 0,
-    `Admin sync on protected branch failed (exit ${adminSyncResult.exitCode}): ${adminSyncResult.stdout}\n${adminSyncResult.stderr}`,
+    adminCheckout.exitCode === 0,
+    `Admin checkout of e2e-test-main failed: ${adminCheckout.stdout}\n${adminCheckout.stderr}`,
   );
 
-  // 7.8: User B switches to development capy branch
-  log('User B switches to development capy branch...');
-  sh('git checkout e2e-test', SANDBOX_USER2);
-  const switchResult = await spawnCapy(['checkout', 'development'], {
+  // 7.8: User B switches back to development — verify SENDGRID_KEY reverts
+  log('User B switches back to development...');
+  const switchDev = await spawnCapy(['checkout', 'development'], {
     cwd: SANDBOX_USER2,
     user: 'B',
     timeout: 15000,
     interactions: [],
   });
+  assert(switchDev.exitCode === 0, `Switch to development failed: ${switchDev.stdout}\n${switchDev.stderr}`);
 
-  // Verify SENDGRID_KEY reverted to 123457
   const decryptB = await spawnCapy(['decrypt'], {
     cwd: SANDBOX_USER2,
     user: 'B',
     timeout: 10000,
     interactions: [],
   });
+  assert(decryptB.exitCode === 0, `Decrypt on development failed: ${decryptB.stdout}\n${decryptB.stderr}`);
 
-  if (decryptB.exitCode === 0) {
-    const envB = readFileSync(join(SANDBOX_USER2, '.env'), 'utf-8');
-    const keyMatch = envB.match(/SENDGRID_KEY=(.*)/);
-    log(`  User B SENDGRID_KEY after branch switch: ${keyMatch?.[1]}`);
-    // Note: exact value depends on conflict resolution prompt interaction
-  }
+  const finalEnv = readFileSync(join(SANDBOX_USER2, '.env'), 'utf-8');
+  const finalKey = finalEnv.match(/SENDGRID_KEY=(.*)/)?.[1];
+  assert(
+    finalKey === 'SG.abcdef123457',
+    `User B on development should see SENDGRID_KEY=SG.abcdef123457, got: ${finalKey}`,
+  );
 }
 
 /** Validate SDK runtime decryption */
@@ -990,6 +1034,7 @@ async function main(): Promise<void> {
     await runTest('Init User A (10 secrets)', testInitUserA);
     await runTest('Verify branch exists', testBranchExists);
     await runTest('Init User B (0 secrets)', testInitUserB);
+    await runTest('Second run after init uses cached session', testSessionCachedAfterInit);
 
     // SDK Validation (run early, before branching messes with .env)
     console.log('\n\x1b[1m--- SDK Validation ---\x1b[0m');
@@ -1012,14 +1057,9 @@ async function main(): Promise<void> {
     await runTest('User A kicks User B', testKickUserB);
     await runTest('Kicked User B cannot sync', testKickedUserCantSync);
 
-    // Branching — TEMPORARILY SKIPPED.
-    // The branching test has stale dependencies on git branches that no longer
-    // exist (e2e-test-main was previously created via the deploy flow which is
-    // gone). Needs rework against the new capy-checkout model. Tracking
-    // separately from the bootstrap/pull fix in this PR.
-    // console.log('\n\x1b[1m--- Branching ---\x1b[0m');
-    // await runTest('Protected branches and role-based access', testBranching);
-    log('Skipping branching test — needs rework against capy-checkout model');
+    // Branching
+    console.log('\n\x1b[1m--- Branching ---\x1b[0m');
+    await runTest('Protected branches and role-based access', testBranching);
 
     // (SDK Validation already ran above)
 

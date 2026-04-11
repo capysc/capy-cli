@@ -106,6 +106,15 @@ export class CapyCommand {
 
     spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
+    // Persist user ID to sync state immediately so the next `capy` run can find
+    // the user-scoped session file at ~/.capy/auth/sessions/{userId}.json.
+    // Without this, sync-state has no user_id, detectProjectState returns
+    // undefined, AuthService loads from the unscoped path and finds nothing,
+    // and the user is sent through OAuth again.
+    if (authResult.user_id) {
+      this.projectManager.writeSyncStateUserId(authResult.user_id);
+    }
+
     // Set token for service client
     const token = this.authService.getToken();
     if (token) {
@@ -882,12 +891,14 @@ export class CapyCommand {
       authResult.user_id!,
     );
 
-    // Read keep.lock. Both currentKeep and pinned are mutable because the
-    // remote fetch below may self-heal a stale local keep.lock.
+    // Read keep.lock. currentKeep is mutable because the remote fetch may
+    // self-heal a stale local keep.lock — but `pinned` and `originalKeep` are
+    // FROZEN at the pre-self-heal values so the diff table reflects what was
+    // actually pinned on this machine and "Retrieve all pinned values"
+    // actually fetches the value shown in the Pinned column.
     let currentKeep = this.projectManager.readKeepFile();
+    const originalKeep = currentKeep ? JSON.parse(JSON.stringify(currentKeep)) as KeepFile : null;
 
-    // Build pinned hashes from keep.lock for active branch
-    let pinned: Record<string, string> = {};
     const rebuildPinned = (keep: KeepFile | null) => {
       const next: Record<string, string> = {};
       if (keep) {
@@ -900,7 +911,7 @@ export class CapyCommand {
       }
       return next;
     };
-    pinned = rebuildPinned(currentKeep);
+    const pinned = rebuildPinned(currentKeep);
 
     // Read local .env and compute hashes
     const localPlaintext: Record<string, string> = {};
@@ -959,8 +970,10 @@ export class CapyCommand {
       }
 
       // Self-heal: if the server returned a keep_file and it differs from local,
-      // overwrite local keep.lock and rebuild pinned hashes from it. This makes
-      // a stale keep.lock automatically catch up to the server's latest snapshot.
+      // overwrite local keep.lock with the server's version and use it as the
+      // base for the post-resolution merge. We DO NOT touch `pinned` here —
+      // the diff table needs to show the user's pre-self-heal pinned values
+      // so that "Pinned vs Local vs Remote" is a true three-way comparison.
       if (decryptData.keep_file) {
         const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
         const localSerialized = currentKeep ? JSON.stringify(currentKeep) : '';
@@ -968,7 +981,6 @@ export class CapyCommand {
         if (localSerialized !== serverSerialized) {
           this.fileManager.writeKeepFile(serverKeep);
           currentKeep = serverKeep;
-          pinned = rebuildPinned(serverKeep);
         }
       }
       fetchSpinner.stop();
@@ -1055,10 +1067,14 @@ export class CapyCommand {
     let finalEnv: Record<string, string>;
 
     if (action === 'retrieve_pinned') {
-      // Fetch pinned values from Keep
+      // Fetch the user's *original* pinned snapshot — the one displayed in the
+      // Pinned column of the diff table. We use originalKeep (pre-self-heal),
+      // not currentKeep, because currentKeep may have been overwritten with
+      // the server's latest. The original snapshot is still in S3 because
+      // env blobs are content-addressed and immutable.
       finalEnv = { ...localPlaintext };
-      if (currentKeep && Object.keys(pinned).length > 0) {
-        const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
+      if (originalKeep && Object.keys(pinned).length > 0) {
+        const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
         try {
           const blob = await fetchSecretsWithCache(
             this.serviceClient,
