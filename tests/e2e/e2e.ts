@@ -1154,18 +1154,11 @@ async function testMultiOrgInviteRedeem(): Promise<void> {
   });
   assert(redeemResult.exitCode === 0, `Redeem failed (exit ${redeemResult.exitCode}): ${redeemResult.stdout}\n${redeemResult.stderr}`);
 
-  // 7. Verify redeem updated keep.lock to point to e2e-test-org (NOT the old org).
-  //    This is the critical assertion — redeem must switch the project context,
-  //    not leave the stale keep.lock pointing to the wrong org.
+  // 7. Verify redeem DELETED the stale keep.lock (it pointed to e2e-test-org-b)
   const keepPath = join(SANDBOX_USER2, 'keep.lock');
-  assert(existsSync(keepPath), 'keep.lock should exist after redeem');
-  const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
-  assert(
-    keep.org_id === orgAId,
-    `keep.lock org_id should be ${orgAId} (redeemed org), got: ${keep.org_id}`,
-  );
+  assert(!existsSync(keepPath), 'keep.lock should be deleted after redeem (was pointing to wrong org)');
 
-  // 8. Verify sync-state also points to the redeemed org
+  // 8. Verify sync-state has org hint pointing to the redeemed org
   const syncStatePath = join(SANDBOX_USER2, '.capy', 'sync-state');
   assert(existsSync(syncStatePath), 'sync-state should exist after redeem');
   const syncState = JSON.parse(readFileSync(syncStatePath, 'utf-8'));
@@ -1174,28 +1167,39 @@ async function testMultiOrgInviteRedeem(): Promise<void> {
     `sync-state org_id should be ${orgAId} (redeemed org), got: ${syncState.org_id}`,
   );
 
-  // 9. Run capy WITHOUT wiping anything — should sync from the redeemed org directly.
-  //    No org picker, no project picker. Just sync.
-  log('User B runs capy after redeem (should sync redeemed org directly)...');
-  const syncResult = await spawnCapy([], {
+  // 9. Run capy — no keep.lock means init flow runs. The org hint in sync-state
+  //    should auto-select e2e-test-org, and init writes a proper keep.lock.
+  log('User B runs capy after redeem (init should auto-select redeemed org)...');
+  const initResult = await spawnCapy([], {
     cwd: SANDBOX_USER2,
     user: 'B',
     timeout: 30000,
     interactions: [
-      // Should go straight to sync — no org/project prompts needed.
-      // The keep.lock already points to the right org+project.
-      { waitFor: /keep\.lock updated|capy push|Everything is up to date|Pulled \d+ secret/, send: '' },
+      // Org picker — e2e-test-org should be pre-selected via org hint. Just Enter.
+      { waitFor: /Select organization/, send: '\n', delay: 500 },
+      // Project picker — pick user1
+      { waitFor: /Which project do you want to use/, send: '\n', delay: 500 },
+      // Wait for sync
+      { waitFor: /Pulled \d+ secret|capy push|Successfully/, send: '' },
     ],
   });
 
-  assert(syncResult.exitCode === 0, `Sync after redeem failed (exit ${syncResult.exitCode}): ${syncResult.stdout}\n${syncResult.stderr}`);
+  assert(initResult.exitCode === 0, `Init after redeem failed (exit ${initResult.exitCode}): ${initResult.stdout}\n${initResult.stderr}`);
 
-  // Verify .env has secrets from the redeemed org
+  // Verify init wrote a proper keep.lock pointing to the redeemed org
+  assert(existsSync(keepPath), 'keep.lock should be created by init after redeem');
+  const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
+  assert(
+    keep.org_id === orgAId,
+    `keep.lock org_id should be ${orgAId} (redeemed org), got: ${keep.org_id}`,
+  );
+
+  // Verify .env has secrets
   const envPath = join(SANDBOX_USER2, '.env');
-  assert(existsSync(envPath), '.env not created after sync');
+  assert(existsSync(envPath), '.env not created after init');
   const envContent = readFileSync(envPath, 'utf-8');
   const varCount = envContent.split('\n').filter(l => l.includes('=') && !l.startsWith('#')).length;
-  assert(varCount >= 10, `Expected 10+ variables after sync, got ${varCount}`);
+  assert(varCount >= 10, `Expected 10+ variables after init, got ${varCount}`);
 }
 
 /** Init in a fresh dir with multiple orgs and no org hint (tests session fallback scan) */
