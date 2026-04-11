@@ -760,7 +760,11 @@ async function testKickUserB(): Promise<void> {
 
 /** Phase 6b: User B cannot sync after being kicked */
 async function testKickedUserCantSync(): Promise<void> {
-  log('User B attempts sync after being kicked (should fail)...');
+  log('User B attempts sync after being kicked (should fail and clean up)...');
+
+  // Capture org ID before sync attempt (keep.lock still exists at this point)
+  const userAKeep = JSON.parse(readFileSync(join(SANDBOX_USER1, 'keep.lock'), 'utf-8'));
+  const orgAId = userAKeep.org_id;
 
   const result = await spawnCapy([], {
     cwd: SANDBOX_USER2,
@@ -772,8 +776,18 @@ async function testKickedUserCantSync(): Promise<void> {
 
   const combined = result.stdout + result.stderr;
   assert(
-    result.exitCode !== 0 || combined.includes('fail') || combined.includes('error') || combined.includes('denied'),
+    result.exitCode !== 0 || combined.includes('denied') || combined.includes('removed'),
     `Expected kicked user to lose access: exit ${result.exitCode}, output: ${combined}`,
+  );
+
+  // Verify local org data was cleaned up
+  assert(
+    !existsSync(join(SANDBOX_USER2, 'keep.lock')),
+    'keep.lock should be deleted after kicked sync attempt',
+  );
+  assert(
+    !existsSync(join(HOME_B, '.capy', 'orgs', orgAId)),
+    'Local org key directory should be deleted after kicked sync attempt',
   );
 }
 

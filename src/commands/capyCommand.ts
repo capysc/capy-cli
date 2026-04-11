@@ -5,7 +5,8 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
-import { existsSync } from 'fs';
+import { existsSync, unlinkSync, rmSync } from 'fs';
+import { join } from 'path';
 import { execSync } from 'child_process';
 import inquirer from 'inquirer';
 import {
@@ -803,6 +804,41 @@ export class CapyCommand {
     return selected || undefined;
   }
 
+  /**
+   * Remove local data for an org the user no longer has access to.
+   * Called on 403 during sync (user was kicked). Does NOT touch session
+   * data for other orgs or the refresh token — only the revoked org.
+   */
+  private cleanupOrgData(orgId: string, userId?: string): void {
+    // Delete org master key
+    try {
+      const { getOrgKeyPath } = require('../config/globalConfig');
+      const keyPath = getOrgKeyPath(orgId, userId);
+      if (existsSync(keyPath)) {
+        unlinkSync(keyPath);
+        console.log('  Removed local encryption key for this organization.');
+      }
+    } catch {}
+
+    // Delete keep.lock — it points to an org the user can't access
+    const keepPath = join(process.cwd(), 'keep.lock');
+    if (existsSync(keepPath)) {
+      try {
+        unlinkSync(keepPath);
+        console.log('  Removed keep.lock (no longer a member).');
+      } catch {}
+    }
+
+    // Clear project key cache for this org
+    try {
+      const { getGlobalCapyDir } = require('../config/globalConfig');
+      const orgDir = join(getGlobalCapyDir(), 'orgs', orgId);
+      if (existsSync(orgDir)) {
+        rmSync(orgDir, { recursive: true });
+      }
+    } catch {}
+  }
+
   private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -1088,7 +1124,14 @@ export class CapyCommand {
       // Network errors fall back to local-only mode.
       if (err instanceof CapyError) {
         const status = err.details?.status;
-        if (status === 401 || status === 403) {
+        if (status === 403) {
+          // User was kicked — clean up local state for this org so stale
+          // keys and session data don't linger.
+          fetchSpinner.fail('Access denied — you may have been removed from this organization.');
+          this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+          throw err;
+        }
+        if (status === 401) {
           fetchSpinner.fail(err.message);
           throw err;
         }
