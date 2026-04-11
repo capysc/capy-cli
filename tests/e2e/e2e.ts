@@ -783,8 +783,8 @@ async function testBranching(): Promise<void> {
       { waitFor: 'SENDGRID_KEY', send: '\n', delay: 500 },
       { waitFor: /Push.*capy/i, send: 'y\n', delay: 300 },
       { waitFor: /Apply these changes/i, send: 'y\n', delay: 300 },
-      // Deploy step 1: Create a deployment PR
-      { waitFor: /Create a deployment PR/, send: '\n', delay: 500 },
+      // Deploy step 1: Generate a deployment
+      { waitFor: /Generate a deployment/, send: '\n', delay: 500 },
       // Deploy step 2: Enter git branch (accept default)
       { waitFor: /Enter the git branch/, send: '\n', delay: 300 },
       // Deploy step 3: Deploy directly
