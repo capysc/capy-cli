@@ -3,6 +3,7 @@ import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
 import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
 import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
+import { FileManager } from '../files/fileManager';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -101,23 +102,47 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 6. Re-encrypt M under this user's wrapping key and store locally
+    // 7. Re-encrypt M under this user's wrapping key and store locally
     const wrappingKey = deriveWrappingKey(userId, orgId);
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
     saveMasterKey(orgId, encryptedM, userId);
 
-    // Write user ID and org ID to sync-state so next `capy` run loads the
-    // right session and pre-selects the redeemed organization.
-    const { ProjectManager } = await import('../core/projectManager');
-    const pm = new ProjectManager();
-    pm.writeSyncStateUserId(userId);
-    pm.writeSyncStateOrgId(orgId);
+    // 8. Switch the local project to the redeemed org — mirrors what `capy org` does.
+    //    Write keep.lock + sync-state so the next `capy` run syncs from the invited
+    //    org, not whatever org the keep.lock was previously pointing to.
+    const fileManager = new FileManager();
 
+    const projects = await serviceClient.listProjects();
+    const orgProjects = projects.filter(p => p.organization_id === orgId);
+
+    if (orgProjects.length > 0) {
+      const project = orgProjects[0];
+      fileManager.writeKeepFile({
+        version: '3.0',
+        org_id: orgId,
+        project_id: project.id,
+        project_name: project.name,
+        variables: {},
+      });
+    }
+
+    fileManager.writeSyncState({
+      last_sync: '',
+      synced_variables: [],
+      user_id: userId,
+      org_id: orgId,
+    });
+
+    const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');
     console.log('');
-    console.log(`  You now have access to org ${B(orgId)}.`);
-    console.log(`  Run ${B('capy')} in a project directory to sync secrets.`);
+    console.log(`  You now have access to ${B(orgName)}.`);
+    if (orgProjects.length > 0) {
+      console.log(`  Run ${B('capy')} to sync secrets.`);
+    } else {
+      console.log(`  Run ${B('capy')} in a project directory to sync secrets.`);
+    }
     console.log('');
   }
 }

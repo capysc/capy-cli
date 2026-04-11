@@ -1154,7 +1154,18 @@ async function testMultiOrgInviteRedeem(): Promise<void> {
   });
   assert(redeemResult.exitCode === 0, `Redeem failed (exit ${redeemResult.exitCode}): ${redeemResult.stdout}\n${redeemResult.stderr}`);
 
-  // 7. Verify sync-state has org_id pointing to e2e-test-org (the redeemed org)
+  // 7. Verify redeem updated keep.lock to point to e2e-test-org (NOT the old org).
+  //    This is the critical assertion — redeem must switch the project context,
+  //    not leave the stale keep.lock pointing to the wrong org.
+  const keepPath = join(SANDBOX_USER2, 'keep.lock');
+  assert(existsSync(keepPath), 'keep.lock should exist after redeem');
+  const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
+  assert(
+    keep.org_id === orgAId,
+    `keep.lock org_id should be ${orgAId} (redeemed org), got: ${keep.org_id}`,
+  );
+
+  // 8. Verify sync-state also points to the redeemed org
   const syncStatePath = join(SANDBOX_USER2, '.capy', 'sync-state');
   assert(existsSync(syncStatePath), 'sync-state should exist after redeem');
   const syncState = JSON.parse(readFileSync(syncStatePath, 'utf-8'));
@@ -1163,48 +1174,28 @@ async function testMultiOrgInviteRedeem(): Promise<void> {
     `sync-state org_id should be ${orgAId} (redeemed org), got: ${syncState.org_id}`,
   );
 
-  // --- Auto-Switch Verification ---
-
-  // 8. Wipe User B's project state (keep.lock, .env, .capy) to simulate fresh clone
-  for (const f of ['keep.lock', '.env', '.capy']) {
-    const p = join(SANDBOX_USER2, f);
-    if (existsSync(p)) rmSync(p, { recursive: true, force: true });
-  }
-
-  // 9. Run capy — should auto-select e2e-test-org thanks to org hint from redeem
-  log('User B runs capy after redeem (should auto-select redeemed org)...');
-  const initResult = await spawnCapy([], {
+  // 9. Run capy WITHOUT wiping anything — should sync from the redeemed org directly.
+  //    No org picker, no project picker. Just sync.
+  log('User B runs capy after redeem (should sync redeemed org directly)...');
+  const syncResult = await spawnCapy([], {
     cwd: SANDBOX_USER2,
     user: 'B',
     timeout: 30000,
     interactions: [
-      // Org picker — e2e-test-org should be the default (pre-selected via org hint).
-      // Just hit Enter to accept.
-      { waitFor: /Select organization/, send: '\n', delay: 500 },
-      // Project picker — pick user1 (User A's project)
-      { waitFor: /Which project do you want to use/, send: '\n', delay: 500 },
-      // Wait for sync to complete
-      { waitFor: /Pulled \d+ secret|capy push|Successfully/, send: '' },
+      // Should go straight to sync — no org/project prompts needed.
+      // The keep.lock already points to the right org+project.
+      { waitFor: /keep\.lock updated|capy push|Everything is up to date|Pulled \d+ secret/, send: '' },
     ],
   });
 
-  assert(initResult.exitCode === 0, `Auto-switch init failed (exit ${initResult.exitCode}): ${initResult.stdout}\n${initResult.stderr}`);
+  assert(syncResult.exitCode === 0, `Sync after redeem failed (exit ${syncResult.exitCode}): ${syncResult.stdout}\n${syncResult.stderr}`);
 
-  // Verify keep.lock points to e2e-test-org
-  const keepPath = join(SANDBOX_USER2, 'keep.lock');
-  assert(existsSync(keepPath), 'keep.lock not created after auto-switch init');
-  const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
-  assert(
-    keep.org_id === orgAId,
-    `keep.lock org_id should be ${orgAId} (redeemed org), got: ${keep.org_id}`,
-  );
-
-  // Verify .env has secrets
+  // Verify .env has secrets from the redeemed org
   const envPath = join(SANDBOX_USER2, '.env');
-  assert(existsSync(envPath), '.env not created after auto-switch init');
+  assert(existsSync(envPath), '.env not created after sync');
   const envContent = readFileSync(envPath, 'utf-8');
   const varCount = envContent.split('\n').filter(l => l.includes('=') && !l.startsWith('#')).length;
-  assert(varCount >= 10, `Expected 10+ variables after auto-switch, got ${varCount}`);
+  assert(varCount >= 10, `Expected 10+ variables after sync, got ${varCount}`);
 }
 
 /** Init in a fresh dir with multiple orgs and no org hint (tests session fallback scan) */
