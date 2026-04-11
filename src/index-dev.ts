@@ -368,6 +368,15 @@ program
   });
 
 program
+  .command('org')
+  .description('Switch organization')
+  .action(async () => {
+    const { OrgCommand } = await import('./commands/orgCommand');
+    const cmd = new OrgCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute();
+  });
+
+program
   .command('info')
   .description('Show current session info')
   .action(async () => {

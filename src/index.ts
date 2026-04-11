@@ -47,6 +47,7 @@ program
       console.log(`    ${B('capy')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
       console.log(`    ${B('capy')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
       console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
+      console.log(`    ${B('capy')} org                    \x1b[90mSwitch organization\x1b[0m`);
       console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
       console.log('');
       process.exit(1);
@@ -375,6 +376,15 @@ program
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
     await cmd.execute(email);
+  });
+
+program
+  .command('org')
+  .description('Switch organization')
+  .action(async () => {
+    const { OrgCommand } = await import('./commands/orgCommand');
+    const cmd = new OrgCommand();
+    await cmd.execute();
   });
 
 program
