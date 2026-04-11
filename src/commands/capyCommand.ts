@@ -131,9 +131,13 @@ export class CapyCommand {
     this.debug('initializeProject start', { cwd: process.cwd() });
     console.log('Welcome to Capy\n');
 
-    // Authenticate first
+    // Check if sync-state has an org hint (e.g. from a recent `capy redeem`)
+    const syncState = this.projectManager.readSyncState();
+    const orgHint = syncState?.org_id;
+
+    // Authenticate — pass org hint so session scopes to the right org
     const spinner = ora('Logging in...').start();
-    const authResult = await this.authService.authenticate();
+    const authResult = await this.authService.authenticate(orgHint);
     this.debug('init authResult', {
       success: authResult.success,
       user_id: authResult.user_id,

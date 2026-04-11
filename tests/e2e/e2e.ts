@@ -33,6 +33,8 @@ const USER_B_PASSWORD = 'E2eTestPass!456';
 
 const HOME_A = join(tmpdir(), 'capy-e2e-userA');
 const HOME_B = join(tmpdir(), 'capy-e2e-userB');
+const TEMP_MULTIORG = join(tmpdir(), 'capy-e2e-multiorg');
+const TEMP_EXFIL = join(tmpdir(), 'capy-e2e-exfil');
 
 // Read WorkOS credentials from service .env
 const serviceEnv = readFileSync(join(SERVICE_ROOT, '.env'), 'utf-8');
@@ -363,6 +365,14 @@ async function setup(): Promise<void> {
   log('Creating e2e-test branch...');
   sh('git checkout -b e2e-test', SANDBOX_USER1);
 
+  // Create temp dirs for multi-org tests
+  for (const dir of [TEMP_MULTIORG, TEMP_EXFIL]) {
+    if (existsSync(dir)) rmSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true });
+    sh('git init', dir);
+    sh('git commit --allow-empty -m "init"', dir);
+  }
+
   // Start test service
   await startTestService();
 }
@@ -417,8 +427,8 @@ async function teardown(): Promise<void> {
     try { sh('git clean -fd', dir); } catch {}
   }
 
-  // Clean HOME dirs
-  for (const dir of [HOME_A, HOME_B]) {
+  // Clean HOME dirs and temp dirs
+  for (const dir of [HOME_A, HOME_B, TEMP_MULTIORG, TEMP_EXFIL]) {
     if (existsSync(dir)) rmSync(dir, { recursive: true });
   }
 }
@@ -1003,6 +1013,299 @@ async function testSdkValidation(): Promise<void> {
   assert(sdkOutput.includes('SG.abcdef'), 'SDK should decrypt SENDGRID_KEY');
 }
 
+// ─── Multi-Org Tests ─────────────────────────────────────────────────────────
+
+/** capy org with a single org should show "no other organizations available" */
+async function testOrgSingleOrg(): Promise<void> {
+  log('User A runs capy org (single org)...');
+
+  const result = await spawnCapy(['org'], {
+    cwd: SANDBOX_USER1,
+    user: 'A',
+    timeout: 15000,
+    interactions: [],
+  });
+
+  assert(result.exitCode === 0, `capy org failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+  assert(
+    result.stdout.includes('No other organizations available'),
+    `Expected "No other organizations available", got: ${result.stdout}`,
+  );
+  assert(result.stdout.includes('e2e-test-org'), `Expected org name in output: ${result.stdout}`);
+}
+
+/** capy org switch — User B switches from e2e-test-org to e2e-test-org-b */
+async function testOrgSwitchFlow(): Promise<void> {
+  log('User B switches org via capy org...');
+
+  const result = await spawnCapy(['org'], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 20000,
+    interactions: [
+      // Pick e2e-test-org-b (not the current org). Arrow down to find it.
+      { waitFor: 'Switch organization', send: '\x1b[B\n', delay: 300 },
+      // Pick project in e2e-test-org-b
+      { waitFor: 'Select project', send: '\n', delay: 300 },
+    ],
+  });
+
+  assert(result.exitCode === 0, `capy org switch failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+  assert(
+    result.stdout.includes('Switched to'),
+    `Expected "Switched to" in output: ${result.stdout}`,
+  );
+
+  // Verify keep.lock was updated
+  const keepContent = readFileSync(join(SANDBOX_USER2, 'keep.lock'), 'utf-8');
+  const keep = JSON.parse(keepContent);
+  assert(
+    keep.project_name === 'user2',
+    `Expected keep.lock project_name=user2 after switch, got: ${keep.project_name}`,
+  );
+}
+
+/** capy org picking the current org should short-circuit with "Already on" */
+async function testOrgSelectCurrentOrg(): Promise<void> {
+  log('User B selects current org (should short-circuit)...');
+
+  const result = await spawnCapy(['org'], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 15000,
+    interactions: [
+      // Pick first item (current, marked with "← current")
+      { waitFor: 'Switch organization', send: '\n', delay: 300 },
+    ],
+  });
+
+  assert(result.exitCode === 0, `capy org current failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+  assert(
+    result.stdout.includes('Already on'),
+    `Expected "Already on" in output: ${result.stdout}`,
+  );
+}
+
+/**
+ * THE CRITICAL TEST: Multi-org invite → redeem → auto org switch.
+ *
+ * Simulates real onboarding: User B is working in e2e-test-org-b (their own org).
+ * User A invites them to e2e-test-org. After redeem, `capy` should automatically
+ * land in e2e-test-org without manual org picker fumbling.
+ */
+async function testMultiOrgInviteRedeem(): Promise<void> {
+  // --- Setup: put User B in the "wrong" org state ---
+
+  // 1. Kick User B from e2e-test-org
+  log('Kicking User B from e2e-test-org for fresh invite test...');
+  const kickResult = await spawnCapy(['kick', USER_B_EMAIL], {
+    cwd: SANDBOX_USER1,
+    user: 'A',
+    timeout: 15000,
+    interactions: [
+      { waitFor: 'Remove', send: 'y\n' },
+    ],
+  });
+  assert(kickResult.exitCode === 0, `Kick failed: ${kickResult.stdout}\n${kickResult.stderr}`);
+
+  // 2. Delete User B's local org key for e2e-test-org so redeem actually does work.
+  //    Find the org ID from User A's keep.lock.
+  const userAKeep = JSON.parse(readFileSync(join(SANDBOX_USER1, 'keep.lock'), 'utf-8'));
+  const orgAId = userAKeep.org_id;
+  const orgKeyDir = join(HOME_B, '.capy', 'orgs', orgAId);
+  if (existsSync(orgKeyDir)) rmSync(orgKeyDir, { recursive: true });
+
+  // Also clear any project key cache for this org
+  log(`Cleared org key for ${orgAId} from User B's HOME`);
+
+  // 3. User B's keep.lock is on e2e-test-org-b from testOrgSwitchFlow — the "wrong" org
+
+  // 4. Rate limit cooldown
+  log('Waiting for rate limit cooldown...');
+  await new Promise(r => setTimeout(r, 60000));
+
+  // --- Invite + Redeem ---
+
+  // 5. User A invites User B as Admin
+  log('User A invites User B to e2e-test-org...');
+  const inviteResult = await spawnCapy(['invite', USER_B_EMAIL], {
+    cwd: SANDBOX_USER1,
+    user: 'A',
+    timeout: 20000,
+    interactions: [
+      // Select Admin (3rd option)
+      { waitFor: 'Select a role', send: '\x1b[B\x1b[B\n', delay: 300 },
+    ],
+  });
+  assert(inviteResult.exitCode === 0, `Invite failed: ${inviteResult.stdout}\n${inviteResult.stderr}`);
+
+  const stripped = inviteResult.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+  const redeemMatch = stripped.match(/capy redeem\s+(\S+)/);
+  assert(redeemMatch !== null, `Could not extract redeem code from: ${stripped}`);
+  const redeemCode = redeemMatch![1];
+
+  // 6. User B redeems while their context is on e2e-test-org-b
+  log('User B redeems invite (context is on wrong org)...');
+  const redeemResult = await spawnCapy(['redeem', redeemCode], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 20000,
+    interactions: [],
+  });
+  assert(redeemResult.exitCode === 0, `Redeem failed (exit ${redeemResult.exitCode}): ${redeemResult.stdout}\n${redeemResult.stderr}`);
+
+  // 7. Verify sync-state has org_id pointing to e2e-test-org (the redeemed org)
+  const syncStatePath = join(SANDBOX_USER2, '.capy', 'sync-state');
+  assert(existsSync(syncStatePath), 'sync-state should exist after redeem');
+  const syncState = JSON.parse(readFileSync(syncStatePath, 'utf-8'));
+  assert(
+    syncState.org_id === orgAId,
+    `sync-state org_id should be ${orgAId} (redeemed org), got: ${syncState.org_id}`,
+  );
+
+  // --- Auto-Switch Verification ---
+
+  // 8. Wipe User B's project state (keep.lock, .env, .capy) to simulate fresh clone
+  for (const f of ['keep.lock', '.env', '.capy']) {
+    const p = join(SANDBOX_USER2, f);
+    if (existsSync(p)) rmSync(p, { recursive: true, force: true });
+  }
+
+  // 9. Run capy — should auto-select e2e-test-org thanks to org hint from redeem
+  log('User B runs capy after redeem (should auto-select redeemed org)...');
+  const initResult = await spawnCapy([], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 30000,
+    interactions: [
+      // Org picker — e2e-test-org should be the default (pre-selected via org hint).
+      // Just hit Enter to accept.
+      { waitFor: /Select organization/, send: '\n', delay: 500 },
+      // Project picker — pick user1 (User A's project)
+      { waitFor: /Which project do you want to use/, send: '\n', delay: 500 },
+      // Wait for sync to complete
+      { waitFor: /Pulled \d+ secret|capy push|Successfully/, send: '' },
+    ],
+  });
+
+  assert(initResult.exitCode === 0, `Auto-switch init failed (exit ${initResult.exitCode}): ${initResult.stdout}\n${initResult.stderr}`);
+
+  // Verify keep.lock points to e2e-test-org
+  const keepPath = join(SANDBOX_USER2, 'keep.lock');
+  assert(existsSync(keepPath), 'keep.lock not created after auto-switch init');
+  const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
+  assert(
+    keep.org_id === orgAId,
+    `keep.lock org_id should be ${orgAId} (redeemed org), got: ${keep.org_id}`,
+  );
+
+  // Verify .env has secrets
+  const envPath = join(SANDBOX_USER2, '.env');
+  assert(existsSync(envPath), '.env not created after auto-switch init');
+  const envContent = readFileSync(envPath, 'utf-8');
+  const varCount = envContent.split('\n').filter(l => l.includes('=') && !l.startsWith('#')).length;
+  assert(varCount >= 10, `Expected 10+ variables after auto-switch, got ${varCount}`);
+}
+
+/** Init in a fresh dir with multiple orgs and no org hint (tests session fallback scan) */
+async function testInitMultiOrgNoCurrent(): Promise<void> {
+  log('User B inits in fresh dir with multiple orgs (no org hint)...');
+
+  const result = await spawnCapy([], {
+    cwd: TEMP_MULTIORG,
+    user: 'B',
+    timeout: 30000,
+    interactions: [
+      // Org picker — no hint, shows flat list. Pick first org.
+      { waitFor: /Select organization/, send: '\n', delay: 500 },
+      // Project picker
+      { waitFor: /Which project do you want to use/, send: '\n', delay: 500 },
+      // Wait for sync
+      { waitFor: /Pulled \d+ secret|capy push|Successfully|Everything is up to date/, send: '' },
+    ],
+  });
+
+  assert(result.exitCode === 0, `Multi-org init failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+
+  // Session fallback scan should have found existing session (no OAuth prompt)
+  assert(
+    /\((cached|refreshed)\)/.test(result.stdout),
+    `Expected cached/refreshed auth (session fallback scan), got: ${result.stdout}`,
+  );
+
+  // Verify project was created
+  assert(existsSync(join(TEMP_MULTIORG, 'keep.lock')), 'keep.lock not created in temp dir');
+  assert(existsSync(join(TEMP_MULTIORG, '.env')), '.env not created in temp dir');
+}
+
+/** Cross-org exfiltration guard: .env with capy: values from wrong org is blocked */
+async function testCrossOrgExfiltrationGuard(): Promise<void> {
+  log('Testing cross-org exfiltration guard...');
+
+  // Copy User A's encrypted .env into the temp dir
+  copyFileSync(join(SANDBOX_USER1, '.env'), join(TEMP_EXFIL, '.env'));
+
+  const result = await spawnCapy([], {
+    cwd: TEMP_EXFIL,
+    user: 'B',
+    timeout: 30000,
+    expectFailure: true,
+    interactions: [
+      // Pick e2e-test-org-b (User B's own org — wrong org for these encrypted values)
+      { waitFor: /Select organization/, send: '\x1b[B\n', delay: 500 },
+      // Need to select or create a project — pick "Create a new project"
+      // The list shows existing projects + separator + "Create a new project"
+      { waitFor: /Which project|Project name/, send: '\x1b[B\x1b[B\n', delay: 500 },
+      // If prompted for project name
+      { waitFor: /Project name/, send: 'exfil-test\n', delay: 300 },
+    ],
+  });
+
+  const combined = result.stdout + result.stderr;
+  assert(
+    combined.includes('Cannot initialize') || combined.includes('encrypted with a different'),
+    `Expected cross-org exfiltration error, got: ${combined}`,
+  );
+}
+
+/** Create a new organization during init when user already has orgs */
+async function testInitCreateNewOrgDuringInit(): Promise<void> {
+  log('User B creates new org during init...');
+
+  // Clean .env from exfiltration test
+  const exfilEnv = join(TEMP_EXFIL, '.env');
+  if (existsSync(exfilEnv)) rmSync(exfilEnv);
+  // Also clean any .capy dir from previous test
+  const exfilCapy = join(TEMP_EXFIL, '.capy');
+  if (existsSync(exfilCapy)) rmSync(exfilCapy, { recursive: true });
+
+  const result = await spawnCapy([], {
+    cwd: TEMP_EXFIL,
+    user: 'B',
+    timeout: 30000,
+    interactions: [
+      // Org picker — arrow past existing orgs + separator to "Create new organization +"
+      // User B has 2 orgs, so: org1, org2, separator, Create new = 4 items, need 3 down arrows
+      { waitFor: /Select organization/, send: '\x1b[B\x1b[B\x1b[B\n', delay: 500 },
+      // Org name
+      { waitFor: 'Organization name', send: 'e2e-test-org-c\n' },
+      // Recovery phrase confirmation
+      { waitFor: 'I have saved my recovery phrase', send: 'y\n' },
+      // Project name (no existing projects in new org)
+      { waitFor: 'Project name', send: 'multiorg-test\n' },
+      // No .env to sync — 0 secrets
+      { waitFor: /capy push|Ready to work|Everything is up to date/, send: '' },
+    ],
+  });
+
+  assert(result.exitCode === 0, `Create new org failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+  assert(existsSync(join(TEMP_EXFIL, 'keep.lock')), 'keep.lock not created for new org');
+  assert(
+    result.stdout.includes('e2e-test-org-c'),
+    `Expected new org name in output: ${result.stdout}`,
+  );
+}
+
 // ─── Runner ───────────────────────────────────────────────────────────────────
 
 async function runTest(name: string, fn: () => Promise<any>): Promise<any> {
@@ -1062,6 +1365,16 @@ async function main(): Promise<void> {
     await runTest('Protected branches and role-based access', testBranching);
 
     // (SDK Validation already ran above)
+
+    // Multi-Org
+    console.log('\n\x1b[1m--- Multi-Org ---\x1b[0m');
+    await runTest('capy org with single org (User A)', testOrgSingleOrg);
+    await runTest('capy org switch flow (User B)', testOrgSwitchFlow);
+    await runTest('capy org select current org (User B)', testOrgSelectCurrentOrg);
+    await runTest('Multi-org invite redeem auto-switch', testMultiOrgInviteRedeem);
+    await runTest('Init with multiple orgs + session scan', testInitMultiOrgNoCurrent);
+    await runTest('Cross-org exfiltration guard', testCrossOrgExfiltrationGuard);
+    await runTest('Create new org during init', testInitCreateNewOrgDuringInit);
 
   } catch {
     // Test failure already logged

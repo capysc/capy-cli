@@ -200,6 +200,15 @@ export class ProjectManager {
     writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
   }
 
+  writeSyncStateOrgId(orgId: string): void {
+    const syncStatePath = this.getSyncStatePath();
+    const capyDir = this.getCapyDir();
+    if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
+    const existing = this.readSyncState() || { last_sync: '', synced_variables: [] };
+    existing.org_id = orgId;
+    writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  }
+
   isGitRepository(): boolean {
     const gitPath = join(this.projectRoot, '.git');
     return existsSync(gitPath);
