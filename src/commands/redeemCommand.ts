@@ -2,7 +2,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
 import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
-import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
+import { saveMasterKey, hasOrgKey, findLatestSessionUserId } from '../config/globalConfig';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -27,28 +27,44 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 2. Authenticate, scoped to the invite's org so WorkOS skips org selection
-    const authService = new AuthService(this.apiUrl, this.devMode);
-    const authResult = await authService.authenticate(targetOrgId);
+    // 2. Authenticate — try silent refresh first (no browser popup),
+    //    fall back to full OAuth only if no session exists.
+    //    The crypto layer (HKDF with email binding) is the real identity proof,
+    //    not the OAuth ceremony.
+    //    We don't have a userId yet (joining a new org), so discover the most
+    //    recent session file to reuse an existing login.
+    const existingUserId = findLatestSessionUserId();
+    const authService = new AuthService(this.apiUrl, this.devMode, existingUserId);
+    let authResult = await authService.authenticateSilent(targetOrgId);
     if (!authResult.success) {
-      console.error(`Authentication failed. You need a ${B('Capy')} account to redeem an invite.`);
-      process.exit(1);
+      // No cached session — need interactive auth
+      authResult = await authService.authenticate(targetOrgId);
+      if (!authResult.success) {
+        console.error(`Authentication failed. You need a ${B('Capy')} account to redeem an invite.`);
+        process.exit(1);
+      }
     }
 
     let userId = authResult.user_id!;
     let orgId = authResult.organization_id!;
 
-    // 3. If logged into a different org, authenticate for the invite's org.
+    // 3. If we got a session for a different org (or no org), refresh into the target org.
     //    Multi-org sessions let both orgs coexist — no save/restore needed.
     if (orgId !== targetOrgId) {
-      const switched = await authService.authenticate(targetOrgId);
+      const switched = await authService.authenticateSilent(targetOrgId);
       if (!switched.success) {
-        console.error('Failed to switch to the invited organization. You may not have access.');
-        process.exit(1);
+        // Silent refresh failed — try full OAuth scoped to the target org
+        const oauthResult = await authService.authenticate(targetOrgId);
+        if (!oauthResult.success) {
+          console.error('Failed to authenticate for the invited organization. You may not have access.');
+          process.exit(1);
+        }
+        orgId = oauthResult.organization_id!;
+        userId = oauthResult.user_id!;
+      } else {
+        orgId = targetOrgId;
+        userId = switched.user_id!;
       }
-      orgId = targetOrgId;
-      userId = switched.user_id!;
-      console.log(`  Switched to organization ${B(targetOrgId)}`);
     }
 
     // 4. If user already has the master key, they're already set up
@@ -84,7 +100,7 @@ export class RedeemCommand {
       const { innerUnwrap } = await import('../crypto/inviteCrypto');
       masterKey = innerUnwrap(innerBlob, token, orgId, userEmail);
     } catch {
-      console.error('Failed to unwrap invite. The redeem code may not be intended for your account.');
+      console.error(`Failed to unwrap invite. You're signed in as ${B(userEmail)} — this invite may be for a different account.`);
       process.exit(1);
     }
 

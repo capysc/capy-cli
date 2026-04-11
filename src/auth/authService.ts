@@ -202,11 +202,12 @@ export class AuthService {
       sessions: this.session?.sessions || {},
     };
 
-    // If service returned a JWT (single org), store the session
+    // If service returned a JWT, store the session.
+    // Use the requested organizationId if provided (multi-org with org-scoped auth),
+    // otherwise fall back to single-org detection.
     if (token.access_token) {
-      const resolvedOrgId = organizations?.length === 1
-        ? organizations[0].id
-        : '';
+      const resolvedOrgId = organizationId
+        || (organizations?.length === 1 ? organizations[0].id : '');
 
       if (resolvedOrgId) {
         this.session.sessions[resolvedOrgId] = {
@@ -218,10 +219,11 @@ export class AuthService {
 
       this.saveSession();
 
+      const resolvedOrg = organizations?.find(o => o.id === resolvedOrgId);
       return {
         success: true,
         organization_id: resolvedOrgId,
-        organization_name: organizations?.[0]?.name,
+        organization_name: resolvedOrg?.name || organizations?.[0]?.name,
         user_id: user.id,
         user_email: user.email,
         user_first_name: user.first_name,
