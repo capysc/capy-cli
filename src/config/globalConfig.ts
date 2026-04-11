@@ -97,3 +97,37 @@ export function readAuthSession(userId?: string): object | null {
   if (!content) return null;
   return JSON.parse(content);
 }
+
+// --- Local keep cache (~/.capy/keep/) ---
+
+export function getKeepCachePath(keepHash: string): string {
+  return join(GLOBAL_CAPY_DIR, 'keep', keepHash);
+}
+
+export function writeKeepCache(keepHash: string, envBlob: string): void {
+  try {
+    writeSecureFile(getKeepCachePath(keepHash), envBlob);
+  } catch {
+    // Best-effort — silent on error
+  }
+}
+
+export function readKeepCache(keepHash: string): string | null {
+  return readFileOrNull(getKeepCachePath(keepHash));
+}
+
+export async function fetchSecretsWithCache(
+  serviceClient: { getSecrets(projectId: string, keepHash: string): Promise<{ env_file: string } | null> },
+  projectId: string,
+  keepHash: string,
+): Promise<{ env_file: string } | null> {
+  const cached = readKeepCache(keepHash);
+  if (cached !== null) {
+    return { env_file: cached };
+  }
+  const result = await serviceClient.getSecrets(projectId, keepHash);
+  if (result?.env_file) {
+    writeKeepCache(keepHash, result.env_file);
+  }
+  return result;
+}

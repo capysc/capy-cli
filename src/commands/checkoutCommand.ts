@@ -7,6 +7,7 @@ import { SyncEngine } from '../sync/syncEngine';
 import inquirer from 'inquirer';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { resolveProjectKey } from '../crypto/keyResolver';
+import { fetchSecretsWithCache } from '../config/globalConfig';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -108,7 +109,7 @@ export class CheckoutCommand {
       const hasVars = keep && Object.keys(keep.variables).length > 0;
       if (hasVars) {
         const keepHash = SyncEngine.computeKeepHash(keep, branchName);
-        const blob = await this.serviceClient.getSecrets(projectId, keepHash);
+        const blob = await fetchSecretsWithCache(this.serviceClient, projectId, keepHash);
         if (blob?.env_file) {
           const remoteEnv = this.fileManager.parseEnvContent(blob.env_file);
           const decrypted: Record<string, string> = {};

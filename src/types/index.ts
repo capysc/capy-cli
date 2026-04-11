@@ -119,6 +119,12 @@ export interface DecryptResponse {
   expires_at: string;
   keep_hash?: string;
   latest_keep_hash?: string;
+  /**
+   * The latest keep.json from the server. Only present when the request omitted
+   * keep_hash (i.e. asked for "give me latest"). The client uses this to self-heal
+   * a stale local keep.lock and to bootstrap a fresh checkout.
+   */
+  keep_file?: string;
 }
 
 export interface OrgKeyFile {
