@@ -506,6 +506,169 @@ describe('AuthService', () => {
     });
   });
 
+  describe('authenticateSilent', () => {
+    test('should return cached session for matching org without OAuth', async () => {
+      mockReadAuthSession.mockReturnValue(makeSession());
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticateSilent('org-123');
+
+      expect(result.success).toBe(true);
+      expect(result.organization_id).toBe('org-123');
+      expect(result._auth_method).toBe('cached');
+      // No fetch calls — purely local
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    test('should refresh into a different org silently (no OAuth)', async () => {
+      mockReadAuthSession.mockReturnValue(makeSession());
+
+      mockFetch.mockResolvedValueOnce(mockFetchResponse({
+        access_token: 'org-B-token',
+        refresh_token: 'new-refresh',
+        expires_in: 3600,
+        user: { id: 'user-456', email: 'test@example.com', first_name: 'Test', last_name: 'User' },
+      }));
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticateSilent('org-B');
+
+      expect(result.success).toBe(true);
+      expect(result.organization_id).toBe('org-B');
+      expect(result._auth_method).toBe('refreshed');
+
+      // Only one fetch (the refresh call), no OAuth initiate/exchange
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('should return failure when no session exists (never triggers OAuth)', async () => {
+      const service = new AuthService();
+      const result = await service.authenticateSilent('org-123');
+
+      expect(result.success).toBe(false);
+      // Must NOT have called fetch at all — no OAuth
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    test('session lookup requires matching sessionUserId — without it, session is invisible', async () => {
+      // This is the bug: RedeemCommand created AuthService without sessionUserId,
+      // so loadSession() read from ~/.capy/auth/session.json (legacy path)
+      // instead of ~/.capy/auth/sessions/{userId}.json where the session lives.
+      //
+      // With sessionUserId: session is found → silent refresh works
+      // Without sessionUserId: session is NOT found → falls to OAuth
+      const session = makeSession();
+
+      // When called with userId, return the session
+      mockReadAuthSession.mockImplementation((userId?: string) => {
+        return userId === 'user-456' ? session : null;
+      });
+
+      // WITHOUT sessionUserId — cannot find session
+      const serviceNoUser = new AuthService(undefined, false);
+      const resultNoUser = await serviceNoUser.authenticateSilent('org-123');
+      expect(resultNoUser.success).toBe(false);
+
+      // WITH sessionUserId — finds session
+      const serviceWithUser = new AuthService(undefined, false, 'user-456');
+      const resultWithUser = await serviceWithUser.authenticateSilent('org-123');
+      expect(resultWithUser.success).toBe(true);
+      expect(resultWithUser.organization_id).toBe('org-123');
+    });
+
+    test('should return failure when refresh fails (never triggers OAuth)', async () => {
+      mockReadAuthSession.mockReturnValue(makeSession());
+
+      // Refresh fails
+      mockFetch.mockRejectedValueOnce(new Error('refresh failed'));
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticateSilent('org-B');
+
+      expect(result.success).toBe(false);
+      // Only one fetch (the failed refresh), no OAuth
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('multi-org OAuth (processExchangeResponse)', () => {
+    test('should resolve org when OAuth returns access_token for multi-org user with organizationId', async () => {
+      // Scenario: multi-org user, OAuth with organization_id, server returns access_token
+      const service = new AuthService();
+
+      mockFetch
+        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          token: { access_token: 'org-B-token', refresh_token: 'new-refresh', expires_in: 3600 },
+          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
+          organizations: [
+            { id: 'org-A', workos_org_id: 'workos-A', name: 'Org A' },
+            { id: 'org-B', workos_org_id: 'workos-B', name: 'Org B' },
+          ],
+        }));
+
+      const mockOAuthInstance = {
+        bind: mock(() => Promise.resolve(undefined)),
+        getState: mock(() => 'mock-state'),
+        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
+        getCodeChallenge: mock(() => 'mock-code-challenge'),
+        getCodeVerifier: mock(() => 'mock-code-verifier'),
+        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
+      };
+      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+
+      const result = await service.authenticate('org-B');
+
+      expect(result.success).toBe(true);
+      // MUST resolve to org-B, not '' — this was the bug
+      expect(result.organization_id).toBe('org-B');
+
+      // Token should be stored for org-B
+      const token = service.getToken();
+      expect(token?.access_token).toBe('org-B-token');
+      expect(token?.organization_id).toBe('org-B');
+    });
+
+    test('should fall back to refresh when OAuth returns null access_token for multi-org user', async () => {
+      // Scenario: multi-org user, server returns access_token: null, must refresh into org
+      const service = new AuthService();
+
+      mockFetch
+        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          token: { access_token: null, refresh_token: 'new-refresh', expires_in: 0 },
+          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
+          organizations: [
+            { id: 'org-A', workos_org_id: 'workos-A', name: 'Org A' },
+            { id: 'org-B', workos_org_id: 'workos-B', name: 'Org B' },
+          ],
+        }))
+        // Third fetch: the refresh call for org-B
+        .mockResolvedValueOnce(mockFetchResponse({
+          access_token: 'refreshed-org-B-token',
+          refresh_token: 'rotated-refresh',
+          expires_in: 3600,
+          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
+        }));
+
+      const mockOAuthInstance = {
+        bind: mock(() => Promise.resolve(undefined)),
+        getState: mock(() => 'mock-state'),
+        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
+        getCodeChallenge: mock(() => 'mock-code-challenge'),
+        getCodeVerifier: mock(() => 'mock-code-verifier'),
+        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
+      };
+      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+
+      const result = await service.authenticate('org-B');
+
+      expect(result.success).toBe(true);
+      expect(result.organization_id).toBe('org-B');
+      expect(result._auth_method).toBe('refreshed');
+    });
+  });
+
   describe('refreshToken', () => {
     test('should refresh the current org session', async () => {
       mockReadAuthSession.mockReturnValue(makeSession());
