@@ -169,6 +169,7 @@ export class ServiceClient {
         permissions: string[];
         keep_hash?: string;
         latest_keep_hash?: string;
+        keep_file?: string;
       }>(
         'GET', `/secrets/${projectId}${query}`,
       );
@@ -179,6 +180,7 @@ export class ServiceClient {
         expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
         keep_hash: data.keep_hash,
         latest_keep_hash: data.latest_keep_hash,
+        keep_file: data.keep_file,
       };
     } catch (error: any) {
       // 404 with "No secrets" or "Snapshot not found" — return empty for secrets, propagate snapshot miss
@@ -316,6 +318,17 @@ export class ServiceClient {
       env_blob: envBlob,
       branch,
     });
+  }
+
+  /**
+   * List all projects in the caller's organization. Used by the client to
+   * bootstrap when running in a directory with no local keep.lock.
+   */
+  async listProjects(): Promise<Array<{ id: string; name: string; organization_id: string }>> {
+    const data = await this.request<{
+      projects: Array<{ id: string; name: string; organization_id: string }>;
+    }>('GET', '/projects');
+    return data.projects;
   }
 
   async createBranch(projectId: string, name: string, isProtected: boolean = false): Promise<Branch> {

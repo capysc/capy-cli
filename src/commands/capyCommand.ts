@@ -268,6 +268,48 @@ export class CapyCommand {
       saveMasterKey(selectedOrg.id, encryptedM, authResult.user_id!);
     }
 
+    // Discover existing projects in the org. If any exist, give the user the
+    // choice to bootstrap one of them OR create a new project. This is the path
+    // a teammate hits when cloning a repo with no committed keep.lock.
+    const CREATE_NEW_PROJECT = '__create_new_project__';
+    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
+    try {
+      const listSpinner = ora('Looking for existing projects...').start();
+      existingProjects = await this.serviceClient.listProjects();
+      listSpinner.stop();
+    } catch {
+      // Network or auth issue — fall through to new-project flow
+      existingProjects = [];
+    }
+
+    if (existingProjects.length > 0) {
+      const choices = [
+        ...existingProjects.map(p => ({
+          name: `Sync existing: ${p.name}`,
+          value: p.id,
+        })),
+        new inquirer.Separator(),
+        { name: 'Create a new project', value: CREATE_NEW_PROJECT },
+      ];
+
+      const { projectChoice } = await inquirer.prompt([{
+        type: 'list',
+        name: 'projectChoice',
+        message: 'Which project do you want to use?',
+        choices,
+      }]);
+
+      if (projectChoice !== CREATE_NEW_PROJECT) {
+        const picked = existingProjects.find(p => p.id === projectChoice)!;
+        await this.bootstrapExistingProject(
+          picked,
+          selectedOrg.id,
+          authResult.user_id!,
+        );
+        return;
+      }
+    }
+
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
     const projectName = await this.promptEngine.promptForProjectName(defaultName);
@@ -468,6 +510,111 @@ export class CapyCommand {
       // Install git hooks
       this.installGitHooks();
     }
+  }
+
+  /**
+   * Bootstrap an existing project into the current directory.
+   *
+   * Used when the user lands in a directory with no keep.lock and picks an
+   * existing project from the org's project list. Pulls the latest keep.json
+   * + env_blob for the development branch from the server, decrypts each
+   * variable, writes keep.lock + encrypted .env. After this returns, the
+   * directory looks identical to one that did `capy push` from scratch.
+   */
+  private async bootstrapExistingProject(
+    project: { id: string; name: string; organization_id: string },
+    orgId: string,
+    userId: string,
+  ): Promise<void> {
+    const branch = 'development';
+    const encryptionKey = resolveProjectKey(orgId, project.id, userId);
+
+    const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
+
+    let decryptData;
+    try {
+      decryptData = await this.serviceClient.getDecryptData(
+        project.id,
+        branch,
+        undefined, // ask for latest
+        true,
+      );
+    } catch (err: any) {
+      // 404 with "No secrets" → empty project, write a stub keep.lock and exit
+      if (err instanceof CapyError && err.details?.status === 404 && /No secrets/i.test(err.message)) {
+        fetchSpinner.stop();
+        const stub: KeepFile = {
+          version: '3.0',
+          org_id: orgId,
+          project_id: project.id,
+          project_name: project.name,
+          variables: {},
+        };
+        this.fileManager.writeKeepFile(stub);
+        this.projectManager.writeActiveBranch(branch);
+        this.fileManager.ensureCapyGitignore();
+        console.log(`\n${B(project.name)} has no secrets yet.`);
+        console.log(`Add secrets to .env, then run ${B('capy push')}.`);
+        this.installGitHooks();
+        return;
+      }
+      fetchSpinner.fail(`Failed to pull from ${B(project.name)}.`);
+      throw err;
+    }
+
+    if (!decryptData.keep_file) {
+      fetchSpinner.fail(`Server did not return keep.json for ${B(project.name)}.`);
+      throw new CapyError(
+        'Bootstrap failed: server response missing keep_file',
+        ERROR_CODES.SERVICE_ERROR,
+      );
+    }
+
+    // Parse the keep.json the server sent us
+    const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
+    // Make sure project metadata is consistent (server's keep.json may have
+    // been written before project_name existed in the schema)
+    serverKeep.org_id = orgId;
+    serverKeep.project_id = project.id;
+    serverKeep.project_name = project.name;
+
+    // Decrypt the env blob into plaintext
+    const plaintext: Record<string, string> = {};
+    if (decryptData.env_content) {
+      const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
+      for (const [key, value] of Object.entries(encrypted)) {
+        try {
+          plaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
+        } catch {
+          // Skip undecryptable (user lacks variable-level permission)
+        }
+      }
+    }
+
+    // Write keep.lock + encrypted .env locally
+    this.fileManager.writeKeepFile(serverKeep);
+    this.projectManager.writeActiveBranch(branch);
+    this.fileManager.ensureCapyGitignore();
+    this.fileManager.writeEncryptedEnvFile(plaintext, encryptionKey, undefined, serverKeep, branch);
+
+    this.fileManager.writeSyncState({
+      last_sync: new Date().toISOString(),
+      synced_variables: Object.keys(plaintext),
+      user_id: userId,
+    });
+
+    fetchSpinner.succeed(
+      `Pulled ${Object.keys(plaintext).length} secret(s) from ${B(project.name)} (${branch})`,
+    );
+
+    // Stage keep.lock so the user can commit it for the rest of the team
+    try {
+      execSync('git add keep.lock', { stdio: 'pipe' });
+    } catch {
+      // Not a git repo — fine
+    }
+
+    this.installGitHooks();
   }
 
   /**
@@ -735,19 +882,25 @@ export class CapyCommand {
       authResult.user_id!,
     );
 
-    // Read keep.lock
-    const currentKeep = this.projectManager.readKeepFile();
+    // Read keep.lock. Both currentKeep and pinned are mutable because the
+    // remote fetch below may self-heal a stale local keep.lock.
+    let currentKeep = this.projectManager.readKeepFile();
 
     // Build pinned hashes from keep.lock for active branch
-    const pinned: Record<string, string> = {};
-    if (currentKeep) {
-      for (const [varName, entries] of Object.entries(currentKeep.variables)) {
-        const entry = entries.find(e => e.branch === branch);
-        if (entry) {
-          pinned[varName] = entry.value_hash;
+    let pinned: Record<string, string> = {};
+    const rebuildPinned = (keep: KeepFile | null) => {
+      const next: Record<string, string> = {};
+      if (keep) {
+        for (const [varName, entries] of Object.entries(keep.variables)) {
+          const entry = entries.find(e => e.branch === branch);
+          if (entry) {
+            next[varName] = entry.value_hash;
+          }
         }
       }
-    }
+      return next;
+    };
+    pinned = rebuildPinned(currentKeep);
 
     // Read local .env and compute hashes
     const localPlaintext: Record<string, string> = {};
@@ -782,31 +935,53 @@ export class CapyCommand {
     let networkAvailable = true;
 
     try {
-      const hasVariables = currentKeep && Object.keys(currentKeep.variables).length > 0;
-      if (hasVariables) {
-        // Fetch the latest remote blob (not pinned to local keep_hash)
-        // so we can detect remote changes from other team members
-        const decryptData = await this.serviceClient.getDecryptData(
-          projectState.projectId!,
-          branch,
-          undefined, // no keep_hash — get latest for this branch
-          true,      // includeLatestHash
-        );
-        if (decryptData.env_content) {
-          const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-          for (const [key, value] of Object.entries(encrypted)) {
-            try {
-              const plaintext = this.fileManager.decryptValue(value, encryptionKey);
-              remotePlaintext[key] = plaintext;
-              remoteHashes[key] = hashValue(plaintext);
-            } catch {
-              // Skip undecryptable
-            }
+      // Always ask for the latest remote blob for this branch (no keep_hash).
+      // The server returns the env_blob AND the latest keep.json — the client
+      // uses keep.json to self-heal a stale local keep.lock.
+      const decryptData = await this.serviceClient.getDecryptData(
+        projectState.projectId!,
+        branch,
+        undefined, // no keep_hash — get latest for this branch
+        true,      // includeLatestHash
+      );
+
+      if (decryptData.env_content) {
+        const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
+        for (const [key, value] of Object.entries(encrypted)) {
+          try {
+            const plaintext = this.fileManager.decryptValue(value, encryptionKey);
+            remotePlaintext[key] = plaintext;
+            remoteHashes[key] = hashValue(plaintext);
+          } catch {
+            // Skip undecryptable
           }
         }
       }
+
+      // Self-heal: if the server returned a keep_file and it differs from local,
+      // overwrite local keep.lock and rebuild pinned hashes from it. This makes
+      // a stale keep.lock automatically catch up to the server's latest snapshot.
+      if (decryptData.keep_file) {
+        const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
+        const localSerialized = currentKeep ? JSON.stringify(currentKeep) : '';
+        const serverSerialized = JSON.stringify(serverKeep);
+        if (localSerialized !== serverSerialized) {
+          this.fileManager.writeKeepFile(serverKeep);
+          currentKeep = serverKeep;
+          pinned = rebuildPinned(serverKeep);
+        }
+      }
       fetchSpinner.stop();
-    } catch {
+    } catch (err: any) {
+      // Auth/permission errors are hard failures (e.g. user was kicked from org).
+      // Network errors fall back to local-only mode.
+      if (err instanceof CapyError) {
+        const status = err.details?.status;
+        if (status === 401 || status === 403) {
+          fetchSpinner.fail(err.message);
+          throw err;
+        }
+      }
       networkAvailable = false;
       fetchSpinner.fail('Cannot reach remote. Showing local changes only.');
     }
