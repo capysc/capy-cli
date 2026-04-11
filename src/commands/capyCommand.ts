@@ -1124,9 +1124,10 @@ export class CapyCommand {
       // Network errors fall back to local-only mode.
       if (err instanceof CapyError) {
         const status = err.details?.status;
-        if (status === 403) {
-          // User was kicked — clean up local state for this org so stale
-          // keys and session data don't linger.
+        if (status === 403 || status === 404) {
+          // 403 = access denied, 404 = project not found (server hides projects
+          // from kicked users). Either way, the user has been removed — clean up
+          // local state so stale keys don't linger.
           fetchSpinner.fail('Access denied — you may have been removed from this organization.');
           this.cleanupOrgData(projectState.organizationId!, projectState.userId);
           throw err;
