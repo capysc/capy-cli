@@ -106,6 +106,15 @@ export class CapyCommand {
 
     spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
+    // Persist user ID to sync state immediately so the next `capy` run can find
+    // the user-scoped session file at ~/.capy/auth/sessions/{userId}.json.
+    // Without this, sync-state has no user_id, detectProjectState returns
+    // undefined, AuthService loads from the unscoped path and finds nothing,
+    // and the user is sent through OAuth again.
+    if (authResult.user_id) {
+      this.projectManager.writeSyncStateUserId(authResult.user_id);
+    }
+
     // Set token for service client
     const token = this.authService.getToken();
     if (token) {

@@ -495,6 +495,30 @@ async function testInitUserB(): Promise<void> {
   assert(existsSync(join(SANDBOX_USER2, 'keep.lock')), 'User B keep.lock file not created');
 }
 
+/** Phase 1c: Second run after init must use cached session.
+ *  Regression test: init previously never wrote user_id to sync-state, so
+ *  the next `capy` run could not find the user-scoped auth session and
+ *  went back through the full login flow. */
+async function testSessionCachedAfterInit(): Promise<void> {
+  log('Second capy run after User B init should use cached session...');
+
+  const result = await spawnCapy([], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 20000,
+    // No interactions — session should be cached and sync should complete silently
+    interactions: [
+      { waitFor: /Everything is up to date|up to date|keep\.lock updated|capy push/, send: '' },
+    ],
+  });
+
+  assert(result.exitCode === 0, `Second capy run failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+  assert(
+    /\((cached|refreshed)\)/.test(result.stdout),
+    `Expected cached/refreshed auth after init, got: ${result.stdout}`,
+  );
+}
+
 /** Phase 2: User A invites User B as Admin */
 async function testInviteUserB(): Promise<string> {
   log('User A invites User B as Admin...');
@@ -1010,6 +1034,7 @@ async function main(): Promise<void> {
     await runTest('Init User A (10 secrets)', testInitUserA);
     await runTest('Verify branch exists', testBranchExists);
     await runTest('Init User B (0 secrets)', testInitUserB);
+    await runTest('Second run after init uses cached session', testSessionCachedAfterInit);
 
     // SDK Validation (run early, before branching messes with .env)
     console.log('\n\x1b[1m--- SDK Validation ---\x1b[0m');
