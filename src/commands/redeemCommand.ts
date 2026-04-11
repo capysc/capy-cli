@@ -69,13 +69,13 @@ export class RedeemCommand {
 
     // 4. Regardless of whether crypto setup is needed, always update local
     //    state so the next `capy` run targets the redeemed org.
-    this.switchLocalContext(orgId, userId);
+    const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
+    this.switchLocalContext(orgId, userId, orgName);
 
     // 5. If user already has the master key, they're done
     if (hasOrgKey(orgId, userId)) {
-      const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
       console.log('');
-      console.log('  \x1b[32mYou\'re all set — your encryption keys are configured for this organization.\x1b[0m');
+      console.log(`  \x1b[32mYou're all set — your encryption keys are configured for ${B(orgName)}.\x1b[0m`);
       console.log(`  Run ${B('capy')} to sync secrets.`);
       console.log('');
       return;
@@ -114,7 +114,6 @@ export class RedeemCommand {
     const encryptedM = encryptMasterKey(masterKey, wrappingKey);
     saveMasterKey(orgId, encryptedM, userId);
 
-    const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');
     console.log('');
@@ -128,7 +127,7 @@ export class RedeemCommand {
    * if it points to a different org. This ensures the next `capy` run goes
    * through init for the correct org instead of syncing a stale project.
    */
-  private switchLocalContext(orgId: string, userId: string): void {
+  private switchLocalContext(orgId: string, userId: string, orgName: string): void {
     const fileManager = new FileManager();
     fileManager.writeSyncState({
       last_sync: '',
@@ -136,6 +135,7 @@ export class RedeemCommand {
       user_id: userId,
       org_id: orgId,
     });
+    console.log(`  Sync state updated → ${B(orgName)}`);
 
     const keepPath = join(process.cwd(), 'keep.lock');
     if (existsSync(keepPath)) {
@@ -143,9 +143,11 @@ export class RedeemCommand {
         const keepContent = JSON.parse(readFileSync(keepPath, 'utf-8'));
         if (keepContent.org_id !== orgId) {
           unlinkSync(keepPath);
+          console.log('  Removed stale keep.lock (different org)');
         }
       } catch {
         unlinkSync(keepPath);
+        console.log('  Removed invalid keep.lock');
       }
     }
   }
