@@ -237,7 +237,7 @@ export class CapyCommand {
         if (!scopedAuth.success) {
           orgSpinner.text = 'Re-authenticating...';
           this.authService.clearToken();
-          scopedAuth = await this.authService.authenticate(selectedOrg.workos_org_id);
+          scopedAuth = await this.authService.authenticate(selectedOrg.id);
           if (!scopedAuth.success) {
             orgSpinner.fail('Failed to authenticate with organization');
             throw new CapyError(

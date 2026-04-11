@@ -1,9 +1,9 @@
-import { unlinkSync, existsSync } from 'fs';
+import { unlinkSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { lockSync, unlockSync } from 'proper-lockfile';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
-import { saveAuthSession, readAuthSession, getAuthSessionPath } from '../config/globalConfig';
+import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir } from '../config/globalConfig';
 
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
   const res = await fetch(url, {
@@ -473,9 +473,37 @@ export class AuthService {
       const data = readAuthSession(this.sessionUserId) as SessionStore | null;
       if (data && data.version === 2) {
         this.session = data;
+        return;
       }
     } catch {
       // Invalid session file, ignore
+    }
+
+    // No session found at the expected path. If we don't know the userId,
+    // scan ~/.capy/auth/sessions/ for any existing session file.
+    // This handles the post-redeem flow where the invitee runs `capy` in a
+    // new project directory that has no sync-state (and thus no userId hint).
+    if (!this.sessionUserId) {
+      try {
+        const sessionsDir = join(getGlobalCapyDir(), 'auth', 'sessions');
+        if (!existsSync(sessionsDir)) return;
+        const files = readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+        for (const file of files) {
+          try {
+            const userId = file.replace('.json', '');
+            const data = readAuthSession(userId) as SessionStore | null;
+            if (data && data.version === 2) {
+              this.session = data;
+              this.sessionUserId = userId;
+              return;
+            }
+          } catch {
+            // Skip invalid files
+          }
+        }
+      } catch {
+        // Sessions directory doesn't exist or isn't readable
+      }
     }
   }
 
