@@ -72,28 +72,37 @@ export class RedeemCommand {
     const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
     this.switchLocalContext(orgId, userId, orgName);
 
-    // 5. If user already has the master key, they're done
+    const serviceToken = authService.getToken();
+    const serviceClient = new ServiceClient(this.apiUrl);
+    if (serviceToken) serviceClient.setToken(serviceToken);
+
+    // 5. Always verify membership via co-decrypt, even if local key exists.
+    //    A kicked user still has the local org key — co-decrypt is the
+    //    server-side gate that proves current membership.
+    let innerBlob: string;
+    try {
+      const result = await serviceClient.coDecrypt(orgId, ciphertext);
+      innerBlob = result.plaintext;
+    } catch (err: any) {
+      // If the user had a local key from a previous invite, remove it —
+      // they've been kicked and should not retain local access.
+      if (hasOrgKey(orgId, userId)) {
+        const { getOrgKeyPath } = await import('../config/globalConfig');
+        const keyPath = getOrgKeyPath(orgId, userId);
+        if (existsSync(keyPath)) unlinkSync(keyPath);
+      }
+      console.error(`\nCo-decryption failed: ${err.message}`);
+      console.error('You may not be a member of this organization, or the invite has been revoked.');
+      process.exit(1);
+    }
+
+    // 6. If user already has the master key and co-decrypt passed, they're good
     if (hasOrgKey(orgId, userId)) {
       console.log('');
       console.log(`  \x1b[32mYou're all set — your encryption keys are configured for ${B(orgName)}.\x1b[0m`);
       console.log(`  Run ${B('capy')} to sync secrets.`);
       console.log('');
       return;
-    }
-
-    const serviceToken = authService.getToken();
-    const serviceClient = new ServiceClient(this.apiUrl);
-    if (serviceToken) serviceClient.setToken(serviceToken);
-
-    // 6. Service co-decrypts (strips outer KMS layer)
-    let innerBlob: string;
-    try {
-      const result = await serviceClient.coDecrypt(orgId, ciphertext);
-      innerBlob = result.plaintext;
-    } catch (err: any) {
-      console.error(`Co-decryption failed: ${err.message}`);
-      console.error('You may not be a member of this organization, or the invite has been revoked.');
-      process.exit(1);
     }
 
     // 7. Strip inner layer with T → recover M

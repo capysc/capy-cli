@@ -9,7 +9,7 @@
  */
 
 import { spawn, ChildProcess, execSync } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, copyFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, copyFileSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 
@@ -1093,7 +1093,7 @@ async function testOrgSelectCurrentOrg(): Promise<void> {
  * User A invites them to e2e-test-org. After redeem, `capy` should automatically
  * land in e2e-test-org without manual org picker fumbling.
  */
-async function testMultiOrgInviteRedeem(): Promise<void> {
+async function testMultiOrgInviteRedeem(): Promise<string> {
   // --- Setup: put User B in the "wrong" org state ---
 
   // 1. Kick User B from e2e-test-org
@@ -1200,7 +1200,67 @@ async function testMultiOrgInviteRedeem(): Promise<void> {
   const envContent = readFileSync(envPath, 'utf-8');
   const varCount = envContent.split('\n').filter(l => l.includes('=') && !l.startsWith('#')).length;
   assert(varCount >= 10, `Expected 10+ variables after init, got ${varCount}`);
+
+  return redeemCode;
 }
+
+/**
+ * SECURITY TEST: A kicked user must NOT be able to re-use an old invite code
+ * to regain access to an organization. The server-side co-decrypt must reject
+ * the request, and the local org key must be deleted.
+ */
+async function testKickedInviteReuse(): Promise<void> {
+  // User B is currently in e2e-test-org from testMultiOrgInviteRedeem.
+  // We need the redeem code from that test (passed via runner).
+
+  // 1. Kick User B from e2e-test-org
+  log('Kicking User B to test invite code reuse...');
+  const kickResult = await spawnCapy(['kick', USER_B_EMAIL], {
+    cwd: SANDBOX_USER1,
+    user: 'A',
+    timeout: 15000,
+    interactions: [
+      { waitFor: 'Remove', send: 'y\n' },
+    ],
+  });
+  assert(kickResult.exitCode === 0, `Kick failed: ${kickResult.stdout}\n${kickResult.stderr}`);
+
+  // 2. Wait for rate limit
+  await new Promise(r => setTimeout(r, 10000));
+
+  // 3. User B tries to redeem the SAME invite code from before the kick
+  log('User B attempts to re-use old invite code after being kicked...');
+  const redeemResult = await spawnCapy(['redeem', kickedRedeemCode], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 20000,
+    expectFailure: true,
+    interactions: [],
+  });
+
+  // 4. Must fail — server should reject co-decrypt for a kicked user
+  const combined = redeemResult.stdout + redeemResult.stderr;
+  assert(
+    redeemResult.exitCode !== 0,
+    `SECURITY VIOLATION: Kicked user was able to re-use invite code! exit ${redeemResult.exitCode}: ${combined}`,
+  );
+  assert(
+    combined.includes('Co-decryption failed') || combined.includes('not be a member') || combined.includes('revoked'),
+    `Expected membership rejection error, got: ${combined}`,
+  );
+
+  // 5. Verify the local org key was cleaned up
+  const userAKeep = JSON.parse(readFileSync(join(SANDBOX_USER1, 'keep.lock'), 'utf-8'));
+  const orgAId = userAKeep.org_id;
+  const orgKeyPath = join(HOME_B, '.capy', 'orgs', orgAId);
+  assert(
+    !existsSync(join(orgKeyPath, 'users')) || !readdirSync(join(orgKeyPath, 'users')).length,
+    `Local org key should be deleted after kicked redeem attempt`,
+  );
+}
+
+// Module-level variable to pass redeem code between tests
+let kickedRedeemCode = '';
 
 /** Init in a fresh dir with multiple orgs and no org hint (tests session fallback scan) */
 async function testInitMultiOrgNoCurrent(): Promise<void> {
@@ -1366,7 +1426,8 @@ async function main(): Promise<void> {
     await runTest('capy org with single org (User A)', testOrgSingleOrg);
     await runTest('capy org switch flow (User B)', testOrgSwitchFlow);
     await runTest('capy org select current org (User B)', testOrgSelectCurrentOrg);
-    await runTest('Multi-org invite redeem auto-switch', testMultiOrgInviteRedeem);
+    kickedRedeemCode = await runTest('Multi-org invite redeem auto-switch', testMultiOrgInviteRedeem);
+    await runTest('SECURITY: kicked user cannot re-use invite code', testKickedInviteReuse);
     await runTest('Init with multiple orgs + session scan', testInitMultiOrgNoCurrent);
     await runTest('Cross-org exfiltration guard', testCrossOrgExfiltrationGuard);
     await runTest('Create new org during init', testInitCreateNewOrgDuringInit);
