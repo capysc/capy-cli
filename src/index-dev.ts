@@ -12,6 +12,24 @@ import { CliOptions } from './types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+// Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
+process.on('uncaughtException', (error: any) => {
+  if (error?.name === 'ExitPromptError') {
+    console.log('\nCancelled.');
+    process.exit(0);
+  }
+  console.error(error);
+  process.exit(1);
+});
+process.on('unhandledRejection', (error: any) => {
+  if (error?.name === 'ExitPromptError') {
+    console.log('\nCancelled.');
+    process.exit(0);
+  }
+  console.error(error);
+  process.exit(1);
+});
+
 // Load .env from the CLI package directory (not the user's project cwd)
 config({ path: resolve(__dirname, '..', '.env') });
 
