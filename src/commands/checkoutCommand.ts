@@ -3,11 +3,9 @@ import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { SyncEngine } from '../sync/syncEngine';
 import inquirer from 'inquirer';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { resolveProjectKey } from '../crypto/keyResolver';
-import { fetchSecretsWithCache } from '../config/globalConfig';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -16,7 +14,6 @@ export class CheckoutCommand {
   private fileManager: FileManager;
   private authService: AuthService;
   private serviceClient: ServiceClient;
-  private syncEngine: SyncEngine;
   private devMode: boolean;
 
   constructor(devMode: boolean = false) {
@@ -25,7 +22,6 @@ export class CheckoutCommand {
     this.fileManager = new FileManager();
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
-    this.syncEngine = new SyncEngine();
 
     this.serviceClient.setTokenRefresher(async () => {
       const refreshed = await this.authService.refreshToken();
@@ -100,29 +96,43 @@ export class CheckoutCommand {
 
     // Save active branch to .capy/branch (local state, not committed)
     this.projectManager.writeActiveBranch(branchName);
-    const keep = this.projectManager.readKeepFile()!;
 
-    // Pull secrets for this branch from Keep
+    // Pull latest secrets for this branch from the server. Use the "no keep_hash"
+    // path so the server resolves to the latest snapshot for the branch and
+    // returns its keep_file — that lets us self-heal local keep.lock if it's
+    // stale OR doesn't yet know about this branch (which is the common case
+    // when switching to a branch that was created by a teammate).
     const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
 
     try {
-      const hasVars = keep && Object.keys(keep.variables).length > 0;
-      if (hasVars) {
-        const keepHash = SyncEngine.computeKeepHash(keep, branchName);
-        const blob = await fetchSecretsWithCache(this.serviceClient, projectId, keepHash);
-        if (blob?.env_file) {
-          const remoteEnv = this.fileManager.parseEnvContent(blob.env_file);
-          const decrypted: Record<string, string> = {};
-          for (const [key, value] of Object.entries(remoteEnv)) {
+      const decryptData = await this.serviceClient.getDecryptData(
+        projectId,
+        branchName,
+        undefined, // ask for latest
+        true,
+      );
+
+      // Self-heal local keep.lock from server's keep_file if returned
+      let keepForWrite = this.projectManager.readKeepFile()!;
+      if (decryptData.keep_file) {
+        const serverKeep = JSON.parse(decryptData.keep_file);
+        this.fileManager.writeKeepFile(serverKeep);
+        keepForWrite = serverKeep;
+      }
+
+      if (decryptData.env_content) {
+        const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
+        const decrypted: Record<string, string> = {};
+        for (const [key, value] of Object.entries(remoteEnv)) {
+          try {
             decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
+          } catch {
+            // Skip undecryptable
           }
-          this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keep, branchName);
-          syncSpinner.stop();
-          console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
-        } else {
-          syncSpinner.stop();
-          console.log(`No secrets yet for ${branchName}`);
         }
+        this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
+        syncSpinner.stop();
+        console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
       } else {
         syncSpinner.stop();
         console.log(`No secrets yet for ${branchName}`);
