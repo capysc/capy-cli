@@ -970,9 +970,25 @@ async function testBranching(): Promise<void> {
   });
   assert(redeemResult.exitCode === 0, `Redeem failed: ${redeemResult.stdout}\n${redeemResult.stderr}`);
 
-  // User B's existing keep.lock (from earlier bootstrap) is on development.
-  // They switch to e2e-test-main — checkoutCommand fetches latest from the
-  // server and self-heals their keep.lock.
+  // User B's keep.lock was deleted when they were kicked. Re-bootstrap by
+  // running capy (init flow picks the org from the redeem sync-state hint).
+  log('User B re-bootstraps after re-invite...');
+  const reBootstrap = await spawnCapy([], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 30000,
+    interactions: [
+      // Org picker — redeem hint should pre-select User A's org
+      { waitFor: /Select organization|Authenticat/, send: '\n', delay: 500 },
+      // Project picker
+      { waitFor: /Which project|Pulled|Everything/, send: '\n', delay: 500 },
+      // Wait for sync
+      { waitFor: /Pulled \d+ secret|capy push|Successfully|Everything is up to date/, send: '' },
+    ],
+  });
+  assert(reBootstrap.exitCode === 0, `Re-bootstrap failed: ${reBootstrap.stdout}\n${reBootstrap.stderr}`);
+
+  // Now switch to the protected branch
   const memberCheckout = await spawnCapy(['checkout', 'e2e-test-main'], {
     cwd: SANDBOX_USER2,
     user: 'B',

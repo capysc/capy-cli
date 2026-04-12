@@ -1012,12 +1012,21 @@ export class CapyCommand {
       );
     }
 
-    const encryptionKey = await resolveProjectKey(
-      projectState.organizationId!,
-      projectState.projectId!,
-      authResult.user_id!,
-      this.keyServiceOps(),
-    );
+    let encryptionKey: string;
+    try {
+      encryptionKey = await resolveProjectKey(
+        projectState.organizationId!,
+        projectState.projectId!,
+        authResult.user_id!,
+        this.keyServiceOps(),
+      );
+    } catch (err: any) {
+      // co-decrypt rejected (e.g. kicked user) — clean up local state
+      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+        this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+      }
+      throw err;
+    }
 
     // Read keep.lock. currentKeep is mutable because the remote fetch may
     // self-heal a stale local keep.lock — but `pinned` and `originalKeep` are
