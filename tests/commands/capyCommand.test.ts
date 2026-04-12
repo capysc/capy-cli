@@ -27,11 +27,13 @@ mock.module('../../src/crypto/keyManager', () => ({
   deriveWrappingKey: mock(() => Buffer.alloc(32, 2)),
 }));
 mock.module('../../src/crypto/keyResolver', () => ({
-  resolveProjectKey: mock(() => 'mock-derived-project-key-hex'),
+  resolveProjectKey: mock(async () => 'mock-derived-project-key-hex'),
+  wrapAndSaveMasterKey: mock(async () => undefined),
   hasOrgKey: mock(() => true),
 }));
 mock.module('../../src/config/globalConfig', () => ({
-  saveMasterKey: mock(() => undefined),
+  writeKeepCache: mock(() => undefined),
+  fetchSecretsWithCache: mock(async () => null),
 }));
 mock.module('inquirer', () => ({
   default: {
@@ -122,9 +124,11 @@ describe('CapyCommand', () => {
 
     mockAuthService = {
       authenticate: mock(() => undefined),
+      authenticateSilent: mock(() => Promise.resolve({ success: false })),
       getToken: mock(() => undefined),
       setOrganizationId: mock(() => undefined),
       setSessionUserId: mock(() => undefined),
+      refreshToken: mock(() => Promise.resolve(false)),
       createOrganization: mock(() => undefined)
     } as any;
 
@@ -138,6 +142,9 @@ describe('CapyCommand', () => {
       getSecrets: mock(() => Promise.resolve(null)),
       createBranch: mock(() => Promise.resolve({ id: 'b1', name: 'staging', project_id: 'p1', is_protected: false })),
       listBranches: mock(() => Promise.resolve([])),
+      coDecrypt: mock(() => Promise.resolve({ plaintext: '' })),
+      wrapOuterLayer: mock(() => Promise.resolve({ ciphertext: '' })),
+      listProjects: mock(() => Promise.resolve([])),
     } as any;
 
     mockSyncEngine = {
@@ -618,6 +625,14 @@ describe('CapyCommand', () => {
     };
 
     beforeEach(() => {
+      // syncProject tries authenticateSilent first, then falls back to authenticate
+      mockAuthService.authenticateSilent.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        _auth_method: 'cached',
+      });
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
         organization_id: 'org-123',
@@ -662,13 +677,15 @@ describe('CapyCommand', () => {
 
       await (capyCommand as any).syncProject(mockProjectState);
 
-      expect(mockAuthService.authenticate).toHaveBeenCalledWith('org-123');
+      // syncProject tries authenticateSilent first
+      expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('org-123');
       expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
 
       consoleSpy.mockRestore();
     });
 
     test('should handle authentication failure during sync', async () => {
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: false });
       mockAuthService.authenticate.mockResolvedValue({
         success: false,
         error: 'Auth failed'
