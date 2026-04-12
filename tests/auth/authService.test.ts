@@ -597,10 +597,10 @@ describe('AuthService', () => {
       expect(session.sessions).not.toHaveProperty('org-OLD');
     });
 
-    test('authenticate with unknown org ID uses existing valid session', async () => {
+    test('authenticate with unknown org ID does NOT fall through to another org', async () => {
       // If keep.lock has an org ID that doesn't exist in the session,
-      // authenticate should fall through to any valid session rather than
-      // forcing OAuth. The server (KMS co-decrypt) is the real org gate.
+      // authenticate must NOT silently use a different org's session.
+      // It should try refresh (fails), then fall to OAuth.
       const session: SessionStore = {
         version: 2,
         user_id: 'user-456',
@@ -616,19 +616,35 @@ describe('AuthService', () => {
       };
       mockReadAuthSession.mockReturnValue(session);
 
-      // Refresh for 'org-OLD' will fail
-      mockFetch.mockRejectedValueOnce(new Error('refresh failed'));
+      // Refresh for 'org-OLD' fails, OAuth mock returns success
+      mockFetch
+        .mockRejectedValueOnce(new Error('refresh failed'))
+        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          token: { access_token: fakeJwt({ org_id: 'workos-org-OLD' }), refresh_token: 'new-refresh', expires_in: 3600 },
+          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
+          organizations: [{ id: 'org-OLD', workos_org_id: 'workos-org-OLD', name: 'Old Org' }],
+        }));
+
+      const mockOAuthInstance = {
+        bind: mock(() => Promise.resolve(undefined)),
+        getState: mock(() => 'mock-state'),
+        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
+        getCodeChallenge: mock(() => 'mock-challenge'),
+        getCodeVerifier: mock(() => 'mock-verifier'),
+        startAuthFlow: mock(() => Promise.resolve('code-123')),
+      };
+      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
 
       const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate('org-OLD');
 
+      // Should have gone to OAuth, not used org-NEW's session
       expect(result.success).toBe(true);
-      // Falls through to the valid org-NEW session — no OAuth needed
-      expect(result.organization_id).toBe('org-NEW');
-      expect(result._auth_method).toBe('cached');
+      expect(result.organization_id).toBe('org-OLD');
     });
 
-    test('refreshForOrg replaces all sessions with the new one', async () => {
+    test('refreshForOrg merges new session, preserves others', async () => {
       const session = makeSession({
         organizations: [
           { id: 'org-A', workos_org_id: 'workos-org-A', name: 'Org A' },
@@ -654,10 +670,10 @@ describe('AuthService', () => {
 
       expect(result.success).toBe(true);
 
-      // After refreshing into org-B, the old org-A session should be gone
+      // After refreshing into org-B, org-A session should still be preserved
       const savedSession = mockSaveAuthSession.mock.calls[0]?.[0] as SessionStore;
       expect(savedSession.sessions).toHaveProperty('org-B');
-      expect(savedSession.sessions).not.toHaveProperty('org-A');
+      expect(savedSession.sessions).toHaveProperty('org-A');
     });
   });
 });

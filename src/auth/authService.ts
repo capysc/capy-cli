@@ -380,13 +380,11 @@ export class AuthService {
         // JWT decode failed — use the orgId as-is
       }
 
-      // Replace all sessions — only one org token should exist at a time.
-      // Holding tokens for other orgs is an access-control risk.
-      this.session.sessions = {
-        [resolvedOrgId]: {
-          access_token: data.access_token,
-          expires_at: Date.now() + (data.expires_in * 1000),
-        },
+      // Add/update the session for this org. Other org sessions are preserved —
+      // the KMS co-decrypt endpoint is the security gate per-org, not the client.
+      this.session.sessions[resolvedOrgId] = {
+        access_token: data.access_token,
+        expires_at: Date.now() + (data.expires_in * 1000),
       };
       this.session.refresh_token = data.refresh_token;
 
@@ -559,15 +557,12 @@ export class AuthService {
     try {
       const data = readAuthSession(this.sessionUserId) as SessionStore | null;
       if (data && data.version === 2) {
-        // Only keep sessions for known orgs, and keep at most one.
-        // Stale tokens for the wrong org are an access-control violation.
+        // Prune sessions for orgs not in the organizations list (stale/deleted).
+        // Keep all sessions for known orgs — multi-org users need tokens for each.
         const knownOrgIds = new Set(data.organizations.map(o => o.id));
-        let kept: string | null = null;
         for (const key of Object.keys(data.sessions)) {
-          if (!knownOrgIds.has(key) || kept !== null) {
+          if (!knownOrgIds.has(key)) {
             delete data.sessions[key];
-          } else {
-            kept = key;
           }
         }
         this.session = data;
