@@ -85,11 +85,14 @@ export class RedeemCommand {
     } catch (err: any) {
       // If the user had a local key from a previous invite, remove it —
       // they've been kicked and should not retain local access.
-      if (hasOrgKey(orgId, userId)) {
-        const { getOrgKeyPath } = await import('../config/globalConfig');
-        const keyPath = getOrgKeyPath(orgId, userId);
-        if (existsSync(keyPath)) unlinkSync(keyPath);
-      }
+      try {
+        const { getGlobalCapyDir } = await import('../config/globalConfig');
+        const orgDir = join(getGlobalCapyDir(), 'orgs', orgId);
+        if (existsSync(orgDir)) {
+          const { rmSync } = await import('fs');
+          rmSync(orgDir, { recursive: true });
+        }
+      } catch {}
       console.error(`\nCo-decryption failed: ${err.message}`);
       console.error('You may not be a member of this organization, or the invite has been revoked.');
       process.exit(1);
