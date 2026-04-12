@@ -1221,13 +1221,16 @@ export class CapyCommand {
         && envMeta.project_id === projectState.projectId);
     }
 
+    // Hide local column for onboarding — it's all "-" and adds noise
+    const effectiveShowLocal = isOnboarding ? false : showLocal;
+
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
     console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
 
     // Display comparison table
-    this.displayComparisonTable(diffs, showLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
+    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
 
     console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
