@@ -9,6 +9,14 @@ import { fetchSecretsWithCache } from '../config/globalConfig';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+type RemoteFailure = 'access_denied' | 'network_error' | 'no_data';
+
+function classifyRemoteFailure(reason: string): RemoteFailure {
+  if (reason.includes('do not have access')) return 'access_denied';
+  if (reason.includes('no data')) return 'no_data';
+  return 'network_error';
+}
+
 export interface DiffResult {
   variable: string;
   type: 'new' | 'changed' | 'deleted';
@@ -228,6 +236,9 @@ export class StatusCommand {
     }
 
     const hasRemote = Object.keys(remoteHashes).length > 0;
+    const remoteFailure: RemoteFailure | undefined = !hasRemote && remoteSkipReason
+      ? classifyRemoteFailure(remoteSkipReason)
+      : undefined;
     const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
 
     if (this.terse) {
@@ -267,6 +278,8 @@ export class StatusCommand {
 
     if (localMatchesPinned) {
       console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);
+    } else if (remoteFailure) {
+      console.log(`x Out of sync (${diffs.length} difference${diffs.length !== 1 ? 's' : ''})`);
     } else {
       const localDiffs = diffs.filter(d => d.local !== d.pinned);
       console.log(`x Local has changes (${localDiffs.length} difference${localDiffs.length !== 1 ? 's' : ''})`);
@@ -287,11 +300,18 @@ export class StatusCommand {
 
     console.log('');
 
+    const failureLabel = remoteFailure === 'access_denied' ? '(access denied)'
+      : remoteFailure === 'network_error' ? '(network error)'
+      : remoteFailure === 'no_data' ? '(no data)' : undefined;
+
     for (const diff of diffs) {
       let prefix: string;
       let desc: string;
 
-      if (diff.type === 'new') {
+      if (failureLabel) {
+        prefix = '?';
+        desc = failureLabel;
+      } else if (diff.type === 'new') {
         prefix = '+';
         if (diff.remote && !diff.pinned) desc = '(new on remote)';
         else if (diff.local && !diff.pinned) desc = '(new locally)';
