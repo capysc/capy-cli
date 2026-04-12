@@ -337,7 +337,11 @@ export class StatusCommand {
     }
 
     console.log('');
-    console.log(`  Run ${B('capy')} to sync these changes.`);
+    if (remoteFailure === 'access_denied') {
+      console.log(`  If you have already been invited, run ${B('capy redeem [invite-code]')} to access these secrets.`);
+    } else {
+      console.log(`  Run ${B('capy')} to sync these changes.`);
+    }
     process.exit(0);
   }
 }
