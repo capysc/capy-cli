@@ -4,6 +4,7 @@ import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 import { readMasterKey } from '../config/globalConfig';
 import { decryptMasterKey, deriveWrappingKey } from '../crypto/keyManager';
+import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
 import {
   generateInviteToken,
   innerWrap,
@@ -59,20 +60,35 @@ export class InviteCommand {
       }
 
 
-      // Read and unwrap master key
+      // Read and unwrap master key (double-wrapped: KMS outer + local inner)
       const encryptedM = readMasterKey(orgId, userId);
       if (!encryptedM) {
         console.error('No master key found for this organization. Only the org owner can invite.');
         process.exit(1);
       }
 
-      const wrappingKey = deriveWrappingKey(userId, orgId);
       let masterKey: Buffer;
       try {
-        masterKey = decryptMasterKey(encryptedM, wrappingKey);
-      } catch {
-        console.error('Failed to unwrap master key. Re-authenticate and try again.');
-        process.exit(1);
+        // Strip KMS outer layer via server co-decrypt
+        const { plaintext: innerBlob } = await serviceClient.coDecrypt(orgId, encryptedM);
+        // Strip local inner layer
+        const wrappingKey = deriveWrappingKey(userId, orgId);
+        masterKey = decryptMasterKey(innerBlob, wrappingKey);
+      } catch (err: any) {
+        // Fallback: try legacy single-wrapped (no KMS outer)
+        try {
+          const wrappingKey = deriveWrappingKey(userId, orgId);
+          masterKey = decryptMasterKey(encryptedM, wrappingKey);
+          // Migration: re-wrap with KMS outer layer
+          const keyOps = {
+            coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+            wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+          };
+          await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
+        } catch {
+          console.error('Failed to unwrap master key. Re-authenticate and try again.');
+          process.exit(1);
+        }
       }
 
       // Prompt for role

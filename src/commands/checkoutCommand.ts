@@ -5,7 +5,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import inquirer from 'inquirer';
 import { CapyError, ERROR_CODES } from '../types/index';
-import { resolveProjectKey } from '../crypto/keyResolver';
+import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -69,8 +69,12 @@ export class CheckoutCommand {
     const projectId = projectState.projectId!;
     const orgId = projectState.organizationId!;
 
-    // Resolve encryption key from global keyring
-    const encryptionKey = resolveProjectKey(orgId, projectId, authResult.user_id!);
+    // Resolve encryption key from global keyring (requires server co-decrypt)
+    const keyOps: KeyServiceOps = {
+      coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+      wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+    };
+    const encryptionKey = await resolveProjectKey(orgId, projectId, authResult.user_id!, keyOps);
 
     if (options.create) {
       await this.createBranch(projectId, branchName, encryptionKey, options.protected);

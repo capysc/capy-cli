@@ -37,6 +37,9 @@ export class ServiceClient {
 
   constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
+    if (devMode) {
+      console.error(`[dev] ServiceClient → ${this.apiUrl}`);
+    }
   }
 
   setToken(token: ServiceToken): void {

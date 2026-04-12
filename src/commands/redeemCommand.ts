@@ -3,8 +3,7 @@ import { join } from 'path';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
-import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
-import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
+import { wrapAndSaveMasterKey, hasOrgKey } from '../crypto/keyResolver';
 import { FileManager } from '../files/fileManager';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -118,10 +117,12 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 8. Re-encrypt M under this user's wrapping key and store locally
-    const wrappingKey = deriveWrappingKey(userId, orgId);
-    const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-    saveMasterKey(orgId, encryptedM, userId);
+    // 8. Double-wrap M (inner local key + outer KMS) and store locally
+    const keyOps = {
+      coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+      wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+    };
+    await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
 
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');

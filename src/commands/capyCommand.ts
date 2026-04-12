@@ -23,14 +23,14 @@ import {
   generateSeedPhrase,
   validateSeedPhrase,
   seedPhraseToMasterKey,
-  encryptMasterKey,
-  deriveWrappingKey,
 } from '../crypto/keyManager';
 import {
   resolveProjectKey,
+  wrapAndSaveMasterKey,
   hasOrgKey,
+  KeyServiceOps,
 } from '../crypto/keyResolver';
-import { saveMasterKey, writeKeepCache, fetchSecretsWithCache } from '../config/globalConfig';
+import { writeKeepCache, fetchSecretsWithCache } from '../config/globalConfig';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -63,6 +63,16 @@ export class CapyCommand {
       }
       return null;
     });
+  }
+
+  /**
+   * Bridge ServiceClient to the KeyServiceOps interface for key resolution.
+   */
+  private keyServiceOps(): KeyServiceOps {
+    return {
+      coDecrypt: (orgId, ciphertext) => this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
+      wrapOuterLayer: (orgId, plaintext) => this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
+    };
   }
 
   /**
@@ -324,9 +334,7 @@ export class CapyCommand {
       }
 
       const masterKey = seedPhraseToMasterKey(seedPhrase);
-      const wrappingKey = deriveWrappingKey(authResult.user_id!, selectedOrg.id);
-      const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-      saveMasterKey(selectedOrg.id, encryptedM, authResult.user_id!);
+      await wrapAndSaveMasterKey(masterKey, selectedOrg.id, authResult.user_id!, this.keyServiceOps());
     }
 
     // Discover existing projects in the org. If any exist, give the user the
@@ -387,11 +395,12 @@ export class CapyCommand {
 
     const keySpinner = ora('Generating encryption keys...').start();
 
-    // Derive project encryption key from master key
-    const encryptionKey = resolveProjectKey(
+    // Derive project encryption key from master key (requires server co-decrypt)
+    const encryptionKey = await resolveProjectKey(
       selectedOrg.id,
       projectResult.project_id,
       authResult.user_id!,
+      this.keyServiceOps(),
     );
 
     // Create keep file (v3 format)
@@ -590,7 +599,7 @@ export class CapyCommand {
     userId: string,
   ): Promise<void> {
     const branch = 'development';
-    const encryptionKey = resolveProjectKey(orgId, project.id, userId);
+    const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
 
@@ -1016,10 +1025,11 @@ export class CapyCommand {
       );
     }
 
-    const encryptionKey = resolveProjectKey(
+    const encryptionKey = await resolveProjectKey(
       projectState.organizationId!,
       projectState.projectId!,
       authResult.user_id!,
+      this.keyServiceOps(),
     );
 
     // Read keep.lock. currentKeep is mutable because the remote fetch may

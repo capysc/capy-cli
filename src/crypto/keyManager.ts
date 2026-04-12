@@ -180,9 +180,12 @@ export function decryptMasterKey(
 }
 
 /**
- * Derives a 32-byte wrapping key from stable user identity.
- * Uses userId + orgId so the wrapping key survives token rotation.
- * This is a stepping stone — will be replaced by service co-sign.
+ * Derives the inner wrapping key for the master key M.
+ * This is one half of the double-wrap: AES-GCM(M, innerKey).
+ * The other half is the KMS outer layer added by the service.
+ *
+ * The inner key alone cannot unwrap M — the KMS outer layer must be
+ * stripped first via the service's co-decrypt endpoint.
  */
 export function deriveWrappingKey(userId: string, orgId: string): Buffer {
   return createHash('sha256').update(`${userId}:${orgId}`).digest();
