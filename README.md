@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@capy/cli)](https://www.npmjs.com/package/@capy/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org)
-[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
 
 > Secret Ops for people with better things to do
 
@@ -269,4 +269,8 @@ Contributions welcome! Please read our [Contributing Guide](../../CONTRIBUTING.m
 
 ## License
 
-Business Source License 1.1 - see [LICENSE](./LICENSE) for details.
+Copyright (c) 2026 Incentv Technologies Inc.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, version 3.
+
+See [LICENSE](./LICENSE) for the full license text.
