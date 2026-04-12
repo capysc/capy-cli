@@ -35,6 +35,7 @@ const HOME_A = join(tmpdir(), 'capy-e2e-userA');
 const HOME_B = join(tmpdir(), 'capy-e2e-userB');
 const TEMP_MULTIORG = join(tmpdir(), 'capy-e2e-multiorg');
 const TEMP_EXFIL = join(tmpdir(), 'capy-e2e-exfil');
+const TEMP_ORGPICKER = join(tmpdir(), 'capy-e2e-orgpicker');
 
 // Read WorkOS credentials from service .env
 const serviceEnv = readFileSync(join(SERVICE_ROOT, '.env'), 'utf-8');
@@ -366,7 +367,7 @@ async function setup(): Promise<void> {
   sh('git checkout -b e2e-test', SANDBOX_USER1);
 
   // Create temp dirs for multi-org tests
-  for (const dir of [TEMP_MULTIORG, TEMP_EXFIL]) {
+  for (const dir of [TEMP_MULTIORG, TEMP_EXFIL, TEMP_ORGPICKER]) {
     if (existsSync(dir)) rmSync(dir, { recursive: true });
     mkdirSync(dir, { recursive: true });
     sh('git init', dir);
@@ -428,7 +429,7 @@ async function teardown(): Promise<void> {
   }
 
   // Clean HOME dirs and temp dirs
-  for (const dir of [HOME_A, HOME_B, TEMP_MULTIORG, TEMP_EXFIL]) {
+  for (const dir of [HOME_A, HOME_B, TEMP_MULTIORG, TEMP_EXFIL, TEMP_ORGPICKER]) {
     if (existsSync(dir)) rmSync(dir, { recursive: true });
   }
 }
@@ -1302,16 +1303,6 @@ async function testInitMultiOrgNoCurrent(): Promise<void> {
     `Expected cached/refreshed auth (session fallback scan), got: ${result.stdout}`,
   );
 
-  // CRITICAL: org picker must show BOTH orgs — if only one appears, multi-org is broken
-  assert(
-    result.stdout.includes('e2e-test-org-b'),
-    `Org picker missing "e2e-test-org-b" — multi-org selector broken: ${result.stdout}`,
-  );
-  assert(
-    result.stdout.includes('e2e-test-org'),
-    `Org picker missing "e2e-test-org" — multi-org selector broken: ${result.stdout}`,
-  );
-
   // Verify project was created
   assert(existsSync(join(TEMP_MULTIORG, 'keep.lock')), 'keep.lock not created in temp dir');
   assert(existsSync(join(TEMP_MULTIORG, '.env')), '.env not created in temp dir');
@@ -1385,6 +1376,65 @@ async function testInitCreateNewOrgDuringInit(): Promise<void> {
   );
 }
 
+/**
+ * After creating a third org, init in a fresh dir and verify ALL THREE orgs
+ * appear as separate entries in the org picker. This catches regressions where
+ * loadSession or refreshForOrg prunes multi-org sessions.
+ */
+async function testOrgPickerShowsAllOrgs(): Promise<void> {
+  log('User B inits in fresh dir — org picker must show all 3 orgs...');
+
+  const result = await spawnCapy([], {
+    cwd: TEMP_ORGPICKER,
+    user: 'B',
+    timeout: 30000,
+    interactions: [
+      // Org picker appears — just pick the first one, we only care about what's shown
+      { waitFor: /Select organization/, send: '\n', delay: 500 },
+      // Project picker or project name
+      { waitFor: /Which project|Project name/, send: '\n', delay: 500 },
+      // Wait for sync
+      { waitFor: /Pulled \d+ secret|capy push|Successfully|Everything is up to date/, send: '' },
+    ],
+  });
+
+  assert(result.exitCode === 0, `Org picker test failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+
+  // Count distinct org names in the output. The picker renders each org as a
+  // line containing its name. We need all 3 to be present as separate matches.
+  const output = result.stdout;
+  const hasOrgB = output.includes('e2e-test-org-b');
+  const hasOrgC = output.includes('e2e-test-org-c');
+  // e2e-test-org is a substring of the other two, so match it as a standalone
+  // word boundary: preceded by a list bullet/space, NOT followed by '-'
+  const hasOrgA = /e2e-test-org(?!-)/.test(output);
+
+  assert(hasOrgA, `Org picker missing "e2e-test-org": ${output}`);
+  assert(hasOrgB, `Org picker missing "e2e-test-org-b": ${output}`);
+  assert(hasOrgC, `Org picker missing "e2e-test-org-c": ${output}`);
+
+  // Also verify `capy org` shows all 3 orgs in the org switcher
+  log('User B runs capy org — must show all 3 orgs...');
+  const orgResult = await spawnCapy(['org'], {
+    cwd: TEMP_ORGPICKER,
+    user: 'B',
+    timeout: 15000,
+    interactions: [
+      // Just pick current org to exit cleanly
+      { waitFor: /Switch organization|Already on/, send: '\n', delay: 300 },
+    ],
+  });
+
+  const orgOutput = orgResult.stdout;
+  const orgHasA = /e2e-test-org(?!-)/.test(orgOutput);
+  const orgHasB = orgOutput.includes('e2e-test-org-b');
+  const orgHasC = orgOutput.includes('e2e-test-org-c');
+
+  assert(orgHasA, `capy org missing "e2e-test-org": ${orgOutput}`);
+  assert(orgHasB, `capy org missing "e2e-test-org-b": ${orgOutput}`);
+  assert(orgHasC, `capy org missing "e2e-test-org-c": ${orgOutput}`);
+}
+
 // ─── Runner ───────────────────────────────────────────────────────────────────
 
 async function runTest(name: string, fn: () => Promise<any>): Promise<any> {
@@ -1455,6 +1505,7 @@ async function main(): Promise<void> {
     await runTest('Init with multiple orgs + session scan', testInitMultiOrgNoCurrent);
     await runTest('Cross-org exfiltration guard', testCrossOrgExfiltrationGuard);
     await runTest('Create new org during init', testInitCreateNewOrgDuringInit);
+    await runTest('Org picker + capy org show all 3 orgs', testOrgPickerShowsAllOrgs);
 
   } catch {
     // Test failure already logged
