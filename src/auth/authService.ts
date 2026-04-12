@@ -59,10 +59,8 @@ export class AuthService {
         }
       }
 
-      // Use any valid session — covers both "no org requested" and
-      // "requested org not found" (e.g. stale keep.lock after DB reset).
-      // The server (KMS co-decrypt) is the real org gate, not the client.
-      if (this.session) {
+      // If we have a session with no specific org requested, use any valid session
+      if (this.session && !organizationId) {
         for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
           if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
             this.currentOrgId = orgId;
@@ -112,8 +110,7 @@ export class AuthService {
       }
     }
 
-    // Fall through to any valid session (covers stale org IDs after DB reset)
-    if (this.session) {
+    if (this.session && !organizationId) {
       for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
         if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
           this.currentOrgId = orgId;
