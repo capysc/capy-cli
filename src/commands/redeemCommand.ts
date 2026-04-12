@@ -4,7 +4,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
 import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
-import { saveMasterKey, hasOrgKey } from '../config/globalConfig';
+import { saveMasterKey, hasOrgKey, findLatestSessionUserId } from '../config/globalConfig';
 import { FileManager } from '../files/fileManager';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -34,7 +34,10 @@ export class RedeemCommand {
     //    fall back to full OAuth only if no session exists.
     //    The crypto layer (HKDF with email binding) is the real identity proof,
     //    not the OAuth ceremony.
-    const authService = new AuthService(this.apiUrl, this.devMode);
+    //    We don't have a userId yet (joining a new org), so discover the most
+    //    recent session file to reuse an existing login.
+    const existingUserId = findLatestSessionUserId();
+    const authService = new AuthService(this.apiUrl, this.devMode, existingUserId);
     let authResult = await authService.authenticateSilent(targetOrgId);
     if (!authResult.success) {
       // No cached session — need interactive auth
