@@ -261,8 +261,36 @@ export class CapyCommand {
       this.serviceClient.setToken(updatedToken);
     }
 
+    // Discover existing projects in the org early — we need this to distinguish
+    // org creators (no projects yet) from invited members (projects already exist).
+    const CREATE_NEW_PROJECT = '__create_new_project__';
+    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
+    try {
+      const listSpinner = ora('Looking for existing projects...').start();
+      existingProjects = await this.serviceClient.listProjects();
+      listSpinner.stop();
+      this.debug('listProjects response', existingProjects);
+    } catch (err) {
+      this.debugError('listProjects failed', err);
+      // Network or auth issue — fall through to new-project flow
+      existingProjects = [];
+    }
+
     // Ensure org has a master key — generate seed phrase if first time
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
+      // If the org already has projects, this user was invited and needs to
+      // redeem their invite code to receive the shared master key. Generating
+      // a new key here would create an incompatible key.
+      if (existingProjects.length > 0) {
+        throw new CapyError(
+          `You have been invited to "${selectedOrg.name}" but haven't redeemed your invite yet.\n\n` +
+          '  Ask your org owner for an invite code, then run:\n\n' +
+          '    capy redeem <code>\n\n' +
+          '  This will securely transfer the shared encryption key to your device.',
+          ERROR_CODES.AUTH_FAILED
+        );
+      }
+
       const seedPhrase = generateSeedPhrase();
 
       const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
@@ -327,22 +355,6 @@ export class CapyCommand {
       const wrappingKey = deriveWrappingKey(authResult.user_id!, selectedOrg.id);
       const encryptedM = encryptMasterKey(masterKey, wrappingKey);
       saveMasterKey(selectedOrg.id, encryptedM, authResult.user_id!);
-    }
-
-    // Discover existing projects in the org. If any exist, give the user the
-    // choice to bootstrap one of them OR create a new project. This is the path
-    // a teammate hits when cloning a repo with no committed keep.lock.
-    const CREATE_NEW_PROJECT = '__create_new_project__';
-    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
-    try {
-      const listSpinner = ora('Looking for existing projects...').start();
-      existingProjects = await this.serviceClient.listProjects();
-      listSpinner.stop();
-      this.debug('listProjects response', existingProjects);
-    } catch (err) {
-      this.debugError('listProjects failed', err);
-      // Network or auth issue — fall through to new-project flow
-      existingProjects = [];
     }
 
     if (existingProjects.length > 0) {
