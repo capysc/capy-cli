@@ -268,4 +268,8 @@ Contributions welcome! Please read our [Contributing Guide](../../CONTRIBUTING.m
 
 ## License
 
-Business Source License 1.1 - see [LICENSE](./LICENSE) for details.
+Copyright (c) 2026 Incentv Technologies Inc.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, version 3.
+
+See [LICENSE](./LICENSE) for the full license text.
