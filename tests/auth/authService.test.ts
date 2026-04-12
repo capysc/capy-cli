@@ -597,10 +597,10 @@ describe('AuthService', () => {
       expect(session.sessions).not.toHaveProperty('org-OLD');
     });
 
-    test('authenticate with unknown org ID falls through to OAuth', async () => {
+    test('authenticate with unknown org ID uses existing valid session', async () => {
       // If keep.lock has an org ID that doesn't exist in the session,
-      // authenticate should NOT silently resolve to a different org.
-      // It should fall through to refresh (which may fail) then OAuth.
+      // authenticate should fall through to any valid session rather than
+      // forcing OAuth. The server (KMS co-decrypt) is the real org gate.
       const session: SessionStore = {
         version: 2,
         user_id: 'user-456',
@@ -616,32 +616,16 @@ describe('AuthService', () => {
       };
       mockReadAuthSession.mockReturnValue(session);
 
-      // Refresh for 'org-OLD' will be attempted, then OAuth
-      mockFetch
-        .mockRejectedValueOnce(new Error('refresh failed'))  // refresh attempt
-        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
-        .mockResolvedValueOnce(mockFetchResponse({
-          token: { access_token: fakeJwt({ org_id: 'workos-org-OLD' }), refresh_token: 'new-refresh', expires_in: 3600 },
-          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
-          organizations: [{ id: 'org-OLD', workos_org_id: 'workos-org-OLD', name: 'Old Org' }],
-        }));
-
-      const mockOAuthInstance = {
-        bind: mock(() => Promise.resolve(undefined)),
-        getState: mock(() => 'mock-state'),
-        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
-        getCodeChallenge: mock(() => 'mock-code-challenge'),
-        getCodeVerifier: mock(() => 'mock-code-verifier'),
-        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
-      };
-      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+      // Refresh for 'org-OLD' will fail
+      mockFetch.mockRejectedValueOnce(new Error('refresh failed'));
 
       const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate('org-OLD');
 
       expect(result.success).toBe(true);
-      // Should NOT have silently resolved to org-NEW
-      expect(result.organization_id).toBe('org-OLD');
+      // Falls through to the valid org-NEW session — no OAuth needed
+      expect(result.organization_id).toBe('org-NEW');
+      expect(result._auth_method).toBe('cached');
     });
 
     test('refreshForOrg replaces all sessions with the new one', async () => {
