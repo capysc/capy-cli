@@ -622,10 +622,11 @@ async function testRedeemInvite(redeemCode: string): Promise<void> {
 async function testUserBSyncAfterRedeem(): Promise<void> {
   log('User B bootstraps with no keep.lock after redeeming...');
 
-  // Wipe user2 dir clean of any keep.lock or .env so the bootstrap path runs
-  for (const f of ['keep.lock', '.env', '.capy']) {
+  // Wipe keep.lock and .env so the bootstrap path runs.
+  // Keep .capy/ (sync-state has the org hint from redeem so init picks the right org).
+  for (const f of ['keep.lock', '.env']) {
     const p = join(SANDBOX_USER2, f);
-    if (existsSync(p)) rmSync(p, { recursive: true, force: true });
+    if (existsSync(p)) rmSync(p);
   }
 
   const result = await spawnCapy([], {
@@ -633,11 +634,14 @@ async function testUserBSyncAfterRedeem(): Promise<void> {
     user: 'B',
     timeout: 30000,
     interactions: [
-      // User B has 2 orgs now (their own + User A's via redeem) — pick User A's org
-      // Org selection appears as a list — "e2e-test-org" is User A's. Use string match.
+      // User B has 2 orgs now. The picker shows either the currentOrg path
+      // (with Switch option) or the flat list. Either way, navigate to select
+      // User A's org (e2e-test-org). If currentOrg is e2e-test-org-b, pick "Switch",
+      // then pick e2e-test-org. If flat list, just pick e2e-test-org.
       { waitFor: 'Select organization', send: '\n', delay: 500 },
-      // Project picker — User A's org has the "user1" project. First option.
-      { waitFor: 'Which project do you want to use', send: '\n', delay: 500 },
+      // If "Switch to another organization" was picked, we get a re-auth and
+      // recursive call. Handle the project picker for whatever org was selected.
+      { waitFor: /Which project do you want to use|Select organization/, send: '\n', delay: 500 },
       // Wait for bootstrap to finish
       { waitFor: /Pulled \d+ secret|capy push|Successfully/, send: '' },
     ],
