@@ -635,11 +635,23 @@ export class CapyCommand {
     }
 
     if (!decryptData.keep_file) {
-      fetchSpinner.fail(`Server did not return keep.json for ${B(project.name)}.`);
-      throw new CapyError(
-        'Bootstrap failed: server response missing keep_file',
-        ERROR_CODES.SERVICE_ERROR,
-      );
+      // No keep_file means the project exists but has never been pushed to.
+      // Treat it like an empty project — write a stub keep.lock.
+      fetchSpinner.stop();
+      const stub: KeepFile = {
+        version: '3.0',
+        org_id: orgId,
+        project_id: project.id,
+        project_name: project.name,
+        variables: {},
+      };
+      this.fileManager.writeKeepFile(stub);
+      this.projectManager.writeActiveBranch(branch);
+      this.fileManager.ensureCapyGitignore();
+      console.log(`\n${B(project.name)} has no secrets yet.`);
+      console.log(`Add secrets to .env, then run ${B('capy push')}.`);
+      this.installGitHooks();
+      return;
     }
 
     // Parse the keep.json the server sent us
