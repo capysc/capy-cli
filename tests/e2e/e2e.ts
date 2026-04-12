@@ -580,9 +580,16 @@ async function testUserBSyncFails(): Promise<void> {
   );
 }
 
-/** Phase 4: User B redeems invite */
+/** Phase 4: User B redeems invite — must switch from Org B to Org A */
 async function testRedeemInvite(redeemCode: string): Promise<void> {
   log('User B redeems invite...');
+
+  // Before redeem: User B is in e2e-test-org-b
+  const keepBefore = JSON.parse(readFileSync(join(SANDBOX_USER2, 'keep.lock'), 'utf-8'));
+  assert(
+    keepBefore.project_name === 'user2',
+    `Before redeem, expected User B in their own project, got: ${keepBefore.project_name}`,
+  );
 
   const result = await spawnCapy(['redeem', redeemCode], {
     cwd: SANDBOX_USER2,
@@ -597,6 +604,22 @@ async function testRedeemInvite(redeemCode: string): Promise<void> {
   assert(
     combined.includes('redeemed') || combined.includes('access'),
     `Expected redeem success message: ${combined}`,
+  );
+
+  // After redeem: User B's session must know about BOTH orgs.
+  // The redeem flow authenticates into Org A (the inviter's org),
+  // so the session should now contain both e2e-test-org and e2e-test-org-b.
+  const sessionFiles = readdirSync(join(HOME_B, '.capy', 'auth', 'sessions')).filter(f => f.endsWith('.json'));
+  assert(sessionFiles.length > 0, 'No session file found after redeem');
+  const session = JSON.parse(readFileSync(join(HOME_B, '.capy', 'auth', 'sessions', sessionFiles[0]), 'utf-8'));
+  const orgNames = session.organizations.map((o: any) => o.name);
+  assert(
+    orgNames.includes('e2e-test-org') || orgNames.some((n: string) => n === 'e2e-test-org'),
+    `Session missing inviter org after redeem. Orgs: ${orgNames.join(', ')}`,
+  );
+  assert(
+    orgNames.includes('e2e-test-org-b'),
+    `Session missing User B's own org after redeem. Orgs: ${orgNames.join(', ')}`,
   );
 }
 
@@ -641,6 +664,47 @@ async function testUserBSyncAfterRedeem(): Promise<void> {
   const envContent = readFileSync(envPath, 'utf-8');
   const varCount = envContent.split('\n').filter(l => l.includes('=') && !l.startsWith('#')).length;
   assert(varCount >= 10, `User B should have at least 10 variables after bootstrap, got ${varCount}`);
+}
+
+/**
+ * After redeem, User B has 2 orgs: e2e-test-org (from invite) and e2e-test-org-b (own).
+ * Run `capy org` and verify BOTH orgs appear in the switcher, with e2e-test-org selected
+ * (since that's where User B just synced to).
+ */
+async function testUserBSeesBothOrgsAfterRedeem(): Promise<void> {
+  log('User B runs capy org — should see both orgs...');
+
+  const result = await spawnCapy(['org'], {
+    cwd: SANDBOX_USER2,
+    user: 'B',
+    timeout: 15000,
+    interactions: [
+      // Org switcher shows — just pick current to exit cleanly
+      { waitFor: /Switch organization|Already on/, send: '\n', delay: 300 },
+    ],
+  });
+
+  assert(result.exitCode === 0, `capy org failed (exit ${result.exitCode}): ${result.stdout}\n${result.stderr}`);
+
+  const output = result.stdout;
+
+  // Must NOT show "No other organizations available" — that means only 1 org was found
+  assert(
+    !output.includes('No other organizations available'),
+    `capy org shows only 1 org — multi-org is broken. Output: ${output}`,
+  );
+
+  // Both org names must appear as distinct entries
+  const hasOrgA = /e2e-test-org(?!-)/.test(output);
+  const hasOrgB = output.includes('e2e-test-org-b');
+  assert(hasOrgA, `capy org missing "e2e-test-org": ${output}`);
+  assert(hasOrgB, `capy org missing "e2e-test-org-b": ${output}`);
+
+  // e2e-test-org should be marked as current (User B just synced there)
+  assert(
+    output.includes('current'),
+    `Expected current org marker in output: ${output}`,
+  );
 }
 
 /** Phase 5: User A updates SENDGRID_KEY locally, syncs, then pushes */
@@ -1478,6 +1542,7 @@ async function main(): Promise<void> {
     await runTest('User B sync fails without redeeming', testUserBSyncFails);
     await runTest('User B redeems invite', () => testRedeemInvite(redeemCode));
     await runTest('User B syncs after redeeming', testUserBSyncAfterRedeem);
+    await runTest('User B sees both orgs in capy org after redeem', testUserBSeesBothOrgsAfterRedeem);
 
     // Syncing
     console.log('\n\x1b[1m--- Syncing ---\x1b[0m');

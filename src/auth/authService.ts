@@ -388,6 +388,8 @@ export class AuthService {
       };
       this.session.refresh_token = data.refresh_token;
 
+
+
       if (data.user) {
         this.session.user_id = data.user.id;
         this.session.user_email = data.user.email;
