@@ -27,11 +27,13 @@ mock.module('../../src/crypto/keyManager', () => ({
   deriveWrappingKey: mock(() => Buffer.alloc(32, 2)),
 }));
 mock.module('../../src/crypto/keyResolver', () => ({
-  resolveProjectKey: mock(() => 'mock-derived-project-key-hex'),
+  resolveProjectKey: mock(async () => 'mock-derived-project-key-hex'),
+  wrapAndSaveMasterKey: mock(async () => undefined),
   hasOrgKey: mock(() => true),
 }));
 mock.module('../../src/config/globalConfig', () => ({
-  saveMasterKey: mock(() => undefined),
+  writeKeepCache: mock(() => undefined),
+  fetchSecretsWithCache: mock(async () => null),
 }));
 mock.module('inquirer', () => ({
   default: {
@@ -122,9 +124,12 @@ describe('CapyCommand', () => {
 
     mockAuthService = {
       authenticate: mock(() => undefined),
+      authenticateSilent: mock(() => Promise.resolve({ success: false })),
       getToken: mock(() => undefined),
       setOrganizationId: mock(() => undefined),
       setSessionUserId: mock(() => undefined),
+      refreshToken: mock(() => Promise.resolve(false)),
+      refreshWithCredentials: mock(() => Promise.resolve({ success: true })),
       createOrganization: mock(() => undefined)
     } as any;
 
@@ -138,6 +143,9 @@ describe('CapyCommand', () => {
       getSecrets: mock(() => Promise.resolve(null)),
       createBranch: mock(() => Promise.resolve({ id: 'b1', name: 'staging', project_id: 'p1', is_protected: false })),
       listBranches: mock(() => Promise.resolve([])),
+      coDecrypt: mock(() => Promise.resolve({ plaintext: '' })),
+      wrapOuterLayer: mock(() => Promise.resolve({ ciphertext: '' })),
+      listProjects: mock(() => Promise.resolve([])),
     } as any;
 
     mockSyncEngine = {
@@ -502,6 +510,77 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('initializeProject — multi-org selector', () => {
+    test('should show org picker with all orgs when user has >1 org and none selected', async () => {
+      // Setup: auth returns 2 orgs but no org selected (organization_id: '')
+      // This simulates the multi-org flow where the server returns no access token
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: '',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [
+          { id: 'org-A', workos_org_id: 'workos-A', name: 'Org Alpha' },
+          { id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' },
+        ],
+        _refresh_token: 'refresh-token',
+      });
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: false });
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token', refresh_token: 'refresh',
+        expires_at: Date.now() + 3600000, organization_id: 'org-A',
+        user_id: 'user-456',
+      });
+      mockAuthService.refreshWithCredentials.mockResolvedValue({
+        success: true, organization_id: 'org-A', user_id: 'user-456',
+      });
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-A', project_id: 'proj-1', project_name: 'test', created: true,
+      });
+      mockServiceClient.listProjects.mockResolvedValue([]);
+
+      // Capture prompt calls to verify choices
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        // Org picker: select org-A
+        if (q.name === 'orgId') return { orgId: 'org-A' };
+        // Project name
+        if (q.name === 'projectName') return { projectName: 'test' };
+        // Branch
+        if (q.name === 'initChoice') return { initChoice: 'development' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).initializeProject();
+      } catch {
+        // May throw due to incomplete mock chain — we only care about the prompt
+      }
+
+      // Find the org picker prompt (the one with 'orgId' as name)
+      const orgPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'orgId';
+      });
+      const question = Array.isArray(orgPrompt) ? orgPrompt[0] : orgPrompt;
+      const orgNames = question?.choices
+        ?.filter((c: any) => typeof c === 'object' && c.name)
+        .map((c: any) => c.name);
+
+      expect(orgNames).toContain('Org Alpha');
+      expect(orgNames).toContain('Org Beta');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+  });
+
   describe('initializeProject — fresh account (no keep.lock, no .env)', () => {
     /**
      * Regression test: a brand-new user with no keep.lock file and no local .env
@@ -618,6 +697,14 @@ describe('CapyCommand', () => {
     };
 
     beforeEach(() => {
+      // syncProject tries authenticateSilent first, then falls back to authenticate
+      mockAuthService.authenticateSilent.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        _auth_method: 'cached',
+      });
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
         organization_id: 'org-123',
@@ -662,13 +749,15 @@ describe('CapyCommand', () => {
 
       await (capyCommand as any).syncProject(mockProjectState);
 
-      expect(mockAuthService.authenticate).toHaveBeenCalledWith('org-123');
+      // syncProject tries authenticateSilent first
+      expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('org-123');
       expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
 
       consoleSpy.mockRestore();
     });
 
     test('should handle authentication failure during sync', async () => {
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: false });
       mockAuthService.authenticate.mockResolvedValue({
         success: false,
         error: 'Auth failed'

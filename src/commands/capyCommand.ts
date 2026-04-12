@@ -23,14 +23,14 @@ import {
   generateSeedPhrase,
   validateSeedPhrase,
   seedPhraseToMasterKey,
-  encryptMasterKey,
-  deriveWrappingKey,
 } from '../crypto/keyManager';
 import {
   resolveProjectKey,
+  wrapAndSaveMasterKey,
   hasOrgKey,
+  KeyServiceOps,
 } from '../crypto/keyResolver';
-import { saveMasterKey, writeKeepCache, fetchSecretsWithCache } from '../config/globalConfig';
+import { writeKeepCache, fetchSecretsWithCache } from '../config/globalConfig';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -63,6 +63,16 @@ export class CapyCommand {
       }
       return null;
     });
+  }
+
+  /**
+   * Bridge ServiceClient to the KeyServiceOps interface for key resolution.
+   */
+  private keyServiceOps(): KeyServiceOps {
+    return {
+      coDecrypt: (orgId, ciphertext) => this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
+      wrapOuterLayer: (orgId, plaintext) => this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
+    };
   }
 
   /**
@@ -334,11 +344,12 @@ export class CapyCommand {
 
     const keySpinner = ora('Generating encryption keys...').start();
 
-    // Derive project encryption key from master key
-    const encryptionKey = resolveProjectKey(
+    // Derive project encryption key from master key (requires server co-decrypt)
+    const encryptionKey = await resolveProjectKey(
       selectedOrg.id,
       projectResult.project_id,
       authResult.user_id!,
+      this.keyServiceOps(),
     );
 
     // Create keep file (v3 format)
@@ -537,7 +548,7 @@ export class CapyCommand {
     userId: string,
   ): Promise<void> {
     const branch = 'development';
-    const encryptionKey = resolveProjectKey(orgId, project.id, userId);
+    const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
 
@@ -573,11 +584,23 @@ export class CapyCommand {
     }
 
     if (!decryptData.keep_file) {
-      fetchSpinner.fail(`Server did not return keep.json for ${B(project.name)}.`);
-      throw new CapyError(
-        'Bootstrap failed: server response missing keep_file',
-        ERROR_CODES.SERVICE_ERROR,
-      );
+      // No keep_file means the project exists but has never been pushed to.
+      // Treat it like an empty project — write a stub keep.lock.
+      fetchSpinner.stop();
+      const stub: KeepFile = {
+        version: '3.0',
+        org_id: orgId,
+        project_id: project.id,
+        project_name: project.name,
+        variables: {},
+      };
+      this.fileManager.writeKeepFile(stub);
+      this.projectManager.writeActiveBranch(branch);
+      this.fileManager.ensureCapyGitignore();
+      console.log(`\n${B(project.name)} has no secrets yet.`);
+      console.log(`Add secrets to .env, then run ${B('capy push')}.`);
+      this.installGitHooks();
+      return;
     }
 
     // Parse the keep.json the server sent us
@@ -884,9 +907,20 @@ export class CapyCommand {
       this.authService.setSessionUserId(projectState.userId);
     }
 
-    // Authenticate
+    // Authenticate — try silent first, then interactive if needed.
     const spinner = ora('Authenticating...').start();
-    const authResult = await this.authService.authenticate(projectState.organizationId);
+    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
+
+    // If silent auth failed, try without a specific org to use any valid session
+    if (!authResult.success) {
+      authResult = await this.authService.authenticateSilent();
+    }
+
+    // If still no session, fall through to interactive auth
+    if (!authResult.success) {
+      authResult = await this.authService.authenticate(projectState.organizationId);
+    }
+
     this.debug('authResult', {
       success: authResult.success,
       user_id: authResult.user_id,
@@ -939,11 +973,21 @@ export class CapyCommand {
       );
     }
 
-    const encryptionKey = resolveProjectKey(
-      projectState.organizationId!,
-      projectState.projectId!,
-      authResult.user_id!,
-    );
+    let encryptionKey: string;
+    try {
+      encryptionKey = await resolveProjectKey(
+        projectState.organizationId!,
+        projectState.projectId!,
+        authResult.user_id!,
+        this.keyServiceOps(),
+      );
+    } catch (err: any) {
+      // co-decrypt rejected (e.g. kicked user) — clean up local state
+      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+        this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+      }
+      throw err;
+    }
 
     // Read keep.lock. currentKeep is mutable because the remote fetch may
     // self-heal a stale local keep.lock — but `pinned` and `originalKeep` are
@@ -1531,9 +1575,7 @@ export class CapyCommand {
     orgSpinner.succeed(`Organization "${org.name}" created`);
 
     const masterKey = seedPhraseToMasterKey(seedPhrase);
-    const wrappingKey = deriveWrappingKey(userId, org.id);
-    const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-    saveMasterKey(org.id, encryptedM, userId);
+    await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
 
     return org;
   }

@@ -21,6 +21,7 @@ let deriveWrappingKey: typeof import('../../src/crypto/keyManager').deriveWrappi
 let saveMasterKey: typeof import('../../src/config/globalConfig').saveMasterKey;
 let resolveProjectKey: typeof import('../../src/crypto/keyResolver').resolveProjectKey;
 let resolveFromSeedPhrase: typeof import('../../src/crypto/keyResolver').resolveFromSeedPhrase;
+let KeyServiceOps: typeof import('../../src/crypto/keyResolver').KeyServiceOps;
 
 beforeAll(async () => {
   const km = await import('../../src/crypto/keyManager');
@@ -43,6 +44,18 @@ afterAll(() => {
   rmSync(tempHome, { recursive: true, force: true });
 });
 
+/**
+ * Mock KeyServiceOps that simulates the legacy migration path:
+ * - coDecrypt always rejects (blob isn't KMS-wrapped in tests)
+ * - wrapOuterLayer returns the plaintext as-is (no real KMS in tests)
+ */
+function mockKeyServiceOps() {
+  return {
+    coDecrypt: async () => { throw new Error('not KMS-wrapped'); },
+    wrapOuterLayer: async (_orgId: string, plaintext: string) => plaintext,
+  };
+}
+
 describe('Key stability across sessions', () => {
   let seedPhrase: string;
   let masterKey: Buffer;
@@ -59,41 +72,29 @@ describe('Key stability across sessions', () => {
     saveMasterKey(orgId, encryptedM, userId);
   });
 
-  it('Session 1: seed → M → project key', () => {
-    // First session with token A
-    const key = resolveProjectKey(orgId, projectId, userId);
+  it('Session 1: seed → M → project key', async () => {
+    const key = await resolveProjectKey(orgId, projectId, userId, mockKeyServiceOps());
 
-    // Should match direct derivation
     const expected = deriveProjectKey(masterKey, projectId, orgId);
     expect(key).toBe(expected);
   });
 
-  it('Session 2: different token, same user → same project key', () => {
-    // Clear the project key cache to force re-derivation from M
-    const cachePath = join(tempHome, '.capy', 'orgs', orgId, 'projects', projectId, 'key.cache');
-    try { rmSync(cachePath); } catch {}
-
-    // Second session — same userId, wrapping key is stable
-    const key = resolveProjectKey(orgId, projectId, userId);
+  it('Session 2: different token, same user → same project key', async () => {
+    const key = await resolveProjectKey(orgId, projectId, userId, mockKeyServiceOps());
 
     const expected = deriveProjectKey(masterKey, projectId, orgId);
     expect(key).toBe(expected);
   });
 
   it('Sessionless: seed phrase alone → same project key', () => {
-    // Offline recovery — no auth, no service, just the seed phrase
     const key = resolveFromSeedPhrase(seedPhrase, orgId, projectId);
 
     const expected = deriveProjectKey(masterKey, projectId, orgId);
     expect(key).toBe(expected);
   });
 
-  it('All three paths produce the same key', () => {
-    // Clear cache again
-    const cachePath = join(tempHome, '.capy', 'orgs', orgId, 'projects', projectId, 'key.cache');
-    try { rmSync(cachePath); } catch {}
-
-    const fromSession = resolveProjectKey(orgId, projectId, userId);
+  it('All three paths produce the same key', async () => {
+    const fromSession = await resolveProjectKey(orgId, projectId, userId, mockKeyServiceOps());
     const fromSeedPhrase = resolveFromSeedPhrase(seedPhrase, orgId, projectId);
     const fromDirect = deriveProjectKey(masterKey, projectId, orgId);
 
@@ -102,13 +103,11 @@ describe('Key stability across sessions', () => {
   });
 
   it('Wrapping key is stable: same userId+orgId always unwraps M', () => {
-    // Simulate multiple sessions with different access tokens but same identity
     const wrappingKey1 = deriveWrappingKey(userId, orgId);
     const wrappingKey2 = deriveWrappingKey(userId, orgId);
 
     expect(wrappingKey1.equals(wrappingKey2)).toBe(true);
 
-    // Wrap and unwrap with same identity
     const encrypted = encryptMasterKey(masterKey, wrappingKey1);
     const decrypted = decryptMasterKey(encrypted, wrappingKey2);
     expect(decrypted.equals(masterKey)).toBe(true);
