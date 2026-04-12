@@ -176,7 +176,6 @@ export class CapyCommand {
     // Resolve organization
     const orgs = authResult.organizations || [];
     let selectedOrg: Organization;
-    let isNewOrg = false;
     const SWITCH_ORG = '__switch_org__';
     const CREATE_NEW_ORG = '__create_new__';
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
@@ -187,7 +186,7 @@ export class CapyCommand {
     if (orgs.length === 0) {
       console.log('\nNo organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-      isNewOrg = true;
+
     } else if (currentOrg) {
       const { orgAction } = await inquirer.prompt([{
         type: 'list',
@@ -215,7 +214,7 @@ export class CapyCommand {
         return this.initializeProject();
       } else if (orgAction === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-        isNewOrg = true;
+  
       } else {
         selectedOrg = currentOrg;
       }
@@ -233,7 +232,7 @@ export class CapyCommand {
 
       if (orgId === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-        isNewOrg = true;
+  
       } else {
         selectedOrg = orgs.find(o => o.id === orgId)!;
 
@@ -265,85 +264,16 @@ export class CapyCommand {
       this.serviceClient.setToken(updatedToken);
     }
 
-    // Ensure org has a master key
+    // User has access to an existing org but no local key — they were invited
+    // and need to redeem their invite code to receive the shared master key.
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
-      if (!isNewOrg) {
-        // User has access to an existing org but no local key — they were invited
-        // and need to redeem their invite code to receive the shared master key.
-        throw new CapyError(
-          `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
-          '  Ask your org owner for an invite code, then run:\n\n' +
-          '    capy redeem <code>\n\n' +
-          '  This will securely transfer the shared encryption key to your device.',
-          ERROR_CODES.AUTH_FAILED
-        );
-      }
-
-      // New org — generate seed phrase for the org owner
-      const seedPhrase = generateSeedPhrase();
-
-      const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
-
-      const boxLines = [
-        'This recovery phrase generates the master key for',
-        'all projects in this organization.',
-        '',
-        '1) As its owner, only you have it',
-        '2) It only exists here and now, and cannot be',
-        '   retrieved when lost',
-        '',
-        'Capy is a ZERO TRUST secrets platform, which means',
-        'we do not store and cannot decode your secrets for',
-        'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!',
-        '',
-        'To learn more about zero-trust:',
-        'https://capy.sc/zero-trust',
-      ];
-
-      const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
-      const title = '!!!IMPORTANT!!! - SAVE THIS RECOVERY PHRASE';
-      const titlePad = Math.max(0, maxLen - title.length);
-      const titleLeft = Math.floor(titlePad / 2);
-      const titleRight = titlePad - titleLeft;
-
-      console.log('');
-      console.log(warn('─'.repeat(maxLen + 2)));
-      console.log(warn(' '.repeat(titleLeft + 1) + title + ' '.repeat(titleRight + 1)));
-      console.log(warn('─'.repeat(maxLen + 2)));
-      console.log('');
-      console.log('');
-      console.log('');
-      console.log(seedPhrase);
-      console.log('');
-      console.log('');
-      console.log('');
-
-      console.log(warn('┌' + '─'.repeat(maxLen) + '┐'));
-      for (const line of boxLines) {
-        const pad = maxLen - line.length - 1;
-        console.log(`${warn('│')} ${warn(line)}${' '.repeat(Math.max(0, pad))}${warn('│')}`);
-      }
-      console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
-      console.log('');
-
-      const { confirmed } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'confirmed',
-        message: 'I have saved my recovery phrase',
-        default: false,
-      }]);
-
-      if (!confirmed) {
-        throw new CapyError(
-          'You must save your recovery phrase before continuing.',
-          ERROR_CODES.AUTH_FAILED
-        );
-      }
-
-      const masterKey = seedPhraseToMasterKey(seedPhrase);
-      const wrappingKey = deriveWrappingKey(authResult.user_id!, selectedOrg.id);
-      const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-      saveMasterKey(selectedOrg.id, encryptedM, authResult.user_id!);
+      throw new CapyError(
+        `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
+        '  Ask your org owner for an invite code, then run:\n\n' +
+        '    capy redeem <code>\n\n' +
+        '  This will securely transfer the shared encryption key to your device.',
+        ERROR_CODES.AUTH_FAILED
+      );
     }
 
     // Discover existing projects in the org. If any exist, give the user the
@@ -1532,9 +1462,79 @@ export class CapyCommand {
       validate: (input: string) => input.trim().length > 0 || 'Organization name cannot be empty',
     }]);
 
+    // Generate seed phrase and get confirmation BEFORE creating the org.
+    // This keeps org creation and key generation atomic — if the user
+    // declines, no org is created and they can retry cleanly.
+    const seedPhrase = generateSeedPhrase();
+
+    const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
+
+    const boxLines = [
+      'This recovery phrase generates the master key for',
+      'all projects in this organization.',
+      '',
+      '1) As its owner, only you have it',
+      '2) It only exists here and now, and cannot be',
+      '   retrieved when lost',
+      '',
+      'Capy is a ZERO TRUST secrets platform, which means',
+      'we do not store and cannot decode your secrets for',
+      'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!',
+      '',
+      'To learn more about zero-trust:',
+      'https://capy.sc/zero-trust',
+    ];
+
+    const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
+    const title = '!!!IMPORTANT!!! - SAVE THIS RECOVERY PHRASE';
+    const titlePad = Math.max(0, maxLen - title.length);
+    const titleLeft = Math.floor(titlePad / 2);
+    const titleRight = titlePad - titleLeft;
+
+    console.log('');
+    console.log(warn('─'.repeat(maxLen + 2)));
+    console.log(warn(' '.repeat(titleLeft + 1) + title + ' '.repeat(titleRight + 1)));
+    console.log(warn('─'.repeat(maxLen + 2)));
+    console.log('');
+    console.log('');
+    console.log('');
+    console.log(seedPhrase);
+    console.log('');
+    console.log('');
+    console.log('');
+
+    console.log(warn('┌' + '─'.repeat(maxLen) + '┐'));
+    for (const line of boxLines) {
+      const pad = maxLen - line.length - 1;
+      console.log(`${warn('│')} ${warn(line)}${' '.repeat(Math.max(0, pad))}${warn('│')}`);
+    }
+    console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
+    console.log('');
+
+    const { confirmed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmed',
+      message: 'I have saved my recovery phrase',
+      default: false,
+    }]);
+
+    if (!confirmed) {
+      throw new CapyError(
+        'You must save your recovery phrase before continuing.',
+        ERROR_CODES.AUTH_FAILED
+      );
+    }
+
+    // Seed phrase confirmed — now create the org and save the key
     const orgSpinner = ora('Creating organization...').start();
     const org = await this.authService.createOrganization(orgName.trim(), refreshToken, userId);
     orgSpinner.succeed(`Organization "${org.name}" created`);
+
+    const masterKey = seedPhraseToMasterKey(seedPhrase);
+    const wrappingKey = deriveWrappingKey(userId, org.id);
+    const encryptedM = encryptMasterKey(masterKey, wrappingKey);
+    saveMasterKey(org.id, encryptedM, userId);
+
     return org;
   }
 }
