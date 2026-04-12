@@ -783,6 +783,150 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('initializeProject — pending invite (no local key)', () => {
+    beforeEach(() => {
+      // User authenticates to an org they were invited to but haven't redeemed
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        organization_name: 'Test Org',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }],
+      });
+
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+      });
+    });
+
+    test('should throw with redeem instructions when user has no local key for existing org', async () => {
+      // hasOrgKey returns false — user was invited but hasn't redeemed
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      (hasOrgKey as any).mockReturnValue(false);
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await expect((capyCommand as any).initializeProject()).rejects.toThrow('no encryption key');
+        await expect((capyCommand as any).initializeProject()).rejects.toThrow('capy redeem');
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('should not prompt for seed phrase when user has no key for existing org', async () => {
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      (hasOrgKey as any).mockReturnValue(false);
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).initializeProject().catch(() => {});
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        consoleSpy.mockRestore();
+      }
+
+      // Should NOT have called createOrganization or initializeProject on service
+      expect(mockServiceClient.initializeProject).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('initializeProject — new org creation is atomic with seed phrase', () => {
+    beforeEach(() => {
+      // No orgs — user will be prompted to create one
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: '',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [],
+        _refresh_token: 'refresh-token',
+      });
+
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-new',
+        user_id: 'user-456',
+      });
+
+      mockAuthService.createOrganization.mockResolvedValue({
+        id: 'org-new',
+        workos_org_id: 'workos-new',
+        name: 'New Org',
+      });
+
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-new',
+        project_id: 'proj-new',
+        project_name: 'test',
+        created: true,
+      });
+
+      mockServiceClient.listProjects.mockResolvedValue([]);
+    });
+
+    test('should not create org when user declines seed phrase', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q.name === 'orgName') return { orgName: 'New Org' };
+        if (q.name === 'confirmed') return { confirmed: false }; // decline seed phrase
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await expect((capyCommand as any).initializeProject()).rejects.toThrow(
+          'You must save your recovery phrase'
+        );
+        // Org should NOT have been created
+        expect(mockAuthService.createOrganization).not.toHaveBeenCalled();
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('should create org and save key when user confirms seed phrase', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q.name === 'orgName') return { orgName: 'New Org' };
+        if (q.name === 'confirmed') return { confirmed: true };
+        if (q.name === 'initChoice') return { initChoice: 'development' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).initializeProject();
+
+        expect(mockAuthService.createOrganization).toHaveBeenCalledWith(
+          'New Org', 'refresh-token', 'user-456'
+        );
+
+        const { wrapAndSaveMasterKey } = await import('../../src/crypto/keyResolver');
+        expect(wrapAndSaveMasterKey).toHaveBeenCalled();
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+    });
+  });
+
   describe('error handling', () => {
     test('should use displayErrorAndExit for errors in execute', async () => {
       // The execute method now uses displayErrorAndExit from errorScreen module
