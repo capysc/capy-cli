@@ -193,7 +193,18 @@ export class AuthService {
     organizations: Organization[],
     organizationId?: string,
   ): Promise<AuthResult> {
-    // Initialize or update session
+    // Initialize or update session.
+    // Only carry over sessions that match a known org from the fresh response.
+    const knownOrgIds = new Set((organizations || []).map(o => o.id));
+    const previousSessions: Record<string, { access_token: string; expires_at: number }> = {};
+    if (this.session?.sessions) {
+      for (const [key, val] of Object.entries(this.session.sessions)) {
+        if (knownOrgIds.has(key)) {
+          previousSessions[key] = val;
+        }
+      }
+    }
+
     this.session = {
       version: 2,
       user_id: user.id,
@@ -202,15 +213,33 @@ export class AuthService {
       user_last_name: user.last_name,
       refresh_token: token.refresh_token,
       organizations: organizations || [],
-      sessions: this.session?.sessions || {},
+      sessions: previousSessions,
     };
 
     // If service returned a JWT, store the session.
-    // Use the requested organizationId if provided (multi-org with org-scoped auth),
-    // otherwise fall back to single-org detection.
+    // Resolve the org: prefer the explicit organizationId, then decode the JWT's
+    // org_id to match against the organizations list, then fall back to single-org.
     if (token.access_token) {
-      const resolvedOrgId = organizationId
-        || (organizations?.length === 1 ? organizations[0].id : '');
+      let resolvedOrgId = organizationId || '';
+
+      // Decode JWT to find which org the token is scoped to
+      if (!resolvedOrgId) {
+        try {
+          const payload = JSON.parse(
+            Buffer.from(token.access_token.split('.')[1], 'base64').toString()
+          );
+          if (payload.org_id) {
+            const match = organizations?.find(o => o.workos_org_id === payload.org_id);
+            if (match) resolvedOrgId = match.id;
+          }
+        } catch {
+          // JWT decode failed — fall through
+        }
+      }
+
+      if (!resolvedOrgId && organizations?.length === 1) {
+        resolvedOrgId = organizations[0].id;
+      }
 
       if (resolvedOrgId) {
         this.session.sessions[resolvedOrgId] = {
