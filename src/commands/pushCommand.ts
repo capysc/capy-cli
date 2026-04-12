@@ -9,7 +9,7 @@ import {
   CapyError,
   ERROR_CODES,
 } from '../types/index';
-import { resolveProjectKey } from '../crypto/keyResolver';
+import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache } from '../config/globalConfig';
 
@@ -114,10 +114,15 @@ export class PushCommand {
     if (token) this.serviceClient.setToken(token);
     spinner.stop();
 
-    const encryptionKey = resolveProjectKey(
+    const keyOps: KeyServiceOps = {
+      coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+      wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+    };
+    const encryptionKey = await resolveProjectKey(
       projectState.organizationId!,
       projectState.projectId!,
       authResult.user_id!,
+      keyOps,
     );
     this.debug('encryptionKey resolved', { length: encryptionKey.length });
 

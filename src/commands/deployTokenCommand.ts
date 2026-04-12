@@ -6,7 +6,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
-import { resolveProjectKey } from '../crypto/keyResolver';
+import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import {
   generateDeployId,
   generateDerivationToken,
@@ -279,8 +279,12 @@ export class DeployCommand {
       // Step 2: Generate credentials
       const spinner = ora('Generating deploy credentials...').start();
 
-      // Resolve project key from keyring
-      const pkHex = resolveProjectKey(orgId, projectId, userId);
+      // Resolve project key from keyring (requires server co-decrypt)
+      const keyOps: KeyServiceOps = {
+        coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+      };
+      const pkHex = await resolveProjectKey(orgId, projectId, userId, keyOps);
       const pk = Buffer.from(pkHex, 'hex');
 
       // Generate deploy ID and derivation token

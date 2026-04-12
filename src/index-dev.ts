@@ -283,24 +283,36 @@ program
     const { FileManager } = await import('./files/fileManager');
     const { ProjectManager } = await import('./core/projectManager');
     const { resolveProjectKey } = await import('./crypto/keyResolver');
+    const { AuthService } = await import('./auth/authService');
+    const { ServiceClient } = await import('./service/serviceClient');
 
     const fm = new FileManager();
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
 
-if (!keep) {
+    if (!keep) {
       console.error(`No keep.lock file found. Run ${B('capy-dev')} first to initialize.`);
       process.exit(1);
     }
 
-    // Resolve key from global keyring (requires prior auth)
+    // Authenticate and resolve key (requires server co-decrypt for KMS unwrap)
     let encryptionKey: string;
     try {
-      // Use a placeholder userId — resolveProjectKey only needs it for wrapping key derivation,
-      // and the project key cache should already exist from the init/sync flow
-      encryptionKey = resolveProjectKey(keep.org_id, keep.project_id, '');
+      const syncState = pm.readSyncState();
+      const authService = new AuthService(undefined, true, syncState?.user_id);
+      const serviceClient = new ServiceClient(undefined, true);
+      const authResult = await authService.authenticateSilent(keep.org_id);
+      if (!authResult.success) throw new Error('auth failed — run capy-dev first');
+      const token = authService.getToken();
+      if (token) serviceClient.setToken(token);
+
+      const keyOps = {
+        coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+      };
+      encryptionKey = await resolveProjectKey(keep.org_id, keep.project_id, authResult.user_id!, keyOps);
     } catch {
-      console.error(`No encryption key found. Run ${B('capy-dev')} first to sync.`);
+      console.error(`Cannot decrypt — server co-sign required. Run ${B('capy-dev')} first to sync.`);
       process.exit(1);
     }
 

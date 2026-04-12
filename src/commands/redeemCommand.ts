@@ -3,8 +3,7 @@ import { join } from 'path';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
-import { deriveWrappingKey, encryptMasterKey } from '../crypto/keyManager';
-import { saveMasterKey, hasOrgKey, findLatestSessionUserId } from '../config/globalConfig';
+import { wrapAndSaveMasterKey, hasOrgKey } from '../crypto/keyResolver';
 import { FileManager } from '../files/fileManager';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -34,10 +33,7 @@ export class RedeemCommand {
     //    fall back to full OAuth only if no session exists.
     //    The crypto layer (HKDF with email binding) is the real identity proof,
     //    not the OAuth ceremony.
-    //    We don't have a userId yet (joining a new org), so discover the most
-    //    recent session file to reuse an existing login.
-    const existingUserId = findLatestSessionUserId();
-    const authService = new AuthService(this.apiUrl, this.devMode, existingUserId);
+    const authService = new AuthService(this.apiUrl, this.devMode);
     let authResult = await authService.authenticateSilent(targetOrgId);
     if (!authResult.success) {
       // No cached session — need interactive auth
@@ -89,11 +85,14 @@ export class RedeemCommand {
     } catch (err: any) {
       // If the user had a local key from a previous invite, remove it —
       // they've been kicked and should not retain local access.
-      if (hasOrgKey(orgId, userId)) {
-        const { getOrgKeyPath } = await import('../config/globalConfig');
-        const keyPath = getOrgKeyPath(orgId, userId);
-        if (existsSync(keyPath)) unlinkSync(keyPath);
-      }
+      try {
+        const { getGlobalCapyDir } = await import('../config/globalConfig');
+        const orgDir = join(getGlobalCapyDir(), 'orgs', orgId);
+        if (existsSync(orgDir)) {
+          const { rmSync } = await import('fs');
+          rmSync(orgDir, { recursive: true });
+        }
+      } catch {}
       console.error(`\nCo-decryption failed: ${err.message}`);
       console.error('You may not be a member of this organization, or the invite has been revoked.');
       process.exit(1);
@@ -121,10 +120,12 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 8. Re-encrypt M under this user's wrapping key and store locally
-    const wrappingKey = deriveWrappingKey(userId, orgId);
-    const encryptedM = encryptMasterKey(masterKey, wrappingKey);
-    saveMasterKey(orgId, encryptedM, userId);
+    // 8. Double-wrap M (inner local key + outer KMS) and store locally
+    const keyOps = {
+      coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+      wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+    };
+    await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
 
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');

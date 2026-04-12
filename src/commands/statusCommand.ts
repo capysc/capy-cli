@@ -181,10 +181,15 @@ export class StatusCommand {
       const token = this.authService.getToken();
       if (token) this.serviceClient.setToken(token);
 
-      encryptionKey = resolveProjectKey(
+      const keyOps = {
+        coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+      };
+      encryptionKey = await resolveProjectKey(
         projectState.organizationId!,
         projectState.projectId!,
         authResult.user_id!,
+        keyOps,
       );
 
       const rawLocal = this.fileManager.readEnvFile();
