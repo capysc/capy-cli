@@ -1302,6 +1302,16 @@ async function testInitMultiOrgNoCurrent(): Promise<void> {
     `Expected cached/refreshed auth (session fallback scan), got: ${result.stdout}`,
   );
 
+  // CRITICAL: org picker must show BOTH orgs — if only one appears, multi-org is broken
+  assert(
+    result.stdout.includes('e2e-test-org-b'),
+    `Org picker missing "e2e-test-org-b" — multi-org selector broken: ${result.stdout}`,
+  );
+  assert(
+    result.stdout.includes('e2e-test-org'),
+    `Org picker missing "e2e-test-org" — multi-org selector broken: ${result.stdout}`,
+  );
+
   // Verify project was created
   assert(existsSync(join(TEMP_MULTIORG, 'keep.lock')), 'keep.lock not created in temp dir');
   assert(existsSync(join(TEMP_MULTIORG, '.env')), '.env not created in temp dir');
