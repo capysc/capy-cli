@@ -46,11 +46,11 @@ export class AuthService {
       // If we have a session and a specific org is requested, try to use/refresh it
       if (this.session && organizationId) {
         const orgSession = this.session.sessions[organizationId];
-        if (orgSession && orgSession.expires_at > Date.now()) {
+        if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(organizationId, orgSession.access_token)) {
           this.currentOrgId = organizationId;
           return this.buildAuthResult('cached');
         }
-        // Try refreshing for this org
+        // Token missing, expired, or org mismatch — refresh into the correct org
         if (this.session.refresh_token) {
           const refreshed = await this.refreshForOrg(organizationId);
           if (refreshed) {
@@ -61,9 +61,9 @@ export class AuthService {
 
       // If we have a session with no specific org requested, use any valid session
       if (this.session && !organizationId) {
-        // Find a valid session
+        // Find a valid session whose token actually matches the org
         for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
-          if (orgSession.expires_at > Date.now()) {
+          if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
             this.currentOrgId = orgId;
             return this.buildAuthResult('cached');
           }
@@ -99,7 +99,7 @@ export class AuthService {
   async authenticateSilent(organizationId?: string): Promise<AuthResult> {
     if (this.session && organizationId) {
       const orgSession = this.session.sessions[organizationId];
-      if (orgSession && orgSession.expires_at > Date.now()) {
+      if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(organizationId, orgSession.access_token)) {
         this.currentOrgId = organizationId;
         return this.buildAuthResult('cached');
       }
@@ -113,7 +113,7 @@ export class AuthService {
 
     if (this.session && !organizationId) {
       for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
-        if (orgSession.expires_at > Date.now()) {
+        if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
           this.currentOrgId = orgId;
           return this.buildAuthResult('cached');
         }
@@ -193,18 +193,8 @@ export class AuthService {
     organizations: Organization[],
     organizationId?: string,
   ): Promise<AuthResult> {
-    // Initialize or update session.
-    // Only carry over sessions that match a known org from the fresh response.
-    const knownOrgIds = new Set((organizations || []).map(o => o.id));
-    const previousSessions: Record<string, { access_token: string; expires_at: number }> = {};
-    if (this.session?.sessions) {
-      for (const [key, val] of Object.entries(this.session.sessions)) {
-        if (knownOrgIds.has(key)) {
-          previousSessions[key] = val;
-        }
-      }
-    }
-
+    // Fresh auth = fresh session. Never carry over stale org tokens —
+    // a leftover token for the wrong org is an access-control violation.
     this.session = {
       version: 2,
       user_id: user.id,
@@ -213,7 +203,7 @@ export class AuthService {
       user_last_name: user.last_name,
       refresh_token: token.refresh_token,
       organizations: organizations || [],
-      sessions: previousSessions,
+      sessions: {},
     };
 
     // If service returned a JWT, store the session.
@@ -373,9 +363,13 @@ export class AuthService {
         },
       );
 
-      this.session.sessions[orgId] = {
-        access_token: data.access_token,
-        expires_at: Date.now() + (data.expires_in * 1000),
+      // Replace all sessions — only one org token should exist at a time.
+      // Holding tokens for other orgs is an access-control risk.
+      this.session.sessions = {
+        [orgId]: {
+          access_token: data.access_token,
+          expires_at: Date.now() + (data.expires_in * 1000),
+        },
       };
       this.session.refresh_token = data.refresh_token;
 
@@ -399,15 +393,38 @@ export class AuthService {
   }
 
   isAuthenticated(): boolean {
-    if (!this.session || !this.currentOrgId) return false;
-    const s = this.session.sessions[this.currentOrgId];
-    return !!s && s.expires_at > Date.now();
+    // Delegate to getToken() which validates the token's org claim
+    return this.getToken() !== null && this.getToken()!.expires_at > Date.now();
   }
 
   getToken(): ServiceToken | null {
     if (!this.session || !this.currentOrgId) return null;
     const orgSession = this.session.sessions[this.currentOrgId];
     if (!orgSession) return null;
+
+    // Validate that the access token's org claim matches the org we think
+    // we're in. A mismatch means stale client state — the token grants
+    // access to a different org than intended.
+    const org = this.session.organizations.find(o => o.id === this.currentOrgId);
+    if (org) {
+      try {
+        const payload = JSON.parse(
+          Buffer.from(orgSession.access_token.split('.')[1], 'base64').toString()
+        );
+        if (payload.org_id && payload.org_id !== org.workos_org_id) {
+          // Token is for a different org — discard it.
+          delete this.session.sessions[this.currentOrgId];
+          this.saveSession();
+          return null;
+        }
+      } catch {
+        // Can't decode token — treat as invalid
+        delete this.session.sessions[this.currentOrgId];
+        this.saveSession();
+        return null;
+      }
+    }
+
     return {
       access_token: orgSession.access_token,
       refresh_token: this.session.refresh_token,
@@ -487,6 +504,27 @@ export class AuthService {
     this.clearSession();
   }
 
+  /**
+   * Validate that an access token's org_id claim matches the expected org.
+   * Returns false if the token is for a different org (stale session).
+   */
+  private validateTokenOrg(orgId: string, accessToken: string): boolean {
+    const org = this.session?.organizations.find(o => o.id === orgId);
+    if (!org) return false;
+    try {
+      const payload = JSON.parse(
+        Buffer.from(accessToken.split('.')[1], 'base64').toString()
+      );
+      if (payload.org_id && payload.org_id !== org.workos_org_id) {
+        // Token is scoped to a different org — stale.
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private buildAuthResult(method: 'cached' | 'refreshed'): AuthResult {
     return {
       success: true,
@@ -504,13 +542,15 @@ export class AuthService {
     try {
       const data = readAuthSession(this.sessionUserId) as SessionStore | null;
       if (data && data.version === 2) {
-        // Prune session keys that don't match any known organization.
-        // This handles DB re-provisioning where the internal org ID changed
-        // but a stale session key remains from the old ID.
+        // Only keep sessions for known orgs, and keep at most one.
+        // Stale tokens for the wrong org are an access-control violation.
         const knownOrgIds = new Set(data.organizations.map(o => o.id));
+        let kept: string | null = null;
         for (const key of Object.keys(data.sessions)) {
-          if (!knownOrgIds.has(key)) {
+          if (!knownOrgIds.has(key) || kept !== null) {
             delete data.sessions[key];
+          } else {
+            kept = key;
           }
         }
         this.session = data;
