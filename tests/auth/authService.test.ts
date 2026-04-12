@@ -161,8 +161,13 @@ describe('AuthService', () => {
       expect(result._auth_method).toBe('cached');
     });
 
-    test('should refresh for a different org when session exists', async () => {
-      const session = makeSession();
+    test('should refresh for a different org when session exists (multi-org)', async () => {
+      const session = makeSession({
+        organizations: [
+          { id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' },
+          { id: 'org-B', workos_org_id: 'workos-org-B', name: 'Org B' },
+        ],
+      });
       mockReadAuthSession.mockReturnValue(session);
 
       mockFetch.mockResolvedValueOnce(mockFetchResponse({
@@ -590,6 +595,36 @@ describe('AuthService', () => {
 
       // The stale key should have been pruned during loadSession
       expect(session.sessions).not.toHaveProperty('org-OLD');
+    });
+
+    test('stale keep.lock org ID resolves to current org (single org)', async () => {
+      // Simulates: keep.lock has org-OLD, but the session's organizations list
+      // shows that org-NEW is the current internal ID. Since there's exactly 1
+      // known org, authenticate('org-OLD') should resolve to org-NEW.
+      const session: SessionStore = {
+        version: 2,
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        refresh_token: 'test-refresh',
+        organizations: [{ id: 'org-NEW', workos_org_id: 'workos-org-123', name: 'Test Org' }],
+        sessions: {
+          'org-NEW': {
+            access_token: fakeJwt({ org_id: 'workos-org-123' }),
+            expires_at: Date.now() + 3600000,
+          },
+        },
+      };
+      mockReadAuthSession.mockReturnValue(session);
+
+      const service = new AuthService(undefined, false, 'user-456');
+
+      // authenticate('org-OLD') should resolve to org-NEW and use cached token
+      const result = await service.authenticate('org-OLD');
+      expect(result.success).toBe(true);
+      expect(result.organization_id).toBe('org-NEW');
+      expect(result._auth_method).toBe('cached');
+      // Should NOT have made any fetch calls (no refresh needed)
+      expect(mockFetch).not.toHaveBeenCalled();
     });
 
     test('refreshForOrg replaces all sessions with the new one', async () => {

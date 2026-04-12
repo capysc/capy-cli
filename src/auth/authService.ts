@@ -43,16 +43,28 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
+      let resolvedOrgId = organizationId;
+
+      // Resolve stale org IDs: if the requested org isn't in the organizations
+      // list (e.g. keep.lock has an old internal ID after DB re-provisioning),
+      // and there's exactly one known org, use that instead.
+      if (resolvedOrgId && this.session) {
+        const knownOrg = this.session.organizations.find(o => o.id === resolvedOrgId);
+        if (!knownOrg && this.session.organizations.length === 1) {
+          resolvedOrgId = this.session.organizations[0].id;
+        }
+      }
+
       // If we have a session and a specific org is requested, try to use/refresh it
-      if (this.session && organizationId) {
-        const orgSession = this.session.sessions[organizationId];
-        if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(organizationId, orgSession.access_token)) {
-          this.currentOrgId = organizationId;
+      if (this.session && resolvedOrgId) {
+        const orgSession = this.session.sessions[resolvedOrgId];
+        if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(resolvedOrgId, orgSession.access_token)) {
+          this.currentOrgId = resolvedOrgId;
           return this.buildAuthResult('cached');
         }
         // Token missing, expired, or org mismatch — refresh into the correct org
         if (this.session.refresh_token) {
-          const refreshed = await this.refreshForOrg(organizationId);
+          const refreshed = await this.refreshForOrg(resolvedOrgId);
           if (refreshed) {
             return this.buildAuthResult('refreshed');
           }
@@ -60,7 +72,7 @@ export class AuthService {
       }
 
       // If we have a session with no specific org requested, use any valid session
-      if (this.session && !organizationId) {
+      if (this.session && !resolvedOrgId) {
         // Find a valid session whose token actually matches the org
         for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
           if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
@@ -79,11 +91,11 @@ export class AuthService {
       }
 
       // Try password auth (E2E testing only — requires devMode + env vars)
-      const pwResult = await this.tryPasswordAuth(organizationId);
+      const pwResult = await this.tryPasswordAuth(resolvedOrgId);
       if (pwResult) return pwResult;
 
       // Full OAuth flow
-      return await this.startOAuthFlow(organizationId);
+      return await this.startOAuthFlow(resolvedOrgId);
     } catch (error: any) {
       return {
         success: false,
@@ -207,26 +219,29 @@ export class AuthService {
     };
 
     // If service returned a JWT, store the session.
-    // Resolve the org: prefer the explicit organizationId, then decode the JWT's
-    // org_id to match against the organizations list, then fall back to single-org.
+    // The JWT's org_id claim is the source of truth — always decode it to
+    // resolve the org. The client-provided organizationId is only a fallback.
     if (token.access_token) {
-      let resolvedOrgId = organizationId || '';
+      let resolvedOrgId = '';
 
       // Decode JWT to find which org the token is scoped to
-      if (!resolvedOrgId) {
-        try {
-          const payload = JSON.parse(
-            Buffer.from(token.access_token.split('.')[1], 'base64').toString()
-          );
-          if (payload.org_id) {
-            const match = organizations?.find(o => o.workos_org_id === payload.org_id);
-            if (match) resolvedOrgId = match.id;
-          }
-        } catch {
-          // JWT decode failed — fall through
+      try {
+        const payload = JSON.parse(
+          Buffer.from(token.access_token.split('.')[1], 'base64').toString()
+        );
+        if (payload.org_id) {
+          const match = organizations?.find(o => o.workos_org_id === payload.org_id);
+          if (match) resolvedOrgId = match.id;
         }
+      } catch {
+        // JWT decode failed — fall through
       }
 
+      // Fallbacks: explicit organizationId if in the org list, then single-org
+      if (!resolvedOrgId && organizationId) {
+        const orgExists = organizations?.find(o => o.id === organizationId);
+        if (orgExists) resolvedOrgId = organizationId;
+      }
       if (!resolvedOrgId && organizations?.length === 1) {
         resolvedOrgId = organizations[0].id;
       }
@@ -363,10 +378,25 @@ export class AuthService {
         },
       );
 
+      // Resolve the actual org from the JWT — the caller may have passed a
+      // stale internal org ID but the token is scoped to the canonical one.
+      let resolvedOrgId = orgId;
+      try {
+        const payload = JSON.parse(
+          Buffer.from(data.access_token.split('.')[1], 'base64').toString()
+        );
+        if (payload.org_id) {
+          const match = this.session.organizations.find(o => o.workos_org_id === payload.org_id);
+          if (match) resolvedOrgId = match.id;
+        }
+      } catch {
+        // JWT decode failed — use the orgId as-is
+      }
+
       // Replace all sessions — only one org token should exist at a time.
       // Holding tokens for other orgs is an access-control risk.
       this.session.sessions = {
-        [orgId]: {
+        [resolvedOrgId]: {
           access_token: data.access_token,
           expires_at: Date.now() + (data.expires_in * 1000),
         },
@@ -380,7 +410,7 @@ export class AuthService {
         this.session.user_last_name = data.user.last_name;
       }
 
-      this.currentOrgId = orgId;
+      this.currentOrgId = resolvedOrgId;
       this.saveSession();
       return true;
     } catch {
