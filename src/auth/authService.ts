@@ -29,6 +29,9 @@ export class AuthService {
     this.devMode = devMode;
     this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
     this.sessionUserId = sessionUserId;
+    if (devMode) {
+      console.error(`[dev] AuthService → ${this.serviceApiUrl}`);
+    }
     this.loadSession();
   }
 
@@ -472,6 +475,15 @@ export class AuthService {
     try {
       const data = readAuthSession(this.sessionUserId) as SessionStore | null;
       if (data && data.version === 2) {
+        // Prune session keys that don't match any known organization.
+        // This handles DB re-provisioning where the internal org ID changed
+        // but a stale session key remains from the old ID.
+        const knownOrgIds = new Set(data.organizations.map(o => o.id));
+        for (const key of Object.keys(data.sessions)) {
+          if (!knownOrgIds.has(key)) {
+            delete data.sessions[key];
+          }
+        }
         this.session = data;
         return;
       }
