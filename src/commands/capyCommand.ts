@@ -997,19 +997,6 @@ export class CapyCommand {
       branch,
     );
 
-    // The authenticated org MUST match the project's org from keep.lock.
-    // A mismatch means the token is scoped to a different org than the one
-    // that owns this project's secrets — refuse to proceed.
-    if (authResult.organization_id && projectState.organizationId &&
-        authResult.organization_id !== projectState.organizationId) {
-      spinner.fail('Organization mismatch');
-      throw new CapyError(
-        `Authenticated into org ${authResult.organization_id} but this project belongs to org ${projectState.organizationId}.\n` +
-        `You are not authorized to decrypt secrets for this project.`,
-        ERROR_CODES.PERMISSION_DENIED
-      );
-    }
-
     // Set token for service client
     const token = this.authService.getToken();
 
