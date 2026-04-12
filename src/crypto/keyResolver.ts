@@ -83,7 +83,8 @@ export async function resolveProjectKey(
   // Legacy blob unwrapped — re-wrap with KMS outer layer for future runs
   try {
     const innerWrapped = encryptMasterKey(masterKey, innerKey);
-    const outerWrapped = await service.wrapOuterLayer(orgId, Buffer.from(innerWrapped).toString('base64'));
+    // innerWrapped is already base64 — pass directly to wrapOuterLayer
+    const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
     saveMasterKey(orgId, outerWrapped, userId);
   } catch {
     // Re-wrap failed (server unavailable?) — proceed with the unwrapped M this time.
@@ -106,7 +107,8 @@ export async function wrapAndSaveMasterKey(
 ): Promise<void> {
   const innerKey = deriveWrappingKey(userId, orgId);
   const innerWrapped = encryptMasterKey(masterKey, innerKey);
-  const outerWrapped = await service.wrapOuterLayer(orgId, Buffer.from(innerWrapped).toString('base64'));
+  // innerWrapped is already base64 — pass directly to wrapOuterLayer
+  const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
   saveMasterKey(orgId, outerWrapped, userId);
 }
 
