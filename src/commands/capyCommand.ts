@@ -176,6 +176,7 @@ export class CapyCommand {
     // Resolve organization
     const orgs = authResult.organizations || [];
     let selectedOrg: Organization;
+    let isNewOrg = false;
     const SWITCH_ORG = '__switch_org__';
     const CREATE_NEW_ORG = '__create_new__';
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
@@ -186,6 +187,7 @@ export class CapyCommand {
     if (orgs.length === 0) {
       console.log('\nNo organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+      isNewOrg = true;
     } else if (currentOrg) {
       const { orgAction } = await inquirer.prompt([{
         type: 'list',
@@ -213,6 +215,7 @@ export class CapyCommand {
         return this.initializeProject();
       } else if (orgAction === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+        isNewOrg = true;
       } else {
         selectedOrg = currentOrg;
       }
@@ -230,6 +233,7 @@ export class CapyCommand {
 
       if (orgId === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+        isNewOrg = true;
       } else {
         selectedOrg = orgs.find(o => o.id === orgId)!;
 
@@ -261,29 +265,13 @@ export class CapyCommand {
       this.serviceClient.setToken(updatedToken);
     }
 
-    // Discover existing projects in the org early — we need this to distinguish
-    // org creators (no projects yet) from invited members (projects already exist).
-    const CREATE_NEW_PROJECT = '__create_new_project__';
-    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
-    try {
-      const listSpinner = ora('Looking for existing projects...').start();
-      existingProjects = await this.serviceClient.listProjects();
-      listSpinner.stop();
-      this.debug('listProjects response', existingProjects);
-    } catch (err) {
-      this.debugError('listProjects failed', err);
-      // Network or auth issue — fall through to new-project flow
-      existingProjects = [];
-    }
-
-    // Ensure org has a master key — generate seed phrase if first time
+    // Ensure org has a master key
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
-      // If the org already has projects, this user was invited and needs to
-      // redeem their invite code to receive the shared master key. Generating
-      // a new key here would create an incompatible key.
-      if (existingProjects.length > 0) {
+      if (!isNewOrg) {
+        // User has access to an existing org but no local key — they were invited
+        // and need to redeem their invite code to receive the shared master key.
         throw new CapyError(
-          `You have been invited to "${selectedOrg.name}" but haven't redeemed your invite yet.\n\n` +
+          `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
           '  Ask your org owner for an invite code, then run:\n\n' +
           '    capy redeem <code>\n\n' +
           '  This will securely transfer the shared encryption key to your device.',
@@ -291,6 +279,7 @@ export class CapyCommand {
         );
       }
 
+      // New org — generate seed phrase for the org owner
       const seedPhrase = generateSeedPhrase();
 
       const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
@@ -355,6 +344,22 @@ export class CapyCommand {
       const wrappingKey = deriveWrappingKey(authResult.user_id!, selectedOrg.id);
       const encryptedM = encryptMasterKey(masterKey, wrappingKey);
       saveMasterKey(selectedOrg.id, encryptedM, authResult.user_id!);
+    }
+
+    // Discover existing projects in the org. If any exist, give the user the
+    // choice to bootstrap one of them OR create a new project. This is the path
+    // a teammate hits when cloning a repo with no committed keep.lock.
+    const CREATE_NEW_PROJECT = '__create_new_project__';
+    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
+    try {
+      const listSpinner = ora('Looking for existing projects...').start();
+      existingProjects = await this.serviceClient.listProjects();
+      listSpinner.stop();
+      this.debug('listProjects response', existingProjects);
+    } catch (err) {
+      this.debugError('listProjects failed', err);
+      // Network or auth issue — fall through to new-project flow
+      existingProjects = [];
     }
 
     if (existingProjects.length > 0) {
