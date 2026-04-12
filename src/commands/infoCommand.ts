@@ -34,9 +34,7 @@ export class InfoCommand {
       process.exit(1);
     }
 
-    // Use the authenticated org (from JWT), not the potentially stale keep.lock org
-    const resolvedOrgId = authResult.organization_id || orgId;
-    const org = authResult.organizations?.find(o => o.id === resolvedOrgId);
+    const org = authResult.organizations?.find(o => o.id === orgId);
     const orgName = authResult.organization_name || org?.name;
     const workosOrgId = org?.workos_org_id;
     const branch = projectState.activeBranch;
@@ -45,7 +43,7 @@ export class InfoCommand {
       ['User', authResult.user_email || '—'],
       ['User ID', authResult.user_id || '—'],
       ['Organization', orgName || '—'],
-      ['Org ID', resolvedOrgId],
+      ['Org ID', orgId],
       ['WorkOS Org ID', workosOrgId || '—'],
       ['Project', projectState.projectName || '—'],
       ['Project ID', projectState.projectId || '—'],

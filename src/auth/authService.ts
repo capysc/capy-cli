@@ -43,28 +43,16 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
-      let resolvedOrgId = organizationId;
-
-      // Resolve stale org IDs: if the requested org isn't in the organizations
-      // list (e.g. keep.lock has an old internal ID after DB re-provisioning),
-      // and there's exactly one known org, use that instead.
-      if (resolvedOrgId && this.session) {
-        const knownOrg = this.session.organizations.find(o => o.id === resolvedOrgId);
-        if (!knownOrg && this.session.organizations.length === 1) {
-          resolvedOrgId = this.session.organizations[0].id;
-        }
-      }
-
       // If we have a session and a specific org is requested, try to use/refresh it
-      if (this.session && resolvedOrgId) {
-        const orgSession = this.session.sessions[resolvedOrgId];
-        if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(resolvedOrgId, orgSession.access_token)) {
-          this.currentOrgId = resolvedOrgId;
+      if (this.session && organizationId) {
+        const orgSession = this.session.sessions[organizationId];
+        if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(organizationId, orgSession.access_token)) {
+          this.currentOrgId = organizationId;
           return this.buildAuthResult('cached');
         }
         // Token missing, expired, or org mismatch — refresh into the correct org
         if (this.session.refresh_token) {
-          const refreshed = await this.refreshForOrg(resolvedOrgId);
+          const refreshed = await this.refreshForOrg(organizationId);
           if (refreshed) {
             return this.buildAuthResult('refreshed');
           }
@@ -72,7 +60,7 @@ export class AuthService {
       }
 
       // If we have a session with no specific org requested, use any valid session
-      if (this.session && !resolvedOrgId) {
+      if (this.session && !organizationId) {
         // Find a valid session whose token actually matches the org
         for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
           if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
@@ -91,11 +79,11 @@ export class AuthService {
       }
 
       // Try password auth (E2E testing only — requires devMode + env vars)
-      const pwResult = await this.tryPasswordAuth(resolvedOrgId);
+      const pwResult = await this.tryPasswordAuth(organizationId);
       if (pwResult) return pwResult;
 
       // Full OAuth flow
-      return await this.startOAuthFlow(resolvedOrgId);
+      return await this.startOAuthFlow(organizationId);
     } catch (error: any) {
       return {
         success: false,

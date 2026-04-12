@@ -937,9 +937,20 @@ export class CapyCommand {
       this.authService.setSessionUserId(projectState.userId);
     }
 
-    // Authenticate
+    // Authenticate — try silent first, then interactive if needed.
     const spinner = ora('Authenticating...').start();
-    const authResult = await this.authService.authenticate(projectState.organizationId);
+    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
+
+    // If silent auth failed, try without a specific org to use any valid session
+    if (!authResult.success) {
+      authResult = await this.authService.authenticateSilent();
+    }
+
+    // If still no session, fall through to interactive auth
+    if (!authResult.success) {
+      authResult = await this.authService.authenticate(projectState.organizationId);
+    }
+
     this.debug('authResult', {
       success: authResult.success,
       user_id: authResult.user_id,
@@ -976,6 +987,19 @@ export class CapyCommand {
       authResult.user_first_name || authResult.user_email || '',
       branch,
     );
+
+    // The authenticated org MUST match the project's org from keep.lock.
+    // A mismatch means the token is scoped to a different org than the one
+    // that owns this project's secrets — refuse to proceed.
+    if (authResult.organization_id && projectState.organizationId &&
+        authResult.organization_id !== projectState.organizationId) {
+      spinner.fail('Organization mismatch');
+      throw new CapyError(
+        `Authenticated into org ${authResult.organization_id} but this project belongs to org ${projectState.organizationId}.\n` +
+        `You are not authorized to decrypt secrets for this project.`,
+        ERROR_CODES.PERMISSION_DENIED
+      );
+    }
 
     // Set token for service client
     const token = this.authService.getToken();

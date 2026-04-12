@@ -597,10 +597,10 @@ describe('AuthService', () => {
       expect(session.sessions).not.toHaveProperty('org-OLD');
     });
 
-    test('stale keep.lock org ID resolves to current org (single org)', async () => {
-      // Simulates: keep.lock has org-OLD, but the session's organizations list
-      // shows that org-NEW is the current internal ID. Since there's exactly 1
-      // known org, authenticate('org-OLD') should resolve to org-NEW.
+    test('authenticate with unknown org ID falls through to OAuth', async () => {
+      // If keep.lock has an org ID that doesn't exist in the session,
+      // authenticate should NOT silently resolve to a different org.
+      // It should fall through to refresh (which may fail) then OAuth.
       const session: SessionStore = {
         version: 2,
         user_id: 'user-456',
@@ -616,15 +616,32 @@ describe('AuthService', () => {
       };
       mockReadAuthSession.mockReturnValue(session);
 
-      const service = new AuthService(undefined, false, 'user-456');
+      // Refresh for 'org-OLD' will be attempted, then OAuth
+      mockFetch
+        .mockRejectedValueOnce(new Error('refresh failed'))  // refresh attempt
+        .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          token: { access_token: fakeJwt({ org_id: 'workos-org-OLD' }), refresh_token: 'new-refresh', expires_in: 3600 },
+          user: { id: 'user-456', email: 'test@example.com', first_name: null, last_name: null },
+          organizations: [{ id: 'org-OLD', workos_org_id: 'workos-org-OLD', name: 'Old Org' }],
+        }));
 
-      // authenticate('org-OLD') should resolve to org-NEW and use cached token
+      const mockOAuthInstance = {
+        bind: mock(() => Promise.resolve(undefined)),
+        getState: mock(() => 'mock-state'),
+        getRedirectUri: mock(() => 'http://localhost:19420/callback'),
+        getCodeChallenge: mock(() => 'mock-code-challenge'),
+        getCodeVerifier: mock(() => 'mock-code-verifier'),
+        startAuthFlow: mock(() => Promise.resolve('auth-code-123')),
+      };
+      (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
+
+      const service = new AuthService(undefined, false, 'user-456');
       const result = await service.authenticate('org-OLD');
+
       expect(result.success).toBe(true);
-      expect(result.organization_id).toBe('org-NEW');
-      expect(result._auth_method).toBe('cached');
-      // Should NOT have made any fetch calls (no refresh needed)
-      expect(mockFetch).not.toHaveBeenCalled();
+      // Should NOT have silently resolved to org-NEW
+      expect(result.organization_id).toBe('org-OLD');
     });
 
     test('refreshForOrg replaces all sessions with the new one', async () => {
