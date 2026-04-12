@@ -783,6 +783,333 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('syncProject — onboarding menu (empty local .env)', () => {
+    const mockProjectState = {
+      initialized: true,
+      hasKeepFile: true,
+      hasDecryptKey: true,
+      hasEnvFile: true,
+      projectName: 'test-project',
+      projectId: 'proj-123',
+      organizationId: 'org-123',
+      activeBranch: 'development',
+    };
+
+    // Hash must match what hashValue() produces for the plaintext
+    const { createHash } = require('crypto');
+    const hash = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 16);
+
+    const remoteVars: Record<string, string> = {
+      API_KEY: 'sk_test_123',
+      DB_URL: 'postgres://localhost/app',
+    };
+    const remoteHashes: Record<string, string> = {};
+    for (const [k, v] of Object.entries(remoteVars)) {
+      remoteHashes[k] = hash(v);
+    }
+
+    // keep.lock with pinned hashes matching remote
+    const makeKeep = (hashes: Record<string, string>) => ({
+      version: '3.0',
+      org_id: 'org-123',
+      project_id: 'proj-123',
+      project_name: 'test-project',
+      variables: Object.fromEntries(
+        Object.entries(hashes).map(([k, h]) => [k, [{ branch: 'development', resource_id: `dev:${k}`, value_hash: h }]])
+      ),
+    });
+
+    beforeEach(() => {
+      mockAuthService.authenticateSilent.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        _auth_method: 'cached',
+      });
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+      });
+
+      // Local .env is empty
+      mockFileManager.readEnvFile.mockReturnValue({});
+
+      // Remote returns secrets
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: 'encrypted-blob',
+        keep_hash: 'a'.repeat(64),
+      });
+      // parseEnvContent returns the "encrypted" values, decryptValue passes through
+      mockFileManager.parseEnvContent.mockReturnValue(remoteVars);
+      mockFileManager.decryptValue.mockImplementation((v: string) => v);
+    });
+
+    test('should only show retrieve option when pinned matches remote and .env is foreign', async () => {
+      // Pinned matches remote
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(remoteHashes));
+      // .env has no metadata (not initialized to this project)
+      mockFileManager.readEnvMeta.mockReturnValue({});
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {
+        // May throw after skip — we only care about the menu choices
+      }
+
+      // Find the action prompt
+      const actionPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'action';
+      });
+      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
+      const choiceValues = question?.choices?.map((c: any) => c.value);
+
+      // Should only have retrieve_pinned + skip (no commit_local, no individual)
+      expect(choiceValues).toContain('retrieve_pinned');
+      expect(choiceValues).not.toContain('commit_local');
+      expect(choiceValues).not.toContain('individual');
+      expect(choiceValues).toContain('skip');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+
+    test('should show both retrieve options when pinned differs from remote and .env is foreign', async () => {
+      // Pinned has different hashes than remote
+      const staleHashes: Record<string, string> = {
+        API_KEY: 'aaaa' + 'bbbb' + 'cccc' + 'dddd',
+        DB_URL: 'eeee' + 'ffff' + '0000' + '1111',
+      };
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(staleHashes));
+      // .env belongs to a different org
+      mockFileManager.readEnvMeta.mockReturnValue({ org_id: 'other-org', project_id: 'other-proj' });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {
+        // May throw after skip
+      }
+
+      const actionPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'action';
+      });
+      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
+      const choiceValues = question?.choices?.map((c: any) => c.value);
+
+      // Should have both retrieve options but no commit_local or individual
+      expect(choiceValues).toContain('retrieve_pinned');
+      expect(choiceValues).toContain('retrieve_remote');
+      expect(choiceValues).not.toContain('commit_local');
+      expect(choiceValues).not.toContain('individual');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+
+    test('should show full menu when .env is empty but belongs to this project (deliberate deletions)', async () => {
+      // Pinned matches remote
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(remoteHashes));
+      // .env IS initialized to this project
+      mockFileManager.readEnvMeta.mockReturnValue({ org_id: 'org-123', project_id: 'proj-123' });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {
+        // May throw after skip
+      }
+
+      const actionPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'action';
+      });
+      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
+      const choiceValues = question?.choices?.map((c: any) => c.value);
+
+      // Should have the normal menu with commit_local option (these are deliberate deletions)
+      expect(choiceValues).toContain('commit_local');
+      expect(choiceValues).toContain('retrieve_pinned');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+  });
+
+  describe('initializeProject — pending invite (no local key)', () => {
+    beforeEach(() => {
+      // User authenticates to an org they were invited to but haven't redeemed
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        organization_name: 'Test Org',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-123', workos_org_id: 'workos-org-123', name: 'Test Org' }],
+      });
+
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+      });
+    });
+
+    test('should throw with redeem instructions when user has no local key for existing org', async () => {
+      // hasOrgKey returns false — user was invited but hasn't redeemed
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      (hasOrgKey as any).mockReturnValue(false);
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await expect((capyCommand as any).initializeProject()).rejects.toThrow('no encryption key');
+        await expect((capyCommand as any).initializeProject()).rejects.toThrow('capy redeem');
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('should not prompt for seed phrase when user has no key for existing org', async () => {
+      const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+      (hasOrgKey as any).mockReturnValue(false);
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).initializeProject().catch(() => {});
+      } finally {
+        (hasOrgKey as any).mockReturnValue(true);
+        consoleSpy.mockRestore();
+      }
+
+      // Should NOT have called createOrganization or initializeProject on service
+      expect(mockServiceClient.initializeProject).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('initializeProject — new org creation is atomic with seed phrase', () => {
+    beforeEach(() => {
+      // No orgs — user will be prompted to create one
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: '',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [],
+        _refresh_token: 'refresh-token',
+      });
+
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-new',
+        user_id: 'user-456',
+      });
+
+      mockAuthService.createOrganization.mockResolvedValue({
+        id: 'org-new',
+        workos_org_id: 'workos-new',
+        name: 'New Org',
+      });
+
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-new',
+        project_id: 'proj-new',
+        project_name: 'test',
+        created: true,
+      });
+
+      mockServiceClient.listProjects.mockResolvedValue([]);
+    });
+
+    test('should not create org when user declines seed phrase', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q.name === 'orgName') return { orgName: 'New Org' };
+        if (q.name === 'confirmed') return { confirmed: false }; // decline seed phrase
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await expect((capyCommand as any).initializeProject()).rejects.toThrow(
+          'You must save your recovery phrase'
+        );
+        // Org should NOT have been created
+        expect(mockAuthService.createOrganization).not.toHaveBeenCalled();
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+    });
+
+    test('should create org and save key when user confirms seed phrase', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q.name === 'orgName') return { orgName: 'New Org' };
+        if (q.name === 'confirmed') return { confirmed: true };
+        if (q.name === 'initChoice') return { initChoice: 'development' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).initializeProject();
+
+        expect(mockAuthService.createOrganization).toHaveBeenCalledWith(
+          'New Org', 'refresh-token', 'user-456'
+        );
+
+        const { wrapAndSaveMasterKey } = await import('../../src/crypto/keyResolver');
+        expect(wrapAndSaveMasterKey).toHaveBeenCalled();
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+    });
+  });
+
   describe('error handling', () => {
     test('should use displayErrorAndExit for errors in execute', async () => {
       // The execute method now uses displayErrorAndExit from errorScreen module
