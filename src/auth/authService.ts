@@ -357,6 +357,7 @@ export class AuthService {
         refresh_token: string;
         expires_in: number;
         user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+        organization?: { id: string; workos_org_id: string; name: string };
       }>(
         `${this.serviceApiUrl}/auth/refresh`,
         {
@@ -388,7 +389,15 @@ export class AuthService {
       };
       this.session.refresh_token = data.refresh_token;
 
-
+      // If this org isn't in the organizations list yet (e.g. user was just
+      // invited and we refreshed into the new org), add it from the response.
+      if (!this.session.organizations.some(o => o.id === resolvedOrgId) && data.organization) {
+        this.session.organizations.push({
+          id: data.organization.id,
+          workos_org_id: data.organization.workos_org_id,
+          name: data.organization.name,
+        });
+      }
 
       if (data.user) {
         this.session.user_id = data.user.id;
