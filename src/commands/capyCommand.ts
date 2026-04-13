@@ -1161,13 +1161,25 @@ export class CapyCommand {
       return;
     }
 
+    // Onboarding detection: local .env is empty (or belongs to a different project)
+    // and remote has values — the user has no local changes to commit or resolve.
+    let isOnboarding = false;
+    if (Object.keys(localHashes).length === 0 && Object.keys(remotePlaintext).length > 0) {
+      const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+      isOnboarding = !(envMeta.org_id === projectState.organizationId
+        && envMeta.project_id === projectState.projectId);
+    }
+
+    // Hide local column for onboarding — it's all "-" and adds noise
+    const effectiveShowLocal = isOnboarding ? false : showLocal;
+
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
     console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
 
     // Display comparison table
-    this.displayComparisonTable(diffs, showLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
+    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
 
     console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
@@ -1175,7 +1187,15 @@ export class CapyCommand {
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
 
-    if (!hasPinned) {
+    if (isOnboarding) {
+      // Onboarding: local .env is empty/foreign — only offer retrieve options
+      if (!showRemote) {
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      } else {
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      }
+    } else if (!hasPinned) {
       // No pinned values — only offer commit or skip
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
     } else if (!hasRemote) {
