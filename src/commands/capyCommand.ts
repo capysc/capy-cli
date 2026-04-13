@@ -499,6 +499,7 @@ export class CapyCommand {
             last_sync: new Date().toISOString(),
             synced_variables: Object.keys(localEnv),
             user_id: authResult.user_id,
+            keep_hash: initKeepHash,
           });
 
           // Backup plaintext .env before encrypting
@@ -634,6 +635,7 @@ export class CapyCommand {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(plaintext),
       user_id: userId,
+      keep_hash: SyncEngine.computeKeepHash(serverKeep, branch),
     });
 
     fetchSpinner.succeed(
@@ -1222,6 +1224,13 @@ export class CapyCommand {
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
 
+    // Direction detection: compare sync-state keep_hash to current keep.lock
+    const syncState = this.projectManager.readSyncState();
+    const currentKeepHash = currentKeep ? SyncEngine.computeKeepHash(currentKeep, branch) : null;
+    const isBehind = syncState?.keep_hash != null
+      && currentKeepHash != null
+      && syncState.keep_hash !== currentKeepHash;
+
     if (isOnboarding) {
       // Onboarding: local .env is empty/foreign — only offer retrieve options
       if (!showRemote) {
@@ -1231,27 +1240,42 @@ export class CapyCommand {
         menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
       }
     } else if (!hasPinned) {
-      // No pinned values — only offer commit or skip
+      // State 6: No pinned values — only offer commit or skip
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
     } else if (!hasRemote) {
-      // No remote values — local vs pinned only
+      // State 5: No remote values — local vs pinned only
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (showLocal && !showRemote) {
-      // Local differs from pinned, remote matches pinned
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 2: Local differs from pinned, remote matches pinned
+      if (isBehind) {
+        // 2b: keep.lock changed via git pull → user is behind
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 2a: user edited .env locally → user is ahead
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (!showLocal && showRemote) {
-      // Remote differs from pinned, local matches pinned
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 3: Remote differs from pinned, local matches pinned
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else {
-      // Both differ — show all 4 options
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-      menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      // State 4: Both differ
+      if (isBehind) {
+        // 4b: keep.lock changed + another push happened → retrieve remote first
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 4a: user edited .env + teammate pushed
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     }
 
@@ -1372,6 +1396,7 @@ export class CapyCommand {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
       user_id: authResult.user_id,
+      keep_hash: SyncEngine.computeKeepHash(finalKeep, branch),
     });
 
     const changeCount = Object.keys(pushedVars).length;

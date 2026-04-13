@@ -13,9 +13,11 @@ mock.module('../../src/auth/authService', () => ({
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: mock(() => ({})),
 }));
-mock.module('../../src/sync/syncEngine', () => ({
-  SyncEngine: mock(() => ({})),
-}));
+mock.module('../../src/sync/syncEngine', () => {
+  const MockSyncEngine = mock(() => ({}));
+  (MockSyncEngine as any).computeKeepHash = mock(() => 'mock-keep-hash');
+  return { SyncEngine: MockSyncEngine };
+});
 mock.module('../../src/ui/promptEngine', () => ({
   PromptEngine: mock(() => ({})),
 }));
@@ -978,6 +980,233 @@ describe('CapyCommand', () => {
       const logCalls = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
       const headerLine = logCalls.split('\n').find((l: string) => l.includes('Variable'));
       expect(headerLine).toContain('Local');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+  });
+
+  describe('syncProject — direction detection (ahead vs behind)', () => {
+    const { createHash } = require('crypto');
+    const hash = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 16);
+
+    const oldVars: Record<string, string> = { API_KEY: 'old_key_123', DB_URL: 'postgres://old' };
+    const newVars: Record<string, string> = { API_KEY: 'new_key_456', DB_URL: 'postgres://new' };
+    const oldHashes: Record<string, string> = {};
+    const newHashes: Record<string, string> = {};
+    for (const [k, v] of Object.entries(oldVars)) oldHashes[k] = hash(v);
+    for (const [k, v] of Object.entries(newVars)) newHashes[k] = hash(v);
+
+    const makeKeep = (hashes: Record<string, string>) => ({
+      version: '3.0',
+      org_id: 'org-123',
+      project_id: 'proj-123',
+      project_name: 'test-project',
+      variables: Object.fromEntries(
+        Object.entries(hashes).map(([k, h]) => [k, [{ branch: 'development', resource_id: `dev:${k}`, value_hash: h }]])
+      ),
+    });
+
+    const mockProjectState = {
+      initialized: true,
+      hasKeepFile: true,
+      hasDecryptKey: true,
+      hasEnvFile: true,
+      projectName: 'test-project',
+      projectId: 'proj-123',
+      organizationId: 'org-123',
+      activeBranch: 'development',
+    };
+
+    beforeEach(() => {
+      mockAuthService.authenticateSilent.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        _auth_method: 'cached',
+      });
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+      });
+      mockFileManager.readEnvMeta.mockReturnValue({ org_id: 'org-123', project_id: 'proj-123' });
+      mockFileManager.parseEnvContent.mockReturnValue({});
+      mockFileManager.decryptValue.mockImplementation((v: string) => v);
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: null,
+        keep_hash: 'a'.repeat(64),
+      });
+    });
+
+    test('state 2a (ahead): user edited .env, keep_hash matches → Commit local first', async () => {
+      // keep.lock has old hashes (unchanged since last sync)
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(oldHashes));
+      // Local .env has new values
+      mockFileManager.readEnvFile.mockReturnValue(newVars);
+      // Remote matches pinned (old)
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: 'encrypted',
+        keep_hash: 'a'.repeat(64),
+      });
+      mockFileManager.parseEnvContent.mockReturnValue(oldVars);
+      // sync-state keep_hash matches current keep.lock → user is ahead
+      mockProjectManager.readSyncState.mockReturnValue({ keep_hash: 'mock-keep-hash' });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {}
+
+      const actionPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'action';
+      });
+      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
+      const choiceValues = question?.choices?.map((c: any) => c.value);
+
+      // Commit local should be first (user is ahead)
+      expect(choiceValues[0]).toBe('commit_local');
+      expect(choiceValues).toContain('retrieve_pinned');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+
+    test('state 2b (behind): git pull updated keep.lock, keep_hash differs → Retrieve pinned first', async () => {
+      // keep.lock has NEW hashes (updated via git pull)
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(newHashes));
+      // Local .env has old values (stale)
+      mockFileManager.readEnvFile.mockReturnValue(oldVars);
+      // Remote matches pinned (new)
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: 'encrypted',
+        keep_hash: 'a'.repeat(64),
+      });
+      mockFileManager.parseEnvContent.mockReturnValue(newVars);
+      // sync-state keep_hash is OLD (from before git pull) → mismatch → user is behind
+      mockProjectManager.readSyncState.mockReturnValue({ keep_hash: 'old-keep-hash' });
+      // computeKeepHash returns something different from 'old-keep-hash'
+      const { SyncEngine } = await import('../../src/sync/syncEngine');
+      (SyncEngine as any).computeKeepHash = mock(() => 'new-keep-hash');
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {}
+
+      const actionPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'action';
+      });
+      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
+      const choiceValues = question?.choices?.map((c: any) => c.value);
+
+      // Retrieve pinned should be first (user is behind)
+      expect(choiceValues[0]).toBe('retrieve_pinned');
+      expect(choiceValues).toContain('commit_local');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+      (SyncEngine as any).computeKeepHash = mock(() => 'mock-keep-hash');
+    });
+
+    test('state 3: remote ahead of pinned → Retrieve remote first', async () => {
+      // keep.lock has old hashes
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(oldHashes));
+      // Local matches pinned (old)
+      mockFileManager.readEnvFile.mockReturnValue(oldVars);
+      // Remote has new values (teammate pushed but user hasn't pulled keep.lock)
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: 'encrypted',
+        keep_hash: 'a'.repeat(64),
+      });
+      mockFileManager.parseEnvContent.mockReturnValue(newVars);
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {}
+
+      const actionPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'action';
+      });
+      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
+      const choiceValues = question?.choices?.map((c: any) => c.value);
+
+      // Retrieve remote should be first
+      expect(choiceValues[0]).toBe('retrieve_remote');
+      expect(choiceValues).toContain('retrieve_pinned');
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+
+    test('no sync-state keep_hash (first run) → falls back to current behavior', async () => {
+      // keep.lock has new hashes
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(newHashes));
+      // Local has old values
+      mockFileManager.readEnvFile.mockReturnValue(oldVars);
+      // Remote matches pinned
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: 'encrypted',
+        keep_hash: 'a'.repeat(64),
+      });
+      mockFileManager.parseEnvContent.mockReturnValue(newVars);
+      // No keep_hash in sync-state
+      mockProjectManager.readSyncState.mockReturnValue({ last_sync: '2026-01-01', synced_variables: [] });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(questions);
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {}
+
+      const actionPrompt = promptCalls.find((q: any) => {
+        const question = Array.isArray(q) ? q[0] : q;
+        return question.name === 'action';
+      });
+      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
+      const choiceValues = question?.choices?.map((c: any) => c.value);
+
+      // Fallback: commit local first (current behavior)
+      expect(choiceValues[0]).toBe('commit_local');
+      expect(choiceValues).toContain('retrieve_pinned');
 
       consoleSpy.mockRestore();
       (inquirer as any).prompt = origPrompt;

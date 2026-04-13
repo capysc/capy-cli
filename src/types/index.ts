@@ -73,6 +73,7 @@ export interface SyncState {
   synced_variables: string[];
   user_id?: string;
   org_id?: string;
+  keep_hash?: string;
 }
 
 export interface ConflictVariable {
