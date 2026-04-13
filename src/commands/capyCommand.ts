@@ -1173,13 +1173,48 @@ export class CapyCommand {
     // Hide local column for onboarding — it's all "-" and adds noise
     const effectiveShowLocal = isOnboarding ? false : showLocal;
 
+    // Resolve pinned plaintext for display. Try local first, then fetch from S3.
+    const pinnedPlaintext: Record<string, string> = {};
+    let needsFetch = false;
+    for (const variable of Object.keys(pinned)) {
+      if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinned[variable]) {
+        pinnedPlaintext[variable] = localPlaintext[variable];
+      } else {
+        needsFetch = true;
+      }
+    }
+    if (needsFetch && originalKeep && Object.keys(pinned).length > 0) {
+      try {
+        const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
+        const blob = await fetchSecretsWithCache(
+          this.serviceClient,
+          projectState.projectId!,
+          keepHash,
+        );
+        if (blob?.env_file) {
+          const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+          for (const [key, value] of Object.entries(encrypted)) {
+            if (pinned[key] && !pinnedPlaintext[key]) {
+              try {
+                pinnedPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
+              } catch (decryptErr) {
+                this.debugError(`pinned decrypt failed for ${key}`, decryptErr);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        this.debugError('pinned fetch failed', err);
+      }
+    }
+
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
     console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
 
     // Display comparison table
-    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
+    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
 
     console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
@@ -1272,7 +1307,7 @@ export class CapyCommand {
       return;
     } else {
       // Individual resolution
-      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
       if (!resolved) return; // Cancelled
       finalEnv = resolved;
     }
@@ -1359,6 +1394,7 @@ export class CapyCommand {
     remoteHashes: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -1369,16 +1405,12 @@ export class CapyCommand {
 
     const pinnedSnippetFor = (variable: string): string => {
       if (!pinned[variable]) return '-';
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
-    // Check if any pinned value can be resolved to plaintext
-    const showPinned = diffs.some(diff => {
-      if (!pinned[diff.variable]) return false;
-      const snippet = this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext);
-      return !snippet.includes('unresolvable');
-    });
+    // Show pinned column if any pinned value can be resolved
+    const showPinned = diffs.some(diff => pinned[diff.variable] && pinnedPlaintext[diff.variable]);
 
     // Build header
     const headers: string[] = ['Variable'];
@@ -1417,10 +1449,7 @@ export class CapyCommand {
     for (const diff of diffs) {
       const cols = [diff.variable];
       if (showPinned) {
-        const pinnedVal = pinned[diff.variable]
-          ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-          : '-';
-        cols.push(pinnedVal);
+        cols.push(pinnedSnippetFor(diff.variable));
       }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
@@ -1433,28 +1462,6 @@ export class CapyCommand {
     }
   }
 
-  /**
-   * Get a snippet value for a pinned hash by finding the matching plaintext.
-   */
-  private getSnippetForHash(
-    variable: string,
-    pinned: Record<string, string>,
-    localPlaintext: Record<string, string>,
-    remotePlaintext: Record<string, string>,
-  ): string {
-    const pinnedHash = pinned[variable];
-    // Check if local matches pinned
-    if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinnedHash) {
-      return localPlaintext[variable];
-    }
-    // Check if remote matches pinned
-    if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
-      return remotePlaintext[variable];
-    }
-    // Can't resolve plaintext — no source has the matching value
-    return '\x1b[3munresolvable\x1b[0m';
-  }
-
   private async resolveIndividually(
     diffs: { variable: string; type: string; pinned?: string; local?: string; remote?: string }[],
     showLocal: boolean,
@@ -1462,14 +1469,15 @@ export class CapyCommand {
     pinned: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
 
     const pinnedSnippetFor = (variable: string): string | null => {
       if (!pinned[variable]) return null;
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
     const rows: Row[] = diffs.map(diff => ({
