@@ -883,6 +883,13 @@ describe('CapyCommand', () => {
       expect(choiceValues).not.toContain('individual');
       expect(choiceValues).toContain('skip');
 
+      // Local column should be hidden (onboarding — all dashes is noise)
+      const logCalls = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
+      const headerLine = logCalls.split('\n').find((l: string) => l.includes('Variable'));
+      expect(headerLine).not.toContain('Local');
+      // Remote column should be hidden (pinned matches remote)
+      expect(headerLine).not.toContain('Remote');
+
       consoleSpy.mockRestore();
       (inquirer as any).prompt = origPrompt;
     });
@@ -925,6 +932,12 @@ describe('CapyCommand', () => {
       expect(choiceValues).not.toContain('commit_local');
       expect(choiceValues).not.toContain('individual');
 
+      // Local column should be hidden, Remote column should be shown
+      const logCalls = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
+      const headerLine = logCalls.split('\n').find((l: string) => l.includes('Variable'));
+      expect(headerLine).not.toContain('Local');
+      expect(headerLine).toContain('Remote');
+
       consoleSpy.mockRestore();
       (inquirer as any).prompt = origPrompt;
     });
@@ -960,6 +973,11 @@ describe('CapyCommand', () => {
       // Should have the normal menu with commit_local option (these are deliberate deletions)
       expect(choiceValues).toContain('commit_local');
       expect(choiceValues).toContain('retrieve_pinned');
+
+      // Local column SHOULD be shown (not onboarding — deliberate deletions)
+      const logCalls = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
+      const headerLine = logCalls.split('\n').find((l: string) => l.includes('Variable'));
+      expect(headerLine).toContain('Local');
 
       consoleSpy.mockRestore();
       (inquirer as any).prompt = origPrompt;
