@@ -1213,7 +1213,7 @@ export class CapyCommand {
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
-    console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+    console.log(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
 
     // Display comparison table
     this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
@@ -1284,7 +1284,7 @@ export class CapyCommand {
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
-      message: ' ',
+      message: 'What would you like to do?',
       choices: menuChoices,
     }]);
 
