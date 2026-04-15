@@ -73,7 +73,27 @@ export interface SyncState {
   synced_variables: string[];
   user_id?: string;
   org_id?: string;
-  keep_hash?: string;
+  keep_hash?: string | Record<string, string>;
+}
+
+/** Read the keep_hash for a specific branch from sync-state (backwards compat with old string format). */
+export function getSyncKeepHash(syncState: SyncState | null | undefined, branch: string): string | undefined {
+  if (!syncState?.keep_hash) return undefined;
+  if (typeof syncState.keep_hash === 'string') return syncState.keep_hash;
+  return syncState.keep_hash[branch];
+}
+
+/** Build an updated keep_hash record with the given branch's hash set. */
+export function setSyncKeepHash(
+  syncState: SyncState | null | undefined,
+  branch: string,
+  hash: string,
+): Record<string, string> {
+  const existing =
+    syncState?.keep_hash && typeof syncState.keep_hash === 'object'
+      ? syncState.keep_hash
+      : {};
+  return { ...existing, [branch]: hash };
 }
 
 export interface ConflictVariable {

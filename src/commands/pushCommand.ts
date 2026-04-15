@@ -8,6 +8,7 @@ import { createHash } from 'crypto';
 import {
   CapyError,
   ERROR_CODES,
+  setSyncKeepHash,
 } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
@@ -219,7 +220,7 @@ export class PushCommand {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(rawLocal),
       user_id: authResult.user_id,
-      keep_hash: SyncEngine.computeKeepHash(updatedKeep, branch),
+      keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(updatedKeep, branch)),
     });
 
     pushSpinner.succeed(

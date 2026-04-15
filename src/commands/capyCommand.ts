@@ -18,6 +18,8 @@ import {
   SyncState,
   CapyError,
   ERROR_CODES,
+  getSyncKeepHash,
+  setSyncKeepHash,
 } from '../types/index';
 import {
   generateSeedPhrase,
@@ -499,7 +501,7 @@ export class CapyCommand {
             last_sync: new Date().toISOString(),
             synced_variables: Object.keys(localEnv),
             user_id: authResult.user_id,
-            keep_hash: initKeepHash,
+            keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
           });
 
           // Backup plaintext .env before encrypting
@@ -635,7 +637,7 @@ export class CapyCommand {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(plaintext),
       user_id: userId,
-      keep_hash: SyncEngine.computeKeepHash(serverKeep, branch),
+      keep_hash: setSyncKeepHash(null, branch, SyncEngine.computeKeepHash(serverKeep, branch)),
     });
 
     fetchSpinner.succeed(
@@ -1227,9 +1229,10 @@ export class CapyCommand {
     // Direction detection: compare sync-state keep_hash to current keep.lock
     const syncState = this.projectManager.readSyncState();
     const currentKeepHash = currentKeep ? SyncEngine.computeKeepHash(currentKeep, branch) : null;
-    const isBehind = syncState?.keep_hash != null
+    const savedHash = getSyncKeepHash(syncState, branch);
+    const isBehind = savedHash != null
       && currentKeepHash != null
-      && syncState.keep_hash !== currentKeepHash;
+      && savedHash !== currentKeepHash;
 
     if (isOnboarding) {
       // Onboarding: local .env is empty/foreign — only offer retrieve options
@@ -1392,11 +1395,13 @@ export class CapyCommand {
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, undefined, finalKeep, branch);
 
     // Update sync state
+    const existingSyncState = this.projectManager.readSyncState();
     this.fileManager.writeSyncState({
+      ...existingSyncState,
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
       user_id: authResult.user_id,
-      keep_hash: SyncEngine.computeKeepHash(finalKeep, branch),
+      keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
     });
 
     const changeCount = Object.keys(pushedVars).length;
