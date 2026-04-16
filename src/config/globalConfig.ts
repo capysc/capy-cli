@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -96,6 +96,27 @@ export function readAuthSession(userId?: string): object | null {
   const content = readFileOrNull(getAuthSessionPath(userId));
   if (!content) return null;
   return JSON.parse(content);
+}
+
+/**
+ * Find the most recently modified session file in ~/.capy/auth/sessions/.
+ * Used by commands that don't have a userId yet (e.g. redeem) to discover
+ * an existing session instead of forcing a re-auth.
+ */
+export function findLatestSessionUserId(): string | undefined {
+  const sessionsDir = join(GLOBAL_CAPY_DIR, 'auth', 'sessions');
+  if (!existsSync(sessionsDir)) return undefined;
+
+  let latest: { userId: string; mtime: number } | undefined;
+  for (const file of readdirSync(sessionsDir)) {
+    if (!file.endsWith('.json')) continue;
+    const filePath = join(sessionsDir, file);
+    const mtime = statSync(filePath).mtimeMs;
+    if (!latest || mtime > latest.mtime) {
+      latest = { userId: file.replace('.json', ''), mtime };
+    }
+  }
+  return latest?.userId;
 }
 
 // --- Local keep cache (~/.capy/keep/{orgId}/{projectId}/{keepHash}) ---
