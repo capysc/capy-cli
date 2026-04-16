@@ -98,36 +98,42 @@ export function readAuthSession(userId?: string): object | null {
   return JSON.parse(content);
 }
 
-// --- Local keep cache (~/.capy/keep/) ---
+// --- Local keep cache (~/.capy/keep/{orgId}/{projectId}/{keepHash}) ---
+//
+// Path is scoped by org+project to mirror the S3 layout and prevent cross-org
+// collisions: keep_hash is derived from plaintext variable names + value hashes,
+// so two different orgs with overlapping variable sets would otherwise share a
+// cache file.
 
-export function getKeepCachePath(keepHash: string): string {
-  return join(GLOBAL_CAPY_DIR, 'keep', keepHash);
+export function getKeepCachePath(orgId: string, projectId: string, keepHash: string): string {
+  return join(GLOBAL_CAPY_DIR, 'keep', orgId, projectId, keepHash);
 }
 
-export function writeKeepCache(keepHash: string, envBlob: string): void {
+export function writeKeepCache(orgId: string, projectId: string, keepHash: string, envBlob: string): void {
   try {
-    writeSecureFile(getKeepCachePath(keepHash), envBlob);
+    writeSecureFile(getKeepCachePath(orgId, projectId, keepHash), envBlob);
   } catch {
     // Best-effort — silent on error
   }
 }
 
-export function readKeepCache(keepHash: string): string | null {
-  return readFileOrNull(getKeepCachePath(keepHash));
+export function readKeepCache(orgId: string, projectId: string, keepHash: string): string | null {
+  return readFileOrNull(getKeepCachePath(orgId, projectId, keepHash));
 }
 
 export async function fetchSecretsWithCache(
   serviceClient: { getSecrets(projectId: string, keepHash: string): Promise<{ env_file: string } | null> },
+  orgId: string,
   projectId: string,
   keepHash: string,
 ): Promise<{ env_file: string } | null> {
-  const cached = readKeepCache(keepHash);
+  const cached = readKeepCache(orgId, projectId, keepHash);
   if (cached !== null) {
     return { env_file: cached };
   }
   const result = await serviceClient.getSecrets(projectId, keepHash);
   if (result?.env_file) {
-    writeKeepCache(keepHash, result.env_file);
+    writeKeepCache(orgId, projectId, keepHash, result.env_file);
   }
   return result;
 }

@@ -493,7 +493,7 @@ export class CapyCommand {
 
           // Cache encrypted blob locally
           const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
-          writeKeepCache(initKeepHash, envBlob);
+          writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
 
           this.fileManager.writeSyncState({
             last_sync: new Date().toISOString(),
@@ -1244,6 +1244,7 @@ export class CapyCommand {
         try {
           const blob = await fetchSecretsWithCache(
             this.serviceClient,
+            projectState.organizationId!,
             projectState.projectId!,
             keepHash,
           );
@@ -1326,7 +1327,7 @@ export class CapyCommand {
           return `${k}=capy:${resourceId}:${enc}`;
         })
         .join('\n');
-      writeKeepCache(cacheKeepHash, cacheBlob);
+      writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, cacheBlob);
     }
 
     // Encrypt and write .env
