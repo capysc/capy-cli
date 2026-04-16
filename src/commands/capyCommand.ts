@@ -1194,6 +1194,7 @@ export class CapyCommand {
         const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
         const blob = await fetchSecretsWithCache(
           this.serviceClient,
+          projectState.organizationId!,
           projectState.projectId!,
           keepHash,
         );
