@@ -218,6 +218,7 @@ export class StatusCommand {
           const keepHash = SyncEngine.computeKeepHash(keep, branch);
           const blob = await fetchSecretsWithCache(
             this.serviceClient,
+            projectState.organizationId!,
             projectState.projectId!,
             keepHash,
           );

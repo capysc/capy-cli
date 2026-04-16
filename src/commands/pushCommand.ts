@@ -206,7 +206,12 @@ export class PushCommand {
     this.debug('pushSecrets response', result);
 
     // Cache encrypted blob locally
-    writeKeepCache(result.keep_hash, envBlob);
+    writeKeepCache(
+      projectState.organizationId!,
+      projectState.projectId!,
+      result.keep_hash,
+      envBlob,
+    );
     this.debug('keep cache written');
 
     // Update keep.lock with new state
