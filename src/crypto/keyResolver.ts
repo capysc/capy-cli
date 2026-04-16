@@ -14,6 +14,18 @@ import {
 } from '../config/globalConfig';
 import { CapyError, ERROR_CODES } from '../types/index';
 
+/** Check whether an error is a server 403 (membership revoked). */
+function isPermissionDenied(err: unknown): boolean {
+  return err instanceof CapyError
+    && err.code === ERROR_CODES.PERMISSION_DENIED
+    && err.details?.status === 403;
+}
+
+/** Check whether an error is a network / connectivity failure. */
+function isNetworkError(err: unknown): boolean {
+  return err instanceof CapyError && err.code === ERROR_CODES.NETWORK_ERROR;
+}
+
 /**
  * Interface for the co-decrypt + wrap operations needed by key resolution.
  * Callers provide this so keyResolver doesn't depend on ServiceClient directly.
@@ -62,8 +74,16 @@ export async function resolveProjectKey(
     const innerBlob = await service.coDecrypt(orgId, encryptedBlob);
     const masterKey = decryptMasterKey(innerBlob, innerKey);
     return deriveProjectKey(masterKey, projectId, orgId);
-  } catch {
-    // co-decrypt failed — either not KMS-wrapped (legacy) or server rejected
+  } catch (err) {
+    // 403 = membership revoked — do NOT fall through to legacy path.
+    // Re-throw so the caller can clean up appropriately.
+    if (isPermissionDenied(err)) throw err;
+
+    // Network / connectivity failure — re-throw so a transient outage
+    // doesn't get misclassified as PERMISSION_DENIED and nuke local keys.
+    if (isNetworkError(err)) throw err;
+
+    // Other errors (e.g. blob isn't KMS-wrapped) → fall through to legacy
   }
 
   // Migration: try legacy single-wrapped (no KMS outer layer)

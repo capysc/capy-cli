@@ -1,6 +1,7 @@
 import { mock, describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
+import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 // Mock homedir to use a temp directory — must come before any import that uses os.homedir()
 const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-resolver-test-'));
@@ -98,6 +99,36 @@ describe('KeyResolver', () => {
     it('should fail with wrong userId', async () => {
       await expect(resolveProjectKey(orgId, 'proj_new', 'wrong-user', mockKeyServiceOps()))
         .rejects.toThrow('You do not have access');
+    });
+
+    it('should re-throw 403 instead of falling through to legacy', async () => {
+      // Setup: save a valid single-wrapped key that legacy WOULD decrypt
+      const wrappingKey = deriveWrappingKey(userId, orgId);
+      const encryptedM = encryptMasterKey(masterKey, wrappingKey);
+      saveMasterKey(orgId, encryptedM, userId);
+
+      const kickedOps = {
+        coDecrypt: async () => {
+          throw new CapyError('Not a member of this organization', ERROR_CODES.PERMISSION_DENIED, { status: 403 });
+        },
+        wrapOuterLayer: async (_orgId: string, pt: string) => pt,
+      };
+
+      // Should throw the 403 error, NOT fall through to legacy and succeed
+      await expect(resolveProjectKey(orgId, projectId, userId, kickedOps))
+        .rejects.toThrow('Not a member of this organization');
+    });
+
+    it('should re-throw network errors instead of falling through to legacy', async () => {
+      const networkOps = {
+        coDecrypt: async () => {
+          throw new CapyError('Failed to connect', ERROR_CODES.NETWORK_ERROR, { code: 'ECONNREFUSED' });
+        },
+        wrapOuterLayer: async (_orgId: string, pt: string) => pt,
+      };
+
+      await expect(resolveProjectKey(orgId, projectId, userId, networkOps))
+        .rejects.toThrow('Failed to connect');
     });
   });
 

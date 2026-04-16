@@ -986,8 +986,10 @@ export class CapyCommand {
         this.keyServiceOps(),
       );
     } catch (err: any) {
-      // co-decrypt rejected (e.g. kicked user) — clean up local state
-      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+      // Only clean up local state on a confirmed server 403 (user was kicked).
+      // Network errors and other failures must NOT delete keys — a transient
+      // outage should never permanently lock out a legitimate user.
+      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED && err.details?.status === 403) {
         this.cleanupOrgData(projectState.organizationId!, projectState.userId);
       }
       throw err;
