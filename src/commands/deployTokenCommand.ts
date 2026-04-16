@@ -396,8 +396,6 @@ export class DeployCommand {
       }
 
       console.log('');
-      console.log(`  Run ${B('capy deploy list')} to see active tokens, ${B('capy deploy revoke')} to kill old ones.`);
-      console.log('');
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
