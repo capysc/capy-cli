@@ -8,6 +8,7 @@ import { createHash } from 'crypto';
 import {
   CapyError,
   ERROR_CODES,
+  setSyncKeepHash,
 } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
@@ -211,6 +212,16 @@ export class PushCommand {
     // Update keep.lock with new state
     this.fileManager.writeKeepFile(updatedKeep);
     this.debug('keep.lock written to disk');
+
+    // Update sync state with keep_hash so direction detection works
+    const existingSyncState = this.projectManager.readSyncState();
+    this.fileManager.writeSyncState({
+      ...existingSyncState,
+      last_sync: new Date().toISOString(),
+      synced_variables: Object.keys(rawLocal),
+      user_id: authResult.user_id,
+      keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(updatedKeep, branch)),
+    });
 
     pushSpinner.succeed(
       `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`

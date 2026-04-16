@@ -18,6 +18,8 @@ import {
   SyncState,
   CapyError,
   ERROR_CODES,
+  getSyncKeepHash,
+  setSyncKeepHash,
 } from '../types/index';
 import {
   generateSeedPhrase,
@@ -499,6 +501,7 @@ export class CapyCommand {
             last_sync: new Date().toISOString(),
             synced_variables: Object.keys(localEnv),
             user_id: authResult.user_id,
+            keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
           });
 
           // Backup plaintext .env before encrypting
@@ -634,6 +637,7 @@ export class CapyCommand {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(plaintext),
       user_id: userId,
+      keep_hash: setSyncKeepHash(null, branch, SyncEngine.computeKeepHash(serverKeep, branch)),
     });
 
     fetchSpinner.succeed(
@@ -1175,19 +1179,62 @@ export class CapyCommand {
     // Hide local column for onboarding — it's all "-" and adds noise
     const effectiveShowLocal = isOnboarding ? false : showLocal;
 
+    // Resolve pinned plaintext for display. Try local first, then fetch from S3.
+    const pinnedPlaintext: Record<string, string> = {};
+    let needsFetch = false;
+    for (const variable of Object.keys(pinned)) {
+      if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinned[variable]) {
+        pinnedPlaintext[variable] = localPlaintext[variable];
+      } else {
+        needsFetch = true;
+      }
+    }
+    if (needsFetch && originalKeep && Object.keys(pinned).length > 0) {
+      try {
+        const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
+        const blob = await fetchSecretsWithCache(
+          this.serviceClient,
+          projectState.projectId!,
+          keepHash,
+        );
+        if (blob?.env_file) {
+          const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+          for (const [key, value] of Object.entries(encrypted)) {
+            if (pinned[key] && !pinnedPlaintext[key]) {
+              try {
+                pinnedPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
+              } catch (decryptErr) {
+                this.debugError(`pinned decrypt failed for ${key}`, decryptErr);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        this.debugError('pinned fetch failed', err);
+      }
+    }
+
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
-    console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+    console.log(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
 
     // Display comparison table
-    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
+    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
 
     console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
+
+    // Direction detection: compare sync-state keep_hash to current keep.lock
+    const syncState = this.projectManager.readSyncState();
+    const currentKeepHash = currentKeep ? SyncEngine.computeKeepHash(currentKeep, branch) : null;
+    const savedHash = getSyncKeepHash(syncState, branch);
+    const isBehind = savedHash != null
+      && currentKeepHash != null
+      && savedHash !== currentKeepHash;
 
     if (isOnboarding) {
       // Onboarding: local .env is empty/foreign — only offer retrieve options
@@ -1198,27 +1245,42 @@ export class CapyCommand {
         menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
       }
     } else if (!hasPinned) {
-      // No pinned values — only offer commit or skip
+      // State 6: No pinned values — only offer commit or skip
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
     } else if (!hasRemote) {
-      // No remote values — local vs pinned only
+      // State 5: No remote values — local vs pinned only
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (showLocal && !showRemote) {
-      // Local differs from pinned, remote matches pinned
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 2: Local differs from pinned, remote matches pinned
+      if (isBehind) {
+        // 2b: keep.lock changed via git pull → user is behind
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 2a: user edited .env locally → user is ahead
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (!showLocal && showRemote) {
-      // Remote differs from pinned, local matches pinned
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 3: Remote differs from pinned, local matches pinned
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else {
-      // Both differ — show all 4 options
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-      menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      // State 4: Both differ
+      if (isBehind) {
+        // 4b: keep.lock changed + another push happened → retrieve remote first
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 4a: user edited .env + teammate pushed
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     }
 
@@ -1227,7 +1289,7 @@ export class CapyCommand {
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
-      message: ' ',
+      message: 'What would you like to do?',
       choices: menuChoices,
     }]);
 
@@ -1274,7 +1336,7 @@ export class CapyCommand {
       return;
     } else {
       // Individual resolution
-      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
       if (!resolved) return; // Cancelled
       finalEnv = resolved;
     }
@@ -1335,10 +1397,13 @@ export class CapyCommand {
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, undefined, finalKeep, branch);
 
     // Update sync state
+    const existingSyncState = this.projectManager.readSyncState();
     this.fileManager.writeSyncState({
+      ...existingSyncState,
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
       user_id: authResult.user_id,
+      keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
     });
 
     const changeCount = Object.keys(pushedVars).length;
@@ -1361,6 +1426,7 @@ export class CapyCommand {
     remoteHashes: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -1371,16 +1437,12 @@ export class CapyCommand {
 
     const pinnedSnippetFor = (variable: string): string => {
       if (!pinned[variable]) return '-';
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
-    // Check if any pinned value can be resolved to plaintext
-    const showPinned = diffs.some(diff => {
-      if (!pinned[diff.variable]) return false;
-      const snippet = this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext);
-      return !snippet.includes('unresolvable');
-    });
+    // Show pinned column if any pinned value can be resolved
+    const showPinned = diffs.some(diff => pinned[diff.variable] && pinnedPlaintext[diff.variable]);
 
     // Build header
     const headers: string[] = ['Variable'];
@@ -1419,10 +1481,7 @@ export class CapyCommand {
     for (const diff of diffs) {
       const cols = [diff.variable];
       if (showPinned) {
-        const pinnedVal = pinned[diff.variable]
-          ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-          : '-';
-        cols.push(pinnedVal);
+        cols.push(pinnedSnippetFor(diff.variable));
       }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
@@ -1435,28 +1494,6 @@ export class CapyCommand {
     }
   }
 
-  /**
-   * Get a snippet value for a pinned hash by finding the matching plaintext.
-   */
-  private getSnippetForHash(
-    variable: string,
-    pinned: Record<string, string>,
-    localPlaintext: Record<string, string>,
-    remotePlaintext: Record<string, string>,
-  ): string {
-    const pinnedHash = pinned[variable];
-    // Check if local matches pinned
-    if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinnedHash) {
-      return localPlaintext[variable];
-    }
-    // Check if remote matches pinned
-    if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
-      return remotePlaintext[variable];
-    }
-    // Can't resolve plaintext — no source has the matching value
-    return '\x1b[3munresolvable\x1b[0m';
-  }
-
   private async resolveIndividually(
     diffs: { variable: string; type: string; pinned?: string; local?: string; remote?: string }[],
     showLocal: boolean,
@@ -1464,14 +1501,15 @@ export class CapyCommand {
     pinned: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
 
     const pinnedSnippetFor = (variable: string): string | null => {
       if (!pinned[variable]) return null;
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
     const rows: Row[] = diffs.map(diff => ({
