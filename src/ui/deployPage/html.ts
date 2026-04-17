@@ -41,7 +41,7 @@ export function generateDeployHtml(
         </div>
       </div>
 
-      <div class="grid grid-cols-3 border-t border-t-black p-3">
+      <div class="grid grid-cols-3 border-t border-t-black dark:border-t-white p-3">
         <label class="text-sm font-mono">PROJECT_KEY</label>
         <div class="flex gap-2 col-span-2 items-start">
           <textarea id="project-key" readonly rows="1" class="flex-grow font-mono text-sm dark:bg-black">${escHtml(projectKey)}</textarea>
