@@ -880,15 +880,24 @@ export class CapyCommand {
       const leftPad = infoWidth - stripAnsi(left).length;
       const rightPad = capyWidth - right.length;
       // Per-character brown variation for fur texture
-      const furry = (s: string) => s.split('').map((ch) => {
+      const blackBg: Record<number, Set<number>> = {
+        1: new Set([3, 4, 10, 11]), // eyes (top 3/8 of ▅▅ pairs)
+        4: new Set([6, 8]),         // mouth (top half of ▄ chars)
+      };
+      const nose: Record<number, Set<number>> = {
+        3: new Set([7]),            // nose top (space → solid black █)
+      };
+      const furry = (s: string, row: number) => s.split('').map((ch, col) => {
+        if (nose[row]?.has(col)) return `\x1b[38;2;0;0;0m█\x1b[0m`;
         if (ch === ' ') return ch;
         const v = Math.random() * 40 - 20; // ±20 variation
         const r = Math.round(150 + v);
         const g = Math.round(115 + v * 0.7);
         const b = Math.round(80 + v * 0.5);
-        return `\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
+        const bg = blackBg[row]?.has(col) ? '\x1b[48;2;0;0;0m' : '';
+        return `${bg}\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
       }).join('');
-      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right, i)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
