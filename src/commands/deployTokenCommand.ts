@@ -16,6 +16,9 @@ import {
 } from '../crypto/deployCrypto';
 import ora from '../ui/spinner';
 import inquirer from 'inquirer';
+import { DEPLOY_PAGE_CSS } from '../ui/deployPage/generatedAssets';
+import { platformLogoSvg } from '../ui/deployPage/platformLogos';
+import { renderInstructionMarkdown } from '../ui/deployPage/markdown';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -107,44 +110,10 @@ function generateDeployHtml(
   secretsBlob: string,
   projectKey: string,
   platformName: string,
+  platformKey: string,
   instructionMarkdown: string,
 ): string {
   const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-  // Convert markdown to Tailwind-styled HTML
-  const mdToHtml = (md: string): string => {
-    const lines = md.split('\n');
-    const out: string[] = [];
-    let inCode = false;
-    for (const line of lines) {
-      if (line.startsWith('```')) {
-        if (inCode) {
-          out.push('</code></pre>');
-          inCode = false;
-        } else {
-          out.push('<pre class="bg-neutral-100 dark:bg-neutral-800 p-3 rounded-md overflow-x-auto my-2 text-sm"><code class="font-mono">');
-          inCode = true;
-        }
-        continue;
-      }
-      if (inCode) {
-        out.push(escHtml(line));
-        continue;
-      }
-      if (line.startsWith('## ')) {
-        out.push(`<h2 class="text-lg font-semibold mt-6 mb-3 dark:text-white">${escHtml(line.slice(3))}</h2>`);
-      } else if (/^\d+\.\s/.test(line)) {
-        const content = line.replace(/^\d+\.\s/, '');
-        out.push(`<p class="ml-4 my-1 text-neutral-700 dark:text-neutral-300">${content.replace(/`([^`]+)`/g, '<code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-sm font-mono">$1</code>')}</p>`);
-      } else if (line.trim() === '') {
-        out.push('<div class="h-2"></div>');
-      } else {
-        out.push(`<p class="my-1 text-neutral-700 dark:text-neutral-300">${line.replace(/`([^`]+)`/g, '<code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-sm font-mono">$1</code>')}</p>`);
-      }
-    }
-    if (inCode) out.push('</code></pre>');
-    return out.join('\n');
-  };
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -152,23 +121,16 @@ function generateDeployHtml(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Capy Deploy — ${escHtml(platformName)}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
-  <script>
-    tailwind.config = {
-      darkMode: 'media',
-      theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
-    }
-  </script>
+  <style>${DEPLOY_PAGE_CSS}</style>
 </head>
 <body class="min-h-screen bg-white dark:bg-neutral-950 font-geist text-neutral-900 dark:text-white">
   <div class="max-w-2xl mx-auto px-5 py-12">
 
     <div class="flex items-center gap-3 mb-8">
       <div class="dark:invert">${CAPY_LOGO_SVG}</div>
-      <h1 class="text-xl font-semibold">Deploy</h1>
+      <svg width="20" height="20" viewBox="0 0 24 24" class="text-neutral-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      ${platformLogoSvg(platformKey) ? `<div class="text-black dark:text-white">${platformLogoSvg(platformKey)}</div>` : ''}
+      <h1 class="text-xl font-semibold">${escHtml(platformName)}</h1>
     </div>
 
     <div class="space-y-4 mb-8">
@@ -190,10 +152,8 @@ function generateDeployHtml(
     </div>
 
     <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-6">
-      ${mdToHtml(instructionMarkdown)}
+      ${renderInstructionMarkdown(instructionMarkdown)}
     </div>
-
-    <p class="mt-6 text-sm text-neutral-500">Run <code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs font-mono">capy deploy list</code> to see active tokens, <code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs font-mono">capy deploy revoke</code> to kill old ones.</p>
   </div>
 
   <script>
@@ -335,7 +295,7 @@ export class DeployCommand {
 
       // Step 3: Fetch instructions and serve HTML page
       const { markdown } = await serviceClient.fetchDeployInstructions(platform!);
-      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, markdown);
+      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, platform!, markdown);
 
       // Try to serve via localhost (needed for clipboard API)
       let serverStarted = false;
