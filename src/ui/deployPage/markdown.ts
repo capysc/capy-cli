@@ -73,6 +73,10 @@ instance.use({
       const text = this.parser.parseInline(tokens);
       return `<a href="${href}" class="underline hover:text-neutral-900 dark:hover:text-white">${text}</a>`;
     },
+    hr() {
+      // Tailwind preflight zeroes out <hr> borders; re-apply an explicit one.
+      return `<hr class="my-6 border-t border-neutral-200 dark:border-neutral-800">\n`;
+    },
   },
 });
 
