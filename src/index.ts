@@ -38,6 +38,7 @@ program
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
       console.log(`    ${B('capy')}                        \x1b[90mSync secrets\x1b[0m`);
+      console.log(`    ${B('capy')} run -- <cmd>           \x1b[90mRun a command with decrypted secrets\x1b[0m`);
       console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
       console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to Keep\x1b[0m`);
       console.log(`    ${B('capy')} deploy                 \x1b[90mSet up deploy credentials\x1b[0m`);
@@ -62,6 +63,19 @@ program
 
     const command = new CapyCommand(cliOptions);
     await command.execute();
+  });
+
+program
+  .command('run')
+  .description('Run a command with decrypted secrets')
+  .allowUnknownOption()
+  .helpOption(false)
+  .action(async (_opts: any, cmd: any) => {
+    const { runCommand } = await import('./commands/runCommand');
+    const dashIdx = process.argv.indexOf('--');
+    const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
+    const code = await runCommand(childArgs);
+    process.exit(code);
   });
 
 program
