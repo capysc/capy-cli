@@ -38,6 +38,14 @@ export class CheckoutCommand {
     try {
       await this._execute(branchName, options);
     } catch (error: any) {
+      // In recovery mode, fall back to offline branch switch
+      const { isRecoveryActive } = await import('../config/globalConfig');
+      if (isRecoveryActive()) {
+        this.projectManager.writeActiveBranch(branchName);
+        console.log(`\nSwitched to branch "${branchName}" (offline — recovery mode)`);
+        console.log(`Run ${B('capy decrypt')} to decrypt secrets for this branch.\n`);
+        return;
+      }
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
     }

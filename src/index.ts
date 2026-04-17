@@ -49,6 +49,8 @@ program
       console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy')} org                    \x1b[90mSwitch organization\x1b[0m`);
       console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
+      console.log(`    ${B('capy')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
+      console.log(`    ${B('capy')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
       console.log('');
       process.exit(1);
     }
@@ -402,6 +404,24 @@ program
   .action(async () => {
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('decrypt')
+  .description('Decrypt secrets offline using seed phrase (owner only)')
+  .action(async () => {
+    const { DecryptCommand } = await import('./commands/decryptCommand');
+    const cmd = new DecryptCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('end-recover')
+  .description('End recovery session and clean up decrypted files')
+  .action(async () => {
+    const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
+    const cmd = new EndRecoverCommand();
     await cmd.execute();
   });
 

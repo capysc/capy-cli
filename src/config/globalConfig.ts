@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -119,6 +119,42 @@ export function writeKeepCache(orgId: string, projectId: string, keepHash: strin
 
 export function readKeepCache(orgId: string, projectId: string, keepHash: string): string | null {
   return readFileOrNull(getKeepCachePath(orgId, projectId, keepHash));
+}
+
+// --- Recovery session (~/.capy/recover/) ---
+
+export function getRecoverySessionPath(): string {
+  return join(GLOBAL_CAPY_DIR, 'recover', 'session.json');
+}
+
+export function isRecoveryActive(): boolean {
+  return existsSync(getRecoverySessionPath());
+}
+
+export function saveRecoverySession(masterKeyHex: string, orgId: string): void {
+  const data = {
+    master_key: masterKeyHex,
+    org_id: orgId,
+    created_at: new Date().toISOString(),
+  };
+  writeSecureFile(getRecoverySessionPath(), JSON.stringify(data, null, 2));
+}
+
+export function readRecoverySession(): { master_key: string; org_id: string } | null {
+  const content = readFileOrNull(getRecoverySessionPath());
+  if (!content) return null;
+  try {
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+export function deleteRecoverySession(): void {
+  const recoverDir = join(GLOBAL_CAPY_DIR, 'recover');
+  if (existsSync(recoverDir)) {
+    rmSync(recoverDir, { recursive: true, force: true });
+  }
 }
 
 export async function fetchSecretsWithCache(
