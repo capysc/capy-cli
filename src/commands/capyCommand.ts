@@ -1626,6 +1626,10 @@ export class CapyCommand {
     console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
     console.log('');
 
+    const { promptCopyToClipboard } = await import('../ui/clipboard');
+    await promptCopyToClipboard(seedPhrase, '');
+    console.log('');
+
     const { confirmed } = await inquirer.prompt([{
       type: 'confirm',
       name: 'confirmed',
