@@ -55,6 +55,7 @@ const PLATFORMS = [
   { name: 'systemd', value: 'systemd' },
   { name: 'Terraform', value: 'terraform' },
   { name: 'Vercel', value: 'vercel' },
+  { name: 'Other...', value: 'other' },
 ] as const;
 
 const BLOB_SIZE_WARN_THRESHOLD = 32 * 1024; // 32KB
@@ -172,11 +173,20 @@ export class DeployCommand {
       const config = readConfig(projectRoot);
       const defaultPlatform = config.platform;
 
+      // Show "Other..." at the top as a ready-made escape hatch, with a
+      // non-selectable Separator between it and the alphabetical list so
+      // it doesn't read as "just another platform".
+      const choices = [
+        ...PLATFORMS.filter(p => p.value === 'other'),
+        new inquirer.Separator(),
+        ...PLATFORMS.filter(p => p.value !== 'other'),
+      ];
+
       const answer = await inquirer.prompt([{
         type: 'list',
         name: 'platform',
         message: 'Where does this project deploy?',
-        choices: PLATFORMS,
+        choices,
         default: defaultPlatform,
         pageSize: 20,
       }]);
