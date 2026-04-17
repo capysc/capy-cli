@@ -16,6 +16,7 @@ import {
 } from '../crypto/deployCrypto';
 import ora from '../ui/spinner';
 import inquirer from 'inquirer';
+import { DEPLOY_PAGE_CSS } from '../ui/deployPage/generatedAssets';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -152,16 +153,7 @@ function generateDeployHtml(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Capy Deploy — ${escHtml(platformName)}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
-  <script>
-    tailwind.config = {
-      darkMode: 'media',
-      theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
-    }
-  </script>
+  <style>${DEPLOY_PAGE_CSS}</style>
 </head>
 <body class="min-h-screen bg-white dark:bg-neutral-950 font-geist text-neutral-900 dark:text-white">
   <div class="max-w-2xl mx-auto px-5 py-12">
