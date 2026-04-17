@@ -16,19 +16,45 @@ import {
 } from '../crypto/deployCrypto';
 import ora from '../ui/spinner';
 import inquirer from 'inquirer';
-import { DEPLOY_PAGE_CSS } from '../ui/deployPage/generatedAssets';
-import { platformLogoSvg } from '../ui/deployPage/platformLogos';
-import { renderInstructionMarkdown } from '../ui/deployPage/markdown';
+import { generateDeployHtml } from '../ui/deployPage/html';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 const PLATFORMS = [
-  { name: 'Vercel', value: 'vercel' },
-  { name: 'GitHub Actions', value: 'github-actions' },
-  { name: 'Render', value: 'render' },
-  { name: 'Railway', value: 'railway' },
+  { name: 'AWS App Runner', value: 'aws-app-runner' },
+  { name: 'AWS CDK', value: 'aws-cdk' },
+  { name: 'AWS ECS', value: 'aws-ecs' },
+  { name: 'AWS Lambda', value: 'aws-lambda' },
+  { name: 'Azure App Service', value: 'azure-app-service' },
+  { name: 'Azure Functions', value: 'azure-functions' },
+  { name: 'CapRover', value: 'caprover' },
+  { name: 'CircleCI', value: 'circleci' },
+  { name: 'Cloudflare Workers', value: 'cloudflare-workers' },
+  { name: 'Coolify', value: 'coolify' },
+  { name: 'Deno Deploy', value: 'deno-deploy' },
+  { name: 'DigitalOcean App Platform', value: 'digitalocean' },
+  { name: 'Docker', value: 'docker' },
+  { name: 'Docker Compose', value: 'docker-compose' },
+  { name: 'Dokku', value: 'dokku' },
+  { name: 'Firebase Functions', value: 'firebase' },
   { name: 'Fly.io', value: 'fly' },
+  { name: 'GitHub Actions', value: 'github-actions' },
+  { name: 'GitLab CI', value: 'gitlab-ci' },
+  { name: 'Google Cloud Run', value: 'google-cloud-run' },
+  { name: 'Helm', value: 'helm' },
   { name: 'Heroku', value: 'heroku' },
+  { name: 'Jenkins', value: 'jenkins' },
+  { name: 'Kamal', value: 'kamal' },
+  { name: 'Kubernetes', value: 'kubernetes' },
+  { name: 'Netlify', value: 'netlify' },
+  { name: 'Nomad', value: 'nomad' },
+  { name: 'Pulumi', value: 'pulumi' },
+  { name: 'Railway', value: 'railway' },
+  { name: 'Render', value: 'render' },
+  { name: 'Supabase Edge Functions', value: 'supabase' },
+  { name: 'systemd', value: 'systemd' },
+  { name: 'Terraform', value: 'terraform' },
+  { name: 'Vercel', value: 'vercel' },
 ] as const;
 
 const BLOB_SIZE_WARN_THRESHOLD = 32 * 1024; // 32KB
@@ -104,81 +130,6 @@ async function openPopupWindow(url: string): Promise<void> {
   open(url).catch(() => {});
 }
 
-const CAPY_LOGO_SVG = `<svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
-
-function generateDeployHtml(
-  secretsBlob: string,
-  projectKey: string,
-  platformName: string,
-  platformKey: string,
-  instructionMarkdown: string,
-): string {
-  const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Capy Deploy — ${escHtml(platformName)}</title>
-  <style>${DEPLOY_PAGE_CSS}</style>
-</head>
-<body class="min-h-screen bg-white dark:bg-neutral-950 font-geist text-neutral-900 dark:text-white">
-  <div class="max-w-2xl mx-auto px-5 py-12">
-
-    <div class="flex items-center gap-3 mb-8">
-      <div class="dark:invert">${CAPY_LOGO_SVG}</div>
-      <svg width="20" height="20" viewBox="0 0 24 24" class="text-neutral-400" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-      ${platformLogoSvg(platformKey) ? `<div class="text-black dark:text-white">${platformLogoSvg(platformKey)}</div>` : ''}
-      <h1 class="text-xl font-semibold">${escHtml(platformName)}</h1>
-    </div>
-
-    <div class="space-y-4 mb-8">
-      <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
-        <label class="block text-sm font-medium mb-2 text-neutral-600 dark:text-neutral-400">SECRETS_BLOB</label>
-        <div class="flex gap-2">
-          <textarea id="secrets-blob" readonly rows="3" class="flex-1 font-mono text-xs p-2.5 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-200 resize-y">${escHtml(secretsBlob)}</textarea>
-          <button onclick="copyValue('secrets-blob', this)" class="self-start px-3 py-2 text-sm font-medium rounded-md bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:bg-neutral-700 dark:hover:bg-neutral-200 transition-colors">Copy</button>
-        </div>
-      </div>
-
-      <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
-        <label class="block text-sm font-medium mb-2 text-neutral-600 dark:text-neutral-400">PROJECT_KEY</label>
-        <div class="flex gap-2">
-          <textarea id="project-key" readonly rows="1" class="flex-1 font-mono text-xs p-2.5 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-200 resize-y">${escHtml(projectKey)}</textarea>
-          <button onclick="copyValue('project-key', this)" class="self-start px-3 py-2 text-sm font-medium rounded-md bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:bg-neutral-700 dark:hover:bg-neutral-200 transition-colors">Copy</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-6">
-      ${renderInstructionMarkdown(instructionMarkdown)}
-    </div>
-  </div>
-
-  <script>
-    async function copyValue(id, btn) {
-      const el = document.getElementById(id);
-      const original = btn.textContent;
-      try {
-        await navigator.clipboard.writeText(el.value);
-        btn.textContent = 'Copied!';
-        btn.classList.add('bg-green-600', 'dark:bg-green-500');
-        btn.classList.remove('bg-neutral-900', 'dark:bg-white', 'dark:text-neutral-900');
-        btn.classList.add('text-white', 'dark:text-white');
-        setTimeout(() => {
-          btn.textContent = original;
-          btn.classList.remove('bg-green-600', 'dark:bg-green-500', 'dark:text-white');
-          btn.classList.add('bg-neutral-900', 'dark:bg-white', 'dark:text-neutral-900');
-        }, 2000);
-      } catch {
-        el.select();
-      }
-    }
-  </script>
-</body>
-</html>`;
-}
 
 export class DeployCommand {
   private apiUrl?: string;
@@ -227,6 +178,7 @@ export class DeployCommand {
         message: 'Where does this project deploy?',
         choices: PLATFORMS,
         default: defaultPlatform,
+        pageSize: 20,
       }]);
       const platform = answer.platform;
       if (platform !== config.platform) {
