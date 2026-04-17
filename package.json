@@ -25,7 +25,9 @@
     "test": "bash tests/run-tests.sh",
     "typecheck": "tsc --noEmit",
     "test:e2e": "bun run tests/e2e/e2e.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist build bin-pkg",
+    "bundle": "node build.esbuild.mjs",
+    "build:binary": "node scripts/build-binary.mjs"
   },
   "dependencies": {
     "@capy/sdk": "workspace:*",
@@ -39,6 +41,8 @@
     "@types/inquirer": "^9.0.0",
     "@types/node": "^20.0.0",
     "@types/proper-lockfile": "^4.1.4",
+    "@yao-pkg/pkg": "^6.14.2",
+    "esbuild": "^0.25.8",
     "typescript": "^5.0.0"
   },
   "license": "AGPL-3.0-only",
