@@ -268,8 +268,13 @@ export class DeployCommand {
 
         const addr = server.address();
         if (addr && typeof addr === 'object') {
-          const url = `http://localhost:${addr.port}`;
-          console.log(`\n  Deploy page opened at ${url}`);
+          // Use 127.0.0.1 explicitly: `localhost` resolves to ::1 (IPv6) first
+          // on macOS/modern Linux, but the server above binds to 127.0.0.1 only,
+          // so default browsers opened via the printed terminal URL would hit
+          // a dead IPv6 port. The popup path happened to retry families and
+          // hid this from users who relied on the auto-opened window.
+          const url = `http://127.0.0.1:${addr.port}`;
+          console.log(`\n  Temporary deploy instructions opened at ${url}`);
           console.log('  Press Ctrl+C to close.\n');
 
           await openPopupWindow(url);
