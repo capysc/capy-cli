@@ -1304,24 +1304,31 @@ describe('CapyCommand', () => {
       mockServiceClient.listProjects.mockResolvedValue([]);
     });
 
-    test('should not create org when user declines seed phrase', async () => {
+    test('should re-prompt and not create org while user declines seed phrase', async () => {
       const inquirer = (await import('inquirer')).default;
       const origPrompt = inquirer.prompt;
+      let confirmCalls = 0;
       (inquirer as any).prompt = async (questions: any) => {
         const q = Array.isArray(questions) ? questions[0] : questions;
         if (q.name === 'orgName') return { orgName: 'New Org' };
-        if (q.name === 'confirmed') return { confirmed: false }; // decline seed phrase
+        if (q.name === 'confirmed') {
+          confirmCalls += 1;
+          // Decline twice, then accept — verifies the loop re-prompts
+          if (confirmCalls < 3) return { confirmed: false };
+          return { confirmed: true };
+        }
+        if (q.name === 'initChoice') return { initChoice: 'development' };
         return {};
       };
 
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       try {
-        await expect((capyCommand as any).initializeProject()).rejects.toThrow(
-          'You must save your recovery phrase'
-        );
-        // Org should NOT have been created
-        expect(mockAuthService.createOrganization).not.toHaveBeenCalled();
+        await (capyCommand as any).initializeProject();
+        // Confirmation was re-prompted until user accepted
+        expect(confirmCalls).toBe(3);
+        // Org was only created after the user confirmed
+        expect(mockAuthService.createOrganization).toHaveBeenCalledTimes(1);
       } finally {
         (inquirer as any).prompt = origPrompt;
         consoleSpy.mockRestore();
