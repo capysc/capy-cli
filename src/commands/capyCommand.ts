@@ -1569,13 +1569,33 @@ export class CapyCommand {
     return result;
   }
 
-  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+  private async promptForAvailableOrgName(promptMessage = 'Organization name:'): Promise<string> {
     const { orgName } = await inquirer.prompt([{
       type: 'input',
       name: 'orgName',
-      message: 'Organization name:',
-      validate: (input: string) => input.trim().length > 0 || 'Organization name cannot be empty',
+      message: promptMessage,
+      validate: async (input: string) => {
+        const trimmed = input.trim();
+        if (trimmed.length === 0) return 'Organization name cannot be empty';
+        if (trimmed.length > 100) return 'Organization name must be 100 characters or fewer';
+        try {
+          const { available } = await this.authService.checkOrgName(trimmed);
+          if (!available) {
+            return `"${trimmed}" is already taken. Org names must be unique to prevent impersonation — try a variant (e.g. "${trimmed} HQ", "${trimmed} Labs").`;
+          }
+          return true;
+        } catch (err: any) {
+          // Don't block the flow on a transient check failure — fall through
+          // to /create-org, which will return 409 if the name is actually taken.
+          return true;
+        }
+      },
     }]);
+    return orgName.trim();
+  }
+
+  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+    let orgName = await this.promptForAvailableOrgName();
 
     // Generate seed phrase and get confirmation BEFORE creating the org.
     // This keeps org creation and key generation atomic — if the user
@@ -1630,28 +1650,44 @@ export class CapyCommand {
     await promptCopyToClipboard(seedPhrase, '');
     console.log('');
 
-    const { confirmed } = await inquirer.prompt([{
-      type: 'confirm',
-      name: 'confirmed',
-      message: 'I have saved my recovery phrase',
-      default: false,
-    }]);
-
-    if (!confirmed) {
-      throw new CapyError(
-        'You must save your recovery phrase before continuing.',
-        ERROR_CODES.AUTH_FAILED
-      );
+    // Loop until the user confirms they've saved the phrase. No org is created
+    // until confirmation, so re-prompting is safe. Ctrl+C still exits cleanly.
+    while (true) {
+      const { confirmed } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirmed',
+        message: 'I have saved my recovery phrase',
+        default: false,
+      }]);
+      if (confirmed) break;
+      console.log(warn('⚠ The recovery phrase cannot be recovered if lost. Scroll up to review, then confirm.'));
+      console.log('');
     }
 
-    // Seed phrase confirmed — now create the org and save the key
-    const orgSpinner = ora('Creating organization...').start();
-    const org = await this.authService.createOrganization(orgName.trim(), refreshToken, userId);
-    orgSpinner.succeed(`Organization "${org.name}" created`);
+    // Seed phrase confirmed — now create the org and save the key.
+    // Retry loop handles TOCTOU: another user may have claimed the name
+    // between our pre-check and this call. On 409, re-prompt for a name
+    // without regenerating the seed phrase (the master key is derived from
+    // the phrase alone, and nothing has been wrapped yet).
+    while (true) {
+      const orgSpinner = ora('Creating organization...').start();
+      try {
+        const org = await this.authService.createOrganization(orgName, refreshToken, userId);
+        orgSpinner.succeed(`Organization "${org.name}" created`);
 
-    const masterKey = seedPhraseToMasterKey(seedPhrase);
-    await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
+        const masterKey = seedPhraseToMasterKey(seedPhrase);
+        await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
 
-    return org;
+        return org;
+      } catch (err: any) {
+        orgSpinner.fail('Failed to create organization');
+        if (err && err.status === 409) {
+          console.log('');
+          orgName = await this.promptForAvailableOrgName('That name was claimed while you were setting up. Pick another:');
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 }
