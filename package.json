@@ -13,8 +13,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "!dist/index-dev.*",
-    "bin/capy",
-    "assets/fonts/OFL.txt"
+    "bin/capy"
   ],
   "scripts": {
     "build": "tsc",
