@@ -1,6 +1,6 @@
 # Capy CLI
 
-[![CI](https://github.com/capysc/capy/actions/workflows/ci.yml/badge.svg)](https://github.com/capysc/capy/actions/workflows/ci.yml)
+[![CI](https://github.com/capysc/capy-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/capysc/capy-cli/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@capy/cli)](https://www.npmjs.com/package/@capy/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org)
