@@ -1,3 +1,4 @@
+import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -59,7 +60,26 @@ export class UsersCommand {
     // Launch TUI or static fallback
     const table = new InteractiveTable();
     if (process.stdin.isTTY) {
-      await table.run(members);
+      await table.run(members, {
+        changeRole: async (userId, newRole, projectId) => {
+          await serviceClient.changeRole(orgId, userId, newRole, projectId);
+        },
+        pickProject: async (prompt: string) => {
+          const projects = await serviceClient.listProjects();
+          if (projects.length === 0) return null;
+          const { chosen } = await inquirer.prompt([{
+            type: 'list',
+            name: 'chosen',
+            message: prompt,
+            choices: projects.map((p) => ({ name: p.name, value: p.id })),
+          }]);
+          return chosen;
+        },
+        reload: async () => {
+          const result = await serviceClient.listMemberDetails(orgId);
+          return result.members;
+        },
+      });
     } else {
       console.log(table.renderStatic(members));
     }

@@ -100,6 +100,23 @@ export class InviteCommand {
         default: 'member',
       }]);
 
+      // Project scope is required for project-admin and member
+      let projectId: string | undefined;
+      if (role === 'project-admin' || role === 'member') {
+        const projects = await serviceClient.listProjects();
+        if (projects.length === 0) {
+          console.error('No projects in this organization. Create one with `capy` first.');
+          process.exit(1);
+        }
+        const { chosenProjectId } = await inquirer.prompt([{
+          type: 'list',
+          name: 'chosenProjectId',
+          message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which project?`,
+          choices: projects.map((p) => ({ name: p.name, value: p.id })),
+        }]);
+        projectId = chosenProjectId;
+      }
+
       // 1. Generate invite token T
       const inviteToken = generateInviteToken();
 
@@ -114,7 +131,7 @@ export class InviteCommand {
       );
 
       // 4. Create invite record on service
-      await serviceClient.createInvite(orgId, email, role);
+      await serviceClient.createInvite(orgId, email, role, projectId);
 
       // 5. Build redeem code
       const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId);
