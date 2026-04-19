@@ -365,7 +365,12 @@ export class FileManager {
   }
 
   ensureCapyGitignore(): void {
-    const requiredEntries = ['.env', '.capy'];
+    const requiredEntries = [
+      '.env',
+      '.capy',
+      '.env.pre-capy.old',
+      '.env.*.decrypted',
+    ];
     this.updateGitignore(requiredEntries);
   }
 
