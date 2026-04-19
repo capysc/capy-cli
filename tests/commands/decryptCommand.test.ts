@@ -335,6 +335,84 @@ describe('DecryptCommand', () => {
     expect(() => Encryptor.decrypt(theirCiphertext, ourKeyAttempt2)).toThrow();
   });
 
+  it('another org\'s .env (with valid header) is refused by belt-and-suspenders check', async () => {
+    setupProject();
+
+    // Simulate: attacker drops another org's .env — with its valid, matching header —
+    // into our project directory. The .env is internally consistent (its header org_id
+    // matches what encrypted its values), but disagrees with our keep.lock.
+    const otherOrgId = 'org_victim_other_org';
+    const otherProjectId = 'proj_victim_other_project';
+    const otherOrgSeed = generateSeedPhrase();
+    const otherOrgMaster = seedPhraseToMasterKey(otherOrgSeed);
+    const otherOrgKey = deriveProjectKey(otherOrgMaster, otherProjectId, otherOrgId);
+
+    const otherEnvLines = [
+      `# capy:org_id=${otherOrgId}`,
+      `# capy:project_id=${otherOrgId}`,
+      '',
+      `STOLEN_SECRET=capy:res1:${Encryptor.encrypt('highly-confidential', otherOrgKey)}`,
+    ];
+    writeFileSync(join(tempProject, '.env'), otherEnvLines.join('\n') + '\n');
+
+    // Also simulate: no active session (fresh run, will prompt for seed phrase).
+    // The belt-and-suspenders check happens BEFORE any seed prompt, so it doesn't
+    // matter what the user types — the command exits before reaching that step.
+    const origExit = process.exit;
+    const origError = console.error;
+    let exitCode: number | undefined;
+    let errOutput = '';
+    // @ts-expect-error — stub for test
+    process.exit = (code?: number) => { exitCode = code; throw new Error('__STUBBED_EXIT__'); };
+    console.error = (msg: string) => { errOutput += msg + '\n'; };
+
+    try {
+      const { DecryptCommand } = await import('../../src/commands/decryptCommand');
+      const cmd = new DecryptCommand();
+      try {
+        await cmd.execute();
+      } catch (e: any) {
+        if (e.message !== '__STUBBED_EXIT__') throw e;
+      }
+    } finally {
+      process.exit = origExit;
+      console.error = origError;
+    }
+
+    expect(exitCode).toBe(1);
+    expect(errOutput).toMatch(/different organization/i);
+  });
+
+  it("another org's .env + swapped keep.lock still fails at AES-GCM (defense in depth)", () => {
+    // Worst case: attacker has BOTH another org's .env AND that org's keep.lock.
+    // The belt-and-suspenders check passes (headers match keep.lock). But the
+    // AES-GCM auth tag must still reject, since user's M can't reproduce theirs.
+    const otherOrgId = 'org_swapped_defense';
+    const otherProjectId = 'proj_swapped_defense';
+    const otherOrgSeed = generateSeedPhrase();
+    const otherOrgMaster = seedPhraseToMasterKey(otherOrgSeed);
+    const otherOrgKey = deriveProjectKey(otherOrgMaster, otherProjectId, otherOrgId);
+
+    // Write another org's .env with matching header + values encrypted under their key
+    const otherEnvLines = [
+      `# capy:org_id=${otherOrgId}`,
+      `# capy:project_id=${otherProjectId}`,
+      '',
+      `STOLEN_SECRET=capy:res1:${Encryptor.encrypt('never-reveal-me', otherOrgKey)}`,
+    ];
+    writeFileSync(join(tempProject, '.env'), otherEnvLines.join('\n') + '\n');
+
+    // User types their own seed phrase. Derive key using THEIR M + the attacker's IDs.
+    const userMaster = seedPhraseToMasterKey(seedPhrase);
+    const userKeyWithAttackersIds = deriveProjectKey(userMaster, otherProjectId, otherOrgId);
+
+    const { FileManager } = require('../../src/files/fileManager');
+    const fm = new FileManager(tempProject);
+
+    // Even with matching headers, the crypto rejects
+    expect(() => fm.readEncryptedEnvFile(userKeyWithAttackersIds)).toThrow();
+  });
+
   it('DecryptCommand refuses to run when session org_id != keep.lock org_id', async () => {
     // Active recovery session for a DIFFERENT org than the current project
     const otherOrgId = 'org_different_from_keep';
