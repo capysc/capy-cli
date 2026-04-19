@@ -105,7 +105,7 @@ describe('DecryptCommand', () => {
   function setupProject(branch: string = 'development') {
     // Write keep.lock
     const keepFile = {
-      version: '1.0',
+      version: '3.0',
       org_id: orgId,
       project_id: projectId,
       project_name: projectName,
@@ -298,6 +298,75 @@ describe('DecryptCommand', () => {
     expect(session.org_id).toBe(orgId);
     expect(session.org_id).not.toBe(differentOrgId);
     // The guard logic in decryptCommand would reject this combo.
+  });
+
+  it("another org's seed phrase cannot decrypt this org's values", () => {
+    setupProject();
+
+    // Simulate a DIFFERENT org owner trying to recover our .env.
+    // They have their own seed phrase for their own org — completely unrelated to ours.
+    const otherOrgSeed = generateSeedPhrase();
+    const otherOrgMaster = seedPhraseToMasterKey(otherOrgSeed);
+
+    // Their org has a different org_id. They type their seed phrase in our dir.
+    // decryptCommand would read OUR keep.lock (our orgId/projectId) and derive:
+    const keyWithTheirMOurIds = deriveProjectKey(otherOrgMaster, projectId, orgId);
+
+    const { FileManager } = require('../../src/files/fileManager');
+    const fm = new FileManager(tempProject);
+
+    // Their M can never reproduce our M → AES-GCM auth tag mismatch
+    expect(() => fm.readEncryptedEnvFile(keyWithTheirMOurIds)).toThrow();
+
+    // Also verify the reverse: their values (encrypted with their M) cannot be
+    // decrypted with OUR seed phrase either, regardless of HKDF params.
+    const ourMaster = seedPhraseToMasterKey(seedPhrase);
+    const theirOrgId = 'org_other_org';
+    const theirProjectId = 'proj_other_org';
+
+    // Encrypt a value under their M + their IDs
+    const theirKey = deriveProjectKey(otherOrgMaster, theirProjectId, theirOrgId);
+    const theirCiphertext = Encryptor.encrypt('their-secret-value', theirKey);
+
+    // Try to decrypt with our M + any combination of IDs — all must fail
+    const ourKeyAttempt1 = deriveProjectKey(ourMaster, theirProjectId, theirOrgId);
+    const ourKeyAttempt2 = deriveProjectKey(ourMaster, projectId, orgId);
+    expect(() => Encryptor.decrypt(theirCiphertext, ourKeyAttempt1)).toThrow();
+    expect(() => Encryptor.decrypt(theirCiphertext, ourKeyAttempt2)).toThrow();
+  });
+
+  it('DecryptCommand refuses to run when session org_id != keep.lock org_id', async () => {
+    // Active recovery session for a DIFFERENT org than the current project
+    const otherOrgId = 'org_different_from_keep';
+    saveRecoverySession('deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef', otherOrgId);
+
+    // Current project's keep.lock is for `orgId`, not `otherOrgId`
+    setupProject();
+
+    // Capture process.exit + stderr to verify the guard triggers without killing the test runner
+    const origExit = process.exit;
+    const origError = console.error;
+    let exitCode: number | undefined;
+    let errOutput = '';
+    // @ts-expect-error — stub for test
+    process.exit = (code?: number) => { exitCode = code; throw new Error('__STUBBED_EXIT__'); };
+    console.error = (msg: string) => { errOutput += msg + '\n'; };
+
+    try {
+      const { DecryptCommand } = await import('../../src/commands/decryptCommand');
+      const cmd = new DecryptCommand();
+      try {
+        await cmd.execute();
+      } catch (e: any) {
+        if (e.message !== '__STUBBED_EXIT__') throw e;
+      }
+    } finally {
+      process.exit = origExit;
+      console.error = origError;
+    }
+
+    expect(exitCode).toBe(1);
+    expect(errOutput).toMatch(/different org/i);
   });
 });
 
