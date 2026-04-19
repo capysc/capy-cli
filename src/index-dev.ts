@@ -60,6 +60,9 @@ program
       console.log(`    ${B('capy-dev')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
       console.log(`    ${B('capy-dev')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy-dev')} deploy                 \x1b[90mGenerate a deployment\x1b[0m`);
+      console.log(`    ${B('capy-dev')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
+      console.log(`    ${B('capy-dev')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
+      console.log(`    ${B('capy-dev')} auth-decrypt           \x1b[90mDecrypt using auth (dev only)\x1b[0m`);
       console.log('');
       process.exit(1);
     }
@@ -276,8 +279,8 @@ program
   });
 
 program
-  .command('decrypt')
-  .description('Decrypt .env file back to plaintext (dev only)')
+  .command('auth-decrypt')
+  .description('Decrypt .env file back to plaintext using auth (dev only)')
   .option('--env-path <path>', 'specify custom .env file location')
   .action(async (options) => {
     const { FileManager } = await import('./files/fileManager');
@@ -472,6 +475,24 @@ program
     } else {
       console.log(`No ${B('Capy')} hooks found.`);
     }
+  });
+
+program
+  .command('decrypt')
+  .description('Decrypt secrets offline using seed phrase (owner only)')
+  .action(async () => {
+    const { DecryptCommand } = await import('./commands/decryptCommand');
+    const cmd = new DecryptCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('end-recover')
+  .description('End recovery session and clean up decrypted files')
+  .action(async () => {
+    const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
+    const cmd = new EndRecoverCommand();
+    await cmd.execute();
   });
 
 program.parse(process.argv);

@@ -1,11 +1,11 @@
 # Capy CLI
 
-[![CI](https://github.com/capysc/capy/actions/workflows/ci.yml/badge.svg)](https://github.com/capysc/capy/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/capysc/capy/branch/main/graph/badge.svg)](https://codecov.io/gh/capysc/capy)
+[![CI](https://github.com/capysc/capy-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/capysc/capy-cli/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/capysc/capy-badges/main/capy-cli-tests.json)](https://github.com/capysc/capy-cli/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@capy/cli)](https://www.npmjs.com/package/@capy/cli)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org)
-[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
 
 > Secret Ops for people with better things to do
 
@@ -269,4 +269,8 @@ Contributions welcome! Please read our [Contributing Guide](../../CONTRIBUTING.m
 
 ## License
 
-Business Source License 1.1 - see [LICENSE](./LICENSE) for details.
+Copyright (c) 2026 Incentv Technologies Inc.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, version 3.
+
+See [LICENSE](./LICENSE) for the full license text.

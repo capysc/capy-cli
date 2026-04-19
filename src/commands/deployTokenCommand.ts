@@ -16,16 +16,40 @@ import {
 } from '../crypto/deployCrypto';
 import ora from '../ui/spinner';
 import inquirer from 'inquirer';
+import { generateDeployHtml } from '../ui/deployPage/html';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 const PLATFORMS = [
-  { name: 'Vercel', value: 'vercel' },
-  { name: 'GitHub Actions', value: 'github-actions' },
-  { name: 'Render', value: 'render' },
-  { name: 'Railway', value: 'railway' },
+  { name: 'AWS App Runner', value: 'aws-app-runner' },
+  { name: 'AWS CDK', value: 'aws-cdk' },
+  { name: 'AWS ECS', value: 'aws-ecs' },
+  { name: 'Azure App Service', value: 'azure-app-service' },
+  { name: 'CapRover', value: 'caprover' },
+  { name: 'CircleCI', value: 'circleci' },
+  { name: 'Coolify', value: 'coolify' },
+  { name: 'DigitalOcean App Platform', value: 'digitalocean' },
+  { name: 'Docker', value: 'docker' },
+  { name: 'Docker Compose', value: 'docker-compose' },
+  { name: 'Dokku', value: 'dokku' },
   { name: 'Fly.io', value: 'fly' },
+  { name: 'GitHub Actions', value: 'github-actions' },
+  { name: 'GitLab CI', value: 'gitlab-ci' },
+  { name: 'Google Cloud Run', value: 'google-cloud-run' },
+  { name: 'Helm', value: 'helm' },
   { name: 'Heroku', value: 'heroku' },
+  { name: 'Jenkins', value: 'jenkins' },
+  { name: 'Kamal', value: 'kamal' },
+  { name: 'Kubernetes', value: 'kubernetes' },
+  { name: 'Netlify', value: 'netlify' },
+  { name: 'Nomad', value: 'nomad' },
+  { name: 'Pulumi', value: 'pulumi' },
+  { name: 'Railway', value: 'railway' },
+  { name: 'Render', value: 'render' },
+  { name: 'systemd', value: 'systemd' },
+  { name: 'Terraform', value: 'terraform' },
+  { name: 'Vercel', value: 'vercel' },
+  { name: 'Other...', value: 'other' },
 ] as const;
 
 const BLOB_SIZE_WARN_THRESHOLD = 32 * 1024; // 32KB
@@ -101,124 +125,6 @@ async function openPopupWindow(url: string): Promise<void> {
   open(url).catch(() => {});
 }
 
-const CAPY_LOGO_SVG = `<svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
-
-function generateDeployHtml(
-  secretsBlob: string,
-  projectKey: string,
-  platformName: string,
-  instructionMarkdown: string,
-): string {
-  const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-  // Convert markdown to Tailwind-styled HTML
-  const mdToHtml = (md: string): string => {
-    const lines = md.split('\n');
-    const out: string[] = [];
-    let inCode = false;
-    for (const line of lines) {
-      if (line.startsWith('```')) {
-        if (inCode) {
-          out.push('</code></pre>');
-          inCode = false;
-        } else {
-          out.push('<pre class="bg-neutral-100 dark:bg-neutral-800 p-3 rounded-md overflow-x-auto my-2 text-sm"><code class="font-mono">');
-          inCode = true;
-        }
-        continue;
-      }
-      if (inCode) {
-        out.push(escHtml(line));
-        continue;
-      }
-      if (line.startsWith('## ')) {
-        out.push(`<h2 class="text-lg font-semibold mt-6 mb-3 dark:text-white">${escHtml(line.slice(3))}</h2>`);
-      } else if (/^\d+\.\s/.test(line)) {
-        const content = line.replace(/^\d+\.\s/, '');
-        out.push(`<p class="ml-4 my-1 text-neutral-700 dark:text-neutral-300">${content.replace(/`([^`]+)`/g, '<code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-sm font-mono">$1</code>')}</p>`);
-      } else if (line.trim() === '') {
-        out.push('<div class="h-2"></div>');
-      } else {
-        out.push(`<p class="my-1 text-neutral-700 dark:text-neutral-300">${line.replace(/`([^`]+)`/g, '<code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-sm font-mono">$1</code>')}</p>`);
-      }
-    }
-    if (inCode) out.push('</code></pre>');
-    return out.join('\n');
-  };
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Capy Deploy — ${escHtml(platformName)}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
-  <script>
-    tailwind.config = {
-      darkMode: 'media',
-      theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
-    }
-  </script>
-</head>
-<body class="min-h-screen bg-white dark:bg-neutral-950 font-geist text-neutral-900 dark:text-white">
-  <div class="max-w-2xl mx-auto px-5 py-12">
-
-    <div class="flex items-center gap-3 mb-8">
-      <div class="dark:invert">${CAPY_LOGO_SVG}</div>
-      <h1 class="text-xl font-semibold">Deploy</h1>
-    </div>
-
-    <div class="space-y-4 mb-8">
-      <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
-        <label class="block text-sm font-medium mb-2 text-neutral-600 dark:text-neutral-400">SECRETS_BLOB</label>
-        <div class="flex gap-2">
-          <textarea id="secrets-blob" readonly rows="3" class="flex-1 font-mono text-xs p-2.5 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-200 resize-y">${escHtml(secretsBlob)}</textarea>
-          <button onclick="copyValue('secrets-blob', this)" class="self-start px-3 py-2 text-sm font-medium rounded-md bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:bg-neutral-700 dark:hover:bg-neutral-200 transition-colors">Copy</button>
-        </div>
-      </div>
-
-      <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4">
-        <label class="block text-sm font-medium mb-2 text-neutral-600 dark:text-neutral-400">PROJECT_KEY</label>
-        <div class="flex gap-2">
-          <textarea id="project-key" readonly rows="1" class="flex-1 font-mono text-xs p-2.5 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 text-neutral-800 dark:text-neutral-200 resize-y">${escHtml(projectKey)}</textarea>
-          <button onclick="copyValue('project-key', this)" class="self-start px-3 py-2 text-sm font-medium rounded-md bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:bg-neutral-700 dark:hover:bg-neutral-200 transition-colors">Copy</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-6">
-      ${mdToHtml(instructionMarkdown)}
-    </div>
-
-    <p class="mt-6 text-sm text-neutral-500">Run <code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs font-mono">capy deploy list</code> to see active tokens, <code class="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs font-mono">capy deploy revoke</code> to kill old ones.</p>
-  </div>
-
-  <script>
-    async function copyValue(id, btn) {
-      const el = document.getElementById(id);
-      const original = btn.textContent;
-      try {
-        await navigator.clipboard.writeText(el.value);
-        btn.textContent = 'Copied!';
-        btn.classList.add('bg-green-600', 'dark:bg-green-500');
-        btn.classList.remove('bg-neutral-900', 'dark:bg-white', 'dark:text-neutral-900');
-        btn.classList.add('text-white', 'dark:text-white');
-        setTimeout(() => {
-          btn.textContent = original;
-          btn.classList.remove('bg-green-600', 'dark:bg-green-500', 'dark:text-white');
-          btn.classList.add('bg-neutral-900', 'dark:bg-white', 'dark:text-neutral-900');
-        }, 2000);
-      } catch {
-        el.select();
-      }
-    }
-  </script>
-</body>
-</html>`;
-}
 
 export class DeployCommand {
   private apiUrl?: string;
@@ -261,12 +167,22 @@ export class DeployCommand {
       const config = readConfig(projectRoot);
       const defaultPlatform = config.platform;
 
+      // Show "Other..." at the top as a ready-made escape hatch, with a
+      // non-selectable Separator between it and the alphabetical list so
+      // it doesn't read as "just another platform".
+      const choices = [
+        ...PLATFORMS.filter(p => p.value === 'other'),
+        new inquirer.Separator(),
+        ...PLATFORMS.filter(p => p.value !== 'other'),
+      ];
+
       const answer = await inquirer.prompt([{
         type: 'list',
         name: 'platform',
         message: 'Where does this project deploy?',
-        choices: PLATFORMS,
+        choices,
         default: defaultPlatform,
+        pageSize: 20,
       }]);
       const platform = answer.platform;
       if (platform !== config.platform) {
@@ -335,7 +251,7 @@ export class DeployCommand {
 
       // Step 3: Fetch instructions and serve HTML page
       const { markdown } = await serviceClient.fetchDeployInstructions(platform!);
-      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, markdown);
+      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, platform!, markdown);
 
       // Try to serve via localhost (needed for clipboard API)
       let serverStarted = false;
@@ -352,8 +268,13 @@ export class DeployCommand {
 
         const addr = server.address();
         if (addr && typeof addr === 'object') {
-          const url = `http://localhost:${addr.port}`;
-          console.log(`\n  Deploy page opened at ${url}`);
+          // Use 127.0.0.1 explicitly: `localhost` resolves to ::1 (IPv6) first
+          // on macOS/modern Linux, but the server above binds to 127.0.0.1 only,
+          // so default browsers opened via the printed terminal URL would hit
+          // a dead IPv6 port. The popup path happened to retry families and
+          // hid this from users who relied on the auto-opened window.
+          const url = `http://127.0.0.1:${addr.port}`;
+          console.log(`\n  Temporary deploy instructions opened at ${url}`);
           console.log('  Press Ctrl+C to close.\n');
 
           await openPopupWindow(url);
@@ -395,8 +316,6 @@ export class DeployCommand {
         console.log(`  Set these as environment variables in ${platformLabel}.`);
       }
 
-      console.log('');
-      console.log(`  Run ${B('capy deploy list')} to see active tokens, ${B('capy deploy revoke')} to kill old ones.`);
       console.log('');
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);

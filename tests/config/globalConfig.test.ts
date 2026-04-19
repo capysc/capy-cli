@@ -97,39 +97,61 @@ describe('GlobalConfig', () => {
   });
 
   describe('keep cache', () => {
+    const ORG = 'org_1';
+    const PROJ = 'proj_1';
+
     it('should round-trip write and read', () => {
       const hash = 'abc123def456';
       const blob = 'FOO=capy:res1:enc1\nBAR=capy:res2:enc2';
-      writeKeepCache(hash, blob);
-      expect(readKeepCache(hash)).toBe(blob);
+      writeKeepCache(ORG, PROJ, hash, blob);
+      expect(readKeepCache(ORG, PROJ, hash)).toBe(blob);
     });
 
     it('should return null for missing hash', () => {
-      expect(readKeepCache('nonexistent_hash')).toBeNull();
+      expect(readKeepCache(ORG, PROJ, 'nonexistent_hash')).toBeNull();
+    });
+
+    it('should isolate cache entries across orgs with the same hash', () => {
+      const hash = 'shared_hash';
+      writeKeepCache('org_a', PROJ, hash, 'ORG_A_BLOB');
+      writeKeepCache('org_b', PROJ, hash, 'ORG_B_BLOB');
+      expect(readKeepCache('org_a', PROJ, hash)).toBe('ORG_A_BLOB');
+      expect(readKeepCache('org_b', PROJ, hash)).toBe('ORG_B_BLOB');
+    });
+
+    it('should isolate cache entries across projects in the same org', () => {
+      const hash = 'shared_hash';
+      writeKeepCache(ORG, 'proj_a', hash, 'PROJ_A_BLOB');
+      writeKeepCache(ORG, 'proj_b', hash, 'PROJ_B_BLOB');
+      expect(readKeepCache(ORG, 'proj_a', hash)).toBe('PROJ_A_BLOB');
+      expect(readKeepCache(ORG, 'proj_b', hash)).toBe('PROJ_B_BLOB');
     });
 
     it('should create file with 0o600 permissions', () => {
       const hash = 'perm_test_hash';
-      writeKeepCache(hash, 'DATA');
+      writeKeepCache(ORG, PROJ, hash, 'DATA');
       const { statSync } = require('fs');
-      const filePath = join(tempHome, '.capy', 'keep', hash);
+      const filePath = join(tempHome, '.capy', 'keep', ORG, PROJ, hash);
       const stat = statSync(filePath);
       expect(stat.mode & 0o777).toBe(0o600);
     });
   });
 
   describe('fetchSecretsWithCache', () => {
+    const ORG = 'org_1';
+    const PROJ = 'proj_1';
+
     it('should return cached value without calling service', async () => {
       const hash = 'cached_hash';
       const blob = 'SECRET=capy:res:enc';
-      writeKeepCache(hash, blob);
+      writeKeepCache(ORG, PROJ, hash, blob);
 
       let called = false;
       const mockClient = {
         getSecrets: async () => { called = true; return { env_file: 'from-server' }; },
       };
 
-      const result = await fetchSecretsWithCache(mockClient, 'proj_1', hash);
+      const result = await fetchSecretsWithCache(mockClient, ORG, PROJ, hash);
       expect(result).toEqual({ env_file: blob });
       expect(called).toBe(false);
     });
@@ -141,9 +163,24 @@ describe('GlobalConfig', () => {
         getSecrets: async () => ({ env_file: serverBlob }),
       };
 
-      const result = await fetchSecretsWithCache(mockClient, 'proj_1', hash);
+      const result = await fetchSecretsWithCache(mockClient, ORG, PROJ, hash);
       expect(result).toEqual({ env_file: serverBlob });
-      expect(readKeepCache(hash)).toBe(serverBlob);
+      expect(readKeepCache(ORG, PROJ, hash)).toBe(serverBlob);
+    });
+
+    it('should not return another org\'s cached blob for the same hash', async () => {
+      const hash = 'shared_hash';
+      writeKeepCache('other_org', PROJ, hash, 'OTHER_ORG_BLOB');
+
+      const serverBlob = 'OWN_SERVER_BLOB';
+      const mockClient = {
+        getSecrets: async () => ({ env_file: serverBlob }),
+      };
+
+      const result = await fetchSecretsWithCache(mockClient, ORG, PROJ, hash);
+      expect(result).toEqual({ env_file: serverBlob });
+      expect(readKeepCache(ORG, PROJ, hash)).toBe(serverBlob);
+      expect(readKeepCache('other_org', PROJ, hash)).toBe('OTHER_ORG_BLOB');
     });
 
     it('should return null when service returns null', async () => {
@@ -152,9 +189,9 @@ describe('GlobalConfig', () => {
         getSecrets: async () => null,
       };
 
-      const result = await fetchSecretsWithCache(mockClient, 'proj_1', hash);
+      const result = await fetchSecretsWithCache(mockClient, ORG, PROJ, hash);
       expect(result).toBeNull();
-      expect(readKeepCache(hash)).toBeNull();
+      expect(readKeepCache(ORG, PROJ, hash)).toBeNull();
     });
   });
 });

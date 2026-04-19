@@ -137,6 +137,7 @@ export class InviteCommand {
       const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId);
 
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
+      const redeemCommand = `capy redeem ${redeemCode}`;
 
       console.log('');
       console.log(`  Invite created for \x1b[1m${email}\x1b[0m as \x1b[1m${roleName}\x1b[0m`);
@@ -148,6 +149,9 @@ export class InviteCommand {
       console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
       console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
       console.log('');
+
+      const { promptCopyToClipboard } = await import('../ui/clipboard');
+      await promptCopyToClipboard(redeemCommand);
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);

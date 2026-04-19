@@ -18,6 +18,8 @@ import {
   SyncState,
   CapyError,
   ERROR_CODES,
+  getSyncKeepHash,
+  setSyncKeepHash,
 } from '../types/index';
 import {
   generateSeedPhrase,
@@ -493,12 +495,13 @@ export class CapyCommand {
 
           // Cache encrypted blob locally
           const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
-          writeKeepCache(initKeepHash, envBlob);
+          writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
 
           this.fileManager.writeSyncState({
             last_sync: new Date().toISOString(),
             synced_variables: Object.keys(localEnv),
             user_id: authResult.user_id,
+            keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
           });
 
           // Backup plaintext .env before encrypting
@@ -634,6 +637,7 @@ export class CapyCommand {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(plaintext),
       user_id: userId,
+      keep_hash: setSyncKeepHash(null, branch, SyncEngine.computeKeepHash(serverKeep, branch)),
     });
 
     fetchSpinner.succeed(
@@ -876,15 +880,24 @@ export class CapyCommand {
       const leftPad = infoWidth - stripAnsi(left).length;
       const rightPad = capyWidth - right.length;
       // Per-character brown variation for fur texture
-      const furry = (s: string) => s.split('').map((ch) => {
+      const blackBg: Record<number, Set<number>> = {
+        1: new Set([3, 4, 10, 11]), // eyes (top 3/8 of ▅▅ pairs)
+        4: new Set([6, 8]),         // mouth (top half of ▄ chars)
+      };
+      const nose: Record<number, Set<number>> = {
+        3: new Set([7]),            // nose top (space → solid black █)
+      };
+      const furry = (s: string, row: number) => s.split('').map((ch, col) => {
+        if (nose[row]?.has(col)) return `\x1b[38;2;0;0;0m█\x1b[0m`;
         if (ch === ' ') return ch;
         const v = Math.random() * 40 - 20; // ±20 variation
         const r = Math.round(150 + v);
         const g = Math.round(115 + v * 0.7);
         const b = Math.round(80 + v * 0.5);
-        return `\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
+        const bg = blackBg[row]?.has(col) ? '\x1b[48;2;0;0;0m' : '';
+        return `${bg}\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
       }).join('');
-      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right, i)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
@@ -982,8 +995,10 @@ export class CapyCommand {
         this.keyServiceOps(),
       );
     } catch (err: any) {
-      // co-decrypt rejected (e.g. kicked user) — clean up local state
-      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+      // Only clean up local state on a confirmed server 403 (user was kicked).
+      // Network errors and other failures must NOT delete keys — a transient
+      // outage should never permanently lock out a legitimate user.
+      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED && err.details?.status === 403) {
         this.cleanupOrgData(projectState.organizationId!, projectState.userId);
       }
       throw err;
@@ -1173,19 +1188,63 @@ export class CapyCommand {
     // Hide local column for onboarding — it's all "-" and adds noise
     const effectiveShowLocal = isOnboarding ? false : showLocal;
 
+    // Resolve pinned plaintext for display. Try local first, then fetch from S3.
+    const pinnedPlaintext: Record<string, string> = {};
+    let needsFetch = false;
+    for (const variable of Object.keys(pinned)) {
+      if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinned[variable]) {
+        pinnedPlaintext[variable] = localPlaintext[variable];
+      } else {
+        needsFetch = true;
+      }
+    }
+    if (needsFetch && originalKeep && Object.keys(pinned).length > 0) {
+      try {
+        const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
+        const blob = await fetchSecretsWithCache(
+          this.serviceClient,
+          projectState.organizationId!,
+          projectState.projectId!,
+          keepHash,
+        );
+        if (blob?.env_file) {
+          const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+          for (const [key, value] of Object.entries(encrypted)) {
+            if (pinned[key] && !pinnedPlaintext[key]) {
+              try {
+                pinnedPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
+              } catch (decryptErr) {
+                this.debugError(`pinned decrypt failed for ${key}`, decryptErr);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        this.debugError('pinned fetch failed', err);
+      }
+    }
+
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
-    console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+    console.log(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
 
     // Display comparison table
-    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
+    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
 
     console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
+
+    // Direction detection: compare sync-state keep_hash to current keep.lock
+    const syncState = this.projectManager.readSyncState();
+    const currentKeepHash = currentKeep ? SyncEngine.computeKeepHash(currentKeep, branch) : null;
+    const savedHash = getSyncKeepHash(syncState, branch);
+    const isBehind = savedHash != null
+      && currentKeepHash != null
+      && savedHash !== currentKeepHash;
 
     if (isOnboarding) {
       // Onboarding: local .env is empty/foreign — only offer retrieve options
@@ -1196,27 +1255,42 @@ export class CapyCommand {
         menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
       }
     } else if (!hasPinned) {
-      // No pinned values — only offer commit or skip
+      // State 6: No pinned values — only offer commit or skip
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
     } else if (!hasRemote) {
-      // No remote values — local vs pinned only
+      // State 5: No remote values — local vs pinned only
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (showLocal && !showRemote) {
-      // Local differs from pinned, remote matches pinned
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 2: Local differs from pinned, remote matches pinned
+      if (isBehind) {
+        // 2b: keep.lock changed via git pull → user is behind
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 2a: user edited .env locally → user is ahead
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (!showLocal && showRemote) {
-      // Remote differs from pinned, local matches pinned
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 3: Remote differs from pinned, local matches pinned
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else {
-      // Both differ — show all 4 options
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-      menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      // State 4: Both differ
+      if (isBehind) {
+        // 4b: keep.lock changed + another push happened → retrieve remote first
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 4a: user edited .env + teammate pushed
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     }
 
@@ -1225,7 +1299,7 @@ export class CapyCommand {
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
-      message: ' ',
+      message: 'What would you like to do?',
       choices: menuChoices,
     }]);
 
@@ -1244,6 +1318,7 @@ export class CapyCommand {
         try {
           const blob = await fetchSecretsWithCache(
             this.serviceClient,
+            projectState.organizationId!,
             projectState.projectId!,
             keepHash,
           );
@@ -1272,7 +1347,7 @@ export class CapyCommand {
       return;
     } else {
       // Individual resolution
-      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
       if (!resolved) return; // Cancelled
       finalEnv = resolved;
     }
@@ -1326,17 +1401,20 @@ export class CapyCommand {
           return `${k}=capy:${resourceId}:${enc}`;
         })
         .join('\n');
-      writeKeepCache(cacheKeepHash, cacheBlob);
+      writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, cacheBlob);
     }
 
     // Encrypt and write .env
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, undefined, finalKeep, branch);
 
     // Update sync state
+    const existingSyncState = this.projectManager.readSyncState();
     this.fileManager.writeSyncState({
+      ...existingSyncState,
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
       user_id: authResult.user_id,
+      keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
     });
 
     const changeCount = Object.keys(pushedVars).length;
@@ -1359,6 +1437,7 @@ export class CapyCommand {
     remoteHashes: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -1369,16 +1448,12 @@ export class CapyCommand {
 
     const pinnedSnippetFor = (variable: string): string => {
       if (!pinned[variable]) return '-';
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
-    // Check if any pinned value can be resolved to plaintext
-    const showPinned = diffs.some(diff => {
-      if (!pinned[diff.variable]) return false;
-      const snippet = this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext);
-      return !snippet.includes('unresolvable');
-    });
+    // Show pinned column if any pinned value can be resolved
+    const showPinned = diffs.some(diff => pinned[diff.variable] && pinnedPlaintext[diff.variable]);
 
     // Build header
     const headers: string[] = ['Variable'];
@@ -1417,10 +1492,7 @@ export class CapyCommand {
     for (const diff of diffs) {
       const cols = [diff.variable];
       if (showPinned) {
-        const pinnedVal = pinned[diff.variable]
-          ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-          : '-';
-        cols.push(pinnedVal);
+        cols.push(pinnedSnippetFor(diff.variable));
       }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
@@ -1433,28 +1505,6 @@ export class CapyCommand {
     }
   }
 
-  /**
-   * Get a snippet value for a pinned hash by finding the matching plaintext.
-   */
-  private getSnippetForHash(
-    variable: string,
-    pinned: Record<string, string>,
-    localPlaintext: Record<string, string>,
-    remotePlaintext: Record<string, string>,
-  ): string {
-    const pinnedHash = pinned[variable];
-    // Check if local matches pinned
-    if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinnedHash) {
-      return localPlaintext[variable];
-    }
-    // Check if remote matches pinned
-    if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
-      return remotePlaintext[variable];
-    }
-    // Can't resolve plaintext — no source has the matching value
-    return '\x1b[3munresolvable\x1b[0m';
-  }
-
   private async resolveIndividually(
     diffs: { variable: string; type: string; pinned?: string; local?: string; remote?: string }[],
     showLocal: boolean,
@@ -1462,14 +1512,15 @@ export class CapyCommand {
     pinned: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
 
     const pinnedSnippetFor = (variable: string): string | null => {
       if (!pinned[variable]) return null;
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
     const rows: Row[] = diffs.map(diff => ({
@@ -1518,13 +1569,33 @@ export class CapyCommand {
     return result;
   }
 
-  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+  private async promptForAvailableOrgName(promptMessage = 'Organization name:'): Promise<string> {
     const { orgName } = await inquirer.prompt([{
       type: 'input',
       name: 'orgName',
-      message: 'Organization name:',
-      validate: (input: string) => input.trim().length > 0 || 'Organization name cannot be empty',
+      message: promptMessage,
+      validate: async (input: string) => {
+        const trimmed = input.trim();
+        if (trimmed.length === 0) return 'Organization name cannot be empty';
+        if (trimmed.length > 100) return 'Organization name must be 100 characters or fewer';
+        try {
+          const { available } = await this.authService.checkOrgName(trimmed);
+          if (!available) {
+            return `"${trimmed}" is already taken. Org names must be unique to prevent impersonation — try a variant (e.g. "${trimmed} HQ", "${trimmed} Labs").`;
+          }
+          return true;
+        } catch (err: any) {
+          // Don't block the flow on a transient check failure — fall through
+          // to /create-org, which will return 409 if the name is actually taken.
+          return true;
+        }
+      },
     }]);
+    return orgName.trim();
+  }
+
+  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+    let orgName = await this.promptForAvailableOrgName();
 
     // Generate seed phrase and get confirmation BEFORE creating the org.
     // This keeps org creation and key generation atomic — if the user
@@ -1575,28 +1646,48 @@ export class CapyCommand {
     console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
     console.log('');
 
-    const { confirmed } = await inquirer.prompt([{
-      type: 'confirm',
-      name: 'confirmed',
-      message: 'I have saved my recovery phrase',
-      default: false,
-    }]);
+    const { promptCopyToClipboard } = await import('../ui/clipboard');
+    await promptCopyToClipboard(seedPhrase, '');
+    console.log('');
 
-    if (!confirmed) {
-      throw new CapyError(
-        'You must save your recovery phrase before continuing.',
-        ERROR_CODES.AUTH_FAILED
-      );
+    // Loop until the user confirms they've saved the phrase. No org is created
+    // until confirmation, so re-prompting is safe. Ctrl+C still exits cleanly.
+    while (true) {
+      const { confirmed } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirmed',
+        message: 'I have saved my recovery phrase',
+        default: false,
+      }]);
+      if (confirmed) break;
+      console.log(warn('⚠ The recovery phrase cannot be recovered if lost. Scroll up to review, then confirm.'));
+      console.log('');
     }
 
-    // Seed phrase confirmed — now create the org and save the key
-    const orgSpinner = ora('Creating organization...').start();
-    const org = await this.authService.createOrganization(orgName.trim(), refreshToken, userId);
-    orgSpinner.succeed(`Organization "${org.name}" created`);
+    // Seed phrase confirmed — now create the org and save the key.
+    // Retry loop handles TOCTOU: another user may have claimed the name
+    // between our pre-check and this call. On 409, re-prompt for a name
+    // without regenerating the seed phrase (the master key is derived from
+    // the phrase alone, and nothing has been wrapped yet).
+    while (true) {
+      const orgSpinner = ora('Creating organization...').start();
+      try {
+        const org = await this.authService.createOrganization(orgName, refreshToken, userId);
+        orgSpinner.succeed(`Organization "${org.name}" created`);
 
-    const masterKey = seedPhraseToMasterKey(seedPhrase);
-    await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
+        const masterKey = seedPhraseToMasterKey(seedPhrase);
+        await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
 
-    return org;
+        return org;
+      } catch (err: any) {
+        orgSpinner.fail('Failed to create organization');
+        if (err && err.status === 409) {
+          console.log('');
+          orgName = await this.promptForAvailableOrgName('That name was claimed while you were setting up. Pick another:');
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 }

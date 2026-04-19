@@ -68,6 +68,7 @@ function renderAuthFailed(error: CapyError): string {
     `    1. Run ${bold('capy')} again to re-authenticate`,
     `    2. Check your internet connection`,
     `    3. Verify your account at ${grey('https://capy.sc')}`,
+    `    4. If you're the org owner, run ${bold('capy decrypt')} to decrypt offline with your seed phrase`,
     '',
   ];
   return lines.join('\n');
@@ -117,6 +118,8 @@ function renderNetworkError(error: CapyError): string {
     `  Check:`,
     `    1. Your internet connection`,
     `    2. The service is running ${grey('(capy-dev: http://localhost:3000)')}`,
+    '',
+    `  If you're the org owner, run ${bold('capy decrypt')} to decrypt secrets offline with your seed phrase.`,
     '',
   ];
   return lines.join('\n');

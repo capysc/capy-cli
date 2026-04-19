@@ -4,8 +4,10 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import inquirer from 'inquirer';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES, getSyncKeepHash } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
+import { SyncEngine } from '../sync/syncEngine';
+import { hashValue } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -36,6 +38,14 @@ export class CheckoutCommand {
     try {
       await this._execute(branchName, options);
     } catch (error: any) {
+      // In recovery mode, fall back to offline branch switch
+      const { isRecoveryActive } = await import('../config/globalConfig');
+      if (isRecoveryActive()) {
+        this.projectManager.writeActiveBranch(branchName);
+        console.log(`\nSwitched to branch "${branchName}" (offline — recovery mode)`);
+        console.log(`Run ${B('capy decrypt')} to decrypt secrets for this branch.\n`);
+        return;
+      }
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
     }
@@ -75,6 +85,70 @@ export class CheckoutCommand {
       wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
     };
     const encryptionKey = await resolveProjectKey(orgId, projectId, authResult.user_id!, keyOps);
+
+    // Guard: block checkout if working tree is dirty (skip for branch creation)
+    if (!options.create) {
+      const keep = this.projectManager.readKeepFile();
+      const currentBranch = this.projectManager.readActiveBranch();
+
+      if (keep && currentBranch) {
+        // Check A: uncommitted changes (.env differs from keep.lock)
+        try {
+          const localPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
+          const pinnedEntries = keep.variables;
+          let hasUncommitted = false;
+
+          // Check for edits and deletions
+          const pinnedKeys = new Set<string>();
+          for (const [varName, entries] of Object.entries(pinnedEntries)) {
+            const entry = entries.find(e => e.branch === currentBranch);
+            if (entry) {
+              pinnedKeys.add(varName);
+              const localValue = localPlaintext[varName];
+              if (!localValue) {
+                // Variable in keep.lock but not in .env — uncommitted deletion
+                hasUncommitted = true;
+                break;
+              }
+              if (hashValue(localValue) !== entry.value_hash) {
+                // Value changed — uncommitted edit
+                hasUncommitted = true;
+                break;
+              }
+            }
+          }
+
+          // Check for additions (in .env but not in keep.lock for this branch)
+          if (!hasUncommitted) {
+            for (const varName of Object.keys(localPlaintext)) {
+              if (!pinnedKeys.has(varName)) {
+                hasUncommitted = true;
+                break;
+              }
+            }
+          }
+
+          if (hasUncommitted) {
+            console.error(`You have uncommitted changes on "${currentBranch}".`);
+            console.error(`Run ${B('capy')} to commit before switching branches.`);
+            process.exit(1);
+          }
+        } catch {
+          // If .env doesn't exist or can't be read, no uncommitted changes to worry about
+        }
+
+        // Check B: unpushed changes (keep.lock differs from last sync)
+        const syncState = this.projectManager.readSyncState();
+        const savedHash = getSyncKeepHash(syncState, currentBranch);
+        const currentKeepHash = SyncEngine.computeKeepHash(keep, currentBranch);
+
+        if (savedHash != null && savedHash !== currentKeepHash) {
+          console.error(`You have unpushed changes on "${currentBranch}".`);
+          console.error(`Run ${B('capy push')} before switching branches.`);
+          process.exit(1);
+        }
+      }
+    }
 
     if (options.create) {
       await this.createBranch(projectId, branchName, encryptionKey, options.protected);
