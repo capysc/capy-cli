@@ -371,6 +371,47 @@ describe('Checkout — proceeds when clean', () => {
 
     consoleSpy.mockRestore();
   });
+
+  test('checkout -b seeds new branch from current .env when remote has no snapshot', async () => {
+    const currentPlaintext = {
+      API_KEY: 'dev-key-123',
+      DB_URL: 'postgres://dev',
+    };
+    const mocks = createCheckoutMocks({ localPlaintext: currentPlaintext });
+    // Remote returns empty env_content (the new-branch case after the server fix).
+    mocks.mockServiceClient.getDecryptData = mock(() => Promise.resolve({
+      env_content: '',
+      keep_hash: 'a'.repeat(64),
+      keep_file: undefined,
+    }));
+    mocks.mockServiceClient.createBranch = mock(() => Promise.resolve({
+      id: 'br-new', name: 'new-feature', project_id: 'proj-123', is_protected: false,
+    }));
+
+    MockProjectManager.mockImplementation(() => mocks.mockProjectManager);
+    MockFileManager.mockImplementation(() => mocks.mockFileManager);
+    MockAuthService.mockImplementation(() => mocks.mockAuthService);
+    MockServiceClient.mockImplementation(() => mocks.mockServiceClient);
+
+    const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+    const cmd = new CheckoutCommand();
+    await cmd.execute('new-feature', { create: true, protected: false });
+
+    // Seed path: writeEncryptedEnvFile must be called with the CURRENT
+    // plaintext values, stamped under the NEW branch name. This is the
+    // regression guard — prior behavior wiped .env on the no-snapshot case.
+    const writeCalls = mocks.mockFileManager.writeEncryptedEnvFile.mock.calls;
+    const seedCall = writeCalls.find((args: any[]) => args[4] === 'new-feature');
+    expect(seedCall).toBeDefined();
+    expect(seedCall[0]).toEqual(currentPlaintext);
+
+    // Output mentions seeding so the user knows the carry-over happened.
+    expect(consoleSpy.mock.calls.some((c: any) =>
+      typeof c[0] === 'string' && c[0].includes('Seeded')
+    )).toBe(true);
+
+    consoleSpy.mockRestore();
+  });
 });
 
 // ---------------------------------------------------------------------------
