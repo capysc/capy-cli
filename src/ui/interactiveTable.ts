@@ -43,7 +43,7 @@ interface ColumnConfig {
 
 const COLUMNS: ColumnConfig[] = [
   { label: 'Email', minWidth: 20, flex: true },
-  { label: 'Role', minWidth: 8 },
+  { label: 'Role', minWidth: 16 },
   { label: 'Added', minWidth: 12 },
   { label: 'Projects', minWidth: 8 },
 ];
