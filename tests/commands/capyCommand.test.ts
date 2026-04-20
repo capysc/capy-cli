@@ -43,6 +43,7 @@ mock.module('inquirer', () => ({
       // Return appropriate defaults based on the prompt name
       const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
       if (name === 'initChoice') return Promise.resolve({ initChoice: 'development' });
+      if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'development' });
       if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
       if (name === 'confirmed') return Promise.resolve({ confirmed: true });
       if (name === 'action') return Promise.resolve({ action: 'commit_local' });
@@ -351,18 +352,46 @@ describe('CapyCommand', () => {
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
 
-    test('does not re-create the default development branch (POST /projects already did)', async () => {
-      // Regression guard: `initializeProject` on the service creates the
-      // 'development' branch server-side. A follow-up client-side
-      // createBranch('development') would 409 on the unique (projectId, name)
-      // index and fail onboarding for every new project.
+    test('creates the chosen initial branch (unprotected development by default)', async () => {
+      // Regression guard: POST /projects no longer auto-creates a branch,
+      // so init MUST call createBranch exactly once with the user's chosen
+      // name + protection. Default inquirer response here is 'development'
+      // unprotected.
       await (capyCommand as any).initializeProject();
 
       const createBranchCalls = mockServiceClient.createBranch.mock.calls;
-      const defaultBranchAttempt = createBranchCalls.find(
-        (args: any[]) => args[1] === 'development'
-      );
-      expect(defaultBranchAttempt).toBeUndefined();
+      expect(createBranchCalls.length).toBe(1);
+      expect(createBranchCalls[0][0]).toBe('proj-123');        // projectId
+      expect(createBranchCalls[0][1]).toBe('development');      // branch name
+      expect(createBranchCalls[0][2]).toBe(false);              // isProtected
+    });
+
+    test('creates a protected production branch when user chooses production', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const originalPrompt = inquirer.prompt;
+      // @ts-expect-error overriding mock for this test
+      inquirer.prompt = mock((questions: any) => {
+        const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
+        if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'production' });
+        if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+        if (name === 'confirmed') return Promise.resolve({ confirmed: true });
+        if (name === 'action') return Promise.resolve({ action: 'commit_local' });
+        return Promise.resolve({});
+      });
+
+      try {
+        await (capyCommand as any).initializeProject();
+
+        const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+        expect(createBranchCalls.length).toBe(1);
+        expect(createBranchCalls[0][1]).toBe('production');
+        expect(createBranchCalls[0][2]).toBe(true);  // protected
+        // And local state is pointed at production.
+        expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('production');
+      } finally {
+        // @ts-expect-error restore
+        inquirer.prompt = originalPrompt;
+      }
     });
 
     test('should log correct message when keep.lock file is not found', async () => {
