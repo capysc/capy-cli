@@ -1,11 +1,19 @@
 import { AuthService } from '../auth/authService';
 import { ProjectManager } from '../core/projectManager';
+import { ServiceClient } from '../service/serviceClient';
 
 const DIM = '\x1b[90m';
 const RESET = '\x1b[0m';
 const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+const ROLE_LABELS: Record<string, string> = {
+  owner: 'Owner',
+  admin: 'Admin',
+  'project-admin': 'Project Admin',
+  member: 'Member',
+};
 
 export class InfoCommand {
   private apiUrl?: string;
@@ -39,9 +47,25 @@ export class InfoCommand {
     const workosOrgId = org?.workos_org_id;
     const branch = projectState.activeBranch;
 
+    let roleLabel = '—';
+    const token = authService.getToken();
+    if (token && authResult.user_id) {
+      try {
+        const serviceClient = new ServiceClient(this.apiUrl);
+        serviceClient.setToken(token);
+        const { members } = await serviceClient.listMembers(orgId);
+        const me = members.find((m: any) => m.userId === authResult.user_id);
+        const slug = me?.role?.slug;
+        if (slug) roleLabel = ROLE_LABELS[slug] || slug;
+      } catch {
+        // leave as —
+      }
+    }
+
     const rows: [string, string][] = [
       ['User', authResult.user_email || '—'],
       ['User ID', authResult.user_id || '—'],
+      ['Role', roleLabel],
       ['Organization', orgName || '—'],
       ['Org ID', orgId],
       ['WorkOS Org ID', workosOrgId || '—'],
