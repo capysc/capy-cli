@@ -153,6 +153,10 @@ export class DeployCommand {
       // Authenticate
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
+      serviceClient.setTokenRefresher(async () => {
+        const refreshed = await authService.refreshToken();
+        return refreshed ? authService.getToken() : null;
+      });
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
@@ -348,6 +352,10 @@ export class DeployRevokeCommand {
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
+      serviceClient.setTokenRefresher(async () => {
+        const refreshed = await authService.refreshToken();
+        return refreshed ? authService.getToken() : null;
+      });
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
@@ -390,6 +398,10 @@ export class DeployListCommand {
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
+      serviceClient.setTokenRefresher(async () => {
+        const refreshed = await authService.refreshToken();
+        return refreshed ? authService.getToken() : null;
+      });
       const authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
