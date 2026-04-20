@@ -399,19 +399,47 @@ export class CapyCommand {
 
     keySpinner.succeed('keep.lock created (0 secrets)');
 
-    // Create the initial branch. `POST /projects` no longer auto-creates
-    // one. Default is 'development' unprotected (the common case). Flags
-    // override for teams that want a protected prod branch from day one:
-    //
-    //   capy --initial-branch=production --initial-branch-protected
-    //   capy --initial-branch=main
-    const initialBranchName = (this.options.initialBranch || 'development').trim();
-    const initialBranchProtected = Boolean(this.options.initialBranchProtected);
-    if (!initialBranchName) {
-      throw new CapyError(
-        '--initial-branch cannot be empty',
-        ERROR_CODES.INVALID_FORMAT,
-      );
+    // Pick the initial branch. `POST /projects` no longer auto-creates one,
+    // so we create the first branch before anything else works. Prompt for
+    // the common shapes (dev-unprotected, prod-protected) plus custom; users
+    // can always `capy checkout -b <name>` later to add more.
+    const initialBranchChoices = [
+      { name: 'development  [90m(unprotected — readable/writable by all org members)[0m', value: 'development' },
+      { name: 'production   [90m(protected — invite-only)[0m', value: 'production' },
+      { name: 'custom...', value: 'custom' },
+    ];
+    const { initialBranchChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'initialBranchChoice',
+      message: 'What branch should this project start with?',
+      choices: initialBranchChoices,
+    }]);
+
+    let initialBranchName: string;
+    let initialBranchProtected: boolean;
+    if (initialBranchChoice === 'development') {
+      initialBranchName = 'development';
+      initialBranchProtected = false;
+    } else if (initialBranchChoice === 'production') {
+      initialBranchName = 'production';
+      initialBranchProtected = true;
+    } else {
+      const customAnswers = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'name',
+          message: 'Branch name:',
+          validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+        },
+        {
+          type: 'confirm',
+          name: 'isProtected',
+          message: 'Make this branch protected? [90m(invite-only)[0m',
+          default: false,
+        },
+      ]);
+      initialBranchName = String(customAnswers.name).trim();
+      initialBranchProtected = Boolean(customAnswers.isProtected);
     }
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();

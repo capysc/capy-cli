@@ -43,6 +43,7 @@ mock.module('inquirer', () => ({
       // Return appropriate defaults based on the prompt name
       const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
       if (name === 'initChoice') return Promise.resolve({ initChoice: 'development' });
+      if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'development' });
       if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
       if (name === 'confirmed') return Promise.resolve({ confirmed: true });
       if (name === 'action') return Promise.resolve({ action: 'commit_local' });
@@ -365,35 +366,60 @@ describe('CapyCommand', () => {
       expect(createBranchCalls[0][2]).toBe(false);              // isProtected
     });
 
-    test('creates a protected production branch when --initial-branch-protected flag is set', async () => {
-      // Re-construct the command with flags so the init flow reads them
-      // from this.options. No prompt any more — the CLI is flag-driven.
-      const cmd = new CapyCommand({
-        initialBranch: 'production',
-        initialBranchProtected: true,
+    test('creates a protected production branch when user picks production in the prompt', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const originalPrompt = inquirer.prompt;
+      // @ts-expect-error overriding mock for this test
+      inquirer.prompt = mock((questions: any) => {
+        const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
+        if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'production' });
+        if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+        if (name === 'confirmed') return Promise.resolve({ confirmed: true });
+        if (name === 'action') return Promise.resolve({ action: 'commit_local' });
+        return Promise.resolve({});
       });
 
-      await (cmd as any).initializeProject();
+      try {
+        await (capyCommand as any).initializeProject();
 
-      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
-      expect(createBranchCalls.length).toBe(1);
-      expect(createBranchCalls[0][1]).toBe('production');
-      expect(createBranchCalls[0][2]).toBe(true);  // protected
-      expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('production');
+        const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+        expect(createBranchCalls.length).toBe(1);
+        expect(createBranchCalls[0][1]).toBe('production');
+        expect(createBranchCalls[0][2]).toBe(true);
+        expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('production');
+      } finally {
+        // @ts-expect-error restore
+        inquirer.prompt = originalPrompt;
+      }
     });
 
-    test('creates a custom-named unprotected branch when --initial-branch is set without --protected', async () => {
-      const cmd = new CapyCommand({
-        initialBranch: 'main',
+    test('creates a custom-named branch when user picks custom in the prompt', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const originalPrompt = inquirer.prompt;
+      // @ts-expect-error overriding mock for this test
+      inquirer.prompt = mock((questions: any) => {
+        const qs = Array.isArray(questions) ? questions : [questions];
+        const firstName = qs[0]?.name;
+        if (firstName === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'custom' });
+        if (firstName === 'name') return Promise.resolve({ name: 'main', isProtected: false });
+        if (firstName === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+        if (firstName === 'confirmed') return Promise.resolve({ confirmed: true });
+        if (firstName === 'action') return Promise.resolve({ action: 'commit_local' });
+        return Promise.resolve({});
       });
 
-      await (cmd as any).initializeProject();
+      try {
+        await (capyCommand as any).initializeProject();
 
-      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
-      expect(createBranchCalls.length).toBe(1);
-      expect(createBranchCalls[0][1]).toBe('main');
-      expect(createBranchCalls[0][2]).toBe(false);
-      expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('main');
+        const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+        expect(createBranchCalls.length).toBe(1);
+        expect(createBranchCalls[0][1]).toBe('main');
+        expect(createBranchCalls[0][2]).toBe(false);
+        expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('main');
+      } finally {
+        // @ts-expect-error restore
+        inquirer.prompt = originalPrompt;
+      }
     });
 
     test('should log correct message when keep.lock file is not found', async () => {

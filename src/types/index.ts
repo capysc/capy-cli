@@ -189,10 +189,6 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
-  /** Name of the initial branch to create during `capy` init. Defaults to 'development'. */
-  initialBranch?: string;
-  /** Make the initial branch protected (invite-only). Only honored if initialBranch is set. */
-  initialBranchProtected?: boolean;
 }
 
 export interface ProjectInitResult {
