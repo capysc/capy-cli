@@ -366,42 +366,15 @@ describe('CapyCommand', () => {
       expect(createBranchCalls[0][2]).toBe(false);              // isProtected
     });
 
-    test('creates a protected production branch when user picks production in the prompt', async () => {
-      const inquirer = (await import('inquirer')).default;
-      const originalPrompt = inquirer.prompt;
-      // @ts-expect-error overriding mock for this test
-      inquirer.prompt = mock((questions: any) => {
-        const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
-        if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'production' });
-        if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
-        if (name === 'confirmed') return Promise.resolve({ confirmed: true });
-        if (name === 'action') return Promise.resolve({ action: 'commit_local' });
-        return Promise.resolve({});
-      });
-
-      try {
-        await (capyCommand as any).initializeProject();
-
-        const createBranchCalls = mockServiceClient.createBranch.mock.calls;
-        expect(createBranchCalls.length).toBe(1);
-        expect(createBranchCalls[0][1]).toBe('production');
-        expect(createBranchCalls[0][2]).toBe(true);
-        expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('production');
-      } finally {
-        // @ts-expect-error restore
-        inquirer.prompt = originalPrompt;
-      }
-    });
-
-    test('creates a custom-named branch when user picks custom in the prompt', async () => {
+    test('creates a custom-named branch when user picks \'another branch\' and enters a name', async () => {
       const inquirer = (await import('inquirer')).default;
       const originalPrompt = inquirer.prompt;
       // @ts-expect-error overriding mock for this test
       inquirer.prompt = mock((questions: any) => {
         const qs = Array.isArray(questions) ? questions : [questions];
         const firstName = qs[0]?.name;
-        if (firstName === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'custom' });
-        if (firstName === 'name') return Promise.resolve({ name: 'main', isProtected: false });
+        if (firstName === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'other' });
+        if (firstName === 'branchName') return Promise.resolve({ branchName: 'main' });
         if (firstName === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
         if (firstName === 'confirmed') return Promise.resolve({ confirmed: true });
         if (firstName === 'action') return Promise.resolve({ action: 'commit_local' });
@@ -414,6 +387,7 @@ describe('CapyCommand', () => {
         const createBranchCalls = mockServiceClient.createBranch.mock.calls;
         expect(createBranchCalls.length).toBe(1);
         expect(createBranchCalls[0][1]).toBe('main');
+        // Protection is not asked at init — always unprotected by default.
         expect(createBranchCalls[0][2]).toBe(false);
         expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('main');
       } finally {
