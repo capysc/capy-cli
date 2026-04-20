@@ -397,11 +397,42 @@ export class CapyCommand {
 
     this.fileManager.writeKeepFile(keep);
 
-    // Note: `POST /projects` already creates the default 'development' branch
-    // server-side, so we don't call createBranch here. Doing so would 409 now
-    // that the server's default matches the name we'd attempt to create.
+    keySpinner.succeed('keep.lock created (0 secrets)');
 
-    keySpinner.succeed('keep.lock created (pinned to development, 0 secrets)');
+    // Create the initial branch. `POST /projects` no longer auto-creates
+    // one. Default is 'development' unprotected (the common case). Flags
+    // override for teams that want a protected prod branch from day one:
+    //
+    //   capy --initial-branch=production --initial-branch-protected
+    //   capy --initial-branch=main
+    const initialBranchName = (this.options.initialBranch || 'development').trim();
+    const initialBranchProtected = Boolean(this.options.initialBranchProtected);
+    if (!initialBranchName) {
+      throw new CapyError(
+        '--initial-branch cannot be empty',
+        ERROR_CODES.INVALID_FORMAT,
+      );
+    }
+
+    const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
+    try {
+      await this.serviceClient.createBranch(
+        projectResult.project_id,
+        initialBranchName,
+        initialBranchProtected,
+      );
+    } catch (err) {
+      branchSpinner.fail(`Failed to create branch ${initialBranchName}`);
+      throw err;
+    }
+    branchSpinner.succeed(
+      initialBranchProtected
+        ? `Created protected branch ${initialBranchName}`
+        : `Created branch ${initialBranchName}`,
+    );
+
+    // The initial branch is what this project is "on" locally going forward.
+    this.projectManager.writeActiveBranch(initialBranchName);
 
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
@@ -464,31 +495,12 @@ export class CapyCommand {
         console.log(`\nFound .env with ${localVarCount} secrets:`);
         console.log(`  ${displayNames}`);
 
-        // First-run flow: commit to development or another branch
-        const { initChoice } = await inquirer.prompt([{
-          type: 'list',
-          name: 'initChoice',
-          message: '',
-          choices: [
-            { name: 'Commit all to development (default)', value: 'development' },
-            { name: 'Commit all to another branch', value: 'other' },
-          ],
-        }]);
-
-        let initBranch: string;
-        if (initChoice === 'other') {
-          const { branchName } = await inquirer.prompt([{
-            type: 'input',
-            name: 'branchName',
-            message: 'Branch name:',
-            validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-          }]);
-          initBranch = branchName.trim();
-          await this.serviceClient.createBranch(projectResult.project_id, initBranch);
-        } else {
-          initBranch = 'development';
-        }
-        this.projectManager.writeActiveBranch(initBranch);
+        // The user already chose their initial branch above — push the
+        // existing .env to that branch. (Previously we re-prompted for a
+        // commit target here, but now that project init explicitly sets
+        // the initial branch, asking again was redundant + could create a
+        // second branch the user didn't ask for.)
+        const initBranch = initialBranchName;
 
         const syncSpinner = ora('Syncing local variables...').start();
 

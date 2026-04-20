@@ -351,18 +351,49 @@ describe('CapyCommand', () => {
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
 
-    test('does not re-create the default development branch (POST /projects already did)', async () => {
-      // Regression guard: `initializeProject` on the service creates the
-      // 'development' branch server-side. A follow-up client-side
-      // createBranch('development') would 409 on the unique (projectId, name)
-      // index and fail onboarding for every new project.
+    test('creates the chosen initial branch (unprotected development by default)', async () => {
+      // Regression guard: POST /projects no longer auto-creates a branch,
+      // so init MUST call createBranch exactly once with the user's chosen
+      // name + protection. Default inquirer response here is 'development'
+      // unprotected.
       await (capyCommand as any).initializeProject();
 
       const createBranchCalls = mockServiceClient.createBranch.mock.calls;
-      const defaultBranchAttempt = createBranchCalls.find(
-        (args: any[]) => args[1] === 'development'
-      );
-      expect(defaultBranchAttempt).toBeUndefined();
+      expect(createBranchCalls.length).toBe(1);
+      expect(createBranchCalls[0][0]).toBe('proj-123');        // projectId
+      expect(createBranchCalls[0][1]).toBe('development');      // branch name
+      expect(createBranchCalls[0][2]).toBe(false);              // isProtected
+    });
+
+    test('creates a protected production branch when --initial-branch-protected flag is set', async () => {
+      // Re-construct the command with flags so the init flow reads them
+      // from this.options. No prompt any more — the CLI is flag-driven.
+      const cmd = new CapyCommand({
+        initialBranch: 'production',
+        initialBranchProtected: true,
+      });
+
+      await (cmd as any).initializeProject();
+
+      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+      expect(createBranchCalls.length).toBe(1);
+      expect(createBranchCalls[0][1]).toBe('production');
+      expect(createBranchCalls[0][2]).toBe(true);  // protected
+      expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('production');
+    });
+
+    test('creates a custom-named unprotected branch when --initial-branch is set without --protected', async () => {
+      const cmd = new CapyCommand({
+        initialBranch: 'main',
+      });
+
+      await (cmd as any).initializeProject();
+
+      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+      expect(createBranchCalls.length).toBe(1);
+      expect(createBranchCalls[0][1]).toBe('main');
+      expect(createBranchCalls[0][2]).toBe(false);
+      expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('main');
     });
 
     test('should log correct message when keep.lock file is not found', async () => {
