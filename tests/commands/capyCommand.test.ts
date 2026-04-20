@@ -43,7 +43,6 @@ mock.module('inquirer', () => ({
       // Return appropriate defaults based on the prompt name
       const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
       if (name === 'initChoice') return Promise.resolve({ initChoice: 'development' });
-      if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'development' });
       if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
       if (name === 'confirmed') return Promise.resolve({ confirmed: true });
       if (name === 'action') return Promise.resolve({ action: 'commit_local' });
@@ -366,32 +365,35 @@ describe('CapyCommand', () => {
       expect(createBranchCalls[0][2]).toBe(false);              // isProtected
     });
 
-    test('creates a protected production branch when user chooses production', async () => {
-      const inquirer = (await import('inquirer')).default;
-      const originalPrompt = inquirer.prompt;
-      // @ts-expect-error overriding mock for this test
-      inquirer.prompt = mock((questions: any) => {
-        const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
-        if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'production' });
-        if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
-        if (name === 'confirmed') return Promise.resolve({ confirmed: true });
-        if (name === 'action') return Promise.resolve({ action: 'commit_local' });
-        return Promise.resolve({});
+    test('creates a protected production branch when --initial-branch-protected flag is set', async () => {
+      // Re-construct the command with flags so the init flow reads them
+      // from this.options. No prompt any more — the CLI is flag-driven.
+      const cmd = new CapyCommand({
+        initialBranch: 'production',
+        initialBranchProtected: true,
       });
 
-      try {
-        await (capyCommand as any).initializeProject();
+      await (cmd as any).initializeProject();
 
-        const createBranchCalls = mockServiceClient.createBranch.mock.calls;
-        expect(createBranchCalls.length).toBe(1);
-        expect(createBranchCalls[0][1]).toBe('production');
-        expect(createBranchCalls[0][2]).toBe(true);  // protected
-        // And local state is pointed at production.
-        expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('production');
-      } finally {
-        // @ts-expect-error restore
-        inquirer.prompt = originalPrompt;
-      }
+      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+      expect(createBranchCalls.length).toBe(1);
+      expect(createBranchCalls[0][1]).toBe('production');
+      expect(createBranchCalls[0][2]).toBe(true);  // protected
+      expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('production');
+    });
+
+    test('creates a custom-named unprotected branch when --initial-branch is set without --protected', async () => {
+      const cmd = new CapyCommand({
+        initialBranch: 'main',
+      });
+
+      await (cmd as any).initializeProject();
+
+      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+      expect(createBranchCalls.length).toBe(1);
+      expect(createBranchCalls[0][1]).toBe('main');
+      expect(createBranchCalls[0][2]).toBe(false);
+      expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('main');
     });
 
     test('should log correct message when keep.lock file is not found', async () => {
