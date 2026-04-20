@@ -429,7 +429,7 @@ describe('FileManager', () => {
   });
 
   describe('ensureCapyGitignore', () => {
-    test('should ensure .env and .capy are in .gitignore', () => {
+    test('should add all capy entries in a single block', () => {
       const existingContent = 'node_modules\n';
       mockExistsSync.mockReturnValue(true);
       mockReadFileSync.mockReturnValue(existingContent);
@@ -443,7 +443,7 @@ describe('FileManager', () => {
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '.env\n.capy\n',
+        '.env\n.capy\n.env.pre-capy.old\n.env.*.decrypted\n',
         'utf-8'
       );
     });
