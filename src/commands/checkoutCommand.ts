@@ -219,6 +219,7 @@ export class CheckoutCommand {
     // branch with .env already updated — detectable on next run via
     // capy-branch-header mismatch self-heal.
     let varCount = 0;
+    let seededFromCurrent = false;
     if (decryptData.env_content) {
       const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
       const decrypted: Record<string, string> = {};
@@ -231,16 +232,32 @@ export class CheckoutCommand {
       }
       this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
       varCount = Object.keys(decrypted).length;
+    } else if (options.create) {
+      // `capy checkout -b <new>` with no remote snapshot: seed the new branch
+      // from the current .env. Preserve the plaintext values and re-write them
+      // under the new branch header (new resource_ids per (branch, key)), so
+      // `capy` sees them as unpinned and offers to push them to <new>.
+      let seed: Record<string, string> = {};
+      try {
+        seed = this.fileManager.readEncryptedEnvFile(encryptionKey);
+      } catch {
+        // Unreadable current .env — fall through to empty-stamped file.
+      }
+      this.fileManager.writeEncryptedEnvFile(seed, encryptionKey, undefined, keepForWrite, branchName);
+      varCount = Object.keys(seed).length;
+      seededFromCurrent = varCount > 0;
     } else {
-      // Overwrite .env with an empty (but branch-stamped) file so the header
-      // matches the branch we're about to switch to.
+      // Switching to an existing empty branch: overwrite .env with an empty
+      // (but branch-stamped) file so the header matches the active branch.
       this.fileManager.writeEncryptedEnvFile({}, encryptionKey, undefined, keepForWrite, branchName);
     }
 
     this.projectManager.writeActiveBranch(branchName);
     syncSpinner.stop();
 
-    if (varCount > 0) {
+    if (seededFromCurrent) {
+      console.log(`Seeded ${varCount} variable(s) from current branch into ${branchName} (unpushed — run ${B('capy')} to push)`);
+    } else if (varCount > 0) {
       console.log(`Synced ${varCount} variable(s) for ${branchName}`);
     } else {
       console.log(`No secrets yet for ${branchName}`);
