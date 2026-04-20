@@ -156,19 +156,19 @@ export class CapyCommand {
     const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
     const envBranch = envMeta.branch;
     if (envBranch === undefined) return; // no header yet (first-run); nothing to reconcile
-    // Default branch is stored as empty string in .capy/branch but may be
-    // omitted from the header entirely; treat falsy==''.
-    const normalizedActive = activeBranch || '';
-    const normalizedHeader = envBranch || '';
+    // Both sides are always a real branch name ('development' or otherwise);
+    // empty never appears in modern state.
+    const normalizedActive = activeBranch || 'development';
+    const normalizedHeader = envBranch || 'development';
     if (normalizedActive === normalizedHeader) return;
 
     const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
     console.error(`\nLocal state is inconsistent:`);
-    console.error(`  .capy/branch says ${B(normalizedActive || 'default')}`);
-    console.error(`  .env was encrypted for ${B(normalizedHeader || 'default')}`);
+    console.error(`  .capy/branch says ${B(normalizedActive)}`);
+    console.error(`  .env was encrypted for ${B(normalizedHeader)}`);
     console.error(`\nThis usually means a previous checkout was interrupted.`);
-    console.error(`Recover with: ${B(`capy checkout ${normalizedHeader || ''}`)} (re-sync to the branch .env actually holds)`);
-    console.error(`           or: ${B(`capy checkout ${normalizedActive || ''}`)} (pull the branch .capy/branch claims)\n`);
+    console.error(`Recover with: ${B(`capy checkout ${normalizedHeader}`)} (re-sync to the branch .env actually holds)`);
+    console.error(`           or: ${B(`capy checkout ${normalizedActive}`)} (pull the branch .capy/branch claims)\n`);
     process.exit(1);
   }
 
@@ -788,14 +788,14 @@ export class CapyCommand {
     branches.forEach((b, i) => {
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
-      const name = b.name || 'no branch';
+      const name = b.name;
       const prot = b.is_protected ? `  ${grey('(protected)')}` : '';
       console.log(`  ${connector} ${name}${prot}`);
     });
     console.log('');
 
     const choices = branches.map(b => ({
-      name: b.name || 'no branch',
+      name: b.name,
       value: b.name,
     }));
 
@@ -1185,7 +1185,7 @@ export class CapyCommand {
               const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
               console.log('\nBranches you can switch to:');
               for (const b of candidates) {
-                console.log(`  ${B(b.name || 'default')}`);
+                console.log(`  ${B(b.name)}`);
               }
               const suggested = candidates[0].name;
               console.log(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);

@@ -162,7 +162,7 @@ export class CheckoutCommand {
         console.log(`Branch "${branchName}" not found\n`);
         console.log('Available branches:');
         for (const b of branches) {
-          const label = b.name || 'no branch';
+          const label = b.name;
           const prod = b.is_protected ? ' \x1b[90m(protected)\x1b[0m' : '';
           console.log(`  ${label}${prod}`);
         }
@@ -246,8 +246,7 @@ export class CheckoutCommand {
       console.log(`No secrets yet for ${branchName}`);
     }
 
-    const displayName = branchName || 'no branch selected';
-    console.log(`\nNow on branch: ${displayName}`);
+    console.log(`\nNow on branch: ${branchName}`);
   }
 
   private async createBranch(
