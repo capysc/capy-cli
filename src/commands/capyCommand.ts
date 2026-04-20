@@ -1126,15 +1126,23 @@ export class CapyCommand {
       fetchSpinner.stop();
     } catch (err: any) {
       this.debugError('remote fetch failed', err);
-      // Auth/permission errors are hard failures (e.g. user was kicked from org).
-      // Network errors fall back to local-only mode.
+      // 403 may be one of two different cases:
+      //   (a) User was kicked from the org — cleanup local state.
+      //   (b) User is still a member but lacks access to this specific branch
+      //       (e.g. Member on a protected branch). DO NOT wipe keys — that
+      //       would destroy access to every other project in the org.
       if (err instanceof CapyError) {
         const status = err.details?.status;
         if (status === 403) {
-          // User was kicked — clean up local state for this org so stale
-          // keys and session data don't linger.
-          fetchSpinner.fail('Access denied — you may have been removed from this organization.');
-          this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+          const msg = (err.message || '').toLowerCase();
+          const kicked = /no longer a member|not a member|not authorized for this organization/.test(msg);
+          if (kicked) {
+            fetchSpinner.fail('Access denied — you may have been removed from this organization.');
+            this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+            throw err;
+          }
+          // Branch-level denial: user is still in the org, just can't read THIS branch.
+          fetchSpinner.fail(`No access to branch "${branch}" — protected branches are invite-only.`);
           throw err;
         }
         if (status === 401) {
