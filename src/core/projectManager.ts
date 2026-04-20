@@ -86,7 +86,8 @@ export class ProjectManager {
     const capyDir = this.getCapyDir();
     if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
     const branchPath = this.getActiveBranchPath();
-    writeFileSync(branchPath, branch || '', { encoding: 'utf-8', mode: 0o600 });
+    // There is no "no branch". Falsy input becomes 'development'.
+    writeFileSync(branchPath, branch || 'development', { encoding: 'utf-8', mode: 0o600 });
   }
 
   getSyncStatePath(): string {

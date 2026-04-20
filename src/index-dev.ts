@@ -155,7 +155,7 @@ program
     branches.forEach((b, i) => {
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
-      const name = b.name || 'no branch';
+      const name = b.name;
       const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === activeBranch;
       const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
@@ -167,7 +167,7 @@ program
     const inquirer = (await import('inquirer')).default;
     const choices = branches
       .filter(b => b.name !== activeBranch)
-      .map(b => ({ name: b.name || 'no branch', value: b.name }));
+      .map(b => ({ name: b.name, value: b.name }));
 
     if (choices.length > 0) {
       choices.push({ name: 'Stay on current branch', value: '__stay__' });
