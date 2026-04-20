@@ -33,8 +33,6 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
-  .option('--initial-branch <name>', 'name of the initial branch to create on project init (default: development)')
-  .option('--initial-branch-protected', 'make the initial branch protected (invite-only)')
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
@@ -61,9 +59,7 @@ program
       envPath: options.envPath,
       verbose: options.verbose,
       force: options.force,
-      dryRun: options.dryRun,
-      initialBranch: options.initialBranch,
-      initialBranchProtected: options.initialBranchProtected,
+      dryRun: options.dryRun
     };
 
     const command = new CapyCommand(cliOptions);

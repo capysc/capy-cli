@@ -400,19 +400,32 @@ export class CapyCommand {
     keySpinner.succeed('keep.lock created (0 secrets)');
 
     // Create the initial branch. `POST /projects` no longer auto-creates
-    // one. Default is 'development' unprotected (the common case). Flags
-    // override for teams that want a protected prod branch from day one:
-    //
-    //   capy --initial-branch=production --initial-branch-protected
-    //   capy --initial-branch=main
-    const initialBranchName = (this.options.initialBranch || 'development').trim();
-    const initialBranchProtected = Boolean(this.options.initialBranchProtected);
-    if (!initialBranchName) {
-      throw new CapyError(
-        '--initial-branch cannot be empty',
-        ERROR_CODES.INVALID_FORMAT,
-      );
+    // one, so pick the name: default 'development', or a custom name the
+    // user enters. Protection isn't asked here - branches are unprotected
+    // by default and can be protected later via a dedicated action.
+    const { initialBranchChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'initialBranchChoice',
+      message: 'What branch should this project start with?',
+      choices: [
+        { name: 'development (default)', value: 'development' },
+        { name: 'another branch', value: 'other' },
+      ],
+    }]);
+
+    let initialBranchName: string;
+    if (initialBranchChoice === 'other') {
+      const { branchName } = await inquirer.prompt([{
+        type: 'input',
+        name: 'branchName',
+        message: 'Branch name:',
+        validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+      }]);
+      initialBranchName = String(branchName).trim();
+    } else {
+      initialBranchName = 'development';
     }
+    const initialBranchProtected = false;
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
     try {
