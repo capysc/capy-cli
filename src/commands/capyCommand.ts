@@ -397,8 +397,9 @@ export class CapyCommand {
 
     this.fileManager.writeKeepFile(keep);
 
-    // Create the default development branch on the service
-    await this.serviceClient.createBranch(projectResult.project_id, 'development');
+    // Note: `POST /projects` already creates the default 'development' branch
+    // server-side, so we don't call createBranch here. Doing so would 409 now
+    // that the server's default matches the name we'd attempt to create.
 
     keySpinner.succeed('keep.lock created (pinned to development, 0 secrets)');
 

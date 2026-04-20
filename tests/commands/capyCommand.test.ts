@@ -351,6 +351,20 @@ describe('CapyCommand', () => {
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
     });
 
+    test('does not re-create the default development branch (POST /projects already did)', async () => {
+      // Regression guard: `initializeProject` on the service creates the
+      // 'development' branch server-side. A follow-up client-side
+      // createBranch('development') would 409 on the unique (projectId, name)
+      // index and fail onboarding for every new project.
+      await (capyCommand as any).initializeProject();
+
+      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+      const defaultBranchAttempt = createBranchCalls.find(
+        (args: any[]) => args[1] === 'development'
+      );
+      expect(defaultBranchAttempt).toBeUndefined();
+    });
+
     test('should log correct message when keep.lock file is not found', async () => {
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
