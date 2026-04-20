@@ -132,12 +132,44 @@ export class CapyCommand {
           return;
         }
       }
+
+      // Invariant: the branch recorded in the .env header must match .capy/branch.
+      // A mismatch indicates a partially-completed checkout (or hand edit); if we
+      // proceed we'd push/pull the wrong branch's secrets. Refuse and show the
+      // recovery command.
+      this.assertBranchInvariant(projectState.activeBranch);
+
       await this.syncProject(projectState);
     } catch (error: any) {
       this.debugError('execute caught error', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
     }
+  }
+
+  /**
+   * Refuse to proceed if .capy/branch disagrees with the branch recorded in
+   * the .env header. This prevents a stuck state where the user thinks they
+   * are on branch X but their secrets belong to branch Y.
+   */
+  private assertBranchInvariant(activeBranch: string): void {
+    const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+    const envBranch = envMeta.branch;
+    if (envBranch === undefined) return; // no header yet (first-run); nothing to reconcile
+    // Default branch is stored as empty string in .capy/branch but may be
+    // omitted from the header entirely; treat falsy==''.
+    const normalizedActive = activeBranch || '';
+    const normalizedHeader = envBranch || '';
+    if (normalizedActive === normalizedHeader) return;
+
+    const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+    console.error(`\nLocal state is inconsistent:`);
+    console.error(`  .capy/branch says ${B(normalizedActive || 'default')}`);
+    console.error(`  .env was encrypted for ${B(normalizedHeader || 'default')}`);
+    console.error(`\nThis usually means a previous checkout was interrupted.`);
+    console.error(`Recover with: ${B(`capy checkout ${normalizedHeader || ''}`)} (re-sync to the branch .env actually holds)`);
+    console.error(`           or: ${B(`capy checkout ${normalizedActive || ''}`)} (pull the branch .capy/branch claims)\n`);
+    process.exit(1);
   }
 
   private async initializeProject(): Promise<void> {
@@ -1142,7 +1174,25 @@ export class CapyCommand {
             throw err;
           }
           // Branch-level denial: user is still in the org, just can't read THIS branch.
-          fetchSpinner.fail(`No access to branch "${branch}" — protected branches are invite-only.`);
+          // This is the demotion scenario — the user may have been a Project Admin
+          // with access to a protected branch, then downgraded to Member. Try to
+          // suggest an accessible alternative before throwing.
+          fetchSpinner.fail(`No access to branch "${branch}" — your role does not permit reading this branch.`);
+          try {
+            const branches = await this.serviceClient.listBranches(projectState.projectId!);
+            const candidates = branches.filter(b => !b.is_protected);
+            if (candidates.length > 0) {
+              const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+              console.log('\nBranches you can switch to:');
+              for (const b of candidates) {
+                console.log(`  ${B(b.name || 'default')}`);
+              }
+              const suggested = candidates[0].name;
+              console.log(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);
+            }
+          } catch (listErr) {
+            this.debugError('listBranches failed during 403 recovery', listErr);
+          }
           throw err;
         }
         if (status === 401) {

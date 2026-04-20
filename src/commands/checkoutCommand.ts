@@ -202,7 +202,9 @@ export class CheckoutCommand {
       }
     }
 
-    // Self-heal local keep.lock from server's keep_file if returned
+    // Self-heal local keep.lock from server's keep_file if returned.
+    // keep.lock holds all branches' metadata, so writing it is safe regardless
+    // of which branch is active.
     let keepForWrite = this.projectManager.readKeepFile()!;
     if (decryptData.keep_file) {
       const serverKeep = JSON.parse(decryptData.keep_file);
@@ -210,9 +212,13 @@ export class CheckoutCommand {
       keepForWrite = serverKeep;
     }
 
-    // Sync succeeded (or no-snapshot-yet) — safe to switch local branch now.
-    this.projectManager.writeActiveBranch(branchName);
-
+    // Write .env BEFORE switching .capy/branch. The .env header records which
+    // branch its contents belong to, so if we fail between these writes we must
+    // never leave .capy/branch pointing to a branch whose secrets aren't in
+    // .env yet. Writing .env first means a crash here leaves us on the old
+    // branch with .env already updated — detectable on next run via
+    // capy-branch-header mismatch self-heal.
+    let varCount = 0;
     if (decryptData.env_content) {
       const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
       const decrypted: Record<string, string> = {};
@@ -224,10 +230,19 @@ export class CheckoutCommand {
         }
       }
       this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
-      syncSpinner.stop();
-      console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
+      varCount = Object.keys(decrypted).length;
     } else {
-      syncSpinner.stop();
+      // Overwrite .env with an empty (but branch-stamped) file so the header
+      // matches the branch we're about to switch to.
+      this.fileManager.writeEncryptedEnvFile({}, encryptionKey, undefined, keepForWrite, branchName);
+    }
+
+    this.projectManager.writeActiveBranch(branchName);
+    syncSpinner.stop();
+
+    if (varCount > 0) {
+      console.log(`Synced ${varCount} variable(s) for ${branchName}`);
+    } else {
       console.log(`No secrets yet for ${branchName}`);
     }
 

@@ -22,6 +22,7 @@ ISOLATED_FILES=(
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
   tests/commands/decryptCommand.test.ts
+  tests/commands/roleAccessGuards.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run
