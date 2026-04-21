@@ -12,6 +12,7 @@ const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
 const INVERSE = `${ESC}[7m`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
+const BOLD_WHITE = `${ESC}[1;97m`;
 const GREEN = `${ESC}[32m`;
 const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
@@ -280,7 +281,7 @@ export class InteractiveTable {
     output.push('');
     const footer = this.editingMemberIndex !== null
       ? `${DIM}↑↓ pick role  Enter confirm  Esc cancel${RESET}`
-      : `${DIM}↑↓ navigate  Enter expand/collapse  r change role  q quit${RESET}`;
+      : `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
     output.push(`${m} ${footer}`);
     if (this.statusMessage) {
       const color = this.statusMessage.isError ? RED : GREEN;
