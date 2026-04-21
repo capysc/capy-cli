@@ -1,7 +1,5 @@
 import inquirer from 'inquirer';
-import { AuthService } from '../auth/authService';
-import { ServiceClient } from '../service/serviceClient';
-import { ProjectManager } from '../core/projectManager';
+import { resolveOrgContext } from '../core/orgContext';
 import { readMasterKey } from '../config/globalConfig';
 import { decryptMasterKey, deriveWrappingKey } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
@@ -30,35 +28,10 @@ export class InviteCommand {
 
   async execute(email: string): Promise<void> {
     try {
-      const pm = new ProjectManager();
-      const projectState = await pm.detectProjectState();
-
-      if (!projectState.initialized || !projectState.organizationId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-        process.exit(1);
-      }
-
-      const orgId = projectState.organizationId;
-
-      // Authenticate
-      const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      const serviceClient = new ServiceClient(this.apiUrl);
-      serviceClient.setTokenRefresher(async () => {
-        const refreshed = await authService.refreshToken();
-        return refreshed ? authService.getToken() : null;
-      });
-      const authResult = await authService.authenticate(orgId);
-      if (!authResult.success) {
-        console.error('Authentication failed');
-        process.exit(1);
-      }
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
-
-      const userId = authResult.user_id!;
+      const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
       // Check if inviting yourself or an existing member
-      if (authResult.user_email && authResult.user_email.toLowerCase() === email.toLowerCase()) {
+      if (userEmail && userEmail.toLowerCase() === email.toLowerCase()) {
         console.log(`${email} is already a member of this organization.`);
         return;
       }

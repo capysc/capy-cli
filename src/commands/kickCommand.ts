@@ -1,8 +1,4 @@
-import { AuthService } from '../auth/authService';
-import { ServiceClient } from '../service/serviceClient';
-import { ProjectManager } from '../core/projectManager';
-
-const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+import { resolveOrgContext } from '../core/orgContext';
 
 export class KickCommand {
   private apiUrl?: string;
@@ -14,30 +10,7 @@ export class KickCommand {
   }
 
   async execute(email: string): Promise<void> {
-    const pm = new ProjectManager();
-    const projectState = await pm.detectProjectState();
-
-    if (!projectState.initialized || !projectState.organizationId) {
-      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-      process.exit(1);
-    }
-
-    const orgId = projectState.organizationId;
-
-    // Authenticate
-    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    const serviceClient = new ServiceClient(this.apiUrl);
-    serviceClient.setTokenRefresher(async () => {
-      const refreshed = await authService.refreshToken();
-      return refreshed ? authService.getToken() : null;
-    });
-    const authResult = await authService.authenticate(orgId);
-    if (!authResult.success) {
-      console.error('Authentication failed');
-      process.exit(1);
-    }
-    const token = authService.getToken();
-    if (token) serviceClient.setToken(token);
+    const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
     // Find the membership by email
     let membershipId: string;
