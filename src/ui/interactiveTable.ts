@@ -32,10 +32,15 @@ const ASSIGNABLE_BY_CALLER: Record<string, ReadonlyArray<RoleValue>> = {
   'project-admin': ['project-admin', 'member'],
 };
 
+export interface ProjectChoice {
+  id: string;
+  name: string;
+}
+
 export interface TableContext {
   callerRole: string;
+  listProjects: () => Promise<ProjectChoice[]>;
   changeRole: (userId: string, newRole: RoleValue, projectId?: string) => Promise<void>;
-  pickProject: (prompt: string) => Promise<string | null>;
   reload: () => Promise<MemberDetail[]>;
 }
 
@@ -76,6 +81,13 @@ export class InteractiveTable {
   private editingMemberIndex: number | null = null;
   private editingRoleIndex = 0;
   private statusMessage: { text: string; isError: boolean } | null = null;
+  // In-TUI project picker (avoids handing the terminal off to inquirer).
+  private projectPicker: {
+    projects: ProjectChoice[];
+    cursor: number;
+    resolve: (id: string | null) => void;
+    prompt: string;
+  } | null = null;
 
   computeColumnWidths(termWidth: number): { widths: number[]; showAdded: boolean } {
     const available = Math.min(termWidth, 130) - MARGIN * 2;
@@ -287,13 +299,29 @@ export class InteractiveTable {
     // Footer
     output.push(m + rule);
     output.push('');
-    const footer = this.editingMemberIndex !== null
-      ? `${DIM}↑↓ pick role  Enter confirm  Esc cancel${RESET}`
-      : `${DIM}↑↓ navigate  Enter expand/collapse  r change role  q quit${RESET}`;
+    let footer: string;
+    if (this.projectPicker) {
+      footer = `${DIM}↑↓ pick project  Enter confirm  Esc cancel${RESET}`;
+    } else if (this.editingMemberIndex !== null) {
+      footer = `${DIM}↑↓ pick role  Enter confirm  Esc cancel${RESET}`;
+    } else {
+      footer = `${DIM}↑↓ navigate  Enter expand/collapse  r change role  q quit${RESET}`;
+    }
     output.push(`${m} ${footer}`);
     if (this.statusMessage) {
       const color = this.statusMessage.isError ? RED : GREEN;
       output.push(`${m} ${color}${this.statusMessage.text}${RESET}`);
+    }
+
+    if (this.projectPicker) {
+      output.push('');
+      output.push(`${m}${this.projectPicker.prompt}`);
+      for (let i = 0; i < this.projectPicker.projects.length; i++) {
+        const p = this.projectPicker.projects[i];
+        const selected = i === this.projectPicker.cursor;
+        const line = `${m}  ${selected ? '▸' : ' '} ${p.name}`;
+        output.push(selected ? `${INVERSE}${this.padToWidth(line, totalWidth)}${RESET}` : line);
+      }
     }
 
     return output.map(line => line + CLEAR_EOL).join('\n');
@@ -365,7 +393,13 @@ export class InteractiveTable {
       return;
     }
 
-    // Role editor mode takes priority
+    // Project picker has highest priority — absorbs all keys while open.
+    if (this.projectPicker) {
+      this.handleProjectPickerKey(key);
+      return;
+    }
+
+    // Role editor mode takes priority over the table navigation.
     if (this.editingMemberIndex !== null) {
       this.handleEditorKey(key);
       return;
@@ -507,6 +541,45 @@ export class InteractiveTable {
     }
   }
 
+  private handleProjectPickerKey(key: string): void {
+    if (!this.projectPicker) return;
+    const { projects } = this.projectPicker;
+    if (key === `${ESC}[A`) {
+      this.projectPicker.cursor = (this.projectPicker.cursor - 1 + projects.length) % projects.length;
+      this.draw();
+      return;
+    }
+    if (key === `${ESC}[B`) {
+      this.projectPicker.cursor = (this.projectPicker.cursor + 1) % projects.length;
+      this.draw();
+      return;
+    }
+    if (key === ESC || key === `${ESC}\x1b`) {
+      const { resolve } = this.projectPicker;
+      this.projectPicker = null;
+      resolve(null);
+      this.draw();
+      return;
+    }
+    if (key === '\r' || key === '\n') {
+      const { resolve, cursor } = this.projectPicker;
+      const chosen = projects[cursor]?.id ?? null;
+      this.projectPicker = null;
+      resolve(chosen);
+      this.draw();
+    }
+  }
+
+  private async pickProjectInline(prompt: string): Promise<string | null> {
+    if (!this.ctx) return null;
+    const projects = await this.ctx.listProjects();
+    if (projects.length === 0) return null;
+    return new Promise<string | null>((resolve) => {
+      this.projectPicker = { projects, cursor: 0, resolve, prompt };
+      this.draw();
+    });
+  }
+
   private async commitRoleChange(): Promise<void> {
     if (this.editingMemberIndex === null || !this.ctx) return;
     const member = this.members[this.editingMemberIndex];
@@ -528,23 +601,17 @@ export class InteractiveTable {
 
     let projectId: string | undefined;
     if (isScoped) {
-      // Reuse member's existing first project if any; else prompt.
+      // Reuse member's existing first project if any; else prompt in-TUI.
       if (member.projects.length > 0 && member.role !== 'owner' && member.role !== 'admin') {
         projectId = member.projects[0].id;
       } else {
-        this.pauseForPrompt();
-        try {
-          const chosen = await this.ctx.pickProject(`Assign ${newRole} on which project?`);
-          if (!chosen) {
-            this.resumeAfterPrompt();
-            this.statusMessage = { text: 'Cancelled', isError: false };
-            this.draw();
-            return;
-          }
-          projectId = chosen;
-        } finally {
-          this.resumeAfterPrompt();
+        const chosen = await this.pickProjectInline(`Assign ${newRole} on which project?`);
+        if (!chosen) {
+          this.statusMessage = { text: 'Cancelled', isError: false };
+          this.draw();
+          return;
         }
+        projectId = chosen;
       }
     }
 
@@ -566,18 +633,6 @@ export class InteractiveTable {
       this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
     }
     this.draw();
-  }
-
-  private pauseForPrompt(): void {
-    process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
-    if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    if (this.onDataHandler) process.stdin.removeListener('data', this.onDataHandler);
-  }
-
-  private resumeAfterPrompt(): void {
-    process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
-    if (process.stdin.isTTY) process.stdin.setRawMode(true);
-    if (this.onDataHandler) process.stdin.on('data', this.onDataHandler);
   }
 
   private cleanup(): void {
