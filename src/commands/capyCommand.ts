@@ -132,12 +132,44 @@ export class CapyCommand {
           return;
         }
       }
+
+      // Invariant: the branch recorded in the .env header must match .capy/branch.
+      // A mismatch indicates a partially-completed checkout (or hand edit); if we
+      // proceed we'd push/pull the wrong branch's secrets. Refuse and show the
+      // recovery command.
+      this.assertBranchInvariant(projectState.activeBranch);
+
       await this.syncProject(projectState);
     } catch (error: any) {
       this.debugError('execute caught error', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
     }
+  }
+
+  /**
+   * Refuse to proceed if .capy/branch disagrees with the branch recorded in
+   * the .env header. This prevents a stuck state where the user thinks they
+   * are on branch X but their secrets belong to branch Y.
+   */
+  private assertBranchInvariant(activeBranch: string): void {
+    const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+    const envBranch = envMeta.branch;
+    if (envBranch === undefined) return; // no header yet (first-run); nothing to reconcile
+    // Both sides are always a real branch name ('development' or otherwise);
+    // empty never appears in modern state.
+    const normalizedActive = activeBranch || 'development';
+    const normalizedHeader = envBranch || 'development';
+    if (normalizedActive === normalizedHeader) return;
+
+    const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+    console.error(`\nLocal state is inconsistent:`);
+    console.error(`  .capy/branch says ${B(normalizedActive)}`);
+    console.error(`  .env was encrypted for ${B(normalizedHeader)}`);
+    console.error(`\nThis usually means a previous checkout was interrupted.`);
+    console.error(`Recover with: ${B(`capy checkout ${normalizedHeader}`)} (re-sync to the branch .env actually holds)`);
+    console.error(`           or: ${B(`capy checkout ${normalizedActive}`)} (pull the branch .capy/branch claims)\n`);
+    process.exit(1);
   }
 
   private async initializeProject(): Promise<void> {
@@ -365,10 +397,55 @@ export class CapyCommand {
 
     this.fileManager.writeKeepFile(keep);
 
-    // Create the default development branch on the service
-    await this.serviceClient.createBranch(projectResult.project_id, 'development');
+    keySpinner.succeed('keep.lock created (0 secrets)');
 
-    keySpinner.succeed('keep.lock created (pinned to development, 0 secrets)');
+    // Create the initial branch. `POST /projects` no longer auto-creates
+    // one, so pick the name: default 'development', or a custom name the
+    // user enters. Protection isn't asked here - branches are unprotected
+    // by default and can be protected later via a dedicated action.
+    const { initialBranchChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'initialBranchChoice',
+      message: 'What branch should this project start with?',
+      choices: [
+        { name: 'development (default)', value: 'development' },
+        { name: 'another branch', value: 'other' },
+      ],
+    }]);
+
+    let initialBranchName: string;
+    if (initialBranchChoice === 'other') {
+      const { branchName } = await inquirer.prompt([{
+        type: 'input',
+        name: 'branchName',
+        message: 'Branch name:',
+        validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+      }]);
+      initialBranchName = String(branchName).trim();
+    } else {
+      initialBranchName = 'development';
+    }
+    const initialBranchProtected = false;
+
+    const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
+    try {
+      await this.serviceClient.createBranch(
+        projectResult.project_id,
+        initialBranchName,
+        initialBranchProtected,
+      );
+    } catch (err) {
+      branchSpinner.fail(`Failed to create branch ${initialBranchName}`);
+      throw err;
+    }
+    branchSpinner.succeed(
+      initialBranchProtected
+        ? `Created protected branch ${initialBranchName}`
+        : `Created branch ${initialBranchName}`,
+    );
+
+    // The initial branch is what this project is "on" locally going forward.
+    this.projectManager.writeActiveBranch(initialBranchName);
 
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
@@ -431,31 +508,12 @@ export class CapyCommand {
         console.log(`\nFound .env with ${localVarCount} secrets:`);
         console.log(`  ${displayNames}`);
 
-        // First-run flow: commit to development or another branch
-        const { initChoice } = await inquirer.prompt([{
-          type: 'list',
-          name: 'initChoice',
-          message: '',
-          choices: [
-            { name: 'Commit all to development (default)', value: 'development' },
-            { name: 'Commit all to another branch', value: 'other' },
-          ],
-        }]);
-
-        let initBranch: string;
-        if (initChoice === 'other') {
-          const { branchName } = await inquirer.prompt([{
-            type: 'input',
-            name: 'branchName',
-            message: 'Branch name:',
-            validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-          }]);
-          initBranch = branchName.trim();
-          await this.serviceClient.createBranch(projectResult.project_id, initBranch);
-        } else {
-          initBranch = 'development';
-        }
-        this.projectManager.writeActiveBranch(initBranch);
+        // The user already chose their initial branch above — push the
+        // existing .env to that branch. (Previously we re-prompted for a
+        // commit target here, but now that project init explicitly sets
+        // the initial branch, asking again was redundant + could create a
+        // second branch the user didn't ask for.)
+        const initBranch = initialBranchName;
 
         const syncSpinner = ora('Syncing local variables...').start();
 
@@ -756,14 +814,14 @@ export class CapyCommand {
     branches.forEach((b, i) => {
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
-      const name = b.name || 'no branch';
+      const name = b.name;
       const prot = b.is_protected ? `  ${grey('(protected)')}` : '';
       console.log(`  ${connector} ${name}${prot}`);
     });
     console.log('');
 
     const choices = branches.map(b => ({
-      name: b.name || 'no branch',
+      name: b.name,
       value: b.name,
     }));
 
@@ -1126,15 +1184,41 @@ export class CapyCommand {
       fetchSpinner.stop();
     } catch (err: any) {
       this.debugError('remote fetch failed', err);
-      // Auth/permission errors are hard failures (e.g. user was kicked from org).
-      // Network errors fall back to local-only mode.
+      // 403 may be one of two different cases:
+      //   (a) User was kicked from the org — cleanup local state.
+      //   (b) User is still a member but lacks access to this specific branch
+      //       (e.g. Member on a protected branch). DO NOT wipe keys — that
+      //       would destroy access to every other project in the org.
       if (err instanceof CapyError) {
         const status = err.details?.status;
         if (status === 403) {
-          // User was kicked — clean up local state for this org so stale
-          // keys and session data don't linger.
-          fetchSpinner.fail('Access denied — you may have been removed from this organization.');
-          this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+          const msg = (err.message || '').toLowerCase();
+          const kicked = /no longer a member|not a member|not authorized for this organization/.test(msg);
+          if (kicked) {
+            fetchSpinner.fail('Access denied — you may have been removed from this organization.');
+            this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+            throw err;
+          }
+          // Branch-level denial: user is still in the org, just can't read THIS branch.
+          // This is the demotion scenario — the user may have been a Project Admin
+          // with access to a protected branch, then downgraded to Member. Try to
+          // suggest an accessible alternative before throwing.
+          fetchSpinner.fail(`No access to branch "${branch}" — your role does not permit reading this branch.`);
+          try {
+            const branches = await this.serviceClient.listBranches(projectState.projectId!);
+            const candidates = branches.filter(b => !b.is_protected);
+            if (candidates.length > 0) {
+              const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+              console.log('\nBranches you can switch to:');
+              for (const b of candidates) {
+                console.log(`  ${B(b.name)}`);
+              }
+              const suggested = candidates[0].name;
+              console.log(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);
+            }
+          } catch (listErr) {
+            this.debugError('listBranches failed during 403 recovery', listErr);
+          }
           throw err;
         }
         if (status === 401) {

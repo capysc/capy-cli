@@ -162,7 +162,7 @@ export class CheckoutCommand {
         console.log(`Branch "${branchName}" not found\n`);
         console.log('Available branches:');
         for (const b of branches) {
-          const label = b.name || 'no branch';
+          const label = b.name;
           const prod = b.is_protected ? ' \x1b[90m(protected)\x1b[0m' : '';
           console.log(`  ${label}${prod}`);
         }
@@ -172,60 +172,98 @@ export class CheckoutCommand {
       branchSpinner.stop();
     }
 
-    // Save active branch to .capy/branch (local state, not committed)
-    this.projectManager.writeActiveBranch(branchName);
-
-    // Pull latest secrets for this branch from the server. Use the "no keep_hash"
-    // path so the server resolves to the latest snapshot for the branch and
-    // returns its keep_file — that lets us self-heal local keep.lock if it's
-    // stale OR doesn't yet know about this branch (which is the common case
-    // when switching to a branch that was created by a teammate).
+    // Pull latest secrets for this branch from the server BEFORE switching
+    // local state, so a 403 (protected branch / no access) leaves the user
+    // on their current branch with their current .env intact.
     const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
 
+    let decryptData: Awaited<ReturnType<typeof this.serviceClient.getDecryptData>>;
     try {
-      const decryptData = await this.serviceClient.getDecryptData(
+      decryptData = await this.serviceClient.getDecryptData(
         projectId,
         branchName,
         undefined, // ask for latest
         true,
       );
-
-      // Self-heal local keep.lock from server's keep_file if returned
-      let keepForWrite = this.projectManager.readKeepFile()!;
-      if (decryptData.keep_file) {
-        const serverKeep = JSON.parse(decryptData.keep_file);
-        this.fileManager.writeKeepFile(serverKeep);
-        keepForWrite = serverKeep;
-      }
-
-      if (decryptData.env_content) {
-        const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
-        const decrypted: Record<string, string> = {};
-        for (const [key, value] of Object.entries(remoteEnv)) {
-          try {
-            decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
-          } catch {
-            // Skip undecryptable
-          }
-        }
-        this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
-        syncSpinner.stop();
-        console.log(`Synced ${Object.keys(decrypted).length} variable(s) for ${branchName}`);
-      } else {
-        syncSpinner.stop();
-        console.log(`No secrets yet for ${branchName}`);
-      }
     } catch (error: any) {
       syncSpinner.stop();
-      if (error?.details?.status === 404) {
-        console.log(`No secrets yet for ${branchName}`);
+      const status = error?.details?.status;
+      if (status === 403) {
+        console.error(`You do not have access to branch "${branchName}".`);
+        console.error(`Protected branches are invite-only — ask a project admin to grant access.`);
+        process.exit(1);
+      }
+      if (status === 404) {
+        // No snapshot yet for this branch — treat as empty and proceed to switch.
+        decryptData = { env_content: '', decrypt_key: '', expires_at: new Date().toISOString() };
       } else {
-        console.log(`Failed to sync secrets: ${error.message}`);
+        console.error(`Failed to sync secrets: ${error.message}`);
+        process.exit(1);
       }
     }
 
-    const displayName = branchName || 'no branch selected';
-    console.log(`\nNow on branch: ${displayName}`);
+    // Self-heal local keep.lock from server's keep_file if returned.
+    // keep.lock holds all branches' metadata, so writing it is safe regardless
+    // of which branch is active.
+    let keepForWrite = this.projectManager.readKeepFile()!;
+    if (decryptData.keep_file) {
+      const serverKeep = JSON.parse(decryptData.keep_file);
+      this.fileManager.writeKeepFile(serverKeep);
+      keepForWrite = serverKeep;
+    }
+
+    // Write .env BEFORE switching .capy/branch. The .env header records which
+    // branch its contents belong to, so if we fail between these writes we must
+    // never leave .capy/branch pointing to a branch whose secrets aren't in
+    // .env yet. Writing .env first means a crash here leaves us on the old
+    // branch with .env already updated — detectable on next run via
+    // capy-branch-header mismatch self-heal.
+    let varCount = 0;
+    let seededFromCurrent = false;
+    if (decryptData.env_content) {
+      const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
+      const decrypted: Record<string, string> = {};
+      for (const [key, value] of Object.entries(remoteEnv)) {
+        try {
+          decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
+        } catch {
+          // Skip undecryptable
+        }
+      }
+      this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
+      varCount = Object.keys(decrypted).length;
+    } else if (options.create) {
+      // `capy checkout -b <new>` with no remote snapshot: seed the new branch
+      // from the current .env. Preserve the plaintext values and re-write them
+      // under the new branch header (new resource_ids per (branch, key)), so
+      // `capy` sees them as unpinned and offers to push them to <new>.
+      let seed: Record<string, string> = {};
+      try {
+        seed = this.fileManager.readEncryptedEnvFile(encryptionKey);
+      } catch {
+        // Unreadable current .env — fall through to empty-stamped file.
+      }
+      this.fileManager.writeEncryptedEnvFile(seed, encryptionKey, undefined, keepForWrite, branchName);
+      varCount = Object.keys(seed).length;
+      seededFromCurrent = varCount > 0;
+    } else {
+      // Switching to an existing empty branch: overwrite .env with an empty
+      // (but branch-stamped) file so the header matches the active branch.
+      this.fileManager.writeEncryptedEnvFile({}, encryptionKey, undefined, keepForWrite, branchName);
+    }
+
+    this.projectManager.writeActiveBranch(branchName);
+    syncSpinner.stop();
+
+    if (seededFromCurrent) {
+      console.log(`Seeded ${varCount} variable(s) from current branch into ${branchName} (unpushed — run ${B('capy')} to push)`);
+    } else if (varCount > 0) {
+      console.log(`Synced ${varCount} variable(s) for ${branchName}`);
+    } else {
+      console.log(`No secrets yet for ${branchName}`);
+    }
+
+    console.log(`\nNow on branch: ${branchName}`);
   }
 
   private async createBranch(

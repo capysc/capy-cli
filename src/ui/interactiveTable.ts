@@ -14,6 +14,22 @@ const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
 const GREEN = `${ESC}[32m`;
 const YELLOW = `${ESC}[33m`;
+const RED = `${ESC}[31m`;
+
+const ROLE_CHOICES = [
+  { label: 'owner', value: 'owner' },
+  { label: 'admin', value: 'admin' },
+  { label: 'project-admin', value: 'project-admin' },
+  { label: 'member', value: 'member' },
+] as const;
+
+type RoleValue = typeof ROLE_CHOICES[number]['value'];
+
+export interface TableContext {
+  changeRole: (userId: string, newRole: RoleValue, projectId?: string) => Promise<void>;
+  pickProject: (prompt: string) => Promise<string | null>;
+  reload: () => Promise<MemberDetail[]>;
+}
 
 const MARGIN = 2;
 const GAP = '   ';
@@ -27,7 +43,7 @@ interface ColumnConfig {
 
 const COLUMNS: ColumnConfig[] = [
   { label: 'Email', minWidth: 20, flex: true },
-  { label: 'Role', minWidth: 8 },
+  { label: 'Role', minWidth: 16 },
   { label: 'Added', minWidth: 12 },
   { label: 'Projects', minWidth: 8 },
 ];
@@ -48,6 +64,10 @@ export class InteractiveTable {
   private onDataHandler: ((data: Buffer) => void) | null = null;
   private onResizeHandler: (() => void) | null = null;
   private cleanedUp = false;
+  private ctx: TableContext | null = null;
+  private editingMemberIndex: number | null = null;
+  private editingRoleIndex = 0;
+  private statusMessage: { text: string; isError: boolean } | null = null;
 
   computeColumnWidths(termWidth: number): { widths: number[]; showAdded: boolean } {
     const available = Math.min(termWidth, 130) - MARGIN * 2;
@@ -93,6 +113,7 @@ export class InteractiveTable {
     widths: number[],
     showAdded: boolean,
     totalWidth: number,
+    memberIndex: number,
   ): string {
     const pointer = isExpanded ? '▾' : '▸';
     const prefix = isSelected ? pointer : ' ';
@@ -100,10 +121,14 @@ export class InteractiveTable {
 
     const isGreenRole = ALL_ACCESS_ROLES.includes(member.role);
     const isYellowRole = member.role === 'project-admin';
+    const isEditing = this.editingMemberIndex === memberIndex;
 
     let row = this.pad(email, widths[0]);
 
-    if (isGreenRole) {
+    if (isEditing) {
+      const editingRole = ROLE_CHOICES[this.editingRoleIndex].value;
+      row += GAP + INVERSE + this.pad(`◆ ${editingRole}`, widths[1]) + RESET;
+    } else if (isGreenRole) {
       row += '  ' + GREEN + ' ' + this.pad(member.role, widths[1]) + RESET;
     } else if (isYellowRole) {
       row += GAP + YELLOW + this.pad(member.role, widths[1]) + RESET;
@@ -192,7 +217,7 @@ export class InteractiveTable {
 
       if (isSelected) cursorLineIndex = allLines.length;
 
-      allLines.push(this.renderMemberRow(member, isSelected, isExpanded, widths, showAdded, totalWidth));
+      allLines.push(this.renderMemberRow(member, isSelected, isExpanded, widths, showAdded, totalWidth, mi));
 
       if (isExpanded) {
         // Find if cursor is on a project under this member
@@ -253,7 +278,14 @@ export class InteractiveTable {
     // Footer
     output.push(m + rule);
     output.push('');
-    output.push(`${m} ${DIM}↑↓ navigate  Enter expand/collapse  q quit${RESET}`);
+    const footer = this.editingMemberIndex !== null
+      ? `${DIM}↑↓ pick role  Enter confirm  Esc cancel${RESET}`
+      : `${DIM}↑↓ navigate  Enter expand/collapse  r change role  q quit${RESET}`;
+    output.push(`${m} ${footer}`);
+    if (this.statusMessage) {
+      const color = this.statusMessage.isError ? RED : GREEN;
+      output.push(`${m} ${color}${this.statusMessage.text}${RESET}`);
+    }
 
     return output.map(line => line + CLEAR_EOL).join('\n');
   }
@@ -268,14 +300,17 @@ export class InteractiveTable {
     return lines.filter(l => !l.includes('navigate')).join('\n');
   }
 
-  run(members: MemberDetail[]): Promise<void> {
+  run(members: MemberDetail[], ctx?: TableContext): Promise<void> {
     this.members = members;
+    this.ctx = ctx ?? null;
     this.cursorIndex = 0;
     this.expandedMembers.clear();
     this.expandedProjects.clear();
     this.scrollOffset = 0;
     this.running = true;
     this.cleanedUp = false;
+    this.editingMemberIndex = null;
+    this.statusMessage = null;
 
     return new Promise<void>((resolve) => {
       process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
@@ -321,6 +356,12 @@ export class InteractiveTable {
       return;
     }
 
+    // Role editor mode takes priority
+    if (this.editingMemberIndex !== null) {
+      this.handleEditorKey(key);
+      return;
+    }
+
     if (key === 'q' || key === 'Q') {
       this.cleanup();
       resolve();
@@ -344,6 +385,18 @@ export class InteractiveTable {
         this.cursorIndex++;
         this.draw();
       }
+      return;
+    }
+
+    // 'r' — enter role editor for selected member
+    if (key === 'r' || key === 'R') {
+      const item = navItems[this.cursorIndex];
+      if (!item || item.type !== 'member') return;
+      if (!this.ctx) return;
+      this.editingMemberIndex = item.memberIndex;
+      this.editingRoleIndex = this.roleIndexFor(this.members[item.memberIndex].role);
+      this.statusMessage = null;
+      this.draw();
       return;
     }
 
@@ -380,6 +433,104 @@ export class InteractiveTable {
       this.draw();
       return;
     }
+  }
+
+  private roleIndexFor(role: string): number {
+    const idx = ROLE_CHOICES.findIndex((c) => c.value === role);
+    return idx >= 0 ? idx : 0;
+  }
+
+  private handleEditorKey(key: string): void {
+    if (key === `${ESC}[A`) {
+      this.editingRoleIndex = (this.editingRoleIndex - 1 + ROLE_CHOICES.length) % ROLE_CHOICES.length;
+      this.draw();
+      return;
+    }
+    if (key === `${ESC}[B`) {
+      this.editingRoleIndex = (this.editingRoleIndex + 1) % ROLE_CHOICES.length;
+      this.draw();
+      return;
+    }
+    // Esc (raw) — cancel
+    if (key === ESC || key === `${ESC}\x1b`) {
+      this.editingMemberIndex = null;
+      this.draw();
+      return;
+    }
+    if (key === '\r' || key === '\n') {
+      void this.commitRoleChange();
+    }
+  }
+
+  private async commitRoleChange(): Promise<void> {
+    if (this.editingMemberIndex === null || !this.ctx) return;
+    const member = this.members[this.editingMemberIndex];
+    const newRole = ROLE_CHOICES[this.editingRoleIndex].value as RoleValue;
+    const isScoped = newRole === 'project-admin' || newRole === 'member';
+    const memberIdx = this.editingMemberIndex;
+
+    if (newRole === member.role) {
+      this.editingMemberIndex = null;
+      this.draw();
+      return;
+    }
+
+    this.editingMemberIndex = null;
+    this.statusMessage = { text: `Updating ${member.email}…`, isError: false };
+    this.draw();
+
+    let projectId: string | undefined;
+    if (isScoped) {
+      // Reuse member's existing first project if any; else prompt.
+      if (member.projects.length > 0 && member.role !== 'owner' && member.role !== 'admin') {
+        projectId = member.projects[0].id;
+      } else {
+        this.pauseForPrompt();
+        try {
+          const chosen = await this.ctx.pickProject(`Assign ${newRole} on which project?`);
+          if (!chosen) {
+            this.resumeAfterPrompt();
+            this.statusMessage = { text: 'Cancelled', isError: false };
+            this.draw();
+            return;
+          }
+          projectId = chosen;
+        } finally {
+          this.resumeAfterPrompt();
+        }
+      }
+    }
+
+    try {
+      await this.ctx.changeRole(member.userId, newRole, projectId);
+      const refreshed = await this.ctx.reload();
+      this.members = refreshed;
+      this.statusMessage = { text: `${member.email} → ${newRole}`, isError: false };
+      // Try to keep cursor on the same member if they still exist
+      const newIdx = refreshed.findIndex((m) => m.userId === member.userId);
+      if (newIdx >= 0) {
+        const navItems = this.buildNavItems();
+        const navPos = navItems.findIndex((n) => n.type === 'member' && n.memberIndex === newIdx);
+        if (navPos >= 0) this.cursorIndex = navPos;
+      } else {
+        this.cursorIndex = Math.min(this.cursorIndex, this.buildNavItems().length - 1);
+      }
+    } catch (err: any) {
+      this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+    }
+    this.draw();
+  }
+
+  private pauseForPrompt(): void {
+    process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    if (this.onDataHandler) process.stdin.removeListener('data', this.onDataHandler);
+  }
+
+  private resumeAfterPrompt(): void {
+    process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    if (this.onDataHandler) process.stdin.on('data', this.onDataHandler);
   }
 
   private cleanup(): void {

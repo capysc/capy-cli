@@ -43,6 +43,7 @@ mock.module('inquirer', () => ({
       // Return appropriate defaults based on the prompt name
       const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
       if (name === 'initChoice') return Promise.resolve({ initChoice: 'development' });
+      if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'development' });
       if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
       if (name === 'confirmed') return Promise.resolve({ confirmed: true });
       if (name === 'action') return Promise.resolve({ action: 'commit_local' });
@@ -349,6 +350,50 @@ describe('CapyCommand', () => {
       expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
       // v4: init no longer calls getDecryptData — new projects have nothing to fetch
       expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+    });
+
+    test('creates the chosen initial branch (unprotected development by default)', async () => {
+      // Regression guard: POST /projects no longer auto-creates a branch,
+      // so init MUST call createBranch exactly once with the user's chosen
+      // name + protection. Default inquirer response here is 'development'
+      // unprotected.
+      await (capyCommand as any).initializeProject();
+
+      const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+      expect(createBranchCalls.length).toBe(1);
+      expect(createBranchCalls[0][0]).toBe('proj-123');        // projectId
+      expect(createBranchCalls[0][1]).toBe('development');      // branch name
+      expect(createBranchCalls[0][2]).toBe(false);              // isProtected
+    });
+
+    test('creates a custom-named branch when user picks \'another branch\' and enters a name', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const originalPrompt = inquirer.prompt;
+      // @ts-expect-error overriding mock for this test
+      inquirer.prompt = mock((questions: any) => {
+        const qs = Array.isArray(questions) ? questions : [questions];
+        const firstName = qs[0]?.name;
+        if (firstName === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'other' });
+        if (firstName === 'branchName') return Promise.resolve({ branchName: 'main' });
+        if (firstName === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+        if (firstName === 'confirmed') return Promise.resolve({ confirmed: true });
+        if (firstName === 'action') return Promise.resolve({ action: 'commit_local' });
+        return Promise.resolve({});
+      });
+
+      try {
+        await (capyCommand as any).initializeProject();
+
+        const createBranchCalls = mockServiceClient.createBranch.mock.calls;
+        expect(createBranchCalls.length).toBe(1);
+        expect(createBranchCalls[0][1]).toBe('main');
+        // Protection is not asked at init — always unprotected by default.
+        expect(createBranchCalls[0][2]).toBe(false);
+        expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('main');
+      } finally {
+        // @ts-expect-error restore
+        inquirer.prompt = originalPrompt;
+      }
     });
 
     test('should log correct message when keep.lock file is not found', async () => {
