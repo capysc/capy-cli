@@ -1,7 +1,5 @@
 import inquirer from 'inquirer';
-import { AuthService } from '../auth/authService';
-import { ServiceClient } from '../service/serviceClient';
-import { ProjectManager } from '../core/projectManager';
+import { resolveOrgContext } from '../core/orgContext';
 import { readMasterKey } from '../config/globalConfig';
 import { decryptMasterKey, deriveWrappingKey } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
@@ -17,6 +15,14 @@ const ROLES = [
   { name: 'Admin', value: 'admin' },
 ] as const;
 
+// Which roles a caller of a given role may invite. Owners are never invitable:
+// there is exactly one owner per org.
+const INVITABLE_BY_ROLE: Record<string, ReadonlyArray<typeof ROLES[number]['value']>> = {
+  owner: ['member', 'project-admin', 'admin'],
+  admin: ['member', 'project-admin', 'admin'],
+  'project-admin': ['member', 'project-admin'],
+};
+
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 export class InviteCommand {
@@ -30,33 +36,24 @@ export class InviteCommand {
 
   async execute(email: string): Promise<void> {
     try {
-      const pm = new ProjectManager();
-      const projectState = await pm.detectProjectState();
-
-      if (!projectState.initialized || !projectState.organizationId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-        process.exit(1);
-      }
-
-      const orgId = projectState.organizationId;
-
-      // Authenticate
-      const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      const serviceClient = new ServiceClient(this.apiUrl);
-      const authResult = await authService.authenticate(orgId);
-      if (!authResult.success) {
-        console.error('Authentication failed');
-        process.exit(1);
-      }
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
-
-      const userId = authResult.user_id!;
+      const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
       // Check if inviting yourself or an existing member
-      if (authResult.user_email && authResult.user_email.toLowerCase() === email.toLowerCase()) {
+      if (userEmail && userEmail.toLowerCase() === email.toLowerCase()) {
         console.log(`${email} is already a member of this organization.`);
         return;
+      }
+
+      // Determine caller's role to filter which roles they may grant.
+      const me = await serviceClient.getOrgMe(orgId);
+      const invitable = INVITABLE_BY_ROLE[me.role];
+      if (!invitable) {
+        console.error(`Your role (${me.role}) does not permit inviting users.`);
+        process.exit(1);
+      }
+      if (me.role === 'project-admin' && me.admin_projects.length === 0) {
+        console.error('You do not administer any projects in this organization.');
+        process.exit(1);
       }
 
 
@@ -91,12 +88,13 @@ export class InviteCommand {
         }
       }
 
-      // Prompt for role
+      // Prompt for role, filtered to what the caller may grant.
+      const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
       const { role } = await inquirer.prompt([{
         type: 'list',
         name: 'role',
         message: `Select a role for ${email}:`,
-        choices: ROLES,
+        choices: allowedChoices,
         default: 'member',
       }]);
 

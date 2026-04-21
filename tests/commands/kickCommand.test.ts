@@ -24,6 +24,7 @@ mock.module('../../src/auth/authService', () => ({
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: jest.fn().mockImplementation(() => ({
     setToken: mockSetToken,
+    setTokenRefresher: jest.fn(),
     listMemberDetails: mockListMemberDetails,
     kickMember: mockKickMember,
   })),

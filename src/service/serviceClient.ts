@@ -400,6 +400,10 @@ export class ServiceClient {
     return this.request('PATCH', `/orgs/${orgId}/members/${encodeURIComponent(userId)}/role`, { role, project_id: projectId });
   }
 
+  async getOrgMe(orgId: string): Promise<{ user_id: string; role: string; admin_projects: Array<{ id: string; name: string }> }> {
+    return this.request('GET', `/orgs/${orgId}/me`);
+  }
+
   async wrapOuterLayer(orgId: string, plaintext: string): Promise<{ ciphertext: string }> {
     return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext });
   }
