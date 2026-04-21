@@ -85,8 +85,12 @@ export interface NavItem {
 export class InteractiveTable {
   private members: MemberDetail[] = [];
   private cursorIndex = 0;
-  private expandedMembers = new Set<number>();
-  private expandedProjects = new Set<string>();
+  // Expansion state is keyed by stable IDs (not array indices) so the UI
+  // survives reloads that reorder or remove members/projects. After a
+  // mutation-triggered reload, a Set<number> of indices would silently point
+  // at the wrong rows — the cursor and expand markers drift.
+  private expandedMembers = new Set<string>();   // userId
+  private expandedProjects = new Set<string>();  // `${userId}:${projectId}`
   private scrollOffset = 0;
   private running = false;
   private onDataHandler: ((data: Buffer) => void) | null = null;
@@ -130,20 +134,24 @@ export class InteractiveTable {
   buildNavItems(): NavItem[] {
     const items: NavItem[] = [];
     for (let mi = 0; mi < this.members.length; mi++) {
+      const member = this.members[mi];
       items.push({ type: 'member', memberIndex: mi });
-      if (this.expandedMembers.has(mi)) {
-        const member = this.members[mi];
+      if (this.expandedMembers.has(member.userId)) {
         if (!ALL_ACCESS_ROLES.includes(member.role)) {
           for (let pi = 0; pi < member.projects.length; pi++) {
             const project = member.projects[pi];
-            if (project.branches.length > 0) {
-              items.push({ type: 'project', memberIndex: mi, projectIndex: pi });
-              // Branch rows are navigable when the project is expanded AND
-              // the user holds the 'member' role on that project — that's the
-              // only case 'g' (protected-branch grant) is meaningful on.
-              const projKey = `${mi}-${pi}`;
-              if (this.expandedProjects.has(projKey) && project.role === 'member') {
-                for (let bi = 0; bi < project.branches.length; bi++) {
+            items.push({ type: 'project', memberIndex: mi, projectIndex: pi });
+            // Branch rows only exist for visible branches: members see only the
+            // branches they have access to. Navigation is enabled when the
+            // project is expanded so `g` can revoke an existing grant.
+            const projKey = `${member.userId}:${project.id}`;
+            if (
+              this.expandedProjects.has(projKey) &&
+              project.role === 'member' &&
+              project.branches.some((b) => b.hasAccess)
+            ) {
+              for (let bi = 0; bi < project.branches.length; bi++) {
+                if (project.branches[bi].hasAccess) {
                   items.push({ type: 'branch', memberIndex: mi, projectIndex: pi, branchIndex: bi });
                 }
               }
@@ -205,6 +213,7 @@ export class InteractiveTable {
     totalWidth: number,
     selectedProjectOrigIdx: number | null,
     selectedBranchRef: { projectIndex: number; branchIndex: number } | null = null,
+    widths: number[] = [],
   ): string[] {
     const lines: string[] = [];
 
@@ -218,52 +227,64 @@ export class InteractiveTable {
       return lines;
     }
 
+    const emailWidth = widths[0] ?? 40;
+    const roleWidth = widths[1] ?? 16;
+
     for (let pi = 0; pi < member.projects.length; pi++) {
       const project = member.projects[pi];
-      const hasBranches = project.branches.length > 0;
-      const roleTag = this.formatProjectRoleTag(memberIndex, pi, project);
+      const projKey = `${member.userId}:${project.id}`;
+      // A project row is expandable when the member has any visible branches.
+      // For 'member' role only branches with access are visible; for
+      // 'project-admin' all branches are visible with an implicit grant.
+      const visibleBranches = project.branches.filter((b) =>
+        project.role === 'project-admin' ? true : b.hasAccess,
+      );
+      const hasBranches = visibleBranches.length > 0;
+      const isExpanded = hasBranches && this.expandedProjects.has(projKey);
+      const isSelected = selectedProjectOrigIdx === pi;
+      const pointer = hasBranches ? (isExpanded ? '▾' : '▸') : ' ';
 
-      if (hasBranches) {
-        const projKey = `${memberIndex}-${pi}`;
-        const isExpanded = this.expandedProjects.has(projKey);
-        const isSelected = selectedProjectOrigIdx === pi;
-        const pointer = isExpanded ? '▾' : '▸';
-        const projLine = `    ${pointer} ${project.name}${roleTag}`;
+      const projectNameCell = this.pad(`    ${pointer} ${project.name}`, emailWidth);
+      const roleCell = this.formatProjectRoleCell(memberIndex, pi, project, roleWidth);
+      const projLine = projectNameCell + GAP + roleCell;
 
-        if (isSelected) {
-          lines.push(`${INVERSE}${this.padToWidth(projLine, totalWidth)}${RESET}`);
-        } else {
-          lines.push(projLine);
-        }
+      if (isSelected) {
+        lines.push(`${INVERSE}${this.padToWidth(projLine, totalWidth)}${RESET}`);
+      } else {
+        lines.push(projLine);
+      }
 
-        if (isExpanded) {
-          for (let bi = 0; bi < project.branches.length; bi++) {
-            const branch = project.branches[bi];
-            const suffix = this.branchSuffix(branch, project.role);
-            const branchLine = `        ${branch.name}${suffix}`;
-            const isBranchSelected =
-              selectedBranchRef !== null &&
-              selectedBranchRef.projectIndex === pi &&
-              selectedBranchRef.branchIndex === bi;
-            if (isBranchSelected) {
-              lines.push(`${INVERSE}${this.padToWidth(branchLine, totalWidth)}${RESET}`);
-            } else {
-              lines.push(`${DIM}${branchLine}${RESET}`);
-            }
+      if (isExpanded) {
+        for (let bi = 0; bi < project.branches.length; bi++) {
+          const branch = project.branches[bi];
+          const visible = project.role === 'project-admin' ? true : branch.hasAccess;
+          if (!visible) continue;
+          const protectedTag = branch.isProtected ? ' (protected)' : '';
+          const branchName = this.pad(`        ${branch.name}${protectedTag}`, emailWidth);
+          const accessCell = this.pad('access granted', roleWidth);
+          const branchLine = branchName + GAP + GREEN + accessCell + RESET;
+          const isBranchSelected =
+            selectedBranchRef !== null &&
+            selectedBranchRef.projectIndex === pi &&
+            selectedBranchRef.branchIndex === bi;
+          if (isBranchSelected) {
+            // padToWidth strips ANSI escapes correctly via visLen.
+            lines.push(`${INVERSE}${this.padToWidth(branchLine, totalWidth)}${RESET}`);
+          } else {
+            lines.push(branchLine);
           }
         }
-      } else {
-        lines.push(`    ${DIM}${project.name}${roleTag}${RESET}`);
       }
     }
 
     return lines;
   }
 
-  private formatProjectRoleTag(
+  private formatProjectRoleCell(
     memberIndex: number,
     projectIndex: number,
     project: MemberProject,
+    roleWidth: number,
   ): string {
     const isEditingThis =
       this.editingProjectRef !== null &&
@@ -271,22 +292,15 @@ export class InteractiveTable {
       this.editingProjectRef.projectIndex === projectIndex;
     if (isEditingThis) {
       const value = PROJECT_ROLE_CHOICES[this.editingProjectRoleIndex];
-      return `  ${INVERSE}◆ ${value}${RESET}`;
+      return INVERSE + this.pad(`◆ ${value}`, roleWidth) + RESET;
     }
-    if (project.role === 'project-admin') return '  project-admin';
-    if (project.role === 'member') return '  member';
-    return '';
-  }
-
-  private branchSuffix(
-    branch: { isProtected: boolean; hasAccess: boolean },
-    projectRole: MemberProject['role'],
-  ): string {
-    if (!branch.isProtected) return '';
-    // Only 'member'-role projects surface the granular grant status; admins
-    // always have access to every branch.
-    if (projectRole === 'project-admin') return ' (protected)';
-    return branch.hasAccess ? ' (protected)' : ' (protected, no access)';
+    if (project.role === 'project-admin') {
+      return YELLOW + this.pad('project-admin', roleWidth) + RESET;
+    }
+    if (project.role === 'member') {
+      return this.pad('member', roleWidth);
+    }
+    return this.pad('', roleWidth);
   }
 
   renderTable(members: MemberDetail[], termWidth: number, termHeight: number): string {
@@ -305,7 +319,7 @@ export class InteractiveTable {
       const member = members[mi];
       const memberNavIdx = navItems.findIndex(n => n.type === 'member' && n.memberIndex === mi);
       const isSelected = memberNavIdx === this.cursorIndex;
-      const isExpanded = this.expandedMembers.has(mi);
+      const isExpanded = this.expandedMembers.has(member.userId);
 
       if (isSelected) cursorLineIndex = allLines.length;
 
@@ -327,23 +341,31 @@ export class InteractiveTable {
           let lineOffset = 0;
           for (let pi = 0; pi < member.projects.length; pi++) {
             const proj = member.projects[pi];
+            const visibleBranches = proj.branches.filter((b) =>
+              proj.role === 'project-admin' ? true : b.hasAccess,
+            );
             if (selectedProjOrigIdx === pi) {
               cursorLineIndex = allLines.length + lineOffset;
               break;
             }
-            lineOffset++; // project line (both branched and branchless emit one line)
-            const pExpanded = proj.branches.length > 0 && this.expandedProjects.has(`${mi}-${pi}`);
+            lineOffset++; // every project emits one line
+            const pExpanded = visibleBranches.length > 0 && this.expandedProjects.has(`${member.userId}:${proj.id}`);
             if (selectedBranchRef !== null && selectedBranchRef.projectIndex === pi) {
-              cursorLineIndex = allLines.length + lineOffset + selectedBranchRef.branchIndex;
+              // The selected branch index refers to the ORIGINAL branch array;
+              // translate it to its position among visible branches.
+              const visIdx = proj.branches
+                .slice(0, selectedBranchRef.branchIndex)
+                .filter((b) => (proj.role === 'project-admin' ? true : b.hasAccess)).length;
+              cursorLineIndex = allLines.length + lineOffset + visIdx;
               break;
             }
             if (pExpanded) {
-              lineOffset += proj.branches.length;
+              lineOffset += visibleBranches.length;
             }
           }
         }
 
-        allLines.push(...this.renderExpandedDetail(member, mi, totalWidth, selectedProjOrigIdx, selectedBranchRef));
+        allLines.push(...this.renderExpandedDetail(member, mi, totalWidth, selectedProjOrigIdx, selectedBranchRef, widths));
       }
     }
 
@@ -394,6 +416,7 @@ export class InteractiveTable {
     }
     if (this.statusMessage) {
       const color = this.statusMessage.isError ? RED : GREEN;
+      output.push('');
       output.push(`${m} ${color}${this.statusMessage.text}${RESET}`);
     }
 
@@ -405,7 +428,7 @@ export class InteractiveTable {
         const atCursor = i === this.projectPicker.cursor;
         const checked = this.projectPicker.selected.has(p.id);
         const mark = checked ? '[x]' : '[ ]';
-        const line = `${m}  ${mark} ${p.name}`;
+        const line = `${m}   ${mark} ${p.name}`;
         output.push(atCursor ? `${INVERSE}${this.padToWidth(line, totalWidth)}${RESET}` : line);
       }
     }
@@ -582,19 +605,23 @@ export class InteractiveTable {
       if (!item) return;
 
       if (item.type === 'member') {
-        if (this.expandedMembers.has(item.memberIndex)) {
-          this.expandedMembers.delete(item.memberIndex);
-          // Clean up any expanded projects under this member
+        const member = this.members[item.memberIndex];
+        if (this.expandedMembers.has(member.userId)) {
+          this.expandedMembers.delete(member.userId);
+          // Collapse any expanded projects that belong to this member.
+          const prefix = `${member.userId}:`;
           for (const key of this.expandedProjects) {
-            if (key.startsWith(`${item.memberIndex}-`)) {
+            if (key.startsWith(prefix)) {
               this.expandedProjects.delete(key);
             }
           }
         } else {
-          this.expandedMembers.add(item.memberIndex);
+          this.expandedMembers.add(member.userId);
         }
       } else if (item.type === 'project') {
-        const projKey = `${item.memberIndex}-${item.projectIndex}`;
+        const member = this.members[item.memberIndex];
+        const project = member.projects[item.projectIndex!];
+        const projKey = `${member.userId}:${project.id}`;
         if (this.expandedProjects.has(projKey)) {
           this.expandedProjects.delete(projKey);
         } else {
@@ -935,13 +962,31 @@ export class InteractiveTable {
     if (!this.ctx) return;
     const refreshed = await this.ctx.reload();
     this.members = refreshed;
+    // Prune expansion state for rows that no longer exist. Without this,
+    // stale entries linger and a later row that happens to reuse the same
+    // userId/projectId would appear pre-expanded.
+    const liveUserIds = new Set(refreshed.map((m) => m.userId));
+    for (const uid of this.expandedMembers) {
+      if (!liveUserIds.has(uid)) this.expandedMembers.delete(uid);
+    }
+    const liveProjectKeys = new Set<string>();
+    for (const m of refreshed) {
+      for (const p of m.projects) {
+        liveProjectKeys.add(`${m.userId}:${p.id}`);
+      }
+    }
+    for (const pk of this.expandedProjects) {
+      if (!liveProjectKeys.has(pk)) this.expandedProjects.delete(pk);
+    }
+    // Re-anchor the cursor on the mutated user if they still exist; otherwise
+    // clamp into the current nav range.
     const newIdx = refreshed.findIndex((m) => m.userId === userId);
+    const navItems = this.buildNavItems();
     if (newIdx >= 0) {
-      const navItems = this.buildNavItems();
       const navPos = navItems.findIndex((n) => n.type === 'member' && n.memberIndex === newIdx);
       if (navPos >= 0) this.cursorIndex = navPos;
     } else {
-      this.cursorIndex = Math.min(this.cursorIndex, this.buildNavItems().length - 1);
+      this.cursorIndex = Math.max(0, Math.min(this.cursorIndex, navItems.length - 1));
     }
   }
 

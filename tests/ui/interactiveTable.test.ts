@@ -187,7 +187,9 @@ describe('InteractiveTable', () => {
     });
 
     it('shows branches when project is expanded', () => {
-      (table as any).expandedProjects.add('1-0');
+      // Expansion state is keyed by `${userId}:${projectId}` (stable IDs, not
+      // array indices) so it survives reloads that reorder members.
+      (table as any).expandedProjects.add(`${MEMBERS[1].userId}:${MEMBERS[1].projects[0].id}`);
       const lines = table.renderExpandedDetail(MEMBERS[1], 1, 100, null);
       const plain = lines.map(stripAnsi).join('\n');
       expect(plain).toContain('▾');
@@ -339,7 +341,7 @@ describe('InteractiveTable', () => {
 
     it('includes project items for expanded non-admin member', () => {
       (table as any).members = MEMBERS;
-      (table as any).expandedMembers.add(1); // bob (member role)
+      (table as any).expandedMembers.add(MEMBERS[1].userId); // bob (member role)
       const items = table.buildNavItems();
       expect(items).toHaveLength(4); // 3 members + 1 project (api-backend)
       expect(items[2]).toEqual({ type: 'project', memberIndex: 1, projectIndex: 0 });
@@ -347,12 +349,12 @@ describe('InteractiveTable', () => {
 
     it('does not include project items for expanded owner/admin', () => {
       (table as any).members = MEMBERS;
-      (table as any).expandedMembers.add(0); // alice (owner role)
+      (table as any).expandedMembers.add(MEMBERS[0].userId); // alice (owner role)
       const items = table.buildNavItems();
       expect(items).toHaveLength(3); // just 3 members, no projects
     });
 
-    it('skips projects with no branches', () => {
+    it('lists every project even when the user has no branch access', () => {
       const membersWithEmpty = [
         makeMember({
           role: 'member',
@@ -363,10 +365,11 @@ describe('InteractiveTable', () => {
         }),
       ];
       (table as any).members = membersWithEmpty;
-      (table as any).expandedMembers.add(0);
+      (table as any).expandedMembers.add(membersWithEmpty[0].userId);
       const items = table.buildNavItems();
-      expect(items).toHaveLength(2); // 1 member + 1 project (the one with branches)
+      expect(items).toHaveLength(3); // 1 member + 2 projects (all projects surface)
       expect(items[1]).toEqual({ type: 'project', memberIndex: 0, projectIndex: 0 });
+      expect(items[2]).toEqual({ type: 'project', memberIndex: 0, projectIndex: 1 });
     });
   });
 
@@ -632,12 +635,13 @@ describe('InteractiveTable', () => {
     describe('r on project row (Flow C)', () => {
       it('enters project edit state preselecting current role', () => {
         const { table } = makeTable('owner');
-        (table as any).expandedMembers.add(1); // bob
+        // Expansion state is keyed by stable IDs now; look up bob's userId.
+        const bob = (table as any).members[1];
+        (table as any).expandedMembers.add(bob.userId);
         (table as any).cursorIndex = 2; // project row under bob
 
         // Give bob a known per-project role.
-        const m = (table as any).members[1];
-        m.projects[0].role = 'member';
+        bob.projects[0].role = 'member';
 
         press(table, 'r');
         const ref = (table as any).editingProjectRef;
@@ -772,29 +776,35 @@ describe('InteractiveTable', () => {
         };
       }
 
-      it('grants access when branch is protected + denied', async () => {
+      it('hides denied branches from navigation (grant flow moves to capy grant-branch CLI)', async () => {
         const { table, calls } = makeTable('owner', [memberWithBranches()]);
-        // Expand project so branch rows are navigable.
-        (table as any).expandedMembers.add(0);
-        (table as any).expandedProjects.add('0-0');
-        // Navigate to the denied prod branch.
+        // Expand project so branch rows are navigable. Expansion state is
+        // keyed by stable IDs: userId / `${userId}:${projectId}`.
+        const bob = (table as any).members[0];
+        (table as any).expandedMembers.add(bob.userId);
+        (table as any).expandedProjects.add(`${bob.userId}:${bob.projects[0].id}`);
+        // Denied branches (hasAccess=false) are no longer rendered, so they
+        // have no nav items. The grant flow for a denied branch uses the
+        // non-interactive `capy grant-branch` subcommand instead.
         const nav = (table as any).buildNavItems();
-        const idx = nav.findIndex((n: any) => n.type === 'branch' && n.branchIndex === 1);
-        (table as any).cursorIndex = idx;
+        const deniedBranchNav = nav.find(
+          (n: any) => n.type === 'branch' && n.branchIndex === 1, // b-prod (denied)
+        );
+        expect(deniedBranchNav).toBeUndefined();
 
+        // Pressing `g` with the cursor elsewhere should not trigger a grant.
+        (table as any).cursorIndex = 0; // member row
         press(table, 'g');
         await new Promise((r) => setTimeout(r, 0));
-
-        expect(calls.grantProtectedBranch).toEqual([
-          { projectId: 'proj-1', branchId: 'b-prod', userId: 'user-bob' },
-        ]);
+        expect(calls.grantProtectedBranch).toHaveLength(0);
         expect(calls.revokeProtectedBranch).toHaveLength(0);
       });
 
       it('revokes when branch is protected + granted', async () => {
         const { table, calls } = makeTable('owner', [memberWithBranches()]);
-        (table as any).expandedMembers.add(0);
-        (table as any).expandedProjects.add('0-0');
+        const bob = (table as any).members[0];
+        (table as any).expandedMembers.add(bob.userId);
+        (table as any).expandedProjects.add(`${bob.userId}:${bob.projects[0].id}`);
         const nav = (table as any).buildNavItems();
         const idx = nav.findIndex((n: any) => n.type === 'branch' && n.branchIndex === 2);
         (table as any).cursorIndex = idx;
@@ -810,8 +820,9 @@ describe('InteractiveTable', () => {
 
       it('is a no-op on a non-protected branch', async () => {
         const { table, calls } = makeTable('owner', [memberWithBranches()]);
-        (table as any).expandedMembers.add(0);
-        (table as any).expandedProjects.add('0-0');
+        const bob = (table as any).members[0];
+        (table as any).expandedMembers.add(bob.userId);
+        (table as any).expandedProjects.add(`${bob.userId}:${bob.projects[0].id}`);
         const nav = (table as any).buildNavItems();
         const idx = nav.findIndex((n: any) => n.type === 'branch' && n.branchIndex === 0);
         (table as any).cursorIndex = idx;
@@ -827,8 +838,8 @@ describe('InteractiveTable', () => {
         const m = memberWithBranches();
         m.projects[0].role = 'project-admin';
         const { table, calls } = makeTable('owner', [m]);
-        (table as any).expandedMembers.add(0);
-        (table as any).expandedProjects.add('0-0');
+        (table as any).expandedMembers.add(m.userId);
+        (table as any).expandedProjects.add(`${m.userId}:${m.projects[0].id}`);
         // project-admin projects don't spawn branch nav items, so attempting
         // to hit `g` on the project row itself is a no-op.
         (table as any).cursorIndex = 1; // project row

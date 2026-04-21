@@ -114,6 +114,11 @@ export class UsersCommand {
     }
     const token = authService.getToken();
     if (token) serviceClient.setToken(token);
+    // Long-running TUI: refresh expired tokens transparently on 401.
+    serviceClient.setTokenRefresher(async () => {
+      const refreshed = await authService.refreshToken();
+      return refreshed ? authService.getToken() : null;
+    });
 
     // Fetch member details
     const spinner = new Spinner('Loading members...');
