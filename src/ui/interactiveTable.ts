@@ -573,7 +573,9 @@ export class InteractiveTable {
   private async pickProjectInline(prompt: string): Promise<string | null> {
     if (!this.ctx) return null;
     const projects = await this.ctx.listProjects();
-    if (projects.length === 0) return null;
+    if (projects.length === 0) {
+      throw new Error('No projects exist in this organization — create one before assigning a scoped role.');
+    }
     return new Promise<string | null>((resolve) => {
       this.projectPicker = { projects, cursor: 0, resolve, prompt };
       this.draw();
@@ -601,10 +603,10 @@ export class InteractiveTable {
 
     let projectId: string | undefined;
     if (isScoped) {
-      // Reuse member's existing first project if any; else prompt in-TUI.
-      if (member.projects.length > 0 && member.role !== 'owner' && member.role !== 'admin') {
-        projectId = member.projects[0].id;
-      } else {
+      // Always prompt: reusing member.projects[0] silently scopes the user to
+      // an arbitrary project, which the server rightly rejects when the
+      // current role is unscoped (admin/owner). Better to ask every time.
+      try {
         const chosen = await this.pickProjectInline(`Assign ${newRole} on which project?`);
         if (!chosen) {
           this.statusMessage = { text: 'Cancelled', isError: false };
@@ -612,6 +614,10 @@ export class InteractiveTable {
           return;
         }
         projectId = chosen;
+      } catch (err: any) {
+        this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+        this.draw();
+        return;
       }
     }
 
