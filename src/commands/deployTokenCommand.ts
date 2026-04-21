@@ -318,8 +318,12 @@ export class DeployCommand {
         process.exit(1);
       }
 
-      // Encrypt all env vars into a single blob using PK
-      const encryptedVars = encryptEnvBlob(plaintextEnv, pk);
+      // Encrypt env vars with DECRYPT_KEY derived from pk + service_key, where
+      // service_key is derived deterministically from innerBlob. This matches
+      // what the consumer derives after fetching service_key at decrypt time,
+      // so projectKey alone is insufficient to decrypt — the server's KMS-
+      // gated service_key is required, preserving zero-trust.
+      const encryptedVars = encryptEnvBlob(plaintextEnv, pk, innerBlob, projectId, deployId);
 
       // Build SECRETS_BLOB
       const secretsBlob = buildSecretsBlob(deployId, outerBlob, encryptedVars);

@@ -1,8 +1,16 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createCipheriv, createHash, randomBytes } from 'crypto';
+import { createCipheriv, createHash, randomBytes, hkdfSync } from 'crypto';
+import { createServer, Server } from 'http';
+import {
+  generateDeployId,
+  generateDerivationToken,
+  deployInnerWrap,
+  encryptEnvBlob,
+  buildSecretsBlob,
+} from '../../src/crypto/deployCrypto';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -31,22 +39,42 @@ function encrypt(value: string, key: string, varName: string = 'SECRET'): string
   return `capy:${resourceId}:${combined.toString('base64')}`;
 }
 
-/** Run `capy run` via the built CLI entry point in a subprocess */
-function capy(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
+/**
+ * Run `capy run` via the built CLI entry point in a subprocess.
+ *
+ * Async (Promise-based) rather than spawnSync because deployed-mode tests run
+ * a fake HTTP server in the test's own event loop — spawnSync would block
+ * that loop and the server could never answer the subprocess's fetch.
+ */
+function capy(
+  args: string[],
+  opts: { cwd?: string; env?: Record<string, string> } = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const cliPath = join(__dirname, '../../dist/index.js');
-  // Use spawnSync to avoid shell interpretation of parentheses etc.
-  const { spawnSync } = require('child_process');
-  const result = spawnSync('node', [cliPath, 'run', ...args], {
-    cwd: opts.cwd ?? TEST_DIR,
-    env: { ...process.env, ...opts.env },
-    stdio: ['pipe', 'pipe', 'pipe'],
-    timeout: 10000,
+  const { spawn } = require('child_process');
+
+  return new Promise((resolve) => {
+    const child = spawn('node', [cliPath, 'run', ...args], {
+      cwd: opts.cwd ?? TEST_DIR,
+      env: { ...process.env, ...opts.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+    child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+
+    const killer = setTimeout(() => child.kill('SIGKILL'), 15000);
+    child.on('close', (code: number | null) => {
+      clearTimeout(killer);
+      resolve({ stdout, stderr, exitCode: code ?? 1 });
+    });
+    child.on('error', () => {
+      clearTimeout(killer);
+      resolve({ stdout, stderr, exitCode: 1 });
+    });
   });
-  return {
-    stdout: (result.stdout ?? '').toString(),
-    stderr: (result.stderr ?? '').toString(),
-    exitCode: result.status ?? 1,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +94,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('capy run', () => {
-  test('decrypts capy: values and passes them to subprocess', () => {
+  test('decrypts capy: values and passes them to subprocess', async () => {
     // CAPY_KEY must be a valid 64-char hex string (32 bytes).
     // The encrypt helper derives the AES key via SHA256(key), so we need to
     // use the same hex string as both the CAPY_KEY env var and the encrypt key.
@@ -74,7 +102,7 @@ describe('capy run', () => {
     const encValue = encrypt('my-secret-value', hexKey, 'SECRET');
     writeFileSync(join(TEST_DIR, '.env'), `SECRET=${encValue}\nPLAIN=hello\n`);
 
-    const result = capy(['--', 'node', '-e', 'console.log(process.env.SECRET)'], {
+    const result = await capy(['--', 'node', '-e', 'console.log(process.env.SECRET)'], {
       env: { CAPY_KEY: hexKey },
     });
 
@@ -82,58 +110,208 @@ describe('capy run', () => {
     expect(result.stdout.trim()).toBe('my-secret-value');
   });
 
-  test('passes plaintext env vars through unchanged', () => {
+  test('passes plaintext env vars through unchanged', async () => {
     writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello-world\n');
 
-    const result = capy(['--', 'node', '-e', 'console.log(process.env.PLAIN_VAR)']);
+    const result = await capy(['--', 'node', '-e', 'console.log(process.env.PLAIN_VAR)']);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('hello-world');
   });
 
-  test('forwards subprocess exit code', () => {
-    const result = capy(['--', 'node', '-e', 'process.exit(42)']);
+  test('forwards subprocess exit code', async () => {
+    const result = await capy(['--', 'node', '-e', 'process.exit(42)']);
     expect(result.exitCode).toBe(42);
   });
 
-  test('exits 1 with usage message when no args given', () => {
-    const result = capy([]);
+  test('exits 1 with usage message when no args given', async () => {
+    const result = await capy([]);
     expect(result.exitCode).not.toBe(0);
   });
 
-  test('exits 1 with clean error for nonexistent command', () => {
-    const result = capy(['--', 'nonexistent-command-xyz']);
+  test('exits 1 with clean error for nonexistent command', async () => {
+    const result = await capy(['--', 'nonexistent-command-xyz']);
     expect(result.exitCode).toBe(1);
   });
 
-  test('works with no .env file (passes process.env through)', () => {
+  test('works with no .env file (passes process.env through)', async () => {
     // No .env written to TEST_DIR
-    const result = capy(['--', 'node', '-e', 'console.log("ok")']);
+    const result = await capy(['--', 'node', '-e', 'console.log("ok")']);
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('ok');
   });
 
-  test('exits 1 with clean error when key is missing for encrypted values', () => {
+  test('exits 1 with clean error when key is missing for encrypted values', async () => {
     const encValue = encrypt('secret', 'some-key', 'SECRET');
     writeFileSync(join(TEST_DIR, '.env'), `SECRET=${encValue}\n`);
 
     // No CAPY_KEY, no keyring, no .capy/decrypt — key resolution should fail
-    const result = capy(['--', 'echo', 'should-not-reach'], {
+    const result = await capy(['--', 'echo', 'should-not-reach'], {
       env: { CAPY_KEY: undefined as any },
     });
 
     expect(result.exitCode).toBe(1);
   });
 
-  test('.env with zero encrypted values needs no key', () => {
+  test('.env with zero encrypted values needs no key', async () => {
     writeFileSync(join(TEST_DIR, '.env'), 'DB_HOST=localhost\nDB_PORT=5432\n');
 
-    const result = capy([
+    const result = await capy([
       '--', 'node', '-e',
       'console.log(process.env.DB_HOST + ":" + process.env.DB_PORT)',
     ]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('localhost:5432');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deployed-mode tests
+//
+// SECRETS_BLOB + PROJECT_KEY in process.env triggers the deployed path:
+// parse blob, POST to /deploy/:id/decrypt to fetch service_key, derive
+// DECRYPT_KEY = HKDF(pk || service_key, deployId, "capy:deploy:decrypt"),
+// AES-256-GCM decrypt the env vars, spawn child.
+// ---------------------------------------------------------------------------
+
+function buildDeployedFixture(envVars: Record<string, string>) {
+  const projectId = 'test-proj-' + randomBytes(4).toString('hex');
+  const pk = randomBytes(32);
+  const dt = generateDerivationToken();
+  const deployId = generateDeployId();
+
+  const innerBlob = deployInnerWrap(pk, dt, projectId);
+  const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
+  // Simulate KMS outer wrap as a passthrough (local dev KMS fallback path).
+  // The fake server uses the same innerBlob bytes to derive service_key so
+  // consumer-side derivation matches.
+  const outerBlob = innerBlob;
+  const secretsBlob = buildSecretsBlob(deployId, outerBlob, encryptedVars);
+
+  const salt = projectId + deployId.toString('hex');
+  const serviceKeyHex = Buffer.from(
+    hkdfSync('sha256', Buffer.from(innerBlob, 'base64'), salt, 'capy:deploy:service-key', 32),
+  ).toString('hex');
+
+  return { projectId, pk, deployId, innerBlob, secretsBlob, serviceKeyHex };
+}
+
+/**
+ * Starts a minimal HTTP server that answers POST /deploy/:id/decrypt with the
+ * provided service_key. Returns { url, close }.
+ */
+async function startFakeService(serviceKeyHex: string): Promise<{ url: string; close: () => void; server: Server }> {
+  const server = createServer((req, res) => {
+    if (req.method === 'POST' && /^\/deploy\/[0-9a-f]+\/decrypt$/.test(req.url ?? '')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ service_key: serviceKeyHex }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('server failed to bind');
+  const url = `http://127.0.0.1:${addr.port}`;
+  return { url, close: () => server.close(), server };
+}
+
+describe('capy run (deployed mode)', () => {
+  let fake: { url: string; close: () => void } | null = null;
+
+  afterEach(() => {
+    if (fake) {
+      fake.close();
+      fake = null;
+    }
+  });
+
+  test('decrypts SECRETS_BLOB via fetched service_key and injects env', async () => {
+    const envVars = { API_KEY: 'sk-test-xyz', DATABASE_URL: 'postgres://h/d' };
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+    fake = await startFakeService(serviceKeyHex);
+
+    const result = await capy(['--', 'node', '-e', 'console.log(process.env.API_KEY, "|", process.env.DATABASE_URL)'], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('sk-test-xyz | postgres://h/d');
+  });
+
+  test('writes .capy/next-env.js with decrypted keys', async () => {
+    const envVars = { VERCEL_SECRET: 'v1', STRIPE: 'sk_1' };
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+    fake = await startFakeService(serviceKeyHex);
+
+    const result = await capy(['--', 'node', '-e', 'console.log("ok")'], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+    expect(result.exitCode).toBe(0);
+
+    const nextEnvPath = join(TEST_DIR, '.capy', 'next-env.js');
+    expect(existsSync(nextEnvPath)).toBe(true);
+    const content = readFileSync(nextEnvPath, 'utf-8');
+    expect(content).toContain('"VERCEL_SECRET"');
+    expect(content).toContain('"STRIPE"');
+    expect(content).toContain('process.env["VERCEL_SECRET"]');
+  });
+
+  test('exits 1 if SECRETS_BLOB set but PROJECT_KEY missing', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { SECRETS_BLOB: 'anything', PROJECT_KEY: undefined as any },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/must both be set/);
+  });
+
+  test('exits 1 if PROJECT_KEY set but SECRETS_BLOB missing', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { PROJECT_KEY: 'a'.repeat(64), SECRETS_BLOB: undefined as any },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/must both be set/);
+  });
+
+  test('exits 1 with clean error when service is unreachable', async () => {
+    const envVars = { X: 'y' };
+    const { pk, secretsBlob } = buildDeployedFixture(envVars);
+    // Point at a port nothing is listening on
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: 'http://127.0.0.1:1',
+      },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/Cannot reach|Deploy decrypt failed/);
+  });
+
+  test('shell-set env overrides decrypted value (dotenv precedence)', async () => {
+    const envVars = { OVERRIDDEN: 'from-secrets-blob' };
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+    fake = await startFakeService(serviceKeyHex);
+
+    const result = await capy(['--', 'node', '-e', 'console.log(process.env.OVERRIDDEN)'], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: fake.url,
+        OVERRIDDEN: 'from-shell',
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('from-shell');
   });
 });
