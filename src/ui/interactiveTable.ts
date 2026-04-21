@@ -12,6 +12,7 @@ const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
 const INVERSE = `${ESC}[7m`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
+const BOLD_WHITE = `${ESC}[1;97m`;
 const GREEN = `${ESC}[32m`;
 const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
@@ -301,11 +302,11 @@ export class InteractiveTable {
     output.push('');
     let footer: string;
     if (this.projectPicker) {
-      footer = `${DIM}↑↓ pick project  Enter confirm  Esc cancel${RESET}`;
+      footer = `${DIM}↑↓ pick project  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
     } else if (this.editingMemberIndex !== null) {
-      footer = `${DIM}↑↓ pick role  Enter confirm  Esc cancel${RESET}`;
+      footer = `${DIM}↑↓ pick role  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
     } else {
-      footer = `${DIM}↑↓ navigate  Enter expand/collapse  r change role  q quit${RESET}`;
+      footer = `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
     }
     output.push(`${m} ${footer}`);
     if (this.statusMessage) {
