@@ -264,6 +264,71 @@ describe('InteractiveTable', () => {
     });
   });
 
+  describe('project picker rendering', () => {
+    function openPicker(projects: Array<{ id: string; name: string }>) {
+      (table as any).projectPicker = {
+        projects,
+        cursor: 0,
+        selected: new Set<string>(),
+        resolve: () => {},
+        prompt: 'Assign project-admin on which projects?',
+      };
+    }
+
+    it('renders the hint line just above the menu rows (not in the main footer)', () => {
+      openPicker([{ id: 'p1', name: 'alpha' }, { id: 'p2', name: 'beta' }]);
+      const output = table.renderTable(MEMBERS, 120, 30);
+      const plain = stripAnsi(output);
+      const lines = plain.split('\n');
+
+      const hintIdx = lines.findIndex(l => l.includes('Space select'));
+      const promptIdx = lines.findIndex(l => l.includes('Assign project-admin on which projects?'));
+      const firstMenuIdx = lines.findIndex(l => l.includes('[ ] alpha'));
+
+      expect(promptIdx).toBeGreaterThan(-1);
+      expect(hintIdx).toBeGreaterThan(-1);
+      expect(firstMenuIdx).toBeGreaterThan(-1);
+      // prompt → hint → menu rows, contiguous with no intervening blank line
+      expect(hintIdx).toBe(promptIdx + 1);
+      expect(firstMenuIdx).toBe(hintIdx + 1);
+    });
+
+    it('suppresses the main-table footer while the picker is open', () => {
+      openPicker([{ id: 'p1', name: 'alpha' }]);
+      const output = table.renderTable(MEMBERS, 120, 30);
+      const plain = stripAnsi(output);
+      // 'expand/collapse' belongs to the main-mode footer; it must not show
+      // while the picker is active, so the only hint shown is the picker's own.
+      expect(plain).not.toContain('expand/collapse');
+    });
+
+    it('prompt is indented the same amount as the picker hint (3 spaces, not 2)', () => {
+      openPicker([{ id: 'p1', name: 'alpha' }]);
+      const output = table.renderTable(MEMBERS, 120, 30);
+      const plain = stripAnsi(output);
+      const lines = plain.split('\n');
+      const promptLine = lines.find(l => l.includes('Assign project-admin on which projects?'))!;
+      const hintLine = lines.find(l => l.includes('Space select'))!;
+      // Both must start with exactly 3 spaces
+      expect(promptLine).toMatch(/^ {3}\S/);
+      expect(hintLine).toMatch(/^ {3}\S/);
+    });
+
+    it('renders [x] for selected rows and [ ] for unselected', () => {
+      (table as any).projectPicker = {
+        projects: [{ id: 'p1', name: 'alpha' }, { id: 'p2', name: 'beta' }],
+        cursor: 1,
+        selected: new Set<string>(['p1']),
+        resolve: () => {},
+        prompt: 'Assign project-admin on which projects?',
+      };
+      const output = table.renderTable(MEMBERS, 120, 30);
+      const plain = stripAnsi(output);
+      expect(plain).toContain('[x] alpha');
+      expect(plain).toContain('[ ] beta');
+    });
+  });
+
   describe('buildNavItems', () => {
     it('returns only member items when nothing expanded', () => {
       (table as any).members = MEMBERS;

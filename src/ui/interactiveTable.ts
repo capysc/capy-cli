@@ -381,23 +381,25 @@ export class InteractiveTable {
     // Footer
     output.push(m + rule);
     output.push('');
-    let footer: string;
-    if (this.projectPicker) {
-      footer = `${DIM}↑↓ navigate  ${RESET}${BOLD_WHITE}Space${RESET}${DIM} select  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
-    } else if (this.editingMemberIndex !== null || this.editingProjectRef !== null) {
-      footer = `${DIM}↑↓ pick role  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
-    } else {
-      footer = `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}g${RESET}${DIM} grant protected  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
+    // In project-picker mode, suppress the main footer. The picker has its
+    // own hint rendered just above the selection menu below.
+    if (!this.projectPicker) {
+      let footer: string;
+      if (this.editingMemberIndex !== null || this.editingProjectRef !== null) {
+        footer = `${DIM}↑↓ pick role  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
+      } else {
+        footer = `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}g${RESET}${DIM} grant protected  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
+      }
+      output.push(`${m} ${footer}`);
     }
-    output.push(`${m} ${footer}`);
     if (this.statusMessage) {
       const color = this.statusMessage.isError ? RED : GREEN;
       output.push(`${m} ${color}${this.statusMessage.text}${RESET}`);
     }
 
     if (this.projectPicker) {
-      output.push('');
-      output.push(`${m}${this.projectPicker.prompt}`);
+      output.push(`${m} ${this.projectPicker.prompt}`);
+      output.push(`${m} ${DIM}↑↓ navigate  ${RESET}${BOLD_WHITE}Space${RESET}${DIM} select  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`);
       for (let i = 0; i < this.projectPicker.projects.length; i++) {
         const p = this.projectPicker.projects[i];
         const atCursor = i === this.projectPicker.cursor;
