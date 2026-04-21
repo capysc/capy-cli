@@ -134,7 +134,7 @@ export class InteractiveTable {
     let row = this.pad(email, widths[0]);
 
     if (isEditing) {
-      const choices = this.assignableRoles();
+      const choices = this.assignableRoles(member.role);
       const editingRole = choices[this.editingRoleIndex] ?? member.role;
       row += GAP + INVERSE + this.pad(`◆ ${editingRole}`, widths[1]) + RESET;
     } else if (isGreenRole) {
@@ -402,19 +402,28 @@ export class InteractiveTable {
       const item = navItems[this.cursorIndex];
       if (!item || item.type !== 'member') return;
       if (!this.ctx) return;
-      if (this.assignableRoles().length === 0) {
+      const target = this.members[item.memberIndex];
+      const callerRole = this.ctx.callerRole;
+      if (!ASSIGNABLE_BY_CALLER[callerRole]) {
         this.statusMessage = { text: 'You do not have permission to change roles', isError: true };
         this.draw();
         return;
       }
-      const target = this.members[item.memberIndex];
       if (target.role === 'owner') {
         this.statusMessage = { text: "The owner's role cannot be changed", isError: true };
         this.draw();
         return;
       }
+      if (this.assignableRoles(target.role).length === 0) {
+        this.statusMessage = {
+          text: `You cannot change ${target.email}'s role (${target.role})`,
+          isError: true,
+        };
+        this.draw();
+        return;
+      }
       this.editingMemberIndex = item.memberIndex;
-      this.editingRoleIndex = this.roleIndexFor(target.role);
+      this.editingRoleIndex = this.roleIndexFor(target.role, this.assignableRoles(target.role));
       this.statusMessage = null;
       this.draw();
       return;
@@ -455,19 +464,27 @@ export class InteractiveTable {
     }
   }
 
-  private assignableRoles(): ReadonlyArray<RoleValue> {
+  private assignableRoles(targetRole?: string): ReadonlyArray<RoleValue> {
     const callerRole = this.ctx?.callerRole ?? '';
-    return ASSIGNABLE_BY_CALLER[callerRole] ?? [];
+    const base = ASSIGNABLE_BY_CALLER[callerRole] ?? [];
+    if (!targetRole) return base;
+    // Project-admins cannot act on org-level admins or the owner.
+    if (callerRole === 'project-admin' && (targetRole === 'admin' || targetRole === 'owner')) {
+      return [];
+    }
+    // Nobody changes the owner via this endpoint (server enforces too).
+    if (targetRole === 'owner') return [];
+    return base;
   }
 
-  private roleIndexFor(role: string): number {
-    const choices = this.assignableRoles();
+  private roleIndexFor(role: string, choices: ReadonlyArray<RoleValue>): number {
     const idx = choices.indexOf(role as RoleValue);
     return idx >= 0 ? idx : 0;
   }
 
   private handleEditorKey(key: string): void {
-    const choices = this.assignableRoles();
+    const target = this.editingMemberIndex !== null ? this.members[this.editingMemberIndex] : null;
+    const choices = this.assignableRoles(target?.role);
     if (choices.length === 0) return;
     if (key === `${ESC}[A`) {
       this.editingRoleIndex = (this.editingRoleIndex - 1 + choices.length) % choices.length;
@@ -493,7 +510,7 @@ export class InteractiveTable {
   private async commitRoleChange(): Promise<void> {
     if (this.editingMemberIndex === null || !this.ctx) return;
     const member = this.members[this.editingMemberIndex];
-    const choices = this.assignableRoles();
+    const choices = this.assignableRoles(member.role);
     if (choices.length === 0) return;
     const newRole = choices[this.editingRoleIndex] as RoleValue;
     const isScoped = newRole === 'project-admin' || newRole === 'member';
