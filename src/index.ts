@@ -408,6 +408,24 @@ program
   });
 
 program
+  .command('grant-branch <email> <project> <branch>')
+  .description('Grant a member wildcard access to a protected branch')
+  .action(async (email: string, project: string, branch: string) => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand();
+    await cmd.grantBranch(email, project, branch);
+  });
+
+program
+  .command('revoke-branch <email> <project> <branch>')
+  .description("Revoke a member's wildcard access to a protected branch")
+  .action(async (email: string, project: string, branch: string) => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand();
+    await cmd.revokeBranch(email, project, branch);
+  });
+
+program
   .command('decrypt')
   .description('Decrypt secrets offline using seed phrase (owner only)')
   .action(async () => {

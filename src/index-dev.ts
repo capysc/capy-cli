@@ -428,6 +428,24 @@ program
   });
 
 program
+  .command('grant-branch <email> <project> <branch>')
+  .description('Grant a member wildcard access to a protected branch')
+  .action(async (email: string, project: string, branch: string) => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
+    await cmd.grantBranch(email, project, branch);
+  });
+
+program
+  .command('revoke-branch <email> <project> <branch>')
+  .description("Revoke a member's wildcard access to a protected branch")
+  .action(async (email: string, project: string, branch: string) => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
+    await cmd.revokeBranch(email, project, branch);
+  });
+
+program
   .command('cleanup')
   .description('Remove Capy git hooks from this repository')
   .action(async () => {

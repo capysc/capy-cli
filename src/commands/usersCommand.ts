@@ -15,6 +15,84 @@ export class UsersCommand {
     this.devMode = devMode;
   }
 
+  /**
+   * Non-interactive helper: resolve org, authenticate, and invoke the same
+   * service-client methods the interactive TUI dispatches to. Used by the
+   * `capy grant-branch` / `capy revoke-branch` subcommands so CI and the E2E
+   * harness can exercise the protected-branch grant flow without a TTY.
+   */
+  private async resolveContext(): Promise<{
+    orgId: string;
+    serviceClient: ServiceClient;
+  }> {
+    const pm = new ProjectManager();
+    const projectState = await pm.detectProjectState();
+
+    if (!projectState.initialized || !projectState.organizationId) {
+      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
+      process.exit(1);
+    }
+    const orgId = projectState.organizationId;
+
+    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
+    const serviceClient = new ServiceClient(this.apiUrl);
+    const authResult = await authService.authenticate(orgId);
+    if (!authResult.success) {
+      console.error('Authentication failed');
+      process.exit(1);
+    }
+    const token = authService.getToken();
+    if (token) serviceClient.setToken(token);
+
+    return { orgId, serviceClient };
+  }
+
+  /** `capy grant-branch <email> <project> <branch>` */
+  async grantBranch(email: string, projectName: string, branchName: string): Promise<void> {
+    const { orgId, serviceClient } = await this.resolveContext();
+    const ids = await this.resolveBranchGrantIds(orgId, serviceClient, email, projectName, branchName);
+    await serviceClient.grantProtectedBranch(orgId, ids.projectId, ids.branchId, ids.userId);
+    console.log(`Granted ${email} access to ${projectName}/${branchName}`);
+  }
+
+  /** `capy revoke-branch <email> <project> <branch>` */
+  async revokeBranch(email: string, projectName: string, branchName: string): Promise<void> {
+    const { orgId, serviceClient } = await this.resolveContext();
+    const ids = await this.resolveBranchGrantIds(orgId, serviceClient, email, projectName, branchName);
+    await serviceClient.revokeProtectedBranch(orgId, ids.projectId, ids.branchId, ids.userId);
+    console.log(`Revoked ${email}'s access to ${projectName}/${branchName}`);
+  }
+
+  private async resolveBranchGrantIds(
+    orgId: string,
+    serviceClient: ServiceClient,
+    email: string,
+    projectName: string,
+    branchName: string,
+  ): Promise<{ projectId: string; branchId: string; userId: string }> {
+    const [projects, memberDetails] = await Promise.all([
+      serviceClient.listProjects(),
+      serviceClient.listMemberDetails(orgId),
+    ]);
+    const project = projects.find((p) => p.name === projectName);
+    if (!project) {
+      console.error(`Project "${projectName}" not found in this organization.`);
+      process.exit(1);
+    }
+    const branches = await serviceClient.listBranches(project.id);
+    const branch = branches.find((b: any) => b.name === branchName);
+    if (!branch) {
+      console.error(`Branch "${branchName}" not found in project "${projectName}".`);
+      process.exit(1);
+    }
+    const member = memberDetails.members.find((m) => m.email.toLowerCase() === email.toLowerCase());
+    if (!member) {
+      console.error(`No member with email "${email}" in this organization.`);
+      process.exit(1);
+    }
+    return { projectId: project.id, branchId: (branch as any).id, userId: member.userId };
+  }
+
   async execute(): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
