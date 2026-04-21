@@ -1,5 +1,6 @@
 import inquirer from 'inquirer';
 import { resolveOrgContext } from '../core/orgContext';
+import { ProjectManager } from '../core/projectManager';
 import { readMasterKey } from '../config/globalConfig';
 import { decryptMasterKey, deriveWrappingKey } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
@@ -98,21 +99,42 @@ export class InviteCommand {
         default: 'member',
       }]);
 
-      // Project scope is required for project-admin and member
+      // Project scope is required for project-admin and member. Multi-select
+      // so the inviter can grant access to several projects at once.
       let projectId: string | undefined;
+      let extraProjectIds: string[] = [];
       if (role === 'project-admin' || role === 'member') {
         const projects = await serviceClient.listProjects();
         if (projects.length === 0) {
           console.error('No projects in this organization. Create one with `capy` first.');
           process.exit(1);
         }
-        const { chosenProjectId } = await inquirer.prompt([{
-          type: 'list',
-          name: 'chosenProjectId',
-          message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which project?`,
-          choices: projects.map((p) => ({ name: p.name, value: p.id })),
-        }]);
-        projectId = chosenProjectId;
+        // Preselect the cwd project if we're inside one and it's available.
+        let cwdProjectId: string | undefined;
+        try {
+          const pm = new ProjectManager();
+          const ps = await pm.detectProjectState();
+          if (ps.projectId && projects.some((p) => p.id === ps.projectId)) {
+            cwdProjectId = ps.projectId;
+          }
+        } catch {
+          // ignore — cwd detection is best-effort
+        }
+
+        const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
+          type: 'checkbox',
+          name: 'chosenProjectIds',
+          message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
+          choices: projects.map((p) => ({
+            name: p.name,
+            value: p.id,
+            checked: p.id === cwdProjectId,
+          })),
+          validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
+        });
+        const ids: string[] = chosenProjectIds;
+        projectId = ids[0];
+        extraProjectIds = ids.slice(1);
       }
 
       // 1. Generate invite token T
@@ -129,7 +151,19 @@ export class InviteCommand {
       );
 
       // 4. Create invite record on service
-      await serviceClient.createInvite(orgId, email, role, projectId);
+      const inviteResult = await serviceClient.createInvite(orgId, email, role, projectId);
+
+      // 4b. Fan out any additional project assignments picked in the checkbox.
+      // Abort noisily only if every extra assignment fails.
+      const failures: Array<{ projectId: string; error: string }> = [];
+      for (const extraId of extraProjectIds) {
+        try {
+          await serviceClient.inviteToProject(orgId, extraId, email, role as 'project-admin' | 'member');
+        } catch (err: any) {
+          failures.push({ projectId: extraId, error: err?.message ?? String(err) });
+        }
+      }
+      void inviteResult;
 
       // 5. Build redeem code
       const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId);
@@ -147,6 +181,14 @@ export class InviteCommand {
       console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
       console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
       console.log('');
+
+      if (failures.length > 0) {
+        console.log(`  \x1b[33m${failures.length} additional project assignment${failures.length === 1 ? '' : 's'} failed:\x1b[0m`);
+        for (const f of failures) {
+          console.log(`    \x1b[90m${f.projectId}: ${f.error}\x1b[0m`);
+        }
+        console.log('');
+      }
 
       const { promptCopyToClipboard } = await import('../ui/clipboard');
       await promptCopyToClipboard(redeemCommand);

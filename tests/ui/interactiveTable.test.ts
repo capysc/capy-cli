@@ -1,8 +1,22 @@
 import { InteractiveTable } from '../../src/ui/interactiveTable';
-import { MemberDetail } from '../../src/service/serviceClient';
+import { MemberDetail, MemberProjectBranch } from '../../src/service/serviceClient';
 
-function makeMember(overrides: Partial<MemberDetail> = {}): MemberDetail {
-  return {
+function branch(name: string, isProtected = false, hasAccess = true): MemberProjectBranch {
+  return { id: `branch-${name}`, name, isProtected, hasAccess };
+}
+
+function makeMember(overrides: any = {}): MemberDetail {
+  // Tests historically pass branches as string[]. Normalize to the new object
+  // shape so individual test cases stay concise.
+  const normalizeProjects = (projects: any[]) =>
+    projects.map((p) => ({
+      ...p,
+      branches: (p.branches || []).map((b: any) =>
+        typeof b === 'string' ? branch(b) : b,
+      ),
+    }));
+
+  const base: MemberDetail = {
     membershipId: 'mem-1',
     userId: 'user-1',
     email: 'alice@acme.com',
@@ -10,11 +24,15 @@ function makeMember(overrides: Partial<MemberDetail> = {}): MemberDetail {
     status: 'active',
     createdAt: '2025-01-15T00:00:00Z',
     projects: [
-      { id: 'proj-1', name: 'api-backend', branches: ['main', 'staging'] },
-      { id: 'proj-2', name: 'web-frontend', branches: ['main'] },
+      { id: 'proj-1', name: 'api-backend', branches: [branch('main'), branch('staging')] },
+      { id: 'proj-2', name: 'web-frontend', branches: [branch('main')] },
     ],
-    ...overrides,
   };
+  const merged: MemberDetail = { ...base, ...overrides };
+  if (overrides.projects) {
+    merged.projects = normalizeProjects(overrides.projects);
+  }
+  return merged;
 }
 
 const MEMBERS: MemberDetail[] = [

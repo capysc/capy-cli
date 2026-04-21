@@ -1,4 +1,4 @@
-import { MemberDetail } from '../service/serviceClient';
+import { MemberDetail, MemberProject } from '../service/serviceClient';
 
 // ANSI escape codes
 const ESC = '\x1b';
@@ -43,7 +43,20 @@ export interface TableContext {
   listProjects: () => Promise<ProjectChoice[]>;
   changeRole: (userId: string, newRole: RoleValue, projectId?: string) => Promise<void>;
   reload: () => Promise<MemberDetail[]>;
+  // Per-project role management (Flow B, Flow C).
+  assignProjectRole: (projectId: string, email: string, role: 'project-admin' | 'member') => Promise<void>;
+  removeProjectRole: (projectId: string, userId: string) => Promise<void>;
+  // Per-branch protected-branch grants for member-scoped users (Flow E).
+  grantProtectedBranch: (projectId: string, branchId: string, userId: string) => Promise<void>;
+  revokeProtectedBranch: (projectId: string, branchId: string, userId: string) => Promise<void>;
 }
+
+// Options for the per-project-row in-cell editor (Flow C).
+const PROJECT_ROLE_CHOICES: ReadonlyArray<'project-admin' | 'member' | 'none'> = [
+  'project-admin',
+  'member',
+  'none',
+];
 
 const MARGIN = 2;
 const GAP = '   ';
@@ -63,9 +76,10 @@ const COLUMNS: ColumnConfig[] = [
 ];
 
 export interface NavItem {
-  type: 'member' | 'project';
+  type: 'member' | 'project' | 'branch';
   memberIndex: number;
   projectIndex?: number;
+  branchIndex?: number;
 }
 
 export class InteractiveTable {
@@ -81,12 +95,16 @@ export class InteractiveTable {
   private ctx: TableContext | null = null;
   private editingMemberIndex: number | null = null;
   private editingRoleIndex = 0;
+  // Flow C: editing a per-project role tag on an expanded project row.
+  private editingProjectRef: { memberIndex: number; projectIndex: number } | null = null;
+  private editingProjectRoleIndex = 0;
   private statusMessage: { text: string; isError: boolean } | null = null;
-  // In-TUI project picker (avoids handing the terminal off to inquirer).
+  // In-TUI multi-select project picker (Flow B).
   private projectPicker: {
     projects: ProjectChoice[];
     cursor: number;
-    resolve: (id: string | null) => void;
+    selected: Set<string>;
+    resolve: (ids: string[] | null) => void;
     prompt: string;
   } | null = null;
 
@@ -117,8 +135,18 @@ export class InteractiveTable {
         const member = this.members[mi];
         if (!ALL_ACCESS_ROLES.includes(member.role)) {
           for (let pi = 0; pi < member.projects.length; pi++) {
-            if (member.projects[pi].branches.length > 0) {
+            const project = member.projects[pi];
+            if (project.branches.length > 0) {
               items.push({ type: 'project', memberIndex: mi, projectIndex: pi });
+              // Branch rows are navigable when the project is expanded AND
+              // the user holds the 'member' role on that project — that's the
+              // only case 'g' (protected-branch grant) is meaningful on.
+              const projKey = `${mi}-${pi}`;
+              if (this.expandedProjects.has(projKey) && project.role === 'member') {
+                for (let bi = 0; bi < project.branches.length; bi++) {
+                  items.push({ type: 'branch', memberIndex: mi, projectIndex: pi, branchIndex: bi });
+                }
+              }
             }
           }
         }
@@ -176,6 +204,7 @@ export class InteractiveTable {
     memberIndex: number,
     totalWidth: number,
     selectedProjectOrigIdx: number | null,
+    selectedBranchRef: { projectIndex: number; branchIndex: number } | null = null,
   ): string[] {
     const lines: string[] = [];
 
@@ -192,13 +221,14 @@ export class InteractiveTable {
     for (let pi = 0; pi < member.projects.length; pi++) {
       const project = member.projects[pi];
       const hasBranches = project.branches.length > 0;
+      const roleTag = this.formatProjectRoleTag(memberIndex, pi, project);
 
       if (hasBranches) {
         const projKey = `${memberIndex}-${pi}`;
         const isExpanded = this.expandedProjects.has(projKey);
         const isSelected = selectedProjectOrigIdx === pi;
         const pointer = isExpanded ? '▾' : '▸';
-        const projLine = `    ${pointer} ${project.name}`;
+        const projLine = `    ${pointer} ${project.name}${roleTag}`;
 
         if (isSelected) {
           lines.push(`${INVERSE}${this.padToWidth(projLine, totalWidth)}${RESET}`);
@@ -207,16 +237,56 @@ export class InteractiveTable {
         }
 
         if (isExpanded) {
-          for (const branch of project.branches) {
-            lines.push(`        ${DIM}${branch}${RESET}`);
+          for (let bi = 0; bi < project.branches.length; bi++) {
+            const branch = project.branches[bi];
+            const suffix = this.branchSuffix(branch, project.role);
+            const branchLine = `        ${branch.name}${suffix}`;
+            const isBranchSelected =
+              selectedBranchRef !== null &&
+              selectedBranchRef.projectIndex === pi &&
+              selectedBranchRef.branchIndex === bi;
+            if (isBranchSelected) {
+              lines.push(`${INVERSE}${this.padToWidth(branchLine, totalWidth)}${RESET}`);
+            } else {
+              lines.push(`${DIM}${branchLine}${RESET}`);
+            }
           }
         }
       } else {
-        lines.push(`    ${DIM}${project.name}${RESET}`);
+        lines.push(`    ${DIM}${project.name}${roleTag}${RESET}`);
       }
     }
 
     return lines;
+  }
+
+  private formatProjectRoleTag(
+    memberIndex: number,
+    projectIndex: number,
+    project: MemberProject,
+  ): string {
+    const isEditingThis =
+      this.editingProjectRef !== null &&
+      this.editingProjectRef.memberIndex === memberIndex &&
+      this.editingProjectRef.projectIndex === projectIndex;
+    if (isEditingThis) {
+      const value = PROJECT_ROLE_CHOICES[this.editingProjectRoleIndex];
+      return `  ${INVERSE}◆ ${value}${RESET}`;
+    }
+    if (project.role === 'project-admin') return '  project-admin';
+    if (project.role === 'member') return '  member';
+    return '';
+  }
+
+  private branchSuffix(
+    branch: { isProtected: boolean; hasAccess: boolean },
+    projectRole: MemberProject['role'],
+  ): string {
+    if (!branch.isProtected) return '';
+    // Only 'member'-role projects surface the granular grant status; admins
+    // always have access to every branch.
+    if (projectRole === 'project-admin') return ' (protected)';
+    return branch.hasAccess ? ' (protected)' : ' (protected, no access)';
   }
 
   renderTable(members: MemberDetail[], termWidth: number, termHeight: number): string {
@@ -242,27 +312,38 @@ export class InteractiveTable {
       allLines.push(this.renderMemberRow(member, isSelected, isExpanded, widths, showAdded, totalWidth, mi));
 
       if (isExpanded) {
-        // Find if cursor is on a project under this member
+        // Find if cursor is on a project or branch row under this member.
         let selectedProjOrigIdx: number | null = null;
+        let selectedBranchRef: { projectIndex: number; branchIndex: number } | null = null;
         const curNav = navItems[this.cursorIndex];
         if (curNav?.type === 'project' && curNav.memberIndex === mi) {
           selectedProjOrigIdx = curNav.projectIndex!;
-          // Find line index for this project, matching renderExpandedDetail output order
+        } else if (curNav?.type === 'branch' && curNav.memberIndex === mi) {
+          selectedBranchRef = { projectIndex: curNav.projectIndex!, branchIndex: curNav.branchIndex! };
+        }
+
+        if (selectedProjOrigIdx !== null || selectedBranchRef !== null) {
+          // Compute the visible-line offset that matches renderExpandedDetail's output.
           let lineOffset = 0;
           for (let pi = 0; pi < member.projects.length; pi++) {
             const proj = member.projects[pi];
-            if (pi === selectedProjOrigIdx) {
+            if (selectedProjOrigIdx === pi) {
               cursorLineIndex = allLines.length + lineOffset;
               break;
             }
             lineOffset++; // project line (both branched and branchless emit one line)
-            if (proj.branches.length > 0 && this.expandedProjects.has(`${mi}-${pi}`)) {
+            const pExpanded = proj.branches.length > 0 && this.expandedProjects.has(`${mi}-${pi}`);
+            if (selectedBranchRef !== null && selectedBranchRef.projectIndex === pi) {
+              cursorLineIndex = allLines.length + lineOffset + selectedBranchRef.branchIndex;
+              break;
+            }
+            if (pExpanded) {
               lineOffset += proj.branches.length;
             }
           }
         }
 
-        allLines.push(...this.renderExpandedDetail(member, mi, totalWidth, selectedProjOrigIdx));
+        allLines.push(...this.renderExpandedDetail(member, mi, totalWidth, selectedProjOrigIdx, selectedBranchRef));
       }
     }
 
@@ -302,11 +383,11 @@ export class InteractiveTable {
     output.push('');
     let footer: string;
     if (this.projectPicker) {
-      footer = `${DIM}↑↓ pick project  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
-    } else if (this.editingMemberIndex !== null) {
+      footer = `${DIM}↑↓ navigate  ${RESET}${BOLD_WHITE}Space${RESET}${DIM} select  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
+    } else if (this.editingMemberIndex !== null || this.editingProjectRef !== null) {
       footer = `${DIM}↑↓ pick role  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
     } else {
-      footer = `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
+      footer = `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}g${RESET}${DIM} grant protected  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
     }
     output.push(`${m} ${footer}`);
     if (this.statusMessage) {
@@ -319,9 +400,11 @@ export class InteractiveTable {
       output.push(`${m}${this.projectPicker.prompt}`);
       for (let i = 0; i < this.projectPicker.projects.length; i++) {
         const p = this.projectPicker.projects[i];
-        const selected = i === this.projectPicker.cursor;
-        const line = `${m}  ${selected ? '▸' : ' '} ${p.name}`;
-        output.push(selected ? `${INVERSE}${this.padToWidth(line, totalWidth)}${RESET}` : line);
+        const atCursor = i === this.projectPicker.cursor;
+        const checked = this.projectPicker.selected.has(p.id);
+        const mark = checked ? '[x]' : '[ ]';
+        const line = `${m}  ${mark} ${p.name}`;
+        output.push(atCursor ? `${INVERSE}${this.padToWidth(line, totalWidth)}${RESET}` : line);
       }
     }
 
@@ -348,6 +431,8 @@ export class InteractiveTable {
     this.running = true;
     this.cleanedUp = false;
     this.editingMemberIndex = null;
+    this.editingProjectRef = null;
+    this.editingProjectRoleIndex = 0;
     this.statusMessage = null;
 
     return new Promise<void>((resolve) => {
@@ -405,6 +490,10 @@ export class InteractiveTable {
       this.handleEditorKey(key);
       return;
     }
+    if (this.editingProjectRef !== null) {
+      this.handleProjectEditorKey(key);
+      return;
+    }
 
     if (key === 'q' || key === 'Q') {
       this.cleanup();
@@ -432,35 +521,56 @@ export class InteractiveTable {
       return;
     }
 
-    // 'r' — enter role editor for selected member
+    // 'r' — enter role editor. Member row edits WorkOS role; project row
+    // (Flow C) edits the per-project membership role.
     if (key === 'r' || key === 'R') {
       const item = navItems[this.cursorIndex];
-      if (!item || item.type !== 'member') return;
-      if (!this.ctx) return;
-      const target = this.members[item.memberIndex];
-      const callerRole = this.ctx.callerRole;
-      if (!ASSIGNABLE_BY_CALLER[callerRole]) {
-        this.statusMessage = { text: 'You do not have permission to change roles', isError: true };
+      if (!item || !this.ctx) return;
+      if (item.type === 'member') {
+        const target = this.members[item.memberIndex];
+        const callerRole = this.ctx.callerRole;
+        if (!ASSIGNABLE_BY_CALLER[callerRole]) {
+          this.statusMessage = { text: 'You do not have permission to change roles', isError: true };
+          this.draw();
+          return;
+        }
+        if (target.role === 'owner') {
+          this.statusMessage = { text: "The owner's role cannot be changed", isError: true };
+          this.draw();
+          return;
+        }
+        if (this.assignableRoles(target.role).length === 0) {
+          this.statusMessage = {
+            text: `You cannot change ${target.email}'s role (${target.role})`,
+            isError: true,
+          };
+          this.draw();
+          return;
+        }
+        this.editingMemberIndex = item.memberIndex;
+        this.editingRoleIndex = this.roleIndexFor(target.role, this.assignableRoles(target.role));
+        this.statusMessage = null;
         this.draw();
         return;
       }
-      if (target.role === 'owner') {
-        this.statusMessage = { text: "The owner's role cannot be changed", isError: true };
+      if (item.type === 'project') {
+        const project = this.members[item.memberIndex].projects[item.projectIndex!];
+        this.editingProjectRef = { memberIndex: item.memberIndex, projectIndex: item.projectIndex! };
+        const currentIdx = PROJECT_ROLE_CHOICES.indexOf(
+          (project.role as 'project-admin' | 'member') ?? 'none',
+        );
+        this.editingProjectRoleIndex = currentIdx >= 0 ? currentIdx : 0;
+        this.statusMessage = null;
         this.draw();
         return;
       }
-      if (this.assignableRoles(target.role).length === 0) {
-        this.statusMessage = {
-          text: `You cannot change ${target.email}'s role (${target.role})`,
-          isError: true,
-        };
-        this.draw();
-        return;
-      }
-      this.editingMemberIndex = item.memberIndex;
-      this.editingRoleIndex = this.roleIndexFor(target.role, this.assignableRoles(target.role));
-      this.statusMessage = null;
-      this.draw();
+    }
+
+    // 'g' — toggle protected-branch grant on a branch row (Flow E).
+    if (key === 'g' || key === 'G') {
+      const item = navItems[this.cursorIndex];
+      if (!item || item.type !== 'branch' || !this.ctx) return;
+      void this.toggleBranchGrant(item.memberIndex, item.projectIndex!, item.branchIndex!);
       return;
     }
 
@@ -555,6 +665,18 @@ export class InteractiveTable {
       this.draw();
       return;
     }
+    if (key === ' ') {
+      const current = projects[this.projectPicker.cursor];
+      if (current) {
+        if (this.projectPicker.selected.has(current.id)) {
+          this.projectPicker.selected.delete(current.id);
+        } else {
+          this.projectPicker.selected.add(current.id);
+        }
+      }
+      this.draw();
+      return;
+    }
     if (key === ESC || key === `${ESC}\x1b`) {
       const { resolve } = this.projectPicker;
       this.projectPicker = null;
@@ -563,22 +685,31 @@ export class InteractiveTable {
       return;
     }
     if (key === '\r' || key === '\n') {
-      const { resolve, cursor } = this.projectPicker;
-      const chosen = projects[cursor]?.id ?? null;
+      const { resolve, selected } = this.projectPicker;
+      const chosen = Array.from(selected);
       this.projectPicker = null;
       resolve(chosen);
       this.draw();
     }
   }
 
-  private async pickProjectInline(prompt: string): Promise<string | null> {
+  private async pickProjectsInline(
+    prompt: string,
+    initialSelected: Set<string> = new Set(),
+  ): Promise<string[] | null> {
     if (!this.ctx) return null;
     const projects = await this.ctx.listProjects();
     if (projects.length === 0) {
       throw new Error('No projects exist in this organization — create one before assigning a scoped role.');
     }
-    return new Promise<string | null>((resolve) => {
-      this.projectPicker = { projects, cursor: 0, resolve, prompt };
+    return new Promise<string[] | null>((resolve) => {
+      this.projectPicker = {
+        projects,
+        cursor: 0,
+        selected: new Set(initialSelected),
+        resolve,
+        prompt,
+      };
       this.draw();
     });
   }
@@ -590,56 +721,226 @@ export class InteractiveTable {
     if (choices.length === 0) return;
     const newRole = choices[this.editingRoleIndex] as RoleValue;
     const isScoped = newRole === 'project-admin' || newRole === 'member';
-    const memberIdx = this.editingMemberIndex;
-
-    if (newRole === member.role) {
-      this.editingMemberIndex = null;
-      this.draw();
-      return;
-    }
 
     this.editingMemberIndex = null;
     this.statusMessage = { text: `Updating ${member.email}…`, isError: false };
     this.draw();
 
-    let projectId: string | undefined;
-    if (isScoped) {
-      // Always prompt: reusing member.projects[0] silently scopes the user to
-      // an arbitrary project, which the server rightly rejects when the
-      // current role is unscoped (admin/owner). Better to ask every time.
-      try {
-        const chosen = await this.pickProjectInline(`Assign ${newRole} on which project?`);
-        if (!chosen) {
-          this.statusMessage = { text: 'Cancelled', isError: false };
-          this.draw();
-          return;
-        }
-        projectId = chosen;
-      } catch (err: any) {
-        this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+    // Non-scoped role change (admin): single-shot.
+    if (!isScoped) {
+      if (newRole === member.role) {
+        this.statusMessage = null;
         this.draw();
         return;
       }
+      try {
+        await this.ctx.changeRole(member.userId, newRole);
+        await this.refreshAfterMutation(member.userId);
+        this.statusMessage = { text: `${member.email} → ${newRole}`, isError: false };
+      } catch (err: any) {
+        this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+      }
+      this.draw();
+      return;
     }
 
+    // Scoped role change: multi-select picker. Pre-check projects already at
+    // this target role for this user.
+    const existingAtTarget = new Set(
+      member.projects
+        .filter((p) => p.role === newRole)
+        .map((p) => p.id),
+    );
+
+    let chosen: string[] | null;
     try {
-      await this.ctx.changeRole(member.userId, newRole, projectId);
-      const refreshed = await this.ctx.reload();
-      this.members = refreshed;
-      this.statusMessage = { text: `${member.email} → ${newRole}`, isError: false };
-      // Try to keep cursor on the same member if they still exist
-      const newIdx = refreshed.findIndex((m) => m.userId === member.userId);
-      if (newIdx >= 0) {
-        const navItems = this.buildNavItems();
-        const navPos = navItems.findIndex((n) => n.type === 'member' && n.memberIndex === newIdx);
-        if (navPos >= 0) this.cursorIndex = navPos;
-      } else {
-        this.cursorIndex = Math.min(this.cursorIndex, this.buildNavItems().length - 1);
+      chosen = await this.pickProjectsInline(
+        `Assign ${newRole} on which projects?`,
+        existingAtTarget,
+      );
+    } catch (err: any) {
+      this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+      this.draw();
+      return;
+    }
+    if (!chosen) {
+      this.statusMessage = { text: 'Cancelled', isError: false };
+      this.draw();
+      return;
+    }
+
+    const chosenSet = new Set(chosen);
+    const toAdd = chosen.filter((pid) => !existingAtTarget.has(pid));
+    const toRemove = Array.from(existingAtTarget).filter((pid) => !chosenSet.has(pid));
+
+    if (toAdd.length === 0 && toRemove.length === 0 && newRole === member.role) {
+      this.statusMessage = null;
+      this.draw();
+      return;
+    }
+
+    // If the user's current role is not the target scoped role (e.g. admin →
+    // member), or there are no existing memberships, we have to call changeRole
+    // at least once to flip the WorkOS role. Pair it with the first add if we
+    // have one; otherwise drop through and just call changeRole with the first
+    // remaining project (if any).
+    const errors: string[] = [];
+    let successCount = 0;
+    const workosRoleNeedsFlip = member.role !== newRole;
+
+    try {
+      if (workosRoleNeedsFlip) {
+        const firstProject = toAdd.shift() ?? Array.from(chosenSet)[0];
+        if (!firstProject) {
+          throw new Error('Pick at least one project');
+        }
+        await this.ctx.changeRole(member.userId, newRole, firstProject);
+        successCount++;
       }
+    } catch (err: any) {
+      errors.push(err.message || String(err));
+    }
+
+    for (const pid of toAdd) {
+      try {
+        await this.ctx.assignProjectRole(pid, member.email, newRole);
+        successCount++;
+      } catch (err: any) {
+        errors.push(err.message || String(err));
+      }
+    }
+
+    for (const pid of toRemove) {
+      try {
+        await this.ctx.removeProjectRole(pid, member.userId);
+        successCount++;
+      } catch (err: any) {
+        errors.push(err.message || String(err));
+      }
+    }
+
+    await this.refreshAfterMutation(member.userId);
+
+    if (errors.length === 0) {
+      const total = successCount;
+      this.statusMessage = { text: `Updated ${total} project${total === 1 ? '' : 's'} for ${member.email}`, isError: false };
+    } else if (successCount === 0) {
+      this.statusMessage = { text: `Error: ${errors[errors.length - 1]}`, isError: true };
+    } else {
+      this.statusMessage = {
+        text: `${errors.length} of ${successCount + errors.length} updates failed: ${errors[errors.length - 1]}`,
+        isError: true,
+      };
+    }
+    this.draw();
+  }
+
+  private handleProjectEditorKey(key: string): void {
+    if (this.editingProjectRef === null) return;
+    if (key === `${ESC}[A`) {
+      this.editingProjectRoleIndex =
+        (this.editingProjectRoleIndex - 1 + PROJECT_ROLE_CHOICES.length) % PROJECT_ROLE_CHOICES.length;
+      this.draw();
+      return;
+    }
+    if (key === `${ESC}[B`) {
+      this.editingProjectRoleIndex = (this.editingProjectRoleIndex + 1) % PROJECT_ROLE_CHOICES.length;
+      this.draw();
+      return;
+    }
+    if (key === ESC || key === `${ESC}\x1b`) {
+      this.editingProjectRef = null;
+      this.draw();
+      return;
+    }
+    if (key === '\r' || key === '\n') {
+      void this.commitProjectRoleChange();
+    }
+  }
+
+  private async commitProjectRoleChange(): Promise<void> {
+    if (this.editingProjectRef === null || !this.ctx) return;
+    const { memberIndex, projectIndex } = this.editingProjectRef;
+    const member = this.members[memberIndex];
+    const project = member.projects[projectIndex];
+    const newChoice = PROJECT_ROLE_CHOICES[this.editingProjectRoleIndex];
+
+    this.editingProjectRef = null;
+    this.statusMessage = { text: `Updating ${member.email} on ${project.name}…`, isError: false };
+    this.draw();
+
+    try {
+      if (newChoice === 'none') {
+        await this.ctx.removeProjectRole(project.id, member.userId);
+      } else if (newChoice === project.role) {
+        // No-op: keep current role.
+      } else {
+        await this.ctx.assignProjectRole(project.id, member.email, newChoice);
+      }
+      await this.refreshAfterMutation(member.userId);
+      this.statusMessage = {
+        text: `${member.email} on ${project.name} → ${newChoice}`,
+        isError: false,
+      };
     } catch (err: any) {
       this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
     }
     this.draw();
+  }
+
+  private async toggleBranchGrant(
+    memberIndex: number,
+    projectIndex: number,
+    branchIndex: number,
+  ): Promise<void> {
+    if (!this.ctx) return;
+    const member = this.members[memberIndex];
+    const project = member.projects[projectIndex];
+    const branch = project.branches[branchIndex];
+    if (project.role !== 'member' || !branch.isProtected) {
+      return; // silent no-op
+    }
+    // Branch id is not in the client payload; derive via project+branch name:
+    // the server endpoint takes branch id, which we don't have on the client
+    // today. MemberDetail.projects[].branches only carries name. We need to
+    // look up the branch id via a service call.
+    this.statusMessage = {
+      text: branch.hasAccess
+        ? `Revoking ${member.email} from ${project.name}/${branch.name}…`
+        : `Granting ${member.email} on ${project.name}/${branch.name}…`,
+      isError: false,
+    };
+    this.draw();
+
+    try {
+      if (branch.hasAccess) {
+        await this.ctx.revokeProtectedBranch(project.id, branch.id, member.userId);
+      } else {
+        await this.ctx.grantProtectedBranch(project.id, branch.id, member.userId);
+      }
+      await this.refreshAfterMutation(member.userId);
+      this.statusMessage = {
+        text: `${member.email}: ${project.name}/${branch.name} ${branch.hasAccess ? 'revoked' : 'granted'}`,
+        isError: false,
+      };
+    } catch (err: any) {
+      this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+    }
+    this.draw();
+  }
+
+  private async refreshAfterMutation(userId: string): Promise<void> {
+    if (!this.ctx) return;
+    const refreshed = await this.ctx.reload();
+    this.members = refreshed;
+    const newIdx = refreshed.findIndex((m) => m.userId === userId);
+    if (newIdx >= 0) {
+      const navItems = this.buildNavItems();
+      const navPos = navItems.findIndex((n) => n.type === 'member' && n.memberIndex === newIdx);
+      if (navPos >= 0) this.cursorIndex = navPos;
+    } else {
+      this.cursorIndex = Math.min(this.cursorIndex, this.buildNavItems().length - 1);
+    }
   }
 
   private cleanup(): void {

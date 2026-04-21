@@ -16,6 +16,20 @@ import { deriveResourceId } from '../crypto/resourceId';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+export interface MemberProjectBranch {
+  id: string;
+  name: string;
+  isProtected: boolean;
+  hasAccess: boolean;
+}
+
+export interface MemberProject {
+  id: string;
+  name: string;
+  role?: 'project-admin' | 'member';
+  branches: MemberProjectBranch[];
+}
+
 export interface MemberDetail {
   membershipId: string;
   userId: string;
@@ -23,11 +37,7 @@ export interface MemberDetail {
   role: string;
   status: string;
   createdAt: string;
-  projects: Array<{
-    id: string;
-    name: string;
-    branches: string[];
-  }>;
+  projects: MemberProject[];
 }
 
 export class ServiceClient {
@@ -394,6 +404,14 @@ export class ServiceClient {
 
   async kickFromProject(orgId: string, projectId: string, userId: string): Promise<void> {
     await this.request('DELETE', `/orgs/${orgId}/projects/${projectId}/members/${encodeURIComponent(userId)}`);
+  }
+
+  async grantProtectedBranch(orgId: string, projectId: string, branchId: string, userId: string): Promise<void> {
+    await this.request('POST', `/orgs/${orgId}/projects/${projectId}/branches/${branchId}/grants`, { user_id: userId });
+  }
+
+  async revokeProtectedBranch(orgId: string, projectId: string, branchId: string, userId: string): Promise<void> {
+    await this.request('DELETE', `/orgs/${orgId}/projects/${projectId}/branches/${branchId}/grants/${encodeURIComponent(userId)}`);
   }
 
   async changeRole(orgId: string, userId: string, role: string, projectId?: string): Promise<{ user_id: string; role: string; project_id: string | null }> {

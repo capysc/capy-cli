@@ -73,6 +73,18 @@ export class UsersCommand {
         changeRole: async (userId, newRole, projectId) => {
           await serviceClient.changeRole(orgId, userId, newRole, projectId);
         },
+        assignProjectRole: async (projectId, email, role) => {
+          await serviceClient.inviteToProject(orgId, projectId, email, role);
+        },
+        removeProjectRole: async (projectId, userId) => {
+          await serviceClient.kickFromProject(orgId, projectId, userId);
+        },
+        grantProtectedBranch: async (projectId, branchId, userId) => {
+          await serviceClient.grantProtectedBranch(orgId, projectId, branchId, userId);
+        },
+        revokeProtectedBranch: async (projectId, branchId, userId) => {
+          await serviceClient.revokeProtectedBranch(orgId, projectId, branchId, userId);
+        },
         reload: async () => {
           const result = await serviceClient.listMemberDetails(orgId);
           return result.members;
