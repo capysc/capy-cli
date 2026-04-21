@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # `capy run` tests spawn `node dist/index.js` as a subprocess — build
+      # the dist artifact before the test step so those 14 tests can find it.
+      - name: Build
+        run: bun run build
+
+      - name: Test
+        run: bun run test
