@@ -17,7 +17,6 @@ const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
 
 const ROLE_CHOICES = [
-  { label: 'owner', value: 'owner' },
   { label: 'admin', value: 'admin' },
   { label: 'project-admin', value: 'project-admin' },
   { label: 'member', value: 'member' },
@@ -25,7 +24,16 @@ const ROLE_CHOICES = [
 
 type RoleValue = typeof ROLE_CHOICES[number]['value'];
 
+// Which target roles each caller role may assign. Owner is never assignable
+// here (single-owner invariant); the server enforces the same matrix.
+const ASSIGNABLE_BY_CALLER: Record<string, ReadonlyArray<RoleValue>> = {
+  owner: ['admin', 'project-admin', 'member'],
+  admin: ['admin', 'project-admin', 'member'],
+  'project-admin': ['project-admin', 'member'],
+};
+
 export interface TableContext {
+  callerRole: string;
   changeRole: (userId: string, newRole: RoleValue, projectId?: string) => Promise<void>;
   pickProject: (prompt: string) => Promise<string | null>;
   reload: () => Promise<MemberDetail[]>;
@@ -126,7 +134,8 @@ export class InteractiveTable {
     let row = this.pad(email, widths[0]);
 
     if (isEditing) {
-      const editingRole = ROLE_CHOICES[this.editingRoleIndex].value;
+      const choices = this.assignableRoles();
+      const editingRole = choices[this.editingRoleIndex] ?? member.role;
       row += GAP + INVERSE + this.pad(`◆ ${editingRole}`, widths[1]) + RESET;
     } else if (isGreenRole) {
       row += '  ' + GREEN + ' ' + this.pad(member.role, widths[1]) + RESET;
@@ -393,8 +402,19 @@ export class InteractiveTable {
       const item = navItems[this.cursorIndex];
       if (!item || item.type !== 'member') return;
       if (!this.ctx) return;
+      if (this.assignableRoles().length === 0) {
+        this.statusMessage = { text: 'You do not have permission to change roles', isError: true };
+        this.draw();
+        return;
+      }
+      const target = this.members[item.memberIndex];
+      if (target.role === 'owner') {
+        this.statusMessage = { text: "The owner's role cannot be changed", isError: true };
+        this.draw();
+        return;
+      }
       this.editingMemberIndex = item.memberIndex;
-      this.editingRoleIndex = this.roleIndexFor(this.members[item.memberIndex].role);
+      this.editingRoleIndex = this.roleIndexFor(target.role);
       this.statusMessage = null;
       this.draw();
       return;
@@ -435,19 +455,27 @@ export class InteractiveTable {
     }
   }
 
+  private assignableRoles(): ReadonlyArray<RoleValue> {
+    const callerRole = this.ctx?.callerRole ?? '';
+    return ASSIGNABLE_BY_CALLER[callerRole] ?? [];
+  }
+
   private roleIndexFor(role: string): number {
-    const idx = ROLE_CHOICES.findIndex((c) => c.value === role);
+    const choices = this.assignableRoles();
+    const idx = choices.indexOf(role as RoleValue);
     return idx >= 0 ? idx : 0;
   }
 
   private handleEditorKey(key: string): void {
+    const choices = this.assignableRoles();
+    if (choices.length === 0) return;
     if (key === `${ESC}[A`) {
-      this.editingRoleIndex = (this.editingRoleIndex - 1 + ROLE_CHOICES.length) % ROLE_CHOICES.length;
+      this.editingRoleIndex = (this.editingRoleIndex - 1 + choices.length) % choices.length;
       this.draw();
       return;
     }
     if (key === `${ESC}[B`) {
-      this.editingRoleIndex = (this.editingRoleIndex + 1) % ROLE_CHOICES.length;
+      this.editingRoleIndex = (this.editingRoleIndex + 1) % choices.length;
       this.draw();
       return;
     }
@@ -465,7 +493,9 @@ export class InteractiveTable {
   private async commitRoleChange(): Promise<void> {
     if (this.editingMemberIndex === null || !this.ctx) return;
     const member = this.members[this.editingMemberIndex];
-    const newRole = ROLE_CHOICES[this.editingRoleIndex].value as RoleValue;
+    const choices = this.assignableRoles();
+    if (choices.length === 0) return;
+    const newRole = choices[this.editingRoleIndex] as RoleValue;
     const isScoped = newRole === 'project-admin' || newRole === 'member';
     const memberIdx = this.editingMemberIndex;
 

@@ -42,9 +42,14 @@ export class UsersCommand {
     const spinner = new Spinner('Loading members...');
     spinner.start();
     let members;
+    let callerRole = '';
     try {
-      const result = await serviceClient.listMemberDetails(orgId);
+      const [result, me] = await Promise.all([
+        serviceClient.listMemberDetails(orgId),
+        serviceClient.getOrgMe(orgId),
+      ]);
       members = result.members;
+      callerRole = me.role;
       spinner.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
     } catch (err: any) {
       spinner.fail('Failed to load members');
@@ -61,6 +66,7 @@ export class UsersCommand {
     const table = new InteractiveTable();
     if (process.stdin.isTTY) {
       await table.run(members, {
+        callerRole,
         changeRole: async (userId, newRole, projectId) => {
           await serviceClient.changeRole(orgId, userId, newRole, projectId);
         },
