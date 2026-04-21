@@ -378,4 +378,465 @@ describe('InteractiveTable', () => {
       expect(plain).toContain('alice@acme.com');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Keyboard-driven mutations
+  //
+  // Drive the private handlers with synthetic key buffers + a fully-mocked
+  // TableContext. `draw()` is stubbed so there's no stdout noise; every
+  // mutation is asserted by inspecting the recorded ctx calls and the
+  // internal editing/picker state.
+  // ---------------------------------------------------------------------------
+  describe('keyboard-driven mutations', () => {
+    const ESC = '\x1b';
+    const ARROW_UP = `${ESC}[A`;
+    const ARROW_DOWN = `${ESC}[B`;
+    const ENTER = '\r';
+
+    interface CtxCalls {
+      changeRole: Array<{ userId: string; role: string; projectId?: string }>;
+      assignProjectRole: Array<{ projectId: string; email: string; role: string }>;
+      removeProjectRole: Array<{ projectId: string; userId: string }>;
+      grantProtectedBranch: Array<{ projectId: string; branchId: string; userId: string }>;
+      revokeProtectedBranch: Array<{ projectId: string; branchId: string; userId: string }>;
+      reloadCount: number;
+      listProjectsCount: number;
+    }
+
+    function makeTable(callerRole = 'owner', members: MemberDetail[] = MEMBERS, projects: Array<{ id: string; name: string }> = []) {
+      const calls: CtxCalls = {
+        changeRole: [],
+        assignProjectRole: [],
+        removeProjectRole: [],
+        grantProtectedBranch: [],
+        revokeProtectedBranch: [],
+        reloadCount: 0,
+        listProjectsCount: 0,
+      };
+      const t = new InteractiveTable();
+      const ctx = {
+        callerRole,
+        listProjects: async () => { calls.listProjectsCount++; return projects; },
+        changeRole: async (userId: string, role: string, projectId?: string) => {
+          calls.changeRole.push({ userId, role, projectId });
+        },
+        reload: async () => { calls.reloadCount++; return members; },
+        assignProjectRole: async (projectId: string, email: string, role: 'project-admin' | 'member') => {
+          calls.assignProjectRole.push({ projectId, email, role });
+        },
+        removeProjectRole: async (projectId: string, userId: string) => {
+          calls.removeProjectRole.push({ projectId, userId });
+        },
+        grantProtectedBranch: async (projectId: string, branchId: string, userId: string) => {
+          calls.grantProtectedBranch.push({ projectId, branchId, userId });
+        },
+        revokeProtectedBranch: async (projectId: string, branchId: string, userId: string) => {
+          calls.revokeProtectedBranch.push({ projectId, branchId, userId });
+        },
+      };
+      (t as any).members = members;
+      (t as any).ctx = ctx;
+      (t as any).draw = () => {}; // suppress stdout writes
+      return { table: t, ctx, calls };
+    }
+
+    function press(t: InteractiveTable, key: string) {
+      (t as any).handleKeypress(Buffer.from(key), () => {});
+    }
+
+    // -------------------------------------------------------------------------
+    // `r` on member row
+    // -------------------------------------------------------------------------
+    describe('r on member row', () => {
+      it('enters edit mode when caller is owner and target is a non-owner', () => {
+        const { table } = makeTable('owner');
+        (table as any).cursorIndex = 1; // bob (member)
+        press(table, 'r');
+        expect((table as any).editingMemberIndex).toBe(1);
+      });
+
+      it('refuses to edit the owner', () => {
+        const { table } = makeTable('owner');
+        (table as any).cursorIndex = 0; // alice (owner)
+        press(table, 'r');
+        expect((table as any).editingMemberIndex).toBeNull();
+        expect((table as any).statusMessage?.isError).toBe(true);
+        expect((table as any).statusMessage?.text).toMatch(/owner/i);
+      });
+
+      it('refuses when caller lacks role permissions', () => {
+        const { table } = makeTable('member');
+        (table as any).cursorIndex = 1;
+        press(table, 'r');
+        expect((table as any).editingMemberIndex).toBeNull();
+        expect((table as any).statusMessage?.isError).toBe(true);
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // Arrow keys while editing a member row
+    // -------------------------------------------------------------------------
+    describe('arrow keys during member role edit', () => {
+      it('cycle editingRoleIndex down and up', () => {
+        const { table } = makeTable('owner');
+        (table as any).cursorIndex = 1;
+        press(table, 'r');
+        const initial = (table as any).editingRoleIndex;
+        press(table, ARROW_DOWN);
+        expect((table as any).editingRoleIndex).not.toBe(initial);
+        press(table, ARROW_UP);
+        expect((table as any).editingRoleIndex).toBe(initial);
+      });
+
+      it('Esc cancels and clears editingMemberIndex', () => {
+        const { table } = makeTable('owner');
+        (table as any).cursorIndex = 1;
+        press(table, 'r');
+        expect((table as any).editingMemberIndex).toBe(1);
+        press(table, ESC);
+        expect((table as any).editingMemberIndex).toBeNull();
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // commitRoleChange fan-out
+    // -------------------------------------------------------------------------
+    describe('commitRoleChange', () => {
+      it('promoting member → admin calls changeRole with no project_id and no fan-out', async () => {
+        const { table, calls } = makeTable('owner');
+        (table as any).editingMemberIndex = 1; // bob (member)
+        // Position the editor on 'admin'.
+        const assignable: string[] = (table as any).assignableRoles('member');
+        (table as any).editingRoleIndex = assignable.indexOf('admin');
+
+        await (table as any).commitRoleChange();
+
+        expect(calls.changeRole).toHaveLength(1);
+        expect(calls.changeRole[0]).toEqual({
+          userId: 'user-2',
+          role: 'admin',
+          projectId: undefined,
+        });
+        expect(calls.assignProjectRole).toHaveLength(0);
+        expect(calls.removeProjectRole).toHaveLength(0);
+        expect(calls.reloadCount).toBe(1);
+      });
+
+      it('cycling admin→member pre-checks no projects, opens multi-select, adds the chosen projects', async () => {
+        const adminWithNone = {
+          ...MEMBERS[2],
+          projects: [], // admin → no scoped memberships
+        };
+        const projects = [
+          { id: 'pA', name: 'api-backend' },
+          { id: 'pB', name: 'web-frontend' },
+        ];
+        const { table, calls } = makeTable('owner', [MEMBERS[0], MEMBERS[1], adminWithNone], projects);
+        (table as any).editingMemberIndex = 2;
+        const assignable: string[] = (table as any).assignableRoles('admin');
+        (table as any).editingRoleIndex = assignable.indexOf('member');
+
+        // commitRoleChange will open the picker — resolve it synchronously
+        // with the user's desired selection.
+        setTimeout(() => {
+          const pp = (table as any).projectPicker;
+          if (pp) {
+            pp.selected = new Set(['pA', 'pB']);
+            pp.resolve(Array.from(pp.selected));
+            (table as any).projectPicker = null;
+          }
+        }, 0);
+
+        await (table as any).commitRoleChange();
+
+        // First-project is folded into the WorkOS role flip; the remainder is
+        // fanned out via assignProjectRole.
+        expect(calls.changeRole).toHaveLength(1);
+        expect(calls.changeRole[0].role).toBe('member');
+        expect(typeof calls.changeRole[0].projectId).toBe('string');
+        expect(['pA', 'pB']).toContain(calls.changeRole[0].projectId);
+
+        expect(calls.assignProjectRole).toHaveLength(1);
+        expect(['pA', 'pB']).toContain(calls.assignProjectRole[0].projectId);
+        expect(calls.assignProjectRole[0].role).toBe('member');
+        expect(calls.removeProjectRole).toHaveLength(0);
+      });
+
+      it('re-picking same scoped role with existing memberships diffs selection — adds new, removes deselected', async () => {
+        // bob is currently member of proj-1 (per MEMBERS[1]).
+        const bobWithExisting = {
+          ...MEMBERS[1],
+          projects: [
+            { id: 'p-current', name: 'current', role: 'member' as const, branches: [] },
+          ],
+        };
+        const projects = [
+          { id: 'p-current', name: 'current' },
+          { id: 'p-new', name: 'new' },
+        ];
+        const { table, calls } = makeTable('owner', [MEMBERS[0], bobWithExisting, MEMBERS[2]], projects);
+        (table as any).editingMemberIndex = 1;
+        const assignable: string[] = (table as any).assignableRoles('member');
+        (table as any).editingRoleIndex = assignable.indexOf('member');
+
+        setTimeout(() => {
+          const pp = (table as any).projectPicker;
+          if (pp) {
+            // Pre-checked p-current — user unchecks it, checks p-new.
+            pp.selected = new Set(['p-new']);
+            pp.resolve(Array.from(pp.selected));
+            (table as any).projectPicker = null;
+          }
+        }, 0);
+
+        await (table as any).commitRoleChange();
+
+        // No WorkOS role flip needed (already member), so no changeRole call.
+        expect(calls.changeRole).toHaveLength(0);
+        expect(calls.assignProjectRole).toEqual([
+          { projectId: 'p-new', email: bobWithExisting.email, role: 'member' },
+        ]);
+        expect(calls.removeProjectRole).toEqual([
+          { projectId: 'p-current', userId: bobWithExisting.userId },
+        ]);
+      });
+
+      it('cancelling the picker leaves state untouched and sets a Cancelled status', async () => {
+        const adminWithNone = { ...MEMBERS[2], projects: [] };
+        const projects = [{ id: 'pA', name: 'api-backend' }];
+        const { table, calls } = makeTable('owner', [MEMBERS[0], MEMBERS[1], adminWithNone], projects);
+        (table as any).editingMemberIndex = 2;
+        const assignable: string[] = (table as any).assignableRoles('admin');
+        (table as any).editingRoleIndex = assignable.indexOf('member');
+
+        setTimeout(() => {
+          const pp = (table as any).projectPicker;
+          if (pp) {
+            pp.resolve(null);
+            (table as any).projectPicker = null;
+          }
+        }, 0);
+
+        await (table as any).commitRoleChange();
+
+        expect(calls.changeRole).toHaveLength(0);
+        expect(calls.assignProjectRole).toHaveLength(0);
+        expect(calls.removeProjectRole).toHaveLength(0);
+        expect((table as any).statusMessage?.text).toMatch(/Cancelled/i);
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // `r` on an expanded project row (Flow C)
+    // -------------------------------------------------------------------------
+    describe('r on project row (Flow C)', () => {
+      it('enters project edit state preselecting current role', () => {
+        const { table } = makeTable('owner');
+        (table as any).expandedMembers.add(1); // bob
+        (table as any).cursorIndex = 2; // project row under bob
+
+        // Give bob a known per-project role.
+        const m = (table as any).members[1];
+        m.projects[0].role = 'member';
+
+        press(table, 'r');
+        const ref = (table as any).editingProjectRef;
+        expect(ref).toEqual({ memberIndex: 1, projectIndex: 0 });
+        // PROJECT_ROLE_CHOICES = ['project-admin', 'member', 'none']
+        expect((table as any).editingProjectRoleIndex).toBe(1);
+      });
+
+      it('commit with "none" calls removeProjectRole', async () => {
+        const { table, calls } = makeTable('owner');
+        (table as any).editingProjectRef = { memberIndex: 1, projectIndex: 0 };
+        (table as any).editingProjectRoleIndex = 2; // none
+
+        await (table as any).commitProjectRoleChange();
+
+        expect(calls.removeProjectRole).toEqual([
+          { projectId: 'proj-1', userId: 'user-2' },
+        ]);
+        expect(calls.assignProjectRole).toHaveLength(0);
+      });
+
+      it('commit with "project-admin" calls assignProjectRole with admin', async () => {
+        const { table, calls } = makeTable('owner');
+        (table as any).editingProjectRef = { memberIndex: 1, projectIndex: 0 };
+        (table as any).editingProjectRoleIndex = 0; // project-admin
+
+        await (table as any).commitProjectRoleChange();
+
+        expect(calls.assignProjectRole).toEqual([
+          { projectId: 'proj-1', email: 'bob@acme.com', role: 'project-admin' },
+        ]);
+        expect(calls.removeProjectRole).toHaveLength(0);
+      });
+
+      it('commit with the unchanged role is a no-op (no ctx call)', async () => {
+        const { table, calls } = makeTable('owner');
+        const m = (table as any).members[1];
+        m.projects[0].role = 'member';
+        (table as any).editingProjectRef = { memberIndex: 1, projectIndex: 0 };
+        (table as any).editingProjectRoleIndex = 1; // member — same as current
+
+        await (table as any).commitProjectRoleChange();
+
+        expect(calls.assignProjectRole).toHaveLength(0);
+        expect(calls.removeProjectRole).toHaveLength(0);
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // Multi-select project picker key handling
+    // -------------------------------------------------------------------------
+    describe('multi-select picker key handling', () => {
+      function openPicker(table: InteractiveTable, initial: Set<string> = new Set()) {
+        let resolvedWith: string[] | null | undefined = undefined;
+        (table as any).projectPicker = {
+          projects: [
+            { id: 'p1', name: 'alpha' },
+            { id: 'p2', name: 'beta' },
+            { id: 'p3', name: 'gamma' },
+          ],
+          cursor: 0,
+          selected: initial,
+          resolve: (v: string[] | null) => { resolvedWith = v; },
+          prompt: 'Pick',
+        };
+        return () => resolvedWith;
+      }
+
+      it('Space toggles selection on highlighted row', () => {
+        const { table } = makeTable('owner');
+        openPicker(table);
+        press(table, ' ');
+        expect((table as any).projectPicker.selected.has('p1')).toBe(true);
+        press(table, ' ');
+        expect((table as any).projectPicker.selected.has('p1')).toBe(false);
+      });
+
+      it('Arrow keys move the cursor', () => {
+        const { table } = makeTable('owner');
+        openPicker(table);
+        press(table, ARROW_DOWN);
+        expect((table as any).projectPicker.cursor).toBe(1);
+        press(table, ARROW_UP);
+        expect((table as any).projectPicker.cursor).toBe(0);
+      });
+
+      it('Enter resolves with the selected id array and closes the picker', () => {
+        const { table } = makeTable('owner');
+        const getResolved = openPicker(table, new Set(['p2']));
+        press(table, ARROW_DOWN); // cursor→p2
+        press(table, ' ');        // toggle p2 off
+        press(table, ARROW_DOWN); // cursor→p3
+        press(table, ' ');        // add p3
+        press(table, ENTER);
+        expect((table as any).projectPicker).toBeNull();
+        expect(getResolved()).toEqual(['p3']);
+      });
+
+      it('Esc resolves with null', () => {
+        const { table } = makeTable('owner');
+        const getResolved = openPicker(table, new Set(['p1', 'p2']));
+        press(table, ESC);
+        expect((table as any).projectPicker).toBeNull();
+        expect(getResolved()).toBeNull();
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // `g` on a branch row (Flow E)
+    // -------------------------------------------------------------------------
+    describe('g on protected branch row (Flow E)', () => {
+      function memberWithBranches(): MemberDetail {
+        return {
+          membershipId: 'mem-bob',
+          userId: 'user-bob',
+          email: 'bob@acme.com',
+          role: 'member',
+          status: 'active',
+          createdAt: '2025-02-01T00:00:00Z',
+          projects: [
+            {
+              id: 'proj-1',
+              name: 'backend',
+              role: 'member',
+              branches: [
+                { id: 'b-main', name: 'main', isProtected: false, hasAccess: true },
+                { id: 'b-prod', name: 'prod', isProtected: true, hasAccess: false },
+                { id: 'b-rel', name: 'release', isProtected: true, hasAccess: true },
+              ],
+            },
+          ],
+        };
+      }
+
+      it('grants access when branch is protected + denied', async () => {
+        const { table, calls } = makeTable('owner', [memberWithBranches()]);
+        // Expand project so branch rows are navigable.
+        (table as any).expandedMembers.add(0);
+        (table as any).expandedProjects.add('0-0');
+        // Navigate to the denied prod branch.
+        const nav = (table as any).buildNavItems();
+        const idx = nav.findIndex((n: any) => n.type === 'branch' && n.branchIndex === 1);
+        (table as any).cursorIndex = idx;
+
+        press(table, 'g');
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(calls.grantProtectedBranch).toEqual([
+          { projectId: 'proj-1', branchId: 'b-prod', userId: 'user-bob' },
+        ]);
+        expect(calls.revokeProtectedBranch).toHaveLength(0);
+      });
+
+      it('revokes when branch is protected + granted', async () => {
+        const { table, calls } = makeTable('owner', [memberWithBranches()]);
+        (table as any).expandedMembers.add(0);
+        (table as any).expandedProjects.add('0-0');
+        const nav = (table as any).buildNavItems();
+        const idx = nav.findIndex((n: any) => n.type === 'branch' && n.branchIndex === 2);
+        (table as any).cursorIndex = idx;
+
+        press(table, 'g');
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(calls.revokeProtectedBranch).toEqual([
+          { projectId: 'proj-1', branchId: 'b-rel', userId: 'user-bob' },
+        ]);
+        expect(calls.grantProtectedBranch).toHaveLength(0);
+      });
+
+      it('is a no-op on a non-protected branch', async () => {
+        const { table, calls } = makeTable('owner', [memberWithBranches()]);
+        (table as any).expandedMembers.add(0);
+        (table as any).expandedProjects.add('0-0');
+        const nav = (table as any).buildNavItems();
+        const idx = nav.findIndex((n: any) => n.type === 'branch' && n.branchIndex === 0);
+        (table as any).cursorIndex = idx;
+
+        press(table, 'g');
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(calls.grantProtectedBranch).toHaveLength(0);
+        expect(calls.revokeProtectedBranch).toHaveLength(0);
+      });
+
+      it('is a no-op when the project role is project-admin (inherent access)', async () => {
+        const m = memberWithBranches();
+        m.projects[0].role = 'project-admin';
+        const { table, calls } = makeTable('owner', [m]);
+        (table as any).expandedMembers.add(0);
+        (table as any).expandedProjects.add('0-0');
+        // project-admin projects don't spawn branch nav items, so attempting
+        // to hit `g` on the project row itself is a no-op.
+        (table as any).cursorIndex = 1; // project row
+        press(table, 'g');
+        await new Promise((r) => setTimeout(r, 0));
+        expect(calls.grantProtectedBranch).toHaveLength(0);
+        expect(calls.revokeProtectedBranch).toHaveLength(0);
+      });
+    });
+  });
 });
