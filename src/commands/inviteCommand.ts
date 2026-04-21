@@ -15,6 +15,14 @@ const ROLES = [
   { name: 'Admin', value: 'admin' },
 ] as const;
 
+// Which roles a caller of a given role may invite. Owners are never invitable:
+// there is exactly one owner per org.
+const INVITABLE_BY_ROLE: Record<string, ReadonlyArray<typeof ROLES[number]['value']>> = {
+  owner: ['member', 'project-admin', 'admin'],
+  admin: ['member', 'project-admin', 'admin'],
+  'project-admin': ['member', 'project-admin'],
+};
+
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 export class InviteCommand {
@@ -34,6 +42,18 @@ export class InviteCommand {
       if (userEmail && userEmail.toLowerCase() === email.toLowerCase()) {
         console.log(`${email} is already a member of this organization.`);
         return;
+      }
+
+      // Determine caller's role to filter which roles they may grant.
+      const me = await serviceClient.getOrgMe(orgId);
+      const invitable = INVITABLE_BY_ROLE[me.role];
+      if (!invitable) {
+        console.error(`Your role (${me.role}) does not permit inviting users.`);
+        process.exit(1);
+      }
+      if (me.role === 'project-admin' && me.admin_projects.length === 0) {
+        console.error('You do not administer any projects in this organization.');
+        process.exit(1);
       }
 
 
@@ -68,12 +88,13 @@ export class InviteCommand {
         }
       }
 
-      // Prompt for role
+      // Prompt for role, filtered to what the caller may grant.
+      const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
       const { role } = await inquirer.prompt([{
         type: 'list',
         name: 'role',
         message: `Select a role for ${email}:`,
-        choices: ROLES,
+        choices: allowedChoices,
         default: 'member',
       }]);
 
