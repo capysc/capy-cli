@@ -1,4 +1,3 @@
-import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -42,9 +41,14 @@ export class UsersCommand {
     const spinner = new Spinner('Loading members...');
     spinner.start();
     let members;
+    let callerRole = '';
     try {
-      const result = await serviceClient.listMemberDetails(orgId);
+      const [result, me] = await Promise.all([
+        serviceClient.listMemberDetails(orgId),
+        serviceClient.getOrgMe(orgId),
+      ]);
       members = result.members;
+      callerRole = me.role;
       spinner.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
     } catch (err: any) {
       spinner.fail('Failed to load members');
@@ -61,19 +65,13 @@ export class UsersCommand {
     const table = new InteractiveTable();
     if (process.stdin.isTTY) {
       await table.run(members, {
+        callerRole,
+        listProjects: async () => {
+          const projects = await serviceClient.listProjects();
+          return projects.map((p) => ({ id: p.id, name: p.name }));
+        },
         changeRole: async (userId, newRole, projectId) => {
           await serviceClient.changeRole(orgId, userId, newRole, projectId);
-        },
-        pickProject: async (prompt: string) => {
-          const projects = await serviceClient.listProjects();
-          if (projects.length === 0) return null;
-          const { chosen } = await inquirer.prompt([{
-            type: 'list',
-            name: 'chosen',
-            message: prompt,
-            choices: projects.map((p) => ({ name: p.name, value: p.id })),
-          }]);
-          return chosen;
         },
         reload: async () => {
           const result = await serviceClient.listMemberDetails(orgId);

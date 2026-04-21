@@ -17,7 +17,6 @@ const YELLOW = `${ESC}[33m`;
 const RED = `${ESC}[31m`;
 
 const ROLE_CHOICES = [
-  { label: 'owner', value: 'owner' },
   { label: 'admin', value: 'admin' },
   { label: 'project-admin', value: 'project-admin' },
   { label: 'member', value: 'member' },
@@ -25,9 +24,23 @@ const ROLE_CHOICES = [
 
 type RoleValue = typeof ROLE_CHOICES[number]['value'];
 
+// Which target roles each caller role may assign. Owner is never assignable
+// here (single-owner invariant); the server enforces the same matrix.
+const ASSIGNABLE_BY_CALLER: Record<string, ReadonlyArray<RoleValue>> = {
+  owner: ['admin', 'project-admin', 'member'],
+  admin: ['admin', 'project-admin', 'member'],
+  'project-admin': ['project-admin', 'member'],
+};
+
+export interface ProjectChoice {
+  id: string;
+  name: string;
+}
+
 export interface TableContext {
+  callerRole: string;
+  listProjects: () => Promise<ProjectChoice[]>;
   changeRole: (userId: string, newRole: RoleValue, projectId?: string) => Promise<void>;
-  pickProject: (prompt: string) => Promise<string | null>;
   reload: () => Promise<MemberDetail[]>;
 }
 
@@ -68,6 +81,13 @@ export class InteractiveTable {
   private editingMemberIndex: number | null = null;
   private editingRoleIndex = 0;
   private statusMessage: { text: string; isError: boolean } | null = null;
+  // In-TUI project picker (avoids handing the terminal off to inquirer).
+  private projectPicker: {
+    projects: ProjectChoice[];
+    cursor: number;
+    resolve: (id: string | null) => void;
+    prompt: string;
+  } | null = null;
 
   computeColumnWidths(termWidth: number): { widths: number[]; showAdded: boolean } {
     const available = Math.min(termWidth, 130) - MARGIN * 2;
@@ -126,7 +146,8 @@ export class InteractiveTable {
     let row = this.pad(email, widths[0]);
 
     if (isEditing) {
-      const editingRole = ROLE_CHOICES[this.editingRoleIndex].value;
+      const choices = this.assignableRoles(member.role);
+      const editingRole = choices[this.editingRoleIndex] ?? member.role;
       row += GAP + INVERSE + this.pad(`◆ ${editingRole}`, widths[1]) + RESET;
     } else if (isGreenRole) {
       row += '  ' + GREEN + ' ' + this.pad(member.role, widths[1]) + RESET;
@@ -278,13 +299,29 @@ export class InteractiveTable {
     // Footer
     output.push(m + rule);
     output.push('');
-    const footer = this.editingMemberIndex !== null
-      ? `${DIM}↑↓ pick role  Enter confirm  Esc cancel${RESET}`
-      : `${DIM}↑↓ navigate  Enter expand/collapse  r change role  q quit${RESET}`;
+    let footer: string;
+    if (this.projectPicker) {
+      footer = `${DIM}↑↓ pick project  Enter confirm  Esc cancel${RESET}`;
+    } else if (this.editingMemberIndex !== null) {
+      footer = `${DIM}↑↓ pick role  Enter confirm  Esc cancel${RESET}`;
+    } else {
+      footer = `${DIM}↑↓ navigate  Enter expand/collapse  r change role  q quit${RESET}`;
+    }
     output.push(`${m} ${footer}`);
     if (this.statusMessage) {
       const color = this.statusMessage.isError ? RED : GREEN;
       output.push(`${m} ${color}${this.statusMessage.text}${RESET}`);
+    }
+
+    if (this.projectPicker) {
+      output.push('');
+      output.push(`${m}${this.projectPicker.prompt}`);
+      for (let i = 0; i < this.projectPicker.projects.length; i++) {
+        const p = this.projectPicker.projects[i];
+        const selected = i === this.projectPicker.cursor;
+        const line = `${m}  ${selected ? '▸' : ' '} ${p.name}`;
+        output.push(selected ? `${INVERSE}${this.padToWidth(line, totalWidth)}${RESET}` : line);
+      }
     }
 
     return output.map(line => line + CLEAR_EOL).join('\n');
@@ -356,7 +393,13 @@ export class InteractiveTable {
       return;
     }
 
-    // Role editor mode takes priority
+    // Project picker has highest priority — absorbs all keys while open.
+    if (this.projectPicker) {
+      this.handleProjectPickerKey(key);
+      return;
+    }
+
+    // Role editor mode takes priority over the table navigation.
     if (this.editingMemberIndex !== null) {
       this.handleEditorKey(key);
       return;
@@ -393,8 +436,28 @@ export class InteractiveTable {
       const item = navItems[this.cursorIndex];
       if (!item || item.type !== 'member') return;
       if (!this.ctx) return;
+      const target = this.members[item.memberIndex];
+      const callerRole = this.ctx.callerRole;
+      if (!ASSIGNABLE_BY_CALLER[callerRole]) {
+        this.statusMessage = { text: 'You do not have permission to change roles', isError: true };
+        this.draw();
+        return;
+      }
+      if (target.role === 'owner') {
+        this.statusMessage = { text: "The owner's role cannot be changed", isError: true };
+        this.draw();
+        return;
+      }
+      if (this.assignableRoles(target.role).length === 0) {
+        this.statusMessage = {
+          text: `You cannot change ${target.email}'s role (${target.role})`,
+          isError: true,
+        };
+        this.draw();
+        return;
+      }
       this.editingMemberIndex = item.memberIndex;
-      this.editingRoleIndex = this.roleIndexFor(this.members[item.memberIndex].role);
+      this.editingRoleIndex = this.roleIndexFor(target.role, this.assignableRoles(target.role));
       this.statusMessage = null;
       this.draw();
       return;
@@ -435,19 +498,35 @@ export class InteractiveTable {
     }
   }
 
-  private roleIndexFor(role: string): number {
-    const idx = ROLE_CHOICES.findIndex((c) => c.value === role);
+  private assignableRoles(targetRole?: string): ReadonlyArray<RoleValue> {
+    const callerRole = this.ctx?.callerRole ?? '';
+    const base = ASSIGNABLE_BY_CALLER[callerRole] ?? [];
+    if (!targetRole) return base;
+    // Project-admins cannot act on org-level admins or the owner.
+    if (callerRole === 'project-admin' && (targetRole === 'admin' || targetRole === 'owner')) {
+      return [];
+    }
+    // Nobody changes the owner via this endpoint (server enforces too).
+    if (targetRole === 'owner') return [];
+    return base;
+  }
+
+  private roleIndexFor(role: string, choices: ReadonlyArray<RoleValue>): number {
+    const idx = choices.indexOf(role as RoleValue);
     return idx >= 0 ? idx : 0;
   }
 
   private handleEditorKey(key: string): void {
+    const target = this.editingMemberIndex !== null ? this.members[this.editingMemberIndex] : null;
+    const choices = this.assignableRoles(target?.role);
+    if (choices.length === 0) return;
     if (key === `${ESC}[A`) {
-      this.editingRoleIndex = (this.editingRoleIndex - 1 + ROLE_CHOICES.length) % ROLE_CHOICES.length;
+      this.editingRoleIndex = (this.editingRoleIndex - 1 + choices.length) % choices.length;
       this.draw();
       return;
     }
     if (key === `${ESC}[B`) {
-      this.editingRoleIndex = (this.editingRoleIndex + 1) % ROLE_CHOICES.length;
+      this.editingRoleIndex = (this.editingRoleIndex + 1) % choices.length;
       this.draw();
       return;
     }
@@ -462,10 +541,53 @@ export class InteractiveTable {
     }
   }
 
+  private handleProjectPickerKey(key: string): void {
+    if (!this.projectPicker) return;
+    const { projects } = this.projectPicker;
+    if (key === `${ESC}[A`) {
+      this.projectPicker.cursor = (this.projectPicker.cursor - 1 + projects.length) % projects.length;
+      this.draw();
+      return;
+    }
+    if (key === `${ESC}[B`) {
+      this.projectPicker.cursor = (this.projectPicker.cursor + 1) % projects.length;
+      this.draw();
+      return;
+    }
+    if (key === ESC || key === `${ESC}\x1b`) {
+      const { resolve } = this.projectPicker;
+      this.projectPicker = null;
+      resolve(null);
+      this.draw();
+      return;
+    }
+    if (key === '\r' || key === '\n') {
+      const { resolve, cursor } = this.projectPicker;
+      const chosen = projects[cursor]?.id ?? null;
+      this.projectPicker = null;
+      resolve(chosen);
+      this.draw();
+    }
+  }
+
+  private async pickProjectInline(prompt: string): Promise<string | null> {
+    if (!this.ctx) return null;
+    const projects = await this.ctx.listProjects();
+    if (projects.length === 0) {
+      throw new Error('No projects exist in this organization — create one before assigning a scoped role.');
+    }
+    return new Promise<string | null>((resolve) => {
+      this.projectPicker = { projects, cursor: 0, resolve, prompt };
+      this.draw();
+    });
+  }
+
   private async commitRoleChange(): Promise<void> {
     if (this.editingMemberIndex === null || !this.ctx) return;
     const member = this.members[this.editingMemberIndex];
-    const newRole = ROLE_CHOICES[this.editingRoleIndex].value as RoleValue;
+    const choices = this.assignableRoles(member.role);
+    if (choices.length === 0) return;
+    const newRole = choices[this.editingRoleIndex] as RoleValue;
     const isScoped = newRole === 'project-admin' || newRole === 'member';
     const memberIdx = this.editingMemberIndex;
 
@@ -481,23 +603,21 @@ export class InteractiveTable {
 
     let projectId: string | undefined;
     if (isScoped) {
-      // Reuse member's existing first project if any; else prompt.
-      if (member.projects.length > 0 && member.role !== 'owner' && member.role !== 'admin') {
-        projectId = member.projects[0].id;
-      } else {
-        this.pauseForPrompt();
-        try {
-          const chosen = await this.ctx.pickProject(`Assign ${newRole} on which project?`);
-          if (!chosen) {
-            this.resumeAfterPrompt();
-            this.statusMessage = { text: 'Cancelled', isError: false };
-            this.draw();
-            return;
-          }
-          projectId = chosen;
-        } finally {
-          this.resumeAfterPrompt();
+      // Always prompt: reusing member.projects[0] silently scopes the user to
+      // an arbitrary project, which the server rightly rejects when the
+      // current role is unscoped (admin/owner). Better to ask every time.
+      try {
+        const chosen = await this.pickProjectInline(`Assign ${newRole} on which project?`);
+        if (!chosen) {
+          this.statusMessage = { text: 'Cancelled', isError: false };
+          this.draw();
+          return;
         }
+        projectId = chosen;
+      } catch (err: any) {
+        this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
+        this.draw();
+        return;
       }
     }
 
@@ -519,18 +639,6 @@ export class InteractiveTable {
       this.statusMessage = { text: `Error: ${err.message || err}`, isError: true };
     }
     this.draw();
-  }
-
-  private pauseForPrompt(): void {
-    process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
-    if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    if (this.onDataHandler) process.stdin.removeListener('data', this.onDataHandler);
-  }
-
-  private resumeAfterPrompt(): void {
-    process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
-    if (process.stdin.isTTY) process.stdin.setRawMode(true);
-    if (this.onDataHandler) process.stdin.on('data', this.onDataHandler);
   }
 
   private cleanup(): void {
