@@ -338,12 +338,12 @@ export class CapyCommand {
 
     if (existingProjects.length > 0) {
       const choices = [
+        { name: 'Create a new project', value: CREATE_NEW_PROJECT },
+        new inquirer.Separator(' ──────────────'),
         ...existingProjects.map(p => ({
-          name: `Sync existing: ${p.name}`,
+          name: `Sync existing project: ${p.name}`,
           value: p.id,
         })),
-        new inquirer.Separator(),
-        { name: 'Create a new project', value: CREATE_NEW_PROJECT },
       ];
 
       const { projectChoice } = await inquirer.prompt([{
@@ -351,6 +351,7 @@ export class CapyCommand {
         name: 'projectChoice',
         message: 'Which project do you want to use?',
         choices,
+        default: CREATE_NEW_PROJECT,
       }]);
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
