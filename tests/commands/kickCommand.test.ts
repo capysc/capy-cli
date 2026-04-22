@@ -3,6 +3,8 @@ import { mock, spyOn, jest, describe, test, it, expect, beforeEach, afterAll } f
 // Mock dependencies before importing KickCommand
 const mockDetectProjectState = jest.fn();
 const mockAuthenticate = jest.fn();
+const mockAuthenticateSilent = jest.fn();
+const mockRefreshToken = jest.fn();
 const mockGetToken = jest.fn();
 const mockSetToken = jest.fn();
 const mockListMemberDetails = jest.fn();
@@ -17,6 +19,8 @@ mock.module('../../src/core/projectManager', () => ({
 mock.module('../../src/auth/authService', () => ({
   AuthService: jest.fn().mockImplementation(() => ({
     authenticate: mockAuthenticate,
+    authenticateSilent: mockAuthenticateSilent,
+    refreshToken: mockRefreshToken,
     getToken: mockGetToken,
   })),
 }));
@@ -52,7 +56,11 @@ describe('KickCommand', () => {
       initialized: true,
       organizationId: 'org-123',
     });
+    // Silent-fallback chain: authenticateSilent(orgId) returns the cached
+    // session — short-circuits the chain without ever hitting interactive auth.
+    mockAuthenticateSilent.mockResolvedValue({ success: true, organizations: [{ id: 'org-123' }] });
     mockAuthenticate.mockResolvedValue({ success: true });
+    mockRefreshToken.mockResolvedValue(false);
     mockGetToken.mockReturnValue({ access_token: 'tok' });
     mockKickMember.mockResolvedValue(undefined);
   });

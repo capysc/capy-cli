@@ -159,6 +159,13 @@ function createCheckoutMocks(overrides: {
   };
 
   const mockAuthService = {
+    // Silent-fallback chain: cached authenticateSilent succeeds, so the chain
+    // short-circuits before reaching authenticate() — but mock both for safety.
+    authenticateSilent: mock(() => Promise.resolve({
+      success: true,
+      organization_id: 'org-123',
+      user_id: 'user-456',
+    })),
     authenticate: mock(() => Promise.resolve({
       success: true,
       organization_id: 'org-123',
