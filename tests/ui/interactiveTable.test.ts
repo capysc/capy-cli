@@ -406,7 +406,7 @@ describe('InteractiveTable', () => {
       listProjectsCount: number;
     }
 
-    function makeTable(callerRole = 'owner', members: MemberDetail[] = MEMBERS, projects: Array<{ id: string; name: string }> = []) {
+    function makeTable(callerRole = 'owner', members: MemberDetail[] = MEMBERS, projects: Array<{ id: string; name: string }> = [], currentUserId = 'user-999') {
       const calls: CtxCalls = {
         changeRole: [],
         assignProjectRole: [],
@@ -419,6 +419,7 @@ describe('InteractiveTable', () => {
       const t = new InteractiveTable();
       const ctx = {
         callerRole,
+        currentUserId,
         listProjects: async () => { calls.listProjectsCount++; return projects; },
         changeRole: async (userId: string, role: string, projectId?: string) => {
           calls.changeRole.push({ userId, role, projectId });
@@ -473,6 +474,33 @@ describe('InteractiveTable', () => {
         press(table, 'r');
         expect((table as any).editingMemberIndex).toBeNull();
         expect((table as any).statusMessage?.isError).toBe(true);
+      });
+
+      it('refuses self-edit on the member row', () => {
+        // bob is user-2; set that as the caller's own id
+        const { table } = makeTable('admin', MEMBERS, [], 'user-2');
+        (table as any).cursorIndex = 1; // bob
+        press(table, 'r');
+        expect((table as any).editingMemberIndex).toBeNull();
+        expect((table as any).statusMessage?.isError).toBe(true);
+        expect((table as any).statusMessage?.text).toMatch(/your own role/i);
+      });
+
+      it('refuses self-edit on an expanded project row', () => {
+        const { table } = makeTable('admin', MEMBERS, [], 'user-2');
+        // expand bob so his project row shows up as a nav item
+        (table as any).expandedMembers.add('user-2');
+        // rebuild nav items and find the project row for bob
+        const navItems = (table as any).buildNavItems();
+        const projIdx = navItems.findIndex(
+          (n: any) => n.type === 'project' && n.memberIndex === 1,
+        );
+        expect(projIdx).toBeGreaterThan(-1);
+        (table as any).cursorIndex = projIdx;
+        press(table, 'r');
+        expect((table as any).editingProjectRef).toBeNull();
+        expect((table as any).statusMessage?.isError).toBe(true);
+        expect((table as any).statusMessage?.text).toMatch(/your own project role/i);
       });
     });
 

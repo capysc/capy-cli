@@ -40,6 +40,7 @@ export interface ProjectChoice {
 
 export interface TableContext {
   callerRole: string;
+  currentUserId: string;
   listProjects: () => Promise<ProjectChoice[]>;
   changeRole: (userId: string, newRole: RoleValue, projectId?: string) => Promise<void>;
   reload: () => Promise<MemberDetail[]>;
@@ -554,6 +555,11 @@ export class InteractiveTable {
       if (item.type === 'member') {
         const target = this.members[item.memberIndex];
         const callerRole = this.ctx.callerRole;
+        if (target.userId === this.ctx.currentUserId) {
+          this.statusMessage = { text: 'You cannot change your own role', isError: true };
+          this.draw();
+          return;
+        }
         if (!ASSIGNABLE_BY_CALLER[callerRole]) {
           this.statusMessage = { text: 'You do not have permission to change roles', isError: true };
           this.draw();
@@ -579,7 +585,13 @@ export class InteractiveTable {
         return;
       }
       if (item.type === 'project') {
-        const project = this.members[item.memberIndex].projects[item.projectIndex!];
+        const member = this.members[item.memberIndex];
+        if (member.userId === this.ctx.currentUserId) {
+          this.statusMessage = { text: 'You cannot change your own project role', isError: true };
+          this.draw();
+          return;
+        }
+        const project = member.projects[item.projectIndex!];
         this.editingProjectRef = { memberIndex: item.memberIndex, projectIndex: item.projectIndex! };
         const currentIdx = PROJECT_ROLE_CHOICES.indexOf(
           (project.role as 'project-admin' | 'member') ?? 'none',
