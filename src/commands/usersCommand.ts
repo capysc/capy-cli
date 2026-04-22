@@ -125,6 +125,7 @@ export class UsersCommand {
     spinner.start();
     let members;
     let callerRole = '';
+    let currentUserId = '';
     try {
       const [result, me] = await Promise.all([
         serviceClient.listMemberDetails(orgId),
@@ -132,6 +133,7 @@ export class UsersCommand {
       ]);
       members = result.members;
       callerRole = me.role;
+      currentUserId = me.user_id;
       spinner.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
     } catch (err: any) {
       spinner.fail('Failed to load members');
@@ -149,6 +151,7 @@ export class UsersCommand {
     if (process.stdin.isTTY) {
       await table.run(members, {
         callerRole,
+        currentUserId,
         listProjects: async () => {
           const projects = await serviceClient.listProjects();
           return projects.map((p) => ({ id: p.id, name: p.name }));
