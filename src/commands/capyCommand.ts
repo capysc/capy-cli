@@ -1759,6 +1759,16 @@ export class CapyCommand {
         const org = await this.authService.createOrganization(orgName, refreshToken, userId);
         orgSpinner.succeed(`Organization "${org.name}" created`);
 
+        // createOrganization returned a new org-scoped access_token and set
+        // currentOrgId on authService. Push that token onto serviceClient so
+        // the subsequent /orgs/:newOrgId/wrap call isn't rejected with 403
+        // (which would happen if serviceClient still held the previous org's
+        // token set during initial authentication).
+        const newToken = this.authService.getToken();
+        if (newToken) {
+          this.serviceClient.setToken(newToken);
+        }
+
         const masterKey = seedPhraseToMasterKey(seedPhrase);
         await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
 
