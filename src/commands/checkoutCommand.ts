@@ -66,7 +66,9 @@ export class CheckoutCommand {
 
     // Authenticate
     const spinner = ora('Authenticating...').start();
-    const authResult = await this.authService.authenticate(projectState.organizationId);
+    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
+    if (!authResult.success) authResult = await this.authService.authenticateSilent();
+    if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       spinner.fail('Authentication failed');
       throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);

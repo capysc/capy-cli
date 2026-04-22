@@ -36,7 +36,9 @@ export class InfoCommand {
     const orgId = projectState.organizationId;
 
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    const authResult = await authService.authenticate(orgId);
+    let authResult = await authService.authenticateSilent(orgId);
+    if (!authResult.success) authResult = await authService.authenticateSilent();
+    if (!authResult.success) authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);

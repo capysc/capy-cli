@@ -36,7 +36,9 @@ export class UsersCommand {
 
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl);
-    const authResult = await authService.authenticate(orgId);
+    let authResult = await authService.authenticateSilent(orgId);
+    if (!authResult.success) authResult = await authService.authenticateSilent();
+    if (!authResult.success) authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);
@@ -104,10 +106,15 @@ export class UsersCommand {
 
     const orgId = projectState.organizationId;
 
-    // Authenticate
+    // Authenticate — silent first (cached / refresh for this org, then any
+    // cached session) before falling back to interactive OAuth. Mirrors the
+    // pattern in capyCommand so a stale per-org token doesn't trigger a relog
+    // when another org's session is still valid.
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl);
-    const authResult = await authService.authenticate(orgId);
+    let authResult = await authService.authenticateSilent(orgId);
+    if (!authResult.success) authResult = await authService.authenticateSilent();
+    if (!authResult.success) authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);

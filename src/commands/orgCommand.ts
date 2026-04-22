@@ -47,7 +47,9 @@ export class OrgCommand {
     if (projectState.userId) {
       this.authService.setSessionUserId(projectState.userId);
     }
-    const authResult = await this.authService.authenticate(currentOrgId);
+    let authResult = await this.authService.authenticateSilent(currentOrgId);
+    if (!authResult.success) authResult = await this.authService.authenticateSilent();
+    if (!authResult.success) authResult = await this.authService.authenticate(currentOrgId);
     if (!authResult.success) {
       console.error('Authentication failed. Run `capy` to re-authenticate.');
       process.exit(1);

@@ -31,7 +31,9 @@ export async function resolveOrgContext(
   });
 
   let orgId = projectState.organizationId;
-  let authResult = await authService.authenticate(orgId);
+  let authResult = await authService.authenticateSilent(orgId);
+  if (!authResult.success) authResult = await authService.authenticateSilent();
+  if (!authResult.success) authResult = await authService.authenticate(orgId);
   if (!authResult.success) {
     console.error('Authentication failed. Run `capy` to sign in.');
     process.exit(1);
@@ -54,7 +56,8 @@ export async function resolveOrgContext(
       orgId = chosen;
     }
 
-    authResult = await authService.authenticate(orgId);
+    authResult = await authService.authenticateSilent(orgId);
+    if (!authResult.success) authResult = await authService.authenticate(orgId);
     if (!authResult.success) {
       console.error('Authentication failed for selected organization.');
       process.exit(1);

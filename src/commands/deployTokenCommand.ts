@@ -157,7 +157,9 @@ export class DeployCommand {
         const refreshed = await authService.refreshToken();
         return refreshed ? authService.getToken() : null;
       });
-      const authResult = await authService.authenticate(orgId);
+      let authResult = await authService.authenticateSilent(orgId);
+      if (!authResult.success) authResult = await authService.authenticateSilent();
+      if (!authResult.success) authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
         process.exit(1);
@@ -356,7 +358,9 @@ export class DeployRevokeCommand {
         const refreshed = await authService.refreshToken();
         return refreshed ? authService.getToken() : null;
       });
-      const authResult = await authService.authenticate(orgId);
+      let authResult = await authService.authenticateSilent(orgId);
+      if (!authResult.success) authResult = await authService.authenticateSilent();
+      if (!authResult.success) authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
         process.exit(1);
@@ -402,7 +406,9 @@ export class DeployListCommand {
         const refreshed = await authService.refreshToken();
         return refreshed ? authService.getToken() : null;
       });
-      const authResult = await authService.authenticate(orgId);
+      let authResult = await authService.authenticateSilent(orgId);
+      if (!authResult.success) authResult = await authService.authenticateSilent();
+      if (!authResult.success) authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
         console.error('Authentication failed');
         process.exit(1);

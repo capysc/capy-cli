@@ -100,7 +100,9 @@ export class PushCommand {
 
     // Authenticate
     const spinner = ora('Authenticating...').start();
-    const authResult = await this.authService.authenticate(projectState.organizationId);
+    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
+    if (!authResult.success) authResult = await this.authService.authenticateSilent();
+    if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
     this.debug('authResult', {
       success: authResult.success,
       user_id: authResult.user_id,
