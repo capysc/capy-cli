@@ -50,11 +50,10 @@ export class InfoCommand {
     const branch = projectState.activeBranch;
 
     let roleLabel = '—';
-    const token = authService.getToken();
-    if (token && authResult.user_id) {
+    if (authService.getToken() && authResult.user_id) {
       try {
         const serviceClient = new ServiceClient(this.apiUrl);
-        serviceClient.setToken(token);
+        serviceClient.setTokenProvider(() => authService.getValidToken());
         const { members } = await serviceClient.listMembers(orgId);
         const me = members.find((m: any) => m.userId === authResult.user_id);
         const slug = me?.role?.slug;

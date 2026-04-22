@@ -57,14 +57,9 @@ export class CapyCommand {
     this.syncEngine = new SyncEngine();
     this.promptEngine = new PromptEngine();
 
-    // Auto-refresh token on 401
-    this.serviceClient.setTokenRefresher(async () => {
-      const refreshed = await this.authService.refreshToken();
-      if (refreshed) {
-        return this.authService.getToken();
-      }
-      return null;
-    });
+    // ServiceClient pulls a fresh token (with auto-refresh on expiry) from
+    // authService for every request. No local token cache; no setToken calls.
+    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
   /**
@@ -211,12 +206,7 @@ export class CapyCommand {
       this.projectManager.writeSyncStateUserId(authResult.user_id);
     }
 
-    // Set token for service client
-    const token = this.authService.getToken();
-    if (token) {
-      this.serviceClient.setToken(token);
-    }
-
+    // No setToken — serviceClient pulls from authService via the provider.
     // Resolve organization
     const orgs = authResult.organizations || [];
     let selectedOrg: Organization;
@@ -302,11 +292,8 @@ export class CapyCommand {
       }
     }
 
-    // Set token for service client (now valid for the selected org)
-    const updatedToken = this.authService.getToken();
-    if (updatedToken) {
-      this.serviceClient.setToken(updatedToken);
-    }
+    // No setToken — serviceClient's provider pulls whatever the current
+    // authService token is (post org-switch).
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
@@ -1029,14 +1016,9 @@ export class CapyCommand {
       branch,
     );
 
-    // Set token for service client
-    const token = this.authService.getToken();
-
-    if (token) {
-      this.serviceClient.setToken(token);
-    }
-
-    if (!token) {
+    // Access check — the provider will supply tokens per-request; we only
+    // need to verify a session exists for the current org here.
+    if (!this.authService.getToken()) {
       throw new CapyError(
         'You do not have access to this project\'s organization.\n\n' +
         'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
@@ -1759,16 +1741,9 @@ export class CapyCommand {
         const org = await this.authService.createOrganization(orgName, refreshToken, userId);
         orgSpinner.succeed(`Organization "${org.name}" created`);
 
-        // createOrganization returned a new org-scoped access_token and set
-        // currentOrgId on authService. Push that token onto serviceClient so
-        // the subsequent /orgs/:newOrgId/wrap call isn't rejected with 403
-        // (which would happen if serviceClient still held the previous org's
-        // token set during initial authentication).
-        const newToken = this.authService.getToken();
-        if (newToken) {
-          this.serviceClient.setToken(newToken);
-        }
-
+        // createOrganization updated currentOrgId and stored the new org-scoped
+        // token on authService. ServiceClient's provider picks it up on the
+        // next request — no manual push needed.
         const masterKey = seedPhraseToMasterKey(seedPhrase);
         await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
 

@@ -96,17 +96,12 @@ program
 
     const authService = new AuthService(undefined, true, projectState.userId);
     const serviceClient = new ServiceClient(undefined, true);
-    serviceClient.setTokenRefresher(async () => {
-      const refreshed = await authService.refreshToken();
-      return refreshed ? authService.getToken() : null;
-    });
+    serviceClient.setTokenProvider(() => authService.getValidToken());
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);
     }
-    const token = authService.getToken();
-    if (token) serviceClient.setToken(token);
 
     try {
 
@@ -304,10 +299,9 @@ program
       const syncState = pm.readSyncState();
       const authService = new AuthService(undefined, true, syncState?.user_id);
       const serviceClient = new ServiceClient(undefined, true);
+      serviceClient.setTokenProvider(() => authService.getValidToken());
       const authResult = await authService.authenticateSilent(keep.org_id);
       if (!authResult.success) throw new Error('auth failed — run capy-dev first');
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
 
       const keyOps = {
         coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),

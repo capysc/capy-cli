@@ -131,8 +131,7 @@ function baseMocks(opts: {
     refreshToken: mock(() => Promise.resolve(false)),
   };
   const serviceClient = {
-    setToken: mock(() => undefined),
-    setTokenRefresher: mock(() => undefined),
+    setTokenProvider: mock(() => undefined),
     listBranches: opts.listBranches ?? mock(() => Promise.resolve([
       { name: 'development', is_protected: false },
       { name: 'prod', is_protected: true },

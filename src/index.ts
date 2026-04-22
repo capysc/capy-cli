@@ -107,13 +107,12 @@ program
 
     const authService = new AuthService(undefined, false, projectState.userId);
     const serviceClient = new ServiceClient();
+    serviceClient.setTokenProvider(() => authService.getValidToken());
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);
     }
-    const token = authService.getToken();
-    if (token) serviceClient.setToken(token);
 
     try {
 

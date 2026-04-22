@@ -181,8 +181,7 @@ function createCheckoutMocks(overrides: {
   };
 
   const mockServiceClient = {
-    setToken: mock(() => undefined),
-    setTokenRefresher: mock(() => undefined),
+    setTokenProvider: mock(() => undefined),
     listBranches: mock(() => Promise.resolve([
       { name: 'development', is_protected: false },
       { name: 'staging', is_protected: false },
@@ -488,8 +487,7 @@ describe('Direction detection — branch-aware keep_hash', () => {
       createOrganization: mock(() => undefined),
     };
     mockServiceClient = {
-      setToken: mock(() => undefined),
-      setTokenRefresher: mock(() => undefined),
+      setTokenProvider: mock(() => undefined),
       initializeProject: mock(() => undefined),
       getDecryptData: mock(() => undefined),
       pushVariables: mock(() => undefined),

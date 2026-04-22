@@ -137,8 +137,7 @@ describe('CapyCommand', () => {
     } as any;
 
     mockServiceClient = {
-      setToken: mock(() => undefined),
-      setTokenRefresher: mock(() => undefined),
+      setTokenProvider: mock(() => undefined),
       initializeProject: mock(() => undefined),
       getDecryptData: mock(() => undefined),
       pushVariables: mock(() => undefined),
@@ -344,7 +343,7 @@ describe('CapyCommand', () => {
       await (capyCommand as any).initializeProject();
 
       expect(mockAuthService.authenticate).toHaveBeenCalled();
-      expect(mockServiceClient.setToken).toHaveBeenCalled();
+      expect(mockServiceClient.setTokenProvider).toHaveBeenCalled();
       expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledWith('test-project');
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-123');
       expect(mockFileManager.writeKeepFile).toHaveBeenCalled();
@@ -678,7 +677,7 @@ describe('CapyCommand', () => {
 
       // Auth should succeed
       expect(mockAuthService.authenticate).toHaveBeenCalled();
-      expect(mockServiceClient.setToken).toHaveBeenCalled();
+      expect(mockServiceClient.setTokenProvider).toHaveBeenCalled();
 
       // Project should be created
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('fresh-project', 'org-123');
