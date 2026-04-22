@@ -339,7 +339,6 @@ export class CapyCommand {
     if (existingProjects.length > 0) {
       const choices = [
         { name: 'Create a new project', value: CREATE_NEW_PROJECT },
-        new inquirer.Separator(' ──────────────'),
         ...existingProjects.map(p => ({
           name: `Sync existing project: ${p.name}`,
           value: p.id,
