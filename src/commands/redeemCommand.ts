@@ -74,6 +74,16 @@ export class RedeemCommand {
     // membership but shouldn't, because the invite's ciphertext was never
     // intended for it. Fail closed if we didn't actually land on targetOrgId.
     if (orgId !== targetOrgId) {
+      // Mirror the post-coDecrypt-failure cleanup so a kicked user doesn't
+      // retain a local org key for the revoked org.
+      try {
+        const { getGlobalCapyDir } = await import('../config/globalConfig');
+        const orgDir = join(getGlobalCapyDir(), 'orgs', targetOrgId);
+        if (existsSync(orgDir)) {
+          const { rmSync } = await import('fs');
+          rmSync(orgDir, { recursive: true });
+        }
+      } catch {}
       console.error(`\n  You are not a member of the invited organization.`);
       console.error(`  The invite may have been revoked, or you were removed.\n`);
       process.exit(1);
