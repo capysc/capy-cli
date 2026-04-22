@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -98,36 +98,78 @@ export function readAuthSession(userId?: string): object | null {
   return JSON.parse(content);
 }
 
-// --- Local keep cache (~/.capy/keep/) ---
+// --- Local keep cache (~/.capy/keep/{orgId}/{projectId}/{keepHash}) ---
+//
+// Path is scoped by org+project to mirror the S3 layout and prevent cross-org
+// collisions: keep_hash is derived from plaintext variable names + value hashes,
+// so two different orgs with overlapping variable sets would otherwise share a
+// cache file.
 
-export function getKeepCachePath(keepHash: string): string {
-  return join(GLOBAL_CAPY_DIR, 'keep', keepHash);
+export function getKeepCachePath(orgId: string, projectId: string, keepHash: string): string {
+  return join(GLOBAL_CAPY_DIR, 'keep', orgId, projectId, keepHash);
 }
 
-export function writeKeepCache(keepHash: string, envBlob: string): void {
+export function writeKeepCache(orgId: string, projectId: string, keepHash: string, envBlob: string): void {
   try {
-    writeSecureFile(getKeepCachePath(keepHash), envBlob);
+    writeSecureFile(getKeepCachePath(orgId, projectId, keepHash), envBlob);
   } catch {
     // Best-effort — silent on error
   }
 }
 
-export function readKeepCache(keepHash: string): string | null {
-  return readFileOrNull(getKeepCachePath(keepHash));
+export function readKeepCache(orgId: string, projectId: string, keepHash: string): string | null {
+  return readFileOrNull(getKeepCachePath(orgId, projectId, keepHash));
+}
+
+// --- Recovery session (~/.capy/recover/) ---
+
+export function getRecoverySessionPath(): string {
+  return join(GLOBAL_CAPY_DIR, 'recover', 'session.json');
+}
+
+export function isRecoveryActive(): boolean {
+  return existsSync(getRecoverySessionPath());
+}
+
+export function saveRecoverySession(masterKeyHex: string, orgId: string): void {
+  const data = {
+    master_key: masterKeyHex,
+    org_id: orgId,
+    created_at: new Date().toISOString(),
+  };
+  writeSecureFile(getRecoverySessionPath(), JSON.stringify(data, null, 2));
+}
+
+export function readRecoverySession(): { master_key: string; org_id: string } | null {
+  const content = readFileOrNull(getRecoverySessionPath());
+  if (!content) return null;
+  try {
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+export function deleteRecoverySession(): void {
+  const recoverDir = join(GLOBAL_CAPY_DIR, 'recover');
+  if (existsSync(recoverDir)) {
+    rmSync(recoverDir, { recursive: true, force: true });
+  }
 }
 
 export async function fetchSecretsWithCache(
   serviceClient: { getSecrets(projectId: string, keepHash: string): Promise<{ env_file: string } | null> },
+  orgId: string,
   projectId: string,
   keepHash: string,
 ): Promise<{ env_file: string } | null> {
-  const cached = readKeepCache(keepHash);
+  const cached = readKeepCache(orgId, projectId, keepHash);
   if (cached !== null) {
     return { env_file: cached };
   }
   const result = await serviceClient.getSecrets(projectId, keepHash);
   if (result?.env_file) {
-    writeKeepCache(keepHash, result.env_file);
+    writeKeepCache(orgId, projectId, keepHash, result.env_file);
   }
   return result;
 }

@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:deploy-assets": "node scripts/build-deploy-assets.mjs",
     "start": "ts-node ./bin/capy.ts",
     "dev": "tsc --watch",
     "capy-dev": "bun run build && node bin/capy-dev",

@@ -1,6 +1,5 @@
 import inquirer from 'inquirer';
-import { AuthService } from '../auth/authService';
-import { ServiceClient } from '../service/serviceClient';
+import { resolveOrgContext } from '../core/orgContext';
 import { ProjectManager } from '../core/projectManager';
 import { readMasterKey } from '../config/globalConfig';
 import { decryptMasterKey, deriveWrappingKey } from '../crypto/keyManager';
@@ -17,6 +16,14 @@ const ROLES = [
   { name: 'Admin', value: 'admin' },
 ] as const;
 
+// Which roles a caller of a given role may invite. Owners are never invitable:
+// there is exactly one owner per org.
+const INVITABLE_BY_ROLE: Record<string, ReadonlyArray<typeof ROLES[number]['value']>> = {
+  owner: ['member', 'project-admin', 'admin'],
+  admin: ['member', 'project-admin', 'admin'],
+  'project-admin': ['member', 'project-admin'],
+};
+
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 export class InviteCommand {
@@ -30,33 +37,24 @@ export class InviteCommand {
 
   async execute(email: string): Promise<void> {
     try {
-      const pm = new ProjectManager();
-      const projectState = await pm.detectProjectState();
-
-      if (!projectState.initialized || !projectState.organizationId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-        process.exit(1);
-      }
-
-      const orgId = projectState.organizationId;
-
-      // Authenticate
-      const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      const serviceClient = new ServiceClient(this.apiUrl);
-      const authResult = await authService.authenticate(orgId);
-      if (!authResult.success) {
-        console.error('Authentication failed');
-        process.exit(1);
-      }
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
-
-      const userId = authResult.user_id!;
+      const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
       // Check if inviting yourself or an existing member
-      if (authResult.user_email && authResult.user_email.toLowerCase() === email.toLowerCase()) {
+      if (userEmail && userEmail.toLowerCase() === email.toLowerCase()) {
         console.log(`${email} is already a member of this organization.`);
         return;
+      }
+
+      // Determine caller's role to filter which roles they may grant.
+      const me = await serviceClient.getOrgMe(orgId);
+      const invitable = INVITABLE_BY_ROLE[me.role];
+      if (!invitable) {
+        console.error(`Your role (${me.role}) does not permit inviting users.`);
+        process.exit(1);
+      }
+      if (me.role === 'project-admin' && me.admin_projects.length === 0) {
+        console.error('You do not administer any projects in this organization.');
+        process.exit(1);
       }
 
 
@@ -91,14 +89,53 @@ export class InviteCommand {
         }
       }
 
-      // Prompt for role
+      // Prompt for role, filtered to what the caller may grant.
+      const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
       const { role } = await inquirer.prompt([{
         type: 'list',
         name: 'role',
         message: `Select a role for ${email}:`,
-        choices: ROLES,
+        choices: allowedChoices,
         default: 'member',
       }]);
+
+      // Project scope is required for project-admin and member. Multi-select
+      // so the inviter can grant access to several projects at once.
+      let projectId: string | undefined;
+      let extraProjectIds: string[] = [];
+      if (role === 'project-admin' || role === 'member') {
+        const projects = await serviceClient.listProjects();
+        if (projects.length === 0) {
+          console.error('No projects in this organization. Create one with `capy` first.');
+          process.exit(1);
+        }
+        // Preselect the cwd project if we're inside one and it's available.
+        let cwdProjectId: string | undefined;
+        try {
+          const pm = new ProjectManager();
+          const ps = await pm.detectProjectState();
+          if (ps.projectId && projects.some((p) => p.id === ps.projectId)) {
+            cwdProjectId = ps.projectId;
+          }
+        } catch {
+          // ignore — cwd detection is best-effort
+        }
+
+        const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
+          type: 'checkbox',
+          name: 'chosenProjectIds',
+          message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
+          choices: projects.map((p) => ({
+            name: p.name,
+            value: p.id,
+            checked: p.id === cwdProjectId,
+          })),
+          validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
+        });
+        const ids: string[] = chosenProjectIds;
+        projectId = ids[0];
+        extraProjectIds = ids.slice(1);
+      }
 
       // 1. Generate invite token T
       const inviteToken = generateInviteToken();
@@ -114,12 +151,25 @@ export class InviteCommand {
       );
 
       // 4. Create invite record on service
-      await serviceClient.createInvite(orgId, email, role);
+      const inviteResult = await serviceClient.createInvite(orgId, email, role, projectId);
+
+      // 4b. Fan out any additional project assignments picked in the checkbox.
+      // Abort noisily only if every extra assignment fails.
+      const failures: Array<{ projectId: string; error: string }> = [];
+      for (const extraId of extraProjectIds) {
+        try {
+          await serviceClient.inviteToProject(orgId, extraId, email, role as 'project-admin' | 'member');
+        } catch (err: any) {
+          failures.push({ projectId: extraId, error: err?.message ?? String(err) });
+        }
+      }
+      void inviteResult;
 
       // 5. Build redeem code
       const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId);
 
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
+      const redeemCommand = `capy redeem ${redeemCode}`;
 
       console.log('');
       console.log(`  Invite created for \x1b[1m${email}\x1b[0m as \x1b[1m${roleName}\x1b[0m`);
@@ -131,6 +181,17 @@ export class InviteCommand {
       console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
       console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
       console.log('');
+
+      if (failures.length > 0) {
+        console.log(`  \x1b[33m${failures.length} additional project assignment${failures.length === 1 ? '' : 's'} failed:\x1b[0m`);
+        for (const f of failures) {
+          console.log(`    \x1b[90m${f.projectId}: ${f.error}\x1b[0m`);
+        }
+        console.log('');
+      }
+
+      const { promptCopyToClipboard } = await import('../ui/clipboard');
+      await promptCopyToClipboard(redeemCommand);
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);

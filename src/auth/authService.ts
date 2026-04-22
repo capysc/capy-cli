@@ -5,6 +5,15 @@ import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_
 import { OAuthServer } from './oauthServer';
 import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir } from '../config/globalConfig';
 
+export class HttpStatusError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'HttpStatusError';
+    this.status = status;
+  }
+}
+
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
   const res = await fetch(url, {
     method: 'POST',
@@ -13,7 +22,8 @@ async function postJson<T>(url: string, body: Record<string, unknown>): Promise<
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error((data as any).error || `Request failed with status ${res.status}`);
+    const message = (data as any).error || `Request failed with status ${res.status}`;
+    throw new HttpStatusError(message, res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -466,6 +476,13 @@ export class AuthService {
 
   getOrganizationId(): string | null {
     return this.currentOrgId;
+  }
+
+  async checkOrgName(name: string): Promise<{ available: boolean; reason?: string }> {
+    return postJson<{ available: boolean; reason?: string }>(
+      `${this.serviceApiUrl}/auth/check-org-name`,
+      { name },
+    );
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {

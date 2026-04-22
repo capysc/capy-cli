@@ -50,6 +50,8 @@ program
       console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy')} org                    \x1b[90mSwitch organization\x1b[0m`);
       console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
+      console.log(`    ${B('capy')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
+      console.log(`    ${B('capy')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
       console.log('');
       process.exit(1);
     }
@@ -157,7 +159,7 @@ program
     branches.forEach((b, i) => {
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
-      const name = b.name || 'no branch';
+      const name = b.name;
       const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === activeBranch;
       const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
@@ -169,7 +171,7 @@ program
     const inquirer = (await import('inquirer')).default;
     const choices = branches
       .filter(b => b.name !== activeBranch)
-      .map(b => ({ name: b.name || 'no branch', value: b.name }));
+      .map(b => ({ name: b.name, value: b.name }));
 
     if (choices.length > 0) {
       choices.push({ name: 'Stay on current branch', value: '__stay__' });
@@ -416,6 +418,42 @@ program
   .action(async () => {
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('grant-branch <email> <project> <branch>')
+  .description('Grant a member wildcard access to a protected branch')
+  .action(async (email: string, project: string, branch: string) => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand();
+    await cmd.grantBranch(email, project, branch);
+  });
+
+program
+  .command('revoke-branch <email> <project> <branch>')
+  .description("Revoke a member's wildcard access to a protected branch")
+  .action(async (email: string, project: string, branch: string) => {
+    const { UsersCommand } = await import('./commands/usersCommand');
+    const cmd = new UsersCommand();
+    await cmd.revokeBranch(email, project, branch);
+  });
+
+program
+  .command('decrypt')
+  .description('Decrypt secrets offline using seed phrase (owner only)')
+  .action(async () => {
+    const { DecryptCommand } = await import('./commands/decryptCommand');
+    const cmd = new DecryptCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('end-recover')
+  .description('End recovery session and clean up decrypted files')
+  .action(async () => {
+    const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
+    const cmd = new EndRecoverCommand();
     await cmd.execute();
   });
 

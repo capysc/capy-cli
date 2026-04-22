@@ -12,6 +12,7 @@ FAIL=0
 ISOLATED_FILES=(
   tests/auth/authService.test.ts
   tests/auth/oauthServer.test.ts
+  tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts
   tests/commands/kickCommand.test.ts
   tests/config/globalConfig.test.ts
@@ -20,6 +21,8 @@ ISOLATED_FILES=(
   tests/crypto/keyStability.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
+  tests/commands/decryptCommand.test.ts
+  tests/commands/roleAccessGuards.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

@@ -18,6 +18,8 @@ import {
   SyncState,
   CapyError,
   ERROR_CODES,
+  getSyncKeepHash,
+  setSyncKeepHash,
 } from '../types/index';
 import {
   generateSeedPhrase,
@@ -130,12 +132,44 @@ export class CapyCommand {
           return;
         }
       }
+
+      // Invariant: the branch recorded in the .env header must match .capy/branch.
+      // A mismatch indicates a partially-completed checkout (or hand edit); if we
+      // proceed we'd push/pull the wrong branch's secrets. Refuse and show the
+      // recovery command.
+      this.assertBranchInvariant(projectState.activeBranch);
+
       await this.syncProject(projectState);
     } catch (error: any) {
       this.debugError('execute caught error', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
     }
+  }
+
+  /**
+   * Refuse to proceed if .capy/branch disagrees with the branch recorded in
+   * the .env header. This prevents a stuck state where the user thinks they
+   * are on branch X but their secrets belong to branch Y.
+   */
+  private assertBranchInvariant(activeBranch: string): void {
+    const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+    const envBranch = envMeta.branch;
+    if (envBranch === undefined) return; // no header yet (first-run); nothing to reconcile
+    // Both sides are always a real branch name ('development' or otherwise);
+    // empty never appears in modern state.
+    const normalizedActive = activeBranch || 'development';
+    const normalizedHeader = envBranch || 'development';
+    if (normalizedActive === normalizedHeader) return;
+
+    const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+    console.error(`\nLocal state is inconsistent:`);
+    console.error(`  .capy/branch says ${B(normalizedActive)}`);
+    console.error(`  .env was encrypted for ${B(normalizedHeader)}`);
+    console.error(`\nThis usually means a previous checkout was interrupted.`);
+    console.error(`Recover with: ${B(`capy checkout ${normalizedHeader}`)} (re-sync to the branch .env actually holds)`);
+    console.error(`           or: ${B(`capy checkout ${normalizedActive}`)} (pull the branch .capy/branch claims)\n`);
+    process.exit(1);
   }
 
   private async initializeProject(): Promise<void> {
@@ -196,6 +230,7 @@ export class CapyCommand {
     if (orgs.length === 0) {
       console.log('\nNo organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+
     } else if (currentOrg) {
       const { orgAction } = await inquirer.prompt([{
         type: 'list',
@@ -223,6 +258,7 @@ export class CapyCommand {
         return this.initializeProject();
       } else if (orgAction === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+  
       } else {
         selectedOrg = currentOrg;
       }
@@ -240,6 +276,7 @@ export class CapyCommand {
 
       if (orgId === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+  
       } else {
         selectedOrg = orgs.find(o => o.id === orgId)!;
 
@@ -271,70 +308,16 @@ export class CapyCommand {
       this.serviceClient.setToken(updatedToken);
     }
 
-    // Ensure org has a master key — generate seed phrase if first time
+    // User has access to an existing org but no local key — they were invited
+    // and need to redeem their invite code to receive the shared master key.
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
-      const seedPhrase = generateSeedPhrase();
-
-      const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
-
-      const boxLines = [
-        'This recovery phrase generates the master key for',
-        'all projects in this organization.',
-        '',
-        '1) As its owner, only you have it',
-        '2) It only exists here and now, and cannot be',
-        '   retrieved when lost',
-        '',
-        'Capy is a ZERO TRUST secrets platform, which means',
-        'we do not store and cannot decode your secrets for',
-        'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!',
-        '',
-        'To learn more about zero-trust:',
-        'https://capy.sc/zero-trust',
-      ];
-
-      const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
-      const title = '!!!IMPORTANT!!! - SAVE THIS RECOVERY PHRASE';
-      const titlePad = Math.max(0, maxLen - title.length);
-      const titleLeft = Math.floor(titlePad / 2);
-      const titleRight = titlePad - titleLeft;
-
-      console.log('');
-      console.log(warn('─'.repeat(maxLen + 2)));
-      console.log(warn(' '.repeat(titleLeft + 1) + title + ' '.repeat(titleRight + 1)));
-      console.log(warn('─'.repeat(maxLen + 2)));
-      console.log('');
-      console.log('');
-      console.log('');
-      console.log(seedPhrase);
-      console.log('');
-      console.log('');
-      console.log('');
-
-      console.log(warn('┌' + '─'.repeat(maxLen) + '┐'));
-      for (const line of boxLines) {
-        const pad = maxLen - line.length - 1;
-        console.log(`${warn('│')} ${warn(line)}${' '.repeat(Math.max(0, pad))}${warn('│')}`);
-      }
-      console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
-      console.log('');
-
-      const { confirmed } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'confirmed',
-        message: 'I have saved my recovery phrase',
-        default: false,
-      }]);
-
-      if (!confirmed) {
-        throw new CapyError(
-          'You must save your recovery phrase before continuing.',
-          ERROR_CODES.AUTH_FAILED
-        );
-      }
-
-      const masterKey = seedPhraseToMasterKey(seedPhrase);
-      await wrapAndSaveMasterKey(masterKey, selectedOrg.id, authResult.user_id!, this.keyServiceOps());
+      throw new CapyError(
+        `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
+        '  Ask your org owner for an invite code, then run:\n\n' +
+        '    capy redeem <code>\n\n' +
+        '  This will securely transfer the shared encryption key to your device.',
+        ERROR_CODES.AUTH_FAILED
+      );
     }
 
     // Discover existing projects in the org. If any exist, give the user the
@@ -355,12 +338,11 @@ export class CapyCommand {
 
     if (existingProjects.length > 0) {
       const choices = [
+        { name: 'New project', value: CREATE_NEW_PROJECT },
         ...existingProjects.map(p => ({
-          name: `Sync existing: ${p.name}`,
+          name: p.name,
           value: p.id,
         })),
-        new inquirer.Separator(),
-        { name: 'Create a new project', value: CREATE_NEW_PROJECT },
       ];
 
       const { projectChoice } = await inquirer.prompt([{
@@ -368,6 +350,7 @@ export class CapyCommand {
         name: 'projectChoice',
         message: 'Which project do you want to use?',
         choices,
+        default: CREATE_NEW_PROJECT,
       }]);
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
@@ -414,10 +397,55 @@ export class CapyCommand {
 
     this.fileManager.writeKeepFile(keep);
 
-    // Create the default development branch on the service
-    await this.serviceClient.createBranch(projectResult.project_id, 'development');
+    keySpinner.succeed('keep.lock created (0 secrets)');
 
-    keySpinner.succeed('keep.lock created (pinned to development, 0 secrets)');
+    // Create the initial branch. `POST /projects` no longer auto-creates
+    // one, so pick the name: default 'development', or a custom name the
+    // user enters. Protection isn't asked here - branches are unprotected
+    // by default and can be protected later via a dedicated action.
+    const { initialBranchChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'initialBranchChoice',
+      message: 'What branch should this project start with?',
+      choices: [
+        { name: 'development (default)', value: 'development' },
+        { name: 'another branch', value: 'other' },
+      ],
+    }]);
+
+    let initialBranchName: string;
+    if (initialBranchChoice === 'other') {
+      const { branchName } = await inquirer.prompt([{
+        type: 'input',
+        name: 'branchName',
+        message: 'Branch name:',
+        validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+      }]);
+      initialBranchName = String(branchName).trim();
+    } else {
+      initialBranchName = 'development';
+    }
+    const initialBranchProtected = false;
+
+    const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
+    try {
+      await this.serviceClient.createBranch(
+        projectResult.project_id,
+        initialBranchName,
+        initialBranchProtected,
+      );
+    } catch (err) {
+      branchSpinner.fail(`Failed to create branch ${initialBranchName}`);
+      throw err;
+    }
+    branchSpinner.succeed(
+      initialBranchProtected
+        ? `Created protected branch ${initialBranchName}`
+        : `Created branch ${initialBranchName}`,
+    );
+
+    // The initial branch is what this project is "on" locally going forward.
+    this.projectManager.writeActiveBranch(initialBranchName);
 
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
@@ -480,31 +508,12 @@ export class CapyCommand {
         console.log(`\nFound .env with ${localVarCount} secrets:`);
         console.log(`  ${displayNames}`);
 
-        // First-run flow: commit to development or another branch
-        const { initChoice } = await inquirer.prompt([{
-          type: 'list',
-          name: 'initChoice',
-          message: '',
-          choices: [
-            { name: 'Commit all to development (default)', value: 'development' },
-            { name: 'Commit all to another branch', value: 'other' },
-          ],
-        }]);
-
-        let initBranch: string;
-        if (initChoice === 'other') {
-          const { branchName } = await inquirer.prompt([{
-            type: 'input',
-            name: 'branchName',
-            message: 'Branch name:',
-            validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-          }]);
-          initBranch = branchName.trim();
-          await this.serviceClient.createBranch(projectResult.project_id, initBranch);
-        } else {
-          initBranch = 'development';
-        }
-        this.projectManager.writeActiveBranch(initBranch);
+        // The user already chose their initial branch above — push the
+        // existing .env to that branch. (Previously we re-prompted for a
+        // commit target here, but now that project init explicitly sets
+        // the initial branch, asking again was redundant + could create a
+        // second branch the user didn't ask for.)
+        const initBranch = initialBranchName;
 
         const syncSpinner = ora('Syncing local variables...').start();
 
@@ -544,12 +553,13 @@ export class CapyCommand {
 
           // Cache encrypted blob locally
           const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
-          writeKeepCache(initKeepHash, envBlob);
+          writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
 
           this.fileManager.writeSyncState({
             last_sync: new Date().toISOString(),
             synced_variables: Object.keys(localEnv),
             user_id: authResult.user_id,
+            keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
           });
 
           // Backup plaintext .env before encrypting
@@ -685,6 +695,7 @@ export class CapyCommand {
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(plaintext),
       user_id: userId,
+      keep_hash: setSyncKeepHash(null, branch, SyncEngine.computeKeepHash(serverKeep, branch)),
     });
 
     fetchSpinner.succeed(
@@ -803,14 +814,14 @@ export class CapyCommand {
     branches.forEach((b, i) => {
       const isLast = i === branches.length - 1;
       const connector = isLast ? '└──' : '├──';
-      const name = b.name || 'no branch';
+      const name = b.name;
       const prot = b.is_protected ? `  ${grey('(protected)')}` : '';
       console.log(`  ${connector} ${name}${prot}`);
     });
     console.log('');
 
     const choices = branches.map(b => ({
-      name: b.name || 'no branch',
+      name: b.name,
       value: b.name,
     }));
 
@@ -927,15 +938,24 @@ export class CapyCommand {
       const leftPad = infoWidth - stripAnsi(left).length;
       const rightPad = capyWidth - right.length;
       // Per-character brown variation for fur texture
-      const furry = (s: string) => s.split('').map((ch) => {
+      const blackBg: Record<number, Set<number>> = {
+        1: new Set([3, 4, 10, 11]), // eyes (top 3/8 of ▅▅ pairs)
+        4: new Set([6, 8]),         // mouth (top half of ▄ chars)
+      };
+      const nose: Record<number, Set<number>> = {
+        3: new Set([7]),            // nose top (space → solid black █)
+      };
+      const furry = (s: string, row: number) => s.split('').map((ch, col) => {
+        if (nose[row]?.has(col)) return `\x1b[38;2;0;0;0m█\x1b[0m`;
         if (ch === ' ') return ch;
         const v = Math.random() * 40 - 20; // ±20 variation
         const r = Math.round(150 + v);
         const g = Math.round(115 + v * 0.7);
         const b = Math.round(80 + v * 0.5);
-        return `\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
+        const bg = blackBg[row]?.has(col) ? '\x1b[48;2;0;0;0m' : '';
+        return `${bg}\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
       }).join('');
-      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right, i)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
     console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
@@ -1033,8 +1053,10 @@ export class CapyCommand {
         this.keyServiceOps(),
       );
     } catch (err: any) {
-      // co-decrypt rejected (e.g. kicked user) — clean up local state
-      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+      // Only clean up local state on a confirmed server 403 (user was kicked).
+      // Network errors and other failures must NOT delete keys — a transient
+      // outage should never permanently lock out a legitimate user.
+      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED && err.details?.status === 403) {
         this.cleanupOrgData(projectState.organizationId!, projectState.userId);
       }
       throw err;
@@ -1162,15 +1184,41 @@ export class CapyCommand {
       fetchSpinner.stop();
     } catch (err: any) {
       this.debugError('remote fetch failed', err);
-      // Auth/permission errors are hard failures (e.g. user was kicked from org).
-      // Network errors fall back to local-only mode.
+      // 403 may be one of two different cases:
+      //   (a) User was kicked from the org — cleanup local state.
+      //   (b) User is still a member but lacks access to this specific branch
+      //       (e.g. Member on a protected branch). DO NOT wipe keys — that
+      //       would destroy access to every other project in the org.
       if (err instanceof CapyError) {
         const status = err.details?.status;
         if (status === 403) {
-          // User was kicked — clean up local state for this org so stale
-          // keys and session data don't linger.
-          fetchSpinner.fail('Access denied — you may have been removed from this organization.');
-          this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+          const msg = (err.message || '').toLowerCase();
+          const kicked = /no longer a member|not a member|not authorized for this organization/.test(msg);
+          if (kicked) {
+            fetchSpinner.fail('Access denied — you may have been removed from this organization.');
+            this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+            throw err;
+          }
+          // Branch-level denial: user is still in the org, just can't read THIS branch.
+          // This is the demotion scenario — the user may have been a Project Admin
+          // with access to a protected branch, then downgraded to Member. Try to
+          // suggest an accessible alternative before throwing.
+          fetchSpinner.fail(`No access to branch "${branch}" — your role does not permit reading this branch.`);
+          try {
+            const branches = await this.serviceClient.listBranches(projectState.projectId!);
+            const candidates = branches.filter(b => !b.is_protected);
+            if (candidates.length > 0) {
+              const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+              console.log('\nBranches you can switch to:');
+              for (const b of candidates) {
+                console.log(`  ${B(b.name)}`);
+              }
+              const suggested = candidates[0].name;
+              console.log(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);
+            }
+          } catch (listErr) {
+            this.debugError('listBranches failed during 403 recovery', listErr);
+          }
           throw err;
         }
         if (status === 401) {
@@ -1212,13 +1260,61 @@ export class CapyCommand {
       return;
     }
 
+    // Onboarding detection: local .env is empty (or belongs to a different project)
+    // and remote has values — the user has no local changes to commit or resolve.
+    let isOnboarding = false;
+    if (Object.keys(localHashes).length === 0 && Object.keys(remotePlaintext).length > 0) {
+      const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+      isOnboarding = !(envMeta.org_id === projectState.organizationId
+        && envMeta.project_id === projectState.projectId);
+    }
+
+    // Hide local column for onboarding — it's all "-" and adds noise
+    const effectiveShowLocal = isOnboarding ? false : showLocal;
+
+    // Resolve pinned plaintext for display. Try local first, then fetch from S3.
+    const pinnedPlaintext: Record<string, string> = {};
+    let needsFetch = false;
+    for (const variable of Object.keys(pinned)) {
+      if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinned[variable]) {
+        pinnedPlaintext[variable] = localPlaintext[variable];
+      } else {
+        needsFetch = true;
+      }
+    }
+    if (needsFetch && originalKeep && Object.keys(pinned).length > 0) {
+      try {
+        const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
+        const blob = await fetchSecretsWithCache(
+          this.serviceClient,
+          projectState.organizationId!,
+          projectState.projectId!,
+          keepHash,
+        );
+        if (blob?.env_file) {
+          const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+          for (const [key, value] of Object.entries(encrypted)) {
+            if (pinned[key] && !pinnedPlaintext[key]) {
+              try {
+                pinnedPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
+              } catch (decryptErr) {
+                this.debugError(`pinned decrypt failed for ${key}`, decryptErr);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        this.debugError('pinned fetch failed', err);
+      }
+    }
+
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
-    console.log(`  ${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found.\n`);
+    console.log(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
 
     // Display comparison table
-    this.displayComparisonTable(diffs, showLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext);
+    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
 
     console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
 
@@ -1226,28 +1322,59 @@ export class CapyCommand {
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
 
-    if (!hasPinned) {
-      // No pinned values — only offer commit or skip
+    // Direction detection: compare sync-state keep_hash to current keep.lock
+    const syncState = this.projectManager.readSyncState();
+    const currentKeepHash = currentKeep ? SyncEngine.computeKeepHash(currentKeep, branch) : null;
+    const savedHash = getSyncKeepHash(syncState, branch);
+    const isBehind = savedHash != null
+      && currentKeepHash != null
+      && savedHash !== currentKeepHash;
+
+    if (isOnboarding) {
+      // Onboarding: local .env is empty/foreign — only offer retrieve options
+      if (!showRemote) {
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      } else {
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      }
+    } else if (!hasPinned) {
+      // State 6: No pinned values — only offer commit or skip
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
     } else if (!hasRemote) {
-      // No remote values — local vs pinned only
+      // State 5: No remote values — local vs pinned only
       menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (showLocal && !showRemote) {
-      // Local differs from pinned, remote matches pinned
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 2: Local differs from pinned, remote matches pinned
+      if (isBehind) {
+        // 2b: keep.lock changed via git pull → user is behind
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 2a: user edited .env locally → user is ahead
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (!showLocal && showRemote) {
-      // Remote differs from pinned, local matches pinned
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      // State 3: Remote differs from pinned, local matches pinned
       menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else {
-      // Both differ — show all 4 options
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-      menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      // State 4: Both differ
+      if (isBehind) {
+        // 4b: keep.lock changed + another push happened → retrieve remote first
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      } else {
+        // 4a: user edited .env + teammate pushed
+        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+      }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     }
 
@@ -1256,7 +1383,7 @@ export class CapyCommand {
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
-      message: ' ',
+      message: 'What would you like to do?',
       choices: menuChoices,
     }]);
 
@@ -1275,6 +1402,7 @@ export class CapyCommand {
         try {
           const blob = await fetchSecretsWithCache(
             this.serviceClient,
+            projectState.organizationId!,
             projectState.projectId!,
             keepHash,
           );
@@ -1303,7 +1431,7 @@ export class CapyCommand {
       return;
     } else {
       // Individual resolution
-      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext);
+      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
       if (!resolved) return; // Cancelled
       finalEnv = resolved;
     }
@@ -1357,17 +1485,20 @@ export class CapyCommand {
           return `${k}=capy:${resourceId}:${enc}`;
         })
         .join('\n');
-      writeKeepCache(cacheKeepHash, cacheBlob);
+      writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, cacheBlob);
     }
 
     // Encrypt and write .env
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, undefined, finalKeep, branch);
 
     // Update sync state
+    const existingSyncState = this.projectManager.readSyncState();
     this.fileManager.writeSyncState({
+      ...existingSyncState,
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(finalEnv),
       user_id: authResult.user_id,
+      keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
     });
 
     const changeCount = Object.keys(pushedVars).length;
@@ -1390,6 +1521,7 @@ export class CapyCommand {
     remoteHashes: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
     const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -1400,16 +1532,12 @@ export class CapyCommand {
 
     const pinnedSnippetFor = (variable: string): string => {
       if (!pinned[variable]) return '-';
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
-    // Check if any pinned value can be resolved to plaintext
-    const showPinned = diffs.some(diff => {
-      if (!pinned[diff.variable]) return false;
-      const snippet = this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext);
-      return !snippet.includes('unresolvable');
-    });
+    // Show pinned column if any pinned value can be resolved
+    const showPinned = diffs.some(diff => pinned[diff.variable] && pinnedPlaintext[diff.variable]);
 
     // Build header
     const headers: string[] = ['Variable'];
@@ -1448,10 +1576,7 @@ export class CapyCommand {
     for (const diff of diffs) {
       const cols = [diff.variable];
       if (showPinned) {
-        const pinnedVal = pinned[diff.variable]
-          ? formatSnippet(this.getSnippetForHash(diff.variable, pinned, localPlaintext, remotePlaintext))
-          : '-';
-        cols.push(pinnedVal);
+        cols.push(pinnedSnippetFor(diff.variable));
       }
       if (showLocal) {
         cols.push(localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : '-');
@@ -1464,28 +1589,6 @@ export class CapyCommand {
     }
   }
 
-  /**
-   * Get a snippet value for a pinned hash by finding the matching plaintext.
-   */
-  private getSnippetForHash(
-    variable: string,
-    pinned: Record<string, string>,
-    localPlaintext: Record<string, string>,
-    remotePlaintext: Record<string, string>,
-  ): string {
-    const pinnedHash = pinned[variable];
-    // Check if local matches pinned
-    if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinnedHash) {
-      return localPlaintext[variable];
-    }
-    // Check if remote matches pinned
-    if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
-      return remotePlaintext[variable];
-    }
-    // Can't resolve plaintext — no source has the matching value
-    return '\x1b[3munresolvable\x1b[0m';
-  }
-
   private async resolveIndividually(
     diffs: { variable: string; type: string; pinned?: string; local?: string; remote?: string }[],
     showLocal: boolean,
@@ -1493,14 +1596,15 @@ export class CapyCommand {
     pinned: Record<string, string>,
     localPlaintext: Record<string, string>,
     remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
   ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
 
     const pinnedSnippetFor = (variable: string): string | null => {
       if (!pinned[variable]) return null;
-      const resolved = this.getSnippetForHash(variable, pinned, localPlaintext, remotePlaintext);
-      return resolved.includes('unresolvable') ? resolved : formatSnippet(resolved);
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
     };
 
     const rows: Row[] = diffs.map(diff => ({
@@ -1549,17 +1653,125 @@ export class CapyCommand {
     return result;
   }
 
-  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+  private async promptForAvailableOrgName(promptMessage = 'Organization name:'): Promise<string> {
     const { orgName } = await inquirer.prompt([{
       type: 'input',
       name: 'orgName',
-      message: 'Organization name:',
-      validate: (input: string) => input.trim().length > 0 || 'Organization name cannot be empty',
+      message: promptMessage,
+      validate: async (input: string) => {
+        const trimmed = input.trim();
+        if (trimmed.length === 0) return 'Organization name cannot be empty';
+        if (trimmed.length > 100) return 'Organization name must be 100 characters or fewer';
+        try {
+          const { available } = await this.authService.checkOrgName(trimmed);
+          if (!available) {
+            return `"${trimmed}" is already taken. Org names must be unique to prevent impersonation — try a variant (e.g. "${trimmed} HQ", "${trimmed} Labs").`;
+          }
+          return true;
+        } catch (err: any) {
+          // Don't block the flow on a transient check failure — fall through
+          // to /create-org, which will return 409 if the name is actually taken.
+          return true;
+        }
+      },
     }]);
+    return orgName.trim();
+  }
 
-    const orgSpinner = ora('Creating organization...').start();
-    const org = await this.authService.createOrganization(orgName.trim(), refreshToken, userId);
-    orgSpinner.succeed(`Organization "${org.name}" created`);
-    return org;
+  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+    let orgName = await this.promptForAvailableOrgName();
+
+    // Generate seed phrase and get confirmation BEFORE creating the org.
+    // This keeps org creation and key generation atomic — if the user
+    // declines, no org is created and they can retry cleanly.
+    const seedPhrase = generateSeedPhrase();
+
+    const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
+
+    const boxLines = [
+      'This recovery phrase generates the master key for',
+      'all projects in this organization.',
+      '',
+      '1) As its owner, only you have it',
+      '2) It only exists here and now, and cannot be',
+      '   retrieved when lost',
+      '',
+      'Capy is a ZERO TRUST secrets platform, which means',
+      'we do not store and cannot decode your secrets for',
+      'you. IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!',
+      '',
+      'To learn more about zero-trust:',
+      'https://capy.sc/zero-trust',
+    ];
+
+    const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
+    const title = '!!!IMPORTANT!!! - SAVE THIS RECOVERY PHRASE';
+    const titlePad = Math.max(0, maxLen - title.length);
+    const titleLeft = Math.floor(titlePad / 2);
+    const titleRight = titlePad - titleLeft;
+
+    console.log('');
+    console.log(warn('─'.repeat(maxLen + 2)));
+    console.log(warn(' '.repeat(titleLeft + 1) + title + ' '.repeat(titleRight + 1)));
+    console.log(warn('─'.repeat(maxLen + 2)));
+    console.log('');
+    console.log('');
+    console.log('');
+    console.log(seedPhrase);
+    console.log('');
+    console.log('');
+    console.log('');
+
+    console.log(warn('┌' + '─'.repeat(maxLen) + '┐'));
+    for (const line of boxLines) {
+      const pad = maxLen - line.length - 1;
+      console.log(`${warn('│')} ${warn(line)}${' '.repeat(Math.max(0, pad))}${warn('│')}`);
+    }
+    console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
+    console.log('');
+
+    const { promptCopyToClipboard } = await import('../ui/clipboard');
+    await promptCopyToClipboard(seedPhrase, '');
+    console.log('');
+
+    // Loop until the user confirms they've saved the phrase. No org is created
+    // until confirmation, so re-prompting is safe. Ctrl+C still exits cleanly.
+    while (true) {
+      const { confirmed } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirmed',
+        message: 'I have saved my recovery phrase',
+        default: false,
+      }]);
+      if (confirmed) break;
+      console.log(warn('⚠ The recovery phrase cannot be recovered if lost. Scroll up to review, then confirm.'));
+      console.log('');
+    }
+
+    // Seed phrase confirmed — now create the org and save the key.
+    // Retry loop handles TOCTOU: another user may have claimed the name
+    // between our pre-check and this call. On 409, re-prompt for a name
+    // without regenerating the seed phrase (the master key is derived from
+    // the phrase alone, and nothing has been wrapped yet).
+    while (true) {
+      const orgSpinner = ora('Creating organization...').start();
+      try {
+        const org = await this.authService.createOrganization(orgName, refreshToken, userId);
+        orgSpinner.succeed(`Organization "${org.name}" created`);
+
+        const masterKey = seedPhraseToMasterKey(seedPhrase);
+        await wrapAndSaveMasterKey(masterKey, org.id, userId, this.keyServiceOps());
+
+        return org;
+      } catch (err: any) {
+        orgSpinner.fail('Failed to create organization');
+        if (err && err.status === 409) {
+          console.log('');
+          orgName = await this.promptForAvailableOrgName('That name was claimed while you were setting up. Pick another:');
+          continue;
+        }
+        throw err;
+      }
+    }
   }
 }
