@@ -66,6 +66,19 @@ export class RedeemCommand {
       }
     }
 
+    // Explicit membership guard: tryPasswordAuth / OAuth may succeed but
+    // return a token scoped to a DIFFERENT org the user already belongs to
+    // (e.g., a kicked user re-authing with a valid password lands on their
+    // own org, not the one the invite was issued for). Without this check,
+    // a downstream co-decrypt hits that OTHER org's endpoint — which passes
+    // membership but shouldn't, because the invite's ciphertext was never
+    // intended for it. Fail closed if we didn't actually land on targetOrgId.
+    if (orgId !== targetOrgId) {
+      console.error(`\n  You are not a member of the invited organization.`);
+      console.error(`  The invite may have been revoked, or you were removed.\n`);
+      process.exit(1);
+    }
+
     // 4. Regardless of whether crypto setup is needed, always update local
     //    state so the next `capy` run targets the redeemed org.
     const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
