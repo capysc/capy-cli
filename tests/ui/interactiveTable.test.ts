@@ -804,28 +804,46 @@ describe('InteractiveTable', () => {
         };
       }
 
-      it('hides denied branches from navigation (grant flow moves to capy grant-branch CLI)', async () => {
-        const { table, calls } = makeTable('owner', [memberWithBranches()]);
-        // Expand project so branch rows are navigable. Expansion state is
-        // keyed by stable IDs: userId / `${userId}:${projectId}`.
+      it('shows denied protected branches to managers so they can grant', async () => {
+        const { table } = makeTable('owner', [memberWithBranches()]);
         const bob = (table as any).members[0];
         (table as any).expandedMembers.add(bob.userId);
         (table as any).expandedProjects.add(`${bob.userId}:${bob.projects[0].id}`);
-        // Denied branches (hasAccess=false) are no longer rendered, so they
-        // have no nav items. The grant flow for a denied branch uses the
-        // non-interactive `capy grant-branch` subcommand instead.
+        const nav = (table as any).buildNavItems();
+        const deniedBranchNav = nav.find(
+          (n: any) => n.type === 'branch' && n.branchIndex === 1, // b-prod (denied)
+        );
+        expect(deniedBranchNav).toBeDefined();
+      });
+
+      it('grants a protected branch when `g` is pressed on a denied row', async () => {
+        const { table, calls } = makeTable('owner', [memberWithBranches()]);
+        const bob = (table as any).members[0];
+        (table as any).expandedMembers.add(bob.userId);
+        (table as any).expandedProjects.add(`${bob.userId}:${bob.projects[0].id}`);
+        const nav = (table as any).buildNavItems();
+        const idx = nav.findIndex((n: any) => n.type === 'branch' && n.branchIndex === 1);
+        (table as any).cursorIndex = idx;
+
+        press(table, 'g');
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(calls.grantProtectedBranch).toEqual([
+          { projectId: 'proj-1', branchId: 'b-prod', userId: 'user-bob' },
+        ]);
+        expect(calls.revokeProtectedBranch).toHaveLength(0);
+      });
+
+      it('hides denied protected branches from viewers who cannot manage access', async () => {
+        const { table } = makeTable('member', [memberWithBranches()]);
+        const bob = (table as any).members[0];
+        (table as any).expandedMembers.add(bob.userId);
+        (table as any).expandedProjects.add(`${bob.userId}:${bob.projects[0].id}`);
         const nav = (table as any).buildNavItems();
         const deniedBranchNav = nav.find(
           (n: any) => n.type === 'branch' && n.branchIndex === 1, // b-prod (denied)
         );
         expect(deniedBranchNav).toBeUndefined();
-
-        // Pressing `g` with the cursor elsewhere should not trigger a grant.
-        (table as any).cursorIndex = 0; // member row
-        press(table, 'g');
-        await new Promise((r) => setTimeout(r, 0));
-        expect(calls.grantProtectedBranch).toHaveLength(0);
-        expect(calls.revokeProtectedBranch).toHaveLength(0);
       });
 
       it('revokes when branch is protected + granted', async () => {

@@ -1,4 +1,4 @@
-import { MemberDetail, MemberProject } from '../service/serviceClient';
+import { MemberDetail, MemberProject, MemberProjectBranch } from '../service/serviceClient';
 
 // ANSI escape codes
 const ESC = '\x1b';
@@ -132,8 +132,26 @@ export class InteractiveTable {
     };
   }
 
+  private canManageAccess(): boolean {
+    const callerRole = this.ctx?.callerRole ?? '';
+    return ASSIGNABLE_BY_CALLER[callerRole] !== undefined;
+  }
+
+  // Filter for member-role branch rows. Viewers with permission to manage
+  // access see every protected branch (granted or not) so they can toggle
+  // grants; viewers without permission only see branches the target actually
+  // has access to. Non-protected branches always show when accessible.
+  private isBranchVisibleToViewer(
+    branch: MemberProjectBranch,
+    canManage: boolean,
+  ): boolean {
+    if (canManage && branch.isProtected) return true;
+    return branch.hasAccess;
+  }
+
   buildNavItems(): NavItem[] {
     const items: NavItem[] = [];
+    const canManage = this.canManageAccess();
     for (let mi = 0; mi < this.members.length; mi++) {
       const member = this.members[mi];
       items.push({ type: 'member', memberIndex: mi });
@@ -142,17 +160,14 @@ export class InteractiveTable {
           for (let pi = 0; pi < member.projects.length; pi++) {
             const project = member.projects[pi];
             items.push({ type: 'project', memberIndex: mi, projectIndex: pi });
-            // Branch rows only exist for visible branches: members see only the
-            // branches they have access to. Navigation is enabled when the
-            // project is expanded so `g` can revoke an existing grant.
             const projKey = `${member.userId}:${project.id}`;
             if (
               this.expandedProjects.has(projKey) &&
               project.role === 'member' &&
-              project.branches.some((b) => b.hasAccess)
+              project.branches.some((b) => this.isBranchVisibleToViewer(b, canManage))
             ) {
               for (let bi = 0; bi < project.branches.length; bi++) {
-                if (project.branches[bi].hasAccess) {
+                if (this.isBranchVisibleToViewer(project.branches[bi], canManage)) {
                   items.push({ type: 'branch', memberIndex: mi, projectIndex: pi, branchIndex: bi });
                 }
               }
@@ -231,14 +246,16 @@ export class InteractiveTable {
     const emailWidth = widths[0] ?? 40;
     const roleWidth = widths[1] ?? 16;
 
+    const canManage = this.canManageAccess();
     for (let pi = 0; pi < member.projects.length; pi++) {
       const project = member.projects[pi];
       const projKey = `${member.userId}:${project.id}`;
-      // A project row is expandable when the member has any visible branches.
-      // For 'member' role only branches with access are visible; for
-      // 'project-admin' all branches are visible with an implicit grant.
+      // A project row is expandable when there's anything worth showing.
+      // project-admin: all branches (implicit grant). member: branches visible
+      // per isBranchVisibleToViewer (managers see every protected branch so
+      // they can grant; others only see granted ones).
       const visibleBranches = project.branches.filter((b) =>
-        project.role === 'project-admin' ? true : b.hasAccess,
+        project.role === 'project-admin' ? true : this.isBranchVisibleToViewer(b, canManage),
       );
       const hasBranches = visibleBranches.length > 0;
       const isExpanded = hasBranches && this.expandedProjects.has(projKey);
@@ -258,12 +275,20 @@ export class InteractiveTable {
       if (isExpanded) {
         for (let bi = 0; bi < project.branches.length; bi++) {
           const branch = project.branches[bi];
-          const visible = project.role === 'project-admin' ? true : branch.hasAccess;
+          const visible = project.role === 'project-admin'
+            ? true
+            : this.isBranchVisibleToViewer(branch, canManage);
           if (!visible) continue;
           const protectedTag = branch.isProtected ? ' (protected)' : '';
           const branchName = this.pad(`        ${branch.name}${protectedTag}`, emailWidth);
-          const accessCell = this.pad('access granted', roleWidth);
-          const branchLine = branchName + GAP + GREEN + accessCell + RESET;
+          // project-admin has implicit access to all branches. For member
+          // rows, reflect the actual grant state so managers see which
+          // protected branches are ungranted.
+          const granted = project.role === 'project-admin' ? true : branch.hasAccess;
+          const accessLabel = granted ? 'access granted' : 'no access';
+          const accessColor = granted ? GREEN : DIM;
+          const accessCell = this.pad(accessLabel, roleWidth);
+          const branchLine = branchName + GAP + accessColor + accessCell + RESET;
           const isBranchSelected =
             selectedBranchRef !== null &&
             selectedBranchRef.projectIndex === pi &&
@@ -411,7 +436,7 @@ export class InteractiveTable {
       if (this.editingMemberIndex !== null || this.editingProjectRef !== null) {
         footer = `${DIM}↑↓ pick role  ${RESET}${BOLD_WHITE}Enter${RESET}${DIM} confirm  ${RESET}${BOLD_WHITE}Esc${RESET}${DIM} cancel${RESET}`;
       } else {
-        footer = `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}g${RESET}${DIM} grant protected  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
+        footer = `${DIM}↑↓ navigate  Enter expand/collapse  ${RESET}${BOLD_WHITE}r${RESET}${DIM} change role  ${RESET}${BOLD_WHITE}g${RESET}${DIM} toggle branch access  ${RESET}${BOLD_WHITE}q${RESET}${DIM} quit${RESET}`;
       }
       output.push(`${m} ${footer}`);
     }
