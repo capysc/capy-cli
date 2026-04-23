@@ -87,31 +87,85 @@ export function innerUnwrap(innerBlob: string, token: Buffer, orgId: string, ema
 }
 
 /**
- * Constructs the redeem code: base64(T + orgIdLen(2 bytes BE) + orgId(utf8) + outerWrappedBlob)
- * T is 32 bytes, orgIdLen is a uint16 BE length prefix, then the org ID, then the ciphertext.
+ * Redeem code format v2 (current):
+ *   version(1=0x02) + T(32) + notAfter(8 bytes BE uint64 ms) +
+ *   orgIdLen(2 BE) + orgId(utf8) + outerWrappedBlob
+ *
+ * `notAfter` is the unix-ms timestamp after which the code must be rejected.
+ * The same value is bound into the KMS EncryptionContext at wrap time, so a
+ * client tampering with notAfter in the redeem code causes the server-side
+ * unwrap to fail at the AEAD layer (defence in depth on top of the explicit
+ * server-side timestamp check).
+ *
+ * No v1 (no-expiry) format is accepted any more — old codes simply fail to
+ * parse, which is the desired security property: pre-expiry-feature codes
+ * predate the wrapping with notAfter context, so they could not unwrap on
+ * the new server anyway.
  */
-export function buildRedeemCode(token: Buffer, outerWrappedBlob: string, orgId: string): string {
+const REDEEM_CODE_VERSION = 0x02;
+
+const DEFAULT_INVITE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+
+/**
+ * Resolve the invite TTL in milliseconds from CAPY_INVITE_TTL_SECONDS, falling
+ * back to the 7-day default. Used by the inviter to compute `notAfter` at
+ * wrap time. Tests override the env to exercise expired-code paths quickly.
+ * Server caps the value at 30 days regardless of what the client requests.
+ */
+export function resolveInviteTtlMs(): number {
+  const raw = process.env.CAPY_INVITE_TTL_SECONDS;
+  if (raw === undefined) return DEFAULT_INVITE_TTL_SECONDS * 1000;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_INVITE_TTL_SECONDS * 1000;
+  }
+  return Math.floor(parsed * 1000);
+}
+
+export function buildRedeemCode(
+  token: Buffer,
+  outerWrappedBlob: string,
+  orgId: string,
+  notAfter: number,
+): string {
   const outerBuf = Buffer.from(outerWrappedBlob, 'base64');
   const orgIdBuf = Buffer.from(orgId, 'utf8');
   const lenBuf = Buffer.alloc(2);
   lenBuf.writeUInt16BE(orgIdBuf.length, 0);
-  return Buffer.concat([token, lenBuf, orgIdBuf, outerBuf]).toString('base64');
+  const versionBuf = Buffer.from([REDEEM_CODE_VERSION]);
+  const notAfterBuf = Buffer.alloc(8);
+  notAfterBuf.writeBigUInt64BE(BigInt(notAfter), 0);
+  return Buffer.concat([versionBuf, token, notAfterBuf, lenBuf, orgIdBuf, outerBuf]).toString('base64');
 }
 
-/**
- * Parses a redeem code back into T, orgId, and the outer-wrapped ciphertext.
- */
-export function parseRedeemCode(redeemCode: string): { token: Buffer; orgId: string; ciphertext: string } {
+export function parseRedeemCode(redeemCode: string): {
+  token: Buffer;
+  orgId: string;
+  ciphertext: string;
+  notAfter: number;
+} {
   const buf = Buffer.from(redeemCode, 'base64');
-  if (buf.length <= TOKEN_LENGTH + 2) {
+  // version(1) + token(32) + notAfter(8) + orgIdLen(2) = 43 bytes minimum
+  if (buf.length <= 1 + TOKEN_LENGTH + 8 + 2) {
     throw new Error('Invalid redeem code: too short');
   }
-  const token = buf.subarray(0, TOKEN_LENGTH);
-  const orgIdLen = buf.readUInt16BE(TOKEN_LENGTH);
-  if (buf.length < TOKEN_LENGTH + 2 + orgIdLen) {
+  const version = buf.readUInt8(0);
+  if (version !== REDEEM_CODE_VERSION) {
+    throw new Error(
+      `Unsupported redeem code version (got 0x${version.toString(16).padStart(2, '0')}, expected 0x${REDEEM_CODE_VERSION
+        .toString(16)
+        .padStart(2, '0')}). Issue a fresh invite.`,
+    );
+  }
+  const token = buf.subarray(1, 1 + TOKEN_LENGTH);
+  const notAfter = Number(buf.readBigUInt64BE(1 + TOKEN_LENGTH));
+  const orgIdLenOffset = 1 + TOKEN_LENGTH + 8;
+  const orgIdLen = buf.readUInt16BE(orgIdLenOffset);
+  const orgIdOffset = orgIdLenOffset + 2;
+  if (buf.length < orgIdOffset + orgIdLen) {
     throw new Error('Invalid redeem code: truncated org ID');
   }
-  const orgId = buf.subarray(TOKEN_LENGTH + 2, TOKEN_LENGTH + 2 + orgIdLen).toString('utf8');
-  const ciphertext = buf.subarray(TOKEN_LENGTH + 2 + orgIdLen).toString('base64');
-  return { token, orgId, ciphertext };
+  const orgId = buf.subarray(orgIdOffset, orgIdOffset + orgIdLen).toString('utf8');
+  const ciphertext = buf.subarray(orgIdOffset + orgIdLen).toString('base64');
+  return { token, orgId, ciphertext, notAfter };
 }

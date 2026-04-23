@@ -18,14 +18,23 @@ export class RedeemCommand {
   }
 
   async execute(code: string): Promise<void> {
-    // 1. Parse redeem code → T + target org + double-wrapped ciphertext
+    // 1. Parse redeem code → T + target org + double-wrapped ciphertext + expiry
     let token: Buffer;
     let ciphertext: string;
     let targetOrgId: string;
+    let notAfter: number;
     try {
-      ({ token, orgId: targetOrgId, ciphertext } = parseRedeemCode(code));
+      ({ token, orgId: targetOrgId, ciphertext, notAfter } = parseRedeemCode(code));
     } catch (err: any) {
       console.error(`Invalid redeem code: ${err.message}`);
+      process.exit(1);
+    }
+
+    // Pre-flight expiry check so we don't bother the user with a sign-in
+    // ceremony just to fail at co-decrypt. Server enforces this independently.
+    if (notAfter <= Date.now()) {
+      console.error(`\n  This invite expired ${new Date(notAfter).toISOString()}.`);
+      console.error('  Ask the inviter for a fresh code.\n');
       process.exit(1);
     }
 
@@ -102,7 +111,7 @@ export class RedeemCommand {
     //    server-side gate that proves current membership.
     let innerBlob: string;
     try {
-      const result = await serviceClient.coDecrypt(orgId, ciphertext);
+      const result = await serviceClient.coDecrypt(orgId, ciphertext, notAfter);
       innerBlob = result.plaintext;
     } catch (err: any) {
       // If the user had a local key from a previous invite, remove it —

@@ -431,12 +431,18 @@ export class ServiceClient {
     return this.request('GET', `/orgs/${orgId}/me`);
   }
 
-  async wrapOuterLayer(orgId: string, plaintext: string): Promise<{ ciphertext: string }> {
-    return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext });
+  /**
+   * `notAfter` is for invite-issued blobs only — when present, the server
+   * binds it into the KMS EncryptionContext so a client tampering with the
+   * value in the redeem code fails the AEAD unwrap. The user's long-lived
+   * master key blob is wrapped without it (no expiry on personal storage).
+   */
+  async wrapOuterLayer(orgId: string, plaintext: string, notAfter?: number): Promise<{ ciphertext: string }> {
+    return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
-  async coDecrypt(orgId: string, ciphertext: string): Promise<{ plaintext: string }> {
-    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext });
+  async coDecrypt(orgId: string, ciphertext: string, notAfter?: number): Promise<{ plaintext: string }> {
+    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
 

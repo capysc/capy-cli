@@ -8,6 +8,7 @@ import {
   generateInviteToken,
   innerWrap,
   buildRedeemCode,
+  resolveInviteTtlMs,
 } from '../crypto/inviteCrypto';
 
 const ROLES = [
@@ -144,10 +145,13 @@ export class InviteCommand {
       //    The recipient email is bound into the HKDF salt so only they can unwrap.
       const innerBlob = innerWrap(masterKey, inviteToken, orgId, email);
 
-      // 3. Service outer wraps (KMS layer)
+      // 3. Service outer wraps (KMS layer), bound to (orgId, notAfter) so
+      //    the redeem code can't outlive its window even if forwarded.
+      const notAfter = Date.now() + resolveInviteTtlMs();
       const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
         orgId,
         Buffer.from(innerBlob, 'base64').toString('base64'),
+        notAfter,
       );
 
       // 4. Create invite record on service
@@ -165,8 +169,8 @@ export class InviteCommand {
       }
       void inviteResult;
 
-      // 5. Build redeem code
-      const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId);
+      // 5. Build redeem code (carries the same notAfter the wrap was bound to).
+      const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId, notAfter);
 
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
       const redeemCommand = `capy redeem ${redeemCode}`;
@@ -180,6 +184,7 @@ export class InviteCommand {
       console.log('');
       console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
       console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
+      console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
       console.log('');
 
       if (failures.length > 0) {
