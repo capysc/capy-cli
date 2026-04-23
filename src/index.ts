@@ -385,6 +385,15 @@ program
   });
 
 program
+  .command('transport')
+  .description('Generate a redeem code to move your account to another machine')
+  .action(async () => {
+    const { TransportCommand } = await import('./commands/transportCommand');
+    const cmd = new TransportCommand();
+    await cmd.execute();
+  });
+
+program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
   .action(async (email) => {

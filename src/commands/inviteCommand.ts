@@ -90,52 +90,71 @@ export class InviteCommand {
         }
       }
 
-      // Prompt for role, filtered to what the caller may grant.
-      const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
-      const { role } = await inquirer.prompt([{
-        type: 'list',
-        name: 'role',
-        message: `Select a role for ${email}:`,
-        choices: allowedChoices,
-        default: 'member',
-      }]);
+      // If this email already belongs to an org member, reuse their role and
+      // project assignments instead of prompting. Re-inviting an existing
+      // member is how admins re-issue a wrapped key (e.g., new machine).
+      const { members } = await serviceClient.listMemberDetails(orgId);
+      const existingMember = members.find(
+        (m) => m.email && m.email.toLowerCase() === email.toLowerCase(),
+      );
 
-      // Project scope is required for project-admin and member. Multi-select
-      // so the inviter can grant access to several projects at once.
+      let role: string;
       let projectId: string | undefined;
       let extraProjectIds: string[] = [];
-      if (role === 'project-admin' || role === 'member') {
-        const projects = await serviceClient.listProjects();
-        if (projects.length === 0) {
-          console.error('No projects in this organization. Create one with `capy` first.');
-          process.exit(1);
-        }
-        // Preselect the cwd project if we're inside one and it's available.
-        let cwdProjectId: string | undefined;
-        try {
-          const pm = new ProjectManager();
-          const ps = await pm.detectProjectState();
-          if (ps.projectId && projects.some((p) => p.id === ps.projectId)) {
-            cwdProjectId = ps.projectId;
-          }
-        } catch {
-          // ignore — cwd detection is best-effort
-        }
+      const reissuing = !!existingMember;
 
-        const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
-          type: 'checkbox',
-          name: 'chosenProjectIds',
-          message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
-          choices: projects.map((p) => ({
-            name: p.name,
-            value: p.id,
-            checked: p.id === cwdProjectId,
-          })),
-          validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
-        });
-        const ids: string[] = chosenProjectIds;
-        projectId = ids[0];
-        extraProjectIds = ids.slice(1);
+      if (existingMember) {
+        role = existingMember.role;
+        const existingProjectIds = (existingMember.projects || []).map((p) => p.id);
+        projectId = existingProjectIds[0];
+        extraProjectIds = existingProjectIds.slice(1);
+      } else {
+        // Prompt for role, filtered to what the caller may grant.
+        const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
+        const answer = await inquirer.prompt([{
+          type: 'list',
+          name: 'role',
+          message: `Select a role for ${email}:`,
+          choices: allowedChoices,
+          default: 'member',
+        }]);
+        role = answer.role;
+
+        // Project scope is required for project-admin and member. Multi-select
+        // so the inviter can grant access to several projects at once.
+        if (role === 'project-admin' || role === 'member') {
+          const projects = await serviceClient.listProjects();
+          if (projects.length === 0) {
+            console.error('No projects in this organization. Create one with `capy` first.');
+            process.exit(1);
+          }
+          // Preselect the cwd project if we're inside one and it's available.
+          let cwdProjectId: string | undefined;
+          try {
+            const pm = new ProjectManager();
+            const ps = await pm.detectProjectState();
+            if (ps.projectId && projects.some((p) => p.id === ps.projectId)) {
+              cwdProjectId = ps.projectId;
+            }
+          } catch {
+            // ignore — cwd detection is best-effort
+          }
+
+          const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
+            type: 'checkbox',
+            name: 'chosenProjectIds',
+            message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
+            choices: projects.map((p) => ({
+              name: p.name,
+              value: p.id,
+              checked: p.id === cwdProjectId,
+            })),
+            validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
+          });
+          const ids: string[] = chosenProjectIds;
+          projectId = ids[0];
+          extraProjectIds = ids.slice(1);
+        }
       }
 
       // 1. Generate invite token T
@@ -176,7 +195,11 @@ export class InviteCommand {
       const redeemCommand = `capy redeem ${redeemCode}`;
 
       console.log('');
-      console.log(`  Invite created for \x1b[1m${email}\x1b[0m as \x1b[1m${roleName}\x1b[0m`);
+      if (reissuing) {
+        console.log(`  Re-issued invite for \x1b[1m${email}\x1b[0m (existing \x1b[1m${roleName}\x1b[0m)`);
+      } else {
+        console.log(`  Invite created for \x1b[1m${email}\x1b[0m as \x1b[1m${roleName}\x1b[0m`);
+      }
       console.log('');
       console.log('  Send them this command:');
       console.log('');
