@@ -167,7 +167,7 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
       return 1;
     }
 
-    const svc = new ServiceClient();
+    const svc = new ServiceClient(undefined, devMode);
     svc.setTokenProvider(() => auth.getValidToken());
     const keyServiceOps = {
       coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
