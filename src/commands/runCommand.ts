@@ -53,7 +53,7 @@ function spawnChild(args: string[], env: Record<string, string | undefined>): Pr
   });
 }
 
-export async function runCommand(args: string[]): Promise<number> {
+export async function runCommand(args: string[], devMode: boolean = false): Promise<number> {
   if (args.length === 0) {
     console.error('Usage: capy run -- <command> [args...]');
     return 1;
@@ -160,7 +160,7 @@ export async function runCommand(args: string[]): Promise<number> {
     const { ServiceClient } = await import('../service/serviceClient');
     const { resolveProjectKey } = await import('../crypto/keyResolver');
 
-    const auth = new AuthService();
+    const auth = new AuthService(undefined, devMode);
     const result = await auth.authenticateSilent(orgId);
     if (!result.success || !result.user_id) {
       console.error('capy run: not authenticated. Run `capy` to sign in.');

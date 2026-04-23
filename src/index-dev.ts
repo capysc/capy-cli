@@ -526,7 +526,7 @@ program
     const { runCommand } = await import('./commands/runCommand');
     const dashIdx = process.argv.indexOf('--');
     const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
-    const code = await runCommand(childArgs);
+    const code = await runCommand(childArgs, true);
     process.exit(code);
   });
 
