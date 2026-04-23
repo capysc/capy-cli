@@ -94,22 +94,6 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('capy run', () => {
-  test('decrypts capy: values and passes them to subprocess', async () => {
-    // CAPY_KEY must be a valid 64-char hex string (32 bytes).
-    // The encrypt helper derives the AES key via SHA256(key), so we need to
-    // use the same hex string as both the CAPY_KEY env var and the encrypt key.
-    const hexKey = 'a'.repeat(64);
-    const encValue = encrypt('my-secret-value', hexKey, 'SECRET');
-    writeFileSync(join(TEST_DIR, '.env'), `SECRET=${encValue}\nPLAIN=hello\n`);
-
-    const result = await capy(['--', 'node', '-e', 'console.log(process.env.SECRET)'], {
-      env: { CAPY_KEY: hexKey },
-    });
-
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout.trim()).toBe('my-secret-value');
-  });
-
   test('passes plaintext env vars through unchanged', async () => {
     writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello-world\n');
 
@@ -141,16 +125,15 @@ describe('capy run', () => {
     expect(result.stdout.trim()).toBe('ok');
   });
 
-  test('exits 1 with clean error when key is missing for encrypted values', async () => {
+  test('exits 1 with clean error when keep.lock is missing for encrypted values', async () => {
     const encValue = encrypt('secret', 'some-key', 'SECRET');
     writeFileSync(join(TEST_DIR, '.env'), `SECRET=${encValue}\n`);
 
-    // No CAPY_KEY, no keyring, no .capy/decrypt — key resolution should fail
-    const result = await capy(['--', 'echo', 'should-not-reach'], {
-      env: { CAPY_KEY: undefined as any },
-    });
+    // No keep.lock → can't resolve project key via server.
+    const result = await capy(['--', 'echo', 'should-not-reach']);
 
     expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/keep\.lock/);
   });
 
   test('.env with zero encrypted values needs no key', async () => {

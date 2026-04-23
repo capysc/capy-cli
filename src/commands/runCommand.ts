@@ -2,7 +2,6 @@ import { spawn, ChildProcess } from 'child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { FileManager } from '../files/fileManager';
-import { readProjectKeyCache } from '../config/globalConfig';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -109,9 +108,9 @@ export async function runCommand(args: string[]): Promise<number> {
     return spawnChild(args, childEnv);
   }
 
-  // Local mode: read .env from CWD, decrypt capy: values with the project key
-  // resolved from CAPY_KEY env var, then the per-project cache written by the
-  // last successful `capy sync`.
+  // Local mode: read .env from CWD, then resolve the project key via the
+  // server's co-decrypt endpoint so every decryption is audit-logged. No
+  // local key caching, no CAPY_KEY escape hatch — server must be reachable.
   const fm = new FileManager();
   const envFromFile = fm.readEnvFile();
 
@@ -132,35 +131,52 @@ export async function runCommand(args: string[]): Promise<number> {
     return spawnChild(args, env);
   }
 
-  // Resolve the project key.
-  let projectKeyHex: string | undefined = process.env.CAPY_KEY;
-  if (projectKeyHex && !/^[0-9a-f]{64}$/.test(projectKeyHex)) {
-    console.error('capy run: CAPY_KEY must be a 64-character hex string (32-byte key).');
+  const keepPath = join(process.cwd(), 'keep.lock');
+  if (!existsSync(keepPath)) {
+    console.error(
+      'capy run: no keep.lock in the current directory. Run `capy` here first to sync.',
+    );
     return 1;
   }
 
-  if (!projectKeyHex) {
-    // Try the per-project cache populated by `capy sync`. Needs org_id +
-    // project_id, which live in keep.lock at the project root.
-    const keepPath = join(process.cwd(), 'keep.lock');
-    if (existsSync(keepPath)) {
-      try {
-        const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
-        if (keep?.org_id && keep?.project_id) {
-          const cached = readProjectKeyCache(keep.org_id, keep.project_id);
-          if (cached) projectKeyHex = cached;
-        }
-      } catch {
-        // keep.lock malformed — fall through to missing-key error.
-      }
-    }
+  let orgId: string | undefined;
+  let projectId: string | undefined;
+  try {
+    const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
+    orgId = keep?.org_id;
+    projectId = keep?.project_id;
+  } catch {
+    console.error('capy run: keep.lock is malformed. Run `capy` to re-sync.');
+    return 1;
+  }
+  if (!orgId || !projectId) {
+    console.error('capy run: keep.lock missing org_id/project_id. Run `capy` to re-sync.');
+    return 1;
   }
 
-  if (!projectKeyHex) {
-    console.error(
-      'capy run: no decryption key available. Run `capy` to sync this project, ' +
-        'or set CAPY_KEY to a 64-character hex project key.',
-    );
+  let projectKeyHex: string;
+  try {
+    const { AuthService } = await import('../auth/authService');
+    const { ServiceClient } = await import('../service/serviceClient');
+    const { resolveProjectKey } = await import('../crypto/keyResolver');
+
+    const auth = new AuthService();
+    const result = await auth.authenticateSilent(orgId);
+    if (!result.success || !result.user_id) {
+      console.error('capy run: not authenticated. Run `capy` to sign in.');
+      return 1;
+    }
+
+    const svc = new ServiceClient();
+    svc.setTokenProvider(() => auth.getValidToken());
+    const keyServiceOps = {
+      coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
+      wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then(r => r.ciphertext),
+    };
+
+    projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
+  } catch (err: any) {
+    console.error(`capy run: failed to resolve project key: ${err.message}`);
     return 1;
   }
 
