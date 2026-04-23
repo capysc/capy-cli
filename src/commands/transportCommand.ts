@@ -6,6 +6,7 @@ import {
   generateInviteToken,
   innerWrap,
   buildRedeemCode,
+  resolveInviteTtlMs,
 } from '../crypto/inviteCrypto';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -59,9 +60,17 @@ export class TransportCommand {
       const transportToken = generateInviteToken();
       const innerBlob = innerWrap(masterKey, transportToken, orgId, userEmail);
 
-      const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(orgId, innerBlob);
+      // Bind notAfter into the KMS EncryptionContext so a tampered redeem
+      // code fails the AEAD unwrap (defence in depth on top of the explicit
+      // server-side timestamp check). Same TTL policy as invites.
+      const notAfter = Date.now() + resolveInviteTtlMs();
+      const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
+        orgId,
+        innerBlob,
+        notAfter,
+      );
 
-      const redeemCode = buildRedeemCode(transportToken, outerBlob, orgId);
+      const redeemCode = buildRedeemCode(transportToken, outerBlob, orgId, notAfter);
       const redeemCommand = `capy redeem ${redeemCode}`;
 
       console.log('');
@@ -73,6 +82,7 @@ export class TransportCommand {
       console.log('');
       console.log(`  \x1b[90mOnly ${userEmail} can redeem this code — the inner key is bound to your email.\x1b[0m`);
       console.log('  \x1b[90mService co-decryption verifies you are still a member at redeem time.\x1b[0m');
+      console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
       console.log('');
 
       const { promptCopyToClipboard } = await import('../ui/clipboard');
