@@ -57,6 +57,7 @@ program
       console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
       console.log(`    ${B('capy-dev')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
       console.log(`    ${B('capy-dev')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
+      console.log(`    ${B('capy-dev')} transport              \x1b[90mMove your account to another machine\x1b[0m`);
       console.log(`    ${B('capy-dev')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
       console.log(`    ${B('capy-dev')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy-dev')} deploy                 \x1b[90mGenerate a deployment\x1b[0m`);
@@ -267,6 +268,15 @@ program
     const { RedeemCommand } = await import('./commands/redeemCommand');
     const cmd = new RedeemCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(code);
+  });
+
+program
+  .command('transport')
+  .description('Generate a redeem code to move your account to another machine')
+  .action(async () => {
+    const { TransportCommand } = await import('./commands/transportCommand');
+    const cmd = new TransportCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute();
   });
 
 program
