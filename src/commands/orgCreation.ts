@@ -118,6 +118,14 @@ export async function createNewOrganization(
       const org = await authService.createOrganization(orgName, refreshToken, userId);
       orgSpinner.succeed(`Organization "${org.name}" created`);
 
+      // createOrganization set currentOrgId + cached the new org's JWT in the
+      // session, but ServiceClient keeps its own cached bearer from before
+      // this call. Refresh that bearer now so /orgs/{newOrg}/wrap gets a JWT
+      // scoped to newOrg — otherwise wrap returns 403 and the master key
+      // never lands on disk, stranding the org.
+      const newOrgToken = authService.getToken();
+      if (newOrgToken) serviceClient.setToken(newOrgToken);
+
       const masterKey = seedPhraseToMasterKey(seedPhrase);
       await wrapAndSaveMasterKey(masterKey, org.id, userId, keyServiceOpsFromClient(serviceClient));
 
