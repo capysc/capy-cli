@@ -53,7 +53,7 @@ function spawnChild(args: string[], env: Record<string, string | undefined>): Pr
   });
 }
 
-export async function runCommand(args: string[]): Promise<number> {
+export async function runCommand(args: string[], devMode: boolean = false): Promise<number> {
   if (args.length === 0) {
     console.error('Usage: capy run -- <command> [args...]');
     return 1;
@@ -114,17 +114,21 @@ export async function runCommand(args: string[]): Promise<number> {
   const fm = new FileManager();
   const envFromFile = fm.readEnvFile();
 
-  // Merge: .env values are only injected where process.env doesn't already set
-  // them. Shell overrides win (dotenv precedence, same as deployed mode).
-  const env: Record<string, string | undefined> = { ...envFromFile, ...process.env };
-
-  // Find capy: prefixed values that need decryption.
+  // Collect encrypted entries from .env *before* the shell merge. An
+  // encrypted value represents a deliberate project secret, so it must not be
+  // silently overridden by a stale value of the same name in process.env
+  // (common when the user has an unrelated DATABASE_URL etc. in their shell).
   const toDecrypt: Array<[string, string]> = [];
-  for (const [k, v] of Object.entries(env)) {
+  for (const [k, v] of Object.entries(envFromFile)) {
     if (typeof v === 'string' && fm.isEncrypted(v)) {
       toDecrypt.push([k, v]);
     }
   }
+
+  // Merge plaintext keys with dotenv precedence (shell wins). Encrypted keys
+  // are re-applied after decryption below, so they always win regardless of
+  // what process.env contains.
+  const env: Record<string, string | undefined> = { ...envFromFile, ...process.env };
 
   if (toDecrypt.length === 0) {
     // Pure plaintext .env — no key required.
@@ -160,14 +164,14 @@ export async function runCommand(args: string[]): Promise<number> {
     const { ServiceClient } = await import('../service/serviceClient');
     const { resolveProjectKey } = await import('../crypto/keyResolver');
 
-    const auth = new AuthService();
+    const auth = new AuthService(undefined, devMode);
     const result = await auth.authenticateSilent(orgId);
     if (!result.success || !result.user_id) {
       console.error('capy run: not authenticated. Run `capy` to sign in.');
       return 1;
     }
 
-    const svc = new ServiceClient();
+    const svc = new ServiceClient(undefined, devMode);
     svc.setTokenProvider(() => auth.getValidToken());
     const keyServiceOps = {
       coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
