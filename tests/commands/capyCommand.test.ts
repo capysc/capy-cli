@@ -44,7 +44,7 @@ mock.module('inquirer', () => ({
       const name = Array.isArray(questions) ? questions[0]?.name : questions?.name;
       if (name === 'initChoice') return Promise.resolve({ initChoice: 'development' });
       if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'development' });
-      if (name === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+      if (name === 'orgId') return Promise.resolve({ orgId: 'org-123' });
       if (name === 'confirmed') return Promise.resolve({ confirmed: true });
       if (name === 'action') return Promise.resolve({ action: 'commit_local' });
       return Promise.resolve({ orgId: 'org-123', orgName: 'Test Org' });
@@ -375,7 +375,7 @@ describe('CapyCommand', () => {
         const firstName = qs[0]?.name;
         if (firstName === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'other' });
         if (firstName === 'branchName') return Promise.resolve({ branchName: 'main' });
-        if (firstName === 'orgAction') return Promise.resolve({ orgAction: 'org-123' });
+        if (firstName === 'orgId') return Promise.resolve({ orgId: 'org-123' });
         if (firstName === 'confirmed') return Promise.resolve({ confirmed: true });
         if (firstName === 'action') return Promise.resolve({ action: 'commit_local' });
         return Promise.resolve({});

@@ -220,7 +220,6 @@ export class CapyCommand {
     // Resolve organization
     const orgs = authResult.organizations || [];
     let selectedOrg: Organization;
-    const SWITCH_ORG = '__switch_org__';
     const CREATE_NEW_ORG = '__create_new__';
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
 
@@ -231,56 +230,32 @@ export class CapyCommand {
       console.log('\nNo organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
 
-    } else if (currentOrg) {
-      const { orgAction } = await inquirer.prompt([{
-        type: 'list',
-        name: 'orgAction',
-        message: 'Select organization for project:',
-        choices: [
-          { name: currentOrg.name, value: currentOrg.id },
-          { name: 'Switch to another organization', value: SWITCH_ORG },
-          { name: 'Create new organization', value: CREATE_NEW_ORG },
-        ],
-      }]);
-
-      if (orgAction === SWITCH_ORG) {
-        this.authService.clearToken();
-        const orgSpinner = ora('Re-authenticating...').start();
-        const freshAuth = await this.authService.authenticate();
-        if (!freshAuth.success) {
-          orgSpinner.fail('Authentication failed');
-          throw new CapyError(
-            freshAuth.error || 'Authentication failed',
-            ERROR_CODES.AUTH_FAILED
-          );
-        }
-        orgSpinner.succeed('Authenticated');
-        return this.initializeProject();
-      } else if (orgAction === CREATE_NEW_ORG) {
-        selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-  
-      } else {
-        selectedOrg = currentOrg;
-      }
     } else {
       const { orgId } = await inquirer.prompt([{
         type: 'list',
         name: 'orgId',
         message: 'Select organization for project:',
         choices: [
-          ...orgs.map(o => ({ name: o.name, value: o.id })),
+          ...orgs.map(o => ({
+            name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+            value: o.id,
+          })),
           new inquirer.Separator(),
           { name: 'Create new organization +', value: CREATE_NEW_ORG },
         ],
+        default: currentOrgId,
       }]);
 
       if (orgId === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-  
+
+      } else if (currentOrg && orgId === currentOrg.id) {
+        selectedOrg = currentOrg;
+
       } else {
         selectedOrg = orgs.find(o => o.id === orgId)!;
 
-        const orgSpinner = ora('Authenticating with organization...').start();
+        const orgSpinner = ora('Switching organization...').start();
         let scopedAuth = await this.authService.refreshWithCredentials(
           refreshToken!,
           selectedOrg.id,
