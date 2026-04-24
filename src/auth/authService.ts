@@ -7,10 +7,12 @@ import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir 
 
 export class HttpStatusError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  body: any;
+  constructor(message: string, status: number, body?: any) {
     super(message);
     this.name = 'HttpStatusError';
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -23,7 +25,7 @@ async function postJson<T>(url: string, body: Record<string, unknown>): Promise<
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const message = (data as any).error || `Request failed with status ${res.status}`;
-    throw new HttpStatusError(message, res.status);
+    throw new HttpStatusError(message, res.status, data);
   }
   return res.json() as Promise<T>;
 }
@@ -486,15 +488,30 @@ export class AuthService {
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
-    const data = await postJson<Organization & {
+    let data: Organization & {
       access_token?: string;
       refresh_token?: string;
       expires_in?: number;
       user?: { id: string; email: string; first_name: string | null; last_name: string | null };
-    }>(
-      `${this.serviceApiUrl}/auth/create-org`,
-      { name, refresh_token: refreshToken },
-    );
+    };
+    try {
+      data = await postJson(
+        `${this.serviceApiUrl}/auth/create-org`,
+        { name, refresh_token: refreshToken },
+      );
+    } catch (err: any) {
+      // Translate quota responses into a CapyError so renderError can show the
+      // upgrade screen — and so the createNewOrganization retry loop does not
+      // mistake a 402 for a name conflict (409) and keep re-prompting.
+      if (err instanceof HttpStatusError && err.status === 402 && err.body?.code === 'QUOTA_EXCEEDED') {
+        throw new CapyError(
+          err.body.error || 'Account quota exceeded',
+          ERROR_CODES.QUOTA_EXCEEDED,
+          { status: 402, kind: err.body.kind, limit: err.body.limit, upgrade_url: err.body.upgrade_url },
+        );
+      }
+      throw err;
+    }
 
     const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
 

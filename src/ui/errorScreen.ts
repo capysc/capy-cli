@@ -34,6 +34,8 @@ export function renderError(error: any, context: ErrorContext = {}): string {
         return renderInvalidFormat(error);
       case ERROR_CODES.NO_KEEP_FILE:
         return renderNoKeepFile();
+      case ERROR_CODES.QUOTA_EXCEEDED:
+        return renderQuotaExceeded(error);
       default:
         return renderGeneric(error);
     }
@@ -205,6 +207,30 @@ function renderNoKeepFile(): string {
     `  ${grey(`This project has not been initialized with ${bold('Capy')} yet.`)}`,
     '',
     `  Run ${bold('capy')} to initialize.`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderQuotaExceeded(error: CapyError): string {
+  const kind = error.details?.kind;
+  const limit = error.details?.limit;
+  const upgradeUrl = error.details?.upgrade_url || 'https://capy.sc/pro';
+  let headline: string;
+  if (kind === 'project') {
+    headline = `Project limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
+  } else if (kind === 'member') {
+    headline = `Member limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
+  } else {
+    headline = `Organization limit reached${limit ? grey(` (${limit}/account)`) : ''}`;
+  }
+  const lines = [
+    '',
+    `  ${bold(headline)}`,
+    `  ${grey(error.message)}`,
+    '',
+    `  Upgrade to ${bold('Capy Pro')} for higher quotas:`,
+    `    ${upgradeUrl}`,
     '',
   ];
   return lines.join('\n');
