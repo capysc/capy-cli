@@ -654,7 +654,11 @@ export class AuthService {
           try {
             const userId = file.replace('.json', '');
             const data = readAuthSession(userId) as SessionStore | null;
-            if (data && data.version === 2) {
+            // Skip stale files where the filename user_id disagrees with the
+            // content user_id — a prior refresh wrote new user data to the
+            // old path, leaving a snapshot that disagrees with the
+            // authoritative per-user file.
+            if (data && data.version === 2 && data.user_id === userId) {
               this.session = data;
               this.sessionUserId = userId;
               return;
