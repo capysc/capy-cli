@@ -235,7 +235,6 @@ export class CapyCommand {
             name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
             value: o.id,
           })),
-          new inquirer.Separator(' ──────────────'),
           { name: 'Create new organization +', value: CREATE_NEW_ORG },
         ],
         default: currentOrgId,
