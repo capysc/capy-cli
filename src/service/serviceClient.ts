@@ -134,6 +134,14 @@ export class ServiceClient {
         );
       }
 
+      if (res.status === 402 && data.code === 'QUOTA_EXCEEDED') {
+        throw new CapyError(
+          data.error || 'Account quota exceeded',
+          ERROR_CODES.QUOTA_EXCEEDED,
+          { status: 402, kind: data.kind, limit: data.limit, upgrade_url: data.upgrade_url }
+        );
+      }
+
       const serverMessage = data.error || data.message || 'Service request failed';
       throw new CapyError(
         serverMessage,
