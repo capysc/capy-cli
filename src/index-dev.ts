@@ -43,7 +43,7 @@ const program = new Command();
 program
   .name('capy-dev')
   .description('Capy CLI (DEV MODE - mock auth enabled)')
-  .version('1.0.0')
+  .version('0.2.0')
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')

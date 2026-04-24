@@ -28,7 +28,7 @@ const program = new Command();
 program
   .name('capy')
   .description('Capy CLI - SecretOps for the AI age')
-  .version('1.0.0')
+  .version('0.2.0')
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
@@ -362,7 +362,7 @@ program
   .command('version')
   .description('Show version information')
   .action(() => {
-    console.log(`${B('Capy')} CLI v1.0.0`);
+    console.log(`${B('Capy')} CLI v0.2.0`);
   });
 
 
