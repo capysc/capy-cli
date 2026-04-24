@@ -38,6 +38,7 @@ program
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
       console.log(`    ${B('capy')}                        \x1b[90mSync secrets\x1b[0m`);
+      console.log(`    ${B('capy')} run -- <cmd>           \x1b[90mRun a command with decrypted secrets\x1b[0m`);
       console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
       console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to Keep\x1b[0m`);
       console.log(`    ${B('capy')} deploy                 \x1b[90mSet up deploy credentials\x1b[0m`);
@@ -67,6 +68,19 @@ program
   });
 
 program
+  .command('run')
+  .description('Run a command with decrypted secrets')
+  .allowUnknownOption()
+  .helpOption(false)
+  .action(async (_opts: any, cmd: any) => {
+    const { runCommand } = await import('./commands/runCommand');
+    const dashIdx = process.argv.indexOf('--');
+    const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
+    const code = await runCommand(childArgs);
+    process.exit(code);
+  });
+
+program
   .command('status')
   .description('Show secret drift between local, pinned, and remote')
   .action(async () => {
@@ -93,13 +107,12 @@ program
 
     const authService = new AuthService(undefined, false, projectState.userId);
     const serviceClient = new ServiceClient();
+    serviceClient.setTokenProvider(() => authService.getValidToken());
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);
     }
-    const token = authService.getToken();
-    if (token) serviceClient.setToken(token);
 
     try {
 
@@ -369,6 +382,15 @@ program
     const { RedeemCommand } = await import('./commands/redeemCommand');
     const cmd = new RedeemCommand();
     await cmd.execute(code);
+  });
+
+program
+  .command('transport')
+  .description('Generate a redeem code to move your account to another machine')
+  .action(async () => {
+    const { TransportCommand } = await import('./commands/transportCommand');
+    const cmd = new TransportCommand();
+    await cmd.execute();
   });
 
 program

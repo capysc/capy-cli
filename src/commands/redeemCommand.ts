@@ -18,14 +18,23 @@ export class RedeemCommand {
   }
 
   async execute(code: string): Promise<void> {
-    // 1. Parse redeem code → T + target org + double-wrapped ciphertext
+    // 1. Parse redeem code → T + target org + double-wrapped ciphertext + expiry
     let token: Buffer;
     let ciphertext: string;
     let targetOrgId: string;
+    let notAfter: number;
     try {
-      ({ token, orgId: targetOrgId, ciphertext } = parseRedeemCode(code));
+      ({ token, orgId: targetOrgId, ciphertext, notAfter } = parseRedeemCode(code));
     } catch (err: any) {
       console.error(`Invalid redeem code: ${err.message}`);
+      process.exit(1);
+    }
+
+    // Pre-flight expiry check so we don't bother the user with a sign-in
+    // ceremony just to fail at co-decrypt. Server enforces this independently.
+    if (notAfter <= Date.now()) {
+      console.error(`\n  This invite expired ${new Date(notAfter).toISOString()}.`);
+      console.error('  Ask the inviter for a fresh code.\n');
       process.exit(1);
     }
 
@@ -66,21 +75,43 @@ export class RedeemCommand {
       }
     }
 
+    // Explicit membership guard: tryPasswordAuth / OAuth may succeed but
+    // return a token scoped to a DIFFERENT org the user already belongs to
+    // (e.g., a kicked user re-authing with a valid password lands on their
+    // own org, not the one the invite was issued for). Without this check,
+    // a downstream co-decrypt hits that OTHER org's endpoint — which passes
+    // membership but shouldn't, because the invite's ciphertext was never
+    // intended for it. Fail closed if we didn't actually land on targetOrgId.
+    if (orgId !== targetOrgId) {
+      // Mirror the post-coDecrypt-failure cleanup so a kicked user doesn't
+      // retain a local org key for the revoked org.
+      try {
+        const { getGlobalCapyDir } = await import('../config/globalConfig');
+        const orgDir = join(getGlobalCapyDir(), 'orgs', targetOrgId);
+        if (existsSync(orgDir)) {
+          const { rmSync } = await import('fs');
+          rmSync(orgDir, { recursive: true });
+        }
+      } catch {}
+      console.error(`\n  You are not a member of the invited organization.`);
+      console.error(`  The invite may have been revoked, or you were removed.\n`);
+      process.exit(1);
+    }
+
     // 4. Regardless of whether crypto setup is needed, always update local
     //    state so the next `capy` run targets the redeemed org.
     const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
     this.switchLocalContext(orgId, userId, orgName);
 
-    const serviceToken = authService.getToken();
     const serviceClient = new ServiceClient(this.apiUrl);
-    if (serviceToken) serviceClient.setToken(serviceToken);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
 
     // 5. Always verify membership via co-decrypt, even if local key exists.
     //    A kicked user still has the local org key — co-decrypt is the
     //    server-side gate that proves current membership.
     let innerBlob: string;
     try {
-      const result = await serviceClient.coDecrypt(orgId, ciphertext);
+      const result = await serviceClient.coDecrypt(orgId, ciphertext, notAfter);
       innerBlob = result.plaintext;
     } catch (err: any) {
       // If the user had a local key from a previous invite, remove it —

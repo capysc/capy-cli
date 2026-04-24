@@ -24,8 +24,8 @@ describe('ServiceClient', () => {
     serviceClient = new ServiceClient(defaultServiceUrl);
   });
 
-  describe('setToken', () => {
-    test('should configure authorization header', () => {
+  describe('setTokenProvider', () => {
+    test('should configure authorization header via provider callback', () => {
       const token: ServiceToken = {
         access_token: 'test_token',
         expires_at: Date.now() + 3600000,
@@ -33,7 +33,7 @@ describe('ServiceClient', () => {
         user_id: 'user_456'
       };
 
-      serviceClient.setToken(token);
+      serviceClient.setTokenProvider(async () => token);
 
       // Verify that subsequent requests include auth header
       // This is tested implicitly in other test methods
@@ -66,7 +66,7 @@ describe('ServiceClient', () => {
         organization_id: 'org_123',
         user_id: 'user_456'
       };
-      serviceClient.setToken(token);
+      serviceClient.setTokenProvider(async () => token);
 
       mockFetch.mockResolvedValue(mockFetchResponse({ env_file: '', permissions: [] }));
 
@@ -144,7 +144,7 @@ describe('ServiceClient', () => {
         organization_id: 'org_123',
         user_id: 'user_456'
       };
-      serviceClient.setToken(token);
+      serviceClient.setTokenProvider(async () => token);
 
       mockFetch.mockResolvedValue(mockFetchResponse({
         id: 'proj_456', name: 'test', organization_id: 'org_123', s3_prefix: 'org_123/proj_456'

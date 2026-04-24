@@ -30,13 +30,7 @@ export class PushCommand {
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
 
-    this.serviceClient.setTokenRefresher(async () => {
-      const refreshed = await this.authService.refreshToken();
-      if (refreshed) {
-        return this.authService.getToken();
-      }
-      return null;
-    });
+    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
   private debug(msg: string, data?: unknown): void {
@@ -113,8 +107,6 @@ export class PushCommand {
       throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
     }
 
-    const token = this.authService.getToken();
-    if (token) this.serviceClient.setToken(token);
     spinner.stop();
 
     const keyOps: KeyServiceOps = {

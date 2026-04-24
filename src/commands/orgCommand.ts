@@ -22,10 +22,7 @@ export class OrgCommand {
     this.authService = new AuthService(apiUrl, devMode);
     this.serviceClient = new ServiceClient(apiUrl, devMode);
 
-    this.serviceClient.setTokenRefresher(async () => {
-      const refreshed = await this.authService.refreshToken();
-      return refreshed ? this.authService.getToken() : null;
-    });
+    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
   async execute(): Promise<void> {
@@ -55,9 +52,6 @@ export class OrgCommand {
       console.error('Authentication failed. Run `capy` to re-authenticate.');
       process.exit(1);
     }
-
-    const token = this.authService.getToken();
-    if (token) this.serviceClient.setToken(token);
 
     const orgs = authResult.organizations || [];
     const currentOrg = currentOrgId ? orgs.find(o => o.id === currentOrgId) : undefined;
@@ -128,10 +122,6 @@ export class OrgCommand {
       }
       orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
     }
-
-    // Update token for service client
-    const updatedToken = this.authService.getToken();
-    if (updatedToken) this.serviceClient.setToken(updatedToken);
 
     // Check for org master key
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {

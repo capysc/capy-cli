@@ -105,6 +105,11 @@ function renderPermissionDenied(error: CapyError, ctx: ErrorContext): string {
     '',
     `  Contact your project admin to get access.`,
     '',
+    `  If you are trying to log into another computer, run ${bold('capy transport')}`,
+    `  where you have an initialized account and copy the redeem code to this`,
+    `  computer. If you don't have access to that computer, you can alternately`,
+    `  get a team member to send you an invite.`,
+    '',
   ];
   return lines.join('\n');
 }

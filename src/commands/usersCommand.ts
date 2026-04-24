@@ -36,6 +36,7 @@ export class UsersCommand {
 
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
     let authResult = await authService.authenticateSilent(orgId);
     if (!authResult.success) authResult = await authService.authenticateSilent();
     if (!authResult.success) authResult = await authService.authenticate(orgId);
@@ -43,8 +44,6 @@ export class UsersCommand {
       console.error('Authentication failed');
       process.exit(1);
     }
-    const token = authService.getToken();
-    if (token) serviceClient.setToken(token);
 
     return { orgId, serviceClient };
   }
@@ -112,6 +111,7 @@ export class UsersCommand {
     // when another org's session is still valid.
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
     const serviceClient = new ServiceClient(this.apiUrl);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
     let authResult = await authService.authenticateSilent(orgId);
     if (!authResult.success) authResult = await authService.authenticateSilent();
     if (!authResult.success) authResult = await authService.authenticate(orgId);
@@ -119,13 +119,6 @@ export class UsersCommand {
       console.error('Authentication failed');
       process.exit(1);
     }
-    const token = authService.getToken();
-    if (token) serviceClient.setToken(token);
-    // Long-running TUI: refresh expired tokens transparently on 401.
-    serviceClient.setTokenRefresher(async () => {
-      const refreshed = await authService.refreshToken();
-      return refreshed ? authService.getToken() : null;
-    });
 
     // Fetch member details
     const spinner = new Spinner('Loading members...');

@@ -25,10 +25,7 @@ export async function resolveOrgContext(
 
   const authService = new AuthService(apiUrl, devMode, projectState.userId);
   const serviceClient = new ServiceClient(apiUrl);
-  serviceClient.setTokenRefresher(async () => {
-    const refreshed = await authService.refreshToken();
-    return refreshed ? authService.getToken() : null;
-  });
+  serviceClient.setTokenProvider(() => authService.getValidToken());
 
   let orgId = projectState.organizationId;
   let authResult = await authService.authenticateSilent(orgId);
@@ -63,9 +60,6 @@ export async function resolveOrgContext(
       process.exit(1);
     }
   }
-
-  const token = authService.getToken();
-  if (token) serviceClient.setToken(token);
 
   return {
     orgId: orgId!,

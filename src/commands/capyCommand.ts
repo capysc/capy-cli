@@ -52,14 +52,7 @@ export class CapyCommand {
     this.syncEngine = new SyncEngine();
     this.promptEngine = new PromptEngine();
 
-    // Auto-refresh token on 401
-    this.serviceClient.setTokenRefresher(async () => {
-      const refreshed = await this.authService.refreshToken();
-      if (refreshed) {
-        return this.authService.getToken();
-      }
-      return null;
-    });
+    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
   /**
@@ -206,12 +199,6 @@ export class CapyCommand {
       this.projectManager.writeSyncStateUserId(authResult.user_id);
     }
 
-    // Set token for service client
-    const token = this.authService.getToken();
-    if (token) {
-      this.serviceClient.setToken(token);
-    }
-
     // Resolve organization
     const orgs = authResult.organizations || [];
     let selectedOrg: Organization;
@@ -269,12 +256,6 @@ export class CapyCommand {
         }
         orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
       }
-    }
-
-    // Set token for service client (now valid for the selected org)
-    const updatedToken = this.authService.getToken();
-    if (updatedToken) {
-      this.serviceClient.setToken(updatedToken);
     }
 
     // User has access to an existing org but no local key — they were invited
@@ -998,13 +979,7 @@ export class CapyCommand {
       branch,
     );
 
-    // Set token for service client
     const token = this.authService.getToken();
-
-    if (token) {
-      this.serviceClient.setToken(token);
-    }
-
     if (!token) {
       throw new CapyError(
         'You do not have access to this project\'s organization.\n\n' +

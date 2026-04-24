@@ -67,17 +67,51 @@ export function parseDeployCode(deployCode: string): {
 }
 
 /**
- * Encrypts all env vars into a single blob using the project key.
- * Format: AES-256-GCM(envBlob, PK) where envBlob is KEY=value\n lines.
+ * Encrypts all env vars into a single blob.
+ *
+ * Zero-trust derivation:
+ *   service_key = HKDF-SHA256(innerBlob, salt=projectId+hex(deployId), info="capy:deploy:service-key", 32)
+ *   DECRYPT_KEY = HKDF-SHA256(projectKey || service_key, salt=deployId, info="capy:deploy:decrypt", 32)
+ *
+ * Encrypted with AES-256-GCM(envBlob, DECRYPT_KEY) where envBlob is KEY=value\n lines.
+ *
+ * IMPORTANT: innerBlob MUST be the exact base64 string that was sent to the
+ * service for KMS-wrapping. Do not recompute innerBlob here — deployInnerWrap
+ * uses a random IV, so a fresh call would produce different bytes, yielding a
+ * different service_key and breaking decryption round-trip.
+ *
+ * At decrypt time the consumer fetches service_key from the server (which
+ * recovers the same innerBlob via KMS-unwrap) and reconstructs DECRYPT_KEY.
+ * Zero-trust holds: projectKey alone is insufficient; revocation gates the
+ * server's willingness to return service_key.
  */
-export function encryptEnvBlob(envVars: Record<string, string>, projectKey: Buffer): Buffer {
+export function encryptEnvBlob(
+  envVars: Record<string, string>,
+  projectKey: Buffer,
+  innerBlob: string,
+  projectId: string,
+  deployId: Buffer,
+): Buffer {
+  // service_key derivation matches service/src/routes/deploy.ts:250-253
+  const innerBlobBytes = Buffer.from(innerBlob, 'base64');
+  const saltService = projectId + deployId.toString('hex');
+  const serviceKey = Buffer.from(
+    hkdfSync('sha256', innerBlobBytes, saltService, 'capy:deploy:service-key', 32),
+  );
+
+  // DECRYPT_KEY derivation matches deployRuntime.decryptSecretsBlob
+  const combined = Buffer.concat([projectKey, serviceKey]);
+  const decryptKey = Buffer.from(
+    hkdfSync('sha256', combined, deployId, 'capy:deploy:decrypt', 32),
+  );
+
   const envBlob = Object.entries(envVars)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');
   const plaintext = Buffer.from(envBlob, 'utf-8');
 
   const iv = randomBytes(IV_LENGTH);
-  const cipher = createCipheriv('aes-256-gcm', projectKey, iv, {
+  const cipher = createCipheriv('aes-256-gcm', decryptKey, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });
   const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);

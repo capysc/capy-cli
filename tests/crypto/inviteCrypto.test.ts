@@ -87,19 +87,31 @@ describe('inviteCrypto', () => {
   });
 
   describe('buildRedeemCode / parseRedeemCode', () => {
-    it('round-trips token, orgId, and ciphertext', () => {
+    it('round-trips token, orgId, ciphertext, and notAfter', () => {
       const token = generateInviteToken();
       const outerBlob = randomBytes(64).toString('base64');
-      const code = buildRedeemCode(token, outerBlob, orgId);
+      const notAfter = Date.now() + 3600_000;
+      const code = buildRedeemCode(token, outerBlob, orgId, notAfter);
       const parsed = parseRedeemCode(code);
       expect(parsed.token.equals(token)).toBe(true);
       expect(parsed.orgId).toBe(orgId);
       expect(parsed.ciphertext).toBe(outerBlob);
+      expect(parsed.notAfter).toBe(notAfter);
     });
 
     it('throws on invalid (too short) code', () => {
       const shortCode = randomBytes(16).toString('base64');
       expect(() => parseRedeemCode(shortCode)).toThrow(/too short/);
+    });
+
+    it('rejects unsupported version byte (forward compat)', () => {
+      const token = generateInviteToken();
+      const outerBlob = randomBytes(32).toString('base64');
+      const code = buildRedeemCode(token, outerBlob, orgId, Date.now() + 60_000);
+      const buf = Buffer.from(code, 'base64');
+      buf.writeUInt8(0x99, 0); // bogus version
+      const tampered = buf.toString('base64');
+      expect(() => parseRedeemCode(tampered)).toThrow(/Unsupported redeem code version/);
     });
   });
 
@@ -119,7 +131,7 @@ describe('inviteCrypto', () => {
       const outerBlob = Buffer.concat([iv, enc, tag]).toString('base64');
 
       // 3. Build redeem code
-      const code = buildRedeemCode(token, outerBlob, orgId);
+      const code = buildRedeemCode(token, outerBlob, orgId, Date.now() + 3600_000);
 
       // 4. Recipient parses redeem code
       const { token: parsedToken, orgId: parsedOrgId, ciphertext } = parseRedeemCode(code);

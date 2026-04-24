@@ -14,6 +14,24 @@ export class HttpStatusError extends Error {
   }
 }
 
+/**
+ * Resolve the effective `expires_at` for a newly-issued access token. Normal
+ * production: `Date.now() + expires_in * 1000` from WorkOS (~10 min).
+ *
+ * Test-only override: setting `CAPY_TOKEN_TTL_SECONDS=5` clamps every
+ * local `expires_at` to 5 seconds from now. This forces `getValidToken()`
+ * to exercise the refresh path on nearly every request, catching
+ * regressions in the refresh logic that wouldn't surface in a single
+ * short-running test run. The override does NOT shorten the WorkOS token
+ * itself — it lies to our code about when the cached copy is stale, which
+ * is exactly the decision we want to exercise.
+ */
+function resolveExpiresAt(expiresInSeconds: number): number {
+  const override = process.env.CAPY_TOKEN_TTL_SECONDS;
+  const ttl = override ? Number(override) : expiresInSeconds;
+  return Date.now() + ttl * 1000;
+}
+
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
   const res = await fetch(url, {
     method: 'POST',
@@ -246,7 +264,7 @@ export class AuthService {
       if (resolvedOrgId) {
         this.session.sessions[resolvedOrgId] = {
           access_token: token.access_token,
-          expires_at: Date.now() + (token.expires_in * 1000),
+          expires_at: resolveExpiresAt(token.expires_in),
         };
         this.currentOrgId = resolvedOrgId;
       }
@@ -395,7 +413,7 @@ export class AuthService {
       // the KMS co-decrypt endpoint is the security gate per-org, not the client.
       this.session.sessions[resolvedOrgId] = {
         access_token: data.access_token,
-        expires_at: Date.now() + (data.expires_in * 1000),
+        expires_at: resolveExpiresAt(data.expires_in),
       };
       this.session.refresh_token = data.refresh_token;
 
@@ -474,6 +492,29 @@ export class AuthService {
     };
   }
 
+  /**
+   * Return a token that's guaranteed to be unexpired by our local clock.
+   * If the cached access_token has passed `expires_at`, refresh via
+   * `refreshForOrg` before returning. Used by ServiceClient on every
+   * request so no stale cached token can escape the authService boundary.
+   *
+   * Returns null if there's no session, no current org, or refresh failed.
+   * Callers typically surface that as "you need to re-authenticate".
+   */
+  async getValidToken(): Promise<ServiceToken | null> {
+    if (!this.session || !this.currentOrgId) return null;
+    const orgSession = this.session.sessions[this.currentOrgId];
+    if (!orgSession) return null;
+
+    if (orgSession.expires_at <= Date.now()) {
+      const refreshed = await this.refreshForOrg(this.currentOrgId);
+      if (!refreshed) return null;
+    }
+
+    // getToken() re-validates the org_id claim and discards mismatches.
+    return this.getToken();
+  }
+
   getOrganizationId(): string | null {
     return this.currentOrgId;
   }
@@ -519,7 +560,7 @@ export class AuthService {
     if (data.access_token) {
       this.session.sessions[data.id] = {
         access_token: data.access_token,
-        expires_at: Date.now() + ((data.expires_in || 86400) * 1000),
+        expires_at: resolveExpiresAt(data.expires_in || 86400),
       };
       this.currentOrgId = data.id;
     }
