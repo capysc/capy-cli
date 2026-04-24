@@ -6,6 +6,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { Organization, KeepFile, CapyError, ERROR_CODES } from '../types/index';
 import { hasOrgKey } from '../crypto/keyResolver';
+import { createNewOrganization } from './orgCreation';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -60,24 +61,21 @@ export class OrgCommand {
 
     const orgs = authResult.organizations || [];
     const currentOrg = currentOrgId ? orgs.find(o => o.id === currentOrgId) : undefined;
+    const CREATE_NEW_ORG = '__create_new__';
 
-    if (orgs.length <= 1) {
-      const orgName = currentOrg?.name || orgs[0]?.name || currentOrgId || 'unknown';
-      console.log(`\n  Organization: ${B(orgName)}`);
-      console.log('  No other organizations available.\n');
-      return;
-    }
-
-    // Show org list and let user pick
     console.log('');
     const { orgId } = await inquirer.prompt([{
       type: 'list',
       name: 'orgId',
       message: 'Switch organization:',
-      choices: orgs.map(o => ({
-        name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
-        value: o.id,
-      })),
+      choices: [
+        ...orgs.map(o => ({
+          name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+          value: o.id,
+        })),
+        new inquirer.Separator(),
+        { name: 'Create new organization +', value: CREATE_NEW_ORG },
+      ],
       default: currentOrgId,
     }]);
 
@@ -86,31 +84,51 @@ export class OrgCommand {
       return;
     }
 
-    const selectedOrg = orgs.find(o => o.id === orgId)!;
-
-    // Switch to the selected org using refresh token — no re-auth
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
-
     if (!refreshToken) {
       console.error('No refresh token available. Run `capy` to re-authenticate.');
       process.exit(1);
     }
 
-    const orgSpinner = ora('Switching organization...').start();
-    const scopedAuth = await this.authService.refreshWithCredentials(
-      refreshToken,
-      selectedOrg.id,
-      authResult.user_id,
-    );
-
-    if (!scopedAuth.success) {
-      orgSpinner.fail('Failed to switch organization');
-      throw new CapyError(
-        scopedAuth.error || 'Organization switch failed',
-        ERROR_CODES.AUTH_FAILED,
+    let selectedOrg: Organization;
+    if (orgId === CREATE_NEW_ORG) {
+      selectedOrg = await createNewOrganization(
+        this.authService,
+        this.serviceClient,
+        refreshToken,
+        authResult.user_id!,
       );
+
+      const scopedAuth = await this.authService.refreshWithCredentials(
+        refreshToken,
+        selectedOrg.id,
+        authResult.user_id,
+      );
+      if (!scopedAuth.success) {
+        throw new CapyError(
+          scopedAuth.error || 'Organization switch failed',
+          ERROR_CODES.AUTH_FAILED,
+        );
+      }
+    } else {
+      selectedOrg = orgs.find(o => o.id === orgId)!;
+
+      const orgSpinner = ora('Switching organization...').start();
+      const scopedAuth = await this.authService.refreshWithCredentials(
+        refreshToken,
+        selectedOrg.id,
+        authResult.user_id,
+      );
+
+      if (!scopedAuth.success) {
+        orgSpinner.fail('Failed to switch organization');
+        throw new CapyError(
+          scopedAuth.error || 'Organization switch failed',
+          ERROR_CODES.AUTH_FAILED,
+        );
+      }
+      orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
     }
-    orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
 
     // Update token for service client
     const updatedToken = this.authService.getToken();
