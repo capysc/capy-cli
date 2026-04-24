@@ -5,8 +5,9 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { Organization, KeepFile, CapyError, ERROR_CODES } from '../types/index';
-import { hasOrgKey } from '../crypto/keyResolver';
+import { hasOrgKey, resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { createNewOrganization } from './orgCreation';
+import { execSync } from 'child_process';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -139,8 +140,7 @@ export class OrgCommand {
     const orgProjects = projects.filter(p => p.organization_id === selectedOrg.id);
 
     if (orgProjects.length === 0) {
-      console.log(`\n  No projects found in ${B(selectedOrg.name)}.`);
-      console.log(`  Run ${B('capy')} to create one.\n`);
+      await this.createFirstProjectInOrg(selectedOrg, authResult.user_id!, hasProject);
       return;
     }
 
@@ -182,5 +182,118 @@ export class OrgCommand {
       console.log(`\n  Switched to ${B(selectedOrg.name)} / ${B(selectedProject.name)}`);
       console.log(`  Run ${B('capy')} in a project directory to sync secrets.\n`);
     }
+  }
+
+  private keyServiceOps(): KeyServiceOps {
+    return {
+      coDecrypt: (orgId, ciphertext) =>
+        this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
+      wrapOuterLayer: (orgId, plaintext) =>
+        this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
+    };
+  }
+
+  /**
+   * Bootstrap the first project in a freshly-created (or empty) org. Without
+   * this, switching into an empty org leaves keep.lock pointed at the old org
+   * — the user's next `capy` run silently resyncs the old project and the
+   * "switch" appears to have no effect.
+   */
+  private async createFirstProjectInOrg(
+    selectedOrg: Organization,
+    userId: string,
+    hasProject: boolean,
+  ): Promise<void> {
+    console.log(`\n  ${B(selectedOrg.name)} has no projects yet.`);
+
+    // If the current directory is already bound to another project, its .env
+    // holds values encrypted for that project's key. Overwriting keep.lock
+    // here would orphan those secrets — refuse and point the user at a clean
+    // directory.
+    if (hasProject) {
+      const localEnv = this.fileManager.readEnvFile();
+      const encryptedEntries = Object.entries(localEnv)
+        .filter(([_, v]) => v.startsWith('capy:'));
+      if (encryptedEntries.length > 0) {
+        throw new CapyError(
+          `This directory is bound to another project and its .env contains ${encryptedEntries.length} encrypted value(s).\n\n` +
+          `  Binding it to a project in ${B(selectedOrg.name)} would make those values unreadable.\n\n` +
+          `  To create the first project in ${B(selectedOrg.name)}, run ${B('capy')} in a fresh directory.`,
+          ERROR_CODES.INVALID_FORMAT,
+        );
+      }
+    }
+
+    const { confirmed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmed',
+      message: `Create the first project in ${selectedOrg.name} here?`,
+      default: true,
+    }]);
+    if (!confirmed) {
+      console.log(`\n  Switch cancelled. Run ${B('capy')} in a fresh directory to create a project in ${B(selectedOrg.name)}.\n`);
+      return;
+    }
+
+    const defaultName = this.projectManager.getDefaultProjectName();
+    const { projectName } = await inquirer.prompt([{
+      type: 'input',
+      name: 'projectName',
+      message: 'Project name:',
+      default: defaultName,
+      validate: (input: string) => input.trim().length > 0 || 'Project name cannot be empty',
+    }]);
+
+    const initSpinner = ora('Creating project...').start();
+    const projectResult = await this.serviceClient.initializeProject(
+      projectName.trim(),
+      selectedOrg.id,
+    );
+    initSpinner.succeed(`Project created: ${projectResult.project_name}`);
+
+    const keySpinner = ora('Resolving project key...').start();
+    await resolveProjectKey(
+      selectedOrg.id,
+      projectResult.project_id,
+      userId,
+      this.keyServiceOps(),
+    );
+    keySpinner.succeed('Project key ready');
+
+    const branchName = 'development';
+    const branchSpinner = ora(`Creating branch ${branchName}...`).start();
+    try {
+      await this.serviceClient.createBranch(projectResult.project_id, branchName, false);
+      branchSpinner.succeed(`Created branch ${branchName}`);
+    } catch (err) {
+      branchSpinner.fail(`Failed to create branch ${branchName}`);
+      throw err;
+    }
+
+    const keep: KeepFile = {
+      version: '3.0',
+      org_id: projectResult.org_id,
+      project_id: projectResult.project_id,
+      project_name: projectResult.project_name,
+      variables: {},
+    };
+    this.fileManager.writeKeepFile(keep);
+    this.projectManager.writeActiveBranch(branchName);
+    this.fileManager.writeSyncState({
+      last_sync: '',
+      synced_variables: [],
+      user_id: userId,
+      org_id: selectedOrg.id,
+    });
+    this.fileManager.ensureCapyGitignore();
+
+    try {
+      execSync('git add keep.lock', { stdio: 'pipe' });
+    } catch {
+      // not a git repo — fine
+    }
+
+    console.log(`\n  Switched to ${B(selectedOrg.name)} / ${B(projectResult.project_name)}`);
+    console.log(`  Run ${B('capy')} to sync secrets.\n`);
   }
 }
