@@ -124,13 +124,7 @@ export class StatusCommand {
     this.authService = new AuthService(undefined, devMode);
     this.serviceClient = new ServiceClient(undefined, devMode);
 
-    this.serviceClient.setTokenRefresher(async () => {
-      const refreshed = await this.authService.refreshToken();
-      if (refreshed) {
-        return this.authService.getToken();
-      }
-      return null;
-    });
+    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
   async execute(): Promise<void> {
@@ -177,9 +171,6 @@ export class StatusCommand {
       const { resolveProjectKey } = await import('../crypto/keyResolver');
       const authResult = await this.authService.authenticateSilent(projectState.organizationId);
       if (!authResult.success) throw new Error('auth failed');
-
-      const token = this.authService.getToken();
-      if (token) this.serviceClient.setToken(token);
 
       const keyOps = {
         coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),

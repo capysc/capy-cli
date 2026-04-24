@@ -43,7 +43,7 @@ const program = new Command();
 program
   .name('capy-dev')
   .description('Capy CLI (DEV MODE - mock auth enabled)')
-  .version('1.0.0')
+  .version('0.2.0')
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
@@ -57,6 +57,7 @@ program
       console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
       console.log(`    ${B('capy-dev')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
       console.log(`    ${B('capy-dev')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
+      console.log(`    ${B('capy-dev')} transport              \x1b[90mMove your account to another machine\x1b[0m`);
       console.log(`    ${B('capy-dev')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
       console.log(`    ${B('capy-dev')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy-dev')} deploy                 \x1b[90mGenerate a deployment\x1b[0m`);
@@ -96,17 +97,12 @@ program
 
     const authService = new AuthService(undefined, true, projectState.userId);
     const serviceClient = new ServiceClient(undefined, true);
-    serviceClient.setTokenRefresher(async () => {
-      const refreshed = await authService.refreshToken();
-      return refreshed ? authService.getToken() : null;
-    });
+    serviceClient.setTokenProvider(() => authService.getValidToken());
     const authResult = await authService.authenticate(projectState.organizationId);
     if (!authResult.success) {
       console.error('Authentication failed');
       process.exit(1);
     }
-    const token = authService.getToken();
-    if (token) serviceClient.setToken(token);
 
     try {
 
@@ -270,6 +266,15 @@ program
   });
 
 program
+  .command('transport')
+  .description('Generate a redeem code to move your account to another machine')
+  .action(async () => {
+    const { TransportCommand } = await import('./commands/transportCommand');
+    const cmd = new TransportCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute();
+  });
+
+program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
   .action(async (email) => {
@@ -304,10 +309,9 @@ program
       const syncState = pm.readSyncState();
       const authService = new AuthService(undefined, true, syncState?.user_id);
       const serviceClient = new ServiceClient(undefined, true);
+      serviceClient.setTokenProvider(() => authService.getValidToken());
       const authResult = await authService.authenticateSilent(keep.org_id);
       if (!authResult.success) throw new Error('auth failed — run capy-dev first');
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
 
       const keyOps = {
         coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
@@ -511,6 +515,19 @@ program
     const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
     const cmd = new EndRecoverCommand();
     await cmd.execute();
+  });
+
+program
+  .command('run')
+  .description('Run a command with decrypted secrets')
+  .allowUnknownOption()
+  .helpOption(false)
+  .action(async (_opts: any, cmd: any) => {
+    const { runCommand } = await import('./commands/runCommand');
+    const dashIdx = process.argv.indexOf('--');
+    const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
+    const code = await runCommand(childArgs, true);
+    process.exit(code);
   });
 
 program.parse(process.argv);

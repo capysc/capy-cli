@@ -40,10 +40,17 @@ export interface MemberDetail {
   projects: MemberProject[];
 }
 
+/**
+ * Async callback that returns the current valid token, refreshing it if
+ * needed. ServiceClient calls this before every request — no local token
+ * cache — so token rotation (org switch, create-org, redeem, expiry) is
+ * invisible to ServiceClient and callers.
+ */
+export type TokenProvider = () => Promise<ServiceToken | null>;
+
 export class ServiceClient {
   private apiUrl: string;
-  private token: ServiceToken | null = null;
-  private onTokenExpired?: () => Promise<ServiceToken | null>;
+  private tokenProvider: TokenProvider | null = null;
 
   constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
@@ -52,20 +59,23 @@ export class ServiceClient {
     }
   }
 
-  setToken(token: ServiceToken): void {
-    this.token = token;
-  }
-
-  setTokenRefresher(refresher: () => Promise<ServiceToken | null>): void {
-    this.onTokenExpired = refresher;
+  /**
+   * Wire the token provider. Call exactly once after construction — ServiceClient
+   * then pulls a token on every request. Replaces the old `setToken()` +
+   * `setTokenRefresher()` pair (removed to eliminate a whole class of
+   * stale-cached-token bugs).
+   */
+  setTokenProvider(provider: TokenProvider): void {
+    this.tokenProvider = provider;
   }
 
   private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token.access_token}`;
+    const token = this.tokenProvider ? await this.tokenProvider() : null;
+    if (token) {
+      headers['Authorization'] = `Bearer ${token.access_token}`;
     }
 
     const controller = new AbortController();
@@ -100,13 +110,12 @@ export class ServiceClient {
       const data = await res.json().catch(() => ({})) as Record<string, any>;
 
       if (res.status === 401) {
-        // Try refreshing token once
-        if (!options?._retried && this.onTokenExpired) {
-          const newToken = await this.onTokenExpired();
-          if (newToken) {
-            this.token = newToken;
-            return this.request<T>(method, path, body, { ...options, _retried: true });
-          }
+        // The provider already refreshes proactively on expiry; a 401 here
+        // means either the server rejected the token for a non-expiry reason
+        // (e.g., membership revoked) or a race with the refresh cycle. Retry
+        // once — the next provider() call will fetch a fresh token.
+        if (!options?._retried && this.tokenProvider) {
+          return this.request<T>(method, path, body, { ...options, _retried: true });
         }
         const detail = data.error || 'Unknown auth error';
         throw new CapyError(
@@ -122,6 +131,14 @@ export class ServiceClient {
           detail,
           ERROR_CODES.PERMISSION_DENIED,
           { status: 403, detail }
+        );
+      }
+
+      if (res.status === 402 && data.code === 'QUOTA_EXCEEDED') {
+        throw new CapyError(
+          data.error || 'Account quota exceeded',
+          ERROR_CODES.QUOTA_EXCEEDED,
+          { status: 402, kind: data.kind, limit: data.limit, upgrade_url: data.upgrade_url }
         );
       }
 
@@ -422,12 +439,18 @@ export class ServiceClient {
     return this.request('GET', `/orgs/${orgId}/me`);
   }
 
-  async wrapOuterLayer(orgId: string, plaintext: string): Promise<{ ciphertext: string }> {
-    return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext });
+  /**
+   * `notAfter` is for invite-issued blobs only — when present, the server
+   * binds it into the KMS EncryptionContext so a client tampering with the
+   * value in the redeem code fails the AEAD unwrap. The user's long-lived
+   * master key blob is wrapped without it (no expiry on personal storage).
+   */
+  async wrapOuterLayer(orgId: string, plaintext: string, notAfter?: number): Promise<{ ciphertext: string }> {
+    return this.request('POST', `/orgs/${orgId}/wrap`, { plaintext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
-  async coDecrypt(orgId: string, ciphertext: string): Promise<{ plaintext: string }> {
-    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext });
+  async coDecrypt(orgId: string, ciphertext: string, notAfter?: number): Promise<{ plaintext: string }> {
+    return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
 

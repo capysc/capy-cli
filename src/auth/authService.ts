@@ -7,11 +7,31 @@ import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir 
 
 export class HttpStatusError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  body: any;
+  constructor(message: string, status: number, body?: any) {
     super(message);
     this.name = 'HttpStatusError';
     this.status = status;
+    this.body = body;
   }
+}
+
+/**
+ * Resolve the effective `expires_at` for a newly-issued access token. Normal
+ * production: `Date.now() + expires_in * 1000` from WorkOS (~10 min).
+ *
+ * Test-only override: setting `CAPY_TOKEN_TTL_SECONDS=5` clamps every
+ * local `expires_at` to 5 seconds from now. This forces `getValidToken()`
+ * to exercise the refresh path on nearly every request, catching
+ * regressions in the refresh logic that wouldn't surface in a single
+ * short-running test run. The override does NOT shorten the WorkOS token
+ * itself — it lies to our code about when the cached copy is stale, which
+ * is exactly the decision we want to exercise.
+ */
+function resolveExpiresAt(expiresInSeconds: number): number {
+  const override = process.env.CAPY_TOKEN_TTL_SECONDS;
+  const ttl = override ? Number(override) : expiresInSeconds;
+  return Date.now() + ttl * 1000;
 }
 
 async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
@@ -23,7 +43,7 @@ async function postJson<T>(url: string, body: Record<string, unknown>): Promise<
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     const message = (data as any).error || `Request failed with status ${res.status}`;
-    throw new HttpStatusError(message, res.status);
+    throw new HttpStatusError(message, res.status, data);
   }
   return res.json() as Promise<T>;
 }
@@ -246,7 +266,7 @@ export class AuthService {
       if (resolvedOrgId) {
         this.session.sessions[resolvedOrgId] = {
           access_token: token.access_token,
-          expires_at: Date.now() + (token.expires_in * 1000),
+          expires_at: resolveExpiresAt(token.expires_in),
         };
         this.currentOrgId = resolvedOrgId;
       }
@@ -395,7 +415,7 @@ export class AuthService {
       // the KMS co-decrypt endpoint is the security gate per-org, not the client.
       this.session.sessions[resolvedOrgId] = {
         access_token: data.access_token,
-        expires_at: Date.now() + (data.expires_in * 1000),
+        expires_at: resolveExpiresAt(data.expires_in),
       };
       this.session.refresh_token = data.refresh_token;
 
@@ -474,6 +494,29 @@ export class AuthService {
     };
   }
 
+  /**
+   * Return a token that's guaranteed to be unexpired by our local clock.
+   * If the cached access_token has passed `expires_at`, refresh via
+   * `refreshForOrg` before returning. Used by ServiceClient on every
+   * request so no stale cached token can escape the authService boundary.
+   *
+   * Returns null if there's no session, no current org, or refresh failed.
+   * Callers typically surface that as "you need to re-authenticate".
+   */
+  async getValidToken(): Promise<ServiceToken | null> {
+    if (!this.session || !this.currentOrgId) return null;
+    const orgSession = this.session.sessions[this.currentOrgId];
+    if (!orgSession) return null;
+
+    if (orgSession.expires_at <= Date.now()) {
+      const refreshed = await this.refreshForOrg(this.currentOrgId);
+      if (!refreshed) return null;
+    }
+
+    // getToken() re-validates the org_id claim and discards mismatches.
+    return this.getToken();
+  }
+
   getOrganizationId(): string | null {
     return this.currentOrgId;
   }
@@ -486,15 +529,30 @@ export class AuthService {
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
-    const data = await postJson<Organization & {
+    let data: Organization & {
       access_token?: string;
       refresh_token?: string;
       expires_in?: number;
       user?: { id: string; email: string; first_name: string | null; last_name: string | null };
-    }>(
-      `${this.serviceApiUrl}/auth/create-org`,
-      { name, refresh_token: refreshToken },
-    );
+    };
+    try {
+      data = await postJson(
+        `${this.serviceApiUrl}/auth/create-org`,
+        { name, refresh_token: refreshToken },
+      );
+    } catch (err: any) {
+      // Translate quota responses into a CapyError so renderError can show the
+      // upgrade screen — and so the createNewOrganization retry loop does not
+      // mistake a 402 for a name conflict (409) and keep re-prompting.
+      if (err instanceof HttpStatusError && err.status === 402 && err.body?.code === 'QUOTA_EXCEEDED') {
+        throw new CapyError(
+          err.body.error || 'Account quota exceeded',
+          ERROR_CODES.QUOTA_EXCEEDED,
+          { status: 402, kind: err.body.kind, limit: err.body.limit, upgrade_url: err.body.upgrade_url },
+        );
+      }
+      throw err;
+    }
 
     const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
 
@@ -519,7 +577,7 @@ export class AuthService {
     if (data.access_token) {
       this.session.sessions[data.id] = {
         access_token: data.access_token,
-        expires_at: Date.now() + ((data.expires_in || 86400) * 1000),
+        expires_at: resolveExpiresAt(data.expires_in || 86400),
       };
       this.currentOrgId = data.id;
     }
@@ -613,9 +671,10 @@ export class AuthService {
           try {
             const userId = file.replace('.json', '');
             const data = readAuthSession(userId) as SessionStore | null;
-            // Skip stale files where filename doesn't match content user_id —
-            // a prior refresh wrote new user data to the old path, leaving a
-            // snapshot that disagrees with the authoritative per-user file.
+            // Skip stale files where the filename user_id disagrees with the
+            // content user_id — a prior refresh wrote new user data to the
+            // old path, leaving a snapshot that disagrees with the
+            // authoritative per-user file.
             if (data && data.version === 2 && data.user_id === userId) {
               this.session = data;
               this.sessionUserId = userId;

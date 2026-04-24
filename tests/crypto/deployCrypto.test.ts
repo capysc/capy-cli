@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { randomBytes, hkdfSync } from 'crypto';
 import {
   generateDeployId,
   generateDerivationToken,
@@ -6,7 +6,13 @@ import {
   deployInnerUnwrap,
   buildDeployCode,
   parseDeployCode,
+  encryptEnvBlob,
+  buildSecretsBlob,
 } from '../../src/crypto/deployCrypto';
+import {
+  parseSecretsBlob,
+  decryptSecretsBlob,
+} from '../../src/crypto/deployRuntime';
 import { deriveInnerKey } from '../../src/crypto/inviteCrypto';
 
 describe('deployCrypto', () => {
@@ -130,6 +136,105 @@ describe('deployCrypto', () => {
       // 7. Verify the recovered key is a valid hex CAPY_KEY
       const pkHex = recoveredPK.toString('hex');
       expect(pkHex).toMatch(/^[0-9a-f]{64}$/);
+    });
+  });
+
+  describe('encryptEnvBlob / decryptSecretsBlob round-trip (zero-trust)', () => {
+    it('mint-side encrypt round-trips with consumer-side decrypt via service_key', () => {
+      const pk = randomBytes(32);
+      const dt = generateDerivationToken();
+      const deployId = generateDeployId();
+      const envVars = {
+        DATABASE_URL: 'postgres://u:p@h/d',
+        STRIPE_API_KEY: 'sk_test_xxx',
+        OPENAI_API_KEY: 'sk-proj-abc',
+      };
+
+      // Mint side: exactly what capy deploy does.
+      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
+
+      // Simulate the server's service_key derivation. In production, the server
+      // KMS-unwraps outerBlob to get innerBlob bytes, then derives service_key
+      // from those bytes. Here we skip KMS and go directly from innerBlob.
+      const innerBlobBytes = Buffer.from(innerBlob, 'base64');
+      const salt = projectId + deployId.toString('hex');
+      const serviceKeyHex = Buffer.from(
+        hkdfSync('sha256', innerBlobBytes, salt, 'capy:deploy:service-key', 32),
+      ).toString('hex');
+
+      // Consumer side: derive DECRYPT_KEY from pk + service_key, decrypt.
+      const decrypted = decryptSecretsBlob(
+        encryptedVars,
+        pk.toString('hex'),
+        serviceKeyHex,
+        deployId,
+      );
+      expect(decrypted).toEqual(envVars);
+    });
+
+    it('projectKey alone cannot decrypt (zero-trust property)', () => {
+      const pk = randomBytes(32);
+      const dt = generateDerivationToken();
+      const deployId = generateDeployId();
+      const envVars = { SECRET: 'leaked' };
+
+      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
+
+      // An attacker with just pk (no service_key) should not be able to decrypt.
+      // Using a zero-filled service_key yields a wrong DECRYPT_KEY → auth fail.
+      const fakeServiceKey = Buffer.alloc(32).toString('hex');
+      expect(() =>
+        decryptSecretsBlob(encryptedVars, pk.toString('hex'), fakeServiceKey, deployId),
+      ).toThrow();
+    });
+
+    it('wrong service_key cannot decrypt', () => {
+      const pk = randomBytes(32);
+      const dt = generateDerivationToken();
+      const deployId = generateDeployId();
+      const envVars = { SECRET: 'value' };
+
+      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
+
+      const otherServiceKey = randomBytes(32).toString('hex');
+      expect(() =>
+        decryptSecretsBlob(encryptedVars, pk.toString('hex'), otherServiceKey, deployId),
+      ).toThrow();
+    });
+
+    it('SECRETS_BLOB end-to-end: buildSecretsBlob + parseSecretsBlob + decryptSecretsBlob', () => {
+      const pk = randomBytes(32);
+      const dt = generateDerivationToken();
+      const deployId = generateDeployId();
+      const envVars = { API_KEY: 'val', DB: 'url' };
+
+      // Mint
+      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const outerBlob = innerBlob; // skip KMS; just round-trip through the container format
+      const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
+      const secretsBlobStr = buildSecretsBlob(deployId, outerBlob, encryptedVars);
+
+      // Parse
+      const parsed = parseSecretsBlob(secretsBlobStr);
+      expect(parsed.deployId.equals(deployId)).toBe(true);
+      expect(parsed.encryptedVars.equals(encryptedVars)).toBe(true);
+
+      // Decrypt (compute service_key the way the server would)
+      const innerBlobBytes = Buffer.from(innerBlob, 'base64');
+      const salt = projectId + deployId.toString('hex');
+      const serviceKeyHex = Buffer.from(
+        hkdfSync('sha256', innerBlobBytes, salt, 'capy:deploy:service-key', 32),
+      ).toString('hex');
+      const decrypted = decryptSecretsBlob(
+        parsed.encryptedVars,
+        pk.toString('hex'),
+        serviceKeyHex,
+        parsed.deployId,
+      );
+      expect(decrypted).toEqual(envVars);
     });
   });
 });

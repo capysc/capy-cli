@@ -153,10 +153,7 @@ export class DeployCommand {
       // Authenticate
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
-      serviceClient.setTokenRefresher(async () => {
-        const refreshed = await authService.refreshToken();
-        return refreshed ? authService.getToken() : null;
-      });
+      serviceClient.setTokenProvider(() => authService.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();
       if (!authResult.success) authResult = await authService.authenticate(orgId);
@@ -164,8 +161,6 @@ export class DeployCommand {
         console.error('Authentication failed');
         process.exit(1);
       }
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
 
       const userId = authResult.user_id!;
 
@@ -240,8 +235,12 @@ export class DeployCommand {
         process.exit(1);
       }
 
-      // Encrypt all env vars into a single blob using PK
-      const encryptedVars = encryptEnvBlob(plaintextEnv, pk);
+      // Encrypt env vars with DECRYPT_KEY derived from pk + service_key, where
+      // service_key is derived deterministically from innerBlob. This matches
+      // what the consumer derives after fetching service_key at decrypt time,
+      // so projectKey alone is insufficient to decrypt — the server's KMS-
+      // gated service_key is required, preserving zero-trust.
+      const encryptedVars = encryptEnvBlob(plaintextEnv, pk, innerBlob, projectId, deployId);
 
       // Build SECRETS_BLOB
       const secretsBlob = buildSecretsBlob(deployId, outerBlob, encryptedVars);
@@ -354,10 +353,7 @@ export class DeployRevokeCommand {
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
-      serviceClient.setTokenRefresher(async () => {
-        const refreshed = await authService.refreshToken();
-        return refreshed ? authService.getToken() : null;
-      });
+      serviceClient.setTokenProvider(() => authService.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();
       if (!authResult.success) authResult = await authService.authenticate(orgId);
@@ -365,8 +361,6 @@ export class DeployRevokeCommand {
         console.error('Authentication failed');
         process.exit(1);
       }
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
 
       await serviceClient.revokeDeployToken(deployIdPrefix);
 
@@ -402,10 +396,7 @@ export class DeployListCommand {
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl);
-      serviceClient.setTokenRefresher(async () => {
-        const refreshed = await authService.refreshToken();
-        return refreshed ? authService.getToken() : null;
-      });
+      serviceClient.setTokenProvider(() => authService.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();
       if (!authResult.success) authResult = await authService.authenticate(orgId);
@@ -413,8 +404,6 @@ export class DeployListCommand {
         console.error('Authentication failed');
         process.exit(1);
       }
-      const token = authService.getToken();
-      if (token) serviceClient.setToken(token);
 
       const { tokens } = await serviceClient.listDeployTokens(orgId, projectId);
 

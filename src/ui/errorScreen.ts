@@ -34,6 +34,8 @@ export function renderError(error: any, context: ErrorContext = {}): string {
         return renderInvalidFormat(error);
       case ERROR_CODES.NO_KEEP_FILE:
         return renderNoKeepFile();
+      case ERROR_CODES.QUOTA_EXCEEDED:
+        return renderQuotaExceeded(error);
       default:
         return renderGeneric(error);
     }
@@ -104,6 +106,11 @@ function renderPermissionDenied(error: CapyError, ctx: ErrorContext): string {
     `  You do not have access to ${ctx.branch ? `this branch (${ctx.branch})` : 'these secrets'}.`,
     '',
     `  Contact your project admin to get access.`,
+    '',
+    `  If you are trying to log into another computer, run ${bold('capy transport')}`,
+    `  where you have an initialized account and copy the redeem code to this`,
+    `  computer. If you don't have access to that computer, you can alternately`,
+    `  get a team member to send you an invite.`,
     '',
   ];
   return lines.join('\n');
@@ -205,6 +212,30 @@ function renderNoKeepFile(): string {
     `  ${grey(`This project has not been initialized with ${bold('Capy')} yet.`)}`,
     '',
     `  Run ${bold('capy')} to initialize.`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderQuotaExceeded(error: CapyError): string {
+  const kind = error.details?.kind;
+  const limit = error.details?.limit;
+  const upgradeUrl = error.details?.upgrade_url || 'https://capy.sc/pro';
+  let headline: string;
+  if (kind === 'project') {
+    headline = `Project limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
+  } else if (kind === 'member') {
+    headline = `Member limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
+  } else {
+    headline = `Organization limit reached${limit ? grey(` (${limit}/account)`) : ''}`;
+  }
+  const lines = [
+    '',
+    `  ${bold(headline)}`,
+    `  ${grey(error.message)}`,
+    '',
+    `  Upgrade to ${bold('Capy Pro')} for higher quotas:`,
+    `    ${upgradeUrl}`,
     '',
   ];
   return lines.join('\n');
