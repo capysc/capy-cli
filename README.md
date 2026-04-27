@@ -38,7 +38,7 @@ Capy is a headless CLI-based secrets control system that secures your entire sta
 
 ## Install
 
-Capy in its most basic form is just a CLI: no lengthy signup, account setup, or SDK to import. For more advanced users and functionality, [Keep](https://www.capy.sc/keep) is our managed platform (coming soon).
+Capy in its most basic form is just a CLI: no lengthy signup, account setup, or SDK to import. For more advanced functionality (like audit logging, provenance tracking, etc.), [Keep](https://www.capy.sc/keep) is our managed platform (coming soon).
 
 ```bash
 npm install -g @capysc/cli
