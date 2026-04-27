@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="616" height="368" class="svgbob">
+  <style>.svgbob line, .svgbob path, .svgbob circle, .svgbob rect, .svgbob polygon {
+  stroke: black;
+  stroke-width: 2;
+  stroke-opacity: 1;
+  fill-opacity: 1;
+  stroke-linecap: round;
+  stroke-linejoin: miter;
+}
+
+.svgbob text {
+  white-space: pre;
+  fill: black;
+  font-family: Iosevka Fixed, monospace;
+  font-size: 14px;
+}
+
+.svgbob rect.backdrop {
+  stroke: none;
+  fill: white;
+}
+
+.svgbob .broken {
+  stroke-dasharray: 8;
+}
+
+.svgbob .filled {
+  fill: black;
+}
+
+.svgbob .bg_filled {
+  fill: white;
+  stroke-width: 1;
+}
+
+.svgbob .nofill {
+  fill: white;
+}
+
+.svgbob .end_marked_arrow {
+  marker-end: url(#arrow);
+}
+
+.svgbob .start_marked_arrow {
+  marker-start: url(#arrow);
+}
+
+.svgbob .end_marked_diamond {
+  marker-end: url(#diamond);
+}
+
+.svgbob .start_marked_diamond {
+  marker-start: url(#diamond);
+}
+
+.svgbob .end_marked_circle {
+  marker-end: url(#circle);
+}
+
+.svgbob .start_marked_circle {
+  marker-start: url(#circle);
+}
+
+.svgbob .end_marked_open_circle {
+  marker-end: url(#open_circle);
+}
+
+.svgbob .start_marked_open_circle {
+  marker-start: url(#open_circle);
+}
+
+.svgbob .end_marked_big_open_circle {
+  marker-end: url(#big_open_circle);
+}
+
+.svgbob .start_marked_big_open_circle {
+  marker-start: url(#big_open_circle);
+}
+
+</style>
+  <defs>
+    <marker id="arrow" viewBox="-2 -2 8 8" refX="4" refY="2" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <polygon points="0,0 0,4 4,2 0,0"></polygon>
+    </marker>
+    <marker id="diamond" viewBox="-2 -2 8 8" refX="4" refY="2" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <polygon points="0,2 2,0 4,2 2,4 0,2"></polygon>
+    </marker>
+    <marker id="circle" viewBox="0 0 8 8" refX="4" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <circle cx="4" cy="4" r="2" class="filled"></circle>
+    </marker>
+    <marker id="open_circle" viewBox="0 0 8 8" refX="4" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <circle cx="4" cy="4" r="2" class="bg_filled"></circle>
+    </marker>
+    <marker id="big_open_circle" viewBox="0 0 8 8" refX="4" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <circle cx="4" cy="4" r="3" class="bg_filled"></circle>
+    </marker>
+  </defs>
+  <rect class="backdrop" x="0" y="0" width="616" height="368"></rect>
+  <rect x="20" y="56" width="184" height="128" class="solid nofill" rx="0"></rect>
+  <text x="34" y="76" >main</text>
+  <text x="34" y="92" >dev</text>
+  <text x="34" y="108" >feature/login</text>
+  <text x="34" y="124" >feature/signup</text>
+  <text x="34" y="140" >feature/billing</text>
+  <text x="34" y="156" >bugfix/hotfix</text>
+  <text x="34" y="172" >release-v2</text>
+  <rect x="420" y="56" width="184" height="128" class="solid nofill" rx="0"></rect>
+  <text x="434" y="76" >development</text>
+  <text x="434" y="108" >DATABASE_URL=...</text>
+  <text x="434" y="124" >API_KEY=...</text>
+  <text x="434" y="140" >STRIPE_SECRET=...</text>
+  <text x="434" y="156" >REDIS_URL=...</text>
+  <text x="434" y="172" >...</text>
+  <rect x="420" y="232" width="184" height="32" class="solid nofill" rx="0"></rect>
+  <text x="434" y="252" >staging</text>
+  <rect x="420" y="312" width="184" height="32" class="solid nofill" rx="0"></rect>
+  <text x="434" y="332" >prod</text>
+  <polygon points="224,116 216,120 224,124" class="filled"></polygon>
+  <polygon points="408,116 416,120 408,124" class="filled"></polygon>
+  <text x="18" y="12" >Git branches</text>
+  <text x="418" y="12" >Capy branches</text>
+  <text x="282" y="124" >keep.lock</text>
+  <g>
+    <line x1="260" y1="104" x2="388" y2="104" class="solid"></line>
+    <line x1="260" y1="104" x2="260" y2="136" class="solid"></line>
+    <line x1="388" y1="104" x2="388" y2="136" class="solid"></line>
+    <line x1="224" y1="120" x2="260" y2="120" class="solid"></line>
+    <line x1="388" y1="120" x2="408" y2="120" class="solid"></line>
+    <line x1="260" y1="136" x2="388" y2="136" class="solid"></line>
+  </g>
+</svg>

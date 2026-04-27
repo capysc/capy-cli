@@ -1,5 +1,5 @@
 {
-  "name": "@capy/cli",
+  "name": "@capysc/cli",
   "version": "0.2.0",
   "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",

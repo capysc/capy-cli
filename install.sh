@@ -21,7 +21,7 @@
 set -euo pipefail
 
 REPO="capysc/capy-cli"
-NPM_PKG="@capy/cli"
+NPM_PKG="@capysc/cli"
 PREFIX="${CAPY_PREFIX:-$HOME/.capy}"
 BIN_DIR="$PREFIX/bin"
 VERSION="${CAPY_VERSION:-latest}"
