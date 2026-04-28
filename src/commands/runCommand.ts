@@ -39,9 +39,13 @@ function spawnChild(args: string[], env: Record<string, string | undefined>): Pr
     process.on(sig, () => child?.kill(sig));
   }
 
+  // On Windows, node_modules/.bin entries are .cmd shims that Node's spawn
+  // won't execute without a shell — bare `cross-env`/`nodemon` fail with
+  // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
   child = spawn(args[0], args.slice(1), {
     env: env as Record<string, string>,
     stdio: 'inherit',
+    shell: process.platform === 'win32',
   });
 
   return new Promise((resolve) => {
