@@ -46,6 +46,7 @@ mock.module('inquirer', () => ({
       if (name === 'initialBranchChoice') return Promise.resolve({ initialBranchChoice: 'development' });
       if (name === 'orgId') return Promise.resolve({ orgId: 'org-123' });
       if (name === 'confirmed') return Promise.resolve({ confirmed: true });
+      if (name === 'confirmEncrypt') return Promise.resolve({ confirmEncrypt: true });
       if (name === 'action') return Promise.resolve({ action: 'commit_local' });
       return Promise.resolve({ orgId: 'org-123', orgName: 'Test Org' });
     }),

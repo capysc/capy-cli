@@ -465,6 +465,22 @@ export class CapyCommand {
         // second branch the user didn't ask for.)
         const initBranch = initialBranchName;
 
+        // Confirm before encrypting + pushing — user may not be in the
+        // right project on first setup. After this step .env is rewritten
+        // with ciphertext, so getting it wrong is painful to recover from.
+        const { confirmEncrypt } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'confirmEncrypt',
+          message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
+          default: true,
+        }]);
+
+        if (!confirmEncrypt) {
+          console.log(`\nSkipped. Your .env was not modified.`);
+          console.log(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
+          return;
+        }
+
         const syncSpinner = ora('Syncing local variables...').start();
 
         try {
@@ -523,6 +539,9 @@ export class CapyCommand {
           // Install git hooks
           this.installGitHooks();
 
+          console.log(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
+          console.log(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
+          console.log(`See: https://docs.capy.sc/using/running-your-app`);
           console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
