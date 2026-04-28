@@ -110,7 +110,7 @@ Most secrets managers encrypt at rest on their servers. Capy is one of the few t
   <img alt="A .env file viewed in vi, with every value as a capy:resourceId:ciphertext snippet" src="./docs/images/encrypted-env.png" width="1024">
 </p>
 
-Each value is a `capy:{resourceId}:{ciphertext}` snippet only your team can decrypt, but with just enough characters surrounding the ciphertext for you to identify the items. Plaintext only exists in process memory while `capy run` has your app spawned.
+Each value is a `capy:{resourceId}:{ciphertext}` snippet only your team can decrypt, but with just enough characters surrounding the ciphertext for you to identify the items.
 
 ## Commands
 
