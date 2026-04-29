@@ -244,6 +244,8 @@ Capy ships with five runtime dependencies. Each is a load-bearing piece of the C
 
 Live audit status and the full transitive dep tree: [github.com/capysc/capy-cli/network/dependencies](https://github.com/capysc/capy-cli/network/dependencies).
 
+[Dependabot](https://docs.github.com/en/code-security/dependabot) keeps dependencies current — see [`.github/dependabot.yml`](./.github/dependabot.yml). It opens weekly PRs for `npm` and `github-actions`, with dev dependencies grouped into a single PR per ecosystem.
+
 ## Security
 
 Don't file public GitHub issues or discussions for security vulnerabilities. Those channels are public.
