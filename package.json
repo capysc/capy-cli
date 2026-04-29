@@ -1,11 +1,10 @@
 {
   "name": "@capysc/cli",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",
   "bin": {
-    "capy": "bin/capy",
-    "capy-dev": "bin/capy-dev"
+    "capy": "bin/capy"
   },
   "repository": {
     "type": "git",

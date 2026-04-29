@@ -28,7 +28,7 @@ const program = new Command();
 program
   .name('capy')
   .description('Capy CLI - SecretOps for the AI age')
-  .version('0.2.1')
+  .version('0.3.0')
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
@@ -40,6 +40,7 @@ program
       console.log(`    ${B('capy')}                        \x1b[90mSync secrets\x1b[0m`);
       console.log(`    ${B('capy')} run -- <cmd>           \x1b[90mRun a command with decrypted secrets\x1b[0m`);
       console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
+      console.log(`    ${B('capy')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
       console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to Keep\x1b[0m`);
       console.log(`    ${B('capy')} deploy                 \x1b[90mSet up deploy credentials\x1b[0m`);
       console.log(`    ${B('capy')} deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m`);
@@ -86,6 +87,15 @@ program
   .action(async () => {
     const { StatusCommand } = await import('./commands/statusCommand');
     const cmd = new StatusCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('edit')
+  .description('Inspect and edit secrets in an interactive TUI')
+  .action(async () => {
+    const { EditCommand } = await import('./commands/editCommand');
+    const cmd = new EditCommand();
     await cmd.execute();
   });
 
@@ -362,7 +372,7 @@ program
   .command('version')
   .description('Show version information')
   .action(() => {
-    console.log(`${B('Capy')} CLI v0.2.1`);
+    console.log(`${B('Capy')} CLI v0.3.0`);
   });
 
 
