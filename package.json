@@ -38,7 +38,7 @@
   "dependencies": {
     "commander": "^11.0.0",
     "dotenv": "^16.3.0",
-    "inquirer": "^12.9.6",
+    "inquirer": "^13.4.2",
     "open": "8.4.2",
     "proper-lockfile": "^4.1.2"
   },
