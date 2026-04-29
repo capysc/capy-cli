@@ -43,7 +43,7 @@ const program = new Command();
 program
   .name('capy-dev')
   .description('Capy CLI (DEV MODE - mock auth enabled)')
-  .version('0.2.1')
+  .version('0.3.0')
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
@@ -53,6 +53,7 @@ program
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
       console.log(`    ${B('capy-dev')}                        \x1b[90mSync secrets\x1b[0m`);
+      console.log(`    ${B('capy-dev')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
       console.log(`    ${B('capy-dev')} branch                 \x1b[90mList secret branches\x1b[0m`);
       console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
       console.log(`    ${B('capy-dev')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
@@ -217,6 +218,15 @@ program
   .action(async () => {
     const { StatusCommand } = await import('./commands/statusCommand');
     const cmd = new StatusCommand(false, true);
+    await cmd.execute();
+  });
+
+program
+  .command('edit')
+  .description('Inspect and edit secrets in an interactive TUI')
+  .action(async () => {
+    const { EditCommand } = await import('./commands/editCommand');
+    const cmd = new EditCommand(process.env.CAPY_API_URL, true);
     await cmd.execute();
   });
 

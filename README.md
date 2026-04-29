@@ -60,6 +60,7 @@ brew install capysc/tap/capy
 
 ```bash
 capy                              # sync secrets
+capy edit                         # inspect & edit secrets in a TUI
 capy invite rachael@tyrell.com    # add a teammate
 capy kick roy@tyrell.com          # remove a teammate
 capy run -- npm run dev           # run with decrypted secrets
@@ -118,6 +119,7 @@ Each value is a `capy:{resourceId}:{ciphertext}` snippet only your team can decr
 |---------|-------------|
 | [`capy`](https://docs.capy.sc/cli/capy) | Sync secrets. Initializes on first run. |
 | [`capy run -- <cmd>`](https://docs.capy.sc/cli/run) | Run a command with decrypted secrets injected. |
+| [`capy edit`](https://docs.capy.sc/cli/edit) | Inspect and edit secrets in an interactive TUI. |
 | [`capy status`](https://docs.capy.sc/cli/status) | Show drift between local, pinned, and remote. |
 | [`capy push`](https://docs.capy.sc/cli/push) | Push local changes without pulling. |
 | [`capy deploy`](https://docs.capy.sc/cli/deploy) | Generate a deploy token and walk through platform setup. |

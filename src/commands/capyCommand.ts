@@ -1306,17 +1306,17 @@ export class CapyCommand {
       menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
     } else if (!hasRemote) {
       // State 5: No remote values — local vs pinned only
-      menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+      menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
     } else if (showLocal && !showRemote) {
       // State 2: Local differs from pinned, remote matches pinned
       if (isBehind) {
         // 2b: keep.lock changed via git pull → user is behind
         menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
       } else {
         // 2a: user edited .env locally → user is ahead
-        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
         menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
       }
       menuChoices.push({ name: 'Individually resolve', value: 'individual' });
@@ -1331,10 +1331,10 @@ export class CapyCommand {
         // 4b: keep.lock changed + another push happened → retrieve remote first
         menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
         menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
       } else {
         // 4a: user edited .env + teammate pushed
-        menuChoices.push({ name: 'Commit all local values', value: 'commit_local' });
+        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
         menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
         menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
       }
@@ -1437,19 +1437,28 @@ export class CapyCommand {
 
     this.fileManager.writeKeepFile(finalKeep);
 
-    // Cache encrypted blob locally
-    {
-      const { Encryptor } = await import('../crypto/encryptor');
-      const cacheKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
-      const cacheBlob = Object.entries(finalEnv)
-        .map(([k, v]) => {
-          const resourceId = deriveResourceId(branch, k);
-          const enc = Encryptor.encrypt(v, encryptionKey);
-          return `${k}=capy:${resourceId}:${enc}`;
-        })
-        .join('\n');
-      writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, cacheBlob);
+    // Build the encrypted env blob (used for both push and local cache).
+    const { Encryptor } = await import('../crypto/encryptor');
+    const cacheKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
+    const envBlob = Object.entries(finalEnv)
+      .map(([k, v]) => {
+        const resourceId = deriveResourceId(branch, k);
+        const enc = Encryptor.encrypt(v, encryptionKey);
+        return `${k}=capy:${resourceId}:${enc}`;
+      })
+      .join('\n');
+
+    // Commit + push are coupled: choosing "commit local" pushes too.
+    if (action === 'commit_local') {
+      await this.serviceClient.pushSecrets(
+        projectState.projectId!,
+        JSON.stringify(finalKeep),
+        envBlob,
+        branch,
+      );
     }
+
+    writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, envBlob);
 
     // Encrypt and write .env
     this.fileManager.writeEncryptedEnvFile(finalEnv, encryptionKey, undefined, finalKeep, branch);
@@ -1468,7 +1477,7 @@ export class CapyCommand {
     console.log(`\n> keep.lock updated (${diffs.length} changes)`);
 
     if (action === 'commit_local') {
-      console.log(`\nRun ${B('capy push')} to share your changes with teammates.`);
+      console.log(`\nPushed ${changeCount} change(s) to Keep.`);
     }
 
     // Install hooks on every run (idempotent)
