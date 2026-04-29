@@ -1,6 +1,8 @@
 // Two-pane TUI for `capy edit`: variable list on the left, inspector on the right.
 // Built on raw stdin + ANSI codes so we don't add a TUI dependency.
 
+import { formatSnippet } from '../commands/statusCommand';
+
 const ESC = '\x1b';
 const HIDE_CURSOR = `${ESC}[?25l`;
 const SHOW_CURSOR = `${ESC}[?25h`;
@@ -22,7 +24,7 @@ const MARGIN = 2;
 const SEPARATOR = ' │ ';
 const MIN_TWO_PANE_WIDTH = 80;
 const MIN_RIGHT_WIDTH = 28;
-const MASK = '****';
+const NO_VALUE = '—';
 
 export interface EditRow {
   key: string;
@@ -420,7 +422,7 @@ export class EditScreen {
 
     return [
       { value: this.state.branch, action: 'active branch' },
-      { value: `${total} tracked`, action: 'values stay masked' },
+      { value: `${total} tracked`, action: 'shown as abc…xyz snippets' },
       {
         value: this.state.remoteAvailable ? `${drift} drift` : `${unknown} ?`,
         action: this.state.remoteAvailable ? 'changed local/remote' : 'remote unavailable',
@@ -436,8 +438,8 @@ export class EditScreen {
     const lines: string[] = [];
     lines.push(`${BOLD}Variables${RESET}`);
     // 4 columns: KEY, VALUE, STATUS, UPDATED
-    const keyW = Math.max(12, Math.floor(width * 0.38));
-    const valW = 6; // "****" + padding
+    const keyW = Math.max(12, Math.floor(width * 0.32));
+    const valW = 11; // "abc...xyz" + padding
     const statusW = 12;
     const updatedW = Math.max(8, width - keyW - valW - statusW - 6); // 6 for gaps
 
@@ -451,7 +453,7 @@ export class EditScreen {
       const isSelected = i === this.cursorIndex && !this.editing;
       const pointer = isSelected ? '▶' : ' ';
       const keyCell = this.pad(`${pointer} ${row.key}`, keyW);
-      const valCell = this.pad(MASK, valW);
+      const valCell = this.pad(this.maskedSnippet(row), valW);
       const statusCell = this.padVis(this.statusBadge(row.status), statusW);
       const updatedCell = this.pad(row.updatedLabel, updatedW);
       let line = keyCell + gap + valCell + gap + statusCell + gap + updatedCell;
@@ -500,7 +502,7 @@ export class EditScreen {
           lines.push(`${DIM}(no value)${RESET}`);
         }
       } else {
-        lines.push(MASK);
+        lines.push(this.maskedSnippet(row));
       }
     }
 
@@ -556,6 +558,12 @@ export class EditScreen {
 
   private visLen(str: string): number {
     return str.replace(/\x1b\[[0-9;]*m/g, '').length;
+  }
+
+  private maskedSnippet(row: EditRow): string {
+    const value = row.localValue ?? row.remoteValue;
+    if (value === undefined || value === '') return NO_VALUE;
+    return formatSnippet(value);
   }
 
   private wrap(str: string, width: number): string[] {
