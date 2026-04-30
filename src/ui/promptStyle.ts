@@ -22,8 +22,13 @@ const KEY = (s: string) => `\x1b[1;97m${s}\x1b[0m`; // bold white
  * choices and the message. No surrounding parentheses — the keys read like
  * a sentence in their own right.
  */
+// Two leading newlines: inquirer concatenates `${message}${helpTipTop}` with
+// no separator, so a single `\n` only terminates the message line and the
+// help text would sit flush against it. The second newline produces the
+// blank line of breathing room. The trailing `\n` plus inquirer's own `\n`
+// before the choices give the matching blank line below.
 export const CHECKBOX_INSTRUCTIONS =
-  '\n' +
+  '\n\n' +
   DIM('Press ') +
   KEY('space') +
   DIM(' to select, ') +

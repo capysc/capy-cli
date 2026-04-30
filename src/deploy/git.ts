@@ -36,6 +36,23 @@ export function currentBranch(cwd: string): string | null {
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
+/**
+ * Returns local branch names sorted by most-recently-committed-first.
+ * Used to populate the "open the deploy PR against which branch?" picker
+ * with sensible suggestions (main / master / develop / staging / etc.).
+ */
+export function listLocalBranches(cwd: string): string[] {
+  const r = git(
+    ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads'],
+    cwd,
+  );
+  if (r.code !== 0) return [];
+  return r.stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export function getStatus(cwd: string): GitStatusEntry[] {
   const r = git(['status', '--porcelain'], cwd);
   if (r.code !== 0) return [];
