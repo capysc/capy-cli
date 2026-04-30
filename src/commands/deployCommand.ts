@@ -35,6 +35,7 @@ import {
 } from '../deploy/git';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { classify } from '../deploy/classify';
+import { CHECKBOX_INSTRUCTIONS } from '../ui/promptStyle';
 import {
   getTarget,
   listTargets,
@@ -250,6 +251,7 @@ async function runPicker(
       type: 'checkbox',
       name: 'vars',
       message: `Which runtime vars to push to ${adapter.label}?`,
+      instructions: CHECKBOX_INSTRUCTIONS,
       choices: cls.runtime.map((v) => ({
         name: v,
         value: v,
