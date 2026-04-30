@@ -18,7 +18,6 @@ import {
   PreflightResult,
   TargetConfig,
 } from '../adapter';
-import { isRuntime } from '../classify';
 
 interface CfWorkerOptions {
   /** Worker name (mirrors `name = ...` in wrangler.toml). */
@@ -83,6 +82,7 @@ export const cfWorkerAdapter: DeployAdapter = {
   id: 'cf-worker',
   label: 'Cloudflare Workers',
   description: 'Server-side, runtime secrets pushed via wrangler secret bulk',
+  varKind: 'runtime',
   requires: { binaries: ['wrangler'] },
 
   async detect(cwd: string): Promise<DetectedDefaults> {
@@ -163,18 +163,7 @@ export const cfWorkerAdapter: DeployAdapter = {
       return {
         ok: false,
         reason: 'cf-worker target has no vars to push',
-        hint: 'Re-run with `--edit` and select at least one runtime var.',
-      };
-    }
-    // Defense-in-depth: refuse to push build-time vars to a Worker.
-    const leaked = config.vars.filter((v) => !isRuntime(v));
-    if (leaked.length > 0) {
-      return {
-        ok: false,
-        reason: `cf-worker target includes build-time vars: ${leaked.join(', ')}`,
-        hint:
-          'Build-time vars (VITE_*, NEXT_PUBLIC_*, PUBLIC_*) belong to a Pages target, ' +
-          'not a Worker. Re-run with `--edit` to move them.',
+        hint: 'Re-run with `--edit` and select at least one var.',
       };
     }
     return { ok: true };

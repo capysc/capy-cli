@@ -28,8 +28,8 @@ const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
  */
 const PLATFORM_TO_CONNECTOR: Record<string, string> = {
   'cloudflare-workers': 'cf-worker',
+  'cloudflare-pages': 'cf-pages',
   // Future:
-  // 'cloudflare-pages': 'cf-pages',
   // 'vercel':           'vercel',
   // 'fly':              'fly',
   // 'github-actions':   'gh-actions',
@@ -42,6 +42,7 @@ const PLATFORMS = [
   { name: 'Azure App Service', value: 'azure-app-service' },
   { name: 'CapRover', value: 'caprover' },
   { name: 'CircleCI', value: 'circleci' },
+  { name: 'Cloudflare Pages', value: 'cloudflare-pages' },
   { name: 'Cloudflare Workers', value: 'cloudflare-workers' },
   { name: 'Coolify', value: 'coolify' },
   { name: 'DigitalOcean App Platform', value: 'digitalocean' },

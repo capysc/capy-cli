@@ -78,26 +78,16 @@ describe('cfWorker — preflight', () => {
     expect(r.reason).toContain('no vars');
   });
 
-  test('REFUSES build-time vars (defense-in-depth against bundle leaks)', async () => {
+  test('accepts build-time vars (the picker is the gate, not preflight)', async () => {
+    // Once the user explicitly opts in via the picker, capy trusts them.
+    // Misclassification protection lives in the picker pre-selection +
+    // the bold-faced summary line, not in preflight refusals.
     writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
     const r = await cfWorkerAdapter.preflight(
       baseTarget({ vars: ['SUPABASE_URL', 'VITE_SUPABASE_URL'] }),
       { cwd: ROOT },
     );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toContain('build-time vars');
-    expect(r.reason).toContain('VITE_SUPABASE_URL');
-  });
-
-  test('refuses NEXT_PUBLIC_* and PUBLIC_* too', async () => {
-    writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
-    const r = await cfWorkerAdapter.preflight(
-      baseTarget({ vars: ['NEXT_PUBLIC_KEY', 'PUBLIC_FOO', 'X'] }),
-      { cwd: ROOT },
-    );
-    expect(r.ok).toBe(false);
-    expect(r.reason).toContain('NEXT_PUBLIC_KEY');
-    expect(r.reason).toContain('PUBLIC_FOO');
+    expect(r.ok).toBe(true);
   });
 
   test('refuses when worker has package.json deps but no node_modules', async () => {

@@ -10,8 +10,9 @@
  */
 import { DeployAdapter } from './adapter';
 import { cfWorkerAdapter } from './adapters/cfWorker';
+import { cfPagesAdapter } from './adapters/cfPages';
 
-export const ALL_ADAPTERS: DeployAdapter[] = [cfWorkerAdapter];
+export const ALL_ADAPTERS: DeployAdapter[] = [cfWorkerAdapter, cfPagesAdapter];
 
 export interface PlannedAdapter {
   id: string;
@@ -22,12 +23,6 @@ export interface PlannedAdapter {
 }
 
 export const PLANNED_ADAPTERS: PlannedAdapter[] = [
-  {
-    id: 'cf-pages',
-    label: 'Cloudflare Pages',
-    description: 'Static, build-time VITE_*/NEXT_PUBLIC_* inlined',
-    fallbackHint: 'capy run -- vite build && wrangler pages deploy dist',
-  },
   {
     id: 'vercel',
     label: 'Vercel',

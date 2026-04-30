@@ -179,23 +179,26 @@ describe('capy deploy --dry-run', () => {
     expect(r.stdout).toContain('filter vars');
   });
 
-  test('dry-run rejects target with build-time vars (preflight)', () => {
+  test('dry-run accepts mixed vars (the picker is the gate, not preflight)', () => {
+    // Once a target is saved, capy trusts the user's earlier picker choice.
+    // No silent var filtering, no preflight refusal — the picker pre-selects
+    // what's likely relevant and surfaces what's not, but lets the user
+    // toggle anything in or out.
     writeKeep(ROOT);
     writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
     writeFileSync(join(ROOT, '.env'), 'SUPABASE_URL=x\nVITE_API_URL=y\n');
     writeDeployConfig(ROOT, [
       {
-        name: 'bad',
+        name: 'mixed',
         kind: 'cf-worker',
         branch: 'production',
-        vars: ['SUPABASE_URL', 'VITE_API_URL'], // VITE_* must not push to Worker
+        vars: ['SUPABASE_URL', 'VITE_API_URL'],
         options: { workerName: 'my-worker', workerDir: 'worker' },
       },
     ]);
-    const r = capy(['deploy', 'bad', '--dry-run', '--yes']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('build-time vars');
-    expect(r.stderr).toContain('VITE_API_URL');
+    const r = capy(['deploy', 'mixed', '--dry-run', '--yes']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('VITE_API_URL');
   });
 });
 

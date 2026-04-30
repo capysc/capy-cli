@@ -31,6 +31,13 @@ export interface TargetConfig {
    * field existed.
    */
   mode?: DeployMode;
+  /**
+   * For CI mode only: the git branch the deploy PR opens AGAINST. Typically
+   * `main` (production rollout via main-merge) or a long-lived
+   * environment branch like `staging`. Persisted per target so the user
+   * doesn't re-pick on every deploy. Ignored in 'direct' mode.
+   */
+  gitBaseBranch?: string;
 }
 
 export interface DetectedDefaults {
@@ -77,6 +84,8 @@ export interface DeployContext {
   cwd: string;
 }
 
+export type AdapterVarKind = 'runtime' | 'build-time';
+
 export interface DeployAdapter {
   /** Stable canonical id used in CLI flags and config files. */
   id: string;
@@ -84,6 +93,18 @@ export interface DeployAdapter {
   label: string;
   /** Short description shown under label in pickers. */
   description: string;
+  /**
+   * Which classification bucket this adapter consumes:
+   *   - 'runtime'   : non-public secrets the vendor injects at request time
+   *                   (cf-worker, vercel server actions, fly secrets).
+   *   - 'build-time': VITE_, NEXT_PUBLIC_, PUBLIC_ vars that get baked into
+   *                   the public JS bundle at compile time (cf-pages,
+   *                   vercel static, netlify).
+   * Drives picker copy + defense-in-depth checks (refuse runtime vars in a
+   * build-time target, or vice versa, since misclassification = secret
+   * leak or bundle-time miss).
+   */
+  varKind: AdapterVarKind;
   /**
    * Hard requirements: binaries that must be on PATH, env vars that must be
    * set (typically only in CI), and an adapter-specific auth check. Any

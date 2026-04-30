@@ -32,6 +32,7 @@ import {
   popStash,
   pushBranch,
   createPr,
+  listLocalBranches,
 } from '../deploy/git';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { classify } from '../deploy/classify';
@@ -204,7 +205,7 @@ async function runPicker(
     console.log(`  ${DIM('Detected:')} ${detected.summary}`);
   }
 
-  // 3. Adapter-specific options. Today only cf-worker.
+  // 3. Adapter-specific options.
   const detectedOpts = (detected.options ?? {}) as Record<string, string>;
   const existingOpts = (existing?.options ?? {}) as Record<string, string>;
   let options: Record<string, unknown> = {};
@@ -226,6 +227,39 @@ async function runPicker(
       },
     ]);
     options = ans;
+  } else if (adapter.id === 'cf-pages') {
+    const ans = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'projectName',
+        message: 'Pages project name (from wrangler pages project list):',
+        default: existingOpts.projectName ?? detectedOpts.projectName ?? '',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'buildCwd',
+        message: 'Build directory (contains package.json):',
+        default: existingOpts.buildCwd ?? detectedOpts.buildCwd ?? '.',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'buildCmd',
+        message: 'Build command (run inside the build directory):',
+        default:
+          existingOpts.buildCmd ?? detectedOpts.buildCmd ?? 'bun run build',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'distDir',
+        message: 'Dist directory (relative to build directory):',
+        default: existingOpts.distDir ?? detectedOpts.distDir ?? 'dist',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+    ]);
+    options = ans;
   }
 
   // 4. Branch.
@@ -240,25 +274,29 @@ async function runPicker(
     } as any,
   ])).branch;
 
-  // 5. Var classification — show suggested split, let user adjust.
+  // 5. Var picking — show every var in keep.lock and pre-select the ones
+  // most likely to be relevant for this adapter (runtime for cf-worker,
+  // build-time prefixes for cf-pages). The user is the authority: they can
+  // toggle anything in or out. No silent exclusion.
   const cls = classify(keep.variables);
-  const defaultRuntime = existing?.vars ?? cls.runtime;
-  if (cls.buildTime.length > 0) {
-    console.log(
-      `  ${DIM(`Build-time vars (${cls.buildTime.length}) auto-excluded from ${adapter.label}: ${cls.buildTime.join(', ')}`)}`,
-    );
+  const presumedRelevant =
+    adapter.varKind === 'build-time' ? cls.buildTime : cls.runtime;
+  const defaultPicks = existing?.vars ?? presumedRelevant;
+  const verb = adapter.varKind === 'build-time' ? 'inline into' : 'push to';
+  if (keep.variables.length === 0) {
+    throw new Error(`keep.lock has no variables — nothing to deploy.`);
   }
   const varsAns = (await inquirer.prompt([
     {
       type: 'checkbox',
       name: 'vars',
-      message: `Which runtime vars to push to ${adapter.label}?`,
+      message: `Which vars to ${verb} ${adapter.label}? (pre-selected: ${adapter.varKind === 'build-time' ? 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_' : 'non-public-prefixed'})`,
       instructions: CHECKBOX_INSTRUCTIONS,
       theme: CHECKBOX_THEME,
-      choices: cls.runtime.map((v) => ({
+      choices: keep.variables.map((v) => ({
         name: v,
         value: v,
-        checked: defaultRuntime.includes(v),
+        checked: defaultPicks.includes(v),
       })),
       validate: (v: readonly string[]) =>
         v.length > 0 ? true : 'select at least one',
@@ -289,6 +327,32 @@ async function runPicker(
     } as any,
   ])).mode as DeployMode;
 
+  // 6b. CI mode only — type the git branch the deploy PR opens against.
+  // Repos can have hundreds of branches, so a list picker is the wrong
+  // shape. Text entry with a sensible default (existing target's branch,
+  // else `main` if it exists locally, else current branch).
+  let gitBaseBranch: string | undefined;
+  if (mode === 'ci') {
+    const local = listLocalBranches(cwd);
+    const fallback =
+      existing?.gitBaseBranch ??
+      (local.includes('main')
+        ? 'main'
+        : local.includes('master')
+          ? 'master'
+          : currentBranch(cwd) ?? 'main');
+    gitBaseBranch = (await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'gitBaseBranch',
+        message: 'Open the deploy PR against which target branch?',
+        default: fallback,
+        validate: (v: string) =>
+          v.trim().length > 0 ? true : 'enter a branch name',
+      },
+    ])).gitBaseBranch.trim();
+  }
+
   // 7. Target name.
   const defaultName = existing?.name ?? `${adapter.id}-${branch}`;
   const name = (await inquirer.prompt([
@@ -311,6 +375,7 @@ async function runPicker(
     vars,
     options,
     mode,
+    gitBaseBranch,
   };
 }
 
@@ -320,6 +385,9 @@ function renderPlan(target: TargetConfig, adapter: DeployAdapter): void {
   console.log('');
   console.log(`  ${B('Target:')}  ${target.name}  ${DIM(`(${adapter.label})`)}`);
   console.log(`  ${B('Branch:')}  ${target.branch}`);
+  if (target.mode === 'ci' && target.gitBaseBranch) {
+    console.log(`  ${B('PR base:')} ${target.gitBaseBranch}`);
+  }
   for (const [k, v] of Object.entries(target.options)) {
     console.log(`  ${DIM(k.padEnd(7))}: ${String(v)}`);
   }
@@ -410,11 +478,12 @@ export async function deployCommand(
     if (options.yes) {
       // Ad-hoc CI path: build a transient target from auto-detected defaults.
       const detected = await adapter.detect(cwd);
+      const cls = classify(keep.variables);
       target = {
         name: `${adapter.id}-adhoc`,
         kind: adapter.id,
         branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
-        vars: classify(keep.variables).runtime,
+        vars: adapter.varKind === 'build-time' ? cls.buildTime : cls.runtime,
         options: detected.options ?? {},
       };
     } else {
@@ -516,8 +585,17 @@ export async function deployCommand(
       // push + PR. The stash dance keeps the user's in-progress source out
       // of the deploy PR — only keep.lock ships.
       originalBranch = currentBranch(cwd);
-      const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const branchName = `capy-deploy/${target.name}-${ts}-${Math.random().toString(36).slice(2, 7)}`;
+      // Branch name format: `capy-deploy-YYYYMMDD-HHMMSS-<rand>` — sortable,
+      // self-documenting, and avoids collisions when two deploys fire close
+      // together. Flat name (no slashes) so it shows up cleanly in branch
+      // pickers and `gh pr list` without nesting under a phantom directory.
+      const now = new Date();
+      const ts =
+        now.toISOString().slice(0, 10).replace(/-/g, '') +
+        '-' +
+        now.toISOString().slice(11, 19).replace(/:/g, '');
+      const rand = Math.random().toString(36).slice(2, 6);
+      const branchName = `capy-deploy-${ts}-${rand}`;
       const co = checkoutNewBranch(cwd, branchName);
       if (!co.ok) {
         console.error(`${RED('✗')} git checkout -b ${branchName}: ${co.error}`);
@@ -594,7 +672,8 @@ export async function deployCommand(
 
     const title = `deploy: ${target.name} → ${target.branch} (${target.kind})`;
     const body = buildDeployPrBody(target);
-    const pr = createPr(cwd, title, body);
+    const prBase = target.gitBaseBranch ?? 'main';
+    const pr = createPr(cwd, title, body, prBase);
 
     let prUrl: string | undefined;
     if (pr.ok) {
@@ -667,6 +746,9 @@ function buildDeployPrBody(target: TargetConfig): string {
   const optionsTable = Object.entries(target.options)
     .map(([k, v]) => `- \`${k}\`: \`${String(v)}\``)
     .join('\n');
+  const baseLine = target.gitBaseBranch
+    ? `- **Git base:** \`${target.gitBaseBranch}\` — merging this PR is the deploy signal for that branch.`
+    : '';
   return [
     `Automated deploy PR opened by \`capy deploy\`.`,
     ``,
@@ -675,6 +757,7 @@ function buildDeployPrBody(target: TargetConfig): string {
     `- **Target:** \`${target.name}\``,
     `- **Adapter:** ${adapterLabel} (\`${target.kind}\`)`,
     `- **Capy branch:** \`${target.branch}\` — secrets snapshot pinned by \`keep.lock\` in this commit.`,
+    baseLine,
     optionsTable,
     ``,
     `## Vars pushed`,
