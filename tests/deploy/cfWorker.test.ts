@@ -100,6 +100,39 @@ describe('cfWorker — preflight', () => {
     expect(r.reason).toContain('PUBLIC_FOO');
   });
 
+  test('refuses when worker has package.json deps but no node_modules', async () => {
+    const workerDir = join(ROOT, 'worker');
+    writeWranglerToml(workerDir, 'my-worker');
+    writeFileSync(
+      join(workerDir, 'package.json'),
+      JSON.stringify({ name: 'w', dependencies: { hono: '^4.0.0' } }),
+    );
+    const r = await cfWorkerAdapter.preflight(baseTarget(), { cwd: ROOT });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('node_modules');
+    expect(r.hint).toContain('bun install');
+  });
+
+  test('passes when node_modules exists', async () => {
+    const workerDir = join(ROOT, 'worker');
+    writeWranglerToml(workerDir, 'my-worker');
+    writeFileSync(
+      join(workerDir, 'package.json'),
+      JSON.stringify({ name: 'w', dependencies: { hono: '^4.0.0' } }),
+    );
+    mkdirSync(join(workerDir, 'node_modules'), { recursive: true });
+    const r = await cfWorkerAdapter.preflight(baseTarget(), { cwd: ROOT });
+    expect(r.ok).toBe(true);
+  });
+
+  test('passes when package.json has no deps (no node_modules required)', async () => {
+    const workerDir = join(ROOT, 'worker');
+    writeWranglerToml(workerDir, 'my-worker');
+    writeFileSync(join(workerDir, 'package.json'), JSON.stringify({ name: 'w' }));
+    const r = await cfWorkerAdapter.preflight(baseTarget(), { cwd: ROOT });
+    expect(r.ok).toBe(true);
+  });
+
   test('fails with helpful hint when options missing', async () => {
     writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
     const r = await cfWorkerAdapter.preflight(

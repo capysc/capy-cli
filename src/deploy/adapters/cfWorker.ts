@@ -123,12 +123,38 @@ export const cfWorkerAdapter: DeployAdapter = {
         hint: 'Run `capy deploy --edit ' + config.name + '` to fix.',
       };
     }
-    const tomlPath = join(ctx.cwd, opts.workerDir, 'wrangler.toml');
+    const workerCwd = join(ctx.cwd, opts.workerDir);
+    const tomlPath = join(workerCwd, 'wrangler.toml');
     if (!existsSync(tomlPath)) {
       return {
         ok: false,
         reason: `wrangler.toml not found at ${opts.workerDir}/wrangler.toml`,
       };
+    }
+    // If the worker has package.json deps, node_modules must exist before we
+    // touch secrets. wrangler runs esbuild during deploy; missing deps fail
+    // the build AFTER secret bulk has already mutated CF state, leaving a
+    // half-deploy. Catch it here.
+    const pkgPath = join(workerCwd, 'package.json');
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+        const hasDeps =
+          (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) ||
+          (pkg.devDependencies && Object.keys(pkg.devDependencies).length > 0);
+        if (hasDeps && !existsSync(join(workerCwd, 'node_modules'))) {
+          return {
+            ok: false,
+            reason: `${opts.workerDir}/node_modules missing — wrangler bundle would fail`,
+            hint:
+              `Install deps first:\n` +
+              `  cd ${opts.workerDir} && bun install\n` +
+              `(or npm/pnpm install)`,
+          };
+        }
+      } catch {
+        // malformed package.json — let wrangler surface the error
+      }
     }
     // Auth: wrangler login session OR CLOUDFLARE_API_TOKEN. We don't probe
     // wrangler login state (no clean way) — wrangler itself surfaces a clean
