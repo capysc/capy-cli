@@ -17,9 +17,19 @@ import { FileManager } from '../files/fileManager';
 import {
   DeployAdapter,
   DeployContext,
+  DeployMode,
   DeployResult,
   TargetConfig,
 } from '../deploy/adapter';
+import {
+  isGitRepo,
+  guardWorkingTree,
+  stageAndCommit,
+  currentBranch,
+  checkoutNewBranch,
+  pushBranch,
+  createPr,
+} from '../deploy/git';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { classify } from '../deploy/classify';
 import {
@@ -248,7 +258,29 @@ async function runPicker(
   ])) as { vars: string[] };
   const vars = varsAns.vars;
 
-  // 6. Target name.
+  // 6. Mode — direct vs CI/CD.
+  const mode = (await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'mode',
+      message: 'How should this target deploy?',
+      choices: [
+        {
+          name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
+          value: 'direct',
+          short: 'direct',
+        },
+        {
+          name: `Via CI/CD        ${DIM('— commit keep.lock on a branch + push secrets + open PR; CI deploys on merge')}`,
+          value: 'ci',
+          short: 'ci',
+        },
+      ],
+      default: existing?.mode ?? 'direct',
+    },
+  ])).mode as DeployMode;
+
+  // 7. Target name.
   const defaultName = existing?.name ?? `${adapter.id}-${branch}`;
   const name = (await inquirer.prompt([
     {
@@ -269,6 +301,7 @@ async function runPicker(
     branch,
     vars,
     options,
+    mode,
   };
 }
 
@@ -429,6 +462,8 @@ export async function deployCommand(
 
   renderPlan(target, adapter);
 
+  const mode: DeployMode = target.mode ?? 'direct';
+
   // Preflight (fail BEFORE decryption).
   const preflight = await adapter.preflight(target, { cwd });
   if (!preflight.ok) {
@@ -437,12 +472,35 @@ export async function deployCommand(
     return 1;
   }
 
+  // Working-tree guard (skip in dry-run — we don't mutate anything).
+  // Both modes require: clean working tree except for keep.lock, which we
+  // auto-commit since it has no secrets and changes naturally during deploy.
+  let gitGuard: ReturnType<typeof guardWorkingTree> | null = null;
+  if (!options.dryRun && isGitRepo(cwd)) {
+    gitGuard = guardWorkingTree(cwd);
+    if (!gitGuard.ok) {
+      console.error(`${RED('✗')} working tree has uncommitted changes:`);
+      for (const e of gitGuard.blockingChanges) {
+        console.error(`    ${e.code} ${e.path}`);
+      }
+      console.error(
+        `\nCommit or stash them, then re-run \`capy deploy\`.\n` +
+          `(capy auto-commits keep.lock changes; everything else is yours.)`,
+      );
+      return 1;
+    }
+  }
+
   if (!options.yes && !options.dryRun) {
+    const summary =
+      mode === 'ci'
+        ? `Open a deploy PR (commit keep.lock + push secrets, no live deploy)?`
+        : `Deploy now (commit keep.lock + push secrets + ship code)?`;
     const { confirm } = await inquirer.prompt([
       {
         type: 'confirm',
         name: 'confirm',
-        message: `Deploy now?`,
+        message: summary,
         default: true,
       },
     ]);
@@ -450,6 +508,28 @@ export async function deployCommand(
       console.log('Cancelled.');
       return 0;
     }
+  }
+
+  // Auto-commit keep.lock (and switch to a deploy branch first if CI mode).
+  if (!options.dryRun && gitGuard && gitGuard.autoCommitChanges.length > 0) {
+    if (mode === 'ci') {
+      const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const branchName = `capy-deploy/${target.name}-${ts}-${Math.random().toString(36).slice(2, 7)}`;
+      const co = checkoutNewBranch(cwd, branchName);
+      if (!co.ok) {
+        console.error(`${RED('✗')} git checkout -b ${branchName}: ${co.error}`);
+        return 1;
+      }
+      console.log(`  ${GREEN('✓')} branch  ${branchName}`);
+    }
+    const paths = gitGuard.autoCommitChanges.map((e) => e.path);
+    const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
+    const commit = stageAndCommit(cwd, paths, msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} commit  ${msg}`);
   }
 
   // Decrypt the current branch — except in dry-run mode, where the adapter
@@ -470,8 +550,46 @@ export async function deployCommand(
   const result = await adapter.deploy(target, {
     env,
     dryRun: !!options.dryRun,
+    secretsOnly: mode === 'ci',
     cwd,
   });
   renderResult(result);
-  return result.ok ? 0 : 1;
+
+  if (!result.ok) return 1;
+
+  // CI mode: push the branch and open a PR for the keep.lock change. The
+  // actual code deploy runs in the user's CI when the PR merges.
+  if (mode === 'ci' && !options.dryRun) {
+    const branchNow = currentBranch(cwd);
+    if (!branchNow) {
+      console.error(`${RED('✗')} could not resolve current branch for push`);
+      return 1;
+    }
+    const push = pushBranch(cwd, branchNow);
+    if (!push.ok) {
+      console.error(`${RED('✗')} git push: ${push.error}`);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} push    ${branchNow}`);
+
+    const title = `deploy: ${target.name} (${target.branch})`;
+    const body =
+      `Automated deploy PR opened by \`capy deploy\`.\n\n` +
+      `- Target: \`${target.name}\` (${target.kind})\n` +
+      `- Branch: \`${target.branch}\`\n` +
+      `- Vars pushed: ${target.vars.join(', ')}\n\n` +
+      `Secrets have already been pushed to the vendor via \`wrangler secret bulk\`. ` +
+      `Merging this PR triggers the actual deploy in CI.`;
+    const pr = createPr(cwd, title, body);
+    if (pr.ok) {
+      console.log(`  ${GREEN('✓')} PR      ${pr.url ?? '(open)'}`);
+    } else if (pr.manualHint) {
+      console.log(`  ${YELLOW('!')} ${pr.manualHint}`);
+    } else {
+      console.error(`${RED('✗')} gh pr create: ${pr.error}`);
+      return 1;
+    }
+  }
+
+  return 0;
 }

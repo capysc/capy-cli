@@ -10,6 +10,8 @@
  *   4. adapter shells out to vendor CLI / API to push secrets and ship code
  */
 
+export type DeployMode = 'direct' | 'ci';
+
 export interface TargetConfig {
   /** Stable identifier the user references with `capy deploy <name>`. */
   name: string;
@@ -21,6 +23,14 @@ export interface TargetConfig {
   vars: string[];
   /** Free-form adapter-specific options (worker name, build cmd, etc.). */
   options: Record<string, unknown>;
+  /**
+   * 'direct' — capy commits keep.lock + pushes secrets + ships code now.
+   * 'ci'     — capy commits keep.lock on a branch + pushes secrets + opens
+   *            a PR. Actual deploy runs in CI on merge.
+   * Defaults to 'direct' for back-compat with targets saved before this
+   * field existed.
+   */
+  mode?: DeployMode;
 }
 
 export interface DetectedDefaults {
@@ -58,6 +68,11 @@ export interface DeployContext {
   env: Record<string, string>;
   /** Set by `capy deploy --dry-run`. Adapter must not push anything. */
   dryRun: boolean;
+  /**
+   * When true, push secrets only — don't ship code. Used by CI mode where
+   * the CI pipeline runs the actual deploy after the PR merges.
+   */
+  secretsOnly?: boolean;
   /** cwd of the user's invocation. */
   cwd: string;
 }

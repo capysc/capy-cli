@@ -223,6 +223,8 @@ export const cfWorkerAdapter: DeployAdapter = {
     });
 
     // 2. Push secrets via stdin to `wrangler secret bulk`.
+    // Always runs unless dry-run; in `secretsOnly` mode (CI handoff) we push
+    // secrets but skip the wrangler deploy below — CI will run the deploy.
     const bulkPayload = JSON.stringify(filtered);
     const bulkR = await spawnAsync(
       'wrangler',
@@ -244,6 +246,15 @@ export const cfWorkerAdapter: DeployAdapter = {
       status: 'ok',
       detail: `${Object.keys(filtered).length} pushed`,
     });
+
+    if (ctx.secretsOnly) {
+      steps.push({
+        label: 'wrangler deploy',
+        status: 'skip',
+        detail: 'CI mode — deploy runs on PR merge',
+      });
+      return { ok: true, steps };
+    }
 
     // 3. Deploy.
     const deployR = await spawnAsync('wrangler', ['deploy'], workerCwd);
