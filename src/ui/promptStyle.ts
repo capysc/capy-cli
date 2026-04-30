@@ -36,23 +36,29 @@ export const CHECKBOX_INSTRUCTIONS =
   '\n';
 
 /**
- * Theme override for `inquirer.prompt({ type: 'checkbox', ... })`. Left-pads
- * the cursor with a single space so the selection indicator (◉ ◯) lines up
- * with the rest of the CLI's column-2 indent.
+ * Theme override for `inquirer.prompt({ type: 'checkbox', ... })`.
+ *
+ * Default checkbox renders the cursor adjacent to the selection indicator
+ * (`❯◉ FOO`). We want one character of breathing room between them so the
+ * caret and the indicator don't visually fuse. Achieved by prefixing the
+ * indicator characters with a space — the cursor itself stays at column 0,
+ * and inactive lines get a matching pad because inquirer replaces the
+ * cursor cell with a single space anyway:
+ *
+ *     ❯ ◉ FOO     <- active
+ *       ◯ BAR     <- inactive (cursor cell + leading-space-on-icon)
  */
 export const CHECKBOX_THEME = {
   icon: {
-    cursor: ' ❯',
+    checked: ' ◉',
+    unchecked: ' ◯',
   },
 };
 
 /**
- * Theme override for `inquirer.prompt({ type: 'list', ... })`. Same indent
- * tweak as CHECKBOX_THEME so list pickers and checkbox pickers feel like
- * one family.
+ * Theme override for `inquirer.prompt({ type: 'list', ... })`. List prompts
+ * have no separate indicator — only the cursor — so no override is needed
+ * for spacing. Exported so future tweaks land here without churning every
+ * call site.
  */
-export const LIST_THEME = {
-  icon: {
-    cursor: ' ❯',
-  },
-};
+export const LIST_THEME = {};
