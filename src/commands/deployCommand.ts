@@ -35,7 +35,7 @@ import {
 } from '../deploy/git';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { classify } from '../deploy/classify';
-import { CHECKBOX_INSTRUCTIONS } from '../ui/promptStyle';
+import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
 import {
   getTarget,
   listTargets,
@@ -188,8 +188,9 @@ async function runPicker(
         type: 'list',
         name: 'kind',
         message: 'Where are you deploying?',
+        theme: LIST_THEME,
         choices,
-      },
+      } as any,
     ])) as any;
     adapterChoice = ans.kind;
   }
@@ -233,9 +234,10 @@ async function runPicker(
       type: 'list',
       name: 'branch',
       message: 'Which capy branch ships to this target?',
+      theme: LIST_THEME,
       choices: keep.branches.length > 0 ? keep.branches : ['development'],
       default: existing?.branch ?? (keep.branches.includes('production') ? 'production' : keep.branches[0]),
-    },
+    } as any,
   ])).branch;
 
   // 5. Var classification — show suggested split, let user adjust.
@@ -252,6 +254,7 @@ async function runPicker(
       name: 'vars',
       message: `Which runtime vars to push to ${adapter.label}?`,
       instructions: CHECKBOX_INSTRUCTIONS,
+      theme: CHECKBOX_THEME,
       choices: cls.runtime.map((v) => ({
         name: v,
         value: v,
@@ -269,6 +272,7 @@ async function runPicker(
       type: 'list',
       name: 'mode',
       message: 'How should this target deploy?',
+      theme: LIST_THEME,
       choices: [
         {
           name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
@@ -282,7 +286,7 @@ async function runPicker(
         },
       ],
       default: existing?.mode ?? 'direct',
-    },
+    } as any,
   ])).mode as DeployMode;
 
   // 7. Target name.
@@ -440,6 +444,7 @@ export async function deployCommand(
           type: 'list',
           name: 'name',
           message: 'Which target?',
+          theme: LIST_THEME,
           choices: [
             ...targets.map((t) => ({
               name: `${t.name}  ${DIM(`(${t.kind}, branch=${t.branch})`)}`,
