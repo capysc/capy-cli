@@ -6,10 +6,14 @@ import { spawnSync } from 'child_process';
 import {
   isGitRepo,
   getStatus,
-  guardWorkingTree,
+  hasKeepLockChanges,
+  hasOtherChanges,
   stageAndCommit,
   currentBranch,
   checkoutNewBranch,
+  checkoutBranch,
+  stashOtherChanges,
+  popStash,
 } from '../../src/deploy/git';
 
 const ROOT = join(tmpdir(), `capy-git-test-${process.pid}`);
@@ -45,28 +49,79 @@ describe('git helpers', () => {
     rmSync(non, { recursive: true, force: true });
   });
 
-  test('clean working tree → guard passes with no changes', () => {
-    const r = guardWorkingTree(ROOT);
-    expect(r.ok).toBe(true);
-    expect(r.blockingChanges).toEqual([]);
-    expect(r.autoCommitChanges).toEqual([]);
+  test('clean tree: hasKeepLockChanges = false, hasOtherChanges = false', () => {
+    expect(hasKeepLockChanges(ROOT)).toBe(false);
+    expect(hasOtherChanges(ROOT)).toBe(false);
   });
 
-  test('only keep.lock dirty → guard passes; flagged for auto-commit', () => {
+  test('only keep.lock dirty', () => {
     writeFileSync(join(ROOT, 'keep.lock'), '{}');
-    const r = guardWorkingTree(ROOT);
-    expect(r.ok).toBe(true);
-    expect(r.autoCommitChanges.map((e) => e.path)).toEqual(['keep.lock']);
-    expect(r.blockingChanges).toEqual([]);
+    expect(hasKeepLockChanges(ROOT)).toBe(true);
+    expect(hasOtherChanges(ROOT)).toBe(false);
   });
 
-  test('other files dirty → guard blocks them', () => {
+  test('only other files dirty', () => {
+    writeFileSync(join(ROOT, 'src.ts'), 'export {};');
+    expect(hasKeepLockChanges(ROOT)).toBe(false);
+    expect(hasOtherChanges(ROOT)).toBe(true);
+  });
+
+  test('keep.lock + other files dirty: both flags true', () => {
     writeFileSync(join(ROOT, 'src.ts'), 'export {};');
     writeFileSync(join(ROOT, 'keep.lock'), '{}');
-    const r = guardWorkingTree(ROOT);
-    expect(r.ok).toBe(false);
-    expect(r.blockingChanges.map((e) => e.path).sort()).toEqual(['src.ts']);
-    expect(r.autoCommitChanges.map((e) => e.path)).toEqual(['keep.lock']);
+    expect(hasKeepLockChanges(ROOT)).toBe(true);
+    expect(hasOtherChanges(ROOT)).toBe(true);
+  });
+
+  test('stage+commit only keep.lock leaves other dirty files alone', () => {
+    writeFileSync(join(ROOT, 'src.ts'), 'export {};');
+    writeFileSync(join(ROOT, 'keep.lock'), '{}');
+    const r = stageAndCommit(ROOT, ['keep.lock'], 'chore(deploy): bump');
+    expect(r.ok).toBe(true);
+    // keep.lock is committed; src.ts is still untracked.
+    const remaining = getStatus(ROOT);
+    expect(remaining.map((e) => e.path)).toEqual(['src.ts']);
+  });
+
+  test('stash dance: stash → branch → commit keep.lock → return → pop', () => {
+    writeFileSync(join(ROOT, 'keep.lock'), '{ "v": 1 }');
+    writeFileSync(join(ROOT, 'src.ts'), 'export const x = 1;');
+    const original = currentBranch(ROOT);
+
+    // 1. Branch
+    const co = checkoutNewBranch(ROOT, 'capy-deploy/test');
+    expect(co.ok).toBe(true);
+
+    // 2. Stash everything BUT keep.lock
+    const stash = stashOtherChanges(ROOT);
+    expect(stash.ok).toBe(true);
+    expect(stash.stashed).toBe(true);
+    // After stash: only keep.lock should remain in the working tree
+    expect(getStatus(ROOT).map((e) => e.path)).toEqual(['keep.lock']);
+
+    // 3. Commit keep.lock only
+    const commit = stageAndCommit(ROOT, ['keep.lock'], 'chore(deploy): bump');
+    expect(commit.ok).toBe(true);
+    expect(getStatus(ROOT)).toEqual([]);
+
+    // 4. Return to original branch
+    const back = checkoutBranch(ROOT, original!);
+    expect(back.ok).toBe(true);
+    expect(currentBranch(ROOT)).toBe(original);
+
+    // 5. Restore the stash — src.ts comes back, keep.lock stays old
+    const pop = popStash(ROOT);
+    expect(pop.ok).toBe(true);
+    expect(getStatus(ROOT).map((e) => e.path).sort()).toEqual(['src.ts']);
+  });
+
+  test('stashOtherChanges is a no-op when nothing other than keep.lock is dirty', () => {
+    writeFileSync(join(ROOT, 'keep.lock'), '{}');
+    const r = stashOtherChanges(ROOT);
+    expect(r.ok).toBe(true);
+    expect(r.stashed).toBe(false);
+    // Nothing was stashed — keep.lock is still dirty.
+    expect(hasKeepLockChanges(ROOT)).toBe(true);
   });
 
   test('stageAndCommit succeeds for tracked files', () => {

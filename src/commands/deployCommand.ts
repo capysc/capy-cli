@@ -23,10 +23,13 @@ import {
 } from '../deploy/adapter';
 import {
   isGitRepo,
-  guardWorkingTree,
+  hasKeepLockChanges,
   stageAndCommit,
   currentBranch,
   checkoutNewBranch,
+  checkoutBranch,
+  stashOtherChanges,
+  popStash,
   pushBranch,
   createPr,
 } from '../deploy/git';
@@ -472,24 +475,10 @@ export async function deployCommand(
     return 1;
   }
 
-  // Working-tree guard (skip in dry-run — we don't mutate anything).
-  // Both modes require: clean working tree except for keep.lock, which we
-  // auto-commit since it has no secrets and changes naturally during deploy.
-  let gitGuard: ReturnType<typeof guardWorkingTree> | null = null;
-  if (!options.dryRun && isGitRepo(cwd)) {
-    gitGuard = guardWorkingTree(cwd);
-    if (!gitGuard.ok) {
-      console.error(`${RED('✗')} working tree has uncommitted changes:`);
-      for (const e of gitGuard.blockingChanges) {
-        console.error(`    ${e.code} ${e.path}`);
-      }
-      console.error(
-        `\nCommit or stash them, then re-run \`capy deploy\`.\n` +
-          `(capy auto-commits keep.lock changes; everything else is yours.)`,
-      );
-      return 1;
-    }
-  }
+  // capy never blocks on uncommitted source changes. It only ever stages and
+  // commits keep.lock — your work-in-progress is left exactly as it was.
+  const gitOk = !options.dryRun && isGitRepo(cwd);
+  const keepLockDirty = gitOk && hasKeepLockChanges(cwd);
 
   if (!options.yes && !options.dryRun) {
     const summary =
@@ -510,9 +499,16 @@ export async function deployCommand(
     }
   }
 
-  // Auto-commit keep.lock (and switch to a deploy branch first if CI mode).
-  if (!options.dryRun && gitGuard && gitGuard.autoCommitChanges.length > 0) {
+  // Track state we'll need to unwind in CI mode after the PR is opened.
+  let originalBranch: string | null = null;
+  let stashedOthers = false;
+
+  if (gitOk && keepLockDirty) {
     if (mode === 'ci') {
+      // CI mode: branch + stash other changes + commit keep.lock only +
+      // push + PR. The stash dance keeps the user's in-progress source out
+      // of the deploy PR — only keep.lock ships.
+      originalBranch = currentBranch(cwd);
       const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const branchName = `capy-deploy/${target.name}-${ts}-${Math.random().toString(36).slice(2, 7)}`;
       const co = checkoutNewBranch(cwd, branchName);
@@ -521,10 +517,22 @@ export async function deployCommand(
         return 1;
       }
       console.log(`  ${GREEN('✓')} branch  ${branchName}`);
+
+      const stash = stashOtherChanges(cwd);
+      if (!stash.ok) {
+        console.error(`${RED('✗')} git stash: ${stash.error}`);
+        return 1;
+      }
+      stashedOthers = stash.stashed;
+      if (stashedOthers) {
+        console.log(
+          `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
+        );
+      }
     }
-    const paths = gitGuard.autoCommitChanges.map((e) => e.path);
+
     const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
-    const commit = stageAndCommit(cwd, paths, msg);
+    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
     if (!commit.ok) {
       console.error(`${RED('✗')} ${commit.error}`);
       return 1;
@@ -558,38 +566,130 @@ export async function deployCommand(
   if (!result.ok) return 1;
 
   // CI mode: push the branch and open a PR for the keep.lock change. The
-  // actual code deploy runs in the user's CI when the PR merges.
+  // actual code deploy runs in the user's CI when the PR merges. After the
+  // PR is opened (or fails), we always try to return the user to the branch
+  // they started on and restore any changes we stashed — even on partial
+  // failure — so a half-finished `capy deploy` never leaves them stranded.
   if (mode === 'ci' && !options.dryRun) {
     const branchNow = currentBranch(cwd);
     if (!branchNow) {
       console.error(`${RED('✗')} could not resolve current branch for push`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
       return 1;
     }
     const push = pushBranch(cwd, branchNow);
     if (!push.ok) {
       console.error(`${RED('✗')} git push: ${push.error}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
       return 1;
     }
     console.log(`  ${GREEN('✓')} push    ${branchNow}`);
 
-    const title = `deploy: ${target.name} (${target.branch})`;
-    const body =
-      `Automated deploy PR opened by \`capy deploy\`.\n\n` +
-      `- Target: \`${target.name}\` (${target.kind})\n` +
-      `- Branch: \`${target.branch}\`\n` +
-      `- Vars pushed: ${target.vars.join(', ')}\n\n` +
-      `Secrets have already been pushed to the vendor via \`wrangler secret bulk\`. ` +
-      `Merging this PR triggers the actual deploy in CI.`;
+    const title = `deploy: ${target.name} → ${target.branch} (${target.kind})`;
+    const body = buildDeployPrBody(target);
     const pr = createPr(cwd, title, body);
+
+    let prUrl: string | undefined;
     if (pr.ok) {
+      prUrl = pr.url;
       console.log(`  ${GREEN('✓')} PR      ${pr.url ?? '(open)'}`);
     } else if (pr.manualHint) {
       console.log(`  ${YELLOW('!')} ${pr.manualHint}`);
     } else {
       console.error(`${RED('✗')} gh pr create: ${pr.error}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
       return 1;
     }
+
+    await unwindGitState(cwd, originalBranch, stashedOthers);
+
+    // Final summary — make the PR link unmissable, since this is the
+    // hand-off point. CI takes over once the user opens the PR.
+    console.log('');
+    console.log(`  ${B('Review and merge to deploy:')}`);
+    if (prUrl) console.log(`    ${prUrl}`);
+    console.log(`    ${DIM('branch')}    ${branchNow}`);
+    if (originalBranch) {
+      console.log(`    ${DIM('you are on')} ${currentBranch(cwd) ?? originalBranch}`);
+    }
+    console.log('');
   }
 
   return 0;
+}
+
+/**
+ * Return the user to the branch they started on and pop any stash we made
+ * during CI mode. Idempotent and best-effort — failures are logged but do
+ * not propagate, since by the time we get here the PR has already been
+ * opened (or the caller already errored). Stranding the user on a deploy
+ * branch with stashed changes is worse than printing a hint.
+ */
+async function unwindGitState(
+  cwd: string,
+  originalBranch: string | null,
+  stashedOthers: boolean,
+): Promise<void> {
+  if (originalBranch && currentBranch(cwd) !== originalBranch) {
+    const co = checkoutBranch(cwd, originalBranch);
+    if (co.ok) {
+      console.log(`  ${DIM('↩')} back on ${originalBranch}`);
+    } else {
+      console.log(
+        `  ${YELLOW('!')} could not return to ${originalBranch}: ${co.error}\n` +
+          `    Run \`git checkout ${originalBranch}\` to switch back.`,
+      );
+    }
+  }
+  if (stashedOthers) {
+    const pop = popStash(cwd);
+    if (pop.ok) {
+      console.log(`  ${DIM('↩')} restored stashed working-tree changes`);
+    } else {
+      console.log(
+        `  ${YELLOW('!')} could not pop stash automatically: ${pop.error}\n` +
+          `    Run \`git stash pop\` to restore your changes.`,
+      );
+    }
+  }
+}
+
+function buildDeployPrBody(target: TargetConfig): string {
+  const adapter = getAdapter(target.kind);
+  const adapterLabel = adapter ? adapter.label : target.kind;
+  const optionsTable = Object.entries(target.options)
+    .map(([k, v]) => `- \`${k}\`: \`${String(v)}\``)
+    .join('\n');
+  return [
+    `Automated deploy PR opened by \`capy deploy\`.`,
+    ``,
+    `## What this ships`,
+    ``,
+    `- **Target:** \`${target.name}\``,
+    `- **Adapter:** ${adapterLabel} (\`${target.kind}\`)`,
+    `- **Capy branch:** \`${target.branch}\` — secrets snapshot pinned by \`keep.lock\` in this commit.`,
+    optionsTable,
+    ``,
+    `## Vars pushed`,
+    ``,
+    `Already delivered to the vendor via \`wrangler secret bulk\` (or adapter`,
+    `equivalent) **before** this PR was opened. Names only — values stay in`,
+    `the vendor's secret store and never appear in git history:`,
+    ``,
+    target.vars.map((v) => `- \`${v}\``).join('\n'),
+    ``,
+    `## What happens on merge`,
+    ``,
+    `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
+    `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
+    `the secrets that were pushed above. capy itself does **not** ship code`,
+    `from the local machine in CI mode — only the keep.lock pin lands here.`,
+    ``,
+    `## Diff scope`,
+    ``,
+    `This PR contains exactly one file change: \`keep.lock\`. Other working-`,
+    `tree changes on the author's machine were not picked up.`,
+    ``,
+    `_Generated by \`capy deploy\`._`,
+  ].join('\n');
 }

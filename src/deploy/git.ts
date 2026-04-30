@@ -48,36 +48,28 @@ export function getStatus(cwd: string): GitStatusEntry[] {
 }
 
 /**
- * Files whose working-tree state may legitimately change as part of a
- * `capy deploy` invocation and which we'll auto-commit. Anything outside this
- * set must be committed by the user before deploying.
+ * The single file `capy deploy` ever auto-commits. `keep.lock` carries no
+ * secrets — only var-name hashes — so committing it on the user's behalf is
+ * always safe. Everything else stays the user's to commit (or not).
  */
-const ALLOWED_AUTOCOMMIT_PATHS = new Set(['keep.lock']);
+const KEEP_LOCK = 'keep.lock';
 
-export interface GuardResult {
-  ok: boolean;
-  /** Files outside the allow-list that need user attention. */
-  blockingChanges: GitStatusEntry[];
-  /** Files in the allow-list that we'll auto-commit. */
-  autoCommitChanges: GitStatusEntry[];
+/**
+ * Returns true if the user has unstaged changes to keep.lock that the deploy
+ * flow needs to bake into a commit. False if keep.lock is already clean
+ * (or if the file doesn't exist).
+ */
+export function hasKeepLockChanges(cwd: string): boolean {
+  return getStatus(cwd).some((e) => e.path === KEEP_LOCK);
 }
 
-export function guardWorkingTree(cwd: string): GuardResult {
-  const entries = getStatus(cwd);
-  const blockingChanges: GitStatusEntry[] = [];
-  const autoCommitChanges: GitStatusEntry[] = [];
-  for (const e of entries) {
-    if (ALLOWED_AUTOCOMMIT_PATHS.has(e.path)) {
-      autoCommitChanges.push(e);
-    } else {
-      blockingChanges.push(e);
-    }
-  }
-  return {
-    ok: blockingChanges.length === 0,
-    blockingChanges,
-    autoCommitChanges,
-  };
+/**
+ * Returns true if the user has any other working-tree changes besides
+ * keep.lock. The caller doesn't refuse on this — it just decides whether a
+ * stash dance is needed before switching branches in CI mode.
+ */
+export function hasOtherChanges(cwd: string): boolean {
+  return getStatus(cwd).some((e) => e.path !== KEEP_LOCK);
 }
 
 export function stageAndCommit(
@@ -102,6 +94,57 @@ export function checkoutNewBranch(
   name: string,
 ): { ok: boolean; error?: string } {
   const r = git(['checkout', '-b', name], cwd);
+  if (r.code !== 0) {
+    return { ok: false, error: r.stderr.trim() };
+  }
+  return { ok: true };
+}
+
+/**
+ * Stash everything in the working tree EXCEPT keep.lock. Used in CI mode so
+ * the user's in-progress source changes survive the branch switch and don't
+ * sneak into the deploy PR. Returns a stash ref the caller passes to
+ * `popStash` after returning to the original branch.
+ *
+ * Returns null if there was nothing to stash (no other changes).
+ */
+export function stashOtherChanges(
+  cwd: string,
+): { ok: boolean; stashed: boolean; error?: string } {
+  if (!hasOtherChanges(cwd)) return { ok: true, stashed: false };
+  // `git stash push -u -- ':!keep.lock'` stashes all changes (incl. untracked)
+  // except keep.lock. The pathspec magic word ':!' excludes a path.
+  const r = git(
+    [
+      'stash',
+      'push',
+      '--include-untracked',
+      '-m',
+      'capy-deploy: temporary stash of non-keep.lock changes',
+      '--',
+      ':!keep.lock',
+    ],
+    cwd,
+  );
+  if (r.code !== 0) {
+    return { ok: false, stashed: false, error: r.stderr.trim() };
+  }
+  return { ok: true, stashed: true };
+}
+
+export function popStash(cwd: string): { ok: boolean; error?: string } {
+  const r = git(['stash', 'pop'], cwd);
+  if (r.code !== 0) {
+    return { ok: false, error: r.stderr.trim() };
+  }
+  return { ok: true };
+}
+
+export function checkoutBranch(
+  cwd: string,
+  name: string,
+): { ok: boolean; error?: string } {
+  const r = git(['checkout', name], cwd);
   if (r.code !== 0) {
     return { ok: false, error: r.stderr.trim() };
   }
