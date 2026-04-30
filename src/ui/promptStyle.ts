@@ -53,6 +53,12 @@ export const CHECKBOX_THEME = {
     checked: ' ◉',
     unchecked: ' ◯',
   },
+  // Keep the "Press space..." help line visible the whole time — inquirer's
+  // default 'auto' hides it after the user's first keystroke, but the
+  // shortcuts stay relevant for the entire interaction (toggle-all, invert,
+  // submit), not just the first move. Don't hide reference material that's
+  // still useful.
+  helpMode: 'always' as const,
 };
 
 /**
@@ -61,4 +67,9 @@ export const CHECKBOX_THEME = {
  * for spacing. Exported so future tweaks land here without churning every
  * call site.
  */
-export const LIST_THEME = {};
+export const LIST_THEME = {
+  // Same reasoning as CHECKBOX_THEME — descriptions/help lines should stay
+  // visible while the user is making a decision, not vanish after one
+  // keystroke.
+  helpMode: 'always' as const,
+};
