@@ -1,0 +1,236 @@
+/**
+ * Cloudflare Workers adapter.
+ *
+ * Push runtime secrets via `wrangler secret bulk` (stdin JSON), then
+ * `wrangler deploy`. Build-time `VITE_*`/`NEXT_PUBLIC_*` should never reach
+ * a Worker — caller must filter via `classify`. Adapter does its own filter
+ * as a defense-in-depth, but the picker is the primary boundary.
+ */
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
+import { spawn, spawnSync } from 'child_process';
+import {
+  DeployAdapter,
+  DeployContext,
+  DeployResult,
+  DeployStep,
+  DetectedDefaults,
+  PreflightResult,
+  TargetConfig,
+} from '../adapter';
+import { isRuntime } from '../classify';
+
+interface CfWorkerOptions {
+  /** Worker name (mirrors `name = ...` in wrangler.toml). */
+  workerName: string;
+  /** Directory containing wrangler.toml. Relative to project root. */
+  workerDir: string;
+}
+
+function which(bin: string): string | null {
+  const r = spawnSync('which', [bin], { encoding: 'utf-8' });
+  return r.status === 0 ? r.stdout.trim() || null : null;
+}
+
+function parseWranglerToml(path: string): { name?: string; account_id?: string } {
+  if (!existsSync(path)) return {};
+  const content = readFileSync(path, 'utf-8');
+  const out: { name?: string; account_id?: string } = {};
+  const nameM = content.match(/^\s*name\s*=\s*"([^"]+)"/m);
+  if (nameM) out.name = nameM[1];
+  const accM = content.match(/^\s*account_id\s*=\s*"([^"]+)"/m);
+  if (accM) out.account_id = accM[1];
+  return out;
+}
+
+/** Walk likely subdirs for a wrangler.toml. Return its containing dir. */
+function findWorkerDir(cwd: string): string | null {
+  const candidates = [cwd, join(cwd, 'worker'), join(cwd, 'workers'), join(cwd, 'api')];
+  for (const c of candidates) {
+    if (existsSync(join(c, 'wrangler.toml'))) return c;
+  }
+  return null;
+}
+
+function spawnAsync(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  env: Record<string, string> = {},
+  stdin?: string,
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d.toString()));
+    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.on('close', (code) =>
+      resolve({ stdout, stderr, code: code ?? 1 }),
+    );
+    if (stdin !== undefined) {
+      child.stdin.write(stdin);
+      child.stdin.end();
+    }
+  });
+}
+
+export const cfWorkerAdapter: DeployAdapter = {
+  id: 'cf-worker',
+  label: 'Cloudflare Workers',
+  description: 'Server-side, runtime secrets pushed via wrangler secret bulk',
+  requires: { binaries: ['wrangler'] },
+
+  async detect(cwd: string): Promise<DetectedDefaults> {
+    const workerDir = findWorkerDir(cwd);
+    if (!workerDir) return {};
+    const tomlPath = join(workerDir, 'wrangler.toml');
+    const parsed = parseWranglerToml(tomlPath);
+    const rel = workerDir === cwd ? '.' : workerDir.slice(cwd.length + 1);
+    const summary = parsed.name
+      ? `worker "${parsed.name}" in ${rel}`
+      : `wrangler.toml in ${rel}`;
+    return {
+      options: {
+        workerName: parsed.name,
+        workerDir: rel,
+      },
+      summary,
+    };
+  },
+
+  async preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
+    if (!which('wrangler')) {
+      return {
+        ok: false,
+        reason: 'wrangler not found on PATH',
+        hint:
+          'Install wrangler:\n' +
+          '  bun add -d wrangler        (project-local, recommended)\n' +
+          '  npm i -g wrangler          (global)\n' +
+          'Re-run `capy deploy` after install.',
+      };
+    }
+    const opts = config.options as Partial<CfWorkerOptions>;
+    if (!opts.workerName || !opts.workerDir) {
+      return {
+        ok: false,
+        reason: 'cf-worker target missing workerName/workerDir',
+        hint: 'Run `capy deploy --edit ' + config.name + '` to fix.',
+      };
+    }
+    const tomlPath = join(ctx.cwd, opts.workerDir, 'wrangler.toml');
+    if (!existsSync(tomlPath)) {
+      return {
+        ok: false,
+        reason: `wrangler.toml not found at ${opts.workerDir}/wrangler.toml`,
+      };
+    }
+    // Auth: wrangler login session OR CLOUDFLARE_API_TOKEN. We don't probe
+    // wrangler login state (no clean way) — wrangler itself surfaces a clean
+    // error if neither is present, and we propagate it.
+    if (config.vars.length === 0) {
+      return {
+        ok: false,
+        reason: 'cf-worker target has no vars to push',
+        hint: 'Re-run with `--edit` and select at least one runtime var.',
+      };
+    }
+    // Defense-in-depth: refuse to push build-time vars to a Worker.
+    const leaked = config.vars.filter((v) => !isRuntime(v));
+    if (leaked.length > 0) {
+      return {
+        ok: false,
+        reason: `cf-worker target includes build-time vars: ${leaked.join(', ')}`,
+        hint:
+          'Build-time vars (VITE_*, NEXT_PUBLIC_*, PUBLIC_*) belong to a Pages target, ' +
+          'not a Worker. Re-run with `--edit` to move them.',
+      };
+    }
+    return { ok: true };
+  },
+
+  async deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
+    const opts = config.options as unknown as CfWorkerOptions;
+    const workerCwd = join(ctx.cwd, opts.workerDir);
+    const steps: DeployStep[] = [];
+
+    // 1. Filter env to declared vars only.
+    const filtered: Record<string, string> = {};
+    for (const name of config.vars) {
+      if (name in ctx.env) filtered[name] = ctx.env[name];
+    }
+    const missing = config.vars.filter((v) => !(v in ctx.env));
+    if (missing.length > 0) {
+      steps.push({
+        label: `filter vars (${config.vars.length} declared)`,
+        status: 'fail',
+        detail: `missing in branch ${config.branch}: ${missing.join(', ')}`,
+      });
+      return { ok: false, steps };
+    }
+    steps.push({
+      label: `filter vars`,
+      status: 'ok',
+      detail: `${Object.keys(filtered).length} runtime var(s) for ${opts.workerName}`,
+    });
+
+    if (ctx.dryRun) {
+      steps.push({
+        label: 'wrangler secret bulk',
+        status: 'skip',
+        detail: 'dry-run',
+      });
+      steps.push({ label: 'wrangler deploy', status: 'skip', detail: 'dry-run' });
+      return { ok: true, steps };
+    }
+
+    // 2. Push secrets via stdin to `wrangler secret bulk`.
+    const bulkPayload = JSON.stringify(filtered);
+    const bulkR = await spawnAsync(
+      'wrangler',
+      ['secret', 'bulk'],
+      workerCwd,
+      {},
+      bulkPayload,
+    );
+    if (bulkR.code !== 0) {
+      steps.push({
+        label: 'wrangler secret bulk',
+        status: 'fail',
+        detail: bulkR.stderr.trim().split('\n').slice(-3).join(' | '),
+      });
+      return { ok: false, steps };
+    }
+    steps.push({
+      label: 'wrangler secret bulk',
+      status: 'ok',
+      detail: `${Object.keys(filtered).length} pushed`,
+    });
+
+    // 3. Deploy.
+    const deployR = await spawnAsync('wrangler', ['deploy'], workerCwd);
+    if (deployR.code !== 0) {
+      steps.push({
+        label: 'wrangler deploy',
+        status: 'fail',
+        detail: deployR.stderr.trim().split('\n').slice(-3).join(' | '),
+      });
+      return { ok: false, steps };
+    }
+    const urlMatch = deployR.stdout.match(
+      /https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/i,
+    );
+    steps.push({
+      label: 'wrangler deploy',
+      status: 'ok',
+      url: urlMatch?.[0],
+    });
+
+    return { ok: true, steps };
+  },
+};
