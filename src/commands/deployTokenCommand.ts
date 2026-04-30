@@ -20,6 +20,21 @@ import { generateDeployHtml } from '../ui/deployPage/html';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/**
+ * Map of platform value → connector adapter id. When the user picks a
+ * platform with a connector, an extra prompt offers connector mode (real
+ * deploy) alongside the existing token+docs path. Platforms not in this map
+ * always use the token+docs flow.
+ */
+const PLATFORM_TO_CONNECTOR: Record<string, string> = {
+  'cloudflare-workers': 'cf-worker',
+  // Future:
+  // 'cloudflare-pages': 'cf-pages',
+  // 'vercel':           'vercel',
+  // 'fly':              'fly',
+  // 'github-actions':   'gh-actions',
+};
+
 const PLATFORMS = [
   { name: 'AWS App Runner', value: 'aws-app-runner' },
   { name: 'AWS CDK', value: 'aws-cdk' },
@@ -27,6 +42,7 @@ const PLATFORMS = [
   { name: 'Azure App Service', value: 'azure-app-service' },
   { name: 'CapRover', value: 'caprover' },
   { name: 'CircleCI', value: 'circleci' },
+  { name: 'Cloudflare Workers', value: 'cloudflare-workers' },
   { name: 'Coolify', value: 'coolify' },
   { name: 'DigitalOcean App Platform', value: 'digitalocean' },
   { name: 'Docker', value: 'docker' },
@@ -51,6 +67,25 @@ const PLATFORMS = [
   { name: 'Vercel', value: 'vercel' },
   { name: 'Other...', value: 'other' },
 ] as const;
+
+/**
+ * Decorate the picker label for platforms that have a connector adapter so
+ * users can see at a glance which platforms support real deploy vs. only
+ * the docs flow.
+ */
+function decorateChoices(
+  base: ReadonlyArray<{ name: string; value: string }>,
+): Array<{ name: string; value: string }> {
+  return base.map((p) => {
+    if (PLATFORM_TO_CONNECTOR[p.value]) {
+      return {
+        ...p,
+        name: `${p.name}  \x1b[90m(connector available)\x1b[0m`,
+      };
+    }
+    return { ...p };
+  });
+}
 
 const BLOB_SIZE_WARN_THRESHOLD = 32 * 1024; // 32KB
 
@@ -172,9 +207,9 @@ export class DeployCommand {
       // non-selectable Separator between it and the alphabetical list so
       // it doesn't read as "just another platform".
       const choices = [
-        ...PLATFORMS.filter(p => p.value === 'other'),
-        new inquirer.Separator(),
-        ...PLATFORMS.filter(p => p.value !== 'other'),
+        ...decorateChoices(PLATFORMS.filter(p => p.value === 'other')),
+        new inquirer.Separator() as any,
+        ...decorateChoices(PLATFORMS.filter(p => p.value !== 'other')),
       ];
 
       const answer = await inquirer.prompt([{
@@ -189,6 +224,38 @@ export class DeployCommand {
       if (platform !== config.platform) {
         config.platform = platform;
         writeConfig(projectRoot, config);
+      }
+
+      // Connector branch: when the picked platform has a real adapter,
+      // offer to run the deploy directly. The existing token+docs flow
+      // remains available — both modes are useful in different setups
+      // (CI vs. interactive shipping).
+      const connectorId = PLATFORM_TO_CONNECTOR[platform];
+      if (connectorId) {
+        const { mode } = await inquirer.prompt([{
+          type: 'list',
+          name: 'mode',
+          message: `${PLATFORMS.find(p => p.value === platform)?.name} — what do you want to do?`,
+          choices: [
+            {
+              name: 'Deploy now via connector (push secrets + ship code)',
+              value: 'connector',
+              short: 'connector',
+            },
+            {
+              name: 'Set up CI deploy token + docs (capy run in your CI)',
+              value: 'token',
+              short: 'token+docs',
+            },
+          ],
+          default: 'connector',
+        }]);
+        if (mode === 'connector') {
+          const { deployCommand } = await import('./deployCommand');
+          const code = await deployCommand(undefined, { target: connectorId, yes: false });
+          process.exit(code);
+        }
+        // else fall through to existing token+docs flow
       }
 
       const platformLabel = PLATFORMS.find(p => p.value === platform)?.name || platform!;

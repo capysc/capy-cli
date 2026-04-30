@@ -159,7 +159,24 @@ export const cfWorkerAdapter: DeployAdapter = {
     const workerCwd = join(ctx.cwd, opts.workerDir);
     const steps: DeployStep[] = [];
 
-    // 1. Filter env to declared vars only.
+    // 1. Filter env to declared vars only. In dry-run we accept an empty env
+    // and just report what *would* be pushed — dry-run skips decryption so
+    // no value-presence check is meaningful.
+    if (ctx.dryRun) {
+      steps.push({
+        label: `filter vars`,
+        status: 'ok',
+        detail: `${config.vars.length} runtime var(s) would push to ${opts.workerName}`,
+      });
+      steps.push({
+        label: 'wrangler secret bulk',
+        status: 'skip',
+        detail: 'dry-run',
+      });
+      steps.push({ label: 'wrangler deploy', status: 'skip', detail: 'dry-run' });
+      return { ok: true, steps };
+    }
+
     const filtered: Record<string, string> = {};
     for (const name of config.vars) {
       if (name in ctx.env) filtered[name] = ctx.env[name];
@@ -178,16 +195,6 @@ export const cfWorkerAdapter: DeployAdapter = {
       status: 'ok',
       detail: `${Object.keys(filtered).length} runtime var(s) for ${opts.workerName}`,
     });
-
-    if (ctx.dryRun) {
-      steps.push({
-        label: 'wrangler secret bulk',
-        status: 'skip',
-        detail: 'dry-run',
-      });
-      steps.push({ label: 'wrangler deploy', status: 'skip', detail: 'dry-run' });
-      return { ok: true, steps };
-    }
 
     // 2. Push secrets via stdin to `wrangler secret bulk`.
     const bulkPayload = JSON.stringify(filtered);

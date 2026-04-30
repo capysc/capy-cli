@@ -43,9 +43,9 @@ program
       console.log(`    ${B('capy')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
       console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to Keep\x1b[0m`);
       console.log(`    ${B('capy')} export                 \x1b[90mPrint decrypted secrets to stdout\x1b[0m`);
-      console.log(`    ${B('capy')} deploy [target]        \x1b[90mShip secrets + code to a vendor\x1b[0m`);
-      console.log(`    ${B('capy')} deploy list            \x1b[90mList configured deploy targets\x1b[0m`);
-      console.log(`    ${B('capy')} deploy token setup     \x1b[90mSet up CI deploy token (capy run in CI)\x1b[0m`);
+      console.log(`    ${B('capy')} deploy                 \x1b[90mDeploy or set up CI deploy credentials\x1b[0m`);
+      console.log(`    ${B('capy')} deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m`);
+      console.log(`    ${B('capy')} deploy list            \x1b[90mList deploy tokens\x1b[0m`);
       console.log(`    ${B('capy')} invite <email>         \x1b[90mInvite a teammate\x1b[0m`);
       console.log(`    ${B('capy')} redeem <code>          \x1b[90mRedeem an invite code\x1b[0m`);
       console.log(`    ${B('capy')} kick <email>           \x1b[90mRemove a teammate\x1b[0m`);
@@ -244,62 +244,44 @@ program
     process.exit(code);
   });
 
+// `capy deploy` is a single picker that surfaces both:
+//   • existing flow: deploy-token + docs page (works for any platform)
+//   • new connector flow: real deploy via adapter (cf-worker, …)
+// When the user picks a platform with a connector available, an extra prompt
+// asks which mode they want; otherwise the existing token+docs flow runs.
 const deploy = program
   .command('deploy [target]')
-  .description('Deploy: ship secrets + code to a vendor (cf-worker, …)')
+  .description('Set up secret delivery — token + docs (existing) or connector deploy')
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
   .option('--yes', 'skip all prompts (CI)')
-  .option('--dry-run', 'preflight + show plan, push nothing')
-  .option('--edit', 're-enter the picker for an existing target')
+  .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
+  .option('--edit', 're-enter the picker for an existing connector target')
+  .option('--connect', 'force connector mode (skip the token+docs path)')
   .action(async (target: string | undefined, options: any, cmd: any) => {
-    const { deployCommand } = await import('./commands/deployCommand');
     // Top-level program also defines --dry-run; merge globals so either
     // `capy --dry-run deploy ...` or `capy deploy ... --dry-run` works.
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
-    const code = await deployCommand(target, {
-      target: options.target,
-      yes: options.yes ?? merged.yes,
-      dryRun: options.dryRun ?? merged.dryRun,
-      edit: options.edit,
-    });
-    process.exit(code);
-  });
 
-deploy
-  .command('list')
-  .description('List configured deploy targets')
-  .action(async () => {
-    const { deployList } = await import('./commands/deployCommand');
-    process.exit(await deployList());
-  });
+    // CI/explicit connector path — go straight to the adapter flow.
+    if (options.target || options.connect || target) {
+      const { deployCommand } = await import('./commands/deployCommand');
+      const code = await deployCommand(target, {
+        target: options.target,
+        yes: options.yes ?? merged.yes,
+        dryRun: options.dryRun ?? merged.dryRun,
+        edit: options.edit,
+      });
+      process.exit(code);
+    }
 
-deploy
-  .command('remove <name>')
-  .description('Remove a configured deploy target')
-  .action(async (name: string) => {
-    const { deployRemove } = await import('./commands/deployCommand');
-    process.exit(await deployRemove(name));
-  });
-
-// ── `capy deploy token …` — legacy deploy-token issuance for CI/CD ─────────
-// Renamed from bare `capy deploy` in v0.4.0. Sets up CAPY_DEPLOY_CODE so a
-// CI build can `capy run` in deployed mode. Distinct from the new bare
-// `capy deploy` which actually ships code+secrets to a vendor.
-
-const deployToken = deploy
-  .command('token')
-  .description('Manage deploy tokens for capy run in CI');
-
-deployToken
-  .command('setup')
-  .description('Set up a deploy token (interactive)')
-  .action(async () => {
+    // Default path: existing token+docs picker. It auto-routes to the
+    // connector flow when the user picks a connector-enabled platform.
     const { DeployCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployCommand();
-    await cmd.execute();
+    const c = new DeployCommand();
+    await c.execute();
   });
 
-deployToken
+deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
   .action(async (deployId: string) => {
@@ -308,13 +290,29 @@ deployToken
     await cmd.execute(deployId);
   });
 
-deployToken
+deploy
   .command('list')
   .description('List deploy tokens for this project')
   .action(async () => {
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployListCommand();
     await cmd.execute();
+  });
+
+deploy
+  .command('targets')
+  .description('List configured connector targets (connector mode)')
+  .action(async () => {
+    const { deployList } = await import('./commands/deployCommand');
+    process.exit(await deployList());
+  });
+
+deploy
+  .command('targets-remove <name>')
+  .description('Remove a configured connector target')
+  .action(async (name: string) => {
+    const { deployRemove } = await import('./commands/deployCommand');
+    process.exit(await deployRemove(name));
   });
 
 program

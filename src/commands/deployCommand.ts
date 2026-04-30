@@ -20,7 +20,7 @@ import {
   DeployResult,
   TargetConfig,
 } from '../deploy/adapter';
-import { ALL_ADAPTERS, getAdapter } from '../deploy/registry';
+import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { classify } from '../deploy/classify';
 import {
   getTarget,
@@ -138,22 +138,47 @@ async function runPicker(
   cwd: string,
   keep: KeepInfo,
   existing?: TargetConfig,
+  /** When set, skip adapter-selection (caller has already picked). */
+  preselectedAdapterId?: string,
 ): Promise<TargetConfig> {
-  // 1. Pick adapter.
-  const adapterChoice = existing
-    ? existing.kind
-    : (await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'kind',
-          message: 'Where are you deploying?',
-          choices: ALL_ADAPTERS.map((a) => ({
-            name: `${a.label}  ${DIM('— ' + a.description)}`,
-            value: a.id,
-            short: a.label,
-          })),
-        },
-      ])).kind;
+  // 1. Pick adapter (when not pre-selected). Real adapters are selectable;
+  // planned-but-not-shipped ones appear disabled with a fallback hint, so
+  // the picker doubles as a roadmap and points users at `capy export` until
+  // each adapter lands.
+  let adapterChoice: string;
+  if (existing) {
+    adapterChoice = existing.kind;
+  } else if (preselectedAdapterId) {
+    adapterChoice = preselectedAdapterId;
+  } else {
+    const realChoices = ALL_ADAPTERS.map((a) => ({
+      name: `${a.label}  ${DIM('— ' + a.description)}`,
+      value: a.id,
+      short: a.label,
+    }));
+    const planned = listPlanned().filter(
+      (p) => !ALL_ADAPTERS.some((a) => a.id === p.id),
+    );
+    const plannedChoices = planned.map((p) => ({
+      name: `${p.label}  ${DIM('(coming soon — ' + p.fallbackHint + ')')}`,
+      value: p.id,
+      short: p.label,
+      disabled: 'use capy export until adapter lands',
+    }));
+    const choices: any[] = [...realChoices];
+    if (plannedChoices.length > 0) {
+      choices.push(new inquirer.Separator() as any, ...plannedChoices);
+    }
+    const ans: { kind: string } = (await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'kind',
+        message: 'Where are you deploying?',
+        choices,
+      },
+    ])) as any;
+    adapterChoice = ans.kind;
+  }
 
   const adapter = getAdapter(adapterChoice);
   if (!adapter) throw new Error(`Unknown adapter: ${adapterChoice}`);
@@ -333,7 +358,6 @@ export async function deployCommand(
       return 1;
     }
   } else if (options.target) {
-    // Ad-hoc: build a transient target from defaults. CI path.
     const adapter = getAdapter(options.target);
     if (!adapter) {
       console.error(
@@ -341,18 +365,24 @@ export async function deployCommand(
       );
       return 1;
     }
-    if (!options.yes) {
-      console.error(`--target requires --yes (CI mode). Run \`capy deploy\` interactively otherwise.`);
-      return 1;
+    if (options.yes) {
+      // Ad-hoc CI path: build a transient target from auto-detected defaults.
+      const detected = await adapter.detect(cwd);
+      target = {
+        name: `${adapter.id}-adhoc`,
+        kind: adapter.id,
+        branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
+        vars: classify(keep.variables).runtime,
+        options: detected.options ?? {},
+      };
+    } else {
+      // Interactive but adapter is pre-chosen — handoff path from existing
+      // platform picker. Run the rest of the picker (worker name, branch,
+      // vars) with the adapter pinned.
+      target = await runPicker(cwd, keep, undefined, adapter.id);
+      upsertTarget(cwd, target);
+      console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
     }
-    const detected = await adapter.detect(cwd);
-    target = {
-      name: `${adapter.id}-adhoc`,
-      kind: adapter.id,
-      branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
-      vars: classify(keep.variables).runtime,
-      options: detected.options ?? {},
-    };
   } else {
     // No name, no --target. Interactive.
     const targets = listTargets(cwd);
@@ -422,17 +452,19 @@ export async function deployCommand(
     }
   }
 
-  // Decrypt and hand off.
-  let env: Record<string, string>;
-  try {
-    env = await decryptCurrentBranch(cwd);
-  } catch (err: any) {
-    console.error(`${RED('✗')} decrypt: ${err.message}`);
-    return 1;
-  }
-
+  // Decrypt the current branch — except in dry-run mode, where the adapter
+  // short-circuits before using env, so we don't need to authenticate or
+  // touch plaintext.
+  let env: Record<string, string> = {};
   if (options.dryRun) {
-    console.log(YELLOW('  --dry-run: no secrets will be pushed.'));
+    console.log(YELLOW('  --dry-run: no secrets will be decrypted or pushed.'));
+  } else {
+    try {
+      env = await decryptCurrentBranch(cwd);
+    } catch (err: any) {
+      console.error(`${RED('✗')} decrypt: ${err.message}`);
+      return 1;
+    }
   }
 
   const result = await adapter.deploy(target, {

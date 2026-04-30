@@ -123,14 +123,15 @@ describe('cfWorker — deploy (dry-run)', () => {
     expect(result.steps.map((s) => s.status)).toEqual(['ok', 'skip', 'skip']);
   });
 
-  test('fails fast if env is missing declared vars', async () => {
+  test('dry-run accepts an empty env (decryption is skipped in dry-run)', async () => {
     writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
     const result = await cfWorkerAdapter.deploy(baseTarget(), {
-      env: { SUPABASE_URL: 'x' }, // STRIPE_SECRET_KEY missing
+      env: {}, // dry-run = no decryption upstream, so empty is expected
       dryRun: true,
       cwd: ROOT,
     });
-    expect(result.ok).toBe(false);
-    expect(result.steps[0].detail).toContain('STRIPE_SECRET_KEY');
+    expect(result.ok).toBe(true);
+    expect(result.steps[0].label).toBe('filter vars');
+    expect(result.steps[0].detail).toContain('would push');
   });
 });

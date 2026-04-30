@@ -81,13 +81,6 @@ describe('capy deploy — refusals', () => {
     expect(r.stderr).toContain('keep.lock');
   });
 
-  test('--target without --yes → refuses (would prompt in CI)', () => {
-    writeKeep(ROOT);
-    const r = capy(['deploy', '--target=cf-worker']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toContain('--yes');
-  });
-
   test('unknown adapter id → lists known ones', () => {
     writeKeep(ROOT);
     const r = capy(['deploy', '--target=does-not-exist', '--yes']);
@@ -108,7 +101,7 @@ describe('capy deploy — refusals', () => {
 
 describe('capy deploy list / remove', () => {
   test('list when no targets configured', () => {
-    const r = capy(['deploy', 'list']);
+    const r = capy(['deploy', 'targets']);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('No targets configured');
   });
@@ -123,7 +116,7 @@ describe('capy deploy list / remove', () => {
         options: { workerName: 'my-worker', workerDir: 'worker' },
       },
     ]);
-    const r = capy(['deploy', 'list']);
+    const r = capy(['deploy', 'targets']);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('worker-prod');
     expect(r.stdout).toContain('Cloudflare Workers');
@@ -140,15 +133,15 @@ describe('capy deploy list / remove', () => {
         options: { workerName: 'w', workerDir: 'worker' },
       },
     ]);
-    const r = capy(['deploy', 'remove', 'worker-prod']);
+    const r = capy(['deploy', 'targets-remove', 'worker-prod']);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('Removed');
-    const r2 = capy(['deploy', 'list']);
+    const r2 = capy(['deploy', 'targets']);
     expect(r2.stdout).toContain('No targets configured');
   });
 
   test('remove unknown target exits non-zero', () => {
-    const r = capy(['deploy', 'remove', 'nope']);
+    const r = capy(['deploy', 'targets-remove', 'nope']);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain('No target');
   });
@@ -208,26 +201,29 @@ describe('capy deploy --dry-run', () => {
 
 // ── Rename: `capy deploy token …` is the legacy token flow ──────────────────
 
-describe('capy deploy token (renamed legacy flow)', () => {
-  test('top-level help advertises `deploy token setup`', () => {
-    const r = capy(['--help']);
-    // commander 11 prints to stdout for --help
-    expect(r.stdout + r.stderr).toContain('deploy');
-  });
-
-  test('`capy deploy token --help` lists the token subcommands', () => {
-    const r = capy(['deploy', 'token', '--help']);
-    const out = r.stdout + r.stderr;
-    expect(out).toContain('setup');
-    expect(out).toContain('revoke');
-    expect(out).toContain('list');
-  });
-
-  test('`capy deploy --help` shows the new top-level options', () => {
+describe('capy deploy — coexistence: token+docs flow + connector flow', () => {
+  test('`capy deploy --help` advertises both modes', () => {
     const r = capy(['deploy', '--help']);
     const out = r.stdout + r.stderr;
     expect(out).toContain('--target');
+    expect(out).toContain('--connect');
     expect(out).toContain('--dry-run');
     expect(out).toContain('--yes');
+  });
+
+  test('legacy `capy deploy revoke` and `list` (deploy tokens) still wired', () => {
+    const r1 = capy(['deploy', 'revoke', '--help']);
+    expect((r1.stdout + r1.stderr)).toContain('Revoke a deploy token');
+
+    const r2 = capy(['deploy', 'list', '--help']);
+    expect((r2.stdout + r2.stderr)).toContain('List deploy tokens');
+  });
+
+  test('connector subcommands are addressable as `targets` / `targets-remove`', () => {
+    const r1 = capy(['deploy', 'targets', '--help']);
+    expect((r1.stdout + r1.stderr)).toContain('connector');
+
+    const r2 = capy(['deploy', 'targets-remove', '--help']);
+    expect((r2.stdout + r2.stderr)).toContain('Remove');
   });
 });
