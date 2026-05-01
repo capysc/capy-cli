@@ -214,10 +214,16 @@ export const cfWorkerAdapter: DeployAdapter = {
     // 2. Push secrets via stdin to `wrangler secret bulk`.
     // Always runs unless dry-run; in `secretsOnly` mode (CI handoff) we push
     // secrets but skip the wrangler deploy below — CI will run the deploy.
+    //
+    // Pass `--name` so capy's configured workerName is the source of truth.
+    // Without it, wrangler reads `name` from wrangler.toml — meaning a user
+    // who points capy at a different worker name (e.g. -prod variant) would
+    // silently push to the toml's name instead. capy's picker is the
+    // authority; toml is the convenience default that detect() seeds from.
     const bulkPayload = JSON.stringify(filtered);
     const bulkR = await spawnAsync(
       'wrangler',
-      ['secret', 'bulk'],
+      ['secret', 'bulk', '--name', opts.workerName],
       workerCwd,
       {},
       bulkPayload,
@@ -245,8 +251,13 @@ export const cfWorkerAdapter: DeployAdapter = {
       return { ok: true, steps };
     }
 
-    // 3. Deploy.
-    const deployR = await spawnAsync('wrangler', ['deploy'], workerCwd);
+    // 3. Deploy. `--name` overrides wrangler.toml's `name` for the same
+    // reason as above — capy's configured workerName wins.
+    const deployR = await spawnAsync(
+      'wrangler',
+      ['deploy', '--name', opts.workerName],
+      workerCwd,
+    );
     if (deployR.code !== 0) {
       steps.push({
         label: 'wrangler deploy',
