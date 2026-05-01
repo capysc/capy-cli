@@ -37,6 +37,7 @@ import {
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { classify } from '../deploy/classify';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
+import { keypressConfirm } from '../ui/keypressConfirm';
 import {
   getTarget,
   listTargets,
@@ -487,12 +488,59 @@ export async function deployCommand(
         options: detected.options ?? {},
       };
     } else {
-      // Interactive but adapter is pre-chosen — handoff path from existing
-      // platform picker. Run the rest of the picker (worker name, branch,
-      // vars) with the adapter pinned.
-      target = await runPicker(cwd, keep, undefined, adapter.id);
-      upsertTarget(cwd, target);
-      console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
+      // Interactive but adapter is pre-chosen — handoff path from the
+      // existing platform picker. If the user already saved targets for
+      // this adapter, offer them first so day-2 doesn't re-fill the whole
+      // picker. New target is always available as a "+ new" option.
+      const sameKind = listTargets(cwd).filter((t) => t.kind === adapter.id);
+      let chosen: TargetConfig | '__new__' = '__new__';
+      if (sameKind.length === 1) {
+        const ans = await inquirer.prompt([
+          {
+            type: 'list',
+            name: 'pick',
+            message: `Use saved target?`,
+            theme: LIST_THEME,
+            choices: [
+              {
+                name: `${sameKind[0].name}  ${DIM(`(branch=${sameKind[0].branch}, mode=${sameKind[0].mode ?? 'direct'})`)}`,
+                value: '__use__',
+              },
+              { name: '+ new target (re-enter picker)', value: '__new__' },
+            ],
+            default: '__use__',
+          } as any,
+        ]);
+        chosen = ans.pick === '__use__' ? sameKind[0] : '__new__';
+      } else if (sameKind.length > 1) {
+        const ans = await inquirer.prompt([
+          {
+            type: 'list',
+            name: 'pick',
+            message: `Use a saved ${adapter.label} target?`,
+            theme: LIST_THEME,
+            choices: [
+              ...sameKind.map((t) => ({
+                name: `${t.name}  ${DIM(`(branch=${t.branch}, mode=${t.mode ?? 'direct'})`)}`,
+                value: t.name,
+              })),
+              new inquirer.Separator() as any,
+              { name: '+ new target (re-enter picker)', value: '__new__' },
+            ],
+          } as any,
+        ]);
+        chosen =
+          ans.pick === '__new__'
+            ? '__new__'
+            : sameKind.find((t) => t.name === ans.pick)!;
+      }
+      if (chosen !== '__new__') {
+        target = chosen;
+      } else {
+        target = await runPicker(cwd, keep, undefined, adapter.id);
+        upsertTarget(cwd, target);
+        console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
+      }
     }
   } else {
     // No name, no --target. Interactive.
@@ -556,22 +604,47 @@ export async function deployCommand(
   const gitOk = !options.dryRun && isGitRepo(cwd);
   const keepLockDirty = gitOk && hasKeepLockChanges(cwd);
 
+  // Confirm-or-edit loop. Single-keypress picker (c/e/d/esc) so the user
+  // can fix a saved target inline instead of having to abort, run
+  // `capy deploy --edit`, then re-run.
   if (!options.yes && !options.dryRun) {
-    const summary =
-      mode === 'ci'
-        ? `Open a deploy PR (commit keep.lock + push secrets, no live deploy)?`
-        : `Deploy now (commit keep.lock + push secrets + ship code)?`;
-    const { confirm } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'confirm',
-        message: summary,
-        default: true,
-      },
-    ]);
-    if (!confirm) {
-      console.log('Cancelled.');
-      return 0;
+    while (true) {
+      const summary =
+        mode === 'ci'
+          ? `Open a deploy PR (commit keep.lock + push secrets, no live deploy)?`
+          : `Deploy now (commit keep.lock + ship from HEAD; your WIP is stashed and restored)?`;
+      const action = await keypressConfirm({ message: summary });
+      if (action === 'confirm') break;
+      if (action === 'cancel') {
+        console.log('Cancelled.');
+        return 0;
+      }
+      if (action === 'delete') {
+        // Only saved targets can be deleted; ad-hoc transient ones aren't on
+        // disk. Either way, stop after delete — there's nothing left to do.
+        const removed = removeTarget(cwd, target.name);
+        if (removed) {
+          console.log(`Removed target ${B(target.name)}.`);
+        } else {
+          console.log(`(target was not saved — nothing to delete)`);
+        }
+        return 0;
+      }
+      if (action === 'edit') {
+        target = await runPicker(cwd, keep, target);
+        upsertTarget(cwd, target);
+        console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
+        renderPlan(target, adapter);
+        // Re-run preflight after edit — paths/options may have changed.
+        const recheck = await adapter.preflight(target, { cwd });
+        if (!recheck.ok) {
+          console.error(`${RED('✗')} preflight: ${recheck.reason}`);
+          if (recheck.hint) console.error('\n' + recheck.hint);
+          return 1;
+        }
+        // Loop back to confirm prompt with the edited target.
+        continue;
+      }
     }
   }
 
@@ -581,9 +654,9 @@ export async function deployCommand(
 
   if (gitOk && keepLockDirty) {
     if (mode === 'ci') {
-      // CI mode: branch + stash other changes + commit keep.lock only +
-      // push + PR. The stash dance keeps the user's in-progress source out
-      // of the deploy PR — only keep.lock ships.
+      // CI mode: branch off so the deploy PR doesn't land directly on the
+      // user's working branch. Direct mode skips the branch step but still
+      // does the stash + commit dance below — same shape, fewer steps.
       originalBranch = currentBranch(cwd);
       // Branch name format: `capy-deploy-YYYYMMDD-HHMMSS-<rand>` — sortable,
       // self-documenting, and avoids collisions when two deploys fire close
@@ -602,18 +675,22 @@ export async function deployCommand(
         return 1;
       }
       console.log(`  ${GREEN('✓')} branch  ${branchName}`);
+    }
 
-      const stash = stashOtherChanges(cwd);
-      if (!stash.ok) {
-        console.error(`${RED('✗')} git stash: ${stash.error}`);
-        return 1;
-      }
-      stashedOthers = stash.stashed;
-      if (stashedOthers) {
-        console.log(
-          `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
-        );
-      }
+    // BOTH modes: stash everything except keep.lock so the commit (and any
+    // build that follows) sees a clean tree based on HEAD + the keep.lock
+    // change only. Direct deploys will then ship from this clean state
+    // instead of accidentally bundling the user's WIP.
+    const stash = stashOtherChanges(cwd);
+    if (!stash.ok) {
+      console.error(`${RED('✗')} git stash: ${stash.error}`);
+      return 1;
+    }
+    stashedOthers = stash.stashed;
+    if (stashedOthers) {
+      console.log(
+        `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
+      );
     }
 
     const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
@@ -648,7 +725,17 @@ export async function deployCommand(
   });
   renderResult(result);
 
-  if (!result.ok) return 1;
+  if (!result.ok) {
+    // Even on failure, restore the user's WIP if we stashed it.
+    await unwindGitState(cwd, originalBranch, stashedOthers);
+    return 1;
+  }
+
+  // Direct mode: deploy is done. Pop the stash so the user's WIP is back
+  // in their working tree. (CI mode does this after the PR step below.)
+  if (mode === 'direct') {
+    await unwindGitState(cwd, originalBranch, stashedOthers);
+  }
 
   // CI mode: push the branch and open a PR for the keep.lock change. The
   // actual code deploy runs in the user's CI when the PR merges. After the
