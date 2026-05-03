@@ -59,7 +59,7 @@ while IFS= read -r f; do
   if [ "$SKIP" -eq 0 ]; then
     BATCH_FILES+=("$f")
   fi
-done < <(find tests -name '*.test.ts' -not -path '*/e2e/*' | sort)
+done < <(find tests -name '*.test.ts' -not -path '*/e2e/*' -not -path '*/plugins/*' | sort)
 
 if [ ${#BATCH_FILES[@]} -gt 0 ]; then
   if ! bun test "${BATCH_FILES[@]}" 2>&1; then

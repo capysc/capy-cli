@@ -33,6 +33,10 @@
     "test": "bash tests/run-tests.sh",
     "typecheck": "tsc --noEmit",
     "test:e2e": "bun run tests/e2e/e2e.ts",
+    "test:plugins": "bash tests/plugins/run-plugin-tests.sh",
+    "test:plugins:cloudflare-workers": "bash tests/plugins/run-plugin-tests.sh cloudflare-workers",
+    "test:plugins:cloudflare-pages": "bash tests/plugins/run-plugin-tests.sh cloudflare-pages",
+    "test:plugins:vercel": "bash tests/plugins/run-plugin-tests.sh vercel",
     "clean": "rm -rf dist"
   },
   "dependencies": {
