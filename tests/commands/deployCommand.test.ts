@@ -12,6 +12,11 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 
+// Tests that run a full deploy through preflight need wrangler on PATH —
+// adapter preflight terminates with "wrangler not found" otherwise. Gate
+// those specific tests; the config/help/list tests don't depend on it.
+const HAS_WRANGLER = spawnSync('which', ['wrangler']).status === 0;
+
 const CLI = join(__dirname, '../../dist/index.js');
 const ROOT = join(tmpdir(), `capy-deploy-cmd-${process.pid}-${Date.now()}`);
 
@@ -150,7 +155,7 @@ describe('capy deploy list / remove', () => {
 // ── --dry-run, plaintext .env (no decrypt path) ────────────────────────────
 
 describe('capy deploy --dry-run', () => {
-  test('plaintext .env + dry-run: preflight + plan, no side effects', () => {
+  test.if(HAS_WRANGLER)('plaintext .env + dry-run: preflight + plan, no side effects', () => {
     writeKeep(ROOT);
     writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
     writeFileSync(
@@ -179,7 +184,7 @@ describe('capy deploy --dry-run', () => {
     expect(r.stdout).toContain('filter vars');
   });
 
-  test('dry-run accepts mixed vars (the picker is the gate, not preflight)', () => {
+  test.if(HAS_WRANGLER)('dry-run accepts mixed vars (the picker is the gate, not preflight)', () => {
     // Once a target is saved, capy trusts the user's earlier picker choice.
     // No silent var filtering, no preflight refusal — the picker pre-selects
     // what's likely relevant and surfaces what's not, but lets the user

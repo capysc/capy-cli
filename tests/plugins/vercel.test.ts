@@ -2,8 +2,8 @@
  * Plugin tests — Vercel (Next.js)
  *
  * Mirrors ~/Dev/test-project. Two tiers:
- *   • hermetic — capy export → emit .capy/next-env.js → next build → assert
- *                values inlined into compiled output. No creds needed.
+ *   • hermetic — fixture .env → emit .capy/next-env.js → next build →
+ *                assert values inlined into compiled output. No creds needed.
  *   • live     — needs VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID.
  *                vercel build + vercel deploy --prebuilt → fetch URL → scrape
  *                data-capy-value cells → assert. Cleanup via vercel remove.
@@ -62,14 +62,6 @@ if (!HAS_VERCEL) {
 
 const HAS_BUN = !!which('bun');
 
-function capySync(
-  args: string[],
-  cwd: string,
-): { stdout: string; stderr: string; code: number } {
-  const r = spawnSync('node', [CLI, ...args], { cwd, encoding: 'utf-8' });
-  return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
-}
-
 function spawnAsync(
   cmd: string,
   args: string[],
@@ -95,8 +87,8 @@ function spawnAsync(
   });
 }
 
-// Plaintext fixture vars — no encryption needed, exercises the no-decrypt
-// branch of `capy export`. Values must be distinctive enough to grep for.
+// Plaintext fixture vars — no encryption needed for the hermetic tier.
+// Values must be distinctive enough to grep for in the built bundle.
 const FIXTURE_ENV = {
   DATABASE_URL: 'postgres://capy-plugintest:hunter2@db.example.com:5432/plugintest',
   STRIPE_API_KEY: 'sk_test_capy_plugintest_stripe_xyz123',
@@ -169,13 +161,10 @@ async function setupNextProject(label: string): Promise<{ dir: string; env: Reco
     }
   }
 
-  // Get the env from capy. With a plaintext .env, `capy export` does not need
-  // auth — exercises the no-decrypt branch.
-  const exportR = capySync(['export', '--format=json'], dir);
-  if (exportR.code !== 0) {
-    throw new Error(`capy export failed:\n${exportR.stderr}`);
-  }
-  const env = JSON.parse(exportR.stdout) as Record<string, string>;
+  // Hermetic test: fixture .env is plaintext. The connector adapter would
+  // decrypt at this point in a real run; here we use the fixture map
+  // directly so the test stays self-contained.
+  const env = { ...FIXTURE_ENV };
 
   // Emit .capy/next-env.js so next.config.ts maps the vars into Next's `env`
   // config — same shape capy run produces in deploy mode.

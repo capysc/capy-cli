@@ -106,6 +106,14 @@ export interface DeployAdapter {
    */
   varKind: AdapterVarKind;
   /**
+   * Mode the picker pre-selects on first config when there's no saved
+   * preference. Adapters whose vendor has turnkey git-CI (Vercel, Netlify,
+   * CF Pages with git integration) should set 'ci' — the deploy PR is the
+   * deploy signal. Adapters where capy is the deploy actor (cf-worker
+   * without GH Actions) should set 'direct'.
+   */
+  defaultMode: DeployMode;
+  /**
    * Hard requirements: binaries that must be on PATH, env vars that must be
    * set (typically only in CI), and an adapter-specific auth check. Any
    * failure here aborts BEFORE decryption.

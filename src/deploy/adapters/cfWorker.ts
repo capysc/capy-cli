@@ -83,6 +83,7 @@ export const cfWorkerAdapter: DeployAdapter = {
   label: 'Cloudflare Workers',
   description: 'Server-side, runtime secrets pushed via wrangler secret bulk',
   varKind: 'runtime',
+  defaultMode: 'direct',
   requires: { binaries: ['wrangler'] },
 
   async detect(cwd: string): Promise<DetectedDefaults> {
@@ -104,17 +105,10 @@ export const cfWorkerAdapter: DeployAdapter = {
   },
 
   async preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
-    if (!which('wrangler')) {
-      return {
-        ok: false,
-        reason: 'wrangler not found on PATH',
-        hint:
-          'Install wrangler:\n' +
-          '  bun add -d wrangler        (project-local, recommended)\n' +
-          '  npm i -g wrangler          (global)\n' +
-          'Re-run `capy deploy` after install.',
-      };
-    }
+    // Order: config errors first, then filesystem, then binary check last.
+    // This way unit tests for config errors can run without wrangler
+    // installed (CI doesn't have it; the binary preflight is asserted by
+    // its own test gated on HAS_WRANGLER).
     const opts = config.options as Partial<CfWorkerOptions>;
     if (!opts.workerName || !opts.workerDir) {
       return {
@@ -156,9 +150,6 @@ export const cfWorkerAdapter: DeployAdapter = {
         // malformed package.json — let wrangler surface the error
       }
     }
-    // Auth: wrangler login session OR CLOUDFLARE_API_TOKEN. We don't probe
-    // wrangler login state (no clean way) — wrangler itself surfaces a clean
-    // error if neither is present, and we propagate it.
     if (config.vars.length === 0) {
       return {
         ok: false,
@@ -166,6 +157,22 @@ export const cfWorkerAdapter: DeployAdapter = {
         hint: 'Re-run with `--edit` and select at least one var.',
       };
     }
+    // Binary check last so config-error tests don't depend on wrangler
+    // being installed.
+    if (!which('wrangler')) {
+      return {
+        ok: false,
+        reason: 'wrangler not found on PATH',
+        hint:
+          'Install wrangler:\n' +
+          '  bun add -d wrangler        (project-local, recommended)\n' +
+          '  npm i -g wrangler          (global)\n' +
+          'Re-run `capy deploy` after install.',
+      };
+    }
+    // Auth: wrangler login session OR CLOUDFLARE_API_TOKEN. We don't probe
+    // wrangler login state (no clean way) — wrangler itself surfaces a clean
+    // error if neither is present, and we propagate it.
     return { ok: true };
   },
 

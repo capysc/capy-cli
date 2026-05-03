@@ -1,45 +1,14 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
-import { join } from 'path';
-import { tmpdir } from 'os';
-import { spawn } from 'child_process';
+import { describe, test, expect } from 'bun:test';
 import {
   dotenvEscape,
   shellEscape,
   formatExport,
 } from '../../src/commands/exportCommand';
 
-const TEST_DIR = join(tmpdir(), `capy-export-test-${process.pid}`);
-
-function capy(
-  args: string[],
-  opts: { cwd?: string } = {},
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const cliPath = join(__dirname, '../../dist/index.js');
-  return new Promise((resolve) => {
-    const child = spawn('node', [cliPath, ...args], {
-      cwd: opts.cwd ?? TEST_DIR,
-      env: { ...process.env, NO_UPDATE_NOTIFIER: '1' },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('close', (code) =>
-      resolve({ stdout, stderr, exitCode: code ?? 0 }),
-    );
-  });
-}
-
-beforeEach(() => {
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
-  mkdirSync(TEST_DIR, { recursive: true });
-});
-
-afterEach(() => {
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
-});
+// `capy export` is no longer a public CLI command — exposing decrypted
+// secrets to stdout was a security smell. The format helpers stay as
+// internal library exports for connector adapters and any future
+// callers, and are unit-tested directly here.
 
 describe('dotenvEscape', () => {
   test('leaves simple identifiers unquoted', () => {
@@ -106,47 +75,3 @@ describe('formatExport', () => {
   });
 });
 
-describe('capy export — plaintext .env (no decryption needed)', () => {
-  test('default format is dotenv', async () => {
-    writeFileSync(join(TEST_DIR, '.env'), 'FOO=bar\nBAZ=qux\n');
-    const r = await capy(['export']);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe('BAZ=qux\nFOO=bar\n');
-    expect(r.stderr).toBe('');
-  });
-
-  test('--format=json', async () => {
-    writeFileSync(join(TEST_DIR, '.env'), 'FOO=bar\n');
-    const r = await capy(['export', '--format=json']);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe(`{\n  "FOO": "bar"\n}\n`);
-  });
-
-  test('--format=shell', async () => {
-    writeFileSync(join(TEST_DIR, '.env'), 'FOO=bar\n');
-    const r = await capy(['export', '--format=shell']);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe(`export FOO='bar'\n`);
-  });
-
-  test('--vars filters subset', async () => {
-    writeFileSync(join(TEST_DIR, '.env'), 'A=1\nB=2\nC=3\n');
-    const r = await capy(['export', '--vars=A,C']);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe('A=1\nC=3\n');
-  });
-
-  test('--vars with missing name fails non-zero', async () => {
-    writeFileSync(join(TEST_DIR, '.env'), 'A=1\n');
-    const r = await capy(['export', '--vars=A,MISSING']);
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain('MISSING');
-  });
-
-  test('unknown format fails', async () => {
-    writeFileSync(join(TEST_DIR, '.env'), 'A=1\n');
-    const r = await capy(['export', '--format=yaml']);
-    expect(r.exitCode).toBe(1);
-    expect(r.stderr).toContain('unknown format');
-  });
-});

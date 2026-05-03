@@ -228,6 +228,70 @@ async function runPicker(
       },
     ]);
     options = ans;
+  } else if (adapter.id === 'vercel') {
+    // Vercel maps cleanly onto capy branches:
+    //   capy "production" branch  → Vercel production lane
+    //   any other capy branch     → Vercel preview lane, git branch
+    //                               named after the capy branch
+    // We don't know the capy branch yet at this point in the picker (it's
+    // asked next), so we use the existing value or the most-likely
+    // fallback. The branch prompt below will refine.
+    const dirAns = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'projectDir',
+        message: 'Project directory (contains .vercel/project.json or package.json):',
+        default: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+    ]);
+    const envAns = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'vercelEnv',
+        message: 'Which Vercel deployment lane?',
+        theme: LIST_THEME,
+        choices: [
+          {
+            name: `Preview  ${DIM('— each push gets a unique URL; can be tied to a git branch')}`,
+            value: 'preview',
+            short: 'preview',
+          },
+          {
+            name: `Production  ${DIM('— --prod, ships to your prod alias')}`,
+            value: 'production',
+            short: 'production',
+          },
+        ],
+        default: existingOpts.vercelEnv ?? 'preview',
+      } as any,
+    ]);
+    let gitBranchAns: { gitBranch?: string } = {};
+    if (envAns.vercelEnv === 'preview') {
+      // Capy branch is the natural default for the git branch here — this
+      // is the whole "natural fit" with vercel preview chains. Falls back
+      // to the current git branch when capy branches don't match git.
+      const gitNow = currentBranch(cwd) ?? '';
+      gitBranchAns = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'gitBranch',
+          message: `Associate preview with git branch (Enter to skip; tags the deployment under this branch in Vercel):`,
+          default:
+            existingOpts.gitBranch ??
+            (existing?.branch && existing.branch !== 'production'
+              ? existing.branch
+              : gitNow),
+        },
+      ]);
+    }
+    options = {
+      ...dirAns,
+      vercelEnv: envAns.vercelEnv,
+      ...(gitBranchAns.gitBranch && gitBranchAns.gitBranch.trim()
+        ? { gitBranch: gitBranchAns.gitBranch.trim() }
+        : {}),
+    };
   } else if (adapter.id === 'cf-pages') {
     const ans = await inquirer.prompt([
       {
@@ -305,7 +369,14 @@ async function runPicker(
   ])) as { vars: string[] };
   const vars = varsAns.vars;
 
-  // 6. Mode — direct vs CI/CD.
+  // 6. Mode — direct vs CI/CD. Default comes from the adapter: vendors
+  // with turnkey git CI (Vercel, etc.) default to 'ci'; vendors where capy
+  // is the deploy actor default to 'direct'. Existing target's mode wins
+  // over the adapter default on subsequent picker passes.
+  const ciHelp =
+    adapter.defaultMode === 'ci'
+      ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
+      : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
   const mode = (await inquirer.prompt([
     {
       type: 'list',
@@ -314,17 +385,17 @@ async function runPicker(
       theme: LIST_THEME,
       choices: [
         {
+          name: `Via CI/CD        ${DIM('— ' + ciHelp)}`,
+          value: 'ci',
+          short: 'ci',
+        },
+        {
           name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
           value: 'direct',
           short: 'direct',
         },
-        {
-          name: `Via CI/CD        ${DIM('— commit keep.lock on a branch + push secrets + open PR; CI deploys on merge')}`,
-          value: 'ci',
-          short: 'ci',
-        },
       ],
-      default: existing?.mode ?? 'direct',
+      default: existing?.mode ?? adapter.defaultMode,
     } as any,
   ])).mode as DeployMode;
 

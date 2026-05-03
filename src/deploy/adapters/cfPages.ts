@@ -110,6 +110,7 @@ export const cfPagesAdapter: DeployAdapter = {
   label: 'Cloudflare Pages',
   description: 'Static site build-inlined VITE_*/NEXT_PUBLIC_*, deployed via wrangler pages deploy',
   varKind: 'build-time',
+  defaultMode: 'direct',
   requires: { binaries: ['wrangler'] },
 
   async detect(cwd: string): Promise<DetectedDefaults> {
@@ -140,17 +141,8 @@ export const cfPagesAdapter: DeployAdapter = {
   },
 
   async preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
-    if (!which('wrangler')) {
-      return {
-        ok: false,
-        reason: 'wrangler not found on PATH',
-        hint:
-          'Install wrangler:\n' +
-          '  bun add -d wrangler        (project-local, recommended)\n' +
-          '  npm i -g wrangler          (global)\n' +
-          'Re-run `capy deploy` after install.',
-      };
-    }
+    // Order: config first, filesystem next, binary last. Lets unit tests
+    // for config errors run without wrangler installed.
     const opts = config.options as Partial<CfPagesOptions>;
     if (!opts.projectName || !opts.buildCwd || !opts.buildCmd || !opts.distDir) {
       return {
@@ -189,6 +181,17 @@ export const cfPagesAdapter: DeployAdapter = {
         ok: false,
         reason: 'cf-pages target has no vars to inline',
         hint: 'Re-run with `--edit` and select at least one var.',
+      };
+    }
+    if (!which('wrangler')) {
+      return {
+        ok: false,
+        reason: 'wrangler not found on PATH',
+        hint:
+          'Install wrangler:\n' +
+          '  bun add -d wrangler        (project-local, recommended)\n' +
+          '  npm i -g wrangler          (global)\n' +
+          'Re-run `capy deploy` after install.',
       };
     }
     return { ok: true };

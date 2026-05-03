@@ -2,8 +2,15 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { spawnSync } from 'child_process';
 import { cfWorkerAdapter } from '../../src/deploy/adapters/cfWorker';
 import { TargetConfig } from '../../src/deploy/adapter';
+
+// "Happy path" preflight tests need wrangler on PATH (the binary check is
+// the last step before ok:true). CI doesn't ship wrangler, so gate those
+// tests. Config-error tests don't need wrangler — they short-circuit before
+// the binary check.
+const HAS_WRANGLER = spawnSync('which', ['wrangler']).status === 0;
 
 const ROOT = join(tmpdir(), `capy-cf-worker-adapter-${process.pid}`);
 
@@ -57,7 +64,7 @@ describe('cfWorker — detect', () => {
 });
 
 describe('cfWorker — preflight', () => {
-  test('passes when wrangler is on PATH and config is valid', async () => {
+  test.if(HAS_WRANGLER)('passes when wrangler is on PATH and config is valid', async () => {
     writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
     const r = await cfWorkerAdapter.preflight(baseTarget(), { cwd: ROOT });
     expect(r.ok).toBe(true);
@@ -78,7 +85,7 @@ describe('cfWorker — preflight', () => {
     expect(r.reason).toContain('no vars');
   });
 
-  test('accepts build-time vars (the picker is the gate, not preflight)', async () => {
+  test.if(HAS_WRANGLER)('accepts build-time vars (the picker is the gate, not preflight)', async () => {
     // Once the user explicitly opts in via the picker, capy trusts them.
     // Misclassification protection lives in the picker pre-selection +
     // the bold-faced summary line, not in preflight refusals.
@@ -103,7 +110,7 @@ describe('cfWorker — preflight', () => {
     expect(r.hint).toContain('bun install');
   });
 
-  test('passes when node_modules exists', async () => {
+  test.if(HAS_WRANGLER)('passes when node_modules exists', async () => {
     const workerDir = join(ROOT, 'worker');
     writeWranglerToml(workerDir, 'my-worker');
     writeFileSync(
@@ -115,7 +122,7 @@ describe('cfWorker — preflight', () => {
     expect(r.ok).toBe(true);
   });
 
-  test('passes when package.json has no deps (no node_modules required)', async () => {
+  test.if(HAS_WRANGLER)('passes when package.json has no deps (no node_modules required)', async () => {
     const workerDir = join(ROOT, 'worker');
     writeWranglerToml(workerDir, 'my-worker');
     writeFileSync(join(workerDir, 'package.json'), JSON.stringify({ name: 'w' }));

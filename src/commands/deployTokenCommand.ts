@@ -29,8 +29,8 @@ const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const PLATFORM_TO_CONNECTOR: Record<string, string> = {
   'cloudflare-workers': 'cf-worker',
   'cloudflare-pages': 'cf-pages',
+  'vercel': 'vercel',
   // Future:
-  // 'vercel':           'vercel',
   // 'fly':              'fly',
   // 'github-actions':   'gh-actions',
 };

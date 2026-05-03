@@ -42,7 +42,6 @@ program
       console.log(`    ${B('capy')} status                 \x1b[90mShow secret drift\x1b[0m`);
       console.log(`    ${B('capy')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
       console.log(`    ${B('capy')} push                   \x1b[90mPush encrypted values to Keep\x1b[0m`);
-      console.log(`    ${B('capy')} export                 \x1b[90mPrint decrypted secrets to stdout\x1b[0m`);
       console.log(`    ${B('capy')} deploy                 \x1b[90mDeploy or set up CI deploy credentials\x1b[0m`);
       console.log(`    ${B('capy')} deploy revoke <id>     \x1b[90mRevoke a deploy token\x1b[0m`);
       console.log(`    ${B('capy')} deploy list            \x1b[90mList deploy tokens\x1b[0m`);
@@ -227,21 +226,6 @@ program
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand();
     await cmd.execute();
-  });
-
-program
-  .command('export')
-  .description('Print decrypted secrets to stdout (dotenv|json|shell). Pipe into any tool.')
-  .option('--format <fmt>', 'output format: dotenv|json|shell', 'dotenv')
-  .option('--vars <names>', 'comma-separated subset of var names to export')
-  .option('--stdout', 'write to stdout (default; reserved for future --file mode)')
-  .action(async (options) => {
-    const { exportCommand } = await import('./commands/exportCommand');
-    const vars = options.vars
-      ? String(options.vars).split(',').map((s: string) => s.trim()).filter(Boolean)
-      : undefined;
-    const code = await exportCommand({ format: options.format, vars });
-    process.exit(code);
   });
 
 // `capy deploy` is a single picker that surfaces both:

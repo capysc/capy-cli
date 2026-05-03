@@ -11,8 +11,13 @@
 import { DeployAdapter } from './adapter';
 import { cfWorkerAdapter } from './adapters/cfWorker';
 import { cfPagesAdapter } from './adapters/cfPages';
+import { vercelAdapter } from './adapters/vercel';
 
-export const ALL_ADAPTERS: DeployAdapter[] = [cfWorkerAdapter, cfPagesAdapter];
+export const ALL_ADAPTERS: DeployAdapter[] = [
+  cfWorkerAdapter,
+  cfPagesAdapter,
+  vercelAdapter,
+];
 
 export interface PlannedAdapter {
   id: string;
@@ -23,12 +28,6 @@ export interface PlannedAdapter {
 }
 
 export const PLANNED_ADAPTERS: PlannedAdapter[] = [
-  {
-    id: 'vercel',
-    label: 'Vercel',
-    description: 'Next/Vite/etc. via the Vercel CLI',
-    fallbackHint: 'capy run -- vercel build && vercel deploy --prebuilt',
-  },
   {
     id: 'fly',
     label: 'Fly.io',
