@@ -118,10 +118,11 @@ export function checkoutNewBranch(
 }
 
 /**
- * Stash everything in the working tree EXCEPT keep.lock. Used in CI mode so
- * the user's in-progress source changes survive the branch switch and don't
- * sneak into the deploy PR. Returns a stash ref the caller passes to
- * `popStash` after returning to the original branch.
+ * Stash everything in the working tree EXCEPT keep.lock. Used in DIRECT
+ * mode where we stay on the current branch — keep.lock can ride along in
+ * the working tree across the commit, and the user's other in-progress
+ * changes go to the stash so the deploy ships from a clean HEAD + keep.lock
+ * state. Restored on success or failure via `popStash`.
  *
  * Returns null if there was nothing to stash (no other changes).
  */
@@ -147,6 +148,71 @@ export function stashOtherChanges(
     return { ok: false, stashed: false, error: r.stderr.trim() };
   }
   return { ok: true, stashed: true };
+}
+
+/**
+ * Stash EVERYTHING in the working tree (incl. keep.lock and untracked
+ * files). Used in CI mode where we need to switch to a fresh branch
+ * derived from the target branch — the keep.lock change has to be lifted
+ * off the current tree before the branch switch and replayed onto the
+ * deploy branch.
+ *
+ * Returns `stashed: false` when the working tree is already clean.
+ */
+export function stashAllChanges(
+  cwd: string,
+): { ok: boolean; stashed: boolean; error?: string } {
+  const status = getStatus(cwd);
+  if (status.length === 0) return { ok: true, stashed: false };
+  const r = git(
+    [
+      'stash',
+      'push',
+      '--include-untracked',
+      '-m',
+      'capy-deploy: temporary stash of all working changes',
+    ],
+    cwd,
+  );
+  if (r.code !== 0) {
+    return { ok: false, stashed: false, error: r.stderr.trim() };
+  }
+  return { ok: true, stashed: true };
+}
+
+/**
+ * `git fetch origin <branch>` so `origin/<branch>` reflects the remote tip
+ * before we branch off it. Without this, a stale local `origin/main` would
+ * make the deploy PR diverge from what main actually has.
+ */
+export function fetchRemoteBranch(
+  cwd: string,
+  branch: string,
+  remote: string = 'origin',
+): { ok: boolean; error?: string } {
+  const r = git(['fetch', remote, branch], cwd);
+  if (r.code !== 0) {
+    return { ok: false, error: r.stderr.trim() };
+  }
+  return { ok: true };
+}
+
+/**
+ * Create a new branch starting from a specific ref (e.g. `origin/main`)
+ * rather than from the current HEAD. CI mode uses this so the deploy PR's
+ * diff is exactly keep.lock vs the target branch — not whatever the user
+ * happens to have on their current branch.
+ */
+export function checkoutNewBranchFrom(
+  cwd: string,
+  name: string,
+  startPoint: string,
+): { ok: boolean; error?: string } {
+  const r = git(['checkout', '-b', name, startPoint], cwd);
+  if (r.code !== 0) {
+    return { ok: false, error: r.stderr.trim() };
+  }
+  return { ok: true };
 }
 
 export function popStash(cwd: string): { ok: boolean; error?: string } {

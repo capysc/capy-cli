@@ -13,8 +13,11 @@ import {
   checkoutNewBranch,
   checkoutBranch,
   stashOtherChanges,
+  stashAllChanges,
   popStash,
+  checkoutNewBranchFrom,
 } from '../../src/deploy/git';
+import { writeFileSync as fsWrite } from 'fs';
 
 const ROOT = join(tmpdir(), `capy-git-test-${process.pid}`);
 
@@ -142,5 +145,45 @@ describe('git helpers', () => {
     git(['checkout', 'main'], ROOT);
     const r = checkoutNewBranch(ROOT, 'dup');
     expect(r.ok).toBe(false);
+  });
+
+  test('stashAllChanges stashes everything (incl. keep.lock + untracked)', () => {
+    fsWrite(join(ROOT, 'keep.lock'), '{}');
+    fsWrite(join(ROOT, 'src.ts'), 'export {};');
+    expect(getStatus(ROOT).length).toBeGreaterThan(0);
+    const r = stashAllChanges(ROOT);
+    expect(r.ok).toBe(true);
+    expect(r.stashed).toBe(true);
+    expect(getStatus(ROOT)).toEqual([]);
+    // Restore so afterEach doesn't see leftover stash state in the repo.
+    popStash(ROOT);
+  });
+
+  test('stashAllChanges no-ops on a clean tree', () => {
+    const r = stashAllChanges(ROOT);
+    expect(r.ok).toBe(true);
+    expect(r.stashed).toBe(false);
+  });
+
+  test('checkoutNewBranchFrom branches off the named ref, not current HEAD', () => {
+    // Set up: main has commit A; create a feature branch with extra commit B;
+    // checkoutNewBranchFrom('deploy', 'main') should land on a branch whose
+    // HEAD == main's HEAD, NOT include B.
+    git(['checkout', '-b', 'feature'], ROOT);
+    fsWrite(join(ROOT, 'feat.txt'), 'B');
+    git(['add', 'feat.txt'], ROOT);
+    git(['commit', '-q', '-m', 'B'], ROOT);
+    const featHead = git(['rev-parse', 'HEAD'], ROOT).stdout.trim();
+    const mainHead = git(['rev-parse', 'main'], ROOT).stdout.trim();
+    expect(featHead).not.toBe(mainHead);
+
+    // Branch off `main`, not feature's HEAD.
+    const co = checkoutNewBranchFrom(ROOT, 'deploy', 'main');
+    expect(co.ok).toBe(true);
+    expect(currentBranch(ROOT)).toBe('deploy');
+    const deployHead = git(['rev-parse', 'HEAD'], ROOT).stdout.trim();
+    expect(deployHead).toBe(mainHead);
+    // feat.txt should not exist on the deploy branch.
+    expect(getStatus(ROOT)).toEqual([]);
   });
 });
