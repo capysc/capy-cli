@@ -806,22 +806,22 @@ export class CapyCommand {
   }
 
   /**
-   * Remove local data for an org the user no longer has access to.
-   * Called on 403 during sync (user was kicked). Does NOT touch session
-   * data for other orgs or the refresh token — only the revoked org.
+   * Clear local UX state after a CONFIRMED kick from the org.
+   *
+   * Strict policy:
+   *   - NEVER delete the wrapped master key (`~/.capy/orgs/<orgId>/users/<userId>/key.enc`)
+   *     or the org dir. The wrapped M is opaque without the server's KMS
+   *     co-decrypt — keeping it on disk has zero security cost, and a single
+   *     misclassified failure that triggered a delete would be irrecoverable
+   *     without a seed phrase.
+   *   - The ONLY destructive action is removing the local `keep.lock` so the
+   *     user isn't left staring at a project pointer for an org they're not in.
+   *
+   * Callers MUST gate this on a server-confirmed kick signal
+   * (`err.details?.code === 'MEMBERSHIP_REVOKED'`), never on a bare 403 status —
+   * any number of unrelated server / network conditions surface as 403.
    */
-  private cleanupOrgData(orgId: string, userId?: string): void {
-    // Delete org master key
-    try {
-      const { getOrgKeyPath } = require('../config/globalConfig');
-      const keyPath = getOrgKeyPath(orgId, userId);
-      if (existsSync(keyPath)) {
-        unlinkSync(keyPath);
-        console.log('  Removed local encryption key for this organization.');
-      }
-    } catch {}
-
-    // Delete keep.lock — it points to an org the user can't access
+  private cleanupOrgData(_orgId: string, _userId?: string): void {
     const keepPath = join(process.cwd(), 'keep.lock');
     if (existsSync(keepPath)) {
       try {
@@ -829,15 +829,6 @@ export class CapyCommand {
         console.log('  Removed keep.lock (no longer a member).');
       } catch {}
     }
-
-    // Clear project key cache for this org
-    try {
-      const { getGlobalCapyDir } = require('../config/globalConfig');
-      const orgDir = join(getGlobalCapyDir(), 'orgs', orgId);
-      if (existsSync(orgDir)) {
-        rmSync(orgDir, { recursive: true });
-      }
-    } catch {}
   }
 
   private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
@@ -1016,10 +1007,16 @@ export class CapyCommand {
         this.keyServiceOps(),
       );
     } catch (err: any) {
-      // Only clean up local state on a confirmed server 403 (user was kicked).
-      // Network errors and other failures must NOT delete keys — a transient
-      // outage should never permanently lock out a legitimate user.
-      if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED && err.details?.status === 403) {
+      // Only clean up local state on a CONFIRMED kick. The server tags the
+      // membership-revoked 403 with code: 'MEMBERSHIP_REVOKED'; a bare 403
+      // (token scope mismatch, transient WorkOS hiccup, etc.) must NOT trigger
+      // any cleanup. cleanupOrgData itself is also strictly non-destructive
+      // toward keys — see its docstring.
+      if (
+        err instanceof CapyError
+        && err.code === ERROR_CODES.PERMISSION_DENIED
+        && err.details?.code === 'MEMBERSHIP_REVOKED'
+      ) {
         this.cleanupOrgData(projectState.organizationId!, projectState.userId);
       }
       throw err;
@@ -1148,17 +1145,18 @@ export class CapyCommand {
     } catch (err: any) {
       this.debugError('remote fetch failed', err);
       // 403 may be one of two different cases:
-      //   (a) User was kicked from the org — cleanup local state.
-      //   (b) User is still a member but lacks access to this specific branch
-      //       (e.g. Member on a protected branch). DO NOT wipe keys — that
-      //       would destroy access to every other project in the org.
+      //   (a) User was kicked from the org — confirmed by an explicit
+      //       `code: 'MEMBERSHIP_REVOKED'` from the server. Clear keep.lock
+      //       (cleanupOrgData is non-destructive toward the wrapped M).
+      //   (b) Anything else — branch-level denial, WorkOS hiccup, token-scope
+      //       mismatch, route-handler 403. DO NOT cleanup. The wrapped M and
+      //       all other local state stay intact; the user can retry.
       if (err instanceof CapyError) {
         const status = err.details?.status;
         if (status === 403) {
-          const msg = (err.message || '').toLowerCase();
-          const kicked = /no longer a member|not a member|not authorized for this organization/.test(msg);
+          const kicked = err.details?.code === 'MEMBERSHIP_REVOKED';
           if (kicked) {
-            fetchSpinner.fail('Access denied — you may have been removed from this organization.');
+            fetchSpinner.fail('Access denied — you have been removed from this organization.');
             this.cleanupOrgData(projectState.organizationId!, projectState.userId);
             throw err;
           }

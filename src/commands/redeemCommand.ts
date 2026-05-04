@@ -83,16 +83,10 @@ export class RedeemCommand {
     // membership but shouldn't, because the invite's ciphertext was never
     // intended for it. Fail closed if we didn't actually land on targetOrgId.
     if (orgId !== targetOrgId) {
-      // Mirror the post-coDecrypt-failure cleanup so a kicked user doesn't
-      // retain a local org key for the revoked org.
-      try {
-        const { getGlobalCapyDir } = await import('../config/globalConfig');
-        const orgDir = join(getGlobalCapyDir(), 'orgs', targetOrgId);
-        if (existsSync(orgDir)) {
-          const { rmSync } = await import('fs');
-          rmSync(orgDir, { recursive: true });
-        }
-      } catch {}
+      // Auth landed on a different org than the invite targets. This is NOT
+      // a kick signal — it can happen when a user with multiple memberships
+      // re-auths to their primary org. Surface the error and exit; never
+      // touch local keys based on a redeem-flow assumption.
       console.error(`\n  You are not a member of the invited organization.`);
       console.error(`  The invite may have been revoked, or you were removed.\n`);
       process.exit(1);
@@ -114,16 +108,11 @@ export class RedeemCommand {
       const result = await serviceClient.coDecrypt(orgId, ciphertext, notAfter);
       innerBlob = result.plaintext;
     } catch (err: any) {
-      // If the user had a local key from a previous invite, remove it —
-      // they've been kicked and should not retain local access.
-      try {
-        const { getGlobalCapyDir } = await import('../config/globalConfig');
-        const orgDir = join(getGlobalCapyDir(), 'orgs', orgId);
-        if (existsSync(orgDir)) {
-          const { rmSync } = await import('fs');
-          rmSync(orgDir, { recursive: true });
-        }
-      } catch {}
+      // Co-decrypt during redeem can fail for many reasons — expired invite,
+      // tampered code, network blip, KMS hiccup. The wrapped M (if any) is
+      // useless without the server anyway, so we never delete keys here. The
+      // user can retry; if they were genuinely kicked, the next normal `capy`
+      // run will surface the explicit MEMBERSHIP_REVOKED signal.
       console.error(`\nCo-decryption failed: ${err.message}`);
       console.error('You may not be a member of this organization, or the invite has been revoked.');
       process.exit(1);
