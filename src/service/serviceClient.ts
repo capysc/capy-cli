@@ -127,10 +127,14 @@ export class ServiceClient {
 
       if (res.status === 403) {
         const detail = data.error || 'You do not have permission to perform this action.';
+        // Surface the server's `code` field if present (e.g., MEMBERSHIP_REVOKED).
+        // Callers MUST gate destructive local cleanup on this code, never on the
+        // bare 403 status — see capyCommand.ts cleanupOrgData.
+        const serverCode = typeof data.code === 'string' ? data.code : undefined;
         throw new CapyError(
           detail,
           ERROR_CODES.PERMISSION_DENIED,
-          { status: 403, detail }
+          { status: 403, detail, code: serverCode }
         );
       }
 

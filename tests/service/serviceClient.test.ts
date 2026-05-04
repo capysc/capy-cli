@@ -227,4 +227,67 @@ describe('ServiceClient', () => {
     });
   });
 
+  describe('403 response code threading', () => {
+    // The CLI's destructive cleanup paths (cleanupOrgData, etc.) gate on
+    // err.details.code === 'MEMBERSHIP_REVOKED' to avoid wiping local key
+    // material on ambiguous 403s. The serviceClient is responsible for
+    // surfacing the server's `code` field — these tests pin that behavior.
+
+    test('threads MEMBERSHIP_REVOKED code into err.details when present', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'You are no longer a member of this organization', code: 'MEMBERSHIP_REVOKED' },
+        false,
+        403,
+      ));
+
+      try {
+        await serviceClient.getDecryptData('proj_kicked');
+        throw new Error('expected request to throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).toBe(ERROR_CODES.PERMISSION_DENIED);
+        expect(err.details?.status).toBe(403);
+        expect(err.details?.code).toBe('MEMBERSHIP_REVOKED');
+      }
+    });
+
+    test('leaves err.details.code undefined when the server omits code', async () => {
+      // Bare 403 (e.g., route-handler token-scope mismatch). Cleanup must
+      // NOT fire — verified by the absence of any `code` on the error.
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'Not authorized for this organization' },
+        false,
+        403,
+      ));
+
+      try {
+        await serviceClient.getDecryptData('proj_wrongorg');
+        throw new Error('expected request to throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).toBe(ERROR_CODES.PERMISSION_DENIED);
+        expect(err.details?.status).toBe(403);
+        expect(err.details?.code).toBeUndefined();
+      }
+    });
+
+    test('ignores non-string code fields on 403 to avoid spoofed wipes', async () => {
+      // Defense in depth: if the server (or a man-in-the-middle on a
+      // localhost-vs-prod misconfig) returns code: true / 1 / object, we
+      // must not coerce it into the kick gate.
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'forbidden', code: 12345 },
+        false,
+        403,
+      ));
+
+      try {
+        await serviceClient.getDecryptData('proj_x');
+        throw new Error('expected request to throw');
+      } catch (err: any) {
+        expect(err.details?.code).toBeUndefined();
+      }
+    });
+  });
+
 });

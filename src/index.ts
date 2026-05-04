@@ -53,6 +53,7 @@ program
       console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
       console.log(`    ${B('capy')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
       console.log(`    ${B('capy')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
+      console.log(`    ${B('capy')} recover                \x1b[90mReconstruct master key from recovery phrase\x1b[0m`);
       console.log('');
       process.exit(1);
     }
@@ -472,6 +473,15 @@ program
   .action(async () => {
     const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
     const cmd = new EndRecoverCommand();
+    await cmd.execute();
+  });
+
+program
+  .command('recover')
+  .description('Reconstruct the wrapped master key from a 24-word recovery phrase')
+  .action(async () => {
+    const { RecoverCommand } = await import('./commands/recoverCommand');
+    const cmd = new RecoverCommand();
     await cmd.execute();
   });
 
