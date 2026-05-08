@@ -140,17 +140,20 @@ export class InviteCommand {
             // ignore — cwd detection is best-effort
           }
 
+          const { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
           const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
             type: 'checkbox',
             name: 'chosenProjectIds',
             message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
+            instructions: CHECKBOX_INSTRUCTIONS,
+            theme: CHECKBOX_THEME,
             choices: projects.map((p) => ({
               name: p.name,
               value: p.id,
               checked: p.id === cwdProjectId,
             })),
             validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
-          });
+          } as any);
           const ids: string[] = chosenProjectIds;
           projectId = ids[0];
           extraProjectIds = ids.slice(1);
