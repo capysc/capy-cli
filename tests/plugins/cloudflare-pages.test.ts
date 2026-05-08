@@ -13,7 +13,7 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { spawnSync, spawn } from 'child_process';
+import { spawn } from 'child_process';
 
 const CLI = join(__dirname, '../../dist/index.js');
 const REPO_WEB = join(
@@ -41,14 +41,6 @@ if (!HAS_VITE) {
   console.log(
     `\x1b[33m[plugin] cloudflare-pages: vite not installed at ${REPO_WEB}/node_modules — run \`bun install\` in the demo first\x1b[0m`,
   );
-}
-
-function capySync(
-  args: string[],
-  cwd: string,
-): { stdout: string; stderr: string; code: number } {
-  const r = spawnSync('node', [CLI, ...args], { cwd, encoding: 'utf-8' });
-  return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
 }
 
 function spawnAsync(
@@ -105,21 +97,10 @@ afterAll(() => {
 });
 
 function buildPagesBundle(buildOutDir: string): Promise<{ stdout: string; stderr: string; code: number; assetsDir: string }> {
-  const dir = join(ROOT, 'build-src');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, '.env'), envToDotenv(FIXTURE_ENV));
-
-  const exportR = capySync(['export', '--format=json'], dir);
-  if (exportR.code !== 0) {
-    return Promise.resolve({
-      stdout: exportR.stdout,
-      stderr: exportR.stderr,
-      code: exportR.code,
-      assetsDir: '',
-    });
-  }
-  const env = JSON.parse(exportR.stdout) as Record<string, string>;
-
+  // Hermetic test: fixture .env is plaintext; inject it into the vite build
+  // process directly. Live deploys go through the connector adapter's
+  // decrypt path; that's covered by unit + manual live-tier tests.
+  const env = { ...FIXTURE_ENV };
   return spawnAsync(
     join(REPO_WEB, 'node_modules/.bin/vite'),
     ['build', '--outDir', buildOutDir, '--emptyOutDir'],
