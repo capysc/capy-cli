@@ -220,21 +220,38 @@ function renderNoKeepFile(): string {
 function renderQuotaExceeded(error: CapyError): string {
   const kind = error.details?.kind;
   const limit = error.details?.limit;
-  const upgradeUrl = error.details?.upgrade_url || 'https://capy.sc/pro';
+  const upgradeUrl = error.details?.upgrade_url || 'https://admin.capy.sc/billing';
+
+  // The 1-org-per-user cap is a hard rule, not a paywall — render distinctly.
+  if (kind === 'organization') {
+    const lines = [
+      '',
+      `  ${bold('Organization limit reached')}`,
+      `  ${grey(error.message)}`,
+      '',
+      `  Each Capy account can own one organization. To work in another org,`,
+      `  ask its owner to invite you with ${bold('capy invite')}.`,
+      '',
+    ];
+    return lines.join('\n');
+  }
+
   let headline: string;
+  let cta: string;
   if (kind === 'project') {
     headline = `Project limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
-  } else if (kind === 'member') {
-    headline = `Member limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
+    cta = 'Upgrade to Capy Business for unlimited projects';
   } else {
-    headline = `Organization limit reached${limit ? grey(` (${limit}/account)`) : ''}`;
+    // member
+    headline = `Member limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
+    cta = 'Upgrade to Capy Business to invite more members';
   }
   const lines = [
     '',
     `  ${bold(headline)}`,
     `  ${grey(error.message)}`,
     '',
-    `  Upgrade to ${bold('Capy Pro')} for higher quotas:`,
+    `  ${cta}:`,
     `    ${upgradeUrl}`,
     '',
   ];
