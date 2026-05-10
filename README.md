@@ -13,7 +13,7 @@
 <br />
 
 <p align="center">
-  <strong>Encrypt your <code>.env</code>. Sync it across your team. Ship it anywhere.</strong>
+  <strong>Like git, built for secrets. Fully revocable, encrypted end-to-end.</strong>
   <br /><br />
   <a href="#install">Install</a>
   ·
@@ -34,17 +34,11 @@
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
-**Doppler, Infisical Cloud, and AWS Secrets Manager can all read your secrets. Capy can't.**
-
-Most secrets managers encrypt at rest with keys they hold. Capy stores ciphertext only — the keys never leave your team's machines. A subpoena, a breach, or a rogue Capy employee gets the attacker the same thing: opaque bytes.
-
-Five commands. No SaaS dashboard. Any runtime. The architecture is zero-trust: nobody can decrypt the secrets we store (not even us), and agents or attackers can never read what's on your machine.
-
-→ [Compare Capy to Doppler, Infisical, dotenvx, AWS Secrets Manager, and SOPS](https://docs.capy.sc/comparisons).
+Capy is a headless CLI-based secrets control system that secures your entire stack with one command. Your `.env` is encrypted on your machine and decrypted only at runtime. The architecture is zero-trust: nobody can decrypt the secrets we store (not even us), and agents or attackers can never read what's on your machine.
 
 ## Install
 
-Capy in its most basic form is just a CLI: no lengthy signup, account setup, or SDK to import.
+Capy in its most basic form is just a CLI: no lengthy signup, account setup, or SDK to import. For more advanced functionality (like audit logging, provenance tracking, etc.), [Keep](https://www.capy.sc/keep) is our managed platform (coming soon).
 
 ```bash
 npm install -g @capysc/cli
@@ -86,11 +80,12 @@ That's the whole loop. Edit a secret, run `capy`, see this guy, redeploy.
 
 ## Why Use Capy
 
-- **We hold ciphertext. You hold keys. A subpoena gets us nothing.** Our service stores membership records and ciphertext. We don't hold your master key, your project keys, or any plaintext. Compromise of our service yields opaque bytes — not a feature flag, the only mode.
-- **Revocation is cryptographic, not a database flag.** `capy kick` makes the kicked user's local `key.enc` cryptographically inert. Remaining members keep using the same keys; no rotation cascade.
-- **Your code stays vanilla `process.env`.** No SDK to import, no daemon to run, no dashboard to maintain. `capy run` injects decrypted values into Node, Python, Go, Ruby, or any process that reads env vars.
-- **Branches that match git.** Capy runs alongside git with its own branches and a committed `keep.lock` manifest. Each git branch pins to a Capy branch, so secrets travel with your code.
-- **Source-available CLI.** AGPL-3.0. Code is auditable on GitHub. ([What AGPL means for your team in practice.](https://docs.capy.sc/using/license))
+- **Zero-trust storage.** Our service holds ciphertext and membership records. We don't hold your master key, your project keys, or any plaintext.
+- **Single CLI for any runtime.** `capy run` injects decrypted values into Node, Python, Go, Ruby, or any process that reads env vars. Your code stays vanilla: just `process.env`.
+- **Headless.** No dashboard, daemon, background service, or UI to slow you down.
+- **Instant revocation.** `capy kick` takes effect on the next request and the kicked user's local `key.enc` becomes cryptographically inert. Remaining members keep using the same keys.
+- **Version control for secrets.** Capy runs alongside git with its own branches and a committed `keep.lock` manifest. Each git branch pins to a Capy branch, so secrets travel with your code.
+- **Source Available.** CLI is AGPL-3.0. Code is auditable on GitHub.
 
 ## How it works
 
@@ -128,6 +123,8 @@ Each value is a `capy:{resourceId}:{ciphertext}` snippet only your team can decr
 | [`capy status`](https://docs.capy.sc/cli/status) | Show drift between local, pinned, and remote. |
 | [`capy push`](https://docs.capy.sc/cli/push) | Push local changes without pulling. |
 | [`capy deploy`](https://docs.capy.sc/cli/deploy) | Generate a deploy token and walk through platform setup. |
+| [`capy connect <provider>`](https://docs.capy.sc/cli/connect) | Pull a credential from a provider into `.env` (Stripe today). |
+| [`capy rotate [var]`](https://docs.capy.sc/cli/rotate) | Rotate a managed credential. |
 | [`capy invite <email>`](https://docs.capy.sc/cli/invite) | Invite a teammate. |
 | [`capy redeem <code>`](https://docs.capy.sc/cli/redeem) | Redeem an invite code. |
 | [`capy kick <email>`](https://docs.capy.sc/cli/kick) | Remove a teammate. |
@@ -140,6 +137,8 @@ Each value is a `capy:{resourceId}:{ciphertext}` snippet only your team can decr
 | [`capy info`](https://docs.capy.sc/cli/info) | Show current session info. |
 | [`capy logout`](https://docs.capy.sc/cli/logout) | Clear local session. |
 | [`capy cleanup`](https://docs.capy.sc/cli/cleanup) | Remove git hooks and local state. |
+
+> **Stripe live mode** is opt-in via `--live` and requires per-action account-id confirmation. See [docs.capy.sc/cli/connect](https://docs.capy.sc/cli/connect).
 
 ## Syncing
 
@@ -269,4 +268,4 @@ You can fork this repo and create pull requests:
 
 AGPL-3.0-only. Copyright © Incentv Technologies Inc.
 
-See [LICENSE](./LICENSE) for the full text. For what AGPL means for your team in practice — when it imposes obligations and when it doesn't — see [docs.capy.sc/using/license](https://docs.capy.sc/using/license).
+See [LICENSE](./LICENSE) for the full text.
