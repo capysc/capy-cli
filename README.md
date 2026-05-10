@@ -13,7 +13,7 @@
 <br />
 
 <p align="center">
-  <strong>Like git, built for secrets. Fully revocable, encrypted end-to-end.</strong>
+  <strong>Like git, built for secrets.</strong>
   <br /><br />
   <a href="#install">Install</a>
   ·
@@ -34,11 +34,13 @@
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
-Capy is a headless CLI-based secrets control system that secures your entire stack with one command. Your `.env` is encrypted on your machine and decrypted only at runtime. The architecture is zero-trust: nobody can decrypt the secrets we store (not even us), and agents or attackers can never read what's on your machine.
+Capy is a secrets toolchain with git-style primitives — branch, sync, deploy, revoke — end-to-end encrypted on your machine and fully revocable for humans and agents. Your `.env` becomes versioned state your team can commit, roll back, and offboard without rotating a single key.
+
+→ [Compare Capy to Doppler, Infisical, dotenvx, AWS Secrets Manager, and SOPS](https://docs.capy.sc/comparisons).
 
 ## Install
 
-Capy in its most basic form is just a CLI: no lengthy signup, account setup, or SDK to import. For more advanced functionality (like audit logging, provenance tracking, etc.), [Keep](https://www.capy.sc/keep) is our managed platform (coming soon).
+Capy in its most basic form is just a CLI: no lengthy signup, account setup, or SDK to import.
 
 ```bash
 npm install -g @capysc/cli
