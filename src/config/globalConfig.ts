@@ -157,6 +157,32 @@ export function deleteRecoverySession(): void {
   }
 }
 
+// --- Force-login marker (~/.capy/auth/.force-login) ---
+//
+// Written by `capy logout` so the next interactive OAuth flow tells the
+// service to ask WorkOS for a fresh login instead of reusing the AuthKit
+// SSO cookie. Without this, `logout` followed by `capy` silently re-auths
+// the previous user — which is what shared-machine evaluators hit.
+
+export function getForceLoginMarkerPath(): string {
+  return join(GLOBAL_CAPY_DIR, 'auth', '.force-login');
+}
+
+export function setForceLoginMarker(): void {
+  writeSecureFile(getForceLoginMarkerPath(), '');
+}
+
+export function consumeForceLoginMarker(): boolean {
+  const path = getForceLoginMarkerPath();
+  if (!existsSync(path)) return false;
+  try {
+    rmSync(path, { force: true });
+  } catch {
+    // best effort
+  }
+  return true;
+}
+
 export async function fetchSecretsWithCache(
   serviceClient: { getSecrets(projectId: string, keepHash: string): Promise<{ env_file: string } | null> },
   orgId: string,
