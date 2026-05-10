@@ -2,10 +2,11 @@ import { mock, jest, describe, test, expect, beforeEach, afterAll } from 'bun:te
 
 const mockExistsSync = jest.fn();
 const mockReadFileSync = jest.fn();
+const mockWriteFileSync = jest.fn();
 mock.module('fs', () => ({
   existsSync: mockExistsSync,
   readFileSync: mockReadFileSync,
-  writeFileSync: jest.fn(),
+  writeFileSync: mockWriteFileSync,
   mkdirSync: jest.fn(),
 }));
 
@@ -289,6 +290,55 @@ describe('ProjectManager', () => {
     test('should return correct env path', () => {
       const path = (projectManager as any).getEnvPath();
       expect(path).toBe(join(testRoot, '.env'));
+    });
+  });
+
+  describe('clearSyncStateUserId', () => {
+    const syncStatePath = join(testRoot, '.capy/sync-state');
+
+    test('drops user_id but preserves other fields', () => {
+      mockExistsSync.mockImplementation((path) => path === syncStatePath);
+      mockReadFileSync.mockReturnValue(JSON.stringify({
+        last_sync: '2026-01-01T00:00:00Z',
+        synced_variables: ['FOO'],
+        user_id: 'user_abc',
+        org_id: 'org_xyz',
+        keep_hash: { development: 'h1' },
+      }));
+
+      const changed = projectManager.clearSyncStateUserId();
+      expect(changed).toBe(true);
+
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
+      const [path, contents] = mockWriteFileSync.mock.calls[0];
+      expect(path).toBe(syncStatePath);
+      const parsed = JSON.parse(contents as string);
+      expect(parsed.user_id).toBeUndefined();
+      expect(parsed.org_id).toBe('org_xyz');
+      expect(parsed.last_sync).toBe('2026-01-01T00:00:00Z');
+      expect(parsed.synced_variables).toEqual(['FOO']);
+      expect(parsed.keep_hash).toEqual({ development: 'h1' });
+    });
+
+    test('returns false when sync-state has no user_id (no rewrite)', () => {
+      mockExistsSync.mockImplementation((path) => path === syncStatePath);
+      mockReadFileSync.mockReturnValue(JSON.stringify({
+        last_sync: '',
+        synced_variables: [],
+        org_id: 'org_xyz',
+      }));
+
+      const changed = projectManager.clearSyncStateUserId();
+      expect(changed).toBe(false);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    test('returns false when sync-state file is missing (no rewrite)', () => {
+      mockExistsSync.mockReturnValue(false);
+
+      const changed = projectManager.clearSyncStateUserId();
+      expect(changed).toBe(false);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
     });
   });
 });
