@@ -13,7 +13,7 @@
 <br />
 
 <p align="center">
-  <strong>Encrypt your <code>.env</code>. Sync it across your team. Ship it anywhere.</strong>
+  <strong>Like git, built for secrets. Fully revocable, encrypted end-to-end.</strong>
   <br /><br />
   <a href="#install">Install</a>
   ·
