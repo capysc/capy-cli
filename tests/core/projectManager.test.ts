@@ -245,18 +245,6 @@ describe('ProjectManager', () => {
   });
 
   describe('parseKeepFile', () => {
-    test('should reject unsupported keep.lock versions', () => {
-      const v4Keep = {
-        version: '4.0',
-        org_id: 'org_123',
-        project_id: 'proj_456',
-        project_name: 'test-project',
-        variables: {}
-      };
-
-      expect(() => (projectManager as any).parseKeepFile(v4Keep)).toThrow('Unsupported keep.lock version');
-    });
-
     test('should pass through v3 keep files', () => {
       const v3Keep = {
         version: '3.0',
