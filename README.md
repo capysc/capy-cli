@@ -82,7 +82,7 @@ That's the whole loop. Edit a secret, run `capy`, see this guy, redeploy.
 
 ## Why Use Capy
 
-- **We hold ciphertext. You hold keys. A subpoena gets us nothing.** Our service stores membership records and ciphertext. We don't hold your master key, your project keys, or any plaintext. Compromise of our service yields opaque bytes — not a feature flag, the only mode.
+- **We hold ciphertext. You hold keys. A subpoena gets us nothing.** Our service stores membership records and ciphertext. We don't hold your master key, your project keys, or any plaintext. Compromise of our service OR your local values yields nothing useful.
 - **Revocation is cryptographic, not a database flag.** `capy kick` makes the kicked user's local `key.enc` cryptographically inert. Remaining members keep using the same keys; no rotation cascade.
 - **Your code stays vanilla `process.env`.** No SDK to import, no daemon to run, no dashboard to maintain. `capy run` injects decrypted values into Node, Python, Go, Ruby, or any process that reads env vars.
 - **Branches that match git.** Capy runs alongside git with its own branches and a committed `keep.lock` manifest. Each git branch pins to a Capy branch, so secrets travel with your code.
