@@ -138,12 +138,6 @@ export class ProjectManager {
   }
 
   private parseKeepFile(raw: any): KeepFile {
-    if (raw.version !== '3.0') {
-      throw new CapyError(
-        `Unsupported keep.lock version: ${raw.version}. Please update your CLI.`,
-        ERROR_CODES.INVALID_FORMAT
-      );
-    }
     return raw as KeepFile;
   }
 
