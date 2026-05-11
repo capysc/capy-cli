@@ -3,7 +3,7 @@ import { join } from 'path';
 import { lockSync, unlockSync } from 'proper-lockfile';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
-import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
+import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir } from '../config/globalConfig';
 
 export class HttpStatusError extends Error {
   status: number;
@@ -165,13 +165,6 @@ export class AuthService {
     const redirectUri = oauthServer.getRedirectUri();
     const state = oauthServer.getState();
 
-    // If `capy logout` left a marker, ask the service to add prompt=login to
-    // the WorkOS auth URL so AuthKit re-prompts instead of silently reusing
-    // its SSO cookie. Consume the marker now — even if the OAuth round-trip
-    // fails later, "force_login" was the user's intent for this attempt and
-    // we don't want it sticking forever.
-    const forceLogin = consumeForceLoginMarker();
-
     const { auth_url } = await postJson<{ auth_url: string }>(
       `${this.serviceApiUrl}/auth/initiate`,
       {
@@ -179,7 +172,6 @@ export class AuthService {
         redirect_uri: redirectUri,
         organization_id: organizationId,
         code_challenge: oauthServer.getCodeChallenge(),
-        ...(forceLogin ? { force_login: true } : {}),
       },
     );
 

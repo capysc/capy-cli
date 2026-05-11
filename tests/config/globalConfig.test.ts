@@ -25,9 +25,6 @@ let readAuthSession: typeof import('../../src/config/globalConfig').readAuthSess
 let writeKeepCache: typeof import('../../src/config/globalConfig').writeKeepCache;
 let readKeepCache: typeof import('../../src/config/globalConfig').readKeepCache;
 let fetchSecretsWithCache: typeof import('../../src/config/globalConfig').fetchSecretsWithCache;
-let getForceLoginMarkerPath: typeof import('../../src/config/globalConfig').getForceLoginMarkerPath;
-let setForceLoginMarker: typeof import('../../src/config/globalConfig').setForceLoginMarker;
-let consumeForceLoginMarker: typeof import('../../src/config/globalConfig').consumeForceLoginMarker;
 
 beforeAll(async () => {
   const mod = await import('../../src/config/globalConfig');
@@ -44,9 +41,6 @@ beforeAll(async () => {
   writeKeepCache = mod.writeKeepCache;
   readKeepCache = mod.readKeepCache;
   fetchSecretsWithCache = mod.fetchSecretsWithCache;
-  getForceLoginMarkerPath = mod.getForceLoginMarkerPath;
-  setForceLoginMarker = mod.setForceLoginMarker;
-  consumeForceLoginMarker = mod.consumeForceLoginMarker;
 });
 
 afterAll(() => {
@@ -198,37 +192,6 @@ describe('GlobalConfig', () => {
       const result = await fetchSecretsWithCache(mockClient, ORG, PROJ, hash);
       expect(result).toBeNull();
       expect(readKeepCache(ORG, PROJ, hash)).toBeNull();
-    });
-  });
-
-  describe('force-login marker', () => {
-    it('returns false when no marker exists', () => {
-      // sanity: marker should not exist at start of this describe block
-      const { existsSync: realExists } = require('fs');
-      if (realExists(getForceLoginMarkerPath())) {
-        require('fs').rmSync(getForceLoginMarkerPath(), { force: true });
-      }
-      expect(consumeForceLoginMarker()).toBe(false);
-    });
-
-    it('round-trip: set then consume returns true exactly once', () => {
-      setForceLoginMarker();
-      expect(existsSync(getForceLoginMarkerPath())).toBe(true);
-
-      // First consume returns true and deletes the marker
-      expect(consumeForceLoginMarker()).toBe(true);
-      expect(existsSync(getForceLoginMarkerPath())).toBe(false);
-
-      // Second consume returns false — no spurious "force login" on a later run
-      expect(consumeForceLoginMarker()).toBe(false);
-    });
-
-    it('writes marker with 0o600 permissions', () => {
-      setForceLoginMarker();
-      const { statSync } = require('fs');
-      const stat = statSync(getForceLoginMarkerPath());
-      expect(stat.mode & 0o777).toBe(0o600);
-      consumeForceLoginMarker();
     });
   });
 });

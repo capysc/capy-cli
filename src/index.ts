@@ -320,17 +320,6 @@ program
       }
     }
 
-    // Drop user_id from .capy/sync-state so the next `capy` run doesn't pin
-    // the previous user's session — syncProject reads this and calls
-    // setSessionUserId before authenticating, which on shared eval machines
-    // silently re-auths the previous user.
-    try {
-      const { ProjectManager } = await import('./core/projectManager');
-      if (new ProjectManager().clearSyncStateUserId()) cleared = true;
-    } catch {
-      // best-effort
-    }
-
     // Clear global auth session and project key caches
     const globalCapyDir = join(homedir(), '.capy');
     const authSession = join(globalCapyDir, 'auth', 'session.json');
@@ -357,16 +346,6 @@ program
           cleared = true;
         }
       }
-    }
-
-    // Drop a marker so the next interactive OAuth flow forces WorkOS to
-    // re-prompt instead of reusing the AuthKit SSO cookie. Without this,
-    // shared eval machines silently re-auth the previous user in the browser.
-    try {
-      const { setForceLoginMarker } = await import('./config/globalConfig');
-      setForceLoginMarker();
-    } catch {
-      // best-effort
     }
 
     if (cleared) {

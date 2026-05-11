@@ -114,6 +114,30 @@ Most secrets managers encrypt at rest on their servers. Capy is one of the few t
 
 Each value is a `capy:{resourceId}:{ciphertext}` snippet only your team can decrypt, but with just enough characters surrounding the ciphertext for you to identify the items. Plaintext only exists in process memory while `capy run` has your app spawned.
 
+## Editing secrets
+
+Two ways to change a value. Both end up encrypted and synced — pick whichever fits the moment.
+
+### Edit `.env` in place
+
+Open `.env` in your editor and overwrite a `capy:...` snippet with the new plaintext value. The next `capy` sync re-encrypts whatever changed and updates `keep.lock`.
+
+<p align="center">
+  <img alt=".env opened in vi with JWT_SECRET being edited in place alongside other capy:resourceId:ciphertext snippets" src="./docs/images/edit-env-vi.png" width="1024">
+</p>
+
+Good when you're already in your editor, pasting a new key from a dashboard, or scripting a bulk change.
+
+### Edit through the TUI (`capy edit`)
+
+`capy edit` opens an interactive table of every variable on the current branch with sync status, drift, and conflicts visible at a glance. Reveal a value with `r`, edit with `e`, navigate with `↑↓`, quit with `q`.
+
+<p align="center">
+  <img alt="capy edit TUI showing a table of variables with sync status and a JWT_SECRET detail panel" src="./docs/images/edit-tui.png" width="1024">
+</p>
+
+Good when you want to see drift across the whole branch, edit one variable without touching the file, or check what's in sync before a deploy.
+
 ## Commands
 
 | Command | Description |

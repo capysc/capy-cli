@@ -204,21 +204,6 @@ export class ProjectManager {
     writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
   }
 
-  /**
-   * Drop just the user_id field from sync-state. Used by `capy logout` so the
-   * next `capy` run doesn't pin the previous user's session via
-   * setSessionUserId(projectState.userId). org_id, keep_hash, last_sync, and
-   * synced_variables are preserved — they're not user-scoped.
-   */
-  clearSyncStateUserId(): boolean {
-    const existing = this.readSyncState();
-    if (!existing || existing.user_id === undefined) return false;
-    delete existing.user_id;
-    const syncStatePath = this.getSyncStatePath();
-    writeFileSync(syncStatePath, JSON.stringify(existing, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    return true;
-  }
-
   isGitRepository(): boolean {
     const gitPath = join(this.projectRoot, '.git');
     return existsSync(gitPath);
