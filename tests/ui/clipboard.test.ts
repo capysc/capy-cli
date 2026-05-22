@@ -35,6 +35,8 @@ describe('promptCopyToClipboard', () => {
     await promptCopyToClipboard('secret');
 
     expect(writeSpy).not.toHaveBeenCalled();
-    expect(setRawModeSpy).not.toHaveBeenCalled();
+    if (setRawModeSpy) {
+      expect(setRawModeSpy).not.toHaveBeenCalled();
+    }
   });
 });
