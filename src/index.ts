@@ -51,6 +51,8 @@ program
       console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy')} org                    \x1b[90mSwitch organization\x1b[0m`);
       console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
+      console.log(`    ${B('capy')} connect <provider>     \x1b[90mPull a credential from a provider into .env\x1b[0m`);
+      console.log(`    ${B('capy')} rotate [var]           \x1b[90mRotate a credential previously set up via connect\x1b[0m`);
       console.log(`    ${B('capy')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
       console.log(`    ${B('capy')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
       console.log(`    ${B('capy')} recover                \x1b[90mReconstruct master key from recovery phrase\x1b[0m`);
@@ -548,6 +550,44 @@ program
     const { RecoverCommand } = await import('./commands/recoverCommand');
     const cmd = new RecoverCommand();
     await cmd.execute();
+  });
+
+program
+  .command('connect [provider]')
+  .description('Connect a third-party provider and pull a credential into .env')
+  .option('--live', 'use live mode (default: test)')
+  .option('--var <name>', 'env var name to write')
+  .option('--account <id>', 'pick a specific provider account when multiple are configured')
+  .option('--no-push', 'write to .env only; do not push to Capy')
+  .option('-f, --force', 'overwrite an existing value without prompting')
+  .action(async (provider, options) => {
+    const { ConnectCommand } = await import('./commands/connectCommand');
+    const cmd = new ConnectCommand();
+    if (!provider) {
+      await cmd.list();
+      return;
+    }
+    await cmd.execute(provider, {
+      live: options.live,
+      var: options.var,
+      account: options.account,
+      noPush: options.push === false,
+      force: options.force,
+    });
+  });
+
+program
+  .command('rotate [var]')
+  .description('Rotate a managed credential previously set up via `capy connect`')
+  .option('--all', 'rotate every managed credential in this project')
+  .option('--no-push', 'update .env only; do not push to Capy')
+  .action(async (varName, options) => {
+    const { RotateCommand } = await import('./commands/rotateCommand');
+    const cmd = new RotateCommand();
+    await cmd.execute(varName, {
+      all: options.all,
+      noPush: options.push === false,
+    });
   });
 
 program.parse(process.argv);

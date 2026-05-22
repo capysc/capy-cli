@@ -200,15 +200,21 @@ export class FileManager {
         project_name: keep.project_name,
         variables: {} as Record<string, any>,
       };
-      // v3 format: variables are arrays of { resource_id, branch?, value_hash }
+      // v3 format: variables are arrays of { resource_id, branch?, value_hash, ...extras }.
+      // Build a stable key order, then attach any other fields the entry carries
+      // (e.g. `connector` metadata set by `capy connect`). Without this, every
+      // sync would strip extras off the entry.
       for (const key of Object.keys(keep.variables).sort()) {
         const entries = keep.variables[key];
         sorted.variables[key] = entries.map(e => {
-          const obj: Record<string, string> = { resource_id: e.resource_id };
-          if (e.branch) {
-            obj.branch = e.branch;
-          }
+          const obj: Record<string, any> = { resource_id: e.resource_id };
+          if (e.branch) obj.branch = e.branch;
           obj.value_hash = e.value_hash;
+          for (const [k, v] of Object.entries(e)) {
+            if (k === 'resource_id' || k === 'branch' || k === 'value_hash') continue;
+            if (v === undefined) continue;
+            obj[k] = v;
+          }
           return obj;
         });
       }
