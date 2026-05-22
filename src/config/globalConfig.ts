@@ -2,32 +2,34 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
-const GLOBAL_CAPY_DIR = join(homedir(), '.capy');
-
+// Resolved lazily so `capy-dev` can isolate its state at `~/.capy-dev/` by
+// setting CAPY_GLOBAL_DIR_NAME at startup — without this, dev tooling like
+// sandbox/*/nuke.sh would clobber the user's prod `~/.capy/` (recovery-equivalent
+// state). Reading env on every call also keeps tests overriding HOME safe.
 export function getGlobalCapyDir(): string {
-  return GLOBAL_CAPY_DIR;
+  return join(homedir(), process.env.CAPY_GLOBAL_DIR_NAME || '.capy');
 }
 
 export function getAuthSessionPath(userId?: string): string {
   if (userId) {
-    return join(GLOBAL_CAPY_DIR, 'auth', 'sessions', `${userId}.json`);
+    return join(getGlobalCapyDir(), 'auth', 'sessions', `${userId}.json`);
   }
-  return join(GLOBAL_CAPY_DIR, 'auth', 'session.json');
+  return join(getGlobalCapyDir(), 'auth', 'session.json');
 }
 
 export function getOrgKeyPath(orgId: string, userId?: string): string {
   if (userId) {
-    return join(GLOBAL_CAPY_DIR, 'orgs', orgId, 'users', userId, 'key.enc');
+    return join(getGlobalCapyDir(), 'orgs', orgId, 'users', userId, 'key.enc');
   }
-  return join(GLOBAL_CAPY_DIR, 'orgs', orgId, 'key.enc');
+  return join(getGlobalCapyDir(), 'orgs', orgId, 'key.enc');
 }
 
 export function getProjectKeyCachePath(orgId: string, projectId: string): string {
-  return join(GLOBAL_CAPY_DIR, 'orgs', orgId, 'projects', projectId, 'key.cache');
+  return join(getGlobalCapyDir(), 'orgs', orgId, 'projects', projectId, 'key.cache');
 }
 
 export function getGlobalConfigPath(): string {
-  return join(GLOBAL_CAPY_DIR, 'config.json');
+  return join(getGlobalCapyDir(), 'config.json');
 }
 
 function ensureDir(dirPath: string): void {
@@ -106,7 +108,7 @@ export function readAuthSession(userId?: string): object | null {
 // cache file.
 
 export function getKeepCachePath(orgId: string, projectId: string, keepHash: string): string {
-  return join(GLOBAL_CAPY_DIR, 'keep', orgId, projectId, keepHash);
+  return join(getGlobalCapyDir(), 'keep', orgId, projectId, keepHash);
 }
 
 export function writeKeepCache(orgId: string, projectId: string, keepHash: string, envBlob: string): void {
@@ -124,7 +126,7 @@ export function readKeepCache(orgId: string, projectId: string, keepHash: string
 // --- Recovery session (~/.capy/recover/) ---
 
 export function getRecoverySessionPath(): string {
-  return join(GLOBAL_CAPY_DIR, 'recover', 'session.json');
+  return join(getGlobalCapyDir(), 'recover', 'session.json');
 }
 
 export function isRecoveryActive(): boolean {
@@ -151,7 +153,7 @@ export function readRecoverySession(): { master_key: string; org_id: string } | 
 }
 
 export function deleteRecoverySession(): void {
-  const recoverDir = join(GLOBAL_CAPY_DIR, 'recover');
+  const recoverDir = join(getGlobalCapyDir(), 'recover');
   if (existsSync(recoverDir)) {
     rmSync(recoverDir, { recursive: true, force: true });
   }
@@ -165,7 +167,7 @@ export function deleteRecoverySession(): void {
 // the previous user — which is what shared-machine evaluators hit.
 
 export function getForceLoginMarkerPath(): string {
-  return join(GLOBAL_CAPY_DIR, 'auth', '.force-login');
+  return join(getGlobalCapyDir(), 'auth', '.force-login');
 }
 
 export function setForceLoginMarker(): void {

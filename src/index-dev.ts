@@ -38,6 +38,13 @@ if (!process.env.CAPY_API_URL) {
   process.env.CAPY_API_URL = 'http://localhost:3000';
 }
 
+// Isolate dev global state at `~/.capy-dev/` so dev tooling (e.g. sandbox nuke
+// scripts) can never collateral-damage the user's prod `~/.capy/`, which holds
+// recovery-equivalent wrapped master keys. Lazy-resolved in globalConfig.ts.
+if (!process.env.CAPY_GLOBAL_DIR_NAME) {
+  process.env.CAPY_GLOBAL_DIR_NAME = '.capy-dev';
+}
+
 const program = new Command();
 
 program
@@ -366,7 +373,7 @@ program
   .action(async () => {
     const { existsSync, unlinkSync, rmSync } = await import('fs');
     const { join } = await import('path');
-    const { homedir } = await import('os');
+    const { getGlobalCapyDir } = await import('./config/globalConfig');
 
     const capyDir = join(process.cwd(), '.capy');
     const sessionFiles = ['token'];
@@ -391,7 +398,7 @@ program
     }
 
     // Clear global auth session and project key caches
-    const globalCapyDir = join(homedir(), '.capy');
+    const globalCapyDir = getGlobalCapyDir();
     const authSession = join(globalCapyDir, 'auth', 'session.json');
     if (existsSync(authSession)) {
       unlinkSync(authSession);

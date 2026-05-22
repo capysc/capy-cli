@@ -306,7 +306,7 @@ program
   .action(async () => {
     const { existsSync, unlinkSync, rmSync } = await import('fs');
     const { join } = await import('path');
-    const { homedir } = await import('os');
+    const { getGlobalCapyDir } = await import('./config/globalConfig');
 
     const capyDir = join(process.cwd(), '.capy');
     const sessionFiles = ['token'];
@@ -332,7 +332,7 @@ program
     }
 
     // Clear global auth session and project key caches
-    const globalCapyDir = join(homedir(), '.capy');
+    const globalCapyDir = getGlobalCapyDir();
     const authSession = join(globalCapyDir, 'auth', 'session.json');
     if (existsSync(authSession)) {
       unlinkSync(authSession);

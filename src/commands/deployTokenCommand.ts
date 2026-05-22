@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { createServer } from 'http';
-import { execSync } from 'child_process';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -110,53 +109,7 @@ function writeConfig(projectRoot: string, config: CapyConfig): void {
   writeFileSync(join(capyDir, 'config'), JSON.stringify(config, null, 2), 'utf-8');
 }
 
-/**
- * Opens a URL in a minimal popup window (no tabs, no URL bar).
- * Tries Chrome/Chromium --app mode first, falls back to regular browser open.
- */
-async function openPopupWindow(url: string): Promise<void> {
-  const platform = process.platform;
-
-  // Chrome/Chromium --app mode opens a clean, borderless window
-  const chromePaths: string[] = platform === 'darwin'
-    ? [
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        '/Applications/Chromium.app/Contents/MacOS/Chromium',
-        '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-      ]
-    : platform === 'win32'
-    ? [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-      ]
-    : [
-        'google-chrome',
-        'google-chrome-stable',
-        'chromium',
-        'chromium-browser',
-        'brave-browser',
-        'microsoft-edge',
-      ];
-
-  for (const browserPath of chromePaths) {
-    try {
-      const quotedPath = `"${browserPath}"`;
-      const args = `--app=${url} --window-size=640,800`;
-      if (platform === 'win32') {
-        execSync(`start "" ${quotedPath} ${args}`, { stdio: 'ignore' });
-      } else {
-        execSync(`${quotedPath} ${args} &`, { stdio: 'ignore', shell: '/bin/sh' });
-      }
-      return;
-    } catch {
-      continue;
-    }
-  }
-
-  // Fallback: regular browser open
+async function openInBrowser(url: string): Promise<void> {
   const open = (await import('open')).default;
   open(url).catch(() => {});
 }
@@ -350,7 +303,7 @@ export class DeployCommand {
           console.log(`\n  Temporary deploy instructions opened at ${url}`);
           console.log('  Press Ctrl+C to close.\n');
 
-          await openPopupWindow(url);
+          await openInBrowser(url);
           serverStarted = true;
 
           // Auto-shutdown after 5 minutes
