@@ -47,14 +47,21 @@ export class RecoverCommand {
   async execute(): Promise<void> {
     const inquirer = (await import('inquirer')).default;
 
-    // 1. Authenticate (silent only — recover should never auto-launch OAuth).
+    // 1. Authenticate. Try silent first; if there's no usable session (e.g.
+    //    fresh machine, or local state was wiped) fall through to interactive
+    //    OAuth. Recovery is inherently interactive — the user is about to type
+    //    a 24-word seed phrase — so launching a browser here is not a surprise.
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
 
     let authResult = await authService.authenticateSilent();
     if (!authResult.success) {
-      console.error(`\n  Not signed in. Run ${B('capy')} to authenticate, then re-run ${B('capy recover')}.\n`);
+      console.log(`\n  No active session. Launching browser to sign in...\n`);
+      authResult = await authService.authenticate();
+    }
+    if (!authResult.success) {
+      console.error(`\n  Sign-in failed: ${authResult.error || 'unknown error'}. Re-run ${B('capy recover')} after authenticating.\n`);
       process.exit(1);
     }
 
