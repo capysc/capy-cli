@@ -576,4 +576,42 @@ program
     process.exit(code);
   });
 
+program
+  .command('connect [provider]')
+  .description('Connect a third-party provider and pull a credential into .env')
+  .option('--live', 'use live mode (default: test)')
+  .option('--var <name>', 'env var name to write')
+  .option('--account <id>', 'pick a specific provider account when multiple are configured')
+  .option('--no-push', 'write to .env only; do not push to Capy')
+  .option('-f, --force', 'overwrite an existing value without prompting')
+  .action(async (provider, options) => {
+    const { ConnectCommand } = await import('./commands/connectCommand');
+    const cmd = new ConnectCommand(true); // devMode: hard-blocks live
+    if (!provider) {
+      await cmd.list();
+      return;
+    }
+    await cmd.execute(provider, {
+      live: options.live,
+      var: options.var,
+      account: options.account,
+      noPush: options.push === false,
+      force: options.force,
+    });
+  });
+
+program
+  .command('rotate [var]')
+  .description('Rotate a managed credential previously set up via `capy connect`')
+  .option('--all', 'rotate every managed credential in this project')
+  .option('--no-push', 'update .env only; do not push to Capy')
+  .action(async (varName, options) => {
+    const { RotateCommand } = await import('./commands/rotateCommand');
+    const cmd = new RotateCommand(true); // devMode: skips live entries
+    await cmd.execute(varName, {
+      all: options.all,
+      noPush: options.push === false,
+    });
+  });
+
 program.parse(process.argv);

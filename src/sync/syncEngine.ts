@@ -233,7 +233,11 @@ export class SyncEngine {
       const targetBranch = branch || SyncEngine.DEFAULT_BRANCH;
       const idx = entries.findIndex(e => e.branch === targetBranch);
 
+      // Preserve any extra fields on the existing entry (e.g. `connector`
+      // metadata set by `capy connect`). Without the spread, every sync
+      // would clobber them.
       const entry: KeepVariableEntry = {
+        ...(idx >= 0 ? entries[idx] : {}),
         resource_id: data.resource_id,
         value_hash: data.value_hash || '',
         branch: targetBranch,

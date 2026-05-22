@@ -225,5 +225,8 @@ export class PushCommand {
     pushSpinner.succeed(
       `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
     );
+
+    const { printExpiryWarnings } = await import('./connectors/shared');
+    printExpiryWarnings();
   }
 }

@@ -1,8 +1,39 @@
+/**
+ * Marker for an env var that was provisioned by a `capy connect <provider>`
+ * flow. Lives on the per-branch variable entry so different branches can
+ * point at different provider accounts/modes (dev → sandbox, main → live).
+ *
+ * Connectors are distinct from deploy integrations (cf-workers, vercel,
+ * etc.): connectors INGEST a credential into one env var, deploy integrations
+ * EGRESS the whole .env to a platform. Don't conflate them — deploy
+ * integrations live in `.capy/config`, not here.
+ */
+export interface ConnectorMetadata {
+  /** Provider name registered in connectors/registry.ts (e.g. 'stripe'). */
+  provider: string;
+  /** How the credential was obtained — provider-specific semantics. */
+  source: string;
+  /** Provider-specific mode label (e.g. 'test'/'live' for Stripe). */
+  mode?: string;
+  /** Provider account identifier the credential is scoped to. */
+  account_id?: string;
+  /** Unix seconds; set by providers whose credentials expire. */
+  expires_at?: number;
+  /** Unix seconds, set when the connector first wrote this var. */
+  created_at: number;
+  /** Unix seconds, updated on each successful rotate. */
+  rotated_at?: number;
+  /** `abc…xyz`-style snippet of the credential value; never the plaintext. */
+  fingerprint: string;
+}
+
 /** v3 keep.lock variable entry — per-branch value hashes */
 export interface KeepVariableEntry {
   resource_id: string;
   branch?: string;
   value_hash: string;
+  /** Set when this variable was provisioned by `capy connect <provider>`. */
+  connector?: ConnectorMetadata;
 }
 
 export interface KeepFile {

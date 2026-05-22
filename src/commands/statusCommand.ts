@@ -266,6 +266,8 @@ export class StatusCommand {
       } else {
         console.log('> Remote is up to date.');
       }
+      const { printExpiryWarnings } = await import('./connectors/shared');
+      printExpiryWarnings();
       process.exit(0);
     }
 
@@ -333,6 +335,11 @@ export class StatusCommand {
       console.log(`  If you have already been invited, run ${B('capy redeem [invite-code]')} to access these secrets.`);
     } else {
       console.log(`  Run ${B('capy')} to sync these changes.`);
+    }
+
+    if (!this.terse) {
+      const { printExpiryWarnings } = await import('./connectors/shared');
+      printExpiryWarnings();
     }
     process.exit(0);
   }
