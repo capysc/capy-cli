@@ -49,9 +49,9 @@
   },
   "devDependencies": {
     "@types/inquirer": "^9.0.0",
-    "@types/node": "^20.0.0",
+    "@types/node": "^25.9.1",
     "@types/proper-lockfile": "^4.1.4",
-    "typescript": "^5.0.0"
+    "typescript": "^6.0.3"
   },
   "license": "AGPL-3.0-only",
   "engines": {
