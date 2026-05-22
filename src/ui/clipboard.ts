@@ -40,7 +40,7 @@ async function copyToClipboard(text: string): Promise<boolean> {
  * presses any key.
  */
 export async function promptCopyToClipboard(text: string, indent = '  '): Promise<void> {
-  if (!process.stdin.isTTY) return;
+  if (!process.stdin.isTTY || process.env.CI) return;
 
   process.stdout.write(`${indent}${DIM('Press')} ${B('c')} ${DIM(`to copy, or any other key to continue...`)} `);
 
