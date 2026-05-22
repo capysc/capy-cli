@@ -13,7 +13,7 @@ jobs:
   bump:
     # Skip pre-releases — they shouldn't push to the stable tap.
     if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
-    runs-on: ubuntu-latest
+    runs-on: latchkey-small
     steps:
       # npm sometimes lags a release event by a few seconds. Give it a
       # breather before brew bump-formula-pr fetches the tarball.
