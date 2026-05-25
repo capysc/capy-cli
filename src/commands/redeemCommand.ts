@@ -5,6 +5,8 @@ import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
 import { wrapAndSaveMasterKey, hasOrgKey } from '../crypto/keyResolver';
 import { FileManager } from '../files/fileManager';
+import { isMembershipRevokedError } from '../errors/membershipRevoked';
+import { cleanupOrgData } from '../cleanup/orgCleanup';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -108,11 +110,14 @@ export class RedeemCommand {
       const result = await serviceClient.coDecrypt(orgId, ciphertext, notAfter);
       innerBlob = result.plaintext;
     } catch (err: any) {
-      // Co-decrypt during redeem can fail for many reasons — expired invite,
-      // tampered code, network blip, KMS hiccup. The wrapped M (if any) is
-      // useless without the server anyway, so we never delete keys here. The
-      // user can retry; if they were genuinely kicked, the next normal `capy`
-      // run will surface the explicit MEMBERSHIP_REVOKED signal.
+      // Co-decrypt can fail for many reasons — expired invite, tampered
+      // code, network blip, KMS hiccup. Only when the server explicitly
+      // tags the failure with code=MEMBERSHIP_REVOKED do we clean up the
+      // local wrapped M for this user in this org. Every other failure
+      // leaves local state intact so the user can retry.
+      if (isMembershipRevokedError(err)) {
+        cleanupOrgData(orgId, userId);
+      }
       console.error(`\nCo-decryption failed: ${err.message}`);
       console.error('You may not be a member of this organization, or the invite has been revoked.');
       process.exit(1);
