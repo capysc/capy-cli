@@ -458,14 +458,20 @@ async function rotate(
   const nextFp = fingerprint(next.value);
 
   if (nextFp === previous.fingerprint) {
-    // Unexpected — logout+login should always produce a fresh key. If we hit
-    // this, something is very off (config caching, clock skew, multi-section
-    // confusion). Bail rather than silently write the same value.
-    console.error('\n  Even after `stripe logout && stripe login`, Stripe produced the same key.');
-    console.error('  This is unexpected — try running the two commands manually:');
-    console.error(`    ${B(`stripe logout --project-name=${sectionName}`)}`);
-    console.error(`    ${B(`stripe login --project-name=${sectionName}`)}`);
-    console.error(`  Then re-run ${B(`capy rotate ${varName}`)}.`);
+    // Stripe is deduplicating: `stripe login` after a recent successful pairing
+    // returns the same restricted key rather than minting a new one. There's no
+    // CLI-side workaround — the dedup happens on Stripe's side. The user can
+    // wait a few minutes and retry, or revoke the existing key in the dashboard
+    // to force the next login to issue a fresh one.
+    const dashUrl = `https://dashboard.stripe.com/${mode === 'live' ? '' : 'test/'}apikeys`;
+    console.error('\n  Stripe returned the same key — no rotation happened.');
+    console.error('');
+    console.error('  This usually means a rotation happened very recently and Stripe is');
+    console.error('  deduplicating the pairing. Two ways to recover:');
+    console.error('    1. Wait a few minutes and re-run `capy rotate`.');
+    console.error(`    2. Revoke the existing key at ${dashUrl}`);
+    console.error('       and re-run `capy rotate` — Stripe will issue a fresh one.');
+    console.error('');
     process.exit(1);
   }
 
