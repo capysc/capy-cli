@@ -242,6 +242,10 @@ const deploy = program
   .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
   .option('--edit', 're-enter the picker for an existing connector target')
   .option('--connect', 'force connector mode (skip the token+docs path)')
+  .option('--platform <id>', 'skip platform picker (token+docs flow; e.g. github-actions, vercel)')
+  .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
+  .option('--scope <scope>', 'gh-actions: "repo" or "env"')
+  .option('--env-name <name>', 'gh-actions: env name when --scope env')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     // Top-level program also defines --dry-run; merge globals so either
     // `capy --dry-run deploy ...` or `capy deploy ... --dry-run` works.
@@ -262,7 +266,13 @@ const deploy = program
     // Default path: existing token+docs picker. It auto-routes to the
     // connector flow when the user picks a connector-enabled platform.
     const { DeployCommand } = await import('./commands/deployTokenCommand');
-    const c = new DeployCommand();
+    const c = new DeployCommand(undefined, false, {
+      platform: options.platform,
+      mode: options.mode,
+      scope: options.scope,
+      envName: options.envName,
+      yes: !!options.yes,
+    });
     await c.execute();
   });
 

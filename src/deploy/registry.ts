@@ -46,12 +46,6 @@ export const PLANNED_ADAPTERS: PlannedAdapter[] = [
     description: 'Deploys via railway up',
     fallbackHint: 'capy export | railway variables set --batch',
   },
-  {
-    id: 'gh-actions',
-    label: 'GitHub Actions (secrets only)',
-    description: 'Push to repo/environment secrets; no deploy',
-    fallbackHint: 'capy export --format=json | gh secret set -e <env> -f -',
-  },
 ];
 
 export function getAdapter(id: string): DeployAdapter | null {

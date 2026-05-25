@@ -241,9 +241,20 @@ program
 const deploy = program
   .command('deploy')
   .description('Set up secret delivery to a deployment platform')
-  .action(async () => {
+  .option('--platform <id>', 'skip platform picker (e.g. github-actions, vercel)')
+  .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
+  .option('--scope <scope>', 'gh-actions: "repo" or "env"')
+  .option('--env-name <name>', 'gh-actions: env name when --scope env')
+  .option('-y, --yes', 'skip confirmation prompts (overwrite existing secrets)')
+  .action(async (options) => {
     const { DeployCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployCommand(process.env.CAPY_API_URL, true);
+    const cmd = new DeployCommand(process.env.CAPY_API_URL, true, {
+      platform: options.platform,
+      mode: options.mode,
+      scope: options.scope,
+      envName: options.envName,
+      yes: !!options.yes,
+    });
     await cmd.execute();
   });
 
