@@ -148,6 +148,8 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy status`](https://docs.capy.sc/cli/status) | Show drift between local, pinned, and remote. |
 | [`capy push`](https://docs.capy.sc/cli/push) | Push local changes without pulling. |
 | [`capy deploy`](https://docs.capy.sc/cli/deploy) | Generate a deploy token and walk through platform setup. |
+| [`capy connect <provider>`](https://docs.capy.sc/cli/connect) | Pull a credential from a provider into `.env` (Stripe today). |
+| [`capy rotate [var]`](https://docs.capy.sc/cli/rotate) | Rotate a managed credential. |
 | [`capy invite <email>`](https://docs.capy.sc/cli/invite) | Invite a teammate. |
 | [`capy redeem <code>`](https://docs.capy.sc/cli/redeem) | Redeem an invite code. |
 | [`capy kick <email>`](https://docs.capy.sc/cli/kick) | Remove a teammate. |
@@ -160,6 +162,8 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy info`](https://docs.capy.sc/cli/info) | Show current session info. |
 | [`capy logout`](https://docs.capy.sc/cli/logout) | Clear local session. |
 | [`capy cleanup`](https://docs.capy.sc/cli/cleanup) | Remove git hooks and local state. |
+
+> **Stripe live mode** is opt-in via `--live` and requires per-action account-id confirmation. See [docs.capy.sc/cli/connect](https://docs.capy.sc/cli/connect).
 
 ## Syncing
 

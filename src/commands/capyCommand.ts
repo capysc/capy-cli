@@ -130,6 +130,8 @@ export class CapyCommand {
       this.assertBranchInvariant(projectState.activeBranch);
 
       await this.syncProject(projectState);
+      const { printExpiryWarnings } = await import('./connectors/shared');
+      printExpiryWarnings();
     } catch (error: any) {
       this.debugError('execute caught error', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');

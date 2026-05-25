@@ -184,6 +184,10 @@ export class EditCommand {
     };
 
     const screen = new EditScreen();
+    const printExpiryAfter = async () => {
+      const { printExpiryWarnings } = await import('./connectors/shared');
+      printExpiryWarnings();
+    };
     await screen.run(state, {
       saveLocalEdits: async (edits: Record<string, string>) => {
         // Same flow as the conflict-resolution "commit local" action and
@@ -242,5 +246,6 @@ export class EditCommand {
         });
       },
     });
+    await printExpiryAfter();
   }
 }
