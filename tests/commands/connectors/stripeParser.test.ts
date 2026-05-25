@@ -5,6 +5,7 @@ import {
   looksStripey,
   rankStripeVars,
   validateVarName,
+  normalizeProjectName,
 } from '../../../src/commands/connectors/stripe';
 
 describe('parseStripeConfig', () => {
@@ -255,5 +256,39 @@ describe('validateVarName', () => {
 
   test('trims whitespace before validating', () => {
     expect(validateVarName('  STRIPE_SECRET_KEY  ')).toBe(true);
+  });
+});
+
+describe('normalizeProjectName', () => {
+  test('passes through clean names unchanged', () => {
+    expect(normalizeProjectName('acornpack prod')).toBe('acornpack prod');
+    expect(normalizeProjectName('default')).toBe('default');
+    expect(normalizeProjectName('rocket-rides')).toBe('rocket-rides');
+  });
+
+  test('strips single quotes', () => {
+    expect(normalizeProjectName(`'acornpack prod'`)).toBe('acornpack prod');
+  });
+
+  test('strips double quotes', () => {
+    expect(normalizeProjectName(`"acornpack prod"`)).toBe('acornpack prod');
+  });
+
+  test('strips mixed nested quotes (the cascade case)', () => {
+    expect(normalizeProjectName(`"'acornpack prod'"`)).toBe('acornpack prod');
+    expect(normalizeProjectName(`'"acornpack prod"'`)).toBe('acornpack prod');
+  });
+
+  test('strips backslashes from escape-stacked names', () => {
+    expect(normalizeProjectName(`\\"'acornpack prod'\\"`)).toBe('acornpack prod');
+    expect(normalizeProjectName(`"\\"'acornpack prod'\\""`)).toBe('acornpack prod');
+  });
+
+  test('trims surrounding whitespace', () => {
+    expect(normalizeProjectName('  acornpack prod  ')).toBe('acornpack prod');
+  });
+
+  test('preserves inner whitespace and hyphens', () => {
+    expect(normalizeProjectName('"my cool-project name"')).toBe('my cool-project name');
   });
 });

@@ -167,6 +167,23 @@ function runStripeLogout(projectName?: string): boolean {
   return result.status === 0;
 }
 
+/**
+ * Strip quote and backslash characters from a section name before re-feeding it
+ * to `stripe login --project-name=`.
+ *
+ * Why: stripe writes section headers in TOML, which escapes any quotes in the
+ * name (`["my proj"]` for a name containing a double-quote). If we read that
+ * section's parsed name back out and pass it as `--project-name=` to the next
+ * login, the name now contains literal quote chars — stripe writes a NEW
+ * section with those quotes in the name (further escaped). Each rotation
+ * stacks another layer, producing dozens of duplicate sections for the same
+ * account_id. Normalizing to alphanumerics + spaces + dashes/underscores
+ * breaks the cycle.
+ */
+export function normalizeProjectName(name: string): string {
+  return name.replace(/[\\'"]/g, '').trim();
+}
+
 async function pickAccount(sections: StripeConfigSection[], requested?: string): Promise<StripeConfigSection> {
   if (requested) {
     const match = sections.find(
@@ -417,10 +434,16 @@ async function rotate(
   // a no-op (already paired), and the pre/post comparison would falsely flag
   // it as "no change." Comparing to previous.fingerprint catches both
   // capy-driven and externally-driven rotations.
+  // Find the section by account_id, then normalize the name to strip any
+  // quote/backslash chars that may have accumulated from prior rotations
+  // (see normalizeProjectName for the full why). If normalization produces
+  // an empty string, fall back to "default" — never pass garbage to stripe.
   const sectionName = (() => {
     const sections = readStripeConfig();
     const byAccount = previous.account_id ? sections.find((s) => s.account_id === previous.account_id) : undefined;
-    return byAccount?.name ?? 'default';
+    if (!byAccount) return 'default';
+    const normalized = normalizeProjectName(byAccount.name);
+    return normalized.length > 0 ? normalized : 'default';
   })();
 
   console.log('');
