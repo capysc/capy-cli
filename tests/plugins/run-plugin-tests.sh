@@ -5,23 +5,19 @@
 # share state, so they run in parallel and are aggregated at the end. Each
 # plugin self-gates on credentials — a missing-creds skip is not a failure.
 #
-# Usage:
-#   ./run-plugin-tests.sh                  # all plugins, in parallel
-#   ./run-plugin-tests.sh cloudflare-workers          # named subset, parallel
-#   ./run-plugin-tests.sh cloudflare-workers cloudflare-pages
+# Credentials are sourced from the inherited environment. Manage them in Capy
+# (the live tier needs CF_API_TOKEN, CF_ACCOUNT_ID, VERCEL_TOKEN, …) and
+# invoke this runner under `capy run`, which decrypts them at runtime:
 #
-# Optional creds: source from packages/cli/.env.plugin-tests if present.
+#   capy run -- ./tests/plugins/run-plugin-tests.sh
+#   capy run -- ./tests/plugins/run-plugin-tests.sh cloudflare-workers
+#   capy run -- ./tests/plugins/run-plugin-tests.sh cloudflare-workers cloudflare-pages
+#
+# No plaintext credential files are read from disk by design — dogfooding the
+# "never store plaintext anywhere in the project" stance Capy exists to enable.
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-
-# Auto-source local credentials file if present (gitignored).
-if [ -f .env.plugin-tests ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env.plugin-tests
-  set +a
-fi
 
 # Build first — plugin tests run against dist/.
 if [ ! -f dist/index.js ] || [ src/index.ts -nt dist/index.js ]; then

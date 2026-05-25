@@ -37,8 +37,15 @@ live tier prints `[skipped — set $VAR1, $VAR2 to run]`.
 
 ## Credentials
 
-Set env vars before invoking. Either export them in your shell or place them
-in `packages/cli/.env.plugin-tests` (gitignored — see below).
+Plugin tests read credentials from the inherited environment. Manage them in
+Capy and invoke the runner under `capy run`, which decrypts at runtime:
+
+```
+capy run -- ./tests/plugins/run-plugin-tests.sh [plugin-name …]
+```
+
+No plaintext credential file is read from disk — Capy is the source of truth
+for these secrets, by design.
 
 ### cloudflare-workers
 
