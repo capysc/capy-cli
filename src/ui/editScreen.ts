@@ -464,7 +464,7 @@ export class EditScreen {
       const dirtyHint = dirty > 0
         ? `${DIM} · ${RESET}${BOLD}c${RESET}${DIM} commit & push (${dirty})${RESET}`
         : '';
-      lines.push(`${m}${DIM}↑↓ navigate · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${dirtyHint}${DIM} · ${RESET}${BOLD}q${RESET}${DIM} quit${RESET}`);
+      lines.push(`${m}${DIM}↑↓ navigate · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}r${RESET}${DIM} reveal · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${dirtyHint}${DIM} · ${RESET}${BOLD}q${RESET}${DIM} quit${RESET}`);
     }
 
     if (this.statusMessage) {
