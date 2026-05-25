@@ -28,6 +28,8 @@ import {
   KeyServiceOps,
 } from '../crypto/keyResolver';
 import { writeKeepCache, fetchSecretsWithCache } from '../config/globalConfig';
+import { isMembershipRevokedError } from '../errors/membershipRevoked';
+import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -808,28 +810,16 @@ export class CapyCommand {
   /**
    * Clear local UX state after a CONFIRMED kick from the org.
    *
-   * Strict policy:
-   *   - NEVER delete the wrapped master key (`~/.capy/orgs/<orgId>/users/<userId>/key.enc`)
-   *     or the org dir. The wrapped M is opaque without the server's KMS
-   *     co-decrypt — keeping it on disk has zero security cost, and a single
-   *     misclassified failure that triggered a delete would be irrecoverable
-   *     without a seed phrase.
-   *   - The ONLY destructive action is removing the local `keep.lock` so the
-   *     user isn't left staring at a project pointer for an org they're not in.
+   * Implementation lives in `../cleanup/orgCleanup.ts` so `redeemCommand`
+   * can use the same destructive logic on a confirmed-kick co-decrypt
+   * failure. The gate predicate
+   * (`../errors/membershipRevoked.ts:isMembershipRevokedError`) MUST be
+   * checked at every call site before invoking — bare 403s (token-scope
+   * mismatch, transient WorkOS, route-level rechecks, branch RBAC) must
+   * leave local state intact.
    *
-   * Callers MUST gate this on a server-confirmed kick signal
-   * (`err.details?.code === 'MEMBERSHIP_REVOKED'`), never on a bare 403 status —
-   * any number of unrelated server / network conditions surface as 403.
+   * No method here — call sites import `cleanupOrgData` directly.
    */
-  private cleanupOrgData(_orgId: string, _userId?: string): void {
-    const keepPath = join(process.cwd(), 'keep.lock');
-    if (existsSync(keepPath)) {
-      try {
-        unlinkSync(keepPath);
-        console.log('  Removed keep.lock (no longer a member).');
-      } catch {}
-    }
-  }
 
   private displayHeader(projectName: string, orgName: string, userName: string, branch?: string): void {
     const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
@@ -1007,17 +997,12 @@ export class CapyCommand {
         this.keyServiceOps(),
       );
     } catch (err: any) {
-      // Only clean up local state on a CONFIRMED kick. The server tags the
-      // membership-revoked 403 with code: 'MEMBERSHIP_REVOKED'; a bare 403
-      // (token scope mismatch, transient WorkOS hiccup, etc.) must NOT trigger
-      // any cleanup. cleanupOrgData itself is also strictly non-destructive
-      // toward keys — see its docstring.
-      if (
-        err instanceof CapyError
-        && err.code === ERROR_CODES.PERMISSION_DENIED
-        && err.details?.code === 'MEMBERSHIP_REVOKED'
-      ) {
-        this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+      // Confirmed kick → destructive local cleanup (wraps key, user dir,
+      // project caches, keep.lock). Any other error path — bare 403,
+      // network blip, etc. — leaves local state untouched. The single
+      // gate predicate lives in errors/membershipRevoked.ts.
+      if (isMembershipRevokedError(err)) {
+        cleanupOrgData(projectState.organizationId!, projectState.userId);
       }
       throw err;
     }
@@ -1146,18 +1131,17 @@ export class CapyCommand {
       this.debugError('remote fetch failed', err);
       // 403 may be one of two different cases:
       //   (a) User was kicked from the org — confirmed by an explicit
-      //       `code: 'MEMBERSHIP_REVOKED'` from the server. Clear keep.lock
-      //       (cleanupOrgData is non-destructive toward the wrapped M).
+      //       `code: 'MEMBERSHIP_REVOKED'` from the server. Destructive
+      //       cleanup runs (key.enc, user dir, project caches, keep.lock).
       //   (b) Anything else — branch-level denial, WorkOS hiccup, token-scope
       //       mismatch, route-handler 403. DO NOT cleanup. The wrapped M and
       //       all other local state stay intact; the user can retry.
       if (err instanceof CapyError) {
         const status = err.details?.status;
         if (status === 403) {
-          const kicked = err.details?.code === 'MEMBERSHIP_REVOKED';
-          if (kicked) {
+          if (isMembershipRevokedError(err)) {
             fetchSpinner.fail('Access denied — you have been removed from this organization.');
-            this.cleanupOrgData(projectState.organizationId!, projectState.userId);
+            cleanupOrgData(projectState.organizationId!, projectState.userId);
             throw err;
           }
           // Branch-level denial: user is still in the org, just can't read THIS branch.
