@@ -30,6 +30,13 @@ export interface ConnectorModule {
   name: string;
   description: string;
   /**
+   * Set when rotating runs an interactive auth step the user must complete by
+   * hand (e.g. Stripe shells out to `stripe login`, which opens a browser).
+   * Surfaced as a leading "Auth" stop in the rotate plan so the user knows a
+   * manual hand-off is coming. Omit for providers that rotate unattended.
+   */
+  requiresAuth?: boolean;
+  /**
    * Synchronous pre-check that runs before any auth or network. Use to bail
    * early on missing local dependencies (e.g. provider CLI not installed) so
    * we don't waste a user's OAuth round-trip on a request that can't succeed.

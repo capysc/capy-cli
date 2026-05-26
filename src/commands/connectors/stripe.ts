@@ -514,6 +514,7 @@ async function rotate(
 export const stripeConnector: ConnectorModule = {
   name: 'stripe',
   description: 'Stripe API key (test or live, restricted)',
+  requiresAuth: true, // rotate shells out to `stripe login` (browser flow)
   precheck: ensureStripeCliInstalled,
   connect,
   rotate,

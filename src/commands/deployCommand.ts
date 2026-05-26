@@ -516,6 +516,65 @@ export async function deployRemove(
   return 0;
 }
 
+/**
+ * Resolve which deploy target to use, setting one up interactively if needed —
+ * but WITHOUT deploying. This is the side-effect-free "resolve" step callers
+ * like `capy rotate` run before showing a plan: it guarantees a configured
+ * target exists (running the picker + saving to `.capy/deploy.json` when none
+ * does) and returns it, so the plan can name a real destination. The actual
+ * deploy happens later via `deployCommand(target.name, …)`.
+ *
+ * Returns null only when resolution can't proceed (no keep.lock, or the user
+ * cancels). Requires a TTY for the picker; callers in non-interactive contexts
+ * should pre-resolve via a target name instead.
+ */
+export async function ensureDeployTarget(
+  cwd: string = process.cwd(),
+): Promise<TargetConfig | null> {
+  const existing = listTargets(cwd);
+  if (existing.length === 1) return existing[0];
+
+  const keep = readKeep(cwd);
+  if (!keep) {
+    console.error(
+      `No keep.lock in ${basename(cwd)}. Run ${B('capy')} here first to sync.`,
+    );
+    return null;
+  }
+
+  if (existing.length === 0) {
+    const target = await runPicker(cwd, keep);
+    upsertTarget(cwd, target);
+    console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
+    return target;
+  }
+
+  // Multiple saved targets — pick one (or set up a new one).
+  const ans = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'name',
+      message: 'Which deploy target?',
+      theme: LIST_THEME,
+      choices: [
+        ...existing.map((t) => ({
+          name: `${t.name}  ${DIM(`(${t.kind}, branch=${t.branch})`)}`,
+          value: t.name,
+        })),
+        new inquirer.Separator() as any,
+        { name: '+ new target', value: '__new__' },
+      ],
+    } as any,
+  ]);
+  if (ans.name === '__new__') {
+    const target = await runPicker(cwd, keep);
+    upsertTarget(cwd, target);
+    console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
+    return target;
+  }
+  return existing.find((t) => t.name === ans.name) ?? null;
+}
+
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
 
 export async function deployCommand(

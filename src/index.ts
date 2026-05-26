@@ -591,12 +591,15 @@ program
   .description('Rotate a managed credential previously set up via `capy connect`')
   .option('--all', 'rotate every managed credential in this project')
   .option('--no-push', 'update .env only; do not push to Capy')
+  .option('-y, --yes', 'skip prompts; run rotate + push + deploy unattended (for CI/automation)')
+  .option('--skip-prompts', 'alias for --yes')
   .action(async (varName, options) => {
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand();
     await cmd.execute(varName, {
       all: options.all,
       noPush: options.push === false,
+      skipPrompts: !!(options.yes || options.skipPrompts),
     });
   });
 

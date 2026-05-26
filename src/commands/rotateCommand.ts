@@ -9,8 +9,66 @@ import { ConnectCommand, confirmLiveAction } from './connectCommand';
 import { loadProvider, listProviders, RotateOpts } from './connectors/registry';
 import { ProjectManager } from '../core/projectManager';
 import { ConnectorMetadata, KeepFile } from '../types/index';
+import { TargetConfig } from '../deploy/adapter';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
+const CYAN = (s: string) => `\x1b[36m${s}\x1b[0m`;
+const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+interface PlanStop {
+  label: string;
+  detail: string;
+  /**
+   * A manual, user-driven stop (e.g. an interactive `stripe login`, or deploy
+   * connector setup). Any track touching a manual stop — leaving it or
+   * arriving at it — is drawn dotted, so the diagram visually separates "you
+   * do this by hand" from the solid run of steps capy performs on its own.
+   */
+  manual?: boolean;
+  /**
+   * An unresolved stop — a blank in the plan. Rendered dimmed with a hollow
+   * placeholder node so the user sees exactly what still needs an answer.
+   * Resolution (selectors / agent needs-input) fills these before the Y/N.
+   */
+  blank?: boolean;
+}
+
+/**
+ * Render the rotation plan as a vertical train-stop diagram: each stage is a
+ * station (● intermediate, ○ terminal) joined by track, with a dimmed
+ * one-line description. A track segment is dotted (┊) when either station it
+ * connects is manual, else solid (│). It's a confirmation aid — the route the
+ * rotation will travel — not a progress bar; the ✓ lines printed during
+ * execution report what actually happened.
+ */
+function renderRotationPlan(stops: PlanStop[]): void {
+  const width = Math.max(...stops.map((s) => s.label.length));
+  console.log('');
+  console.log(`  ${B('Rotation plan')}`);
+  console.log('');
+  stops.forEach((s, i) => {
+    const last = i === stops.length - 1;
+    const node = s.blank ? DIM('◌') : last ? CYAN('○') : CYAN('●');
+    const label = s.blank ? DIM(s.label.padEnd(width)) : B(s.label.padEnd(width));
+    console.log(`  ${node}  ${label}   ${DIM(s.detail)}`);
+    if (!last) {
+      const dotted = s.manual || stops[i + 1].manual;
+      console.log(`  ${DIM(dotted ? '┊' : '│')}`);
+    }
+  });
+  console.log('');
+}
+
+/** One-line description of how a configured target ships, for the Deploy stop. */
+function describeDeploy(t: TargetConfig): string {
+  const mode = t.mode ?? 'direct';
+  if (mode === 'ci') {
+    const base = t.gitBaseBranch ? ` against ${t.gitBaseBranch}` : '';
+    return `open a deploy PR for ${t.name}${base} (CI ships on merge)`;
+  }
+  return `ship directly to ${t.name}`;
+}
 
 export class RotateCommand {
   private devMode: boolean;
@@ -19,7 +77,10 @@ export class RotateCommand {
     this.devMode = devMode;
   }
 
-  async execute(varName: string | undefined, opts: RotateOpts & { all?: boolean }): Promise<void> {
+  async execute(
+    varName: string | undefined,
+    opts: RotateOpts & { all?: boolean; skipPrompts?: boolean },
+  ): Promise<void> {
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
     const branch = pm.readActiveBranch();
@@ -40,7 +101,7 @@ export class RotateCommand {
         console.error(`  Connect one with ${B('capy connect <provider>')}, or run ${B('capy rotate')} to set up an existing var.\n`);
         process.exit(1);
       }
-      await this.rotateMany(managed, opts);
+      await this.planAndRotate(managed, branch, opts);
       return;
     }
 
@@ -87,7 +148,7 @@ export class RotateCommand {
       return;
     }
 
-    await this.rotateMany([target], opts);
+    await this.planAndRotate([target], branch, opts);
   }
 
   /**
@@ -142,7 +203,7 @@ export class RotateCommand {
   private async rotateMany(
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
     opts: RotateOpts & { all?: boolean },
-  ): Promise<void> {
+  ): Promise<string[]> {
     let toRotate = targets;
 
     if (this.devMode) {
@@ -235,6 +296,148 @@ export class RotateCommand {
       }
       console.log('');
     }
+
+    return succeeded;
+  }
+
+  /**
+   * Autorotation entrypoint for the managed-key path, modelled as
+   * resolve → confirm → apply (see docs/rotate-deploy-agent-flow.md):
+   *
+   *   Resolve — gather every input the journey needs until the train-stop has
+   *             no blanks. Side-effect-free. The deploy integration is set up
+   *             inline here (picker), NOT as a confirmed action.
+   *   Confirm — render the complete train-stop, take one Y/N.
+   *   Apply   — rotate → push → deploy. Deploy is the automatic terminal step,
+   *             never a separate, optional action.
+   *
+   * --no-push is local-only with nothing to ship, so it skips the diagram and
+   * rotates directly.
+   */
+  private async planAndRotate(
+    targets: Array<{ varName: string; connector: ConnectorMetadata }>,
+    branch: string,
+    opts: RotateOpts & { all?: boolean; skipPrompts?: boolean },
+  ): Promise<void> {
+    if (opts.noPush) {
+      await this.rotateMany(targets, opts);
+      return;
+    }
+
+    const isTTY = !!process.stdout.isTTY;
+    const deployable = !this.devMode; // dev binary never ships to real vendors
+
+    // ── Resolve: deploy integration (gate 3) ────────────────────────────────
+    // Branch (gate 1) is the active branch; the credential connector (gate 2)
+    // is already managed by the time we reach here (unmanaged vars are promoted
+    // in execute()). The remaining gate is the deploy integration. Resolving it
+    // is side-effect-free — the picker writes config to .capy/deploy.json; no
+    // deploy happens until Apply.
+    let deployTarget: TargetConfig | null = null;
+    if (deployable) {
+      const { listTargets } = await import('../deploy/config');
+      if (opts.skipPrompts) {
+        // Unattended (agent apply / CI): can't drive the picker. Resolve only
+        // the unambiguous single-target case; otherwise refuse before doing
+        // anything — the journey can't complete, so don't half-run it.
+        const cfg = listTargets(process.cwd());
+        if (cfg.length === 1) {
+          deployTarget = cfg[0];
+        } else {
+          console.error(
+            `\n  Can't auto-resolve a deploy target (${cfg.length === 0 ? 'none configured' : `${cfg.length} configured`}).`,
+          );
+          console.error(`  Run ${B('capy deploy')} to configure one, then retry.\n`);
+          process.exit(1);
+        }
+      } else if (isTTY) {
+        // Interactive: ensure a target exists, setting one up inline if needed.
+        const { ensureDeployTarget } = await import('./deployCommand');
+        deployTarget = await ensureDeployTarget(process.cwd());
+        if (!deployTarget) {
+          console.log('\n  Cancelled.\n');
+          return;
+        }
+      }
+      // else: non-TTY without --skip-prompts → leave unresolved; we rotate +
+      // push only and never ship unattended (deployTarget stays null).
+    }
+
+    // ── Build the (now fully resolved) train-stop ───────────────────────────
+    const providers = Array.from(new Set(targets.map((t) => t.connector.provider)));
+    const providerLabel = providers.map(cap).join(', ');
+    const rotateDetail =
+      targets.length === 1
+        ? `fetch a fresh key from ${providerLabel}`
+        : `fetch fresh keys for ${targets.length} credentials from ${providerLabel}`;
+
+    // Providers that hand off to an interactive login (Stripe → `stripe
+    // login`) get a leading, dotted "Auth" stop.
+    const authProviders: string[] = [];
+    for (const p of providers) {
+      const mod = await loadProvider(p);
+      if (mod.requiresAuth) authProviders.push(p);
+    }
+
+    const stops: PlanStop[] = [];
+    if (authProviders.length > 0) {
+      stops.push({
+        label: 'Auth',
+        detail: `authenticate with ${authProviders.map(cap).join(', ')} (requires manual user auth)`,
+        manual: true,
+      });
+    }
+    stops.push({ label: 'Rotate', detail: rotateDetail });
+    stops.push({ label: 'Push', detail: `encrypt + push to Capy (branch: ${branch})` });
+    if (deployable) {
+      stops.push(
+        deployTarget
+          ? { label: 'Deploy', detail: describeDeploy(deployTarget) }
+          : { label: 'Deploy', detail: 'no deploy target configured', blank: true },
+      );
+    }
+
+    renderRotationPlan(stops);
+
+    // ── Confirm: single Y/N gate ─────────────────────────────────────────────
+    // --skip-prompts skips it (the agent already confirmed in its own surface);
+    // non-TTY without the flag runs core rotate + push with no deploy.
+    if (!opts.skipPrompts && isTTY) {
+      const inquirer = (await import('inquirer')).default;
+      const { proceed } = await inquirer.prompt([
+        { type: 'confirm', name: 'proceed', message: 'Proceed?', default: true },
+      ]);
+      if (!proceed) {
+        console.log('\n  Cancelled.\n');
+        return;
+      }
+    }
+
+    // ── Apply ────────────────────────────────────────────────────────────────
+    const rotated = await this.rotateMany(targets, opts);
+    if (rotated.length === 0) return;
+
+    if (deployTarget) {
+      const { deployCommand } = await import('./deployCommand');
+      const code = await deployCommand(deployTarget.name, { yes: true });
+      if (code !== 0) process.exit(code);
+    } else if (deployable) {
+      // Non-TTY core-only path: rotated + pushed, deploy left to the user.
+      const { listTargets } = await import('../deploy/config');
+      this.deployHint(listTargets(process.cwd()).length);
+    }
+  }
+
+  /** Point the user at the right deploy command when we didn't ship for them. */
+  private deployHint(targetCount: number): void {
+    if (targetCount === 0) {
+      console.log(`  No deploy target yet. Set one up to ship the new value: ${B('capy deploy')}`);
+    } else if (targetCount > 1) {
+      console.log(`  Deploy the new value when you're ready: ${B('capy deploy <target>')}`);
+    } else {
+      console.log(`  Deploy the new value when you're ready: ${B('capy deploy')}`);
+    }
+    console.log('');
   }
 }
 
