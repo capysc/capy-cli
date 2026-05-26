@@ -157,9 +157,12 @@ export const vercelAdapter: DeployAdapter = {
   },
 
   async preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
-    // Order: config first, filesystem next, vendor checks last (binary,
-    // linkage, auth). Lets unit tests for config errors run without the
-    // vercel CLI installed.
+    // Order: config first, filesystem next, vendor checks (binary, linkage,
+    // auth) last. Two payoffs: config-error unit tests run without the vercel
+    // CLI installed, and — the important one — CI-mode targets short-circuit
+    // before the vendor checks entirely. In CI mode capy never touches the
+    // vercel CLI: it opens a keep.lock PR and the build runs in the user's CI
+    // on merge, so linkage/auth/binary are that pipeline's concern, not ours.
     const opts = config.options as Partial<VercelOptions>;
     if (!opts.projectDir) {
       return {
@@ -175,6 +178,24 @@ export const vercelAdapter: DeployAdapter = {
         reason: `project directory ${opts.projectDir} not found`,
       };
     }
+    if (config.vars.length === 0) {
+      return {
+        ok: false,
+        reason: 'vercel target has no vars to inline',
+        hint: 'Re-run with `--edit` and select at least one var.',
+      };
+    }
+
+    // CI mode stops here. The build — and therefore the vercel CLI, project
+    // linkage, and login — all live in the user's CI, which runs when the
+    // deploy PR merges. capy's only local job in CI mode is the keep.lock PR:
+    // no vercel binary, no `.vercel/project.json`, no auth required here.
+    if (config.mode === 'ci') {
+      return { ok: true };
+    }
+
+    // ── Direct mode only: capy runs `vercel build` + `vercel deploy` on this
+    // machine, so the vendor toolchain must be present. ─────────────────────
     // node_modules check, same logic as cfPages.
     const pkg = readPackageJson(projectDir);
     if (pkg) {
@@ -192,15 +213,6 @@ export const vercelAdapter: DeployAdapter = {
         };
       }
     }
-    if (config.vars.length === 0) {
-      return {
-        ok: false,
-        reason: 'vercel target has no vars to inline',
-        hint: 'Re-run with `--edit` and select at least one var.',
-      };
-    }
-    // Vendor checks last so config-error tests don't depend on vercel
-    // being installed.
     if (!which('vercel')) {
       return {
         ok: false,
@@ -212,21 +224,10 @@ export const vercelAdapter: DeployAdapter = {
           'Re-run `capy deploy` after install.',
       };
     }
-    // Linkage: either .vercel/project.json exists OR VERCEL_PROJECT_ID +
-    // VERCEL_ORG_ID are in env (CI). Either is sufficient.
-    const linked = readVercelProjectId(projectDir);
-    const hasEnvIds =
-      !!process.env.VERCEL_PROJECT_ID && !!process.env.VERCEL_ORG_ID;
-    if (!linked.projectId && !hasEnvIds) {
-      return {
-        ok: false,
-        reason: `${opts.projectDir} is not linked to a Vercel project`,
-        hint:
-          `Link the project once:\n` +
-          `  cd ${opts.projectDir} && vercel link\n` +
-          `Or in CI, set VERCEL_PROJECT_ID + VERCEL_ORG_ID + VERCEL_TOKEN.`,
-      };
-    }
+    // Linkage is NOT a preflight failure. An unlinked project is fixed inline
+    // at deploy time by running `vercel link` (see deploy() below), so we let
+    // that step handle it rather than refusing here.
+    //
     // Auth: either VERCEL_TOKEN env (CI) or `vercel whoami` works (local).
     if (!process.env.VERCEL_TOKEN) {
       const who = spawnSync('vercel', ['whoami'], {
@@ -305,15 +306,46 @@ export const vercelAdapter: DeployAdapter = {
       detail: `${Object.keys(filtered).length} build-time var(s)`,
     });
 
+    // Token passthrough, shared by link/build/deploy below.
+    const tokenArg: string[] = process.env.VERCEL_TOKEN
+      ? ['--token', process.env.VERCEL_TOKEN]
+      : [];
+
+    // Ensure the project is linked before building. CI mode never reaches here
+    // (it returned at the secretsOnly short-circuit). An unlinked project
+    // would make `vercel build` fail with "Project not found"; rather than
+    // erroring, link it now — interactively (stdio inherited) so the user
+    // picks the Vercel scope + project. Skipped when VERCEL_PROJECT_ID +
+    // VERCEL_ORG_ID are set, since the CLI is already pinned via env.
+    const linked = readVercelProjectId(projectDir);
+    const hasEnvIds =
+      !!process.env.VERCEL_PROJECT_ID && !!process.env.VERCEL_ORG_ID;
+    if (!linked.projectId && !hasEnvIds) {
+      const link = spawnSync('vercel', ['link', ...tokenArg], {
+        cwd: projectDir,
+        stdio: 'inherit',
+      });
+      if (link.status !== 0) {
+        steps.push({
+          label: 'vercel link',
+          status: 'fail',
+          detail: `linking failed — run \`cd ${opts.projectDir} && vercel link\` and retry`,
+        });
+        return { ok: false, steps };
+      }
+      steps.push({
+        label: 'vercel link',
+        status: 'ok',
+        detail: 'project linked',
+      });
+    }
+
     // Build env: capy vars + (passthrough) VERCEL_TOKEN/PROJECT/ORG. The
     // vercel CLI reads process.env directly — no extra plumbing needed.
     const buildEnv = { ...filtered };
     const isProd = opts.vercelEnv === 'production';
     const buildArgs = ['build'];
     if (isProd) buildArgs.push('--prod');
-    const tokenArg: string[] = process.env.VERCEL_TOKEN
-      ? ['--token', process.env.VERCEL_TOKEN]
-      : [];
     const buildR = await spawnAsync(
       'vercel',
       [...buildArgs, ...tokenArg],

@@ -725,99 +725,110 @@ export async function deployCommand(
   let originalBranch: string | null = null;
   let stashedOthers = false;
 
-  if (gitOk && keepLockDirty) {
-    const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
+  const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
 
-    if (mode === 'ci') {
-      // CI mode goal: deploy PR diff = ONLY the keep.lock change against the
-      // chosen target branch. NOT "current branch + everything ahead of
-      // target". To get there: lift the keep.lock change off the current
-      // tree, branch fresh from origin/<target>, replay keep.lock, commit.
-      originalBranch = currentBranch(cwd);
-      const baseBranch = target.gitBaseBranch ?? 'main';
+  if (gitOk && mode === 'ci') {
+    // CI mode ALWAYS opens its PR from a fresh branch cut off the target —
+    // never the user's current branch, and independent of whether keep.lock
+    // has uncommitted edits right now. (A clean keep.lock that's already
+    // *committed* on the current branch but ahead of origin/<base> is still a
+    // real deploy: the diff lives between the branches, not in the working
+    // tree.) Raising the PR from the current branch would drag everything that
+    // branch has ahead of the target into it; gating the branch cut on a dirty
+    // working tree would skip it entirely and do exactly that. So we branch
+    // unconditionally and replay the current keep.lock (committed or not).
+    originalBranch = currentBranch(cwd);
+    const baseBranch = target.gitBaseBranch ?? 'main';
 
-      // 1. Save the new keep.lock content so we can replay it after the
-      //    branch switch resets the working tree to origin/<base>'s state.
-      const keepLockContent = readFileSync(join(cwd, 'keep.lock'), 'utf-8');
+    // 1. Save the keep.lock content we want to ship before the branch switch
+    //    resets the working tree to origin/<base>'s state.
+    const keepLockContent = readFileSync(join(cwd, 'keep.lock'), 'utf-8');
 
-      // 2. Stash EVERYTHING (keep.lock + any WIP source) so the branch
-      //    switch is safe and we land on a clean origin/<base> tree.
-      const stash = stashAllChanges(cwd);
-      if (!stash.ok) {
-        console.error(`${RED('✗')} git stash: ${stash.error}`);
-        return 1;
-      }
-      stashedOthers = stash.stashed;
-
-      // 3. Fetch the target branch tip so we don't branch off a stale local
-      //    `origin/<base>`.
-      const fetched = fetchRemoteBranch(cwd, baseBranch);
-      if (!fetched.ok) {
-        console.error(
-          `${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`,
-        );
-        await unwindGitState(cwd, originalBranch, stashedOthers);
-        return 1;
-      }
-
-      // 4. Create deploy branch off origin/<base>. Sortable timestamp +
-      //    random suffix; flat (no slashes) so it lists cleanly.
-      const now = new Date();
-      const ts =
-        now.toISOString().slice(0, 10).replace(/-/g, '') +
-        '-' +
-        now.toISOString().slice(11, 19).replace(/:/g, '');
-      const rand = Math.random().toString(36).slice(2, 6);
-      const branchName = `capy-deploy-${ts}-${rand}`;
-      const co = checkoutNewBranchFrom(cwd, branchName, `origin/${baseBranch}`);
-      if (!co.ok) {
-        console.error(
-          `${RED('✗')} git checkout -b ${branchName} origin/${baseBranch}: ${co.error}`,
-        );
-        await unwindGitState(cwd, originalBranch, stashedOthers);
-        return 1;
-      }
-      console.log(`  ${GREEN('✓')} branch  ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
-      if (stashedOthers) {
-        console.log(
-          `  ${GREEN('✓')} stash   set aside working-tree changes (will restore)`,
-        );
-      }
-
-      // 5. Replay the keep.lock content onto the new branch. If the value
-      //    matches what's already at origin/<base>, the commit step below
-      //    will surface "nothing to commit" — which means the deploy is a
-      //    no-op (already deployed at this snapshot). Treat as success.
-      writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
-
-      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-      if (!commit.ok) {
-        console.error(`${RED('✗')} ${commit.error}`);
-        await unwindGitState(cwd, originalBranch, stashedOthers);
-        return 1;
-      }
-      console.log(`  ${GREEN('✓')} commit  ${msg}`);
-    } else {
-      // Direct mode: stay on current branch. Stash WIP except keep.lock so
-      // the deploy ships from HEAD + keep.lock, not WIP.
-      const stash = stashOtherChanges(cwd);
-      if (!stash.ok) {
-        console.error(`${RED('✗')} git stash: ${stash.error}`);
-        return 1;
-      }
-      stashedOthers = stash.stashed;
-      if (stashedOthers) {
-        console.log(
-          `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
-        );
-      }
-      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-      if (!commit.ok) {
-        console.error(`${RED('✗')} ${commit.error}`);
-        return 1;
-      }
-      console.log(`  ${GREEN('✓')} commit  ${msg}`);
+    // 2. Stash EVERYTHING (any keep.lock edit + WIP source) so the branch
+    //    switch is safe and we land on a clean origin/<base> tree.
+    const stash = stashAllChanges(cwd);
+    if (!stash.ok) {
+      console.error(`${RED('✗')} git stash: ${stash.error}`);
+      return 1;
     }
+    stashedOthers = stash.stashed;
+
+    // 3. Fetch the target branch tip so we don't branch off a stale local
+    //    `origin/<base>`.
+    const fetched = fetchRemoteBranch(cwd, baseBranch);
+    if (!fetched.ok) {
+      console.error(
+        `${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`,
+      );
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
+
+    // 4. Create deploy branch off origin/<base>. Sortable timestamp +
+    //    random suffix; flat (no slashes) so it lists cleanly.
+    const now = new Date();
+    const ts =
+      now.toISOString().slice(0, 10).replace(/-/g, '') +
+      '-' +
+      now.toISOString().slice(11, 19).replace(/:/g, '');
+    const rand = Math.random().toString(36).slice(2, 6);
+    const branchName = `capy-deploy-${ts}-${rand}`;
+    const co = checkoutNewBranchFrom(cwd, branchName, `origin/${baseBranch}`);
+    if (!co.ok) {
+      console.error(
+        `${RED('✗')} git checkout -b ${branchName} origin/${baseBranch}: ${co.error}`,
+      );
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} branch  ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
+    if (stashedOthers) {
+      console.log(
+        `  ${GREEN('✓')} stash   set aside working-tree changes (will restore)`,
+      );
+    }
+
+    // 5. Replay the keep.lock content onto the new branch.
+    writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
+
+    // 6. If the replayed keep.lock matches what's already at origin/<base>,
+    //    there's nothing to deploy — the target is already at this secrets
+    //    snapshot. Treat it as a clean no-op instead of opening an empty PR.
+    if (!hasKeepLockChanges(cwd)) {
+      console.log(
+        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — nothing to deploy.`,
+      );
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 0;
+    }
+
+    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} commit  ${msg}`);
+  } else if (gitOk && keepLockDirty) {
+    // Direct mode: stay on current branch. Stash WIP except keep.lock so
+    // the deploy ships from HEAD + keep.lock, not WIP.
+    const stash = stashOtherChanges(cwd);
+    if (!stash.ok) {
+      console.error(`${RED('✗')} git stash: ${stash.error}`);
+      return 1;
+    }
+    stashedOthers = stash.stashed;
+    if (stashedOthers) {
+      console.log(
+        `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
+      );
+    }
+    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} commit  ${msg}`);
   }
 
   // Decrypt the current branch — except in dry-run mode, where the adapter

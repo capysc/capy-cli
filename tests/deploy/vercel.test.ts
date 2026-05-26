@@ -94,19 +94,44 @@ describe('vercel — preflight', () => {
     expect(r.hint).toContain('bun install');
   });
 
-  test.if(HAS_VERCEL)('refuses when project not linked and no env IDs', async () => {
+  test.if(HAS_VERCEL)('does NOT refuse when project not linked (direct mode links inline at deploy)', async () => {
     const dir = join(ROOT, 'web');
     writePkg(dir, { next: '^16.0.0' });
     mkdirSync(join(dir, 'node_modules'), { recursive: true });
     const prevProj = process.env.VERCEL_PROJECT_ID;
     const prevOrg = process.env.VERCEL_ORG_ID;
+    const prevTok = process.env.VERCEL_TOKEN;
+    delete process.env.VERCEL_PROJECT_ID;
+    delete process.env.VERCEL_ORG_ID;
+    // Token set so the auth check short-circuits — we're asserting linkage is
+    // no longer a preflight gate, not exercising auth.
+    process.env.VERCEL_TOKEN = 'test-token-shortcircuits-whoami-check';
+    try {
+      const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT });
+      expect(r.ok).toBe(true);
+    } finally {
+      if (prevProj) process.env.VERCEL_PROJECT_ID = prevProj;
+      if (prevOrg) process.env.VERCEL_ORG_ID = prevOrg;
+      if (prevTok) process.env.VERCEL_TOKEN = prevTok;
+      else delete process.env.VERCEL_TOKEN;
+    }
+  });
+
+  test('CI mode skips all vendor checks (no binary, linkage, node_modules)', async () => {
+    // CI mode never invokes the vercel CLI — it only opens a keep.lock PR and
+    // the build runs in the user's CI on merge. So an unlinked project with no
+    // node_modules and (potentially) no vercel binary on PATH must still pass.
+    const dir = join(ROOT, 'web');
+    writePkg(dir, { next: '^16.0.0' });
+    const prevProj = process.env.VERCEL_PROJECT_ID;
+    const prevOrg = process.env.VERCEL_ORG_ID;
     delete process.env.VERCEL_PROJECT_ID;
     delete process.env.VERCEL_ORG_ID;
     try {
-      const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT });
-      expect(r.ok).toBe(false);
-      expect(r.reason).toContain('not linked');
-      expect(r.hint).toContain('vercel link');
+      const r = await vercelAdapter.preflight(baseTarget({ mode: 'ci' }), {
+        cwd: ROOT,
+      });
+      expect(r.ok).toBe(true);
     } finally {
       if (prevProj) process.env.VERCEL_PROJECT_ID = prevProj;
       if (prevOrg) process.env.VERCEL_ORG_ID = prevOrg;
