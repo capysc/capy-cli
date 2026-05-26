@@ -231,13 +231,11 @@ async function runPicker(
     ]);
     options = ans;
   } else if (adapter.id === 'vercel') {
-    // Vercel maps cleanly onto capy branches:
-    //   capy "production" branch  → Vercel production lane
-    //   any other capy branch     → Vercel preview lane, git branch
-    //                               named after the capy branch
-    // We don't know the capy branch yet at this point in the picker (it's
-    // asked next), so we use the existing value or the most-likely
-    // fallback. The branch prompt below will refine.
+    // Vercel is CI-only: capy opens the keep.lock PR and Vercel's git
+    // integration builds + deploys on merge. capy never runs the vercel CLI,
+    // so the only thing to capture here is which app this target maps to. The
+    // Vercel deployment lane (production vs preview) is decided by Vercel's own
+    // git config — which branch is the production branch — not by capy.
     const dirAns = await inquirer.prompt([
       {
         type: 'input',
@@ -247,53 +245,7 @@ async function runPicker(
         validate: (v: string) => (v.trim() ? true : 'required'),
       },
     ]);
-    const envAns = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'vercelEnv',
-        message: 'Which Vercel deployment lane?',
-        theme: LIST_THEME,
-        choices: [
-          {
-            name: `Preview  ${DIM('— each push gets a unique URL; can be tied to a git branch')}`,
-            value: 'preview',
-            short: 'preview',
-          },
-          {
-            name: `Production  ${DIM('— --prod, ships to your prod alias')}`,
-            value: 'production',
-            short: 'production',
-          },
-        ],
-        default: existingOpts.vercelEnv ?? 'preview',
-      } as any,
-    ]);
-    let gitBranchAns: { gitBranch?: string } = {};
-    if (envAns.vercelEnv === 'preview') {
-      // Capy branch is the natural default for the git branch here — this
-      // is the whole "natural fit" with vercel preview chains. Falls back
-      // to the current git branch when capy branches don't match git.
-      const gitNow = currentBranch(cwd) ?? '';
-      gitBranchAns = await inquirer.prompt([
-        {
-          type: 'input',
-          name: 'gitBranch',
-          message: `Associate preview with git branch (Enter to skip; tags the deployment under this branch in Vercel):`,
-          default:
-            existingOpts.gitBranch ??
-            (existing?.branch && existing.branch !== 'production'
-              ? existing.branch
-              : gitNow),
-        },
-      ]);
-    }
-    options = {
-      ...dirAns,
-      vercelEnv: envAns.vercelEnv,
-      ...(gitBranchAns.gitBranch && gitBranchAns.gitBranch.trim()
-        ? { gitBranch: gitBranchAns.gitBranch.trim() }
-        : {}),
-    };
+    options = { ...dirAns };
   } else if (adapter.id === 'cf-pages') {
     const ans = await inquirer.prompt([
       {
@@ -375,31 +327,39 @@ async function runPicker(
   // with turnkey git CI (Vercel, etc.) default to 'ci'; vendors where capy
   // is the deploy actor default to 'direct'. Existing target's mode wins
   // over the adapter default on subsequent picker passes.
-  const ciHelp =
-    adapter.defaultMode === 'ci'
-      ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
-      : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
-  const mode = (await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'mode',
-      message: 'How should this target deploy?',
-      theme: LIST_THEME,
-      choices: [
-        {
-          name: `Via CI/CD        ${DIM('— ' + ciHelp)}`,
-          value: 'ci',
-          short: 'ci',
-        },
-        {
-          name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
-          value: 'direct',
-          short: 'direct',
-        },
-      ],
-      default: existing?.mode ?? adapter.defaultMode,
-    } as any,
-  ])).mode as DeployMode;
+  //
+  // CI-only adapters (Vercel) have no direct mode at all — capy never runs
+  // their CLI — so skip the question and force 'ci'.
+  let mode: DeployMode;
+  if (adapter.ciOnly) {
+    mode = 'ci';
+  } else {
+    const ciHelp =
+      adapter.defaultMode === 'ci'
+        ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
+        : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
+    mode = (await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'mode',
+        message: 'How should this target deploy?',
+        theme: LIST_THEME,
+        choices: [
+          {
+            name: `Via CI/CD        ${DIM('— ' + ciHelp)}`,
+            value: 'ci',
+            short: 'ci',
+          },
+          {
+            name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
+            value: 'direct',
+            short: 'direct',
+          },
+        ],
+        default: existing?.mode ?? adapter.defaultMode,
+      } as any,
+    ])).mode as DeployMode;
+  }
 
   // 6b. CI mode only — type the git branch the deploy PR opens against.
   // Repos can have hundreds of branches, so a list picker is the wrong
@@ -559,6 +519,7 @@ export async function deployCommand(
         branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
         vars: adapter.varKind === 'build-time' ? cls.buildTime : cls.runtime,
         options: detected.options ?? {},
+        ...(adapter.ciOnly ? { mode: 'ci' as const } : {}),
       };
     } else {
       // Interactive but adapter is pre-chosen — handoff path from the
@@ -662,7 +623,9 @@ export async function deployCommand(
 
   renderPlan(target, adapter);
 
-  const mode: DeployMode = target.mode ?? 'direct';
+  // CI-only adapters (Vercel) always take the CI/PR path, even if a legacy or
+  // ad-hoc target carries a stale 'direct' mode — capy never runs their CLI.
+  const mode: DeployMode = adapter.ciOnly ? 'ci' : (target.mode ?? 'direct');
 
   // Preflight (fail BEFORE decryption).
   const preflight = await adapter.preflight(target, { cwd });

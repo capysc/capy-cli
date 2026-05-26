@@ -2,15 +2,11 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { spawnSync } from 'child_process';
 import { vercelAdapter } from '../../src/deploy/adapters/vercel';
 import { TargetConfig } from '../../src/deploy/adapter';
 
-// Tests that exercise vendor-side checks (linkage, auth) need the vercel
-// CLI on PATH — preflight terminates earlier with "vercel not found"
-// otherwise. CI doesn't have it, so gate. Config/filesystem-only tests
-// short-circuit before the binary check and don't need it.
-const HAS_VERCEL = spawnSync('which', ['vercel']).status === 0;
+// Vercel is CI-only: capy never runs the vercel CLI. There are no vendor-side
+// checks (binary, linkage, auth), so these tests need nothing on PATH.
 
 const ROOT = join(tmpdir(), `capy-vercel-adapter-${process.pid}`);
 
@@ -35,40 +31,41 @@ function writePkg(dir: string, deps: Record<string, string> = {}): void {
   );
 }
 
-function writeLink(dir: string, projectId: string, orgId: string): void {
-  mkdirSync(join(dir, '.vercel'), { recursive: true });
-  writeFileSync(
-    join(dir, '.vercel/project.json'),
-    JSON.stringify({ projectId, orgId, projectName: 'app' }),
-  );
-}
-
 const baseTarget = (overrides: Partial<TargetConfig> = {}): TargetConfig => ({
   name: 'vercel-test',
   kind: 'vercel',
   branch: 'production',
   vars: ['NEXT_PUBLIC_X', 'DATABASE_URL'],
-  options: { projectDir: 'web', vercelEnv: 'preview' },
+  options: { projectDir: 'web' },
+  mode: 'ci',
   ...overrides,
 });
 
+describe('vercel — adapter shape', () => {
+  test('is CI-only and needs no local vendor toolchain', () => {
+    expect(vercelAdapter.ciOnly).toBe(true);
+    expect(vercelAdapter.defaultMode).toBe('ci');
+    expect(vercelAdapter.requires.binaries).toEqual([]);
+  });
+});
+
 describe('vercel — detect', () => {
-  test('finds linked project in web/', async () => {
+  test('finds project in web/', async () => {
     const dir = join(ROOT, 'web');
     writePkg(dir, { next: '^16.0.0' });
-    writeLink(dir, 'prj_abc123def456', 'team_xyz');
     const r = await vercelAdapter.detect(ROOT);
     expect((r.options as any).projectDir).toBe('web');
     expect(r.summary).toContain('Next.js');
-    expect(r.summary).toContain('linked');
+    // CI-only: linkage is irrelevant, so it's not mentioned.
+    expect(r.summary).not.toMatch(/linked/i);
   });
 
-  test('finds unlinked project (package.json only)', async () => {
+  test('finds project from package.json build script', async () => {
     const dir = join(ROOT, 'web');
     writePkg(dir, { vite: '^5.0.0' });
     const r = await vercelAdapter.detect(ROOT);
     expect((r.options as any).projectDir).toBe('web');
-    expect(r.summary).toContain('NOT linked');
+    expect(r.summary).toContain('Vite');
   });
 
   test('returns empty when nothing detected', async () => {
@@ -84,130 +81,41 @@ describe('vercel — preflight', () => {
     expect(r.reason).toMatch(/project directory|not found/i);
   });
 
-  test('refuses when node_modules missing and deps declared', async () => {
-    const dir = join(ROOT, 'web');
-    writePkg(dir, { next: '^16.0.0' });
-    writeLink(dir, 'prj_x', 'team_y');
-    const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toContain('node_modules');
-    expect(r.hint).toContain('bun install');
-  });
-
-  test.if(HAS_VERCEL)('does NOT refuse when project not linked (direct mode links inline at deploy)', async () => {
-    const dir = join(ROOT, 'web');
-    writePkg(dir, { next: '^16.0.0' });
-    mkdirSync(join(dir, 'node_modules'), { recursive: true });
-    const prevProj = process.env.VERCEL_PROJECT_ID;
-    const prevOrg = process.env.VERCEL_ORG_ID;
-    const prevTok = process.env.VERCEL_TOKEN;
-    delete process.env.VERCEL_PROJECT_ID;
-    delete process.env.VERCEL_ORG_ID;
-    // Token set so the auth check short-circuits — we're asserting linkage is
-    // no longer a preflight gate, not exercising auth.
-    process.env.VERCEL_TOKEN = 'test-token-shortcircuits-whoami-check';
-    try {
-      const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT });
-      expect(r.ok).toBe(true);
-    } finally {
-      if (prevProj) process.env.VERCEL_PROJECT_ID = prevProj;
-      if (prevOrg) process.env.VERCEL_ORG_ID = prevOrg;
-      if (prevTok) process.env.VERCEL_TOKEN = prevTok;
-      else delete process.env.VERCEL_TOKEN;
-    }
-  });
-
-  test('CI mode skips all vendor checks (no binary, linkage, node_modules)', async () => {
-    // CI mode never invokes the vercel CLI — it only opens a keep.lock PR and
-    // the build runs in the user's CI on merge. So an unlinked project with no
-    // node_modules and (potentially) no vercel binary on PATH must still pass.
-    const dir = join(ROOT, 'web');
-    writePkg(dir, { next: '^16.0.0' });
-    const prevProj = process.env.VERCEL_PROJECT_ID;
-    const prevOrg = process.env.VERCEL_ORG_ID;
-    delete process.env.VERCEL_PROJECT_ID;
-    delete process.env.VERCEL_ORG_ID;
-    try {
-      const r = await vercelAdapter.preflight(baseTarget({ mode: 'ci' }), {
-        cwd: ROOT,
-      });
-      expect(r.ok).toBe(true);
-    } finally {
-      if (prevProj) process.env.VERCEL_PROJECT_ID = prevProj;
-      if (prevOrg) process.env.VERCEL_ORG_ID = prevOrg;
-    }
-  });
-
   test('refuses when zero vars', async () => {
     const dir = join(ROOT, 'web');
     writePkg(dir, { next: '^16.0.0' });
-    writeLink(dir, 'prj_x', 'team_y');
-    mkdirSync(join(dir, 'node_modules'), { recursive: true });
-    const prevTok = process.env.VERCEL_TOKEN;
-    process.env.VERCEL_TOKEN = 'test-token-shortcircuits-whoami-check';
-    try {
-      const r = await vercelAdapter.preflight(baseTarget({ vars: [] }), {
-        cwd: ROOT,
-      });
-      expect(r.ok).toBe(false);
-      expect(r.reason).toContain('no vars');
-    } finally {
-      if (prevTok) process.env.VERCEL_TOKEN = prevTok;
-      else delete process.env.VERCEL_TOKEN;
-    }
+    const r = await vercelAdapter.preflight(baseTarget({ vars: [] }), {
+      cwd: ROOT,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('no vars');
+  });
+
+  test('passes with no vendor setup — no binary, linkage, or node_modules', async () => {
+    // The whole point of CI-only: an unlinked project with no node_modules and
+    // no vercel CLI on PATH must still preflight clean. The build runs in the
+    // user's CI on merge.
+    const dir = join(ROOT, 'web');
+    writePkg(dir, { next: '^16.0.0' });
+    const r = await vercelAdapter.preflight(baseTarget(), { cwd: ROOT });
+    expect(r.ok).toBe(true);
   });
 });
 
-describe('vercel — deploy (dry-run)', () => {
-  test('dry-run skips build + deploy steps without side effects', async () => {
-    const dir = join(ROOT, 'web');
-    writePkg(dir, { next: '^16.0.0' });
-    writeLink(dir, 'prj_x', 'team_y');
+describe('vercel — deploy', () => {
+  test('dry-run reports the PR it would open, no side effects', async () => {
     const result = await vercelAdapter.deploy(baseTarget(), {
-      env: { NEXT_PUBLIC_X: 'a', DATABASE_URL: 'b' },
-      dryRun: true,
-      cwd: ROOT,
-    });
-    expect(result.ok).toBe(true);
-    expect(result.steps.map((s) => s.label)).toEqual([
-      'inject build env',
-      'vercel build',
-      'vercel deploy',
-    ]);
-    expect(result.steps[1].status).toBe('skip');
-    expect(result.steps[2].status).toBe('skip');
-  });
-
-  test('dry-run preview vs production tags the deploy step', async () => {
-    const r1 = await vercelAdapter.deploy(baseTarget(), {
       env: {},
       dryRun: true,
       cwd: ROOT,
     });
-    expect(r1.steps[2].detail).toContain('preview');
-
-    const r2 = await vercelAdapter.deploy(
-      baseTarget({ options: { projectDir: 'web', vercelEnv: 'production' } }),
-      { env: {}, dryRun: true, cwd: ROOT },
-    );
-    expect(r2.steps[2].detail).toContain('--prod');
+    expect(result.ok).toBe(true);
+    expect(result.steps.length).toBe(1);
+    expect(result.steps[0].status).toBe('skip');
+    expect(result.steps[0].detail).toMatch(/keep\.lock/);
   });
 
-  test('dry-run preview with gitBranch surfaces --git-branch in plan', async () => {
-    const r = await vercelAdapter.deploy(
-      baseTarget({
-        options: {
-          projectDir: 'web',
-          vercelEnv: 'preview',
-          gitBranch: 'staging',
-        },
-      }),
-      { env: {}, dryRun: true, cwd: ROOT },
-    );
-    expect(r.steps[2].detail).toContain('--git-branch=staging');
-  });
-
-  test('secretsOnly (CI mode) collapses to a single skipped step', async () => {
+  test('CI deploy is a single skipped vendor step (PR is the deploy)', async () => {
     const result = await vercelAdapter.deploy(baseTarget(), {
       env: {},
       dryRun: false,
