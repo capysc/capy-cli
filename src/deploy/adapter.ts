@@ -114,6 +114,14 @@ export interface DeployAdapter {
    */
   defaultMode: DeployMode;
   /**
+   * When true, this adapter ONLY deploys via CI: capy opens the keep.lock PR
+   * and the vendor's git integration builds + ships on merge. capy never runs
+   * the vendor CLI locally, so there is no 'direct' mode to choose. The picker
+   * skips the direct/CI question (forced to 'ci') and `capy deploy` forces
+   * mode='ci' regardless of any saved or ad-hoc target mode. Vercel sets this.
+   */
+  ciOnly?: boolean;
+  /**
    * Hard requirements: binaries that must be on PATH, env vars that must be
    * set (typically only in CI), and an adapter-specific auth check. Any
    * failure here aborts BEFORE decryption.
