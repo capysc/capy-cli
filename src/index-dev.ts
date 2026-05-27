@@ -12,6 +12,11 @@ import { CliOptions } from './types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/** Commander accumulator for repeatable, comma-splittable options (e.g. --project). */
+function collectProjects(val: string, acc: string[]): string[] {
+  return acc.concat(val.split(',').map((s) => s.trim()).filter(Boolean));
+}
+
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
 process.on('uncaughtException', (error: any) => {
   if (error?.name === 'ExitPromptError') {
@@ -43,6 +48,14 @@ if (!process.env.CAPY_API_URL) {
 // recovery-equivalent wrapped master keys. Lazy-resolved in globalConfig.ts.
 if (!process.env.CAPY_GLOBAL_DIR_NAME) {
   process.env.CAPY_GLOBAL_DIR_NAME = '.capy-dev';
+}
+
+// One verbosity switch for the whole CLI: diagnostic logs (see ui/debug.ts)
+// are silent unless `-v`/`--verbose`. Set from argv here, at the head, before
+// any command runs — the gated output lives in deep shared code that isn't
+// threaded the parsed option.
+if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
+  process.env.CAPY_VERBOSE = '1';
 }
 
 const program = new Command();
@@ -239,23 +252,44 @@ program
   });
 
 const deploy = program
-  .command('deploy')
-  .description('Set up secret delivery to a deployment platform')
-  .option('--platform <id>', 'skip platform picker (e.g. github-actions, vercel)')
+  .command('deploy [target]')
+  .description('Set up secret delivery — token + docs (existing) or connector deploy')
+  .option('--target <id>', 'adapter id; requires --yes (CI mode)')
+  .option('--yes', 'skip all prompts (CI)')
+  .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
+  .option('--edit', 're-enter the picker for an existing connector target')
+  .option('--connect', 'force connector mode (skip the token+docs path)')
+  .option('--platform <id>', 'skip platform picker (token+docs flow; e.g. github-actions, vercel)')
   .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
-  .option('-y, --yes', 'skip confirmation prompts (overwrite existing secrets)')
-  .action(async (options) => {
+  .action(async (target: string | undefined, options: any, cmd: any) => {
+    const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
+
+    // CI/explicit connector path — go straight to the adapter flow (devMode).
+    if (options.target || options.connect || target) {
+      const { deployCommand } = await import('./commands/deployCommand');
+      const code = await deployCommand(target, {
+        target: options.target,
+        yes: options.yes ?? merged.yes,
+        dryRun: options.dryRun ?? merged.dryRun,
+        edit: options.edit,
+        devMode: true,
+      });
+      process.exit(code);
+    }
+
+    // Default path: existing token+docs picker (auto-routes to connector mode
+    // when the user picks a connector-enabled platform; that route is devMode).
     const { DeployCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployCommand(process.env.CAPY_API_URL, true, {
+    const c = new DeployCommand(process.env.CAPY_API_URL, true, {
       platform: options.platform,
       mode: options.mode,
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
     });
-    await cmd.execute();
+    await c.execute();
   });
 
 deploy
@@ -279,10 +313,23 @@ deploy
 program
   .command('invite <email>')
   .description('Invite a teammate to your organization')
-  .action(async (email) => {
+  .option('--role <role>', 'invitee role: member | project-admin | admin')
+  .option('--project <id|name>', 'grant project access (repeatable, comma-ok)', collectProjects, [])
+  .option('--ttl <duration>', 'invite lifetime, e.g. 30m, 24h, 7d (or seconds)')
+  .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .action(async (email, options) => {
     const { InviteCommand } = await import('./commands/inviteCommand');
     const cmd = new InviteCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute(email);
+    await cmd.execute(email, {
+      role: options.role,
+      projects: options.project,
+      ttl: options.ttl,
+      expires: options.expires,
+      json: options.json,
+      nonTty: options.nonTty,
+    });
   });
 
 program
@@ -595,19 +642,24 @@ program
   .option('--account <id>', 'pick a specific provider account when multiple are configured')
   .option('--no-push', 'write to .env only; do not push to Capy')
   .option('-f, --force', 'overwrite an existing value without prompting')
-  .action(async (provider, options) => {
+  .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
+  .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
     if (!provider) {
       await cmd.list();
       return;
     }
+    // Merge globals: the top-level program also defines -f/--force, which
+    // otherwise shadows this subcommand's --force (opts.force stays undefined).
+    const merged = command.optsWithGlobals();
     await cmd.execute(provider, {
       live: options.live,
       var: options.var,
       account: options.account,
       noPush: options.push === false,
-      force: options.force,
+      force: merged.force,
+      nonTty: options.nonTty,
     });
   });
 
@@ -618,6 +670,8 @@ program
   .option('--no-push', 'update .env only; do not push to Capy')
   .option('-y, --yes', 'skip prompts; run rotate + push unattended (for CI/automation)')
   .option('--skip-prompts', 'alias for --yes')
+  .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
+  .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
   .action(async (varName, options) => {
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand(true); // devMode: skips live entries
@@ -625,6 +679,8 @@ program
       all: options.all,
       noPush: options.push === false,
       skipPrompts: !!(options.yes || options.skipPrompts),
+      nonTty: options.nonTty,
+      provider: options.provider,
     });
   });
 
