@@ -4,6 +4,7 @@ import { lockSync, unlockSync } from 'proper-lockfile';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
+import { debug } from '../ui/debug';
 
 export class HttpStatusError extends Error {
   status: number;
@@ -60,7 +61,7 @@ export class AuthService {
     this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
     this.sessionUserId = sessionUserId;
     if (devMode) {
-      console.error(`[dev] AuthService → ${this.serviceApiUrl}`);
+      debug(`[dev] AuthService → ${this.serviceApiUrl}`);
     }
     this.loadSession();
   }

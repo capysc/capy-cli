@@ -13,6 +13,7 @@ import {
 import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
+import { debug } from '../ui/debug';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -55,7 +56,7 @@ export class ServiceClient {
   constructor(apiUrl?: string, devMode: boolean = false) {
     this.apiUrl = apiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
     if (devMode) {
-      console.error(`[dev] ServiceClient → ${this.apiUrl}`);
+      debug(`[dev] ServiceClient → ${this.apiUrl}`);
     }
   }
 

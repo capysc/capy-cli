@@ -4,6 +4,7 @@ import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } 
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
+import { debug } from '../ui/debug';
 
 export class FileManager {
   private projectRoot: string;
@@ -89,7 +90,7 @@ export class FileManager {
 
   writeEnvFile(variables: Record<string, string>, path?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`Writing ${Object.keys(variables).length} variables to ${envPath}`);
+    debug(`Writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -99,7 +100,7 @@ export class FileManager {
 
       this.ensureDirectoryExists(dirname(envPath));
       writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`Successfully wrote .env file`);
+      debug(`Successfully wrote .env file`);
 
       if (backup) {
         this.removeBackup(backup);
@@ -118,7 +119,7 @@ export class FileManager {
 
   writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null, branch?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
+    debug(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -165,7 +166,7 @@ export class FileManager {
 
       this.ensureDirectoryExists(dirname(envPath));
       writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`Successfully wrote encrypted .env file`);
+      debug(`Successfully wrote encrypted .env file`);
 
       if (backup) {
         this.removeBackup(backup);
