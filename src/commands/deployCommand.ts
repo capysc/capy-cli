@@ -62,6 +62,12 @@ export interface DeployCliOptions {
   dryRun?: boolean;
   /** Force re-entry into the picker for an existing target. */
   edit?: boolean;
+  /**
+   * Run against the dev service (capy-dev). Propagated to the auth/service
+   * clients used for decryption — without it they default to prod
+   * (api.capy.sc) and co-decrypt fails for dev-only orgs.
+   */
+  devMode?: boolean;
 }
 
 // ── Project-level keep.lock parsing ────────────────────────────────────────
@@ -103,6 +109,7 @@ function readKeep(cwd: string): KeepInfo | null {
 
 async function decryptCurrentBranch(
   cwd: string,
+  devMode: boolean = false,
 ): Promise<Record<string, string>> {
   const fm = new FileManager();
   const envFromFile = fm.readEnvFile();
@@ -125,12 +132,12 @@ async function decryptCurrentBranch(
   const { ServiceClient } = await import('../service/serviceClient');
   const { resolveProjectKey } = await import('../crypto/keyResolver');
 
-  const auth = new AuthService();
+  const auth = new AuthService(undefined, devMode);
   const result = await auth.authenticateSilent(keep.orgId);
   if (!result.success || !result.user_id) {
     throw new Error('not authenticated. Run `capy` to sign in.');
   }
-  const svc = new ServiceClient();
+  const svc = new ServiceClient(undefined, devMode);
   svc.setTokenProvider(() => auth.getValidToken());
   const keyServiceOps = {
     coDecrypt: (o: string, c: string) =>
@@ -148,6 +155,39 @@ async function decryptCurrentBranch(
     out[k] = fm.decryptValue(v, projectKeyHex);
   }
   return out;
+}
+
+/**
+ * Mint the SECRETS_BLOB + PROJECT_KEY pair for build-time injection (what
+ * `capy run` consumes). Same devMode-aware auth as decryptCurrentBranch — so
+ * under capy-dev it talks to the dev service, not prod.
+ */
+async function mintForDeploy(
+  cwd: string,
+  devMode: boolean = false,
+): Promise<{ secretsBlob: string; projectKey: string }> {
+  const keep = readKeep(cwd);
+  if (!keep) throw new Error('no keep.lock — run `capy` to sync first.');
+
+  const { AuthService } = await import('../auth/authService');
+  const { ServiceClient } = await import('../service/serviceClient');
+  const { mintDeployToken } = await import('./deployTokenCommand');
+
+  const auth = new AuthService(undefined, devMode);
+  const result = await auth.authenticateSilent(keep.orgId);
+  if (!result.success || !result.user_id) {
+    throw new Error('not authenticated. Run `capy` to sign in.');
+  }
+  const svc = new ServiceClient(undefined, devMode);
+  svc.setTokenProvider(() => auth.getValidToken());
+  const minted = await mintDeployToken({
+    serviceClient: svc,
+    fm: new FileManager(),
+    orgId: keep.orgId,
+    projectId: keep.projectId,
+    userId: result.user_id,
+  });
+  return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -231,12 +271,12 @@ async function runPicker(
     ]);
     options = ans;
   } else if (adapter.id === 'vercel') {
-    // Vercel is CI-only: capy opens the keep.lock PR and Vercel's git
-    // integration builds + deploys on merge. capy never runs the vercel CLI,
-    // so the only thing to capture here is which app this target maps to. The
-    // Vercel deployment lane (production vs preview) is decided by Vercel's own
-    // git config — which branch is the production branch — not by capy.
-    const dirAns = await inquirer.prompt([
+    // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
+    // but capy pushes SECRETS_BLOB + PROJECT_KEY into the chosen Vercel
+    // environment via the vercel CLI. Capture the app dir AND which Vercel
+    // environment these secrets target (preview is scoped to the target's git
+    // branch; production targets the production env).
+    const ans = await inquirer.prompt([
       {
         type: 'input',
         name: 'projectDir',
@@ -244,8 +284,18 @@ async function runPicker(
         default: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
         validate: (v: string) => (v.trim() ? true : 'required'),
       },
+      {
+        type: 'list',
+        name: 'vercelEnv',
+        message: 'Which Vercel environment do these secrets target?',
+        choices: [
+          { name: "Preview (scoped to this target's git branch)", value: 'preview' },
+          { name: 'Production', value: 'production' },
+        ],
+        default: existingOpts.vercelEnv ?? 'preview',
+      },
     ]);
-    options = { ...dirAns };
+    options = { ...ans };
   } else if (adapter.id === 'cf-pages') {
     const ans = await inquirer.prompt([
       {
@@ -363,18 +413,16 @@ async function runPicker(
 
   // 6b. CI mode only — type the git branch the deploy PR opens against.
   // Repos can have hundreds of branches, so a list picker is the wrong
-  // shape. Text entry with a sensible default (existing target's branch,
-  // else `main` if it exists locally, else current branch).
+  // shape. Text entry defaulting to the current branch (you usually open the
+  // PR against the branch you're on), then the existing target's saved value,
+  // then main/master.
   let gitBaseBranch: string | undefined;
   if (mode === 'ci') {
     const local = listLocalBranches(cwd);
     const fallback =
+      currentBranch(cwd) ??
       existing?.gitBaseBranch ??
-      (local.includes('main')
-        ? 'main'
-        : local.includes('master')
-          ? 'master'
-          : currentBranch(cwd) ?? 'main');
+      (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main');
     gitBaseBranch = (await inquirer.prompt([
       {
         type: 'input',
@@ -853,23 +901,35 @@ export async function deployCommand(
     console.log(`  ${GREEN('✓')} commit  ${msg}`);
   }
 
-  // Decrypt the current branch — except in dry-run mode, where the adapter
-  // short-circuits before using env, so we don't need to authenticate or
-  // touch plaintext.
+  // Prepare secret material — skipped in dry-run (the adapter short-circuits).
+  // Build-time adapters that inject via `capy run` get a minted SECRETS_BLOB +
+  // PROJECT_KEY; the rest get the decrypted env. On failure, unwind git state
+  // first so a half-finished deploy never strands the user on a deploy branch.
   let env: Record<string, string> = {};
+  let deployToken: { secretsBlob: string; projectKey: string } | undefined;
   if (options.dryRun) {
     console.log(YELLOW('  --dry-run: no secrets will be decrypted or pushed.'));
+  } else if (adapter.needsDeployToken) {
+    try {
+      deployToken = await mintForDeploy(cwd, options.devMode);
+    } catch (err: any) {
+      console.error(`${RED('✗')} mint deploy token: ${err.message}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
   } else {
     try {
-      env = await decryptCurrentBranch(cwd);
+      env = await decryptCurrentBranch(cwd, options.devMode);
     } catch (err: any) {
       console.error(`${RED('✗')} decrypt: ${err.message}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
       return 1;
     }
   }
 
   const result = await adapter.deploy(target, {
     env,
+    deployToken,
     dryRun: !!options.dryRun,
     secretsOnly: mode === 'ci',
     cwd,
@@ -987,6 +1047,42 @@ function buildDeployPrBody(target: TargetConfig): string {
   const baseLine = target.gitBaseBranch
     ? `- **Git base:** \`${target.gitBaseBranch}\` — merging this PR is the deploy signal for that branch.`
     : '';
+
+  // Secret-delivery wording depends on the adapter. Blob adapters (Vercel) push
+  // SECRETS_BLOB + PROJECT_KEY and let the build decrypt via `capy run`; others
+  // push the individual secrets into the vendor's store.
+  const varsSection = adapter?.needsDeployToken
+    ? [
+        `Delivered to ${adapterLabel} as \`SECRETS_BLOB\` + \`PROJECT_KEY\` **before** this`,
+        `PR was opened — the encrypted bundle of your secrets plus its build-time`,
+        `key. Your individual secret values stay encrypted in the bundle and never`,
+        `appear in git history; the build decrypts them with \`capy run\`:`,
+        ``,
+        `- \`SECRETS_BLOB\``,
+        `- \`PROJECT_KEY\``,
+      ].join('\n')
+    : [
+        `Already delivered to the vendor's secret store **before** this PR was`,
+        `opened (e.g. \`wrangler secret bulk\` for cf-worker). Names only — values`,
+        `stay in the vendor's store and never appear in git history:`,
+        ``,
+        target.vars.map((v) => `- \`${v}\``).join('\n'),
+      ].join('\n');
+
+  const mergeSection = adapter?.needsDeployToken
+    ? [
+        `Merging this PR is the deploy signal. ${adapterLabel}'s git CI builds on`,
+        `merge, and \`capy run\` injects your secrets from \`SECRETS_BLOB\` at build`,
+        `time. capy does **not** ship code from the local machine — only the`,
+        `keep.lock pin lands here.`,
+      ].join('\n')
+    : [
+        `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
+        `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
+        `the secrets that were pushed above. capy itself does **not** ship code`,
+        `from the local machine in CI mode — only the keep.lock pin lands here.`,
+      ].join('\n');
+
   return [
     `Automated deploy PR opened by \`capy deploy\`.`,
     ``,
@@ -1000,18 +1096,11 @@ function buildDeployPrBody(target: TargetConfig): string {
     ``,
     `## Vars pushed`,
     ``,
-    `Already delivered to the vendor via \`wrangler secret bulk\` (or adapter`,
-    `equivalent) **before** this PR was opened. Names only — values stay in`,
-    `the vendor's secret store and never appear in git history:`,
-    ``,
-    target.vars.map((v) => `- \`${v}\``).join('\n'),
+    varsSection,
     ``,
     `## What happens on merge`,
     ``,
-    `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
-    `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
-    `the secrets that were pushed above. capy itself does **not** ship code`,
-    `from the local machine in CI mode — only the keep.lock pin lands here.`,
+    mergeSection,
     ``,
     `## Diff scope`,
     ``,
