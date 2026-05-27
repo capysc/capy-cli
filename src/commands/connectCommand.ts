@@ -1,5 +1,6 @@
 import { resolveContext, writeAndSync } from './connectors/shared';
 import { listProviders, loadProvider, ConnectOpts } from './connectors/registry';
+import { isInteractive } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -46,8 +47,11 @@ export class ConnectCommand {
       process.exit(1);
     }
 
-    // Confirmation gate for live mode in prod.
-    if (!this.devMode && entry.mode === 'live') {
+    // Confirmation gate for live mode in prod: a human typing the account ID.
+    // In assisted non-interactive mode we skip the typed echo — when connect
+    // ran `stripe login`, completing that browser pairing is the human-presence
+    // proof. The typed confirmation only runs in an interactive terminal.
+    if (!this.devMode && entry.mode === 'live' && isInteractive(opts.nonTty)) {
       const ok = await confirmLiveAction({
         action: 'connect',
         varName,

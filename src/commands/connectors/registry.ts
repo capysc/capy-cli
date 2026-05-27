@@ -7,10 +7,14 @@ export interface ConnectOpts {
   account?: string;
   noPush?: boolean;
   force?: boolean;
+  /** Disable interactive prompts: resolve every choice from flags or fail fast. */
+  nonTty?: boolean;
 }
 
 export interface RotateOpts {
   noPush?: boolean;
+  /** Disable interactive prompts: resolve every choice from flags or fail fast. */
+  nonTty?: boolean;
 }
 
 /** Result of provider.connect(): the provider hands us a value + the connector metadata to record on the keep.lock entry. */

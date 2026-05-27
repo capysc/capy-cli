@@ -10,6 +10,8 @@ import { loadProvider, listProviders, RotateOpts } from './connectors/registry';
 import { ProjectManager } from '../core/projectManager';
 import { ConnectorMetadata, KeepFile } from '../types/index';
 import { TargetConfig } from '../deploy/adapter';
+import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { writeSync } from 'fs';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
@@ -44,25 +46,38 @@ interface PlanStop {
  */
 function renderRotationPlan(stops: PlanStop[]): void {
   const width = Math.max(...stops.map((s) => s.label.length));
-  console.log('');
-  console.log(`  ${B('Rotation plan')}`);
-  console.log('');
+  const lines: string[] = ['', `  ${B('Rotation plan')}`, ''];
   stops.forEach((s, i) => {
     const last = i === stops.length - 1;
     const node = s.blank ? DIM('◌') : last ? CYAN('○') : CYAN('●');
     const label = s.blank ? DIM(s.label.padEnd(width)) : B(s.label.padEnd(width));
-    console.log(`  ${node}  ${label}   ${DIM(s.detail)}`);
+    lines.push(`  ${node}  ${label}   ${DIM(s.detail)}`);
     if (!last) {
       const dotted = s.manual || stops[i + 1].manual;
-      console.log(`  ${DIM(dotted ? '┊' : '│')}`);
+      lines.push(`  ${DIM(dotted ? '┊' : '│')}`);
     }
   });
-  console.log('');
+  lines.push('');
+  // Write synchronously to fd 1. A backgrounded run pipes stdout, where
+  // console.log is buffered and would only flush AFTER the blocking
+  // `stripe login` spawnSync — so the plan would be missing from the captured
+  // output during the auth wait (when the agent reads it to relay the pairing
+  // code). writeSync lands the whole plan now, before that block.
+  writeSync(1, lines.join('\n') + '\n');
 }
 
 /** One-line description of how a configured target ships, for the Deploy stop. */
 function describeDeploy(t: TargetConfig): string {
   const mode = t.mode ?? 'direct';
+  // Vercel sets env vars (scoped to the Vercel environment) as part of deploy.
+  if (t.kind === 'vercel') {
+    const venv = (t.options as { vercelEnv?: string } | undefined)?.vercelEnv;
+    const scope =
+      venv === 'preview' ? `preview · branch=${t.branch}` : venv === 'production' ? 'production' : (venv ?? '?');
+    const prBit =
+      mode === 'ci' ? ` + open deploy PR${t.gitBaseBranch ? ` against ${t.gitBaseBranch}` : ''}` : '';
+    return `push SECRETS_BLOB + PROJECT_KEY to Vercel ${scope}${prBit}`;
+  }
   if (mode === 'ci') {
     const base = t.gitBaseBranch ? ` against ${t.gitBaseBranch}` : '';
     return `open a deploy PR for ${t.name}${base} (CI ships on merge)`;
@@ -79,7 +94,7 @@ export class RotateCommand {
 
   async execute(
     varName: string | undefined,
-    opts: RotateOpts & { all?: boolean; skipPrompts?: boolean },
+    opts: RotateOpts & { all?: boolean; skipPrompts?: boolean; provider?: string },
   ): Promise<void> {
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
@@ -128,6 +143,12 @@ export class RotateCommand {
         console.error(`  Add one to .env and run ${B('capy')}, or run ${B('capy connect <provider>')}.\n`);
         process.exit(1);
       }
+      if (!isInteractive(opts.nonTty)) {
+        refuseNonInteractive(
+          'no variable specified and the picker needs a prompt',
+          `Pass the variable name: capy rotate <VAR> (available: ${allVars.join(', ')}).`,
+        );
+      }
       const inquirer = (await import('inquirer')).default;
       const { picked } = await inquirer.prompt([
         {
@@ -157,35 +178,61 @@ export class RotateCommand {
    * provider, overwrites the existing value, and tags the keep.lock entry
    * as connector-managed for future rotations.
    */
-  private async promoteAndConnect(varName: string, opts: RotateOpts): Promise<void> {
+  private async promoteAndConnect(
+    varName: string,
+    opts: RotateOpts & { provider?: string },
+  ): Promise<void> {
     const providers = listProviders();
     if (providers.length === 0) {
       console.error('\n  No connectors are registered. Cannot promote.\n');
       process.exit(1);
     }
 
-    console.log('');
-    console.log(`  ${B(varName)} isn't connected to a third-party integration yet.`);
-    console.log('  Pick one and Capy will rotate it via the provider from here on.');
-    console.log('');
+    let provider: string;
+    if (!isInteractive(opts.nonTty)) {
+      // Non-interactive: resolve the integration from --provider, or auto-pick
+      // it only when there's exactly one registered (unambiguous). Otherwise
+      // refuse — we won't silently guess which provider owns this credential.
+      if (opts.provider) {
+        if (!providers.some((p) => p.name === opts.provider)) {
+          refuseNonInteractive(
+            `unknown integration "${opts.provider}"`,
+            `Known integrations: ${providers.map((p) => p.name).join(', ')}.`,
+          );
+        }
+        provider = opts.provider;
+      } else if (providers.length === 1) {
+        provider = providers[0].name;
+      } else {
+        refuseNonInteractive(
+          `${B(varName)} isn't connected to an integration yet, and several are available`,
+          `Pass --provider <name> (one of: ${providers.map((p) => p.name).join(', ')}).`,
+        );
+      }
+    } else {
+      console.log('');
+      console.log(`  ${B(varName)} isn't connected to a third-party integration yet.`);
+      console.log('  Pick one and Capy will rotate it via the provider from here on.');
+      console.log('');
 
-    const inquirer = (await import('inquirer')).default;
-    const { provider } = await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'provider',
-        message: 'Integration:',
-        choices: [
-          ...providers.map((p) => ({ name: `${B(p.name)} — ${p.description}`, value: p.name })),
-          new inquirer.Separator(),
-          { name: 'Cancel', value: '__cancel__' },
-        ],
-      },
-    ]);
-
-    if (provider === '__cancel__') {
-      console.log('\n  Cancelled.\n');
-      return;
+      const inquirer = (await import('inquirer')).default;
+      const picked = await inquirer.prompt([
+        {
+          type: 'list',
+          name: 'provider',
+          message: 'Integration:',
+          choices: [
+            ...providers.map((p) => ({ name: `${B(p.name)} — ${p.description}`, value: p.name })),
+            new inquirer.Separator(),
+            { name: 'Cancel', value: '__cancel__' },
+          ],
+        },
+      ]);
+      if (picked.provider === '__cancel__') {
+        console.log('\n  Cancelled.\n');
+        return;
+      }
+      provider = picked.provider;
     }
 
     const connect = new ConnectCommand(this.devMode);
@@ -193,6 +240,7 @@ export class RotateCommand {
       var: varName,
       force: true,
       noPush: opts.noPush,
+      nonTty: opts.nonTty,
     });
   }
 
@@ -245,7 +293,12 @@ export class RotateCommand {
 
     for (const { varName: name, connector } of toRotate) {
       try {
-        if (!this.devMode && connector.mode === 'live') {
+        // Prod live rotation normally gates on a human typing the account ID.
+        // In assisted non-interactive mode we skip that echo: the rotation
+        // re-runs `stripe login`, and completing that browser pairing is itself
+        // the human-presence proof (see docs/rotate-deploy-agent-flow.md). The
+        // typed confirmation only runs in an interactive terminal.
+        if (!this.devMode && connector.mode === 'live' && isInteractive(opts.nonTty)) {
           const ok = await confirmLiveAction({
             action: 'rotate',
             varName: name,
@@ -324,43 +377,42 @@ export class RotateCommand {
       return;
     }
 
-    const isTTY = !!process.stdout.isTTY;
-    const deployable = !this.devMode; // dev binary never ships to real vendors
+    const isTTY = isInteractive(opts.nonTty);
 
-    // ── Resolve: deploy integration (gate 3) ────────────────────────────────
+    // ── Resolve: deploy target (gate 3) ─────────────────────────────────────
     // Branch (gate 1) is the active branch; the credential connector (gate 2)
-    // is already managed by the time we reach here (unmanaged vars are promoted
-    // in execute()). The remaining gate is the deploy integration. Resolving it
-    // is side-effect-free — the picker writes config to .capy/deploy.json; no
-    // deploy happens until Apply.
+    // is already managed by the time we reach here. The remaining gate is the
+    // deploy target. Resolving it is side-effect-free; nothing ships until Apply.
+    //
+    // Deploy is NOT gated on dev-vs-prod: capy-dev opens CI/PR deploys too — a
+    // deploy PR is just `git push` + `gh pr create`, not a vendor write. The
+    // only dev restriction is the direct-ship guard below: capy-dev never
+    // invokes a vendor CLI/API directly.
+    const { listTargets } = await import('../deploy/config');
+    const configuredTargets = listTargets(process.cwd());
     let deployTarget: TargetConfig | null = null;
-    if (deployable) {
-      const { listTargets } = await import('../deploy/config');
-      if (opts.skipPrompts) {
-        // Unattended (agent apply / CI): can't drive the picker. Resolve only
-        // the unambiguous single-target case; otherwise refuse before doing
-        // anything — the journey can't complete, so don't half-run it.
-        const cfg = listTargets(process.cwd());
-        if (cfg.length === 1) {
-          deployTarget = cfg[0];
-        } else {
-          console.error(
-            `\n  Can't auto-resolve a deploy target (${cfg.length === 0 ? 'none configured' : `${cfg.length} configured`}).`,
-          );
-          console.error(`  Run ${B('capy deploy')} to configure one, then retry.\n`);
-          process.exit(1);
-        }
-      } else if (isTTY) {
-        // Interactive: ensure a target exists, setting one up inline if needed.
-        const { ensureDeployTarget } = await import('./deployCommand');
-        deployTarget = await ensureDeployTarget(process.cwd());
-        if (!deployTarget) {
-          console.log('\n  Cancelled.\n');
-          return;
-        }
+    if (isTTY) {
+      // Interactive: ensure a target exists, setting one up inline if needed.
+      const { ensureDeployTarget } = await import('./deployCommand');
+      deployTarget = await ensureDeployTarget(process.cwd());
+      if (!deployTarget) {
+        console.log('\n  Cancelled.\n');
+        return;
       }
-      // else: non-TTY without --skip-prompts → leave unresolved; we rotate +
-      // push only and never ship unattended (deployTarget stays null).
+    } else if (configuredTargets.length === 1) {
+      // Non-interactive: auto-resolve the unambiguous single target. With zero
+      // or several we don't refuse — rotate + push still runs and the user is
+      // kicked into the deploy flow afterward (deployTarget stays null).
+      deployTarget = configuredTargets[0];
+    }
+
+    // Dev isolation: capy-dev may open a CI/PR deploy, but must never run a
+    // direct vendor ship. Drop a resolved direct-mode target in dev.
+    if (this.devMode && deployTarget && (deployTarget.mode ?? 'direct') !== 'ci') {
+      console.log(
+        `\n  \x1b[33m⚠ capy-dev skips the direct-mode deploy for ${deployTarget.name} (CI/PR only in dev).\x1b[0m`,
+      );
+      deployTarget = null;
     }
 
     // ── Build the (now fully resolved) train-stop ───────────────────────────
@@ -389,19 +441,21 @@ export class RotateCommand {
     }
     stops.push({ label: 'Rotate', detail: rotateDetail });
     stops.push({ label: 'Push', detail: `encrypt + push to Capy (branch: ${branch})` });
-    if (deployable) {
-      stops.push(
-        deployTarget
-          ? { label: 'Deploy', detail: describeDeploy(deployTarget) }
-          : { label: 'Deploy', detail: 'no deploy target configured', blank: true },
-      );
-    }
+    // Deploy is always a stop — it's the terminal step of every rotation, dev
+    // included. When unresolved it's a blank stop the user resolves via the
+    // deploy flow after rotate + push.
+    stops.push(
+      deployTarget
+        ? { label: 'Deploy', detail: describeDeploy(deployTarget) }
+        : { label: 'Deploy', detail: 'set up a deploy target — opens a rollout PR (CI deploys on merge)', blank: true },
+    );
 
     renderRotationPlan(stops);
 
     // ── Confirm: single Y/N gate ─────────────────────────────────────────────
-    // --skip-prompts skips it (the agent already confirmed in its own surface);
-    // non-TTY without the flag runs core rotate + push with no deploy.
+    // Interactive only. Non-interactive (--non-tty / --skip-prompts / piped)
+    // skips it; Apply still runs rotate → push → deploy when a target resolved,
+    // else rotate + push and kick into the deploy flow.
     if (!opts.skipPrompts && isTTY) {
       const inquirer = (await import('inquirer')).default;
       const { proceed } = await inquirer.prompt([
@@ -419,23 +473,28 @@ export class RotateCommand {
 
     if (deployTarget) {
       const { deployCommand } = await import('./deployCommand');
-      const code = await deployCommand(deployTarget.name, { yes: true });
+      const code = await deployCommand(deployTarget.name, { yes: true, devMode: this.devMode });
       if (code !== 0) process.exit(code);
-    } else if (deployable) {
-      // Non-TTY core-only path: rotated + pushed, deploy left to the user.
-      const { listTargets } = await import('../deploy/config');
-      this.deployHint(listTargets(process.cwd()).length);
+    } else {
+      // No target resolved (none configured, several to disambiguate, or a
+      // dev direct-mode target we skipped). The key is already rotated +
+      // pushed; kick the user into the deploy flow to open the rollout PR.
+      this.deployHint(configuredTargets.length);
     }
   }
 
-  /** Point the user at the right deploy command when we didn't ship for them. */
+  /**
+   * Rotated + pushed, but we didn't ship — point the user into the deploy flow
+   * to open the rollout PR. The key is already live in Capy; this is the
+   * rollout step, not a leftover.
+   */
   private deployHint(targetCount: number): void {
     if (targetCount === 0) {
-      console.log(`  No deploy target yet. Set one up to ship the new value: ${B('capy deploy')}`);
+      console.log(`  ✓ Rotated + pushed. No deploy target yet — set one up to open the rollout PR: ${B('capy deploy')}`);
     } else if (targetCount > 1) {
-      console.log(`  Deploy the new value when you're ready: ${B('capy deploy <target>')}`);
+      console.log(`  ✓ Rotated + pushed. Pick a target to open the rollout PR: ${B('capy deploy <target>')}`);
     } else {
-      console.log(`  Deploy the new value when you're ready: ${B('capy deploy')}`);
+      console.log(`  ✓ Rotated + pushed. Deploy to open the rollout PR: ${B('capy deploy')}`);
     }
     console.log('');
   }

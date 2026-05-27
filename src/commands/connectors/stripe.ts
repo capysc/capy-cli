@@ -1,10 +1,11 @@
 import { execSync, spawnSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ConnectorModule, ConnectResult, RotateResult, ConnectOpts, RotateOpts } from './registry';
 import { ConnectorMetadata } from '../../types/index';
 import { ResolvedContext, fingerprint } from './shared';
+import { isInteractive, refuseNonInteractive } from '../../ui/interactive';
 
 type StripeMode = 'test' | 'live';
 
@@ -142,11 +143,33 @@ function ensureStripeCliInstalled(): void {
   }
 }
 
-/** Run `stripe login`, optionally for a named project. Inherits stdio so the user sees the browser flow. */
-function runStripeLogin(projectName?: string): void {
+/**
+ * Run `stripe login`, optionally for a named project. Inherits stdout/stderr so
+ * the user sees the pairing code + URL and the browser flow.
+ *
+ * In non-interactive (assisted-agent) mode there's no TTY attached to our
+ * stdin, so `stripe login`'s "Press Enter to open the browser" gate would hang.
+ * We feed it a single newline via `input` to clear that gate; stripe then
+ * prints the pairing code + URL (visible on the inherited stdout) and polls for
+ * the browser callback, which the user completes out-of-band. stdin hits EOF
+ * after the newline, which is fine — the pairing step needs no further input.
+ */
+function runStripeLogin(projectName?: string, nonTty?: boolean): void {
   const args = ['login'];
   if (projectName && projectName !== 'default') args.push(`--project-name=${projectName}`);
-  const result = spawnSync('stripe', args, { stdio: 'inherit' });
+  if (nonTty) {
+    // writeSync (not console.log) so this flushes before the blocking
+    // `stripe login` spawnSync — otherwise a backgrounded run buffers it and
+    // it appears only after auth completes, out of order with the pairing code.
+    writeSync(
+      1,
+      `\n  ${B('Opening Stripe in your browser.')} Compare the pairing code shown below\n` +
+        '  with the one in the browser, then approve. Waiting for you to authenticate…\n\n',
+    );
+  }
+  const result = nonTty
+    ? spawnSync('stripe', args, { input: '\n', stdio: ['pipe', 'inherit', 'inherit'] })
+    : spawnSync('stripe', args, { stdio: 'inherit' });
   if (result.status !== 0) {
     console.error('\nstripe login failed or was cancelled.');
     process.exit(1);
@@ -184,7 +207,11 @@ export function normalizeProjectName(name: string): string {
   return name.replace(/[\\'"]/g, '').trim();
 }
 
-async function pickAccount(sections: StripeConfigSection[], requested?: string): Promise<StripeConfigSection> {
+async function pickAccount(
+  sections: StripeConfigSection[],
+  requested?: string,
+  nonTty?: boolean,
+): Promise<StripeConfigSection> {
   if (requested) {
     const match = sections.find(
       (s) => s.account_id === requested || s.name === requested || s.display_name === requested,
@@ -196,6 +223,13 @@ async function pickAccount(sections: StripeConfigSection[], requested?: string):
     return match;
   }
   if (sections.length === 1) return sections[0];
+
+  if (!isInteractive(nonTty)) {
+    refuseNonInteractive(
+      `${sections.length} Stripe accounts in config.toml; can't pick one without a prompt`,
+      `Pass --account <id> (one of: ${sections.map((s) => s.account_id ?? s.name).join(', ')}).`,
+    );
+  }
 
   const inquirer = (await import('inquirer')).default;
   const { picked } = await inquirer.prompt([{
@@ -210,8 +244,11 @@ async function pickAccount(sections: StripeConfigSection[], requested?: string):
   return sections.find((s) => s.name === picked)!;
 }
 
-async function pickMode(forceLive: boolean): Promise<StripeMode> {
+async function pickMode(forceLive: boolean, nonTty?: boolean): Promise<StripeMode> {
   if (forceLive) return 'live';
+  // Non-interactive: default to the safe mode. Live is only ever reached via an
+  // explicit --live (forceLive above), never by defaulting.
+  if (!isInteractive(nonTty)) return 'test';
   const inquirer = (await import('inquirer')).default;
   const { mode } = await inquirer.prompt([{
     type: 'list',
@@ -261,12 +298,18 @@ export function validateRestrictedKey(value: string, expectedMode?: StripeMode):
   return true;
 }
 
-async function expiringSoonPrompt(expiresAt: number | undefined): Promise<boolean> {
+async function expiringSoonPrompt(expiresAt: number | undefined, nonTty?: boolean): Promise<boolean> {
   if (typeof expiresAt !== 'number') return false;
   const remainingDays = Math.floor((expiresAt - Date.now() / 1000) / 86400);
   if (remainingDays > 7) return false;
   console.log('');
   console.log(`  ${B('Heads up:')} this key expires in ${remainingDays} day(s).`);
+  // Non-interactive: don't offer the (browser-bound) re-login here. Take the
+  // existing key as-is; the caller can re-run interactively to refresh it.
+  if (!isInteractive(nonTty)) {
+    console.log(`  ${B('skipping')} re-login (non-interactive); using the current key.`);
+    return false;
+  }
   const inquirer = (await import('inquirer')).default;
   const { relogin } = await inquirer.prompt([{
     type: 'confirm',
@@ -277,7 +320,13 @@ async function expiringSoonPrompt(expiresAt: number | undefined): Promise<boolea
   return relogin;
 }
 
-async function promptNewVarName(): Promise<string> {
+async function promptNewVarName(nonTty?: boolean): Promise<string> {
+  if (!isInteractive(nonTty)) {
+    refuseNonInteractive(
+      'no variable name to write the Stripe key to',
+      'Pass --var <NAME> (e.g. --var STRIPE_API_KEY).',
+    );
+  }
   const inquirer = (await import('inquirer')).default;
   const { name } = await inquirer.prompt([{
     type: 'input',
@@ -307,7 +356,14 @@ async function pickVarName(ctx: ResolvedContext, opts: ConnectOpts): Promise<str
   }
 
   const existing = Object.keys(ctx.localPlaintext).sort();
-  if (existing.length === 0) return promptNewVarName();
+  if (existing.length === 0) return promptNewVarName(opts.nonTty);
+
+  if (!isInteractive(opts.nonTty)) {
+    refuseNonInteractive(
+      'which variable holds your Stripe key is ambiguous without a prompt',
+      `Pass --var <NAME> (existing: ${existing.join(', ')}).`,
+    );
+  }
 
   const { matches, others } = rankStripeVars(existing);
 
@@ -333,12 +389,23 @@ async function pickVarName(ctx: ResolvedContext, opts: ConnectOpts): Promise<str
     default: matches[0] ?? CREATE_NEW,
   }]);
 
-  return picked === CREATE_NEW ? promptNewVarName() : picked;
+  return picked === CREATE_NEW ? promptNewVarName(opts.nonTty) : picked;
 }
 
-async function confirmOverwrite(varName: string, ctx: ResolvedContext, force: boolean): Promise<boolean> {
+async function confirmOverwrite(
+  varName: string,
+  ctx: ResolvedContext,
+  force: boolean,
+  nonTty?: boolean,
+): Promise<boolean> {
   if (force) return true;
   if (!(varName in ctx.localPlaintext)) return true;
+  if (!isInteractive(nonTty)) {
+    refuseNonInteractive(
+      `${varName} already has a value; refusing to overwrite without confirmation`,
+      'Pass -f/--force to overwrite it.',
+    );
+  }
   const inquirer = (await import('inquirer')).default;
   const { ok } = await inquirer.prompt([{
     type: 'confirm',
@@ -351,30 +418,38 @@ async function confirmOverwrite(varName: string, ctx: ResolvedContext, force: bo
 
 async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<ConnectResult> {
   const varName = await pickVarName(ctx, opts);
-  if (!(await confirmOverwrite(varName, ctx, opts.force ?? false))) {
+  if (!(await confirmOverwrite(varName, ctx, opts.force ?? false, opts.nonTty))) {
     console.log('Cancelled.');
     process.exit(0);
   }
 
-  const mode = await pickMode(opts.live ?? false);
+  const mode = await pickMode(opts.live ?? false, opts.nonTty);
 
   // Read from the Stripe CLI's config. Login if needed.
   let sections = readStripeConfig();
   if (sections.length === 0) {
-    console.log('No Stripe CLI session found. Running `stripe login`...');
-    runStripeLogin(opts.account);
+    // No paired session yet. `stripe login` is a browser flow; in non-interactive
+    // (assisted-agent) mode we still run it — the human completes the pairing in
+    // the browser out-of-band while the CLI polls. runStripeLogin handles the
+    // "Press Enter" gate for us in that mode.
+    if (!isInteractive(opts.nonTty)) {
+      console.log('  No Stripe CLI session found — starting browser pairing.');
+    } else {
+      console.log('No Stripe CLI session found. Running `stripe login`...');
+    }
+    runStripeLogin(opts.account, opts.nonTty);
     sections = readStripeConfig();
     if (sections.length === 0) {
       console.error('\n  stripe login completed but no config.toml entries found.');
       process.exit(1);
     }
   }
-  const section = await pickAccount(sections, opts.account);
+  const section = await pickAccount(sections, opts.account, opts.nonTty);
 
   // If the existing key is already near expiry, offer to refresh first.
   const initial = readKeyFromSection(section, mode);
-  if (await expiringSoonPrompt(initial.expiresAt)) {
-    runStripeLogin(section.name);
+  if (await expiringSoonPrompt(initial.expiresAt, opts.nonTty)) {
+    runStripeLogin(section.name, opts.nonTty);
     sections = readStripeConfig();
     const refreshed = sections.find((s) => s.name === section.name);
     if (!refreshed) {
@@ -416,8 +491,15 @@ async function rotate(
   _ctx: ResolvedContext,
   varName: string,
   previous: ConnectorMetadata,
-  _opts: RotateOpts,
+  opts: RotateOpts,
 ): Promise<RotateResult> {
+  // Stripe rotation re-pairs the CLI: `stripe logout` then `stripe login`, a
+  // browser flow. We can't mint a key headlessly (the managed-keys API needs a
+  // Stripe marketplace app and doesn't yet issue restricted keys), but the
+  // browser step itself works in assisted non-interactive mode: the user
+  // completes the pairing out-of-band while we poll. runStripeLogin clears the
+  // "Press Enter" gate for us. So we proceed rather than refuse.
+  const nonTty = opts.nonTty;
   if (previous.mode !== 'test' && previous.mode !== 'live') {
     console.error(
       `\n  ${varName} keep.lock entry has invalid mode "${previous.mode ?? '(unset)'}".`,
@@ -446,8 +528,7 @@ async function rotate(
     return normalized.length > 0 ? normalized : 'default';
   })();
 
-  console.log('');
-  console.log(`  Rotating ${B(varName)} via \`stripe login\` (account: ${sectionName}, mode: ${mode}).`);
+  writeSync(1, `\n  Rotating ${B(varName)} via \`stripe login\` (account: ${sectionName}, mode: ${mode}).\n`);
 
   // `stripe login` is idempotent at the key level — re-pairing an already-
   // paired session refreshes the local credential but doesn't mint a new key
@@ -456,9 +537,23 @@ async function rotate(
   // user is logged into are untouched.
   const loggedOut = runStripeLogout(sectionName);
 
+  if (nonTty) {
+    // writeSync (not console.log) so this flushes before the blocking
+    // `stripe login` spawnSync — otherwise a backgrounded run buffers it and
+    // it appears only after auth completes, out of order with the pairing code.
+    writeSync(
+      1,
+      `\n  ${B('Opening Stripe in your browser.')} Compare the pairing code shown below\n` +
+        '  with the one in the browser, then approve. Waiting for you to authenticate…\n\n',
+    );
+  }
   const loginArgs = ['login'];
   if (sectionName !== 'default') loginArgs.push(`--project-name=${sectionName}`);
-  const loginResult = spawnSync('stripe', loginArgs, { stdio: 'inherit' });
+  // In assisted non-interactive mode, feed the "Press Enter" gate a newline and
+  // keep stdout/stderr inherited so the pairing code + URL surface to the user.
+  const loginResult = nonTty
+    ? spawnSync('stripe', loginArgs, { input: '\n', stdio: ['pipe', 'inherit', 'inherit'] })
+    : spawnSync('stripe', loginArgs, { stdio: 'inherit' });
   if (loginResult.status !== 0) {
     console.error('');
     console.error(`  ${B('stripe login')} failed or was cancelled after logout.`);
