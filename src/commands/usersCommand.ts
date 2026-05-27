@@ -35,7 +35,7 @@ export class UsersCommand {
     const orgId = projectState.organizationId;
 
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    const serviceClient = new ServiceClient(this.apiUrl);
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
     let authResult = await authService.authenticateSilent(orgId);
     if (!authResult.success) authResult = await authService.authenticateSilent();
@@ -110,7 +110,7 @@ export class UsersCommand {
     // pattern in capyCommand so a stale per-org token doesn't trigger a relog
     // when another org's session is still valid.
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    const serviceClient = new ServiceClient(this.apiUrl);
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
     let authResult = await authService.authenticateSilent(orgId);
     if (!authResult.success) authResult = await authService.authenticateSilent();
