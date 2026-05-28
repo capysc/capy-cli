@@ -25,6 +25,9 @@ ISOLATED_FILES=(
   tests/commands/roleAccessGuards.test.ts
   tests/commands/recoverCommand.test.ts
   tests/commands/cleanupOrgData.test.ts
+  tests/config/profileConfig.test.ts
+  tests/commands/byocCommand.test.ts
+  tests/commands/profileCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

@@ -51,6 +51,9 @@ program
       console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy')} org                    \x1b[90mSwitch organization\x1b[0m`);
       console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
+      console.log(`    ${B('capy')} byoc [url]             \x1b[90mConnect to a self-hosted Capy (BYOC) instance\x1b[0m`);
+      console.log(`    ${B('capy')} use <profile>          \x1b[90mSwitch to a different profile\x1b[0m`);
+      console.log(`    ${B('capy')} profile list           \x1b[90mList configured profiles\x1b[0m`);
       console.log(`    ${B('capy')} connect <provider>     \x1b[90mPull a credential from a provider into .env\x1b[0m`);
       console.log(`    ${B('capy')} rotate [var]           \x1b[90mRotate a credential previously set up via connect\x1b[0m`);
       console.log(`    ${B('capy')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
@@ -386,6 +389,50 @@ program
     } else {
       console.log('No active session.');
     }
+  });
+
+program
+  .command('byoc [url]')
+  .description('Connect to a self-hosted Capy (BYOC) instance')
+  .action(async (url: string | undefined) => {
+    const { byocCommand } = await import('./commands/byocCommand');
+    process.exit(await byocCommand(url));
+  });
+
+program
+  .command('use <profile>')
+  .description('Switch to a different profile')
+  .action(async (name: string) => {
+    const { useCommand } = await import('./commands/profileCommand');
+    process.exit(await useCommand(name));
+  });
+
+const profileCmd = program
+  .command('profile')
+  .description('Manage CLI profiles (cloud, BYOC, etc.)');
+
+profileCmd
+  .command('list')
+  .description('List configured profiles')
+  .action(async () => {
+    const { profileListCommand } = await import('./commands/profileCommand');
+    process.exit(await profileListCommand());
+  });
+
+profileCmd
+  .command('show [name]')
+  .description('Show profile details (defaults to active)')
+  .action(async (name?: string) => {
+    const { profileShowCommand } = await import('./commands/profileCommand');
+    process.exit(await profileShowCommand(name));
+  });
+
+profileCmd
+  .command('remove <name>')
+  .description('Delete a profile')
+  .action(async (name: string) => {
+    const { profileRemoveCommand } = await import('./commands/profileCommand');
+    process.exit(await profileRemoveCommand(name));
   });
 
 program
