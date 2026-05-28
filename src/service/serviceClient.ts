@@ -53,7 +53,24 @@ export class ServiceClient {
   private tokenProvider: TokenProvider | null = null;
 
   constructor(apiUrl?: string, devMode: boolean = false) {
-    this.apiUrl = apiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
+    // Explicit apiUrl wins (call-site override / tests). Otherwise resolve
+    // through the profile chain: CAPY_API_URL → CAPY_PROFILE → config.default
+    // → built-in default. See src/config/profileConfig.ts for the precedence
+    // contract.
+    if (apiUrl) {
+      this.apiUrl = apiUrl;
+    } else {
+      // Lazy require so config/profileConfig doesn't get pulled into the
+      // dist when this module is tree-shaken in isolation (matches the rest
+      // of the codebase's lazy-import pattern for dev-only paths).
+      const { resolveActiveUrl } = require('../config/profileConfig') as typeof import('../config/profileConfig');
+      this.apiUrl = resolveActiveUrl(devMode);
+    }
+    // Install profile TLS trust (idempotent) so subsequent fetch() calls
+    // accept self-signed BYOC certs configured via `capy byoc`. No-op when
+    // there's no active profile or the profile has no caBundle.
+    const { installProfileTlsTrust } = require('../config/tlsBootstrap') as typeof import('../config/tlsBootstrap');
+    installProfileTlsTrust();
     if (devMode) {
       console.error(`[dev] ServiceClient → ${this.apiUrl}`);
     }
