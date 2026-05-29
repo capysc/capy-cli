@@ -13,6 +13,13 @@ const PBKDF2_ITERATIONS = 2048;
 const PBKDF2_KEY_LENGTH = 32;
 const PBKDF2_DIGEST = 'sha512';
 
+// Local-only mode: the passphrase that locks M at rest is low-entropy
+// (human-chosen), so it gets a much higher work factor + per-keystore random
+// salt — distinct from the seed-phrase derivation above, which has a fixed
+// salt because its input (a 24-word mnemonic) is already 256-bit entropy.
+const LOCAL_PBKDF2_ITERATIONS = 200_000;
+const LOCAL_PBKDF2_DIGEST = 'sha256';
+
 const AES_ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
@@ -190,3 +197,21 @@ export function decryptMasterKey(
 export function deriveWrappingKey(userId: string, orgId: string): Buffer {
   return createHash('sha256').update(`${userId}:${orgId}`).digest();
 }
+
+/**
+ * Derives the wrapping key that encrypts M at rest in local-only mode, from a
+ * user-chosen passphrase + a per-keystore random salt. Unlike the seed-phrase
+ * derivation, the input is low-entropy so this uses a high iteration count.
+ */
+export function deriveLocalWrappingKey(passphrase: string, salt: Buffer): Buffer {
+  return pbkdf2Sync(
+    passphrase,
+    salt,
+    LOCAL_PBKDF2_ITERATIONS,
+    PBKDF2_KEY_LENGTH,
+    LOCAL_PBKDF2_DIGEST,
+  );
+}
+
+/** Iteration count baked into local keystore records (for forward-compat). */
+export const LOCAL_KEY_ITERATIONS = LOCAL_PBKDF2_ITERATIONS;

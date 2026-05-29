@@ -72,7 +72,10 @@ export class ServiceClient {
     const { installProfileTlsTrust } = require('../config/tlsBootstrap') as typeof import('../config/tlsBootstrap');
     installProfileTlsTrust();
     if (devMode) {
-      console.error(`[dev] ServiceClient → ${this.apiUrl}`);
+      // Suppress the dev diagnostic in local-only mode — the server URL is
+      // never used there, and the log is misleading (looks like server use).
+      const { isLocalOnly } = require('../config/profileConfig') as typeof import('../config/profileConfig');
+      if (!isLocalOnly()) console.error(`[dev] ServiceClient → ${this.apiUrl}`);
     }
   }
 

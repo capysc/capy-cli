@@ -22,6 +22,14 @@ import {
   readProfileConfig,
   saveAndActivateProfile,
 } from '../config/profileConfig';
+import {
+  generateSeedPhrase,
+  validateSeedPhrase,
+  seedPhraseToMasterKey,
+} from '../crypto/keyManager';
+import { saveLocalKey } from '../crypto/keyResolver';
+import { saveLocalSession } from '../config/globalConfig';
+import { displayAndConfirmRecoveryPhrase } from '../ui/recoveryPhrase';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
@@ -247,10 +255,136 @@ async function probeWithRetries(initial: string): Promise<ProbeOk> {
   }
 }
 
-export async function byocCommand(initialUrl?: string): Promise<number> {
-  const startUrl = normalizeUrl(initialUrl || DEFAULT_URL);
+/**
+ * Prompt for the recovery phrase that seeds the master key. Either generate a
+ * fresh 24-word phrase (shown once, with a save-confirmation gate) or accept an
+ * existing one. Returns the validated phrase.
+ */
+async function promptForRecoveryPhrase(): Promise<string> {
+  const inquirer = (await import('inquirer')).default;
+  const { mode } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'mode',
+      message: 'Local key:',
+      choices: [
+        { name: 'Generate a new recovery phrase', value: 'generate' },
+        { name: 'Enter an existing recovery phrase', value: 'enter' },
+      ],
+    },
+  ]);
+
+  if (mode === 'enter') {
+    const { phrase } = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'phrase',
+        message: 'Enter your 24-word recovery phrase:',
+        mask: '*',
+        validate: (input: string) =>
+          validateSeedPhrase(input.trim()) || 'Invalid 24-word BIP-39 phrase',
+      },
+    ]);
+    return phrase.trim();
+  }
+
+  const phrase = generateSeedPhrase();
+  await displayAndConfirmRecoveryPhrase(phrase, [
+    'This recovery phrase generates the master key for',
+    'every project on this machine.',
+    '',
+    '1) Only you have it — it is never sent anywhere',
+    '2) It only exists here and now, and cannot be',
+    '   retrieved when lost',
+    '',
+    'Local mode stores secrets ONLY on this machine.',
+    'IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!',
+  ]);
+  return phrase;
+}
+
+/** Prompt for a local passphrase with confirmation. */
+async function promptForPassphrase(): Promise<string> {
+  const inquirer = (await import('inquirer')).default;
+  while (true) {
+    const { passphrase } = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'passphrase',
+        message: 'Set a local passphrase (locks your key on this machine):',
+        mask: '*',
+        validate: (input: string) =>
+          input.length >= 8 || 'Use at least 8 characters',
+      },
+    ]);
+    const { confirm } = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'confirm',
+        message: 'Confirm passphrase:',
+        mask: '*',
+      },
+    ]);
+    if (passphrase === confirm) return passphrase;
+    console.log(RED('✗') + ' Passphrases do not match. Try again.');
+  }
+}
+
+/**
+ * Local-only setup: derive M from a recovery phrase, wrap it at rest with a
+ * passphrase, save the `local` profile, and open an unlocked session. No URL,
+ * no probe, no server.
+ */
+async function localSetup(): Promise<number> {
+  console.log(DIM('  Secrets will be stored only on this machine. No server, no account.'));
+  console.log('');
+
+  const phrase = await promptForRecoveryPhrase();
+  const passphrase = await promptForPassphrase();
+
+  const masterKey = seedPhraseToMasterKey(phrase);
+  try {
+    saveLocalKey(masterKey, passphrase);
+    saveAndActivateProfile('local', { url: 'local://', localOnly: true, displayName: 'Local (this machine only)' });
+    saveLocalSession(masterKey.toString('hex'));
+  } catch (err: any) {
+    console.error(`Failed to set up local mode: ${err.message}`);
+    return 1;
+  }
 
   console.log('');
+  console.log(`${GREEN('✓')} Local mode ready — profile ${B('local')} active`);
+  console.log('');
+  console.log(`  Run ${B('capy')} in a project directory to start.`);
+  console.log(DIM('  Lock the key any time with `capy lock`.'));
+  console.log('');
+  return 0;
+}
+
+async function promptUseLocalMode(): Promise<boolean> {
+  const inquirer = (await import('inquirer')).default;
+  const { local } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'local',
+      message: 'Use in local mode? (secrets are only stored on this machine)',
+      default: false,
+    },
+  ]);
+  return local;
+}
+
+export async function byocCommand(initialUrl?: string): Promise<number> {
+  console.log('');
+
+  // Ask first: local-only mode skips the URL probe entirely — there is no
+  // server to reach.
+  if (await promptUseLocalMode()) {
+    return localSetup();
+  }
+
+  const startUrl = normalizeUrl(initialUrl || DEFAULT_URL);
+
   let result: ProbeOk;
   try {
     result = await probeWithRetries(startUrl);

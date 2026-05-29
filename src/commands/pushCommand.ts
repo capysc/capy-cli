@@ -12,7 +12,9 @@ import {
 } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
-import { writeKeepCache } from '../config/globalConfig';
+import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
+import { isLocalOnly } from '../config/profileConfig';
+import { resolveLocalProjectKey } from '../core/localUnlock';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -88,37 +90,49 @@ export class PushCommand {
       process.exit(1);
     }
 
-    if (projectState.userId) {
-      this.authService.setSessionUserId(projectState.userId);
+    // Local-only mode: no auth, no server push. `capy push` becomes a local
+    // commit — the local writes below ARE the commit. serviceClient is unused.
+    const localMode = isLocalOnly();
+
+    let userId: string;
+    let encryptionKey: string;
+    if (localMode) {
+      userId = LOCAL_USER_ID;
+      encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
+    } else {
+      if (projectState.userId) {
+        this.authService.setSessionUserId(projectState.userId);
+      }
+
+      // Authenticate
+      const spinner = ora('Authenticating...').start();
+      let authResult = await this.authService.authenticateSilent(projectState.organizationId);
+      if (!authResult.success) authResult = await this.authService.authenticateSilent();
+      if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
+      this.debug('authResult', {
+        success: authResult.success,
+        user_id: authResult.user_id,
+        _auth_method: authResult._auth_method,
+      });
+      if (!authResult.success) {
+        spinner.fail('Authentication failed');
+        throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
+      }
+
+      spinner.stop();
+
+      const keyOps: KeyServiceOps = {
+        coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+      };
+      encryptionKey = await resolveProjectKey(
+        projectState.organizationId!,
+        projectState.projectId!,
+        authResult.user_id!,
+        keyOps,
+      );
+      userId = authResult.user_id!;
     }
-
-    // Authenticate
-    const spinner = ora('Authenticating...').start();
-    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
-    if (!authResult.success) authResult = await this.authService.authenticateSilent();
-    if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
-    this.debug('authResult', {
-      success: authResult.success,
-      user_id: authResult.user_id,
-      _auth_method: authResult._auth_method,
-    });
-    if (!authResult.success) {
-      spinner.fail('Authentication failed');
-      throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
-    }
-
-    spinner.stop();
-
-    const keyOps: KeyServiceOps = {
-      coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-      wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-    };
-    const encryptionKey = await resolveProjectKey(
-      projectState.organizationId!,
-      projectState.projectId!,
-      authResult.user_id!,
-      keyOps,
-    );
     this.debug('encryptionKey resolved', { length: encryptionKey.length });
 
     // Read keep.lock
@@ -139,7 +153,7 @@ export class PushCommand {
     this.debug('active branch', branch);
 
     // Read and encrypt .env file
-    const pushSpinner = ora('Pushing secrets to Keep...').start();
+    const pushSpinner = ora(localMode ? 'Storing secrets locally...' : 'Pushing secrets to Keep...').start();
 
     const rawLocal = this.fileManager.readEnvFile();
     this.debug('.env raw keys', Object.keys(rawLocal));
@@ -191,19 +205,24 @@ export class PushCommand {
       keepFileLength: keepFileContent.length,
       envBlobLength: envBlob.length,
     });
-    const result = await this.serviceClient.pushSecrets(
-      projectState.projectId!,
-      keepFileContent,
-      envBlob,
-      branch,
-    );
-    this.debug('pushSecrets response', result);
+    // keep_hash is computed locally; the server returns the same value on a
+    // push. In local-only mode there is no push.
+    const localKeepHash = SyncEngine.computeKeepHash(updatedKeep, branch);
+    const cacheKeepHash = localMode
+      ? localKeepHash
+      : (await this.serviceClient.pushSecrets(
+          projectState.projectId!,
+          keepFileContent,
+          envBlob,
+          branch,
+        )).keep_hash;
+    this.debug('push complete', { localMode, cacheKeepHash });
 
     // Cache encrypted blob locally
     writeKeepCache(
       projectState.organizationId!,
       projectState.projectId!,
-      result.keep_hash,
+      cacheKeepHash,
       envBlob,
     );
     this.debug('keep cache written');
@@ -218,12 +237,14 @@ export class PushCommand {
       ...existingSyncState,
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(rawLocal),
-      user_id: authResult.user_id,
-      keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(updatedKeep, branch)),
+      user_id: userId,
+      keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
     });
 
     pushSpinner.succeed(
-      `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
+      localMode
+        ? `Stored ${Object.keys(rawLocal).length} secret(s) locally (local-only mode)`
+        : `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
     );
 
     const { printExpiryWarnings } = await import('./connectors/shared');

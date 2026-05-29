@@ -60,7 +60,10 @@ export class AuthService {
     this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
     this.sessionUserId = sessionUserId;
     if (devMode) {
-      console.error(`[dev] AuthService → ${this.serviceApiUrl}`);
+      // Suppress the dev diagnostic in local-only mode — no identity provider
+      // is used there, so the server URL is irrelevant and misleading.
+      const { isLocalOnly } = require('../config/profileConfig') as typeof import('../config/profileConfig');
+      if (!isLocalOnly()) console.error(`[dev] AuthService → ${this.serviceApiUrl}`);
     }
     this.loadSession();
   }

@@ -16,6 +16,7 @@ import {
   KeepFile,
   KeepVariableEntry,
   SyncState,
+  AuthResult,
   CapyError,
   ERROR_CODES,
   getSyncKeepHash,
@@ -27,7 +28,9 @@ import {
   hasOrgKey,
   KeyServiceOps,
 } from '../crypto/keyResolver';
-import { writeKeepCache, fetchSecretsWithCache } from '../config/globalConfig';
+import { writeKeepCache, fetchSecretsWithCache, readSecretsLocal, LOCAL_ORG_ID, LOCAL_USER_ID } from '../config/globalConfig';
+import { isLocalOnly } from '../config/profileConfig';
+import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
@@ -117,6 +120,11 @@ export class CapyCommand {
           projectState.organizationId = envMeta.org_id;
           projectState.projectId = envMeta.project_id;
           projectState.activeBranch = envMeta.branch || 'development';
+        } else if (isLocalOnly()) {
+          // Local-only mode: bootstrap a project entirely on this machine
+          // (synthetic org, generated projectId) instead of server onboarding.
+          await this.initializeProjectLocal();
+          return;
         } else {
           await this.initializeProject();
           return;
@@ -162,6 +170,35 @@ export class CapyCommand {
     console.error(`Recover with: ${B(`capy checkout ${normalizedHeader}`)} (re-sync to the branch .env actually holds)`);
     console.error(`           or: ${B(`capy checkout ${normalizedActive}`)} (pull the branch .capy/branch claims)\n`);
     process.exit(1);
+  }
+
+  /**
+   * Local-only onboarding: create a project entirely on this machine — no
+   * auth, no org selection, no server. Generates a local projectId, writes
+   * keep.lock with the synthetic local org, then runs the normal (local-gated)
+   * sync so the user can commit their .env.
+   */
+  private async initializeProjectLocal(): Promise<void> {
+    this.debug('initializeProjectLocal start', { cwd: process.cwd() });
+    const { randomUUID } = await import('crypto');
+    const { basename } = await import('path');
+
+    // Unlock now so a missing/locked key fails before we write keep.lock.
+    await resolveLocalProjectKey('bootstrap');
+
+    const projectName = basename(process.cwd()) || 'local-project';
+    const keep: KeepFile = {
+      version: '3.0',
+      org_id: LOCAL_ORG_ID,
+      project_id: randomUUID(),
+      project_name: projectName,
+      variables: {},
+    };
+    this.fileManager.writeKeepFile(keep);
+    console.log(`Created local project "${projectName}" (this machine only).\n`);
+
+    const projectState = await this.projectManager.detectProjectState();
+    await this.syncProject(projectState);
   }
 
   private async initializeProject(): Promise<void> {
@@ -925,85 +962,108 @@ export class CapyCommand {
       cwd: process.cwd(),
     });
 
-    // Load user-scoped session if we know who last synced this project
-    if (projectState.userId) {
-      this.authService.setSessionUserId(projectState.userId);
-    }
-
-    // Authenticate — try silent first, then interactive if needed.
-    const spinner = ora('Authenticating...').start();
-    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
-
-    // If silent auth failed, try without a specific org to use any valid session
-    if (!authResult.success) {
-      authResult = await this.authService.authenticateSilent();
-    }
-
-    // If still no session, fall through to interactive auth
-    if (!authResult.success) {
-      authResult = await this.authService.authenticate(projectState.organizationId);
-    }
-
-    this.debug('authResult', {
-      success: authResult.success,
-      user_id: authResult.user_id,
-      organization_id: authResult.organization_id,
-      _auth_method: authResult._auth_method,
-      error: authResult.error,
-    });
-
-    if (!authResult.success) {
-      spinner.fail('Authentication failed');
-      throw new CapyError(
-        authResult.error || 'Authentication failed',
-        ERROR_CODES.AUTH_FAILED
-      );
-    }
-
-    // Persist user ID to sync state immediately
-    if (authResult.user_id) {
-      this.projectManager.writeSyncStateUserId(authResult.user_id);
-    }
-
-    spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
-
-    const orgName = authResult.organization_name
-      || authResult.organizations?.find(o => o.id === authResult.organization_id)?.name
-      || (authResult.organizations?.length === 0 ? 'not yet created' : authResult.organization_id)
-      || 'not yet created';
-
+    // Local-only mode: no identity provider, no server. Identity is the fixed
+    // synthetic local/local pair; the key is unwrapped from the passphrase
+    // session. Everything below this point is shared with the server path,
+    // gated by `localMode` at the few seams that would otherwise call out.
+    const localMode = isLocalOnly();
     const branch = projectState.activeBranch;
 
-    this.displayHeader(
-      projectState.projectName || 'not yet created',
-      orgName,
-      authResult.user_first_name || authResult.user_email || '',
-      branch,
-    );
+    let authResult: AuthResult;
 
-    const token = this.authService.getToken();
-    if (!token) {
-      throw new CapyError(
-        'You do not have access to this project\'s organization.\n\n' +
-        'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
-        ERROR_CODES.PERMISSION_DENIED
+    if (localMode) {
+      authResult = { success: true, user_id: LOCAL_USER_ID };
+      this.displayHeader(
+        projectState.projectName || 'local project',
+        'local (this machine only)',
+        'local',
+        branch,
       );
+    } else {
+      // Load user-scoped session if we know who last synced this project
+      if (projectState.userId) {
+        this.authService.setSessionUserId(projectState.userId);
+      }
+
+      // Authenticate — try silent first, then interactive if needed.
+      const spinner = ora('Authenticating...').start();
+      let result = await this.authService.authenticateSilent(projectState.organizationId);
+
+      // If silent auth failed, try without a specific org to use any valid session
+      if (!result.success) {
+        result = await this.authService.authenticateSilent();
+      }
+
+      // If still no session, fall through to interactive auth
+      if (!result.success) {
+        result = await this.authService.authenticate(projectState.organizationId);
+      }
+
+      this.debug('authResult', {
+        success: result.success,
+        user_id: result.user_id,
+        organization_id: result.organization_id,
+        _auth_method: result._auth_method,
+        error: result.error,
+      });
+
+      if (!result.success) {
+        spinner.fail('Authentication failed');
+        throw new CapyError(
+          result.error || 'Authentication failed',
+          ERROR_CODES.AUTH_FAILED
+        );
+      }
+
+      // Persist user ID to sync state immediately
+      if (result.user_id) {
+        this.projectManager.writeSyncStateUserId(result.user_id);
+      }
+
+      spinner.succeed(`Authenticated as ${result.user_email || result.user_first_name} (${result._auth_method || 'oauth'})`);
+
+      const orgName = result.organization_name
+        || result.organizations?.find(o => o.id === result.organization_id)?.name
+        || (result.organizations?.length === 0 ? 'not yet created' : result.organization_id)
+        || 'not yet created';
+
+      this.displayHeader(
+        projectState.projectName || 'not yet created',
+        orgName,
+        result.user_first_name || result.user_email || '',
+        branch,
+      );
+
+      const token = this.authService.getToken();
+      if (!token) {
+        throw new CapyError(
+          'You do not have access to this project\'s organization.\n\n' +
+          'Ask the project owner to invite you, or run capy in a different directory to create your own project.',
+          ERROR_CODES.PERMISSION_DENIED
+        );
+      }
+      authResult = result;
     }
 
     let encryptionKey: string;
     try {
-      encryptionKey = await resolveProjectKey(
-        projectState.organizationId!,
-        projectState.projectId!,
-        authResult.user_id!,
-        this.keyServiceOps(),
-      );
+      if (localMode) {
+        encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
+      } else {
+        encryptionKey = await resolveProjectKey(
+          projectState.organizationId!,
+          projectState.projectId!,
+          authResult.user_id!,
+          this.keyServiceOps(),
+        );
+      }
     } catch (err: any) {
       // Confirmed kick → destructive local cleanup (wraps key, user dir,
       // project caches, keep.lock). Any other error path — bare 403,
       // network blip, etc. — leaves local state untouched. The single
-      // gate predicate lives in errors/membershipRevoked.ts.
-      if (isMembershipRevokedError(err)) {
+      // gate predicate lives in errors/membershipRevoked.ts. Never runs in
+      // local mode (no server, no membership).
+      if (!localMode && isMembershipRevokedError(err)) {
         cleanupOrgData(projectState.organizationId!, projectState.userId);
       }
       throw err;
@@ -1068,12 +1128,15 @@ export class CapyCommand {
       this.debugError('.env read failed', error);
     }
 
-    // Fetch remote secrets
-    const fetchSpinner = ora('Fetching remote secrets...').start();
+    // Fetch remote secrets. In local-only mode there is no remote — skip the
+    // fetch entirely and reuse the existing offline path (networkAvailable
+    // false → empty remote → pinned-vs-local comparison only).
     const remotePlaintext: Record<string, string> = {};
     const remoteHashes: Record<string, string> = {};
-    let networkAvailable = true;
+    let networkAvailable = !localMode;
 
+    if (!localMode) {
+    const fetchSpinner = ora('Fetching remote secrets...').start();
     try {
       // Always ask for the latest remote blob for this branch (no keep_hash).
       // The server returns the env_blob AND the latest keep.json — the client
@@ -1176,6 +1239,7 @@ export class CapyCommand {
       networkAvailable = false;
       fetchSpinner.fail('Cannot reach remote. Showing local changes only.');
     }
+    } // end if (!localMode) remote fetch
 
     // 3-way comparison
     const hasRemote = Object.keys(remotePlaintext).length > 0;
@@ -1232,12 +1296,14 @@ export class CapyCommand {
     if (needsFetch && originalKeep && Object.keys(pinned).length > 0) {
       try {
         const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
-        const blob = await fetchSecretsWithCache(
-          this.serviceClient,
-          projectState.organizationId!,
-          projectState.projectId!,
-          keepHash,
-        );
+        const blob = localMode
+          ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
+          : await fetchSecretsWithCache(
+              this.serviceClient,
+              projectState.organizationId!,
+              projectState.projectId!,
+              keepHash,
+            );
         if (blob?.env_file) {
           const encrypted = this.fileManager.parseEnvContent(blob.env_file);
           for (const [key, value] of Object.entries(encrypted)) {
@@ -1327,6 +1393,13 @@ export class CapyCommand {
 
     menuChoices.push({ name: 'Continue working', value: 'skip' });
 
+    // In local-only mode there is no remote, so "push" is misleading.
+    if (localMode) {
+      for (const c of menuChoices) {
+        if (c.value === 'commit_local') c.name = 'Commit all local values';
+      }
+    }
+
     const { action } = await inquirer.prompt([{
       type: 'list',
       name: 'action',
@@ -1347,12 +1420,14 @@ export class CapyCommand {
       if (originalKeep && Object.keys(pinned).length > 0) {
         const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
         try {
-          const blob = await fetchSecretsWithCache(
-            this.serviceClient,
-            projectState.organizationId!,
-            projectState.projectId!,
-            keepHash,
-          );
+          const blob = localMode
+            ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
+            : await fetchSecretsWithCache(
+                this.serviceClient,
+                projectState.organizationId!,
+                projectState.projectId!,
+                keepHash,
+              );
           if (blob?.env_file) {
             const encrypted = this.fileManager.parseEnvContent(blob.env_file);
             finalEnv = {};
@@ -1432,8 +1507,10 @@ export class CapyCommand {
       })
       .join('\n');
 
-    // Commit + push are coupled: choosing "commit local" pushes too.
-    if (action === 'commit_local') {
+    // Commit + push are coupled: choosing "commit local" pushes too — except
+    // in local-only mode, where there is no remote. The local writes below
+    // (keep cache, encrypted .env, sync-state) ARE the commit.
+    if (action === 'commit_local' && !localMode) {
       await this.serviceClient.pushSecrets(
         projectState.projectId!,
         JSON.stringify(finalKeep),
@@ -1461,7 +1538,11 @@ export class CapyCommand {
     console.log(`\n> keep.lock updated (${diffs.length} changes)`);
 
     if (action === 'commit_local') {
-      console.log(`\nPushed ${changeCount} change(s) to Keep.`);
+      console.log(
+        localMode
+          ? `\nStored ${changeCount} change(s) locally (local-only mode).`
+          : `\nPushed ${changeCount} change(s) to Keep.`,
+      );
     }
 
     // Install hooks on every run (idempotent)
