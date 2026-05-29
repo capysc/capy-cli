@@ -68,8 +68,8 @@ describe('byocCommand', () => {
         return ok({ status: 'ok', service: 'capy' });
       };
       stubFetch();
-      // Profile name prompt — accept the suggested default.
-      nextResponses = [{ name: 'internal' }];
+      // 1st prompt: decline local mode. Then profile name (suggested default).
+      nextResponses = [{ local: false }, { name: 'internal' }];
 
       const code = await byocCommand();
       restoreFetch();
@@ -88,7 +88,7 @@ describe('byocCommand', () => {
         return ok({ status: 'ok', service: 'capy' });
       };
       stubFetch();
-      nextResponses = [{ name: 'acme' }];
+      nextResponses = [{ local: false }, { name: 'acme' }];
 
       const code = await byocCommand('https://capy.acme.com');
       restoreFetch();
@@ -104,7 +104,7 @@ describe('byocCommand', () => {
         return ok({ status: 'ok', service: 'capy' });
       };
       stubFetch();
-      nextResponses = [{ name: 'acme' }];
+      nextResponses = [{ local: false }, { name: 'acme' }];
 
       await byocCommand('capy.acme.com');
       restoreFetch();
@@ -115,7 +115,7 @@ describe('byocCommand', () => {
     it('strips trailing slashes', async () => {
       fetchHandler = () => ok({ status: 'ok', service: 'capy' });
       stubFetch();
-      nextResponses = [{ name: 'acme' }];
+      nextResponses = [{ local: false }, { name: 'acme' }];
 
       await byocCommand('https://capy.acme.com///');
       restoreFetch();
@@ -134,7 +134,7 @@ describe('byocCommand', () => {
       };
       stubFetch();
       // After rejection, prompt asks for URL, then for profile name.
-      nextResponses = [{ url: 'https://retry.example.com' }, { name: 'retry' }];
+      nextResponses = [{ local: false }, { url: 'https://retry.example.com' }, { name: 'retry' }];
 
       const code = await byocCommand();
       restoreFetch();
@@ -151,7 +151,7 @@ describe('byocCommand', () => {
         return ok({ status: 'ok', service: 'capy' });
       };
       stubFetch();
-      nextResponses = [{ url: 'https://retry.example.com' }, { name: 'retry' }];
+      nextResponses = [{ local: false }, { url: 'https://retry.example.com' }, { name: 'retry' }];
 
       const code = await byocCommand();
       restoreFetch();
@@ -180,13 +180,55 @@ describe('byocCommand', () => {
           return Promise.reject(err);
         }
       }) as any;
-      nextResponses = [{ url: 'https://retry.example.com' }, { name: 'retry' }];
+      nextResponses = [{ local: false }, { url: 'https://retry.example.com' }, { name: 'retry' }];
 
       const code = await byocCommand();
       restoreFetch();
 
       expect(code).toBe(0);
       expect(profileConfig.readProfileConfig()?.profiles.retry.url).toBe('https://retry.example.com');
+    });
+  });
+
+  describe('local-only mode', () => {
+    it('sets up a local profile + keystore without probing any URL', async () => {
+      let fetchCalled = false;
+      global.fetch = (() => {
+        fetchCalled = true;
+        throw new Error('local mode must not probe');
+      }) as any;
+
+      const phrase = (await import('../../src/crypto/keyManager')).generateSeedPhrase();
+      // Prompts: 1) use local? yes  2) key mode: enter existing  3) phrase
+      //          4) passphrase  5) confirm passphrase
+      nextResponses = [
+        { local: true },
+        { mode: 'enter' },
+        { phrase },
+        { passphrase: 'hunter2hunter2' },
+        { confirm: 'hunter2hunter2' },
+      ];
+
+      const code = await byocCommand();
+      restoreFetch();
+
+      expect(code).toBe(0);
+      expect(fetchCalled).toBe(false);
+
+      const config = profileConfig.readProfileConfig();
+      expect(config?.default).toBe('local');
+      expect(config?.profiles.local.localOnly).toBe(true);
+
+      // Keystore written and unwrappable with the passphrase.
+      const gc = await import('../../src/config/globalConfig');
+      const kr = await import('../../src/crypto/keyResolver');
+      const km = await import('../../src/crypto/keyManager');
+      expect(gc.hasLocalKey()).toBe(true);
+      const hex = kr.decryptLocalMasterKeyHex('hunter2hunter2');
+      expect(hex).toBe(km.seedPhraseToMasterKey(phrase).toString('hex'));
+
+      // Session started unlocked.
+      expect(gc.isLocalUnlocked(60 * 60 * 1000)).toBe(true);
     });
   });
 
@@ -200,7 +242,7 @@ describe('byocCommand', () => {
       // 1st name prompt: choose "acme" (already exists)
       // 2nd confirm prompt: decline overwrite
       // 3rd name prompt: choose a different name
-      nextResponses = [{ name: 'acme' }, { confirm: false }, { name: 'acme2' }];
+      nextResponses = [{ local: false }, { name: 'acme' }, { confirm: false }, { name: 'acme2' }];
 
       const code = await byocCommand('https://capy.acme.com');
       restoreFetch();

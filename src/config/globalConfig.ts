@@ -159,6 +159,128 @@ export function deleteRecoverySession(): void {
   }
 }
 
+// --- Local-only mode (~/.capy/local/) ---
+//
+// Fixed identity for local-only mode. There is no identity provider and no
+// server user, so org/user are synthetic constants. projectId remains real
+// and per-project, so deriveProjectKey(M, projectId, LOCAL_ORG_ID) still
+// yields distinct keys per project.
+export const LOCAL_ORG_ID = 'local';
+export const LOCAL_USER_ID = 'local';
+
+// The passphrase-wrapped master key lives under ~/.capy/local/ — deliberately
+// NOT under ~/.capy/orgs/, so `capy logout` (which sweeps org/session state)
+// can never delete the only copy of M.
+export function getLocalKeyPath(): string {
+  return join(getGlobalCapyDir(), 'local', 'key.local');
+}
+
+export interface LocalKeyRecord {
+  version: string;
+  wrapping_method: 'passphrase';
+  /** base64 random salt for the passphrase KDF */
+  salt: string;
+  iterations: number;
+  /** base64(iv || ciphertext || authTag) of M */
+  encrypted_master_key: string;
+  created_at: string;
+}
+
+export function saveLocalKeyRecord(record: LocalKeyRecord): void {
+  writeSecureFile(getLocalKeyPath(), JSON.stringify(record, null, 2));
+}
+
+export function readLocalKeyRecord(): LocalKeyRecord | null {
+  const content = readFileOrNull(getLocalKeyPath());
+  if (!content) return null;
+  try {
+    return JSON.parse(content) as LocalKeyRecord;
+  } catch {
+    return null;
+  }
+}
+
+export function hasLocalKey(): boolean {
+  return existsSync(getLocalKeyPath());
+}
+
+// --- Local-only session (~/.capy/local/session.json) ---
+//
+// After a successful passphrase unlock, the decrypted M is cached here (mode
+// 0600) so subsequent commands in the same window don't re-prompt — mirroring
+// the recovery-session model. Idle auto-lock: the cached key is treated as
+// locked once `now - last_used_at` exceeds the configured timeout.
+
+export function getLocalSessionPath(): string {
+  return join(getGlobalCapyDir(), 'local', 'session.json');
+}
+
+interface LocalSessionRecord {
+  master_key: string;
+  last_used_at: string;
+}
+
+export function saveLocalSession(masterKeyHex: string): void {
+  const data: LocalSessionRecord = {
+    master_key: masterKeyHex,
+    last_used_at: new Date().toISOString(),
+  };
+  writeSecureFile(getLocalSessionPath(), JSON.stringify(data, null, 2));
+}
+
+function readLocalSessionRecord(): LocalSessionRecord | null {
+  const content = readFileOrNull(getLocalSessionPath());
+  if (!content) return null;
+  try {
+    const data = JSON.parse(content);
+    if (typeof data?.master_key === 'string') return data as LocalSessionRecord;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearLocalSession(): void {
+  try {
+    rmSync(getLocalSessionPath(), { force: true });
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * Whether an unexpired local session exists. Enforces idle auto-lock lazily:
+ * if the session is older than `timeoutMs` of inactivity, it is cleared and
+ * treated as locked. No background daemon — checked on every use.
+ */
+export function isLocalUnlocked(timeoutMs: number): boolean {
+  const rec = readLocalSessionRecord();
+  if (!rec) return false;
+  const last = Date.parse(rec.last_used_at);
+  if (Number.isNaN(last)) {
+    clearLocalSession();
+    return false;
+  }
+  if (Date.now() - last > timeoutMs) {
+    clearLocalSession();
+    return false;
+  }
+  return true;
+}
+
+/** Read the cached master key hex, or null if no (unexpired) session. */
+export function readLocalSession(timeoutMs: number): string | null {
+  if (!isLocalUnlocked(timeoutMs)) return null;
+  return readLocalSessionRecord()?.master_key ?? null;
+}
+
+/** Refresh the idle clock on an active session (call after each use). */
+export function touchLocalSession(): void {
+  const rec = readLocalSessionRecord();
+  if (!rec) return;
+  saveLocalSession(rec.master_key);
+}
+
 // --- Force-login marker (~/.capy/auth/.force-login) ---
 //
 // Written by `capy logout` so the next interactive OAuth flow tells the
@@ -183,6 +305,21 @@ export function consumeForceLoginMarker(): boolean {
     // best effort
   }
   return true;
+}
+
+/**
+ * Local-only counterpart to fetchSecretsWithCache: reads the encrypted blob
+ * from the local keep cache ONLY, returning null on a miss. Never touches the
+ * network — used by local-only mode so a cache miss can't fall through to a
+ * server fetch.
+ */
+export function readSecretsLocal(
+  orgId: string,
+  projectId: string,
+  keepHash: string,
+): { env_file: string } | null {
+  const cached = readKeepCache(orgId, projectId, keepHash);
+  return cached !== null ? { env_file: cached } : null;
 }
 
 export async function fetchSecretsWithCache(

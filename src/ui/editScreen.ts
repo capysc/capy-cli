@@ -36,10 +36,31 @@ export interface EditState {
   branch: string;
   rows: EditRow[];
   remoteAvailable: boolean;
+  /**
+   * Local-only mode: there is no remote. The comparison is committed-vs-working
+   * (status is 'in sync' or 'local'/uncommitted), and the UPDATED column shows
+   * committed/uncommitted instead of remote-drift wording.
+   */
+  localMode?: boolean;
 }
 
 export interface EditContext {
   saveLocalEdits: (edits: Record<string, string>) => Promise<void>;
+}
+
+/**
+ * Local-only row classification: committed-vs-working. `working` is the value
+ * in .env; `committed` is the value in the local keep (cache). Shared by the
+ * initial build (editCommand) and the in-TUI reclassify so they never drift.
+ */
+export function classifyLocalRow(
+  working: string | undefined,
+  committed: string | undefined,
+): { status: EditRow['status']; updatedLabel: string } {
+  const inSync = working !== undefined && working === committed;
+  return inSync
+    ? { status: 'in sync', updatedLabel: 'committed' }
+    : { status: 'local', updatedLabel: 'uncommitted' };
 }
 
 export class EditScreen {
@@ -239,18 +260,19 @@ export class EditScreen {
     if (!this.ctx || this.pendingEdits.size === 0) return;
     const editedKeys = Array.from(this.pendingEdits.keys());
     const edits = Object.fromEntries(this.pendingEdits);
-    this.statusMessage = { text: `Committing & pushing ${editedKeys.length} change(s)…`, isError: false };
+    const verb = this.state.localMode ? 'Committing' : 'Committing & pushing';
+    this.statusMessage = { text: `${verb} ${editedKeys.length} change(s)…`, isError: false };
     this.draw();
     try {
       await this.ctx.saveLocalEdits(edits);
       this.pendingEdits.clear();
-      // After push, remote == local for the edited rows.
+      // After commit, the committed baseline == local for the edited rows.
       for (const k of editedKeys) {
         const row = this.state.rows.find((r) => r.key === k);
         if (row && row.localValue !== undefined) {
           row.remoteValue = row.localValue;
           row.status = this.reclassify(row);
-          row.updatedLabel = row.status === 'in sync' ? 'in sync' : row.status;
+          row.updatedLabel = this.updatedLabelFor(row.status);
         }
       }
       this.statusMessage = { text: `Committed ${editedKeys.length} change(s)`, isError: false };
@@ -310,7 +332,7 @@ export class EditScreen {
     if (row) {
       row.localValue = buffer;
       row.status = this.reclassify(row);
-      row.updatedLabel = row.status === 'in sync' ? 'in sync' : row.status;
+      row.updatedLabel = this.updatedLabelFor(row.status);
     }
     this.statusMessage = { text: `Edited ${key} (uncommitted)`, isError: false };
     this.draw();
@@ -338,7 +360,8 @@ export class EditScreen {
   private async commitAndQuit(resolve: () => void): Promise<void> {
     if (!this.ctx) return;
     const edits = Object.fromEntries(this.pendingEdits);
-    this.statusMessage = { text: `Committing & pushing ${this.pendingEdits.size} change(s)…`, isError: false };
+    const verb = this.state.localMode ? 'Committing' : 'Committing & pushing';
+    this.statusMessage = { text: `${verb} ${this.pendingEdits.size} change(s)…`, isError: false };
     this.draw();
     try {
       await this.ctx.saveLocalEdits(edits);
@@ -354,7 +377,17 @@ export class EditScreen {
 
   // Local-only reclassification. We don't refetch remote, so the remote side
   // is treated as unchanged from when the TUI loaded.
+  /** UPDATED-column label for a status, mode-aware. */
+  private updatedLabelFor(status: EditRow['status']): string {
+    if (this.state.localMode) return status === 'in sync' ? 'committed' : 'uncommitted';
+    return status === 'in sync' ? 'in sync' : status;
+  }
+
   private reclassify(row: EditRow): EditRow['status'] {
+    // Local mode: committed-vs-working. remoteValue holds the committed value.
+    if (this.state.localMode) {
+      return classifyLocalRow(row.localValue, row.remoteValue).status;
+    }
     if (!this.state.remoteAvailable) return 'unknown';
     const localPresent = row.localValue !== undefined;
     const remotePresent = row.remoteValue !== undefined;
@@ -446,7 +479,7 @@ export class EditScreen {
     lines.push('');
     if (this.quitPrompt) {
       const n = this.pendingEdits.size;
-      lines.push(`${m}${YELLOW}${n} uncommitted change${n === 1 ? '' : 's'}.${RESET} ${BOLD}c${RESET}${DIM} commit & push · ${RESET}${BOLD}d${RESET}${DIM} discard · ${RESET}${BOLD}k${RESET}${DIM} keep working${RESET}`);
+      lines.push(`${m}${YELLOW}${n} uncommitted change${n === 1 ? '' : 's'}.${RESET} ${BOLD}c${RESET}${DIM} ${this.state.localMode ? 'commit' : 'commit & push'} · ${RESET}${BOLD}d${RESET}${DIM} discard · ${RESET}${BOLD}k${RESET}${DIM} keep working${RESET}`);
     } else if (this.editing) {
       lines.push(`${m}${DIM}Type new value · ${RESET}${BOLD}Enter${RESET}${DIM} save · ${RESET}${BOLD}Esc${RESET}${DIM} cancel${RESET}`);
     } else if (this.popupOpen) {
@@ -456,13 +489,13 @@ export class EditScreen {
       const panHint = isRevealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
       const dirty = this.pendingEdits.size;
       const dirtyHint = dirty > 0
-        ? `${DIM} · ${RESET}${BOLD}c${RESET}${DIM} commit & push (${dirty})${RESET}`
+        ? `${DIM} · ${RESET}${BOLD}c${RESET}${DIM} ${this.state.localMode ? "commit" : "commit & push"} (${dirty})${RESET}`
         : '';
       lines.push(`${m}${BOLD}r${RESET}${DIM} ${revealLabel} · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${panHint}${dirtyHint}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM} close${RESET}`);
     } else {
       const dirty = this.pendingEdits.size;
       const dirtyHint = dirty > 0
-        ? `${DIM} · ${RESET}${BOLD}c${RESET}${DIM} commit & push (${dirty})${RESET}`
+        ? `${DIM} · ${RESET}${BOLD}c${RESET}${DIM} ${this.state.localMode ? "commit" : "commit & push"} (${dirty})${RESET}`
         : '';
       lines.push(`${m}${DIM}↑↓ navigate · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}r${RESET}${DIM} reveal · ${RESET}${BOLD}e${RESET}${DIM} edit${RESET}${dirtyHint}${DIM} · ${RESET}${BOLD}q${RESET}${DIM} quit${RESET}`);
     }
@@ -490,8 +523,12 @@ export class EditScreen {
       { value: this.state.branch, action: 'active branch' },
       { value: `${total} tracked`, action: 'shown as abc…xyz snippets' },
       {
-        value: this.state.remoteAvailable ? `${drift} drift` : `${unknown} ?`,
-        action: this.state.remoteAvailable ? 'changed local/remote' : 'remote unavailable',
+        value: this.state.localMode
+          ? `${drift} uncommitted`
+          : this.state.remoteAvailable ? `${drift} drift` : `${unknown} ?`,
+        action: this.state.localMode
+          ? 'changed since commit'
+          : this.state.remoteAvailable ? 'changed local/remote' : 'remote unavailable',
       },
       {
         value: `${conflicts} conflicts`,

@@ -31,7 +31,24 @@ export interface Profile {
   caBundle?: string;
   /** Optional human-friendly name surfaced in `capy profile list`. */
   displayName?: string;
+  /**
+   * Local-only mode: fully offline, passphrase-protected local key, no
+   * identity provider and no server calls. When true the profile carries no
+   * live server dependency for crypto/auth — secrets are stored only on this
+   * machine.
+   */
+  localOnly?: boolean;
+  /**
+   * Idle auto-lock timeout (ms) for the local-only session. After this much
+   * inactivity the cached key is treated as locked and the passphrase is
+   * re-prompted on next use. Only meaningful when localOnly is true.
+   * Defaults to LOCAL_LOCK_TIMEOUT_DEFAULT_MS (1 hour).
+   */
+  localLockTimeoutMs?: number;
 }
+
+/** Default idle auto-lock timeout for local-only mode: 1 hour. */
+export const LOCAL_LOCK_TIMEOUT_DEFAULT_MS = 60 * 60 * 1000;
 
 export interface ProfileConfig {
   /** Name of the active profile. Must be a key of `profiles`. */
@@ -126,6 +143,38 @@ export function getActiveProfile(): { name: string; profile: Profile } | null {
     return null;
   }
   return { name, profile };
+}
+
+/**
+ * True when the active profile is local-only (fully offline, passphrase
+ * key). This is the single gate every command consults to decide whether to
+ * skip auth/server calls and route crypto through the local keystore.
+ *
+ * Never throws — a corrupt config or a missing CAPY_PROFILE resolves to
+ * false (i.e. normal server-backed behavior) rather than blowing up.
+ */
+export function isLocalOnly(): boolean {
+  try {
+    const active = getActiveProfile();
+    return active?.profile.localOnly === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Idle auto-lock timeout (ms) for the active local-only profile, falling back
+ * to the 1-hour default when unset. Returns the default for non-local-only or
+ * absent profiles too (harmless — only the local session reads it).
+ */
+export function getLocalLockTimeoutMs(): number {
+  try {
+    const active = getActiveProfile();
+    const v = active?.profile.localLockTimeoutMs;
+    return typeof v === 'number' && v > 0 ? v : LOCAL_LOCK_TIMEOUT_DEFAULT_MS;
+  } catch {
+    return LOCAL_LOCK_TIMEOUT_DEFAULT_MS;
+  }
 }
 
 /**
