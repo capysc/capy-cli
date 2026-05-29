@@ -133,7 +133,7 @@ export class PushCommand {
       );
       userId = authResult.user_id!;
     }
-    this.debug('encryptionKey resolved', { length: encryptionKey.length });
+    this.debug('encryptionKey resolved', { available: true });
 
     // Read keep.lock
     const keep = this.projectManager.readKeepFile();

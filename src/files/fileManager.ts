@@ -98,7 +98,7 @@ export class FileManager {
         .join('\n');
 
       this.ensureDirectoryExists(dirname(envPath));
-      writeFileSync(envPath, content + '\n', 'utf-8');
+      writeFileSync(envPath, content + '\n', { encoding: 'utf-8', mode: 0o600 });
       console.log(`Successfully wrote .env file`);
 
       if (backup) {
@@ -164,7 +164,7 @@ export class FileManager {
         .join('\n');
 
       this.ensureDirectoryExists(dirname(envPath));
-      writeFileSync(envPath, content + '\n', 'utf-8');
+      writeFileSync(envPath, content + '\n', { encoding: 'utf-8', mode: 0o600 });
       console.log(`Successfully wrote encrypted .env file`);
 
       if (backup) {
@@ -338,7 +338,7 @@ export class FileManager {
     const backupPath = `${filePath}.backup`;
     try {
       const content = readFileSync(filePath, 'utf-8');
-      writeFileSync(backupPath, content, 'utf-8');
+      writeFileSync(backupPath, content, { encoding: 'utf-8', mode: 0o600 });
       return backupPath;
     } catch {
       return null;
@@ -413,7 +413,7 @@ export class FileManager {
 
     const oldPath = envPath.replace(/\.env$/, '.env.pre-capy.old');
     const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting this file or putting it somewhere safe because the values are unencrypted.\n\n';
-    writeFileSync(oldPath, header + commented, 'utf-8');
+    writeFileSync(oldPath, header + commented, { encoding: 'utf-8', mode: 0o600 });
     this.updateGitignore(['.env.pre-capy.old']);
     console.log(`Saved plaintext backup to ${oldPath}`);
     return true;
