@@ -147,11 +147,13 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy edit`](https://docs.capy.sc/cli/edit) | Inspect and edit secrets in an interactive TUI. |
 | [`capy status`](https://docs.capy.sc/cli/status) | Show drift between local, pinned, and remote. |
 | [`capy push`](https://docs.capy.sc/cli/push) | Push local changes without pulling. |
+| [`capy lock`](https://docs.capy.sc/cli/lock) | Lock the local key so the passphrase is required next time. |
 | [`capy deploy`](https://docs.capy.sc/cli/deploy) | Generate a deploy token and walk through platform setup. |
-| [`capy connect <provider>`](https://docs.capy.sc/cli/connect) | Pull a credential from a provider into `.env` (Stripe today). |
+| [`capy connect <provider>`](https://docs.capy.sc/cli/connect) | Pull a credential from a provider into `.env`. |
 | [`capy rotate [var]`](https://docs.capy.sc/cli/rotate) | Rotate a managed credential. |
 | [`capy invite <email>`](https://docs.capy.sc/cli/invite) | Invite a teammate. |
 | [`capy redeem <code>`](https://docs.capy.sc/cli/redeem) | Redeem an invite code. |
+| [`capy transport`](https://docs.capy.sc/cli/transport) | Move your account to another machine. |
 | [`capy kick <email>`](https://docs.capy.sc/cli/kick) | Remove a teammate. |
 | [`capy users`](https://docs.capy.sc/cli/users) | Interactive member management. |
 | [`capy org`](https://docs.capy.sc/cli/org) | List or switch organizations. |
@@ -159,11 +161,15 @@ Good when you want to see drift across the whole branch, edit one variable witho
 | [`capy checkout <branch>`](https://docs.capy.sc/cli/checkout) | Switch branches. `-b` to create. |
 | [`capy grant-branch`](https://docs.capy.sc/cli/grant-branch) | Grant access to a protected branch. |
 | [`capy revoke-branch`](https://docs.capy.sc/cli/revoke-branch) | Revoke branch access. |
+| [`capy recover`](https://docs.capy.sc/cli/recover) | Restore access from your recovery phrase. |
+| [`capy end-recover`](https://docs.capy.sc/cli/end-recover) | End a recovery session. |
+| [`capy decrypt`](https://docs.capy.sc/cli/decrypt) | Decrypt secrets offline (owner only). |
+| [`capy use <profile>`](https://docs.capy.sc/cli/use) | Switch between configured profiles. |
+| [`capy profile`](https://docs.capy.sc/cli/profile) | Manage CLI profiles. |
+| [`capy byoc [url]`](https://docs.capy.sc/cli/byoc) | Connect to a self-hosted Capy instance. |
 | [`capy info`](https://docs.capy.sc/cli/info) | Show current session info. |
 | [`capy logout`](https://docs.capy.sc/cli/logout) | Clear local session. |
 | [`capy cleanup`](https://docs.capy.sc/cli/cleanup) | Remove git hooks and local state. |
-
-> **Stripe live mode** is opt-in via `--live` and requires per-action account-id confirmation. See [docs.capy.sc/cli/connect](https://docs.capy.sc/cli/connect).
 
 ## Syncing
 
