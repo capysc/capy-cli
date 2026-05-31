@@ -9,6 +9,7 @@ import { resolve } from 'path';
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
+import { version as CLI_VERSION } from '../package.json';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -60,7 +61,7 @@ const program = new Command();
 program
   .name('capy-dev')
   .description('Capy CLI (DEV MODE - mock auth enabled)')
-  .version('0.3.0')
+  .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')

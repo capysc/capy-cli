@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
+import { version as CLI_VERSION } from '../package.json';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -29,7 +30,7 @@ const program = new Command();
 program
   .name('capy')
   .description('Capy CLI - SecretOps for the AI age')
-  .version('0.3.0')
+  .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
