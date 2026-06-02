@@ -165,25 +165,36 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
 
   let projectKeyHex: string;
   try {
-    const { AuthService } = await import('../auth/authService');
-    const { ServiceClient } = await import('../service/serviceClient');
-    const { resolveProjectKey } = await import('../crypto/keyResolver');
+    const { isLocalOnly } = await import('../config/profileConfig');
 
-    const auth = new AuthService(undefined, devMode);
-    const result = await auth.authenticateSilent(orgId);
-    if (!result.success || !result.user_id) {
-      console.error('capy run: not authenticated. Run `capy` to sign in.');
-      return 1;
+    // Local-only mode: resolve the key entirely offline from the passphrase
+    // session — no auth, no ServiceClient, no co-decrypt. Prompts for the
+    // passphrase on demand if the session is locked, so `capy run` always
+    // works even after `capy lock`.
+    if (isLocalOnly()) {
+      const { resolveLocalProjectKey } = await import('../core/localUnlock');
+      projectKeyHex = await resolveLocalProjectKey(projectId);
+    } else {
+      const { AuthService } = await import('../auth/authService');
+      const { ServiceClient } = await import('../service/serviceClient');
+      const { resolveProjectKey } = await import('../crypto/keyResolver');
+
+      const auth = new AuthService(undefined, devMode);
+      const result = await auth.authenticateSilent(orgId);
+      if (!result.success || !result.user_id) {
+        console.error('capy run: not authenticated. Run `capy` to sign in.');
+        return 1;
+      }
+
+      const svc = new ServiceClient(undefined, devMode);
+      svc.setTokenProvider(() => auth.getValidToken());
+      const keyServiceOps = {
+        coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
+        wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then(r => r.ciphertext),
+      };
+
+      projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
     }
-
-    const svc = new ServiceClient(undefined, devMode);
-    svc.setTokenProvider(() => auth.getValidToken());
-    const keyServiceOps = {
-      coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
-      wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then(r => r.ciphertext),
-    };
-
-    projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
   } catch (err: any) {
     console.error(`capy run: failed to resolve project key: ${err.message}`);
     return 1;

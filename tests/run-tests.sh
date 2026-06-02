@@ -18,6 +18,7 @@ ISOLATED_FILES=(
   tests/config/globalConfig.test.ts
   tests/core/projectManager.test.ts
   tests/crypto/keyResolver.test.ts
+  tests/crypto/localKey.test.ts
   tests/crypto/keyStability.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
@@ -25,6 +26,10 @@ ISOLATED_FILES=(
   tests/commands/roleAccessGuards.test.ts
   tests/commands/recoverCommand.test.ts
   tests/commands/cleanupOrgData.test.ts
+  tests/config/profileConfig.test.ts
+  tests/commands/byocCommand.test.ts
+  tests/commands/profileCommand.test.ts
+  tests/commands/localOnlyFlow.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

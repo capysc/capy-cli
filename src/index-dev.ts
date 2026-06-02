@@ -38,11 +38,6 @@ process.on('unhandledRejection', (error: any) => {
 // Load .env from the CLI package directory (not the user's project cwd)
 config({ path: resolve(__dirname, '..', '.env') });
 
-// Default to localhost for dev builds
-if (!process.env.CAPY_API_URL) {
-  process.env.CAPY_API_URL = 'http://localhost:3000';
-}
-
 // Isolate dev global state at `~/.capy-dev/` so dev tooling (e.g. sandbox nuke
 // scripts) can never collateral-damage the user's prod `~/.capy/`, which holds
 // recovery-equivalent wrapped master keys. Lazy-resolved in globalConfig.ts.
@@ -56,6 +51,21 @@ if (!process.env.CAPY_GLOBAL_DIR_NAME) {
 // threaded the parsed option.
 if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
   process.env.CAPY_VERBOSE = '1';
+}
+
+// Default to localhost for dev builds — but only when neither CAPY_API_URL nor
+// a saved profile is present. Without this guard, the auto-set silently wins
+// over `capy-dev byoc` profiles, making them functionally useless in dev.
+// Resolution order in dev with this guard:
+//   explicit CAPY_API_URL > saved profile in ~/.capy-dev/config.json > localhost
+if (!process.env.CAPY_API_URL) {
+  const { existsSync } = require('fs') as typeof import('fs');
+  const { join } = require('path') as typeof import('path');
+  const { homedir } = require('os') as typeof import('os');
+  const configPath = join(homedir(), process.env.CAPY_GLOBAL_DIR_NAME, 'config.json');
+  if (!existsSync(configPath)) {
+    process.env.CAPY_API_URL = 'http://localhost:3000';
+  }
 }
 
 const program = new Command();
@@ -86,6 +96,9 @@ program
       console.log(`    ${B('capy-dev')} end-recover            \x1b[90mEnd recovery session\x1b[0m`);
       console.log(`    ${B('capy-dev')} recover                \x1b[90mReconstruct master key from recovery phrase\x1b[0m`);
       console.log(`    ${B('capy-dev')} auth-decrypt           \x1b[90mDecrypt using auth (dev only)\x1b[0m`);
+      console.log(`    ${B('capy-dev')} byoc [url]             \x1b[90mConnect to a self-hosted Capy (BYOC) instance\x1b[0m`);
+      console.log(`    ${B('capy-dev')} use <profile>          \x1b[90mSwitch to a different profile\x1b[0m`);
+      console.log(`    ${B('capy-dev')} profile list           \x1b[90mList configured profiles\x1b[0m`);
       console.log('');
       process.exit(1);
     }
@@ -542,6 +555,50 @@ program
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
     await cmd.revokeBranch(email, project, branch);
+  });
+
+program
+  .command('byoc [url]')
+  .description('Connect to a self-hosted Capy (BYOC) instance')
+  .action(async (url: string | undefined) => {
+    const { byocCommand } = await import('./commands/byocCommand');
+    process.exit(await byocCommand(url));
+  });
+
+program
+  .command('use <profile>')
+  .description('Switch to a different profile')
+  .action(async (name: string) => {
+    const { useCommand } = await import('./commands/profileCommand');
+    process.exit(await useCommand(name));
+  });
+
+const profileCmd = program
+  .command('profile')
+  .description('Manage CLI profiles (cloud, BYOC, etc.)');
+
+profileCmd
+  .command('list')
+  .description('List configured profiles')
+  .action(async () => {
+    const { profileListCommand } = await import('./commands/profileCommand');
+    process.exit(await profileListCommand());
+  });
+
+profileCmd
+  .command('show [name]')
+  .description('Show profile details (defaults to active)')
+  .action(async (name?: string) => {
+    const { profileShowCommand } = await import('./commands/profileCommand');
+    process.exit(await profileShowCommand(name));
+  });
+
+profileCmd
+  .command('remove <name>')
+  .description('Delete a profile')
+  .action(async (name: string) => {
+    const { profileRemoveCommand } = await import('./commands/profileCommand');
+    process.exit(await profileRemoveCommand(name));
   });
 
 program

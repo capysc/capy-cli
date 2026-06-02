@@ -8,8 +8,9 @@ import {
   seedPhraseToMasterKey,
 } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey, KeyServiceOps } from '../crypto/keyResolver';
+import { displayAndConfirmRecoveryPhrase } from '../ui/recoveryPhrase';
 
-const warn = (s: string) => `\x1b[38;2;235;90;120m${s}\x1b[0m`;
+// (recovery-phrase display + confirm lives in ../ui/recoveryPhrase)
 
 function keyServiceOpsFromClient(serviceClient: ServiceClient): KeyServiceOps {
   return {
@@ -70,47 +71,7 @@ export async function createNewOrganization(
     'https://capy.sc/zero-trust',
   ];
 
-  const maxLen = Math.max(50, ...boxLines.map(l => l.length + 2));
-  const title = '!!!IMPORTANT!!! - SAVE THIS RECOVERY PHRASE';
-  const titlePad = Math.max(0, maxLen - title.length);
-  const titleLeft = Math.floor(titlePad / 2);
-  const titleRight = titlePad - titleLeft;
-
-  console.log('');
-  console.log(warn('─'.repeat(maxLen + 2)));
-  console.log(warn(' '.repeat(titleLeft + 1) + title + ' '.repeat(titleRight + 1)));
-  console.log(warn('─'.repeat(maxLen + 2)));
-  console.log('');
-  console.log('');
-  console.log('');
-  console.log(seedPhrase);
-  console.log('');
-  console.log('');
-  console.log('');
-
-  console.log(warn('┌' + '─'.repeat(maxLen) + '┐'));
-  for (const line of boxLines) {
-    const pad = maxLen - line.length - 1;
-    console.log(`${warn('│')} ${warn(line)}${' '.repeat(Math.max(0, pad))}${warn('│')}`);
-  }
-  console.log(warn('└' + '─'.repeat(maxLen) + '┘'));
-  console.log('');
-
-  const { promptCopyToClipboard } = await import('../ui/clipboard');
-  await promptCopyToClipboard(seedPhrase, '');
-  console.log('');
-
-  while (true) {
-    const { confirmed } = await inquirer.prompt([{
-      type: 'confirm',
-      name: 'confirmed',
-      message: 'I have saved my recovery phrase',
-      default: false,
-    }]);
-    if (confirmed) break;
-    console.log(warn('⚠ The recovery phrase cannot be recovered if lost. Scroll up to review, then confirm.'));
-    console.log('');
-  }
+  await displayAndConfirmRecoveryPhrase(seedPhrase, boxLines);
 
   while (true) {
     const orgSpinner = ora('Creating organization...').start();

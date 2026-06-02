@@ -1,9 +1,12 @@
+import { randomBytes } from 'crypto';
 import {
   deriveProjectKey,
   deriveWrappingKey,
+  deriveLocalWrappingKey,
   decryptMasterKey,
   encryptMasterKey,
   seedPhraseToMasterKey,
+  LOCAL_KEY_ITERATIONS,
 } from './keyManager';
 import {
   readMasterKey,
@@ -11,6 +14,9 @@ import {
   readProjectKeyCache,
   saveProjectKeyCache,
   hasOrgKey as globalHasOrgKey,
+  saveLocalKeyRecord,
+  readLocalKeyRecord,
+  LOCAL_ORG_ID,
 } from '../config/globalConfig';
 import { CapyError, ERROR_CODES } from '../types/index';
 
@@ -150,4 +156,61 @@ export function resolveFromSeedPhrase(
  */
 export function hasOrgKey(orgId: string, userId?: string): boolean {
   return globalHasOrgKey(orgId, userId);
+}
+
+// --- Local-only mode -------------------------------------------------------
+//
+// Local-only mode is persistent recover-mode protected by a passphrase. M is
+// derived locally from a seed phrase, then wrapped at rest with a PBKDF2
+// (passphrase) key — no server KMS layer. Everything below M (project key
+// derivation, value crypto) is identical to the server-backed path.
+
+/**
+ * Derives a project key from a locally-held master key (hex), with the org
+ * pinned to LOCAL_ORG_ID. Pure-local analog of resolveFromSeedPhrase.
+ */
+export function resolveFromLocalKey(masterKeyHex: string, projectId: string): string {
+  const masterKey = Buffer.from(masterKeyHex, 'hex');
+  return deriveProjectKey(masterKey, projectId, LOCAL_ORG_ID);
+}
+
+/**
+ * Wraps M with a passphrase-derived key and writes the local keystore record
+ * to ~/.capy/local/key.local. Used by the `capy byoc` local-setup flow.
+ */
+export function saveLocalKey(masterKey: Buffer, passphrase: string): void {
+  const salt = randomBytes(16);
+  const wrappingKey = deriveLocalWrappingKey(passphrase, salt);
+  const encrypted = encryptMasterKey(masterKey, wrappingKey);
+  saveLocalKeyRecord({
+    version: '1.0',
+    wrapping_method: 'passphrase',
+    salt: salt.toString('base64'),
+    iterations: LOCAL_KEY_ITERATIONS,
+    encrypted_master_key: encrypted,
+    created_at: new Date().toISOString(),
+  });
+}
+
+/**
+ * Unwraps M from the local keystore using the passphrase, returning M as hex.
+ * Throws a clean CapyError on a wrong passphrase (GCM auth-tag failure) or a
+ * missing keystore — never leaks a raw crypto stack trace.
+ */
+export function decryptLocalMasterKeyHex(passphrase: string): string {
+  const record = readLocalKeyRecord();
+  if (!record) {
+    throw new CapyError(
+      'No local key found. Run `capy byoc` and choose local mode to set one up.',
+      ERROR_CODES.PERMISSION_DENIED,
+    );
+  }
+  const salt = Buffer.from(record.salt, 'base64');
+  const wrappingKey = deriveLocalWrappingKey(passphrase, salt);
+  try {
+    const masterKey = decryptMasterKey(record.encrypted_master_key, wrappingKey);
+    return masterKey.toString('hex');
+  } catch {
+    throw new CapyError('Incorrect passphrase.', ERROR_CODES.PERMISSION_DENIED);
+  }
 }

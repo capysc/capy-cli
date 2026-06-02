@@ -4,9 +4,11 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
-import { fetchSecretsWithCache, writeKeepCache } from '../config/globalConfig';
+import { fetchSecretsWithCache, writeKeepCache, readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
+import { isLocalOnly } from '../config/profileConfig';
+import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
-import { EditScreen, EditRow, EditState } from '../ui/editScreen';
+import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScreen';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash } from '../types/index';
@@ -67,32 +69,49 @@ export class EditCommand {
       if (entry) pinned[varName] = entry.value_hash;
     }
 
-    // Auth — silent first, then interactive (mirrors usersCommand pattern)
-    const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-    serviceClient.setTokenProvider(() => authService.getValidToken());
-    let authResult = await authService.authenticateSilent(orgId);
-    if (!authResult.success) authResult = await authService.authenticateSilent();
-    if (!authResult.success) authResult = await authService.authenticate(orgId);
-    if (!authResult.success || !authResult.user_id) {
-      console.error('Authentication failed');
-      process.exit(1);
+    // Local-only mode: no auth, no server. Identity is synthetic; the key is
+    // unwrapped from the passphrase session. No AuthService/ServiceClient is
+    // constructed (avoids the dev-mode "[dev] AuthService → …" log and any
+    // accidental server use).
+    const localMode = isLocalOnly();
+
+    let authService: AuthService | undefined;
+    let serviceClient: ServiceClient | undefined;
+    let userId: string;
+    if (localMode) {
+      userId = LOCAL_USER_ID;
+    } else {
+      // Auth — silent first, then interactive (mirrors usersCommand pattern)
+      authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
+      serviceClient = new ServiceClient(this.apiUrl, this.devMode);
+      serviceClient.setTokenProvider(() => authService!.getValidToken());
+      let authResult = await authService.authenticateSilent(orgId);
+      if (!authResult.success) authResult = await authService.authenticateSilent();
+      if (!authResult.success) authResult = await authService.authenticate(orgId);
+      if (!authResult.success || !authResult.user_id) {
+        console.error('Authentication failed');
+        process.exit(1);
+      }
+      userId = authResult.user_id;
     }
 
     let projectKey: string;
-    let remoteAvailable = false;
     try {
-      const { resolveProjectKey } = await import('../crypto/keyResolver');
-      const keyOps = {
-        coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
-        wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-      };
-      projectKey = await resolveProjectKey(
-        orgId,
-        projectId,
-        authResult.user_id,
-        keyOps,
-      );
+      if (localMode) {
+        projectKey = await resolveLocalProjectKey(projectId);
+      } else {
+        const { resolveProjectKey } = await import('../crypto/keyResolver');
+        const keyOps = {
+          coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
+          wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+        };
+        projectKey = await resolveProjectKey(
+          orgId,
+          projectId,
+          userId,
+          keyOps,
+        );
+      }
     } catch (err: any) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(err, {
@@ -118,29 +137,35 @@ export class EditCommand {
       }
     }
 
-    // Fetch and decrypt remote
+    // Baseline the working copy is compared against:
+    //  - remote mode: the latest committed blob fetched from the server.
+    //  - local mode:  the committed blob from the local keep cache (no server).
+    // In both cases it lands in `remotePlaintext` so the TUI's reclassify can
+    // compare working-vs-baseline.
     const remotePlaintext: Record<string, string> = {};
-    try {
+    let remoteAvailable = false;
+    {
       const keepHash = SyncEngine.computeKeepHash(keep, branch);
-      const blob = await fetchSecretsWithCache(
-        serviceClient,
-        orgId,
-        projectId,
-        keepHash,
-      );
-      if (blob?.env_file) {
-        const encrypted = fileManager.parseEnvContent(blob.env_file);
-        for (const [key, value] of Object.entries(encrypted)) {
-          try {
-            remotePlaintext[key] = fileManager.decryptValue(value, projectKey);
-          } catch {
-            // Skip values we can't decrypt
+      try {
+        const blob = localMode
+          ? readSecretsLocal(orgId, projectId, keepHash)
+          : await fetchSecretsWithCache(serviceClient!, orgId, projectId, keepHash);
+        if (blob?.env_file) {
+          const encrypted = fileManager.parseEnvContent(blob.env_file);
+          for (const [key, value] of Object.entries(encrypted)) {
+            try {
+              remotePlaintext[key] = fileManager.decryptValue(value, projectKey);
+            } catch {
+              // Skip values we can't decrypt
+            }
           }
+          // Remote column only applies to server mode; local mode uses the
+          // committed baseline with local-mode wording instead.
+          if (!localMode) remoteAvailable = true;
         }
-        remoteAvailable = true;
+      } catch {
+        // Remote fetch failed (server mode) — fall back to pinned-only.
       }
-    } catch {
-      // Remote fetch failed — TUI runs in local-only mode for the remote column
     }
 
     // Build rows for every variable known to any source
@@ -157,15 +182,23 @@ export class EditCommand {
       const pinnedHash = pinned[key];
       const localHash = localVal !== undefined ? hashValue(localVal) : undefined;
       const remoteHash = remoteVal !== undefined ? hashValue(remoteVal) : undefined;
-      const status = classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable);
 
+      let status: EditRow['status'];
       let updatedLabel: string;
-      if (!remoteAvailable) updatedLabel = '—';
-      else if (status === 'in sync') updatedLabel = 'in sync';
-      else if (status === 'local') updatedLabel = 'local';
-      else if (status === 'remote') updatedLabel = 'remote';
-      else if (status === 'conflict') updatedLabel = 'needs review';
-      else updatedLabel = '—';
+      if (localMode) {
+        // committed-vs-working, via the shared classifier so the initial build
+        // and the in-TUI reclassify can't drift. `remoteVal` holds the
+        // committed value from the local keep cache.
+        ({ status, updatedLabel } = classifyLocalRow(localVal, remoteVal));
+      } else {
+        status = classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable);
+        if (!remoteAvailable) updatedLabel = '—';
+        else if (status === 'in sync') updatedLabel = 'in sync';
+        else if (status === 'local') updatedLabel = 'local';
+        else if (status === 'remote') updatedLabel = 'remote';
+        else if (status === 'conflict') updatedLabel = 'needs review';
+        else updatedLabel = '—';
+      }
 
       rows.push({
         key,
@@ -181,6 +214,7 @@ export class EditCommand {
       branch,
       rows,
       remoteAvailable,
+      localMode,
     };
 
     const screen = new EditScreen();
@@ -225,14 +259,20 @@ export class EditCommand {
           }
         }
 
-        const result = await serviceClient.pushSecrets(
-          projectId,
-          JSON.stringify(finalKeep),
-          envBlob,
-          branch,
-        );
+        // keep_hash is computed locally; the server returns the same value on
+        // push. In local-only mode there is no push — the local writes below
+        // ARE the commit.
+        const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
+        const keepHashForCache = localMode
+          ? localKeepHash
+          : (await serviceClient!.pushSecrets(
+              projectId,
+              JSON.stringify(finalKeep),
+              envBlob,
+              branch,
+            )).keep_hash;
 
-        writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
+        writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
         fileManager.writeKeepFile(finalKeep);
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
@@ -241,8 +281,8 @@ export class EditCommand {
           ...existingSyncState,
           last_sync: new Date().toISOString(),
           synced_variables: Object.keys(finalEnv),
-          user_id: authResult.user_id,
-          keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
+          user_id: userId,
+          keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
         });
       },
     });

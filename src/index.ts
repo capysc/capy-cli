@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
+import { assertNotLocalOnly } from './core/localGate';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -64,6 +65,9 @@ program
       console.log(`    ${B('capy')} users                  \x1b[90mList organization members\x1b[0m`);
       console.log(`    ${B('capy')} org                    \x1b[90mSwitch organization\x1b[0m`);
       console.log(`    ${B('capy')} info                   \x1b[90mShow current session info\x1b[0m`);
+      console.log(`    ${B('capy')} byoc [url]             \x1b[90mConnect to a self-hosted Capy (BYOC) instance\x1b[0m`);
+      console.log(`    ${B('capy')} use <profile>          \x1b[90mSwitch to a different profile\x1b[0m`);
+      console.log(`    ${B('capy')} profile list           \x1b[90mList configured profiles\x1b[0m`);
       console.log(`    ${B('capy')} connect <provider>     \x1b[90mPull a credential from a provider into .env\x1b[0m`);
       console.log(`    ${B('capy')} rotate [var]           \x1b[90mRotate a credential previously set up via connect\x1b[0m`);
       console.log(`    ${B('capy')} decrypt                \x1b[90mDecrypt secrets offline (owner only)\x1b[0m`);
@@ -120,6 +124,7 @@ program
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
   .action(async (options) => {
+    assertNotLocalOnly('branch');
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -230,6 +235,7 @@ program
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
   .action(async (branch, options) => {
+    assertNotLocalOnly('checkout');
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand();
     await cmd.execute(branch, { create: options.create, protected: options.protected });
@@ -262,6 +268,7 @@ const deploy = program
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   .action(async (target: string | undefined, options: any, cmd: any) => {
+    assertNotLocalOnly('deploy');
     // Top-level program also defines --dry-run; merge globals so either
     // `capy --dry-run deploy ...` or `capy deploy ... --dry-run` works.
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
@@ -295,6 +302,7 @@ deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
   .action(async (deployId: string) => {
+    assertNotLocalOnly('deploy revoke');
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployRevokeCommand();
     await cmd.execute(deployId);
@@ -304,6 +312,7 @@ deploy
   .command('list')
   .description('List deploy tokens for this project')
   .action(async () => {
+    assertNotLocalOnly('deploy list');
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
     const cmd = new DeployListCommand();
     await cmd.execute();
@@ -313,6 +322,7 @@ deploy
   .command('targets')
   .description('List configured connector targets (connector mode)')
   .action(async () => {
+    assertNotLocalOnly('deploy targets');
     const { deployList } = await import('./commands/deployCommand');
     process.exit(await deployList());
   });
@@ -321,6 +331,7 @@ deploy
   .command('targets-remove <name>')
   .description('Remove a configured connector target')
   .action(async (name: string) => {
+    assertNotLocalOnly('deploy targets-remove');
     const { deployRemove } = await import('./commands/deployCommand');
     process.exit(await deployRemove(name));
   });
@@ -329,6 +340,14 @@ program
   .command('logout')
   .description('End the current session')
   .action(async () => {
+    const { isLocalOnly } = await import('./config/profileConfig');
+    if (isLocalOnly()) {
+      // Local-only mode has no account/server session. Never touch the local
+      // keystore here — `capy lock` is how the user locks their key.
+      console.log('Local-only mode has no account to log out of. Use `capy lock` to lock your key.');
+      return;
+    }
+
     const { existsSync, unlinkSync, rmSync } = await import('fs');
     const { join } = await import('path');
     const { getGlobalCapyDir } = await import('./config/globalConfig');
@@ -399,6 +418,50 @@ program
     } else {
       console.log('No active session.');
     }
+  });
+
+program
+  .command('byoc [url]')
+  .description('Connect to a self-hosted Capy (BYOC) instance')
+  .action(async (url: string | undefined) => {
+    const { byocCommand } = await import('./commands/byocCommand');
+    process.exit(await byocCommand(url));
+  });
+
+program
+  .command('use <profile>')
+  .description('Switch to a different profile')
+  .action(async (name: string) => {
+    const { useCommand } = await import('./commands/profileCommand');
+    process.exit(await useCommand(name));
+  });
+
+const profileCmd = program
+  .command('profile')
+  .description('Manage CLI profiles (cloud, BYOC, etc.)');
+
+profileCmd
+  .command('list')
+  .description('List configured profiles')
+  .action(async () => {
+    const { profileListCommand } = await import('./commands/profileCommand');
+    process.exit(await profileListCommand());
+  });
+
+profileCmd
+  .command('show [name]')
+  .description('Show profile details (defaults to active)')
+  .action(async (name?: string) => {
+    const { profileShowCommand } = await import('./commands/profileCommand');
+    process.exit(await profileShowCommand(name));
+  });
+
+profileCmd
+  .command('remove <name>')
+  .description('Delete a profile')
+  .action(async (name: string) => {
+    const { profileRemoveCommand } = await import('./commands/profileCommand');
+    process.exit(await profileRemoveCommand(name));
   });
 
 program
@@ -477,6 +540,7 @@ program
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .action(async (email, options) => {
+    assertNotLocalOnly('invite');
     const { InviteCommand } = await import('./commands/inviteCommand');
     const cmd = new InviteCommand();
     await cmd.execute(email, {
@@ -493,6 +557,7 @@ program
   .command('redeem <code>')
   .description('Redeem an invite code to join an organization')
   .action(async (code) => {
+    assertNotLocalOnly('redeem');
     const { RedeemCommand } = await import('./commands/redeemCommand');
     const cmd = new RedeemCommand();
     await cmd.execute(code);
@@ -502,6 +567,7 @@ program
   .command('transport')
   .description('Generate a redeem code to move your account to another machine')
   .action(async () => {
+    assertNotLocalOnly('transport');
     const { TransportCommand } = await import('./commands/transportCommand');
     const cmd = new TransportCommand();
     await cmd.execute();
@@ -511,6 +577,7 @@ program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
   .action(async (email) => {
+    assertNotLocalOnly('kick');
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
     await cmd.execute(email);
@@ -520,6 +587,7 @@ program
   .command('org')
   .description('Switch organization')
   .action(async () => {
+    assertNotLocalOnly('org');
     const { OrgCommand } = await import('./commands/orgCommand');
     const cmd = new OrgCommand();
     await cmd.execute();
@@ -529,6 +597,7 @@ program
   .command('info')
   .description('Show current session info')
   .action(async () => {
+    assertNotLocalOnly('info');
     const { InfoCommand } = await import('./commands/infoCommand');
     const cmd = new InfoCommand();
     await cmd.execute();
@@ -538,6 +607,7 @@ program
   .command('users')
   .description('List organization members and their project access')
   .action(async () => {
+    assertNotLocalOnly('users');
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
     await cmd.execute();
@@ -547,6 +617,7 @@ program
   .command('grant-branch <email> <project> <branch>')
   .description('Grant a member wildcard access to a protected branch')
   .action(async (email: string, project: string, branch: string) => {
+    assertNotLocalOnly('grant-branch');
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
     await cmd.grantBranch(email, project, branch);
@@ -556,6 +627,7 @@ program
   .command('revoke-branch <email> <project> <branch>')
   .description("Revoke a member's wildcard access to a protected branch")
   .action(async (email: string, project: string, branch: string) => {
+    assertNotLocalOnly('revoke-branch');
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand();
     await cmd.revokeBranch(email, project, branch);
@@ -583,6 +655,7 @@ program
   .command('recover')
   .description('Reconstruct the wrapped master key from a 24-word recovery phrase')
   .action(async () => {
+    assertNotLocalOnly('recover');
     const { RecoverCommand } = await import('./commands/recoverCommand');
     const cmd = new RecoverCommand();
     await cmd.execute();
@@ -598,6 +671,7 @@ program
   .option('-f, --force', 'overwrite an existing value without prompting')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .action(async (provider, options, command) => {
+    assertNotLocalOnly('connect');
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand();
     if (!provider) {
@@ -627,6 +701,7 @@ program
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
   .action(async (varName, options) => {
+    assertNotLocalOnly('rotate');
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand();
     await cmd.execute(varName, {
@@ -636,6 +711,14 @@ program
       nonTty: options.nonTty,
       provider: options.provider,
     });
+  });
+
+program
+  .command('lock')
+  .description('Lock the local-only key (re-prompts the passphrase next time)')
+  .action(async () => {
+    const { LockCommand } = await import('./commands/lockCommand');
+    await new LockCommand().execute();
   });
 
 program.parse(process.argv);

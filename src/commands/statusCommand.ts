@@ -5,7 +5,9 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { KeepFile } from '../types/index';
-import { fetchSecretsWithCache } from '../config/globalConfig';
+import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
+import { isLocalOnly } from '../config/profileConfig';
+import { resolveLocalProjectKey } from '../core/localUnlock';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -164,24 +166,29 @@ export class StatusCommand {
     const localHashes: Record<string, string> = {};
     let encryptionKey: string | undefined;
     let remoteSkipReason: string | undefined;
+    const localMode = isLocalOnly();
     try {
-      if (projectState.userId) {
-        this.authService.setSessionUserId(projectState.userId);
-      }
-      const { resolveProjectKey } = await import('../crypto/keyResolver');
-      const authResult = await this.authService.authenticateSilent(projectState.organizationId);
-      if (!authResult.success) throw new Error('auth failed');
+      if (localMode) {
+        encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
+      } else {
+        if (projectState.userId) {
+          this.authService.setSessionUserId(projectState.userId);
+        }
+        const { resolveProjectKey } = await import('../crypto/keyResolver');
+        const authResult = await this.authService.authenticateSilent(projectState.organizationId);
+        if (!authResult.success) throw new Error('auth failed');
 
-      const keyOps = {
-        coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-        wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-      };
-      encryptionKey = await resolveProjectKey(
-        projectState.organizationId!,
-        projectState.projectId!,
-        authResult.user_id!,
-        keyOps,
-      );
+        const keyOps = {
+          coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+          wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+        };
+        encryptionKey = await resolveProjectKey(
+          projectState.organizationId!,
+          projectState.projectId!,
+          authResult.user_id!,
+          keyOps,
+        );
+      }
 
       const rawLocal = this.fileManager.readEnvFile();
       for (const [key, value] of Object.entries(rawLocal)) {
@@ -207,12 +214,14 @@ export class StatusCommand {
         const hasVariables = Object.keys(pinned).length > 0;
         if (hasVariables) {
           const keepHash = SyncEngine.computeKeepHash(keep, branch);
-          const blob = await fetchSecretsWithCache(
-            this.serviceClient,
-            projectState.organizationId!,
-            projectState.projectId!,
-            keepHash,
-          );
+          const blob = localMode
+            ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
+            : await fetchSecretsWithCache(
+                this.serviceClient,
+                projectState.organizationId!,
+                projectState.projectId!,
+                keepHash,
+              );
           if (blob?.env_file) {
             const encrypted = this.fileManager.parseEnvContent(blob.env_file);
             for (const [key, value] of Object.entries(encrypted)) {
