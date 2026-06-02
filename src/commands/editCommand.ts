@@ -83,7 +83,7 @@ export class EditCommand {
     } else {
       // Auth — silent first, then interactive (mirrors usersCommand pattern)
       authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      serviceClient = new ServiceClient(this.apiUrl);
+      serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService!.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();

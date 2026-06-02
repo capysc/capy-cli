@@ -7,6 +7,11 @@ import { version as CLI_VERSION } from '../package.json';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/** Commander accumulator for repeatable, comma-splittable options (e.g. --project). */
+function collectProjects(val: string, acc: string[]): string[] {
+  return acc.concat(val.split(',').map((s) => s.trim()).filter(Boolean));
+}
+
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
 process.on('uncaughtException', (error: any) => {
   if (error?.name === 'ExitPromptError') {
@@ -24,6 +29,14 @@ process.on('unhandledRejection', (error: any) => {
   console.error(error);
   process.exit(1);
 });
+
+// One verbosity switch for the whole CLI: diagnostic logs (see ui/debug.ts)
+// are silent unless `-v`/`--verbose`. Set from argv here, at the head, before
+// any command runs — the gated output lives in deep shared code that isn't
+// threaded the parsed option.
+if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
+  process.env.CAPY_VERBOSE = '1';
+}
 
 const program = new Command();
 
@@ -521,11 +534,24 @@ program
 program
   .command('invite <email>')
   .description('Invite a teammate to this organization')
-  .action(async (email) => {
+  .option('--role <role>', 'invitee role: member | project-admin | admin')
+  .option('--project <id|name>', 'grant project access (repeatable, comma-ok)', collectProjects, [])
+  .option('--ttl <duration>', 'invite lifetime, e.g. 30m, 24h, 7d (or seconds)')
+  .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .action(async (email, options) => {
     assertNotLocalOnly('invite');
     const { InviteCommand } = await import('./commands/inviteCommand');
     const cmd = new InviteCommand();
-    await cmd.execute(email);
+    await cmd.execute(email, {
+      role: options.role,
+      projects: options.project,
+      ttl: options.ttl,
+      expires: options.expires,
+      json: options.json,
+      nonTty: options.nonTty,
+    });
   });
 
 program
@@ -644,7 +670,8 @@ program
   .option('--account <id>', 'pick a specific provider account when multiple are configured')
   .option('--no-push', 'write to .env only; do not push to Capy')
   .option('-f, --force', 'overwrite an existing value without prompting')
-  .action(async (provider, options) => {
+  .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
+  .action(async (provider, options, command) => {
     assertNotLocalOnly('connect');
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand();
@@ -652,12 +679,16 @@ program
       await cmd.list();
       return;
     }
+    // Merge globals: the top-level program also defines -f/--force, which
+    // otherwise shadows this subcommand's --force (opts.force stays undefined).
+    const merged = command.optsWithGlobals();
     await cmd.execute(provider, {
       live: options.live,
       var: options.var,
       account: options.account,
       noPush: options.push === false,
-      force: options.force,
+      force: merged.force,
+      nonTty: options.nonTty,
     });
   });
 
@@ -666,6 +697,10 @@ program
   .description('Rotate a managed credential previously set up via `capy connect`')
   .option('--all', 'rotate every managed credential in this project')
   .option('--no-push', 'update .env only; do not push to Capy')
+  .option('-y, --yes', 'skip prompts; run rotate + push + deploy unattended (for CI/automation)')
+  .option('--skip-prompts', 'alias for --yes')
+  .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
+  .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
   .action(async (varName, options) => {
     assertNotLocalOnly('rotate');
     const { RotateCommand } = await import('./commands/rotateCommand');
@@ -673,6 +708,9 @@ program
     await cmd.execute(varName, {
       all: options.all,
       noPush: options.push === false,
+      skipPrompts: !!(options.yes || options.skipPrompts),
+      nonTty: options.nonTty,
+      provider: options.provider,
     });
   });
 

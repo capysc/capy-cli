@@ -4,6 +4,7 @@ import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } 
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
+import { debug } from '../ui/debug';
 
 export class FileManager {
   private projectRoot: string;
@@ -87,38 +88,9 @@ export class FileManager {
     }
   }
 
-  writeEnvFile(variables: Record<string, string>, path?: string): void {
-    const envPath = path || join(this.projectRoot, '.env');
-    console.log(`Writing ${Object.keys(variables).length} variables to ${envPath}`);
-    const backup = this.createBackup(envPath);
-
-    try {
-      const content = Object.entries(variables)
-        .map(([key, value]) => `${key}=${value}`)
-        .join('\n');
-
-      this.ensureDirectoryExists(dirname(envPath));
-      writeFileSync(envPath, content + '\n', { encoding: 'utf-8', mode: 0o600 });
-      console.log(`Successfully wrote .env file`);
-
-      if (backup) {
-        this.removeBackup(backup);
-      }
-    } catch (error) {
-      if (backup) {
-        this.restoreBackup(backup, envPath);
-      }
-      throw new CapyError(
-        `Failed to write .env file at ${envPath}`,
-        ERROR_CODES.PERMISSION_DENIED,
-        { error, path: envPath }
-      );
-    }
-  }
-
   writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null, branch?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
+    debug(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -165,7 +137,7 @@ export class FileManager {
 
       this.ensureDirectoryExists(dirname(envPath));
       writeFileSync(envPath, content + '\n', { encoding: 'utf-8', mode: 0o600 });
-      console.log(`Successfully wrote encrypted .env file`);
+      debug(`Successfully wrote encrypted .env file`);
 
       if (backup) {
         this.removeBackup(backup);

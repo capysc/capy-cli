@@ -13,6 +13,7 @@ import {
 import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
+import { debug } from '../ui/debug';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -75,7 +76,7 @@ export class ServiceClient {
       // Suppress the dev diagnostic in local-only mode — the server URL is
       // never used there, and the log is misleading (looks like server use).
       const { isLocalOnly } = require('../config/profileConfig') as typeof import('../config/profileConfig');
-      if (!isLocalOnly()) console.error(`[dev] ServiceClient → ${this.apiUrl}`);
+      if (!isLocalOnly()) debug(`[dev] ServiceClient → ${this.apiUrl}`);
     }
   }
 

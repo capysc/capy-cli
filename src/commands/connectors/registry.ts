@@ -7,10 +7,14 @@ export interface ConnectOpts {
   account?: string;
   noPush?: boolean;
   force?: boolean;
+  /** Disable interactive prompts: resolve every choice from flags or fail fast. */
+  nonTty?: boolean;
 }
 
 export interface RotateOpts {
   noPush?: boolean;
+  /** Disable interactive prompts: resolve every choice from flags or fail fast. */
+  nonTty?: boolean;
 }
 
 /** Result of provider.connect(): the provider hands us a value + the connector metadata to record on the keep.lock entry. */
@@ -29,6 +33,13 @@ export interface RotateResult {
 export interface ConnectorModule {
   name: string;
   description: string;
+  /**
+   * Set when rotating runs an interactive auth step the user must complete by
+   * hand (e.g. Stripe shells out to `stripe login`, which opens a browser).
+   * Surfaced as a leading "Auth" stop in the rotate plan so the user knows a
+   * manual hand-off is coming. Omit for providers that rotate unattended.
+   */
+  requiresAuth?: boolean;
   /**
    * Synchronous pre-check that runs before any auth or network. Use to bail
    * early on missing local dependencies (e.g. provider CLI not installed) so

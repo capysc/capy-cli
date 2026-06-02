@@ -99,7 +99,7 @@ export class RedeemCommand {
     const orgName = authResult.organizations?.find(o => o.id === orgId)?.name || orgId;
     this.switchLocalContext(orgId, userId, orgName);
 
-    const serviceClient = new ServiceClient(this.apiUrl);
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
 
     // 5. Always verify membership via co-decrypt, even if local key exists.

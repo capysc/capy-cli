@@ -4,6 +4,7 @@ import { lockSync, unlockSync } from 'proper-lockfile';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
+import { debug } from '../ui/debug';
 
 export class HttpStatusError extends Error {
   status: number;
@@ -63,7 +64,7 @@ export class AuthService {
       // Suppress the dev diagnostic in local-only mode — no identity provider
       // is used there, so the server URL is irrelevant and misleading.
       const { isLocalOnly } = require('../config/profileConfig') as typeof import('../config/profileConfig');
-      if (!isLocalOnly()) console.error(`[dev] AuthService → ${this.serviceApiUrl}`);
+      if (!isLocalOnly()) debug(`[dev] AuthService → ${this.serviceApiUrl}`);
     }
     this.loadSession();
   }

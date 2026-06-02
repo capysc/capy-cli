@@ -60,7 +60,7 @@ export class InfoCommand {
     let roleLabel = '—';
     if (activeOrgId && authService.getToken() && authResult.user_id) {
       try {
-        const serviceClient = new ServiceClient(this.apiUrl);
+        const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
         serviceClient.setTokenProvider(() => authService.getValidToken());
         const { members } = await serviceClient.listMembers(activeOrgId);
         const me = members.find((m: any) => m.userId === authResult.user_id);

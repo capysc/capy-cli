@@ -67,9 +67,20 @@ export async function fetchServiceKey(
     });
   } catch {
     clearTimeout(timeout);
-    throw new Error('Cannot reach Capy service for deploy decrypt.');
+    throw new Error(
+      `Cannot reach Capy service for deploy decrypt at ${apiUrl}. ` +
+        'Set CAPY_API_URL to the service that minted this deploy token (build env hits ' +
+        'https://api.capy.sc by default — a dev-minted token will not resolve there).',
+    );
   }
   clearTimeout(timeout);
+
+  if (res.status === 404) {
+    throw new Error(
+      `Deploy token not found on ${apiUrl} — was it minted against a different Capy service? ` +
+        'Make sure CAPY_API_URL in the build matches the service used to deploy.',
+    );
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: 'unknown' }));

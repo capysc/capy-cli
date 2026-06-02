@@ -62,6 +62,12 @@ export interface DeployCliOptions {
   dryRun?: boolean;
   /** Force re-entry into the picker for an existing target. */
   edit?: boolean;
+  /**
+   * Run against the dev service (capy-dev). Propagated to the auth/service
+   * clients used for decryption — without it they default to prod
+   * (api.capy.sc) and co-decrypt fails for dev-only orgs.
+   */
+  devMode?: boolean;
 }
 
 // ── Project-level keep.lock parsing ────────────────────────────────────────
@@ -103,6 +109,7 @@ function readKeep(cwd: string): KeepInfo | null {
 
 async function decryptCurrentBranch(
   cwd: string,
+  devMode: boolean = false,
 ): Promise<Record<string, string>> {
   const fm = new FileManager();
   const envFromFile = fm.readEnvFile();
@@ -125,12 +132,12 @@ async function decryptCurrentBranch(
   const { ServiceClient } = await import('../service/serviceClient');
   const { resolveProjectKey } = await import('../crypto/keyResolver');
 
-  const auth = new AuthService();
+  const auth = new AuthService(undefined, devMode);
   const result = await auth.authenticateSilent(keep.orgId);
   if (!result.success || !result.user_id) {
     throw new Error('not authenticated. Run `capy` to sign in.');
   }
-  const svc = new ServiceClient();
+  const svc = new ServiceClient(undefined, devMode);
   svc.setTokenProvider(() => auth.getValidToken());
   const keyServiceOps = {
     coDecrypt: (o: string, c: string) =>
@@ -148,6 +155,39 @@ async function decryptCurrentBranch(
     out[k] = fm.decryptValue(v, projectKeyHex);
   }
   return out;
+}
+
+/**
+ * Mint the SECRETS_BLOB + PROJECT_KEY pair for build-time injection (what
+ * `capy run` consumes). Same devMode-aware auth as decryptCurrentBranch — so
+ * under capy-dev it talks to the dev service, not prod.
+ */
+async function mintForDeploy(
+  cwd: string,
+  devMode: boolean = false,
+): Promise<{ secretsBlob: string; projectKey: string }> {
+  const keep = readKeep(cwd);
+  if (!keep) throw new Error('no keep.lock — run `capy` to sync first.');
+
+  const { AuthService } = await import('../auth/authService');
+  const { ServiceClient } = await import('../service/serviceClient');
+  const { mintDeployToken } = await import('./deployTokenCommand');
+
+  const auth = new AuthService(undefined, devMode);
+  const result = await auth.authenticateSilent(keep.orgId);
+  if (!result.success || !result.user_id) {
+    throw new Error('not authenticated. Run `capy` to sign in.');
+  }
+  const svc = new ServiceClient(undefined, devMode);
+  svc.setTokenProvider(() => auth.getValidToken());
+  const minted = await mintDeployToken({
+    serviceClient: svc,
+    fm: new FileManager(),
+    orgId: keep.orgId,
+    projectId: keep.projectId,
+    userId: result.user_id,
+  });
+  return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -231,14 +271,12 @@ async function runPicker(
     ]);
     options = ans;
   } else if (adapter.id === 'vercel') {
-    // Vercel maps cleanly onto capy branches:
-    //   capy "production" branch  → Vercel production lane
-    //   any other capy branch     → Vercel preview lane, git branch
-    //                               named after the capy branch
-    // We don't know the capy branch yet at this point in the picker (it's
-    // asked next), so we use the existing value or the most-likely
-    // fallback. The branch prompt below will refine.
-    const dirAns = await inquirer.prompt([
+    // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
+    // but capy pushes SECRETS_BLOB + PROJECT_KEY into the chosen Vercel
+    // environment via the vercel CLI. Capture the app dir AND which Vercel
+    // environment these secrets target (preview is scoped to the target's git
+    // branch; production targets the production env).
+    const ans = await inquirer.prompt([
       {
         type: 'input',
         name: 'projectDir',
@@ -246,54 +284,18 @@ async function runPicker(
         default: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
         validate: (v: string) => (v.trim() ? true : 'required'),
       },
-    ]);
-    const envAns = await inquirer.prompt([
       {
         type: 'list',
         name: 'vercelEnv',
-        message: 'Which Vercel deployment lane?',
-        theme: LIST_THEME,
+        message: 'Which Vercel environment do these secrets target?',
         choices: [
-          {
-            name: `Preview  ${DIM('— each push gets a unique URL; can be tied to a git branch')}`,
-            value: 'preview',
-            short: 'preview',
-          },
-          {
-            name: `Production  ${DIM('— --prod, ships to your prod alias')}`,
-            value: 'production',
-            short: 'production',
-          },
+          { name: "Preview (scoped to this target's git branch)", value: 'preview' },
+          { name: 'Production', value: 'production' },
         ],
         default: existingOpts.vercelEnv ?? 'preview',
-      } as any,
+      },
     ]);
-    let gitBranchAns: { gitBranch?: string } = {};
-    if (envAns.vercelEnv === 'preview') {
-      // Capy branch is the natural default for the git branch here — this
-      // is the whole "natural fit" with vercel preview chains. Falls back
-      // to the current git branch when capy branches don't match git.
-      const gitNow = currentBranch(cwd) ?? '';
-      gitBranchAns = await inquirer.prompt([
-        {
-          type: 'input',
-          name: 'gitBranch',
-          message: `Associate preview with git branch (Enter to skip; tags the deployment under this branch in Vercel):`,
-          default:
-            existingOpts.gitBranch ??
-            (existing?.branch && existing.branch !== 'production'
-              ? existing.branch
-              : gitNow),
-        },
-      ]);
-    }
-    options = {
-      ...dirAns,
-      vercelEnv: envAns.vercelEnv,
-      ...(gitBranchAns.gitBranch && gitBranchAns.gitBranch.trim()
-        ? { gitBranch: gitBranchAns.gitBranch.trim() }
-        : {}),
-    };
+    options = { ...ans };
   } else if (adapter.id === 'cf-pages') {
     const ans = await inquirer.prompt([
       {
@@ -375,46 +377,52 @@ async function runPicker(
   // with turnkey git CI (Vercel, etc.) default to 'ci'; vendors where capy
   // is the deploy actor default to 'direct'. Existing target's mode wins
   // over the adapter default on subsequent picker passes.
-  const ciHelp =
-    adapter.defaultMode === 'ci'
-      ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
-      : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
-  const mode = (await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'mode',
-      message: 'How should this target deploy?',
-      theme: LIST_THEME,
-      choices: [
-        {
-          name: `Via CI/CD        ${DIM('— ' + ciHelp)}`,
-          value: 'ci',
-          short: 'ci',
-        },
-        {
-          name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
-          value: 'direct',
-          short: 'direct',
-        },
-      ],
-      default: existing?.mode ?? adapter.defaultMode,
-    } as any,
-  ])).mode as DeployMode;
+  //
+  // CI-only adapters (Vercel) have no direct mode at all — capy never runs
+  // their CLI — so skip the question and force 'ci'.
+  let mode: DeployMode;
+  if (adapter.ciOnly) {
+    mode = 'ci';
+  } else {
+    const ciHelp =
+      adapter.defaultMode === 'ci'
+        ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
+        : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
+    mode = (await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'mode',
+        message: 'How should this target deploy?',
+        theme: LIST_THEME,
+        choices: [
+          {
+            name: `Via CI/CD        ${DIM('— ' + ciHelp)}`,
+            value: 'ci',
+            short: 'ci',
+          },
+          {
+            name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
+            value: 'direct',
+            short: 'direct',
+          },
+        ],
+        default: existing?.mode ?? adapter.defaultMode,
+      } as any,
+    ])).mode as DeployMode;
+  }
 
   // 6b. CI mode only — type the git branch the deploy PR opens against.
   // Repos can have hundreds of branches, so a list picker is the wrong
-  // shape. Text entry with a sensible default (existing target's branch,
-  // else `main` if it exists locally, else current branch).
+  // shape. Text entry defaulting to the current branch (you usually open the
+  // PR against the branch you're on), then the existing target's saved value,
+  // then main/master.
   let gitBaseBranch: string | undefined;
   if (mode === 'ci') {
     const local = listLocalBranches(cwd);
     const fallback =
+      currentBranch(cwd) ??
       existing?.gitBaseBranch ??
-      (local.includes('main')
-        ? 'main'
-        : local.includes('master')
-          ? 'master'
-          : currentBranch(cwd) ?? 'main');
+      (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main');
     gitBaseBranch = (await inquirer.prompt([
       {
         type: 'input',
@@ -516,6 +524,65 @@ export async function deployRemove(
   return 0;
 }
 
+/**
+ * Resolve which deploy target to use, setting one up interactively if needed —
+ * but WITHOUT deploying. This is the side-effect-free "resolve" step callers
+ * like `capy rotate` run before showing a plan: it guarantees a configured
+ * target exists (running the picker + saving to `.capy/deploy.json` when none
+ * does) and returns it, so the plan can name a real destination. The actual
+ * deploy happens later via `deployCommand(target.name, …)`.
+ *
+ * Returns null only when resolution can't proceed (no keep.lock, or the user
+ * cancels). Requires a TTY for the picker; callers in non-interactive contexts
+ * should pre-resolve via a target name instead.
+ */
+export async function ensureDeployTarget(
+  cwd: string = process.cwd(),
+): Promise<TargetConfig | null> {
+  const existing = listTargets(cwd);
+  if (existing.length === 1) return existing[0];
+
+  const keep = readKeep(cwd);
+  if (!keep) {
+    console.error(
+      `No keep.lock in ${basename(cwd)}. Run ${B('capy')} here first to sync.`,
+    );
+    return null;
+  }
+
+  if (existing.length === 0) {
+    const target = await runPicker(cwd, keep);
+    upsertTarget(cwd, target);
+    console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
+    return target;
+  }
+
+  // Multiple saved targets — pick one (or set up a new one).
+  const ans = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'name',
+      message: 'Which deploy target?',
+      theme: LIST_THEME,
+      choices: [
+        ...existing.map((t) => ({
+          name: `${t.name}  ${DIM(`(${t.kind}, branch=${t.branch})`)}`,
+          value: t.name,
+        })),
+        new inquirer.Separator() as any,
+        { name: '+ new target', value: '__new__' },
+      ],
+    } as any,
+  ]);
+  if (ans.name === '__new__') {
+    const target = await runPicker(cwd, keep);
+    upsertTarget(cwd, target);
+    console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
+    return target;
+  }
+  return existing.find((t) => t.name === ans.name) ?? null;
+}
+
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
 
 export async function deployCommand(
@@ -559,6 +626,7 @@ export async function deployCommand(
         branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
         vars: adapter.varKind === 'build-time' ? cls.buildTime : cls.runtime,
         options: detected.options ?? {},
+        ...(adapter.ciOnly ? { mode: 'ci' as const } : {}),
       };
     } else {
       // Interactive but adapter is pre-chosen — handoff path from the
@@ -662,7 +730,9 @@ export async function deployCommand(
 
   renderPlan(target, adapter);
 
-  const mode: DeployMode = target.mode ?? 'direct';
+  // CI-only adapters (Vercel) always take the CI/PR path, even if a legacy or
+  // ad-hoc target carries a stale 'direct' mode — capy never runs their CLI.
+  const mode: DeployMode = adapter.ciOnly ? 'ci' : (target.mode ?? 'direct');
 
   // Preflight (fail BEFORE decryption).
   const preflight = await adapter.preflight(target, { cwd });
@@ -725,118 +795,141 @@ export async function deployCommand(
   let originalBranch: string | null = null;
   let stashedOthers = false;
 
-  if (gitOk && keepLockDirty) {
-    const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
+  const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
 
-    if (mode === 'ci') {
-      // CI mode goal: deploy PR diff = ONLY the keep.lock change against the
-      // chosen target branch. NOT "current branch + everything ahead of
-      // target". To get there: lift the keep.lock change off the current
-      // tree, branch fresh from origin/<target>, replay keep.lock, commit.
-      originalBranch = currentBranch(cwd);
-      const baseBranch = target.gitBaseBranch ?? 'main';
+  if (gitOk && mode === 'ci') {
+    // CI mode ALWAYS opens its PR from a fresh branch cut off the target —
+    // never the user's current branch, and independent of whether keep.lock
+    // has uncommitted edits right now. (A clean keep.lock that's already
+    // *committed* on the current branch but ahead of origin/<base> is still a
+    // real deploy: the diff lives between the branches, not in the working
+    // tree.) Raising the PR from the current branch would drag everything that
+    // branch has ahead of the target into it; gating the branch cut on a dirty
+    // working tree would skip it entirely and do exactly that. So we branch
+    // unconditionally and replay the current keep.lock (committed or not).
+    originalBranch = currentBranch(cwd);
+    const baseBranch = target.gitBaseBranch ?? 'main';
 
-      // 1. Save the new keep.lock content so we can replay it after the
-      //    branch switch resets the working tree to origin/<base>'s state.
-      const keepLockContent = readFileSync(join(cwd, 'keep.lock'), 'utf-8');
+    // 1. Save the keep.lock content we want to ship before the branch switch
+    //    resets the working tree to origin/<base>'s state.
+    const keepLockContent = readFileSync(join(cwd, 'keep.lock'), 'utf-8');
 
-      // 2. Stash EVERYTHING (keep.lock + any WIP source) so the branch
-      //    switch is safe and we land on a clean origin/<base> tree.
-      const stash = stashAllChanges(cwd);
-      if (!stash.ok) {
-        console.error(`${RED('✗')} git stash: ${stash.error}`);
-        return 1;
-      }
-      stashedOthers = stash.stashed;
-
-      // 3. Fetch the target branch tip so we don't branch off a stale local
-      //    `origin/<base>`.
-      const fetched = fetchRemoteBranch(cwd, baseBranch);
-      if (!fetched.ok) {
-        console.error(
-          `${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`,
-        );
-        await unwindGitState(cwd, originalBranch, stashedOthers);
-        return 1;
-      }
-
-      // 4. Create deploy branch off origin/<base>. Sortable timestamp +
-      //    random suffix; flat (no slashes) so it lists cleanly.
-      const now = new Date();
-      const ts =
-        now.toISOString().slice(0, 10).replace(/-/g, '') +
-        '-' +
-        now.toISOString().slice(11, 19).replace(/:/g, '');
-      const rand = Math.random().toString(36).slice(2, 6);
-      const branchName = `capy-deploy-${ts}-${rand}`;
-      const co = checkoutNewBranchFrom(cwd, branchName, `origin/${baseBranch}`);
-      if (!co.ok) {
-        console.error(
-          `${RED('✗')} git checkout -b ${branchName} origin/${baseBranch}: ${co.error}`,
-        );
-        await unwindGitState(cwd, originalBranch, stashedOthers);
-        return 1;
-      }
-      console.log(`  ${GREEN('✓')} branch  ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
-      if (stashedOthers) {
-        console.log(
-          `  ${GREEN('✓')} stash   set aside working-tree changes (will restore)`,
-        );
-      }
-
-      // 5. Replay the keep.lock content onto the new branch. If the value
-      //    matches what's already at origin/<base>, the commit step below
-      //    will surface "nothing to commit" — which means the deploy is a
-      //    no-op (already deployed at this snapshot). Treat as success.
-      writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
-
-      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-      if (!commit.ok) {
-        console.error(`${RED('✗')} ${commit.error}`);
-        await unwindGitState(cwd, originalBranch, stashedOthers);
-        return 1;
-      }
-      console.log(`  ${GREEN('✓')} commit  ${msg}`);
-    } else {
-      // Direct mode: stay on current branch. Stash WIP except keep.lock so
-      // the deploy ships from HEAD + keep.lock, not WIP.
-      const stash = stashOtherChanges(cwd);
-      if (!stash.ok) {
-        console.error(`${RED('✗')} git stash: ${stash.error}`);
-        return 1;
-      }
-      stashedOthers = stash.stashed;
-      if (stashedOthers) {
-        console.log(
-          `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
-        );
-      }
-      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-      if (!commit.ok) {
-        console.error(`${RED('✗')} ${commit.error}`);
-        return 1;
-      }
-      console.log(`  ${GREEN('✓')} commit  ${msg}`);
+    // 2. Stash EVERYTHING (any keep.lock edit + WIP source) so the branch
+    //    switch is safe and we land on a clean origin/<base> tree.
+    const stash = stashAllChanges(cwd);
+    if (!stash.ok) {
+      console.error(`${RED('✗')} git stash: ${stash.error}`);
+      return 1;
     }
+    stashedOthers = stash.stashed;
+
+    // 3. Fetch the target branch tip so we don't branch off a stale local
+    //    `origin/<base>`.
+    const fetched = fetchRemoteBranch(cwd, baseBranch);
+    if (!fetched.ok) {
+      console.error(
+        `${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`,
+      );
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
+
+    // 4. Create deploy branch off origin/<base>. Sortable timestamp +
+    //    random suffix; flat (no slashes) so it lists cleanly.
+    const now = new Date();
+    const ts =
+      now.toISOString().slice(0, 10).replace(/-/g, '') +
+      '-' +
+      now.toISOString().slice(11, 19).replace(/:/g, '');
+    const rand = Math.random().toString(36).slice(2, 6);
+    const branchName = `capy-deploy-${ts}-${rand}`;
+    const co = checkoutNewBranchFrom(cwd, branchName, `origin/${baseBranch}`);
+    if (!co.ok) {
+      console.error(
+        `${RED('✗')} git checkout -b ${branchName} origin/${baseBranch}: ${co.error}`,
+      );
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} branch  ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
+    if (stashedOthers) {
+      console.log(
+        `  ${GREEN('✓')} stash   set aside working-tree changes (will restore)`,
+      );
+    }
+
+    // 5. Replay the keep.lock content onto the new branch.
+    writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
+
+    // 6. If the replayed keep.lock matches what's already at origin/<base>,
+    //    there's nothing to deploy — the target is already at this secrets
+    //    snapshot. Treat it as a clean no-op instead of opening an empty PR.
+    if (!hasKeepLockChanges(cwd)) {
+      console.log(
+        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — nothing to deploy.`,
+      );
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 0;
+    }
+
+    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} commit  ${msg}`);
+  } else if (gitOk && keepLockDirty) {
+    // Direct mode: stay on current branch. Stash WIP except keep.lock so
+    // the deploy ships from HEAD + keep.lock, not WIP.
+    const stash = stashOtherChanges(cwd);
+    if (!stash.ok) {
+      console.error(`${RED('✗')} git stash: ${stash.error}`);
+      return 1;
+    }
+    stashedOthers = stash.stashed;
+    if (stashedOthers) {
+      console.log(
+        `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
+      );
+    }
+    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} commit  ${msg}`);
   }
 
-  // Decrypt the current branch — except in dry-run mode, where the adapter
-  // short-circuits before using env, so we don't need to authenticate or
-  // touch plaintext.
+  // Prepare secret material — skipped in dry-run (the adapter short-circuits).
+  // Build-time adapters that inject via `capy run` get a minted SECRETS_BLOB +
+  // PROJECT_KEY; the rest get the decrypted env. On failure, unwind git state
+  // first so a half-finished deploy never strands the user on a deploy branch.
   let env: Record<string, string> = {};
+  let deployToken: { secretsBlob: string; projectKey: string } | undefined;
   if (options.dryRun) {
     console.log(YELLOW('  --dry-run: no secrets will be decrypted or pushed.'));
+  } else if (adapter.needsDeployToken) {
+    try {
+      deployToken = await mintForDeploy(cwd, options.devMode);
+    } catch (err: any) {
+      console.error(`${RED('✗')} mint deploy token: ${err.message}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
+      return 1;
+    }
   } else {
     try {
-      env = await decryptCurrentBranch(cwd);
+      env = await decryptCurrentBranch(cwd, options.devMode);
     } catch (err: any) {
       console.error(`${RED('✗')} decrypt: ${err.message}`);
+      await unwindGitState(cwd, originalBranch, stashedOthers);
       return 1;
     }
   }
 
   const result = await adapter.deploy(target, {
     env,
+    deployToken,
     dryRun: !!options.dryRun,
     secretsOnly: mode === 'ci',
     cwd,
@@ -954,6 +1047,42 @@ function buildDeployPrBody(target: TargetConfig): string {
   const baseLine = target.gitBaseBranch
     ? `- **Git base:** \`${target.gitBaseBranch}\` — merging this PR is the deploy signal for that branch.`
     : '';
+
+  // Secret-delivery wording depends on the adapter. Blob adapters (Vercel) push
+  // SECRETS_BLOB + PROJECT_KEY and let the build decrypt via `capy run`; others
+  // push the individual secrets into the vendor's store.
+  const varsSection = adapter?.needsDeployToken
+    ? [
+        `Delivered to ${adapterLabel} as \`SECRETS_BLOB\` + \`PROJECT_KEY\` **before** this`,
+        `PR was opened — the encrypted bundle of your secrets plus its build-time`,
+        `key. Your individual secret values stay encrypted in the bundle and never`,
+        `appear in git history; the build decrypts them with \`capy run\`:`,
+        ``,
+        `- \`SECRETS_BLOB\``,
+        `- \`PROJECT_KEY\``,
+      ].join('\n')
+    : [
+        `Already delivered to the vendor's secret store **before** this PR was`,
+        `opened (e.g. \`wrangler secret bulk\` for cf-worker). Names only — values`,
+        `stay in the vendor's store and never appear in git history:`,
+        ``,
+        target.vars.map((v) => `- \`${v}\``).join('\n'),
+      ].join('\n');
+
+  const mergeSection = adapter?.needsDeployToken
+    ? [
+        `Merging this PR is the deploy signal. ${adapterLabel}'s git CI builds on`,
+        `merge, and \`capy run\` injects your secrets from \`SECRETS_BLOB\` at build`,
+        `time. capy does **not** ship code from the local machine — only the`,
+        `keep.lock pin lands here.`,
+      ].join('\n')
+    : [
+        `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
+        `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
+        `the secrets that were pushed above. capy itself does **not** ship code`,
+        `from the local machine in CI mode — only the keep.lock pin lands here.`,
+      ].join('\n');
+
   return [
     `Automated deploy PR opened by \`capy deploy\`.`,
     ``,
@@ -967,18 +1096,11 @@ function buildDeployPrBody(target: TargetConfig): string {
     ``,
     `## Vars pushed`,
     ``,
-    `Already delivered to the vendor via \`wrangler secret bulk\` (or adapter`,
-    `equivalent) **before** this PR was opened. Names only — values stay in`,
-    `the vendor's secret store and never appear in git history:`,
-    ``,
-    target.vars.map((v) => `- \`${v}\``).join('\n'),
+    varsSection,
     ``,
     `## What happens on merge`,
     ``,
-    `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
-    `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
-    `the secrets that were pushed above. capy itself does **not** ship code`,
-    `from the local machine in CI mode — only the keep.lock pin lands here.`,
+    mergeSection,
     ``,
     `## Diff scope`,
     ``,

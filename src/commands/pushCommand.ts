@@ -4,6 +4,7 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
+import { debugLine } from '../ui/debug';
 import { createHash } from 'crypto';
 import {
   CapyError,
@@ -36,19 +37,10 @@ export class PushCommand {
   }
 
   private debug(msg: string, data?: unknown): void {
-    if (!this.devMode) return;
-    const ts = new Date().toISOString();
-    const prefix = `\x1b[90m[debug ${ts}]\x1b[0m`;
-    if (data !== undefined) {
-      const serialized = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
-      console.error(`${prefix} push: ${msg} ${serialized}`);
-    } else {
-      console.error(`${prefix} push: ${msg}`);
-    }
+    debugLine(`push: ${msg}`, data);
   }
 
   private debugError(label: string, err: unknown): void {
-    if (!this.devMode) return;
     if (err instanceof CapyError) {
       this.debug(`${label}: CapyError`, {
         message: err.message,

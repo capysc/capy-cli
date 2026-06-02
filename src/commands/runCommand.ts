@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { FileManager } from '../files/fileManager';
+import { debug } from '../ui/debug';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -86,7 +87,7 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     try {
       const { deployId, outerBlob, encryptedVars } = parseSecretsBlob(secretsBlob);
       const apiUrl = process.env.CAPY_API_URL ?? 'https://api.capy.sc';
-      console.error('capy run: fetching deploy key...');
+      debug('capy run: fetching deploy key...');
       const serviceKey = await fetchServiceKey(
         apiUrl,
         deployId.toString('hex'),

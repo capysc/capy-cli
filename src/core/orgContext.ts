@@ -24,7 +24,7 @@ export async function resolveOrgContext(
   const projectState = await pm.detectProjectState();
 
   const authService = new AuthService(apiUrl, devMode, projectState.userId);
-  const serviceClient = new ServiceClient(apiUrl);
+  const serviceClient = new ServiceClient(apiUrl, devMode);
   serviceClient.setTokenProvider(() => authService.getValidToken());
 
   let orgId = projectState.organizationId;

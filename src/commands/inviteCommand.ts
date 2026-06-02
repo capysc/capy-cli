@@ -10,12 +10,58 @@ import {
   buildRedeemCode,
   resolveInviteTtlMs,
 } from '../crypto/inviteCrypto';
+import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 
 const ROLES = [
   { name: 'Member', value: 'member' },
   { name: 'Project Admin', value: 'project-admin' },
   { name: 'Admin', value: 'admin' },
 ] as const;
+
+export interface InviteOpts {
+  /** Invitee role: member | project-admin | admin (validated against the caller's grantable set). */
+  role?: string;
+  /** Project access by id or name; repeatable. Required for member/project-admin. */
+  projects?: string[];
+  /** Invite lifetime, e.g. "30m", "24h", "7d", or bare seconds. Overrides CAPY_INVITE_TTL_SECONDS. */
+  ttl?: string;
+  /** Absolute expiry as an ISO date/time. Takes precedence over ttl. */
+  expires?: string;
+  /** Emit machine-readable JSON (redeem code, role, projects, expiry) instead of the human UI. */
+  json?: boolean;
+  /** No prompts: resolve from flags or fail fast; also skips the clipboard prompt. */
+  nonTty?: boolean;
+}
+
+/** Parse "30s"/"10m"/"24h"/"7d" or bare seconds → ms. Exits on invalid input. */
+function parseTtlMs(raw: string): number {
+  const m = raw.trim().match(/^(\d+)\s*(s|m|h|d)?$/i);
+  if (!m) {
+    console.error(`\n  Invalid --ttl "${raw}". Use e.g. 30m, 24h, 7d, or a number of seconds.\n`);
+    process.exit(1);
+  }
+  const n = parseInt(m[1], 10);
+  const mult = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[(m[2] || 's').toLowerCase()]!;
+  return n * mult;
+}
+
+/** Resolve the invite's notAfter (ms epoch) from --expires / --ttl / env default. Exits on invalid. */
+function resolveNotAfter(opts: InviteOpts): number {
+  if (opts.expires) {
+    const t = Date.parse(opts.expires);
+    if (Number.isNaN(t)) {
+      console.error(`\n  Invalid --expires "${opts.expires}". Use an ISO date, e.g. 2026-06-01T00:00:00Z.\n`);
+      process.exit(1);
+    }
+    if (t <= Date.now()) {
+      console.error(`\n  --expires "${opts.expires}" is in the past.\n`);
+      process.exit(1);
+    }
+    return t;
+  }
+  if (opts.ttl) return Date.now() + parseTtlMs(opts.ttl);
+  return Date.now() + resolveInviteTtlMs();
+}
 
 // Which roles a caller of a given role may invite. Owners are never invitable:
 // there is exactly one owner per org.
@@ -36,7 +82,8 @@ export class InviteCommand {
     this.devMode = devMode;
   }
 
-  async execute(email: string): Promise<void> {
+  async execute(email: string, opts: InviteOpts = {}): Promise<void> {
+    const interactive = isInteractive(opts.nonTty);
     try {
       const { orgId, userId, userEmail, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
@@ -109,26 +156,40 @@ export class InviteCommand {
         projectId = existingProjectIds[0];
         extraProjectIds = existingProjectIds.slice(1);
       } else {
-        // Prompt for role, filtered to what the caller may grant.
+        // ── Role ────────────────────────────────────────────────────────────
         const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
-        const answer = await inquirer.prompt([{
-          type: 'list',
-          name: 'role',
-          message: `Select a role for ${email}:`,
-          choices: allowedChoices,
-          default: 'member',
-        }]);
-        role = answer.role;
+        if (opts.role) {
+          if (!invitable.includes(opts.role as typeof ROLES[number]['value'])) {
+            console.error(
+              `\n  Your role (${me.role}) can't grant "${opts.role}". Allowed: ${invitable.join(', ')}.\n`,
+            );
+            process.exit(1);
+          }
+          role = opts.role;
+        } else if (!interactive) {
+          // No --role given and can't prompt: default to the safe baseline
+          // (same default the interactive picker uses). Override with --role.
+          role = 'member';
+        } else {
+          const answer = await inquirer.prompt([{
+            type: 'list',
+            name: 'role',
+            message: `Select a role for ${email}:`,
+            choices: allowedChoices,
+            default: 'member',
+          }]);
+          role = answer.role;
+        }
 
-        // Project scope is required for project-admin and member. Multi-select
-        // so the inviter can grant access to several projects at once.
+        // ── Project scope (required for project-admin and member) ─────────────
         if (role === 'project-admin' || role === 'member') {
           const projects = await serviceClient.listProjects();
           if (projects.length === 0) {
             console.error('No projects in this organization. Create one with `capy` first.');
             process.exit(1);
           }
-          // Preselect the cwd project if we're inside one and it's available.
+          // The cwd project sorts first (it's the most likely intent) and is
+          // the non-interactive default when --project is omitted.
           let cwdProjectId: string | undefined;
           try {
             const pm = new ProjectManager();
@@ -139,24 +200,56 @@ export class InviteCommand {
           } catch {
             // ignore — cwd detection is best-effort
           }
+          const cwdFirst = <T extends { id: string }>(a: T, b: T) =>
+            a.id === cwdProjectId ? -1 : b.id === cwdProjectId ? 1 : 0;
 
-          const { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
-          const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
-            type: 'checkbox',
-            name: 'chosenProjectIds',
-            message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
-            instructions: CHECKBOX_INSTRUCTIONS,
-            theme: CHECKBOX_THEME,
-            choices: projects.map((p) => ({
-              name: p.name,
-              value: p.id,
-              checked: p.id === cwdProjectId,
-            })),
-            validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
-          } as any);
-          const ids: string[] = chosenProjectIds;
-          projectId = ids[0];
-          extraProjectIds = ids.slice(1);
+          if (opts.projects && opts.projects.length > 0) {
+            // Resolve each token (id or name) to an id; refuse on unknowns.
+            const resolved: string[] = [];
+            for (const token of opts.projects) {
+              const match = projects.find((p) => p.id === token || p.name === token);
+              if (!match) {
+                console.error(
+                  `\n  No project "${token}" in this org. Available: ${projects.map((p) => p.name).join(', ')}.\n`,
+                );
+                process.exit(1);
+              }
+              if (!resolved.includes(match.id)) resolved.push(match.id);
+            }
+            resolved.sort((a, b) => cwdFirst({ id: a }, { id: b }));
+            projectId = resolved[0];
+            extraProjectIds = resolved.slice(1);
+          } else if (!interactive) {
+            // No --project: fall back to the cwd project, else refuse — we
+            // won't silently grant access to a project the caller didn't name.
+            if (cwdProjectId) {
+              projectId = cwdProjectId;
+            } else {
+              refuseNonInteractive(
+                `role "${role}" needs project access and none was given`,
+                `Pass --project <id|name> (available: ${projects.map((p) => p.name).join(', ')}).`,
+              );
+            }
+          } else {
+            const { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
+            const ordered = [...projects].sort(cwdFirst);
+            const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
+              type: 'checkbox',
+              name: 'chosenProjectIds',
+              message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
+              instructions: CHECKBOX_INSTRUCTIONS,
+              theme: CHECKBOX_THEME,
+              choices: ordered.map((p) => ({
+                name: p.name,
+                value: p.id,
+                checked: p.id === cwdProjectId,
+              })),
+              validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
+            } as any);
+            const ids: string[] = chosenProjectIds;
+            projectId = ids[0];
+            extraProjectIds = ids.slice(1);
+          }
         }
       }
 
@@ -169,7 +262,7 @@ export class InviteCommand {
 
       // 3. Service outer wraps (KMS layer), bound to (orgId, notAfter) so
       //    the redeem code can't outlive its window even if forwarded.
-      const notAfter = Date.now() + resolveInviteTtlMs();
+      const notAfter = resolveNotAfter(opts);
       const { ciphertext: outerBlob } = await serviceClient.wrapOuterLayer(
         orgId,
         Buffer.from(innerBlob, 'base64').toString('base64'),
@@ -196,6 +289,23 @@ export class InviteCommand {
 
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
       const redeemCommand = `capy redeem ${redeemCode}`;
+      const grantedProjectIds = [projectId, ...extraProjectIds].filter(Boolean) as string[];
+
+      // Machine-readable path for agents/CI: emit JSON to stdout and skip the
+      // human UI + clipboard prompt entirely.
+      if (opts.json) {
+        console.log(JSON.stringify({
+          email,
+          role,
+          reissued: reissuing,
+          projectIds: grantedProjectIds,
+          redeemCode,
+          redeemCommand,
+          expiresAt: new Date(notAfter).toISOString(),
+          projectAssignmentFailures: failures,
+        }, null, 2));
+        return;
+      }
 
       console.log('');
       if (reissuing) {
@@ -221,8 +331,11 @@ export class InviteCommand {
         console.log('');
       }
 
-      const { promptCopyToClipboard } = await import('../ui/clipboard');
-      await promptCopyToClipboard(redeemCommand);
+      // The clipboard prompt is interactive — skip it under --non-tty/piped.
+      if (interactive) {
+        const { promptCopyToClipboard } = await import('../ui/clipboard');
+        await promptCopyToClipboard(redeemCommand);
+      }
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);

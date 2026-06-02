@@ -281,6 +281,31 @@ describe('capy run (deployed mode)', () => {
     expect(result.stderr).toMatch(/Cannot reach|Deploy decrypt failed/);
   });
 
+  test('exits 1 with mismatch hint when deploy token is unknown (404)', async () => {
+    const envVars = { X: 'y' };
+    const { pk, secretsBlob } = buildDeployedFixture(envVars);
+    // Service that 404s the decrypt route — simulates a token minted against
+    // a different Capy service than the one the build is pointed at.
+    const server = createServer((_req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('server failed to bind');
+    fake = { url: `http://127.0.0.1:${addr.port}`, close: () => server.close() };
+
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/not found on .* different Capy service/);
+  });
+
   test('shell-set env overrides decrypted value (dotenv precedence)', async () => {
     const envVars = { OVERRIDDEN: 'from-secrets-blob' };
     const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);

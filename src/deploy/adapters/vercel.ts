@@ -1,24 +1,21 @@
 /**
  * Vercel adapter.
  *
- * Wraps the vercel CLI. Build-time secret delivery (NEXT_PUBLIC_, VITE_,
- * server-component process.env reads) is the dominant pattern; capy
- * injects vars into the env during `vercel build`, then `vercel deploy
- * --prebuilt` uploads the resulting build.
+ * Code deploy is CI: `capy deploy` opens the keep.lock PR against the target
+ * branch and Vercel's git integration builds + ships on merge. Secret delivery
+ * is done HERE, by pushing each var into Vercel's Environment Variables (scoped
+ * to the right Vercel environment) via the `vercel env` CLI — so the values are
+ * live in Vercel before the build runs, not only inlined from the keep.lock.
  *
- * Project linkage comes from `.vercel/project.json` (created by
- * `vercel link` once). Capy doesn't need to know project IDs explicitly
- * unless the user is running in CI without a checked-in `.vercel/`, in
- * which case VERCEL_PROJECT_ID + VERCEL_ORG_ID env vars do the same job.
- *
- * In CI mode (secretsOnly = true) the adapter is a no-op vendor-side, the
- * same as cf-pages: there's no separate runtime-secret push for Vercel
- * build-time inlining; the build runs in the user's CI when the deploy PR
- * merges.
+ * Target → Vercel environment mapping is explicit, via `options.vercelEnv`:
+ *   - 'production' → Vercel `production`
+ *   - 'preview'    → Vercel `preview`, scoped to the target's git branch
+ *                    (so e.g. the `development` capy branch lands on the
+ *                    Preview deployment for git branch `development`).
  */
 import { existsSync, readFileSync } from 'fs';
+import { spawnSync, spawn } from 'child_process';
 import { join } from 'path';
-import { spawn, spawnSync } from 'child_process';
 import {
   DeployAdapter,
   DeployContext,
@@ -29,33 +26,35 @@ import {
   TargetConfig,
 } from '../adapter';
 
-export type VercelEnv = 'production' | 'preview';
+type VercelEnv = 'production' | 'preview';
 
 interface VercelOptions {
-  /** Directory the vercel CLI runs in. Holds .vercel/project.json. */
+  /** Directory holding the Vercel app (package.json / .vercel). Relative to root. */
   projectDir: string;
-  /**
-   * Which Vercel deployment lane this target ships to.
-   *   - 'production' → `vercel deploy --prod`. The prod alias updates.
-   *   - 'preview'    → `vercel deploy` (default). Each push gets a unique
-   *                    URL; can be associated with a git branch so Vercel's
-   *                    branch-aware UI groups the deployments.
-   * A common pattern is one capy target per env: `vercel-production`
-   * (capy branch=production, vercelEnv=production), `vercel-staging`
-   * (capy branch=staging, vercelEnv=preview, gitBranch=staging), etc.
-   */
-  vercelEnv: VercelEnv;
-  /**
-   * For preview deploys: associates the deployment with a git branch so
-   * Vercel groups it under that branch's preview chain. Optional. Ignored
-   * for production. Pass `--git-branch=<name>` to vercel deploy.
-   */
-  gitBranch?: string;
+  /** Which Vercel environment these vars target. */
+  vercelEnv?: VercelEnv;
 }
 
-function which(bin: string): string | null {
-  const r = spawnSync('which', [bin], { encoding: 'utf-8' });
-  return r.status === 0 ? r.stdout.trim() || null : null;
+/**
+ * Upsert one env var into Vercel via the CLI. Value goes over stdin (never argv,
+ * so it can't leak into the process list). `--force` overwrites an existing
+ * value; preview vars are scoped to `gitBranch`.
+ */
+function setVercelEnv(
+  name: string,
+  value: string,
+  vercelEnv: VercelEnv,
+  gitBranch: string | undefined,
+  cwd: string,
+): { ok: boolean; error?: string } {
+  const args = ['env', 'add', name, vercelEnv];
+  if (vercelEnv === 'preview' && gitBranch) args.push(gitBranch);
+  args.push('--force', '--yes', '--cwd', cwd);
+  const r = spawnSync('vercel', args, { input: value, stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' });
+  if (r.status !== 0) {
+    return { ok: false, error: (r.stderr || r.stdout || 'vercel env add failed').trim().split('\n').pop() };
+  }
+  return { ok: true };
 }
 
 function readPackageJson(dir: string): any | null {
@@ -75,7 +74,7 @@ function findProjectDir(cwd: string): string | null {
   for (const c of candidates) {
     if (existsSync(join(c, '.vercel', 'project.json'))) return c;
   }
-  // Fallback: any package.json with a deploy or build script.
+  // Fallback: any package.json with a build or deploy script.
   for (const c of candidates) {
     const pkg = readPackageJson(c);
     if (pkg && (pkg.scripts?.build || pkg.scripts?.deploy)) return c;
@@ -149,47 +148,37 @@ async function runVercelLink(projectDir: string): Promise<boolean> {
 export const vercelAdapter: DeployAdapter = {
   id: 'vercel',
   label: 'Vercel',
-  description: 'Wraps the vercel CLI: vercel build with capy env + vercel deploy --prebuilt',
+  description: 'Opens a keep.lock PR; Vercel git CI builds + deploys on merge',
   varKind: 'build-time',
-  // Vercel has turnkey git CI: connect the repo once, every push auto-
-  // deploys. The natural capy flow is `ci` mode — capy commits keep.lock
-  // to a branch and opens the deploy PR; Vercel's git integration picks
-  // up the merge and runs the build itself. `direct` mode (capy builds
-  // and uploads via `vercel deploy --prebuilt`) is the exception, useful
-  // when the repo isn't connected to a Vercel git integration.
+  // CI-only: capy never invokes the vercel CLI. The deploy PR is the deploy
+  // signal; Vercel's git integration builds and ships when it merges.
   defaultMode: 'ci',
+  ciOnly: true,
+  // Inject secrets the capy way: push SECRETS_BLOB + PROJECT_KEY and let the
+  // build decrypt them via `capy run` — not individual plaintext vendor vars.
+  needsDeployToken: true,
   requires: {
+    // Code deploy is CI (the PR), but we push the blob via the vercel CLI.
     binaries: ['vercel'],
-    // VERCEL_TOKEN is only required in CI. Local runs use `vercel login`.
-    // Preflight checks one or the other, not strictly both.
     env: [],
   },
 
   async detect(cwd: string): Promise<DetectedDefaults> {
     const projectDir = findProjectDir(cwd);
     if (!projectDir) return {};
-    const linked = readVercelProjectId(projectDir);
     const pkg = readPackageJson(projectDir);
     const framework = detectFramework(pkg);
     const rel = projectDir === cwd ? '.' : projectDir.slice(cwd.length + 1);
-    const linkedSummary = linked.projectId
-      ? `linked to project ${linked.projectId.slice(0, 12)}…`
-      : 'NOT linked — run `vercel link` once before deploying';
     return {
-      options: {
-        projectDir: rel,
-        vercelEnv: 'preview',
-      },
-      summary: framework
-        ? `${framework} app in ${rel} (${linkedSummary})`
-        : `app in ${rel} (${linkedSummary})`,
+      options: { projectDir: rel },
+      summary: framework ? `${framework} app in ${rel}` : `app in ${rel}`,
     };
   },
 
   async preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult> {
-    // Order: config first, filesystem next, vendor checks last (binary,
-    // linkage, auth). Lets unit tests for config errors run without the
-    // vercel CLI installed.
+    // CI-only: no vendor checks at all (no vercel binary, project linkage, or
+    // login) — the build runs in the user's CI when the deploy PR merges. We
+    // only validate that the config is coherent and there's something to ship.
     const opts = config.options as Partial<VercelOptions>;
     if (!opts.projectDir) {
       return {
@@ -205,41 +194,18 @@ export const vercelAdapter: DeployAdapter = {
         reason: `project directory ${opts.projectDir} not found`,
       };
     }
-    // node_modules check, same logic as cfPages.
-    const pkg = readPackageJson(projectDir);
-    if (pkg) {
-      const hasDeps =
-        (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) ||
-        (pkg.devDependencies && Object.keys(pkg.devDependencies).length > 0);
-      if (hasDeps && !existsSync(join(projectDir, 'node_modules'))) {
-        return {
-          ok: false,
-          reason: `${opts.projectDir}/node_modules missing — vercel build would fail`,
-          hint:
-            `Install deps first:\n` +
-            `  cd ${opts.projectDir} && bun install\n` +
-            `(or npm/pnpm install)`,
-        };
-      }
-    }
     if (config.vars.length === 0) {
       return {
         ok: false,
-        reason: 'vercel target has no vars to inline',
+        reason: 'vercel target has no vars to push',
         hint: 'Re-run with `--edit` and select at least one var.',
       };
     }
-    // Vendor checks last so config-error tests don't depend on vercel
-    // being installed.
-    if (!which('vercel')) {
+    if (opts.vercelEnv !== 'production' && opts.vercelEnv !== 'preview') {
       return {
         ok: false,
-        reason: 'vercel not found on PATH',
-        hint:
-          'Install the Vercel CLI:\n' +
-          '  bun add -g vercel        (recommended)\n' +
-          '  npm i -g vercel          (alternative)\n' +
-          'Re-run `capy deploy` after install.',
+        reason: `vercel target missing vercelEnv (got ${JSON.stringify(opts.vercelEnv)})`,
+        hint: `Set options.vercelEnv to "production" or "preview" (run \`capy deploy --edit ${config.name}\`).`,
       };
     }
     // Linkage: either .vercel/project.json exists OR VERCEL_PROJECT_ID +
@@ -279,149 +245,66 @@ export const vercelAdapter: DeployAdapter = {
         };
       }
     }
-    // Auth: either VERCEL_TOKEN env (CI) or `vercel whoami` works (local).
-    if (!process.env.VERCEL_TOKEN) {
-      const who = spawnSync('vercel', ['whoami'], {
-        cwd: projectDir,
-        encoding: 'utf-8',
-      });
-      if (who.status !== 0) {
-        return {
-          ok: false,
-          reason: 'not authenticated with Vercel',
-          hint:
-            'One of:\n' +
-            '  vercel login                       (local dev)\n' +
-            '  set VERCEL_TOKEN=<token>           (CI)\n' +
-            'Tokens: Vercel dashboard → Settings → Tokens.',
-        };
-      }
-    }
     return { ok: true };
   },
 
   async deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult> {
-    const opts = config.options as unknown as VercelOptions;
-    const projectDir = join(ctx.cwd, opts.projectDir);
     const steps: DeployStep[] = [];
+    const opts = config.options as Partial<VercelOptions>;
+    const vercelEnv = opts.vercelEnv as VercelEnv;
+    const gitBranch = vercelEnv === 'preview' ? config.branch : undefined;
+    const projectDir = join(ctx.cwd, opts.projectDir ?? '.');
+    const scope = vercelEnv === 'preview' ? `preview · branch=${gitBranch}` : 'production';
 
     if (ctx.dryRun) {
-      const lane =
-        opts.vercelEnv === 'production'
-          ? '--prod'
-          : opts.gitBranch
-            ? `preview, --git-branch=${opts.gitBranch}`
-            : 'preview';
       steps.push({
-        label: 'inject build env',
-        status: 'ok',
-        detail: `${config.vars.length} build-time var(s) would inline`,
-      });
-      steps.push({ label: 'vercel build', status: 'skip', detail: 'dry-run' });
-      steps.push({
-        label: 'vercel deploy',
+        label: 'set Vercel env',
         status: 'skip',
-        detail: `dry-run (${lane})`,
+        detail: `dry-run — would set SECRETS_BLOB + PROJECT_KEY on ${scope}, then open the deploy PR`,
       });
       return { ok: true, steps };
     }
 
-    // CI mode: no vendor-side step. Build+deploy run in the user's CI when
-    // the deploy PR merges. capy only commits keep.lock here.
-    if (ctx.secretsOnly) {
+    // Push the capy build-time pair so the build can `capy run` to decrypt the
+    // secrets — not the plaintext secrets themselves. Scoped to the Vercel env.
+    if (!ctx.deployToken) {
       steps.push({
-        label: 'vercel build + deploy',
-        status: 'skip',
-        detail: 'CI mode — both run in CI when the deploy PR merges',
+        label: 'set Vercel env',
+        status: 'fail',
+        detail: 'no deploy token minted (SECRETS_BLOB + PROJECT_KEY unavailable)',
       });
-      return { ok: true, steps };
+      return { ok: false, steps };
+    }
+    const pairs: Array<[string, string]> = [
+      ['SECRETS_BLOB', ctx.deployToken.secretsBlob],
+      ['PROJECT_KEY', ctx.deployToken.projectKey],
+    ];
+    const failed: string[] = [];
+    for (const [name, value] of pairs) {
+      const r = setVercelEnv(name, value, vercelEnv, gitBranch, projectDir);
+      if (!r.ok) failed.push(`${name} (${r.error})`);
     }
 
-    // Filter env to declared vars.
-    const filtered: Record<string, string> = {};
-    for (const name of config.vars) {
-      if (name in ctx.env) filtered[name] = ctx.env[name];
-    }
-    const missing = config.vars.filter((v) => !(v in ctx.env));
-    if (missing.length > 0) {
+    if (failed.length > 0) {
       steps.push({
-        label: `filter vars (${config.vars.length} declared)`,
+        label: 'set Vercel env',
         status: 'fail',
-        detail: `missing in branch ${config.branch}: ${missing.join(', ')}`,
+        detail: `${scope}: ${failed.join(', ')}`,
       });
       return { ok: false, steps };
     }
     steps.push({
-      label: 'filter vars',
+      label: 'set Vercel env',
       status: 'ok',
-      detail: `${Object.keys(filtered).length} build-time var(s)`,
+      detail: `SECRETS_BLOB + PROJECT_KEY set on ${scope} (build decrypts via capy run)`,
     });
-
-    // Build env: capy vars + (passthrough) VERCEL_TOKEN/PROJECT/ORG. The
-    // vercel CLI reads process.env directly — no extra plumbing needed.
-    const buildEnv = { ...filtered };
-    const isProd = opts.vercelEnv === 'production';
-    const buildArgs = ['build'];
-    if (isProd) buildArgs.push('--prod');
-    const tokenArg: string[] = process.env.VERCEL_TOKEN
-      ? ['--token', process.env.VERCEL_TOKEN]
-      : [];
-    const buildR = await spawnAsync(
-      'vercel',
-      [...buildArgs, ...tokenArg],
-      projectDir,
-      buildEnv,
-    );
-    if (buildR.code !== 0) {
-      const tail = buildR.stderr.trim().split('\n').slice(-3).join(' | ');
-      const notLinked = /Project not found|not linked/i.test(buildR.stderr);
-      steps.push({
-        label: 'vercel build',
-        status: 'fail',
-        detail: notLinked
-          ? `Project not linked. Run:\n      cd ${opts.projectDir} && vercel link`
-          : tail,
-      });
-      return { ok: false, steps };
-    }
+    // Code ships via the keep.lock PR (opened by deployCommand); Vercel's git
+    // CI builds on merge and `capy run` injects the secrets from the blob.
     steps.push({
-      label: 'vercel build',
-      status: 'ok',
-      detail: isProd ? 'production build' : 'preview build',
+      label: 'vercel build + deploy',
+      status: 'skip',
+      detail: 'CI mode — Vercel builds and deploys when the deploy PR merges',
     });
-
-    // Deploy. --prebuilt skips the remote build (we just built locally).
-    // For previews, --git-branch tags the deployment under the named branch
-    // in Vercel's branch-aware UI so it groups with prior deploys for that
-    // branch (matches capy's natural mapping: capy branch ↔ git branch ↔
-    // vercel preview lane).
-    const deployArgs = ['deploy', '--prebuilt', '--yes'];
-    if (isProd) {
-      deployArgs.push('--prod');
-    } else if (opts.gitBranch) {
-      deployArgs.push('--git-branch', opts.gitBranch);
-    }
-    const deployR = await spawnAsync(
-      'vercel',
-      [...deployArgs, ...tokenArg],
-      projectDir,
-      buildEnv,
-    );
-    if (deployR.code !== 0) {
-      steps.push({
-        label: 'vercel deploy',
-        status: 'fail',
-        detail: deployR.stderr.trim().split('\n').slice(-3).join(' | '),
-      });
-      return { ok: false, steps };
-    }
-    const urlMatch = deployR.stdout.match(/https:\/\/[a-z0-9-]+\.vercel\.app/i);
-    steps.push({
-      label: 'vercel deploy',
-      status: 'ok',
-      url: urlMatch?.[0],
-    });
-
     return { ok: true, steps };
   },
 };
