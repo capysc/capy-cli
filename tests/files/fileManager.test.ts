@@ -96,7 +96,7 @@ describe('FileManager', () => {
       expect(mockWriteFileSync).toHaveBeenCalledWith(
         join(testRoot, '.env'),
         'API_KEY=test123\nDB_URL=postgres://localhost\n',
-        'utf-8'
+        { encoding: 'utf-8', mode: 0o600 }
       );
     });
 
@@ -130,9 +130,9 @@ describe('FileManager', () => {
       fileManager.writeEnvFile(variables);
 
       // Should create backup
-      expect(mockWriteFileSync).toHaveBeenCalledWith(backupPath, 'old content', 'utf-8');
+      expect(mockWriteFileSync).toHaveBeenCalledWith(backupPath, 'old content', { encoding: 'utf-8', mode: 0o600 });
       // Should write new content
-      expect(mockWriteFileSync).toHaveBeenCalledWith(envPath, 'API_KEY=test123\n', 'utf-8');
+      expect(mockWriteFileSync).toHaveBeenCalledWith(envPath, 'API_KEY=test123\n', { encoding: 'utf-8', mode: 0o600 });
       // Should remove backup
       expect(mockUnlinkSync).toHaveBeenCalledWith(backupPath);
     });
@@ -465,7 +465,7 @@ describe('FileManager', () => {
       const result = (fileManager as any).createBackup(filePath);
 
       expect(result).toBe(backupPath);
-      expect(mockWriteFileSync).toHaveBeenCalledWith(backupPath, content, 'utf-8');
+      expect(mockWriteFileSync).toHaveBeenCalledWith(backupPath, content, { encoding: 'utf-8', mode: 0o600 });
     });
 
     test('should return null for non-existent file', () => {
@@ -556,7 +556,7 @@ describe('FileManager', () => {
       expect(mockWriteFileSync).toHaveBeenCalledWith(
         join(testRoot, '.env.pre-capy.old'),
         expect.stringContaining('From Capy'),
-        'utf-8'
+        { encoding: 'utf-8', mode: 0o600 }
       );
       // Verify the original content is included after the header
       const writtenContent = (mockWriteFileSync as any).mock.calls.find(
@@ -634,7 +634,7 @@ describe('FileManager', () => {
       expect(mockWriteFileSync).toHaveBeenCalledWith(
         '/custom/.env.pre-capy.old',
         expect.stringContaining('# KEY=value'),
-        'utf-8'
+        { encoding: 'utf-8', mode: 0o600 }
       );
     });
   });
