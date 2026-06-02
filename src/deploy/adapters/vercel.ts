@@ -14,7 +14,7 @@
  *                    Preview deployment for git branch `development`).
  */
 import { existsSync, readFileSync } from 'fs';
-import { spawnSync } from 'child_process';
+import { spawnSync, spawn } from 'child_process';
 import { join } from 'path';
 import {
   DeployAdapter,
@@ -82,6 +82,69 @@ function findProjectDir(cwd: string): string | null {
   return null;
 }
 
+function readVercelProjectId(dir: string): { projectId?: string; orgId?: string } {
+  const p = join(dir, '.vercel', 'project.json');
+  if (!existsSync(p)) return {};
+  try {
+    const raw = JSON.parse(readFileSync(p, 'utf-8'));
+    return { projectId: raw.projectId, orgId: raw.orgId };
+  } catch {
+    return {};
+  }
+}
+
+function spawnAsync(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  env: Record<string, string> = {},
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d.toString()));
+    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.on('close', (code) =>
+      resolve({ stdout, stderr, code: code ?? 1 }),
+    );
+  });
+}
+
+/**
+ * Runs `vercel link` interactively so the user can pick scope + project. We
+ * inherit stdio (vercel's scope/project pickers use arrow-key lists and
+ * require a raw TTY on stdin — we can't both inject keystrokes AND let the
+ * user navigate without a PTY). To honor the "decline env-var download"
+ * intent, we print a clear instruction immediately before launching so the
+ * answer is unambiguous: capy manages those vars, downloading them would
+ * mix sources of truth.
+ */
+async function runVercelLink(projectDir: string): Promise<boolean> {
+  // ANSI: 33 = yellow, 90 = grey, 0 = reset.
+  process.stdout.write(
+    '\n\x1b[33m▸ Project not linked to Vercel. Running `vercel link`…\x1b[0m\n',
+  );
+  process.stdout.write(
+    '\x1b[90m  When asked "Download Environment Variables?", answer N.\x1b[0m\n',
+  );
+  process.stdout.write(
+    '\x1b[90m  capy manages those — pulling them would mix sources.\x1b[0m\n\n',
+  );
+  return new Promise((resolve) => {
+    const child = spawn('vercel', ['link'], {
+      cwd: projectDir,
+      stdio: 'inherit',
+    });
+    child.on('close', (code) => resolve(code === 0));
+    child.on('error', () => resolve(false));
+  });
+}
+
 export const vercelAdapter: DeployAdapter = {
   id: 'vercel',
   label: 'Vercel',
@@ -145,13 +208,42 @@ export const vercelAdapter: DeployAdapter = {
         hint: `Set options.vercelEnv to "production" or "preview" (run \`capy deploy --edit ${config.name}\`).`,
       };
     }
-    // Must be linked so the CLI knows which project to target.
-    if (!existsSync(join(projectDir, '.vercel', 'project.json'))) {
-      return {
-        ok: false,
-        reason: `${opts.projectDir} is not linked to a Vercel project`,
-        hint: 'Run `vercel link` in that directory first.',
-      };
+    // Linkage: either .vercel/project.json exists OR VERCEL_PROJECT_ID +
+    // VERCEL_ORG_ID are in env (CI). Either is sufficient. If neither holds
+    // AND we're sitting at an interactive TTY, auto-run `vercel link` so the
+    // user doesn't have to break flow. In CI/non-TTY we keep the original
+    // hard fail with the install hint.
+    let linked = readVercelProjectId(projectDir);
+    const hasEnvIds =
+      !!process.env.VERCEL_PROJECT_ID && !!process.env.VERCEL_ORG_ID;
+    if (!linked.projectId && !hasEnvIds) {
+      const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
+      if (!interactive) {
+        return {
+          ok: false,
+          reason: `${opts.projectDir} is not linked to a Vercel project`,
+          hint:
+            `Link the project once:\n` +
+            `  cd ${opts.projectDir} && vercel link\n` +
+            `Or in CI, set VERCEL_PROJECT_ID + VERCEL_ORG_ID + VERCEL_TOKEN.`,
+        };
+      }
+      const linkOk = await runVercelLink(projectDir);
+      if (!linkOk) {
+        return {
+          ok: false,
+          reason: 'vercel link did not complete',
+          hint: `Re-run, or link manually: cd ${opts.projectDir} && vercel link`,
+        };
+      }
+      linked = readVercelProjectId(projectDir);
+      if (!linked.projectId) {
+        return {
+          ok: false,
+          reason: `${opts.projectDir} is still not linked after vercel link`,
+          hint: `Try again: cd ${opts.projectDir} && vercel link`,
+        };
+      }
     }
     return { ok: true };
   },
