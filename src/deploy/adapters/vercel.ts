@@ -9,9 +9,14 @@
  *
  * Target → Vercel environment mapping is explicit, via `options.vercelEnv`:
  *   - 'production' → Vercel `production`
- *   - 'preview'    → Vercel `preview`, scoped to the target's git branch
- *                    (so e.g. the `development` capy branch lands on the
- *                    Preview deployment for git branch `development`).
+ *   - 'preview'    → Vercel `preview`, scoped to `options.gitBranch` (the git
+ *                    branch that Preview env is wired to). That git branch is
+ *                    picked explicitly at setup and need NOT match the capy
+ *                    branch name or the branch you're checked out on — e.g.
+ *                    sitting on git `main` with capy branch `development`, you
+ *                    can still push to the Preview env for git `development`.
+ *                    Falls back to `config.branch` for targets saved before
+ *                    `options.gitBranch` existed.
  */
 import { existsSync, readFileSync } from 'fs';
 import { spawnSync, spawn } from 'child_process';
@@ -33,6 +38,14 @@ interface VercelOptions {
   projectDir: string;
   /** Which Vercel environment these vars target. */
   vercelEnv?: VercelEnv;
+  /**
+   * For `vercelEnv: 'preview'` only — the GIT branch the Vercel Preview env is
+   * wired to (what `vercel env add … preview <gitBranch>` scopes the value to).
+   * This is a git branch Vercel knows about, NOT necessarily the capy branch
+   * name. Defaults to `config.branch` when unset for back-compat with targets
+   * saved before this field existed.
+   */
+  gitBranch?: string;
 }
 
 /**
@@ -252,7 +265,11 @@ export const vercelAdapter: DeployAdapter = {
     const steps: DeployStep[] = [];
     const opts = config.options as Partial<VercelOptions>;
     const vercelEnv = opts.vercelEnv as VercelEnv;
-    const gitBranch = vercelEnv === 'preview' ? config.branch : undefined;
+    // Preview scope = the git branch the Preview env is wired to. Prefer the
+    // explicit per-target option; fall back to the capy branch name for
+    // targets saved before gitBranch existed.
+    const gitBranch =
+      vercelEnv === 'preview' ? (opts.gitBranch ?? config.branch) : undefined;
     const projectDir = join(ctx.cwd, opts.projectDir ?? '.');
     const scope = vercelEnv === 'preview' ? `preview · branch=${gitBranch}` : 'production';
 

@@ -164,4 +164,19 @@ describe('vercel — deploy', () => {
     );
     expect(result.steps[0].detail).toMatch(/preview · branch=development/);
   });
+
+  test('explicit options.gitBranch decouples preview scope from the capy branch', async () => {
+    // Real scenario: checked out / capy branch is one thing, but the Vercel
+    // Preview env is wired to a different git branch. The explicit gitBranch
+    // option must win over config.branch.
+    const result = await vercelAdapter.deploy(
+      baseTarget({
+        branch: 'main',
+        options: { projectDir: 'web', vercelEnv: 'preview', gitBranch: 'development' },
+      }),
+      { env: {}, dryRun: true, cwd: ROOT },
+    );
+    expect(result.steps[0].detail).toMatch(/preview · branch=development/);
+    expect(result.steps[0].detail).not.toMatch(/branch=main/);
+  });
 });
