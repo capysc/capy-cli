@@ -248,7 +248,21 @@ async function runPicker(
     console.log(`  ${DIM('Detected:')} ${detected.summary}`);
   }
 
-  // 3. Adapter-specific options.
+  // 3. Branch. Asked BEFORE adapter-specific options so adapters whose options
+  // depend on the branch (e.g. Vercel scopes its Preview env to a git branch)
+  // can default to and name it in their prompts.
+  const branch = (await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'branch',
+      message: 'Which capy branch ships to this target?',
+      theme: LIST_THEME,
+      choices: keep.branches.length > 0 ? keep.branches : ['development'],
+      default: existing?.branch ?? (keep.branches.includes('production') ? 'production' : keep.branches[0]),
+    } as any,
+  ])).branch;
+
+  // 4. Adapter-specific options.
   const detectedOpts = (detected.options ?? {}) as Record<string, string>;
   const existingOpts = (existing?.options ?? {}) as Record<string, string>;
   let options: Record<string, unknown> = {};
@@ -273,9 +287,12 @@ async function runPicker(
   } else if (adapter.id === 'vercel') {
     // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
     // but capy pushes SECRETS_BLOB + PROJECT_KEY into the chosen Vercel
-    // environment via the vercel CLI. Capture the app dir AND which Vercel
-    // environment these secrets target (preview is scoped to the target's git
-    // branch; production targets the production env).
+    // environment via the vercel CLI. Capture the app dir, which Vercel
+    // environment these secrets go to, and — for Preview — exactly which git
+    // branch that Preview env is wired to. The Preview scope is a GIT branch
+    // Vercel knows about, which is NOT necessarily your capy branch name nor
+    // the branch you're checked out on, so we ask explicitly and default to
+    // the capy branch.
     const ans = await inquirer.prompt([
       {
         type: 'input',
@@ -287,15 +304,27 @@ async function runPicker(
       {
         type: 'list',
         name: 'vercelEnv',
-        message: 'Which Vercel environment do these secrets target?',
+        message: 'Which Vercel environment should these secrets go to?',
         choices: [
-          { name: "Preview (scoped to this target's git branch)", value: 'preview' },
+          { name: 'Preview — scoped to a specific git branch', value: 'preview' },
           { name: 'Production', value: 'production' },
         ],
         default: existingOpts.vercelEnv ?? 'preview',
       },
+      {
+        type: 'input',
+        name: 'gitBranch',
+        message: 'Which git branch is that Vercel Preview environment wired to?',
+        default: existingOpts.gitBranch ?? branch,
+        when: (a: Record<string, unknown>) => a.vercelEnv === 'preview',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
     ]);
-    options = { ...ans };
+    // Drop gitBranch entirely for production — it has no meaning there.
+    options =
+      ans.vercelEnv === 'preview'
+        ? { projectDir: ans.projectDir, vercelEnv: 'preview', gitBranch: (ans.gitBranch as string).trim() }
+        : { projectDir: ans.projectDir, vercelEnv: 'production' };
   } else if (adapter.id === 'cf-pages') {
     const ans = await inquirer.prompt([
       {
@@ -330,18 +359,6 @@ async function runPicker(
     ]);
     options = ans;
   }
-
-  // 4. Branch.
-  const branch = (await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'branch',
-      message: 'Which capy branch ships to this target?',
-      theme: LIST_THEME,
-      choices: keep.branches.length > 0 ? keep.branches : ['development'],
-      default: existing?.branch ?? (keep.branches.includes('production') ? 'production' : keep.branches[0]),
-    } as any,
-  ])).branch;
 
   // 5. Var picking — show every var in keep.lock and pre-select the ones
   // most likely to be relevant for this adapter (runtime for cf-worker,
