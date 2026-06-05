@@ -524,14 +524,6 @@ program
   });
 
 program
-  .command('version')
-  .description('Show version information')
-  .action(() => {
-    console.log(`${B('Capy')} CLI v0.3.0`);
-  });
-
-
-program
   .command('invite <email>')
   .description('Invite a teammate to this organization')
   .option('--role <role>', 'invitee role: member | project-admin | admin')
