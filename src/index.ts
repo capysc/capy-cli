@@ -1,10 +1,27 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+// Single source of truth for the version: package.json. Reading it here means
+// `capy --version` can never drift from the published npm version. Resolves
+// relative to the bundled `dist/` location at runtime; npm always ships
+// package.json regardless of the `files` whitelist.
+function readCliVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'),
+    );
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
 
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
 process.on('uncaughtException', (error: any) => {
@@ -29,7 +46,7 @@ const program = new Command();
 program
   .name('capy')
   .description('Capy CLI - SecretOps for the AI age')
-  .version('0.3.0')
+  .version(readCliVersion())
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
@@ -508,14 +525,6 @@ program
   .action(() => {
     program.outputHelp();
   });
-
-program
-  .command('version')
-  .description('Show version information')
-  .action(() => {
-    console.log(`${B('Capy')} CLI v0.3.0`);
-  });
-
 
 program
   .command('invite <email>')

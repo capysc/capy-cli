@@ -5,7 +5,8 @@
  * This file is NOT included in production builds or npm packages.
  */
 import { config } from 'dotenv';
-import { resolve } from 'path';
+import { readFileSync } from 'fs';
+import { join, resolve } from 'path';
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
@@ -55,12 +56,25 @@ if (!process.env.CAPY_API_URL) {
   }
 }
 
+// Single source of truth for the version: package.json, so `capy-dev --version`
+// can never drift from the published npm version.
+function readCliVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'),
+    );
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
 const program = new Command();
 
 program
   .name('capy-dev')
   .description('Capy CLI (DEV MODE - mock auth enabled)')
-  .version('0.3.0')
+  .version(readCliVersion())
   .option('--env-path <path>', 'specify custom .env file location')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
