@@ -73,6 +73,12 @@ export interface DeployResult {
 export interface DeployContext {
   /** Decrypted env for the chosen branch. Adapter may filter to config.vars. */
   env: Record<string, string>;
+  /**
+   * Minted SECRETS_BLOB + PROJECT_KEY for build-time secret injection (the
+   * pair `capy run` consumes). Present only when the adapter sets
+   * `needsDeployToken`; the deploy flow mints it instead of decrypting `env`.
+   */
+  deployToken?: { secretsBlob: string; projectKey: string };
   /** Set by `capy deploy --dry-run`. Adapter must not push anything. */
   dryRun: boolean;
   /**
@@ -113,6 +119,21 @@ export interface DeployAdapter {
    * without GH Actions) should set 'direct'.
    */
   defaultMode: DeployMode;
+  /**
+   * When true, this adapter ONLY deploys via CI: capy opens the keep.lock PR
+   * and the vendor's git integration builds + ships on merge. capy never runs
+   * the vendor CLI locally, so there is no 'direct' mode to choose. The picker
+   * skips the direct/CI question (forced to 'ci') and `capy deploy` forces
+   * mode='ci' regardless of any saved or ad-hoc target mode. Vercel sets this.
+   */
+  ciOnly?: boolean;
+  /**
+   * When true, the deploy flow mints a SECRETS_BLOB + PROJECT_KEY and passes it
+   * as `ctx.deployToken` (instead of decrypting individual vars into `ctx.env`).
+   * For build-time adapters that inject secrets via `capy run` at build, rather
+   * than setting each secret as a plaintext vendor env var.
+   */
+  needsDeployToken?: boolean;
   /**
    * Hard requirements: binaries that must be on PATH, env vars that must be
    * set (typically only in CI), and an adapter-specific auth check. Any

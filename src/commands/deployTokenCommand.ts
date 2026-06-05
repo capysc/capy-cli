@@ -240,7 +240,7 @@ export class DeployCommand {
 
       // Authenticate
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      const serviceClient = new ServiceClient(this.apiUrl);
+      const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();
@@ -337,7 +337,7 @@ export class DeployCommand {
             process.exit(code);
           }
           const { deployCommand } = await import('./deployCommand');
-          const code = await deployCommand(undefined, { target: connectorId, yes: !!this.options.yes });
+          const code = await deployCommand(undefined, { target: connectorId, yes: !!this.options.yes, devMode: this.devMode });
           process.exit(code);
         }
         // else fall through to existing token+docs flow
@@ -459,7 +459,7 @@ export class DeployRevokeCommand {
       const orgId = projectState.organizationId;
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      const serviceClient = new ServiceClient(this.apiUrl);
+      const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();
@@ -502,7 +502,7 @@ export class DeployListCommand {
       const projectId = projectState.projectId;
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      const serviceClient = new ServiceClient(this.apiUrl);
+      const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
       let authResult = await authService.authenticateSilent(orgId);
       if (!authResult.success) authResult = await authService.authenticateSilent();

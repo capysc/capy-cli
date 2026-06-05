@@ -33,7 +33,7 @@
     "prepublishOnly": "npm pkg delete bin.capy-dev",
     "test": "bash tests/run-tests.sh",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "bun run tests/e2e/e2e.ts",
+    "test:e2e": "bun test tests/e2e/",
     "test:plugins": "bash tests/plugins/run-plugin-tests.sh",
     "test:plugins:cloudflare-workers": "bash tests/plugins/run-plugin-tests.sh cloudflare-workers",
     "test:plugins:cloudflare-pages": "bash tests/plugins/run-plugin-tests.sh cloudflare-pages",

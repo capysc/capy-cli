@@ -86,91 +86,6 @@ describe('FileManager', () => {
     });
   });
 
-  describe('writeEnvFile', () => {
-    test('should write variables to .env file', () => {
-      const variables = { API_KEY: 'test123', DB_URL: 'postgres://localhost' };
-      mockExistsSync.mockReturnValue(false); // No backup needed
-
-      fileManager.writeEnvFile(variables);
-
-      expect(mockWriteFileSync).toHaveBeenCalledWith(
-        join(testRoot, '.env'),
-        'API_KEY=test123\nDB_URL=postgres://localhost\n',
-        'utf-8'
-      );
-    });
-
-    test('should create directory if it does not exist', () => {
-      const variables = { API_KEY: 'test123' };
-      const envPath = join(testRoot, 'subdir', '.env');
-      mockExistsSync.mockImplementation((path) => {
-        if (path === dirname(envPath)) return false;
-        return false;
-      });
-
-      fileManager.writeEnvFile(variables, envPath);
-
-      expect(mockMkdirSync).toHaveBeenCalledWith(dirname(envPath), { recursive: true });
-    });
-
-    test('should create and remove backup on successful write', () => {
-      const variables = { API_KEY: 'test123' };
-      const envPath = join(testRoot, '.env');
-      const backupPath = `${envPath}.backup`;
-
-      // Mock existing file for backup
-      mockExistsSync.mockImplementation((path) => {
-        if (path === envPath) return true;
-        if (path === backupPath) return true;
-        if (path === dirname(envPath)) return true;
-        return false;
-      });
-      mockReadFileSync.mockReturnValue('old content');
-
-      fileManager.writeEnvFile(variables);
-
-      // Should create backup
-      expect(mockWriteFileSync).toHaveBeenCalledWith(backupPath, 'old content', 'utf-8');
-      // Should write new content
-      expect(mockWriteFileSync).toHaveBeenCalledWith(envPath, 'API_KEY=test123\n', 'utf-8');
-      // Should remove backup
-      expect(mockUnlinkSync).toHaveBeenCalledWith(backupPath);
-    });
-
-    test('should restore backup on write failure', () => {
-      const variables = { API_KEY: 'test123' };
-      const envPath = join(testRoot, '.env');
-      const backupPath = `${envPath}.backup`;
-
-      mockExistsSync.mockImplementation((path) => {
-        if (path === envPath) return true;
-        if (path === backupPath) return true;
-        if (path === dirname(envPath)) return true;
-        return false;
-      });
-
-      (mockReadFileSync as any).mockImplementation((path: any) => {
-        if (path === envPath) return 'old content';
-        if (path === backupPath) return 'old content';
-        return '';
-      });
-
-      // Mock write failure
-      let writeCallCount = 0;
-      mockWriteFileSync.mockImplementation((path, content) => {
-        writeCallCount++;
-        if (writeCallCount === 2) { // Second call is the actual write
-          throw new Error('Write failed');
-        }
-      });
-
-      expect(() => fileManager.writeEnvFile(variables)).toThrow(CapyError);
-
-      // Should restore backup
-      expect(mockWriteFileSync).toHaveBeenCalledWith(envPath, 'old content', 'utf-8');
-    });
-  });
-
   describe('parseEnvContent', () => {
     test('should parse env content string', () => {
       const content = 'API_KEY=test123\nDB_URL=postgres://localhost\n# Comment\nEMPTY=';
@@ -465,7 +380,7 @@ describe('FileManager', () => {
       const result = (fileManager as any).createBackup(filePath);
 
       expect(result).toBe(backupPath);
-      expect(mockWriteFileSync).toHaveBeenCalledWith(backupPath, content, 'utf-8');
+      expect(mockWriteFileSync).toHaveBeenCalledWith(backupPath, content, { encoding: 'utf-8', mode: 0o600 });
     });
 
     test('should return null for non-existent file', () => {
@@ -556,7 +471,7 @@ describe('FileManager', () => {
       expect(mockWriteFileSync).toHaveBeenCalledWith(
         join(testRoot, '.env.pre-capy.old'),
         expect.stringContaining('From Capy'),
-        'utf-8'
+        { encoding: 'utf-8', mode: 0o600 }
       );
       // Verify the original content is included after the header
       const writtenContent = (mockWriteFileSync as any).mock.calls.find(
@@ -634,7 +549,7 @@ describe('FileManager', () => {
       expect(mockWriteFileSync).toHaveBeenCalledWith(
         '/custom/.env.pre-capy.old',
         expect.stringContaining('# KEY=value'),
-        'utf-8'
+        { encoding: 'utf-8', mode: 0o600 }
       );
     });
   });

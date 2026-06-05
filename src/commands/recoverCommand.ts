@@ -94,7 +94,7 @@ export class RecoverCommand {
     }
     authResult = scoped;
 
-    const serviceClient = new ServiceClient(this.apiUrl);
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
 
     // 4. Overwrite gate.

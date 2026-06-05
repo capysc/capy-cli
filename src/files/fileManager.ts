@@ -4,6 +4,7 @@ import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } 
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
+import { debug } from '../ui/debug';
 
 export class FileManager {
   private projectRoot: string;
@@ -87,38 +88,9 @@ export class FileManager {
     }
   }
 
-  writeEnvFile(variables: Record<string, string>, path?: string): void {
-    const envPath = path || join(this.projectRoot, '.env');
-    console.log(`Writing ${Object.keys(variables).length} variables to ${envPath}`);
-    const backup = this.createBackup(envPath);
-
-    try {
-      const content = Object.entries(variables)
-        .map(([key, value]) => `${key}=${value}`)
-        .join('\n');
-
-      this.ensureDirectoryExists(dirname(envPath));
-      writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`Successfully wrote .env file`);
-
-      if (backup) {
-        this.removeBackup(backup);
-      }
-    } catch (error) {
-      if (backup) {
-        this.restoreBackup(backup, envPath);
-      }
-      throw new CapyError(
-        `Failed to write .env file at ${envPath}`,
-        ERROR_CODES.PERMISSION_DENIED,
-        { error, path: envPath }
-      );
-    }
-  }
-
   writeEncryptedEnvFile(variables: Record<string, string>, encryptionKey: string, path?: string, keep?: KeepFile | null, branch?: string): void {
     const envPath = path || join(this.projectRoot, '.env');
-    console.log(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
+    debug(`Encrypting and writing ${Object.keys(variables).length} variables to ${envPath}`);
     const backup = this.createBackup(envPath);
 
     try {
@@ -164,8 +136,8 @@ export class FileManager {
         .join('\n');
 
       this.ensureDirectoryExists(dirname(envPath));
-      writeFileSync(envPath, content + '\n', 'utf-8');
-      console.log(`Successfully wrote encrypted .env file`);
+      writeFileSync(envPath, content + '\n', { encoding: 'utf-8', mode: 0o600 });
+      debug(`Successfully wrote encrypted .env file`);
 
       if (backup) {
         this.removeBackup(backup);
@@ -338,7 +310,7 @@ export class FileManager {
     const backupPath = `${filePath}.backup`;
     try {
       const content = readFileSync(filePath, 'utf-8');
-      writeFileSync(backupPath, content, 'utf-8');
+      writeFileSync(backupPath, content, { encoding: 'utf-8', mode: 0o600 });
       return backupPath;
     } catch {
       return null;
@@ -413,7 +385,7 @@ export class FileManager {
 
     const oldPath = envPath.replace(/\.env$/, '.env.pre-capy.old');
     const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting this file or putting it somewhere safe because the values are unencrypted.\n\n';
-    writeFileSync(oldPath, header + commented, 'utf-8');
+    writeFileSync(oldPath, header + commented, { encoding: 'utf-8', mode: 0o600 });
     this.updateGitignore(['.env.pre-capy.old']);
     console.log(`Saved plaintext backup to ${oldPath}`);
     return true;
