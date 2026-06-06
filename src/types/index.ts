@@ -51,20 +51,9 @@ export interface EnvVariable {
   encrypted: boolean;
 }
 
-export interface DecryptKey {
-  version: string;
-  org_id: string;
-  project_id: string;
-  user_id: string;
-  decryption_key: string;
-  expires_at: string;
-  permissions: string[];
-}
-
 export interface ProjectState {
   initialized: boolean;
   hasKeepFile: boolean;
-  hasDecryptKey: boolean;
   hasEnvFile: boolean;
   projectName?: string;
   organizationId?: string;

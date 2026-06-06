@@ -454,7 +454,6 @@ describe('Direction detection — branch-aware keep_hash', () => {
       getDefaultProjectName: mock(() => 'test-project'),
       getEnvPath: mock(() => '.env'),
       readKeepFile: mock(() => undefined),
-      readDecryptKey: mock(() => undefined),
       readSyncState: mock(() => null),
       readActiveBranch: mock(() => null),
       writeActiveBranch: mock(() => undefined),
@@ -462,7 +461,6 @@ describe('Direction detection — branch-aware keep_hash', () => {
     };
     mockFileManager = {
       writeKeepFile: mock(() => undefined),
-      writeDecryptKey: mock(() => undefined),
       writeSyncState: mock(() => undefined),
       writeEncryptedEnvFile: mock(() => undefined),
       readEnvFile: mock(() => ({})),
@@ -500,7 +498,6 @@ describe('Direction detection — branch-aware keep_hash', () => {
       listProjects: mock(() => Promise.resolve([])),
     };
     mockSyncEngine = {
-      createDecryptKey: mock(() => 'mock-decrypt-key'),
       compareEnvironments: mock(() => undefined),
       formatSyncSummary: mock(() => undefined),
       validateDecisions: mock(() => []),
@@ -541,7 +538,6 @@ describe('Direction detection — branch-aware keep_hash', () => {
     const projectState = {
       initialized: true,
       hasKeepFile: true,
-      hasDecryptKey: true,
       hasEnvFile: true,
       projectName: 'test-project',
       projectId: 'proj-123',
