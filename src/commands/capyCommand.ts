@@ -1,6 +1,6 @@
 import ora from '../ui/spinner';
 import { ProjectManager } from '../core/projectManager';
-import { FileManager } from '../files/fileManager';
+import { FileManager, serializeKeep } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
@@ -1173,8 +1173,12 @@ export class CapyCommand {
       // so that "Pinned vs Local vs Remote" is a true three-way comparison.
       if (decryptData.keep_file) {
         const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
-        const localSerialized = currentKeep ? JSON.stringify(currentKeep) : '';
-        const serverSerialized = JSON.stringify(serverKeep);
+        // Compare in the canonical on-disk form. A keep read from disk carries
+        // `_comment` and is already sorted; the server's copy has neither, so a
+        // bare JSON.stringify comparison always reports a difference and would
+        // rewrite keep.lock on every sync. serializeKeep normalizes both sides.
+        const localSerialized = currentKeep ? serializeKeep(currentKeep) : '';
+        const serverSerialized = serializeKeep(serverKeep);
         if (localSerialized !== serverSerialized) {
           this.debug('self-heal: local keep.lock differs from server, overwriting');
           this.fileManager.writeKeepFile(serverKeep);
