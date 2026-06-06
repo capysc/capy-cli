@@ -395,33 +395,6 @@ describe('SyncEngine', () => {
     });
   });
 
-  describe('createDecryptKey', () => {
-    test('should create decrypt key with proper structure', () => {
-      const orgId = 'org_123';
-      const projectId = 'proj_456';
-      const userId = 'user_789';
-      const decryptionKey = 'decrypt_key_abc';
-      const permissions = ['VAR1', 'VAR2'];
-
-      const result = syncEngine.createDecryptKey(orgId, projectId, userId, decryptionKey, permissions);
-
-      expect(result.version).toBe('1.0');
-      expect(result.org_id).toBe(orgId);
-      expect(result.project_id).toBe(projectId);
-      expect(result.user_id).toBe(userId);
-      expect(result.decryption_key).toBe(decryptionKey);
-      expect(result.permissions).toEqual(permissions);
-      expect(result.expires_at).toBeDefined();
-      
-      // Check that expiration is 30 days from now
-      const expiresAt = new Date(result.expires_at);
-      const expectedExpiration = new Date();
-      expectedExpiration.setDate(expectedExpiration.getDate() + 30);
-      
-      expect(Math.abs(expiresAt.getTime() - expectedExpiration.getTime())).toBeLessThan(1000);
-    });
-  });
-
   describe('formatSyncSummary', () => {
     test('should format comprehensive sync summary', () => {
       const changeSet: ChangeSet = {

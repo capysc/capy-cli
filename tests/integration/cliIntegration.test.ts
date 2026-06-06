@@ -6,7 +6,7 @@ import { SyncEngine } from '../../src/sync/syncEngine';
 import { PromptEngine } from '../../src/ui/promptEngine';
 import { AuthService } from '../../src/auth/authService';
 import { ServiceClient } from '../../src/service/serviceClient';
-import { CapyError, KeepFile, DecryptKey } from '../../src/types/index';
+import { CapyError, KeepFile } from '../../src/types/index';
 import * as fs from 'fs';
 
 // Integration tests - testing components working together without full mocking
@@ -44,7 +44,6 @@ describe('CLI Integration Tests', () => {
       // Mock file system operations since we're not actually creating files
       spyOn(fs, 'existsSync').mockImplementation((path: any) => {
         if (path.includes('keep.lock')) return false;
-        if (path.includes('.capy/decrypt')) return false;
         if (path.includes('.env')) return true;
         return false;
       });
@@ -54,7 +53,6 @@ describe('CLI Integration Tests', () => {
       expect(state).toMatchObject({
         initialized: false,
         hasKeepFile: false,
-        hasDecryptKey: false,
         hasEnvFile: true,
         activeBranch: 'development',
       });
@@ -71,7 +69,6 @@ describe('CLI Integration Tests', () => {
 
       spyOn(fs, 'existsSync').mockImplementation((path: any) => {
         if (path.includes('keep.lock')) return true;
-        if (path.includes('.capy/decrypt')) return true;
         if (path.includes('.env')) return true;
         return false;
       });
@@ -83,7 +80,6 @@ describe('CLI Integration Tests', () => {
       expect(state).toMatchObject({
         initialized: true,
         hasKeepFile: true,
-        hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
         organizationId: 'org_123',
@@ -135,27 +131,6 @@ DEBUG=true`;
       );
     });
 
-    test('should create decrypt key with secure permissions', () => {
-      const mockDecryptKey: DecryptKey = {
-        version: '1.0',
-        org_id: 'org_123',
-        project_id: 'proj_456',
-        user_id: 'user_789',
-        decryption_key: 'decrypt_key_abc',
-        expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-        permissions: ['API_KEY', 'DB_URL']
-      };
-
-      const writeFileSyncSpy = spyOn(fs, 'writeFileSync').mockImplementation(() => {});
-
-      fileManager.writeDecryptKey(mockDecryptKey);
-
-      expect(writeFileSyncSpy).toHaveBeenCalledWith(
-        expect.stringContaining('.capy/decrypt'),
-        JSON.stringify(mockDecryptKey, null, 2) + '\n',
-        { encoding: 'utf-8', mode: 0o600 }
-      );
-    });
   });
 
   describe('Sync Engine Integration', () => {
@@ -340,33 +315,6 @@ DEBUG=true`;
         const result = manager.getDefaultProjectName();
         expect(result).toBe(expected);
       });
-    });
-  });
-
-  describe('Decrypt Key Creation Integration', () => {
-    test('should create valid decrypt key with proper expiration', () => {
-      const orgId = 'org_123';
-      const projectId = 'proj_456';
-      const userId = 'user_789';
-      const decryptionKey = 'decrypt_key_abc';
-      const permissions = ['API_KEY', 'DB_URL'];
-
-      const decryptKey = syncEngine.createDecryptKey(orgId, projectId, userId, decryptionKey, permissions);
-
-      expect(decryptKey.version).toBe('1.0');
-      expect(decryptKey.org_id).toBe(orgId);
-      expect(decryptKey.project_id).toBe(projectId);
-      expect(decryptKey.user_id).toBe(userId);
-      expect(decryptKey.decryption_key).toBe(decryptionKey);
-      expect(decryptKey.permissions).toEqual(permissions);
-
-      // Verify expiration is approximately 30 days from now
-      const expiresAt = new Date(decryptKey.expires_at);
-      const expectedExpiration = new Date();
-      expectedExpiration.setDate(expectedExpiration.getDate() + 30);
-      
-      const timeDiff = Math.abs(expiresAt.getTime() - expectedExpiration.getTime());
-      expect(timeDiff).toBeLessThan(1000); // Less than 1 second difference
     });
   });
 

@@ -102,7 +102,6 @@ describe('CapyCommand', () => {
       getDefaultProjectName: mock(() => 'test-project'),
       getEnvPath: mock(() => '.env'),
       readKeepFile: mock(() => undefined),
-      readDecryptKey: mock(() => undefined),
       readSyncState: mock(() => null),
       readActiveBranch: mock(() => null),
       writeActiveBranch: mock(() => undefined),
@@ -111,7 +110,6 @@ describe('CapyCommand', () => {
 
     mockFileManager = {
       writeKeepFile: mock(() => undefined),
-      writeDecryptKey: mock(() => undefined),
       writeSyncState: mock(() => undefined),
       writeEncryptedEnvFile: mock(() => undefined),
       readEnvFile: mock(() => ({})),
@@ -152,7 +150,6 @@ describe('CapyCommand', () => {
     } as any;
 
     mockSyncEngine = {
-      createDecryptKey: mock(() => 'mock-decrypt-key'),
       compareEnvironments: mock(() => undefined),
       formatSyncSummary: mock(() => undefined),
       validateDecisions: mock(() => []),
@@ -214,7 +211,6 @@ describe('CapyCommand', () => {
       mockProjectManager.detectProjectState.mockResolvedValue({
         initialized: false,
         hasKeepFile: false,
-        hasDecryptKey: false,
         hasEnvFile: false,
         projectName: undefined,
         projectId: undefined,
@@ -233,7 +229,6 @@ describe('CapyCommand', () => {
       const projectState = {
         initialized: true,
         hasKeepFile: true,
-        hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
         projectId: 'proj-123',
@@ -253,7 +248,6 @@ describe('CapyCommand', () => {
       mockProjectManager.detectProjectState.mockResolvedValue({
         initialized: true,
         hasKeepFile: true,
-        hasDecryptKey: false,
         hasEnvFile: false,
         projectName: 'existing-project',
         projectId: 'proj-123',
@@ -736,7 +730,6 @@ describe('CapyCommand', () => {
     const mockProjectState = {
       initialized: true,
       hasKeepFile: true,
-      hasDecryptKey: true,
       hasEnvFile: true,
       projectName: 'test-project',
       projectId: 'proj-123',
@@ -834,7 +827,6 @@ describe('CapyCommand', () => {
     const mockProjectState = {
       initialized: true,
       hasKeepFile: true,
-      hasDecryptKey: true,
       hasEnvFile: true,
       projectName: 'test-project',
       projectId: 'proj-123',
@@ -1055,7 +1047,6 @@ describe('CapyCommand', () => {
     const mockProjectState = {
       initialized: true,
       hasKeepFile: true,
-      hasDecryptKey: true,
       hasEnvFile: true,
       projectName: 'test-project',
       projectId: 'proj-123',

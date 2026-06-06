@@ -29,7 +29,6 @@ describe('ProjectManager', () => {
     test('should detect uninitialized project when no keep.lock file exists', async () => {
       mockExistsSync.mockImplementation((path) => {
         if (path === join(testRoot, 'keep.lock')) return false;
-        if (path === join(testRoot, '.capy/decrypt')) return false;
         if (path === join(testRoot, '.env')) return true;
         return false;
       });
@@ -39,7 +38,6 @@ describe('ProjectManager', () => {
       expect(state).toMatchObject({
         initialized: false,
         hasKeepFile: false,
-        hasDecryptKey: false,
         hasEnvFile: true,
         activeBranch: 'development',
       });
@@ -56,7 +54,6 @@ describe('ProjectManager', () => {
 
       mockExistsSync.mockImplementation((path) => {
         if (path === join(testRoot, 'keep.lock')) return true;
-        if (path === join(testRoot, '.capy/decrypt')) return true;
         if (path === join(testRoot, '.env')) return true;
         return false;
       });
@@ -68,7 +65,6 @@ describe('ProjectManager', () => {
       expect(state).toMatchObject({
         initialized: true,
         hasKeepFile: true,
-        hasDecryptKey: true,
         hasEnvFile: true,
         projectName: 'test-project',
         organizationId: 'org_123',
@@ -268,11 +264,6 @@ describe('ProjectManager', () => {
     test('should return correct keep path', () => {
       const path = (projectManager as any).getKeepPath();
       expect(path).toBe(join(testRoot, 'keep.lock'));
-    });
-
-    test('should return correct decrypt path', () => {
-      const path = (projectManager as any).getDecryptPath();
-      expect(path).toBe(join(testRoot, '.capy/decrypt'));
     });
 
     test('should return correct env path', () => {

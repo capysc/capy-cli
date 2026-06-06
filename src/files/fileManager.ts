@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, appendFileSync, chmodSync, mkdirSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
-import { EnvVariable, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { EnvVariable, KeepFile, SyncState, CapyError, ERROR_CODES } from '../types/index';
 import { parse as parseDotenv } from 'dotenv';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
@@ -204,32 +204,6 @@ export class FileManager {
         'Failed to write keep.lock file',
         ERROR_CODES.PERMISSION_DENIED,
         { error, path: keepPath }
-      );
-    }
-  }
-
-  writeDecryptKey(decryptKey: DecryptKey): void {
-    const capyDir = join(this.projectRoot, '.capy');
-    this.ensureDirectoryExists(capyDir);
-
-    const decryptPath = join(capyDir, 'decrypt');
-    const backup = this.createBackup(decryptPath);
-
-    try {
-      const content = JSON.stringify(decryptKey, null, 2);
-      writeFileSync(decryptPath, content + '\n', { encoding: 'utf-8', mode: 0o600 });
-
-      if (backup) {
-        this.removeBackup(backup);
-      }
-    } catch (error) {
-      if (backup) {
-        this.restoreBackup(backup, decryptPath);
-      }
-      throw new CapyError(
-        'Failed to write decrypt file',
-        ERROR_CODES.PERMISSION_DENIED,
-        { error, path: decryptPath }
       );
     }
   }

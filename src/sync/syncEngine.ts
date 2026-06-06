@@ -7,7 +7,6 @@ import {
   SyncResult,
   KeepFile,
   KeepVariableEntry,
-  DecryptKey,
   SyncState,
 } from '../types/index';
 
@@ -253,27 +252,6 @@ export class SyncEngine {
     }
 
     return updatedKeep;
-  }
-
-  createDecryptKey(
-    organizationId: string,
-    projectId: string,
-    userId: string,
-    decryptionKey: string,
-    variableNames: string[]
-  ): DecryptKey {
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 30); // 30 days expiration
-
-    return {
-      version: '1.0',
-      org_id: organizationId,
-      project_id: projectId,
-      user_id: userId,
-      decryption_key: decryptionKey,
-      expires_at: expiresAt.toISOString(),
-      permissions: variableNames
-    };
   }
 
   formatSyncSummary(changeSet: ChangeSet): string {

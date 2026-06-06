@@ -21,7 +21,7 @@ afterAll(() => { mock.restore(); });
 
 import { join, dirname } from 'path';
 import { FileManager } from '../../src/files/fileManager';
-import { KeepFile, DecryptKey, CapyError, ERROR_CODES } from '../../src/types/index';
+import { KeepFile, CapyError, ERROR_CODES } from '../../src/types/index';
 
 describe('FileManager', () => {
   let fileManager: FileManager;
@@ -222,53 +222,9 @@ describe('FileManager', () => {
     });
   });
 
-  describe('writeDecryptKey', () => {
-    test('should write decrypt key with secure permissions', () => {
-      const decryptKey: DecryptKey = {
-        version: '1.0',
-        org_id: 'org_123',
-        project_id: 'proj_456',
-        user_id: 'user_789',
-        decryption_key: 'key_abc',
-        expires_at: '2024-02-01T00:00:00Z',
-        permissions: ['VAR1', 'VAR2']
-      };
-
-      mockExistsSync.mockReturnValue(false); // No backup needed
-
-      fileManager.writeDecryptKey(decryptKey);
-
-      expect(mockWriteFileSync).toHaveBeenCalledWith(
-        join(testRoot, '.capy/decrypt'),
-        JSON.stringify(decryptKey, null, 2) + '\n',
-        { encoding: 'utf-8', mode: 0o600 }
-      );
-    });
-
-    test('should handle write failure with error throwing', () => {
-      const decryptKey: DecryptKey = {
-        version: '1.0',
-        org_id: 'org_123',
-        project_id: 'proj_456',
-        user_id: 'user_789',
-        decryption_key: 'key_abc',
-        expires_at: '2024-02-01T00:00:00Z',
-        permissions: []
-      };
-
-      mockExistsSync.mockReturnValue(false);
-      mockWriteFileSync.mockImplementation(() => {
-        throw new Error('Permission denied');
-      });
-
-      expect(() => fileManager.writeDecryptKey(decryptKey)).toThrow(CapyError);
-      expect(() => fileManager.writeDecryptKey(decryptKey)).toThrow('Failed to write decrypt file');
-    });
-  });
-
   describe('updateGitignore', () => {
     test('should add new entries to .gitignore', () => {
-      const entries = ['.env', '.capy/decrypt'];
+      const entries = ['.env'];
       mockExistsSync.mockReturnValue(false); // No existing .gitignore
 
       fileManager.updateGitignore(entries);
@@ -280,14 +236,14 @@ describe('FileManager', () => {
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '.env\n.capy/decrypt\n',
+        '.env\n',
         'utf-8'
       );
     });
 
     test('should not add duplicate entries', () => {
-      const entries = ['.env', '.capy/decrypt'];
-      const existingContent = '.env\nnode_modules\n.capy/decrypt\n';
+      const entries = ['.env'];
+      const existingContent = '.env\nnode_modules\n';
 
       mockExistsSync.mockReturnValue(true);
       mockReadFileSync.mockReturnValue(existingContent);
@@ -299,7 +255,7 @@ describe('FileManager', () => {
     });
 
     test('should add only missing entries', () => {
-      const entries = ['.env', '.capy/decrypt', '.capy/token'];
+      const entries = ['.env', '.capy/token'];
       const existingContent = '.env\nnode_modules\n';
 
       mockExistsSync.mockReturnValue(true);
@@ -314,7 +270,7 @@ describe('FileManager', () => {
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '.capy/decrypt\n.capy/token\n',
+        '.capy/token\n',
         'utf-8'
       );
     });

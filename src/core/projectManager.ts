@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, basename } from 'path';
-import { ProjectState, KeepFile, DecryptKey, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { ProjectState, KeepFile, SyncState, CapyError, ERROR_CODES } from '../types/index';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -11,11 +11,9 @@ export class ProjectManager {
 
   async detectProjectState(): Promise<ProjectState> {
     const keepPath = this.getKeepPath();
-    const decryptPath = this.getDecryptPath();
     const envPath = this.getEnvPath();
 
     const hasKeepFile = existsSync(keepPath);
-    const hasDecryptKey = existsSync(decryptPath);
     const hasEnvFile = existsSync(envPath);
 
     let projectName: string | undefined;
@@ -45,7 +43,6 @@ export class ProjectManager {
     return {
       initialized: hasKeepFile,
       hasKeepFile,
-      hasDecryptKey,
       hasEnvFile,
       projectName,
       organizationId,
@@ -61,10 +58,6 @@ export class ProjectManager {
 
   getCapyDir(): string {
     return join(this.projectRoot, '.capy');
-  }
-
-  getDecryptPath(): string {
-    return join(this.getCapyDir(), 'decrypt');
   }
 
   getActiveBranchPath(): string {
@@ -150,24 +143,6 @@ export class ProjectManager {
     }
     if (keep.variables !== undefined && typeof keep.variables !== 'object') {
       throw new CapyError('Invalid variables structure', ERROR_CODES.INVALID_FORMAT);
-    }
-  }
-
-  readDecryptKey(): DecryptKey | null {
-    const decryptPath = this.getDecryptPath();
-    if (!existsSync(decryptPath)) {
-      return null;
-    }
-
-    try {
-      const content = readFileSync(decryptPath, 'utf-8');
-      return JSON.parse(content) as DecryptKey;
-    } catch (error) {
-      throw new CapyError(
-        'Failed to read .decrypt file',
-        ERROR_CODES.INVALID_FORMAT,
-        { error, path: decryptPath }
-      );
     }
   }
 
