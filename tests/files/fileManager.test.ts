@@ -20,7 +20,7 @@ mock.module('fs', () => ({
 afterAll(() => { mock.restore(); });
 
 import { join, dirname } from 'path';
-import { FileManager } from '../../src/files/fileManager';
+import { FileManager, serializeKeep } from '../../src/files/fileManager';
 import { KeepFile, CapyError, ERROR_CODES } from '../../src/types/index';
 
 describe('FileManager', () => {
@@ -219,6 +219,112 @@ describe('FileManager', () => {
       const outputB = mockWriteFileSync.mock.calls[0][1] as string;
 
       expect(outputA).toBe(outputB);
+    });
+  });
+
+  describe('serializeKeep canonical comparison (sync self-heal)', () => {
+    // Regression for the bug where a bare `capy` sync rewrote keep.lock on
+    // EVERY run — even with an empty .env. During sync, self-heal compares the
+    // local keep.lock against the server's keep_file. The local copy is read
+    // off disk (so it carries `_comment` and is already sorted); the server's
+    // copy has neither. A bare JSON.stringify comparison therefore always saw a
+    // difference and rewrote the file. serializeKeep normalizes both sides so
+    // the comparison reflects real changes only.
+
+    test('on-disk keep (with _comment) and server keep (without _comment) serialize identically', () => {
+      // Shape the server hands back: no _comment, variables in arbitrary order.
+      const serverKeep = {
+        version: '3.0',
+        org_id: 'org_1',
+        project_id: 'proj_1',
+        project_name: 'test',
+        variables: {
+          B_VAR: [{ resource_id: 'rb', value_hash: 'hb' }],
+          A_VAR: [{ resource_id: 'ra', value_hash: 'ha' }],
+        },
+      } as KeepFile;
+
+      // Shape on disk: writeKeepFile injects _comment + sorts; readKeepFile
+      // returns it verbatim (raw `as KeepFile`), so the parsed object still
+      // carries _comment.
+      mockExistsSync.mockReturnValue(false);
+      fileManager.writeKeepFile(serverKeep);
+      const onDiskContent = mockWriteFileSync.mock.calls[0][1] as string;
+      const onDiskKeep = JSON.parse(onDiskContent) as KeepFile;
+      expect((onDiskKeep as any)._comment).toBeDefined();
+
+      // The fix: self-heal must treat these as equal → no rewrite.
+      expect(serializeKeep(onDiskKeep)).toBe(serializeKeep(serverKeep));
+
+      // Documents the root cause: the OLD bare-stringify comparison reported a
+      // difference for the very same data, triggering the spurious rewrite.
+      expect(JSON.stringify(onDiskKeep)).not.toBe(JSON.stringify(serverKeep));
+    });
+
+    test('is independent of variable insertion order and extra entry fields', () => {
+      const a = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: {
+          Z: [{ resource_id: 'rz', value_hash: 'hz', connector: { provider: 'aws' } }],
+          A: [{ resource_id: 'ra', value_hash: 'ha' }],
+        },
+      } as unknown as KeepFile;
+      const b = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: {
+          A: [{ resource_id: 'ra', value_hash: 'ha' }],
+          Z: [{ resource_id: 'rz', connector: { provider: 'aws' }, value_hash: 'hz' }],
+        },
+      } as unknown as KeepFile;
+
+      expect(serializeKeep(a)).toBe(serializeKeep(b));
+    });
+
+    test('reports a real change when a value_hash differs', () => {
+      const before = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: { API_KEY: [{ resource_id: 'r', value_hash: 'old' }] },
+      } as KeepFile;
+      const after = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: { API_KEY: [{ resource_id: 'r', value_hash: 'new' }] },
+      } as KeepFile;
+
+      expect(serializeKeep(before)).not.toBe(serializeKeep(after));
+    });
+  });
+
+  describe('writeKeepFile no-op guard', () => {
+    const keep: KeepFile = {
+      version: '3.0',
+      org_id: 'org_1',
+      project_id: 'proj_1',
+      project_name: 'test',
+      variables: {},
+    };
+
+    test('does not rewrite keep.lock when on-disk content is already canonical', () => {
+      const keepPath = join(testRoot, 'keep.lock');
+      mockExistsSync.mockImplementation((p: string) => p === keepPath);
+      mockReadFileSync.mockReturnValue(serializeKeep(keep));
+
+      fileManager.writeKeepFile(keep);
+
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    test('rewrites keep.lock when on-disk content differs', () => {
+      const keepPath = join(testRoot, 'keep.lock');
+      mockExistsSync.mockImplementation((p: string) => p === keepPath);
+      mockReadFileSync.mockReturnValue('stale content');
+
+      fileManager.writeKeepFile(keep);
+
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        keepPath,
+        serializeKeep(keep),
+        'utf-8',
+      );
     });
   });
 
