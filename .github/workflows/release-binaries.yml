@@ -1,0 +1,102 @@
+name: Release binaries
+
+# Cross-platform standalone binaries (Node runtime bundled via @yao-pkg/pkg) so
+# `capy` runs on Python / PHP / Ruby / Go deploy targets without Node installed.
+# Runs after a GitHub Release is published (the same trigger as bump-homebrew),
+# builds all five targets on a single Ubuntu runner, and uploads the archives +
+# checksums as assets on that release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach binaries to (e.g. v0.6.1)'
+        required: true
+
+jobs:
+  build-binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag + version
+        id: version
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+
+      # ldid lets us pseudo-sign Mach-O binaries on Linux, so we cross-build the
+      # macOS targets without a Mac runner. See MOZGIII/install-ldid-action.
+      - name: Install ldid (macOS cross-sign)
+        uses: MOZGIII/install-ldid-action@v1
+        with:
+          tag: v2.1.5-procursus2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Verify package.json version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$PKG_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "Tag version ${{ steps.version.outputs.version }} != package.json $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Bundle CLI with esbuild
+        run: bun run bundle
+
+      - name: Build cross-platform binaries
+        working-directory: build
+        run: |
+          set -euo pipefail
+          PKG="../node_modules/.bin/pkg"
+          mkdir -p ../bin-pkg
+          $PKG . --public-packages "*" --public --target node22-macos-x64        --output ../bin-pkg/capy-darwin-x64/capy
+          $PKG . --public-packages "*" --public --target node22-macos-arm64      --output ../bin-pkg/capy-darwin-arm64/capy
+          $PKG . --public-packages "*" --public --target node22-linuxstatic-x64  --output ../bin-pkg/capy-linux-x64/capy
+          $PKG . --public-packages "*" --public --target node22-linuxstatic-arm64 --output ../bin-pkg/capy-linux-arm64/capy
+          $PKG . --public-packages "*" --public --target node22-win-x64          --output ../bin-pkg/capy-win-x64/capy.exe
+
+      - name: Package archives + checksums
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          cd bin-pkg
+          for d in capy-darwin-x64 capy-darwin-arm64 capy-linux-x64 capy-linux-arm64; do
+            tar -czf "../dist/${d}-${VERSION}.tar.gz" -C "$d" .
+          done
+          (cd capy-win-x64 && zip "../../dist/capy-win-x64-${VERSION}.zip" capy.exe)
+          cd ../dist
+          shasum -a 256 *.tar.gz *.zip > "checksums-${VERSION}.txt"
+          ls -la
+
+      - name: Smoke-test linux-x64 binary in python:3.12-slim (no Node)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/dist:/dist:ro" \
+            python:3.12-slim \
+            bash -c "set -e && cd /tmp && tar xzf /dist/capy-linux-x64-${{ steps.version.outputs.version }}.tar.gz && ./capy --version"
+
+      - name: Upload binaries to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums-*.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
