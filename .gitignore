@@ -5,6 +5,8 @@ node_modules
 .decrypt
 .capy-sync
 dist
+build
+bin-pkg
 .capy-token
 *.env
 .capy
