@@ -10,6 +10,8 @@ import {
   CURRENT_KDF_VERSION,
   KDF_VERSIONS,
   KdfVersion,
+  masterKeyAAD,
+  LOCAL_MASTER_KEY_AAD,
 } from './keyManager';
 import {
   readMasterKey,
@@ -77,11 +79,12 @@ export async function resolveProjectKey(
   }
 
   const innerKey = deriveWrappingKey(userId, orgId);
+  const innerAAD = masterKeyAAD(userId, orgId);
 
   // Try double-wrapped path: co-decrypt strips KMS outer, then inner unwrap
   try {
     const innerBlob = await service.coDecrypt(orgId, encryptedBlob);
-    const masterKey = decryptMasterKey(innerBlob, innerKey);
+    const masterKey = decryptMasterKey(innerBlob, innerKey, innerAAD);
     return deriveProjectKey(masterKey, projectId, orgId);
   } catch (err) {
     // 403 = membership revoked — do NOT fall through to legacy path.
@@ -98,7 +101,7 @@ export async function resolveProjectKey(
   // Migration: try legacy single-wrapped (no KMS outer layer)
   let masterKey: Buffer;
   try {
-    masterKey = decryptMasterKey(encryptedBlob, innerKey);
+    masterKey = decryptMasterKey(encryptedBlob, innerKey, innerAAD);
   } catch {
     throw new CapyError(
       'You do not have access to this project\'s secrets.\n\n' +
@@ -111,7 +114,7 @@ export async function resolveProjectKey(
 
   // Legacy blob unwrapped — re-wrap with KMS outer layer for future runs
   try {
-    const innerWrapped = encryptMasterKey(masterKey, innerKey);
+    const innerWrapped = encryptMasterKey(masterKey, innerKey, innerAAD);
     // innerWrapped is already base64 — pass directly to wrapOuterLayer
     const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
     saveMasterKey(orgId, outerWrapped, userId);
@@ -135,7 +138,7 @@ export async function wrapAndSaveMasterKey(
   service: KeyServiceOps,
 ): Promise<void> {
   const innerKey = deriveWrappingKey(userId, orgId);
-  const innerWrapped = encryptMasterKey(masterKey, innerKey);
+  const innerWrapped = encryptMasterKey(masterKey, innerKey, masterKeyAAD(userId, orgId));
   // innerWrapped is already base64 — pass directly to wrapOuterLayer
   const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
   saveMasterKey(orgId, outerWrapped, userId);
@@ -227,7 +230,7 @@ export function resolveFromLocalKey(masterKeyHex: string, projectId: string): st
 export function saveLocalKey(masterKey: Buffer, passphrase: string): void {
   const salt = randomBytes(16);
   const wrappingKey = deriveLocalWrappingKey(passphrase, salt);
-  const encrypted = encryptMasterKey(masterKey, wrappingKey);
+  const encrypted = encryptMasterKey(masterKey, wrappingKey, LOCAL_MASTER_KEY_AAD);
   saveLocalKeyRecord({
     version: '1.0',
     wrapping_method: 'passphrase',
@@ -254,7 +257,7 @@ export function decryptLocalMasterKeyHex(passphrase: string): string {
   const salt = Buffer.from(record.salt, 'base64');
   const wrappingKey = deriveLocalWrappingKey(passphrase, salt);
   try {
-    const masterKey = decryptMasterKey(record.encrypted_master_key, wrappingKey);
+    const masterKey = decryptMasterKey(record.encrypted_master_key, wrappingKey, LOCAL_MASTER_KEY_AAD);
     return masterKey.toString('hex');
   } catch {
     throw new CapyError('Incorrect passphrase.', ERROR_CODES.PERMISSION_DENIED);

@@ -2,7 +2,7 @@ import inquirer from 'inquirer';
 import { resolveOrgContext } from '../core/orgContext';
 import { ProjectManager } from '../core/projectManager';
 import { readMasterKey } from '../config/globalConfig';
-import { decryptMasterKey, deriveWrappingKey } from '../crypto/keyManager';
+import { decryptMasterKey, deriveWrappingKey, masterKeyAAD } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
 import {
   generateInviteToken,
@@ -119,12 +119,12 @@ export class InviteCommand {
         const { plaintext: innerBlob } = await serviceClient.coDecrypt(orgId, encryptedM);
         // Strip local inner layer
         const wrappingKey = deriveWrappingKey(userId, orgId);
-        masterKey = decryptMasterKey(innerBlob, wrappingKey);
+        masterKey = decryptMasterKey(innerBlob, wrappingKey, masterKeyAAD(userId, orgId));
       } catch (err: any) {
         // Fallback: try legacy single-wrapped (no KMS outer)
         try {
           const wrappingKey = deriveWrappingKey(userId, orgId);
-          masterKey = decryptMasterKey(encryptedM, wrappingKey);
+          masterKey = decryptMasterKey(encryptedM, wrappingKey, masterKeyAAD(userId, orgId));
           // Migration: re-wrap with KMS outer layer
           const keyOps = {
             coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),

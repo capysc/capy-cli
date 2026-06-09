@@ -118,6 +118,8 @@ export function decryptSecretsBlob(
   const authTag = encryptedVars.subarray(encryptedVars.length - BLOB_AUTH_TAG_LENGTH);
   const ciphertext = encryptedVars.subarray(BLOB_IV_LENGTH, encryptedVars.length - BLOB_AUTH_TAG_LENGTH);
 
+  // No setAAD — mirrors deployCrypto.encryptSecretsBlob: decryptKey already
+  // binds the deploy context via HKDF(salt=deployId), so AAD would be redundant.
   const decipher = createDecipheriv('aes-256-gcm', decryptKey, iv, {
     authTagLength: BLOB_AUTH_TAG_LENGTH,
   });

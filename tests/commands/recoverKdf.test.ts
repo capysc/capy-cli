@@ -106,11 +106,16 @@ function envBlobForVersion(version: 1 | 2, phrase: string): string {
 }
 
 // Recover the M that recover wrote to disk (strip fake KMS layer, unwrap inner).
+// The inner blob is now AAD-bound (CAP-57), so pass the matching context AAD.
 function writtenMasterKey(): Buffer {
   const outer = gc.readMasterKey(ORG, FAKE_USER_ID);
   if (!outer) throw new Error('no key written');
   const inner = outer.replace(/^kms:/, '');
-  return km.decryptMasterKey(inner, km.deriveWrappingKey(FAKE_USER_ID, ORG));
+  return km.decryptMasterKey(
+    inner,
+    km.deriveWrappingKey(FAKE_USER_ID, ORG),
+    km.masterKeyAAD(FAKE_USER_ID, ORG),
+  );
 }
 
 describe('RecoverCommand — KDF version detection', () => {

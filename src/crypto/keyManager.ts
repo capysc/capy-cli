@@ -178,20 +178,41 @@ export function deriveProjectKey(
 }
 
 /**
+ * AAD binding the org master-key wrapping to its (user, org) context, so a
+ * wrapped blob cannot be verified/substituted under a different user or org.
+ * Mirrors the context already in deriveWrappingKey; the version tag leaves room
+ * to rotate the binding later.
+ */
+export function masterKeyAAD(userId: string, orgId: string): Buffer {
+  return Buffer.from(`capy:masterkey:v1:${userId}:${orgId}`, 'utf8');
+}
+
+/**
+ * AAD for the passphrase-wrapped local-mode keystore. A fixed domain tag (the
+ * local keystore has no user/org) that separates local blobs from org-wrapped
+ * ones: an org blob won't verify under the local AAD, and vice versa.
+ */
+export const LOCAL_MASTER_KEY_AAD = Buffer.from('capy:local-masterkey:v1', 'utf8');
+
+/**
  * Encrypts the master key M for storage on disk using AES-256-GCM.
- * The wrapping key is derived from the auth token (stepping stone until
- * service co-sign is implemented).
+ *
+ * `aad` binds the ciphertext to its operational context (see masterKeyAAD /
+ * LOCAL_MASTER_KEY_AAD). It is optional so older call sites keep compiling, but
+ * every new write should pass it.
  *
  * Returns a base64 string: base64(iv || ciphertext || authTag)
  */
 export function encryptMasterKey(
   masterKey: Buffer,
   wrappingKey: Buffer,
+  aad?: Buffer,
 ): string {
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(AES_ALGORITHM, wrappingKey, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });
+  if (aad) cipher.setAAD(aad);
   const encrypted = Buffer.concat([
     cipher.update(masterKey),
     cipher.final(),
@@ -200,18 +221,7 @@ export function encryptMasterKey(
   return Buffer.concat([iv, encrypted, authTag]).toString('base64');
 }
 
-/**
- * Decrypts the master key M from its on-disk wrapped form.
- */
-export function decryptMasterKey(
-  encryptedBlob: string,
-  wrappingKey: Buffer,
-): Buffer {
-  const combined = Buffer.from(encryptedBlob, 'base64');
-  if (combined.length < IV_LENGTH + AUTH_TAG_LENGTH) {
-    throw new Error('Encrypted master key blob too short');
-  }
-
+function gcmDecryptMasterKey(combined: Buffer, wrappingKey: Buffer, aad?: Buffer): Buffer {
   const iv = combined.subarray(0, IV_LENGTH);
   const authTag = combined.subarray(combined.length - AUTH_TAG_LENGTH);
   const encrypted = combined.subarray(IV_LENGTH, combined.length - AUTH_TAG_LENGTH);
@@ -219,11 +229,42 @@ export function decryptMasterKey(
   const decipher = createDecipheriv(AES_ALGORITHM, wrappingKey, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });
+  if (aad) decipher.setAAD(aad);
   decipher.setAuthTag(authTag);
   return Buffer.concat([
     decipher.update(encrypted),
     decipher.final(),
   ]);
+}
+
+/**
+ * Decrypts the master key M from its on-disk wrapped form.
+ *
+ * When `aad` is supplied, we verify against it first, then fall back to a
+ * no-AAD decrypt for blobs written before AAD binding existed — a transparent
+ * grandfather (those legacy blobs just aren't context-bound). A blob written
+ * WITH one AAD never verifies under a different AAD: the wrong-AAD attempt fails
+ * the GCM tag and the no-AAD fallback fails too, so cross-context substitution
+ * is rejected. Only genuinely AAD-less blobs reach the fallback.
+ */
+export function decryptMasterKey(
+  encryptedBlob: string,
+  wrappingKey: Buffer,
+  aad?: Buffer,
+): Buffer {
+  const combined = Buffer.from(encryptedBlob, 'base64');
+  if (combined.length < IV_LENGTH + AUTH_TAG_LENGTH) {
+    throw new Error('Encrypted master key blob too short');
+  }
+
+  if (aad) {
+    try {
+      return gcmDecryptMasterKey(combined, wrappingKey, aad);
+    } catch {
+      // Legacy blob written without AAD — grandfather it (not context-bound).
+    }
+  }
+  return gcmDecryptMasterKey(combined, wrappingKey, undefined);
 }
 
 /**
