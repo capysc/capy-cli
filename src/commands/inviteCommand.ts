@@ -149,10 +149,17 @@ export class InviteCommand {
       let projectId: string | undefined;
       let extraProjectIds: string[] = [];
       const reissuing = !!existingMember;
+      const existingProjectIds = existingMember
+        ? (existingMember.projects || []).map((p) => p.id)
+        : [];
 
-      if (existingMember) {
+      // Pure re-issue (existing member, no explicit --role): reuse their current
+      // role + projects. But an explicit --role MUST be honored so admins can
+      // promote/demote on re-invite — and so a re-invite that races a just-issued
+      // `kick` (a not-yet-propagated member read) still applies the requested
+      // role instead of silently keeping the stale one.
+      if (existingMember && !opts.role) {
         role = existingMember.role;
-        const existingProjectIds = (existingMember.projects || []).map((p) => p.id);
         projectId = existingProjectIds[0];
         extraProjectIds = existingProjectIds.slice(1);
       } else {
@@ -220,9 +227,13 @@ export class InviteCommand {
             projectId = resolved[0];
             extraProjectIds = resolved.slice(1);
           } else if (!interactive) {
-            // No --project: fall back to the cwd project, else refuse — we
-            // won't silently grant access to a project the caller didn't name.
-            if (cwdProjectId) {
+            // No --project: keep the member's existing projects on re-issue, else
+            // fall back to the cwd project, else refuse — we won't silently grant
+            // access to a project the caller didn't name.
+            if (reissuing && existingProjectIds.length > 0) {
+              projectId = existingProjectIds[0];
+              extraProjectIds = existingProjectIds.slice(1);
+            } else if (cwdProjectId) {
               projectId = cwdProjectId;
             } else {
               refuseNonInteractive(
