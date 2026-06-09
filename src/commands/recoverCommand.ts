@@ -1,11 +1,68 @@
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
-import { hasOrgKey, wrapAndSaveMasterKey } from '../crypto/keyResolver';
+import { FileManager } from '../files/fileManager';
+import {
+  hasOrgKey,
+  wrapAndSaveMasterKey,
+  resolveProjectKeyByTrial,
+} from '../crypto/keyResolver';
 import {
   validateSeedPhrase,
   seedPhraseToMasterKey,
+  CURRENT_KDF_VERSION,
 } from '../crypto/keyManager';
+
+/**
+ * Finds a piece of this org's ciphertext to use as a KDF-version oracle.
+ *
+ * The org's KDF version isn't recorded anywhere, so to recover the correct M we
+ * need a known ciphertext to test candidate keys against. Scans the org's
+ * projects for any genuinely-encrypted value and returns a verifier bound to
+ * that project. Returns null if the org has no stored secrets (nothing to
+ * verify against).
+ */
+async function findOrgCiphertextOracle(
+  serviceClient: ServiceClient,
+  orgId: string,
+  fm: FileManager,
+): Promise<{ projectId: string; verify: (projectKey: string) => boolean } | null> {
+  let projects: Array<{ id: string; organization_id: string }>;
+  try {
+    projects = await serviceClient.listProjects();
+  } catch {
+    return null;
+  }
+
+  for (const proj of projects.filter(p => p.organization_id === orgId)) {
+    let envContent = '';
+    try {
+      envContent = (await serviceClient.getDecryptData(proj.id)).env_content || '';
+    } catch {
+      continue;
+    }
+    for (const line of envContent.split('\n')) {
+      const eq = line.indexOf('=');
+      if (eq < 0) continue;
+      const value = line.slice(eq + 1).trim();
+      // Only genuinely-encrypted values work as oracles: capy:{id}:{payload}.
+      // Tombstones (capy:deleted) and plaintext decrypt as no-ops under any key.
+      if (!value.startsWith('capy:') || value.split(':').length < 3) continue;
+      return {
+        projectId: proj.id,
+        verify: (projectKey: string) => {
+          try {
+            fm.decryptValue(value, projectKey);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      };
+    }
+  }
+  return null;
+}
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const Y = (s: string) => `\x1b[33m${s}\x1b[0m`;
@@ -142,7 +199,34 @@ export class RecoverCommand {
       process.exit(1);
     }
 
-    const masterKey = seedPhraseToMasterKey(phrase);
+    // Determine M. The KDF version that created this org isn't recorded, so we
+    // detect it by trial against a piece of the org's own ciphertext. This also
+    // validates the phrase up front — recover used to write a key.enc for a
+    // wrong phrase and only fail later (see class doc); now a phrase that
+    // matches nothing in the org is rejected before anything is written.
+    const fm = new FileManager();
+    const oracle = await findOrgCiphertextOracle(serviceClient, orgId, fm);
+
+    let masterKey: Buffer;
+    if (oracle) {
+      const trial = resolveProjectKeyByTrial(phrase, orgId, oracle.projectId, oracle.verify);
+      if (!trial) {
+        console.error(`\n  That recovery phrase does not match any secrets in ${B(selectedOrg.name)}.`);
+        console.error('  Double-check the phrase, and that you selected the right organization.');
+        console.error('  No changes were written.\n');
+        process.exit(1);
+      }
+      masterKey = trial.masterKey;
+    } else {
+      // No stored secrets in this org — nothing to verify against. Use the
+      // current KDF version (what a new org would use). With no ciphertext there
+      // is nothing to mis-key; the first push defines the key tree.
+      console.log('');
+      console.log(Y('  ⚠ This org has no stored secrets yet, so the recovery phrase could not'));
+      console.log(Y('    be verified. Writing a key under the current KDF version — run capy in'));
+      console.log(Y('    a project for this org to confirm it decrypts.'));
+      masterKey = seedPhraseToMasterKey(phrase, CURRENT_KDF_VERSION);
+    }
 
     const keyOps = {
       coDecrypt: (oid: string, ct: string) =>

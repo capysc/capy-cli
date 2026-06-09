@@ -7,6 +7,9 @@ import {
   encryptMasterKey,
   seedPhraseToMasterKey,
   LOCAL_KEY_ITERATIONS,
+  CURRENT_KDF_VERSION,
+  KDF_VERSIONS,
+  KdfVersion,
 } from './keyManager';
 import {
   readMasterKey,
@@ -141,14 +144,57 @@ export async function wrapAndSaveMasterKey(
 /**
  * Resolves a project key offline using a seed phrase (owner self-custody).
  * No server needed — the seed phrase replaces both shares.
+ *
+ * `version` selects the KDF used to derive M. Defaults to CURRENT_KDF_VERSION;
+ * callers that don't know the org's version should use resolveProjectKeyByTrial
+ * instead (it detects the version against a known ciphertext).
  */
 export function resolveFromSeedPhrase(
   seedPhrase: string,
   orgId: string,
   projectId: string,
+  version: KdfVersion = CURRENT_KDF_VERSION,
 ): string {
-  const masterKey = seedPhraseToMasterKey(seedPhrase);
+  const masterKey = seedPhraseToMasterKey(seedPhrase, version);
   return deriveProjectKey(masterKey, projectId, orgId);
+}
+
+/** Outcome of a successful trial resolution. */
+export interface TrialResolution {
+  projectKey: string;
+  masterKey: Buffer;
+  version: KdfVersion;
+}
+
+/**
+ * Resolves a project key from a seed phrase when the org's KDF version is
+ * unknown.
+ *
+ * M's value is bound to the KDF version that created the org, and that version
+ * isn't recorded anywhere (it can't be: recovery is offline-from-phrase-only).
+ * So we derive M under each known version (newest first) and return the first
+ * whose project key satisfies `verify` — a decryption oracle over a piece of
+ * known ciphertext for this project.
+ *
+ * Returns null if no version verifies, which means either the phrase is wrong
+ * or the ciphertext belongs to a different project/org. Callers MUST treat null
+ * as "do not write a key" — guessing a version would corrupt the org for every
+ * other member.
+ */
+export function resolveProjectKeyByTrial(
+  seedPhrase: string,
+  orgId: string,
+  projectId: string,
+  verify: (projectKey: string) => boolean,
+): TrialResolution | null {
+  for (const version of KDF_VERSIONS) {
+    const masterKey = seedPhraseToMasterKey(seedPhrase, version);
+    const projectKey = deriveProjectKey(masterKey, projectId, orgId);
+    if (verify(projectKey)) {
+      return { projectKey, masterKey, version };
+    }
+  }
+  return null;
 }
 
 /**

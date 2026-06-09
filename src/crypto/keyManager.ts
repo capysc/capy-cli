@@ -8,10 +8,44 @@ import {
 } from 'crypto';
 import { BIP39_WORDLIST } from './bip39Words';
 
+// --- Seed-phrase KDF versions -------------------------------------------
+//
+// M is derived deterministically from the seed phrase with a FIXED salt: there
+// is nowhere durable to keep a per-user salt that survives the recovery
+// scenario (a full machine wipe, where only the 24 words remain — see
+// recoverCommand). The KDF *version* selects the parameter set instead.
+//
+// New seed phrases derive M under CURRENT_KDF_VERSION. An existing org's M is
+// bound to whatever version created it and must never change — that would
+// re-key the whole org and lock everyone out — so legacy versions are detected
+// at the phrase→M boundaries by trial decryption (see resolveProjectKeyByTrial),
+// not migrated.
+export type KdfVersion = 1 | 2;
+
+// v1 — BIP-39 default. LEGACY: do not change these. Existing owners' M is
+// PBKDF2(phrase, 'capy-mnemonic', 2048, sha512); altering any value re-keys
+// their org. 2048 is low, but the input is a 24-word mnemonic (256-bit
+// entropy), so this was never brute-forceable; v2 is defense-in-depth (OWASP
+// compliance, and protection for partially-leaked / non-uniform phrases).
 const PBKDF2_SALT = 'capy-mnemonic';
 const PBKDF2_ITERATIONS = 2048;
-const PBKDF2_KEY_LENGTH = 32;
 const PBKDF2_DIGEST = 'sha512';
+
+// v2 — OWASP 2023 guidance for PBKDF2-SHA256 (>=600k). Distinct salt so v2's M
+// is cleanly separated from v1 for the same phrase. PBKDF2 (not Argon2id) keeps
+// the standalone pkg binary free of native addons; a v3 = Argon2id is a
+// one-case addition to seedPhraseToMasterKey when wanted.
+const PBKDF2_V2_SALT = 'capy-mnemonic-v2';
+const PBKDF2_V2_ITERATIONS = 600_000;
+const PBKDF2_V2_DIGEST = 'sha256';
+
+const PBKDF2_KEY_LENGTH = 32;
+
+/** Strongest available KDF version. New seed phrases derive M under this. */
+export const CURRENT_KDF_VERSION: KdfVersion = 2;
+
+/** All known KDF versions, in trial order (newest first). */
+export const KDF_VERSIONS: readonly KdfVersion[] = [2, 1];
 
 // Local-only mode: the passphrase that locks M at rest is low-entropy
 // (human-chosen), so it gets a much higher work factor + per-keystore random
@@ -107,15 +141,21 @@ export function validateSeedPhrase(phrase: string): boolean {
 
 /**
  * Derives a 256-bit master key M from a BIP-39 seed phrase using PBKDF2.
+ *
+ * `version` selects the parameter set. Defaults to CURRENT_KDF_VERSION so fresh
+ * derivations (new orgs / local setups) use the strongest KDF. Pass an explicit
+ * version to reproduce a legacy org's M (e.g. during trial resolution).
  */
-export function seedPhraseToMasterKey(phrase: string): Buffer {
-  return pbkdf2Sync(
-    phrase,
-    PBKDF2_SALT,
-    PBKDF2_ITERATIONS,
-    PBKDF2_KEY_LENGTH,
-    PBKDF2_DIGEST,
-  );
+export function seedPhraseToMasterKey(
+  phrase: string,
+  version: KdfVersion = CURRENT_KDF_VERSION,
+): Buffer {
+  const [salt, iterations, digest] =
+    version === 1 ? [PBKDF2_SALT, PBKDF2_ITERATIONS, PBKDF2_DIGEST] :
+    version === 2 ? [PBKDF2_V2_SALT, PBKDF2_V2_ITERATIONS, PBKDF2_V2_DIGEST] :
+    [null, null, null];
+  if (salt === null) throw new Error(`Unknown KDF version: ${version}`);
+  return pbkdf2Sync(phrase, salt, iterations, PBKDF2_KEY_LENGTH, digest);
 }
 
 /**
