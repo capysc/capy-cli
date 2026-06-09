@@ -11,6 +11,13 @@ const CLEAR_SCREEN = `${ESC}[2J`;
 const CLEAR_EOL = `${ESC}[K`;
 const ENTER_ALT_SCREEN = `${ESC}[?1049h`;
 const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
+// Bracketed paste: when enabled the terminal wraps pasted text in these
+// markers, so we can append a multi-line paste (e.g. a PEM private key)
+// verbatim instead of treating its embedded newlines as Enter/commit.
+const ENABLE_BRACKETED_PASTE = `${ESC}[?2004h`;
+const DISABLE_BRACKETED_PASTE = `${ESC}[?2004l`;
+const PASTE_START = `${ESC}[200~`;
+const PASTE_END = `${ESC}[201~`;
 const INVERSE = `${ESC}[7m`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
@@ -63,6 +70,33 @@ export function classifyLocalRow(
     : { status: 'local', updatedLabel: 'uncommitted' };
 }
 
+/**
+ * Normalizes bracketed-paste content for storage in an edit buffer. Pasted
+ * line breaks are kept (so multi-line secrets like PEM keys survive), CRLF/CR
+ * are folded to LF, and other control characters (besides tab) are dropped so a
+ * stray escape sequence in the paste can't corrupt the value or the terminal.
+ */
+export function sanitizePastedText(raw: string): string {
+  let out = '';
+  for (const ch of raw.replace(/\r\n?/g, '\n')) {
+    const code = ch.charCodeAt(0);
+    if (code === 0x0a || code === 0x09 || (code >= 0x20 && code !== 0x7f)) {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/**
+ * Collapses a (possibly multi-line) value to a single visible line for the
+ * single-row TUI table: newlines render as a ↵ marker and tabs as a space.
+ * Length is preserved 1:1 so callers that pan/clip by character offset stay
+ * correct.
+ */
+export function renderInlineValue(value: string): string {
+  return value.replace(/\n/g, '↵').replace(/\t/g, ' ');
+}
+
 export class EditScreen {
   private state: EditState = { projectName: '', branch: '', rows: [], remoteAvailable: false };
   private ctx: EditContext | null = null;
@@ -78,6 +112,9 @@ export class EditScreen {
   private quitPrompt: 'commit' | null = null;
   private popupOpen = false;
   private popupPanOffset = 0;
+  // Accumulates raw stdin between PASTE_START and PASTE_END markers when a
+  // bracketed paste spans multiple `data` chunks. null when not mid-paste.
+  private pasteBuffer: string | null = null;
 
   run(state: EditState, ctx: EditContext): Promise<void> {
     this.state = state;
@@ -94,7 +131,7 @@ export class EditScreen {
     this.popupPanOffset = 0;
 
     return new Promise<void>((resolve) => {
-      process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
+      process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR + ENABLE_BRACKETED_PASTE);
       if (process.stdin.isTTY) process.stdin.setRawMode(true);
       process.stdin.resume();
 
@@ -118,7 +155,7 @@ export class EditScreen {
   private cleanup(): void {
     if (this.cleanedUp) return;
     this.cleanedUp = true;
-    process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
+    process.stdout.write(DISABLE_BRACKETED_PASTE + SHOW_CURSOR + EXIT_ALT_SCREEN);
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
     if (this.onDataHandler) process.stdin.removeListener('data', this.onDataHandler);
@@ -127,6 +164,15 @@ export class EditScreen {
 
   private handleKeypress(data: Buffer, resolve: () => void): void {
     const key = data.toString();
+
+    // Bracketed paste arrives as ESC[200~ <content> ESC[201~, possibly split
+    // across data chunks. Intercept it before any key dispatch so pasted text
+    // (which may contain 'q', newlines, etc.) can never trigger quit/commit or
+    // navigation — its content is only ever appended to an active edit buffer.
+    if (this.pasteBuffer !== null || key.includes(PASTE_START)) {
+      this.consumePaste(key);
+      return;
+    }
 
     // Ctrl-C exits unconditionally
     if (key === '\x03') {
@@ -280,6 +326,30 @@ export class EditScreen {
       this.statusMessage = { text: `Error committing: ${err?.message || err}`, isError: true };
     }
     this.draw();
+  }
+
+  // Accumulates a bracketed paste across data chunks and, once the closing
+  // marker arrives, appends the pasted text to the active edit buffer verbatim
+  // (newlines preserved). Pasted outside of edit mode, the content is dropped.
+  private consumePaste(chunk: string): void {
+    this.pasteBuffer = (this.pasteBuffer ?? '') + chunk;
+    const start = this.pasteBuffer.indexOf(PASTE_START);
+    if (start === -1) {
+      this.pasteBuffer = null;
+      return;
+    }
+    const end = this.pasteBuffer.indexOf(PASTE_END, start + PASTE_START.length);
+    if (end === -1) return; // paste spans more chunks — wait for the rest
+
+    const pasted = this.pasteBuffer.substring(start + PASTE_START.length, end);
+    this.pasteBuffer = null;
+
+    if (!this.editing) return;
+    const appended = sanitizePastedText(pasted);
+    if (appended) {
+      this.editing.buffer += appended;
+      this.draw();
+    }
   }
 
   private handleEditKey(key: string): void {
@@ -615,7 +685,7 @@ export class EditScreen {
   // and revealed state with horizontal panning when the value overflows.
   private renderValueField(row: EditRow, width: number): string {
     if (this.editing && this.editing.key === row.key) {
-      const display = `> ${this.editing.buffer}_`;
+      const display = `> ${renderInlineValue(this.editing.buffer)}_`;
       if (display.length <= width) return display;
       // Keep the cursor (end of buffer) visible — clip from the left.
       return '…' + display.slice(display.length - width + 1);
@@ -626,9 +696,13 @@ export class EditScreen {
       return this.maskedSnippet(row);
     }
 
-    const value = row.localValue ?? row.remoteValue;
-    if (value === undefined) return `${DIM}(no value)${RESET}`;
-    if (value === '') return `${DIM}(empty)${RESET}`;
+    const rawValue = row.localValue ?? row.remoteValue;
+    if (rawValue === undefined) return `${DIM}(no value)${RESET}`;
+    if (rawValue === '') return `${DIM}(empty)${RESET}`;
+    // Collapse newlines/tabs so a revealed multi-line value (e.g. a PEM key)
+    // stays on one row. renderInlineValue preserves length 1:1, so the panning
+    // math below remains correct.
+    const value = renderInlineValue(rawValue);
 
     if (value.length <= width) {
       this.popupPanOffset = 0;
@@ -694,6 +768,6 @@ export class EditScreen {
   private maskedSnippet(row: EditRow): string {
     const value = row.localValue ?? row.remoteValue;
     if (value === undefined || value === '') return NO_VALUE;
-    return formatSnippet(value);
+    return renderInlineValue(formatSnippet(value));
   }
 }

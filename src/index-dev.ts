@@ -424,8 +424,10 @@ program
       }
 
       const { writeFileSync } = await import('fs');
+      const { dotenvEscape } = await import('./commands/exportCommand');
+      // Escape so multi-line secrets survive being re-read by dotenv.
       const content = Object.entries(decrypted)
-        .map(([key, value]) => `${key}=${value}`)
+        .map(([key, value]) => `${key}=${dotenvEscape(value as string)}`)
         .join('\n');
 
       writeFileSync(envPath, content + '\n', 'utf-8');

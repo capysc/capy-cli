@@ -92,10 +92,51 @@ export async function fetchServiceKey(
 }
 
 /**
+ * Parses the decrypted env-var plaintext into a { KEY: value } record.
+ *
+ * Two formats are accepted:
+ *   - JSON object (current): `{"KEY":"value",...}` — round-trips multi-line
+ *     values and values containing `=`/`#` byte-for-byte.
+ *   - Legacy `KEY=value\n` lines: emitted by CLI versions before multi-line
+ *     support. Kept for backward compatibility so a newer `capy run` can still
+ *     decrypt a SECRETS_BLOB minted by an older `capy deploy`.
+ *
+ * The leading `{` discriminates the two: env var names cannot begin with `{`,
+ * so a legacy blob (which starts with a key name) never collides with JSON.
+ */
+export function parseEnvPlaintext(text: string): Record<string, string> {
+  if (text.trimStart().startsWith('{')) {
+    try {
+      const obj = JSON.parse(text);
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        const result: Record<string, string> = {};
+        for (const [k, v] of Object.entries(obj)) {
+          result[k] = typeof v === 'string' ? v : String(v);
+        }
+        return result;
+      }
+    } catch {
+      // Not valid JSON after all — fall through to legacy line parsing.
+    }
+  }
+
+  const result: Record<string, string> = {};
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    result[trimmed.substring(0, eqIdx)] = trimmed.substring(eqIdx + 1);
+  }
+  return result;
+}
+
+/**
  * Derives the DECRYPT_KEY = HKDF(PROJECT_KEY || SERVICE_KEY, salt=deployId,
  * info="capy:deploy:decrypt") and decrypts the env var blob with AES-256-GCM.
  *
- * Returns a record of KEY=value pairs parsed from the "KEY1=value1\n..." plaintext.
+ * Returns a record of KEY=value pairs parsed from the decrypted plaintext
+ * (JSON object, or legacy `KEY=value\n` lines — see {@link parseEnvPlaintext}).
  */
 export function decryptSecretsBlob(
   encryptedVars: Buffer,
@@ -124,13 +165,5 @@ export function decryptSecretsBlob(
   decipher.setAuthTag(authTag);
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
-  const result: Record<string, string> = {};
-  for (const line of plaintext.toString('utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    result[trimmed.substring(0, eqIdx)] = trimmed.substring(eqIdx + 1);
-  }
-  return result;
+  return parseEnvPlaintext(plaintext.toString('utf-8'));
 }
