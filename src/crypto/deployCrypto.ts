@@ -117,6 +117,9 @@ export function encryptEnvBlob(
   const plaintext = Buffer.from(JSON.stringify(envVars), 'utf-8');
 
   const iv = randomBytes(IV_LENGTH);
+  // No setAAD: decryptKey = HKDF(projectKey||serviceKey, salt=deployId,
+  // info="capy:deploy:decrypt") already binds the deploy/project context, so the
+  // blob can't be replayed under a different deploy. AAD would be redundant.
   const cipher = createCipheriv('aes-256-gcm', decryptKey, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });

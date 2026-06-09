@@ -7,6 +7,7 @@ import {
   validateSeedPhrase,
   seedPhraseToMasterKey,
   deriveProjectKey,
+  KDF_VERSIONS,
 } from '../crypto/keyManager';
 import {
   isRecoveryActive,
@@ -56,8 +57,31 @@ export class DecryptCommand {
         process.exit(1);
       }
 
-      // Check for existing recovery session
+      // Decrypt the .env with the master key M. `decryptWith` derives the
+      // project key from a candidate M and decrypts; it throws "different
+      // project's key" if M is wrong for this project.
+      const decryptWith = (mkHex: string): Record<string, string> => {
+        const projectKey = deriveProjectKey(Buffer.from(mkHex, 'hex'), projectId, orgId);
+        return fm.readEncryptedEnvFile(projectKey);
+      };
+      const wrongSeedExit = (): never => {
+        console.error(
+          `\n  Decryption failed. Double-check your seed phrase — a single wrong word` +
+          `\n  produces a completely different key.` +
+          `\n\n  If you have multiple orgs, make sure you're using the right seed` +
+          `\n  phrase for this org.\n`
+        );
+        process.exit(1);
+      };
+
+      // Resolve M and decrypt. A cached recovery session already holds the
+      // resolved M (its KDF version was determined on first use). For a freshly
+      // entered phrase the org's KDF version is unknown, so we trial each known
+      // version against the encrypted .env (the oracle) and keep the one that
+      // decrypts — this is how legacy (v1) and current (v2) orgs are told apart
+      // without any stored version marker.
       let masterKeyHex: string;
+      let decrypted: Record<string, string>;
 
       if (isRecoveryActive()) {
         const session = readRecoverySession();
@@ -73,6 +97,12 @@ export class DecryptCommand {
           process.exit(1);
         }
         masterKeyHex = session.master_key;
+        try {
+          decrypted = decryptWith(masterKeyHex);
+        } catch (error: any) {
+          if (error?.message?.includes("different project's key")) wrongSeedExit();
+          throw error;
+        }
       } else {
         // Prompt for seed phrase
         const inquirer = (await import('inquirer')).default;
@@ -88,34 +118,23 @@ export class DecryptCommand {
           process.exit(1);
         }
 
-        const masterKey = seedPhraseToMasterKey(seedPhrase);
-        masterKeyHex = masterKey.toString('hex');
+        let resolved: { hex: string; decrypted: Record<string, string> } | null = null;
+        for (const version of KDF_VERSIONS) {
+          const mkHex = seedPhraseToMasterKey(seedPhrase, version).toString('hex');
+          try {
+            resolved = { hex: mkHex, decrypted: decryptWith(mkHex) };
+            break;
+          } catch (error: any) {
+            if (error?.message?.includes("different project's key")) continue;
+            throw error;
+          }
+        }
+        if (!resolved) return wrongSeedExit();
+
+        masterKeyHex = resolved.hex;
+        decrypted = resolved.decrypted;
         saveRecoverySession(masterKeyHex, orgId);
         console.log('  ✓ Recovery session started');
-      }
-
-      // Derive project key
-      const projectKey = deriveProjectKey(
-        Buffer.from(masterKeyHex, 'hex'),
-        projectId,
-        orgId,
-      );
-
-      // Decrypt .env
-      let decrypted: Record<string, string>;
-      try {
-        decrypted = fm.readEncryptedEnvFile(projectKey);
-      } catch (error: any) {
-        if (error?.message?.includes("different project's key")) {
-          console.error(
-            `\n  Decryption failed. Double-check your seed phrase — a single wrong word` +
-            `\n  produces a completely different key.` +
-            `\n\n  If you have multiple orgs, make sure you're using the right seed` +
-            `\n  phrase for this org.\n`
-          );
-          process.exit(1);
-        }
-        throw error;
       }
 
       if (Object.keys(decrypted).length === 0) {

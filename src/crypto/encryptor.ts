@@ -15,6 +15,11 @@ export class Encryptor {
       const iv = randomBytes(this.ivLength);
       const derivedKey = this.deriveKey(key);
 
+      // No setAAD: the key is already fully context-bound — `key` is the project
+      // key = HKDF(M, projectId, orgId), so a value can't be moved across
+      // projects/orgs (decryption fails). Binding per-value AAD (e.g. the
+      // resource_id) would require re-encrypting every stored secret for marginal
+      // gain; deferred (CAP-57).
       const cipher = createCipheriv(this.algorithm, derivedKey, iv, {
         authTagLength: this.authTagLength,
       });

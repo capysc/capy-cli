@@ -7,6 +7,11 @@ import {
   encryptMasterKey,
   seedPhraseToMasterKey,
   LOCAL_KEY_ITERATIONS,
+  CURRENT_KDF_VERSION,
+  KDF_VERSIONS,
+  KdfVersion,
+  masterKeyAAD,
+  LOCAL_MASTER_KEY_AAD,
 } from './keyManager';
 import {
   readMasterKey,
@@ -74,11 +79,12 @@ export async function resolveProjectKey(
   }
 
   const innerKey = deriveWrappingKey(userId, orgId);
+  const innerAAD = masterKeyAAD(userId, orgId);
 
   // Try double-wrapped path: co-decrypt strips KMS outer, then inner unwrap
   try {
     const innerBlob = await service.coDecrypt(orgId, encryptedBlob);
-    const masterKey = decryptMasterKey(innerBlob, innerKey);
+    const masterKey = decryptMasterKey(innerBlob, innerKey, innerAAD);
     return deriveProjectKey(masterKey, projectId, orgId);
   } catch (err) {
     // 403 = membership revoked — do NOT fall through to legacy path.
@@ -95,7 +101,7 @@ export async function resolveProjectKey(
   // Migration: try legacy single-wrapped (no KMS outer layer)
   let masterKey: Buffer;
   try {
-    masterKey = decryptMasterKey(encryptedBlob, innerKey);
+    masterKey = decryptMasterKey(encryptedBlob, innerKey, innerAAD);
   } catch {
     throw new CapyError(
       'You do not have access to this project\'s secrets.\n\n' +
@@ -108,7 +114,7 @@ export async function resolveProjectKey(
 
   // Legacy blob unwrapped — re-wrap with KMS outer layer for future runs
   try {
-    const innerWrapped = encryptMasterKey(masterKey, innerKey);
+    const innerWrapped = encryptMasterKey(masterKey, innerKey, innerAAD);
     // innerWrapped is already base64 — pass directly to wrapOuterLayer
     const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
     saveMasterKey(orgId, outerWrapped, userId);
@@ -132,7 +138,7 @@ export async function wrapAndSaveMasterKey(
   service: KeyServiceOps,
 ): Promise<void> {
   const innerKey = deriveWrappingKey(userId, orgId);
-  const innerWrapped = encryptMasterKey(masterKey, innerKey);
+  const innerWrapped = encryptMasterKey(masterKey, innerKey, masterKeyAAD(userId, orgId));
   // innerWrapped is already base64 — pass directly to wrapOuterLayer
   const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
   saveMasterKey(orgId, outerWrapped, userId);
@@ -141,14 +147,57 @@ export async function wrapAndSaveMasterKey(
 /**
  * Resolves a project key offline using a seed phrase (owner self-custody).
  * No server needed — the seed phrase replaces both shares.
+ *
+ * `version` selects the KDF used to derive M. Defaults to CURRENT_KDF_VERSION;
+ * callers that don't know the org's version should use resolveProjectKeyByTrial
+ * instead (it detects the version against a known ciphertext).
  */
 export function resolveFromSeedPhrase(
   seedPhrase: string,
   orgId: string,
   projectId: string,
+  version: KdfVersion = CURRENT_KDF_VERSION,
 ): string {
-  const masterKey = seedPhraseToMasterKey(seedPhrase);
+  const masterKey = seedPhraseToMasterKey(seedPhrase, version);
   return deriveProjectKey(masterKey, projectId, orgId);
+}
+
+/** Outcome of a successful trial resolution. */
+export interface TrialResolution {
+  projectKey: string;
+  masterKey: Buffer;
+  version: KdfVersion;
+}
+
+/**
+ * Resolves a project key from a seed phrase when the org's KDF version is
+ * unknown.
+ *
+ * M's value is bound to the KDF version that created the org, and that version
+ * isn't recorded anywhere (it can't be: recovery is offline-from-phrase-only).
+ * So we derive M under each known version (newest first) and return the first
+ * whose project key satisfies `verify` — a decryption oracle over a piece of
+ * known ciphertext for this project.
+ *
+ * Returns null if no version verifies, which means either the phrase is wrong
+ * or the ciphertext belongs to a different project/org. Callers MUST treat null
+ * as "do not write a key" — guessing a version would corrupt the org for every
+ * other member.
+ */
+export function resolveProjectKeyByTrial(
+  seedPhrase: string,
+  orgId: string,
+  projectId: string,
+  verify: (projectKey: string) => boolean,
+): TrialResolution | null {
+  for (const version of KDF_VERSIONS) {
+    const masterKey = seedPhraseToMasterKey(seedPhrase, version);
+    const projectKey = deriveProjectKey(masterKey, projectId, orgId);
+    if (verify(projectKey)) {
+      return { projectKey, masterKey, version };
+    }
+  }
+  return null;
 }
 
 /**
@@ -181,7 +230,7 @@ export function resolveFromLocalKey(masterKeyHex: string, projectId: string): st
 export function saveLocalKey(masterKey: Buffer, passphrase: string): void {
   const salt = randomBytes(16);
   const wrappingKey = deriveLocalWrappingKey(passphrase, salt);
-  const encrypted = encryptMasterKey(masterKey, wrappingKey);
+  const encrypted = encryptMasterKey(masterKey, wrappingKey, LOCAL_MASTER_KEY_AAD);
   saveLocalKeyRecord({
     version: '1.0',
     wrapping_method: 'passphrase',
@@ -208,7 +257,7 @@ export function decryptLocalMasterKeyHex(passphrase: string): string {
   const salt = Buffer.from(record.salt, 'base64');
   const wrappingKey = deriveLocalWrappingKey(passphrase, salt);
   try {
-    const masterKey = decryptMasterKey(record.encrypted_master_key, wrappingKey);
+    const masterKey = decryptMasterKey(record.encrypted_master_key, wrappingKey, LOCAL_MASTER_KEY_AAD);
     return masterKey.toString('hex');
   } catch {
     throw new CapyError('Incorrect passphrase.', ERROR_CODES.PERMISSION_DENIED);

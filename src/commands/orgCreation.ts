@@ -6,6 +6,7 @@ import { Organization } from '../types/index';
 import {
   generateSeedPhrase,
   seedPhraseToMasterKey,
+  CURRENT_KDF_VERSION,
 } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey, KeyServiceOps } from '../crypto/keyResolver';
 import { displayAndConfirmRecoveryPhrase } from '../ui/recoveryPhrase';
@@ -79,7 +80,10 @@ export async function createNewOrganization(
       const org = await authService.createOrganization(orgName, refreshToken, userId);
       orgSpinner.succeed(`Organization "${org.name}" created`);
 
-      const masterKey = seedPhraseToMasterKey(seedPhrase);
+      // New orgs derive M under the current (strongest) KDF version. This is
+      // what binds the org to v2; legacy orgs created before this stay on v1 and
+      // are detected by trial decryption at the phrase→M boundaries.
+      const masterKey = seedPhraseToMasterKey(seedPhrase, CURRENT_KDF_VERSION);
       await wrapAndSaveMasterKey(masterKey, org.id, userId, keyServiceOpsFromClient(serviceClient));
 
       return org;
