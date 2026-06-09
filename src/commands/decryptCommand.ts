@@ -2,6 +2,7 @@ import { writeFileSync } from 'fs';
 import { join } from 'path';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
+import { dotenvEscape } from './exportCommand';
 import {
   validateSeedPhrase,
   seedPhraseToMasterKey,
@@ -122,10 +123,12 @@ export class DecryptCommand {
         process.exit(0);
       }
 
-      // Write .env.{branch}.decrypted
+      // Write .env.{branch}.decrypted. Escape values so multi-line secrets
+      // (PEM keys, certs) are quoted/`\n`-escaped and survive being re-read by
+      // dotenv — a bare `KEY=value` line would truncate at the first newline.
       const outputFile = `.env.${branch}.decrypted`;
       const content = Object.entries(decrypted)
-        .map(([key, value]) => `${key}=${value}`)
+        .map(([key, value]) => `${key}=${dotenvEscape(value)}`)
         .join('\n');
 
       writeFileSync(join(process.cwd(), outputFile), content + '\n', 'utf-8');

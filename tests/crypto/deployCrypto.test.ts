@@ -1,4 +1,6 @@
-import { randomBytes, hkdfSync } from 'crypto';
+import { randomBytes, hkdfSync, createCipheriv } from 'crypto';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   generateDeployId,
   generateDerivationToken,
@@ -12,8 +14,38 @@ import {
 import {
   parseSecretsBlob,
   decryptSecretsBlob,
+  parseEnvPlaintext,
 } from '../../src/crypto/deployRuntime';
 import { deriveInnerKey } from '../../src/crypto/inviteCrypto';
+
+const PEM = readFileSync(join(__dirname, '../fixtures/rsa_test_key.pem'), 'utf-8');
+
+// Derives the same DECRYPT_KEY the deploy/run pair uses, so a test can mint a
+// blob in either the current (JSON) or legacy (KEY=value\n) plaintext format.
+function deriveDecryptKey(pk: Buffer, innerBlob: string, projectId: string, deployId: Buffer): Buffer {
+  const innerBlobBytes = Buffer.from(innerBlob, 'base64');
+  const serviceKey = Buffer.from(
+    hkdfSync('sha256', innerBlobBytes, projectId + deployId.toString('hex'), 'capy:deploy:service-key', 32),
+  );
+  const combined = Buffer.concat([pk, serviceKey]);
+  return Buffer.from(hkdfSync('sha256', combined, deployId, 'capy:deploy:decrypt', 32));
+}
+
+function serviceKeyHexFor(innerBlob: string, projectId: string, deployId: Buffer): string {
+  const innerBlobBytes = Buffer.from(innerBlob, 'base64');
+  return Buffer.from(
+    hkdfSync('sha256', innerBlobBytes, projectId + deployId.toString('hex'), 'capy:deploy:service-key', 32),
+  ).toString('hex');
+}
+
+// Encrypts an arbitrary plaintext under the deploy DECRYPT_KEY, reproducing the
+// AES-256-GCM framing of encryptEnvBlob. Used to mint a *legacy*-format blob.
+function encryptPlaintextBlob(plaintext: string, decryptKey: Buffer): Buffer {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', decryptKey, iv, { authTagLength: 16 });
+  const enc = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf-8')), cipher.final()]);
+  return Buffer.concat([iv, enc, cipher.getAuthTag()]);
+}
 
 describe('deployCrypto', () => {
   const projectKey = randomBytes(32);
@@ -235,6 +267,82 @@ describe('deployCrypto', () => {
         parsed.deployId,
       );
       expect(decrypted).toEqual(envVars);
+    });
+  });
+
+  // CAP-55: multi-line secrets (PEM keys, certs) were truncated at the first
+  // line, and continuation lines containing `=` minted phantom env vars,
+  // because the deploy blob serialized vars as `KEY=value\n`. It now uses JSON.
+  describe('multi-line and special-character values (CAP-55)', () => {
+    function deployRoundtrip(envVars: Record<string, string>): Record<string, string> {
+      const pk = randomBytes(32);
+      const dt = generateDerivationToken();
+      const deployId = generateDeployId();
+      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const encryptedVars = encryptEnvBlob(envVars, pk, innerBlob, projectId, deployId);
+      return decryptSecretsBlob(
+        encryptedVars,
+        pk.toString('hex'),
+        serviceKeyHexFor(innerBlob, projectId, deployId),
+        deployId,
+      );
+    }
+
+    it('round-trips a real multi-line RSA PEM byte-for-byte', () => {
+      const decrypted = deployRoundtrip({ RSA_KEY: PEM, DB: 'postgres://u:p@h/d' });
+      expect(decrypted.RSA_KEY).toBe(PEM);
+      expect(decrypted.DB).toBe('postgres://u:p@h/d');
+    });
+
+    it('does not mint phantom keys from value lines containing "=" or "#"', () => {
+      const envVars = {
+        CERT: '-----BEGIN CERTIFICATE-----\nkey=val\n# not a comment\n-----END CERTIFICATE-----\n',
+        SVC_JSON: '{"type":"service_account","key":"a=b"}',
+      };
+      const decrypted = deployRoundtrip(envVars);
+      // Exactly the two declared keys — no `key`, no orphaned lines.
+      expect(Object.keys(decrypted).sort()).toEqual(['CERT', 'SVC_JSON']);
+      expect(decrypted).toEqual(envVars);
+    });
+
+    it('decrypts a legacy KEY=value\\n blob minted by an older CLI (backward compat)', () => {
+      const pk = randomBytes(32);
+      const dt = generateDerivationToken();
+      const deployId = generateDeployId();
+      const innerBlob = deployInnerWrap(pk, dt, projectId);
+      const decryptKey = deriveDecryptKey(pk, innerBlob, projectId, deployId);
+
+      // Mint with the OLD serialization the bug-era CLI produced.
+      const legacyPlaintext = 'API_KEY=sk_test_xxx\nDB=postgres://u:p@h/d';
+      const encryptedVars = encryptPlaintextBlob(legacyPlaintext, decryptKey);
+
+      const decrypted = decryptSecretsBlob(
+        encryptedVars,
+        pk.toString('hex'),
+        serviceKeyHexFor(innerBlob, projectId, deployId),
+        deployId,
+      );
+      expect(decrypted).toEqual({ API_KEY: 'sk_test_xxx', DB: 'postgres://u:p@h/d' });
+    });
+  });
+
+  describe('parseEnvPlaintext', () => {
+    it('parses the current JSON format', () => {
+      expect(parseEnvPlaintext('{"A":"1","B":"two\\nlines"}')).toEqual({ A: '1', B: 'two\nlines' });
+    });
+
+    it('parses the legacy KEY=value line format', () => {
+      expect(parseEnvPlaintext('A=1\nB=2\n# comment\n')).toEqual({ A: '1', B: '2' });
+    });
+
+    it('keeps "=" inside a JSON value intact', () => {
+      expect(parseEnvPlaintext('{"TOKEN":"a=b=c"}')).toEqual({ TOKEN: 'a=b=c' });
+    });
+
+    it('falls back to line parsing if a non-JSON value happens to start with {', () => {
+      // Legacy blobs always start with a key name, never `{`, so this is just a
+      // defensive check that malformed JSON does not throw.
+      expect(parseEnvPlaintext('{garbage not json')).toEqual({});
     });
   });
 });
