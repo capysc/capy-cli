@@ -1,7 +1,6 @@
 import { resolveOrgContext } from '../core/orgContext';
 import { readMasterKey } from '../config/globalConfig';
-import { decryptMasterKey, deriveWrappingKey, masterKeyAAD } from '../crypto/keyManager';
-import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
+import { unwrapMasterKey } from '../crypto/keyResolver';
 import {
   generateInviteToken,
   innerWrap,
@@ -35,24 +34,20 @@ export class TransportCommand {
         process.exit(1);
       }
 
+      // Recover M via the shared resolver: co-decrypt strips the KMS outer
+      // layer, the inner layer is unwrapped under K_local (legacy SHA256
+      // fallback + transparent migration). K_local never enters the transport
+      // payload — only M is transported, re-wrapped under the transport token.
       let masterKey: Buffer;
       try {
-        const { plaintext: innerBlob } = await serviceClient.coDecrypt(orgId, encryptedM);
-        const wrappingKey = deriveWrappingKey(userId, orgId);
-        masterKey = decryptMasterKey(innerBlob, wrappingKey, masterKeyAAD(userId, orgId));
+        const keyOps = {
+          coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+          wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+        };
+        masterKey = await unwrapMasterKey(orgId, userId, keyOps);
       } catch {
-        try {
-          const wrappingKey = deriveWrappingKey(userId, orgId);
-          masterKey = decryptMasterKey(encryptedM, wrappingKey, masterKeyAAD(userId, orgId));
-          const keyOps = {
-            coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-            wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-          };
-          await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
-        } catch {
-          console.error('Failed to unwrap master key. Re-authenticate and try again.');
-          process.exit(1);
-        }
+        console.error('Failed to unwrap master key. Re-authenticate and try again.');
+        process.exit(1);
       }
 
       // Bind the inner key to the user's own email so only the same WorkOS

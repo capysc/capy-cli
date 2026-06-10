@@ -21,8 +21,11 @@ import {
   hasOrgKey as globalHasOrgKey,
   saveLocalKeyRecord,
   readLocalKeyRecord,
+  readLocalRoot,
+  saveLocalRoot,
   LOCAL_ORG_ID,
 } from '../config/globalConfig';
+import { generateLocalRoot, deriveEpochInnerKey } from './localKeyRoot';
 import { CapyError, ERROR_CODES } from '../types/index';
 
 /** Check whether an error is a server 403 (membership revoked). */
@@ -49,25 +52,76 @@ export interface KeyServiceOps {
 }
 
 /**
- * Resolves the encryption key for a project.
+ * Unwraps the inner blob (KMS already stripped) to recover M, trying the
+ * current K_local inner key first and falling back to the legacy
+ * SHA256(userId:orgId) key. Returns whether the legacy key was used, so the
+ * caller can trigger a transparent re-wrap under K_local.
  *
- * M is stored double-wrapped on disk: KMS_ENCRYPT(AES-GCM(M, innerKey)).
- * To unwrap:
- * 1. Send the blob to the server's co-decrypt endpoint (strips KMS outer layer)
- * 2. Decrypt the inner layer locally with SHA256(userId:orgId)
- * 3. Derive the project key via HKDF(M, projectId, orgId)
- *
- * Without the server, the blob on disk is KMS-encrypted garbage — no M, no decrypt.
- *
- * Migration: if the blob is not KMS-wrapped (legacy single-wrap), unwrap with
- * the local key, re-wrap with KMS outer, and save. Future runs require the server.
+ * Trying K_local-then-legacy (rather than assuming one) also self-heals a
+ * split-brain: if K_local was minted but key.enc wasn't yet re-wrapped (crash
+ * mid-migration), the legacy key still opens it and we re-wrap.
  */
-export async function resolveProjectKey(
+function unwrapInner(
+  innerBlob: string,
   orgId: string,
-  projectId: string,
+  userId: string,
+  innerAAD: Buffer,
+): { masterKey: Buffer; usedLegacy: boolean } {
+  const kLocal = readLocalRoot(orgId, userId);
+  if (kLocal) {
+    try {
+      return { masterKey: decryptMasterKey(innerBlob, deriveEpochInnerKey(kLocal), innerAAD), usedLegacy: false };
+    } catch {
+      // K_local didn't open it — fall through to the legacy key (split-brain
+      // or a blob from before this machine minted K_local).
+    }
+  }
+  // Legacy path: the publicly-computable SHA256(userId:orgId). Throws if this
+  // key doesn't open the blob either — the caller maps that to PERMISSION_DENIED.
+  const masterKey = decryptMasterKey(innerBlob, deriveWrappingKey(userId, orgId), innerAAD);
+  return { masterKey, usedLegacy: true };
+}
+
+/**
+ * Re-wraps M under K_local (minting one if this machine has none) and persists
+ * the double-wrapped blob. This is the inner-wrap migration: it moves a blob
+ * off the legacy SHA256(userId:orgId) key — which the service can recompute —
+ * onto a device-local secret the service never sees (CAP-58 / K_local).
+ *
+ * Best-effort: a failure here (e.g. server unavailable) leaves the existing
+ * blob in place; the next run retries.
+ */
+async function rewrapUnderLocalRoot(
+  masterKey: Buffer,
+  orgId: string,
   userId: string,
   service: KeyServiceOps,
-): Promise<string> {
+): Promise<void> {
+  let kLocal = readLocalRoot(orgId, userId);
+  if (!kLocal) {
+    kLocal = generateLocalRoot();
+    saveLocalRoot(orgId, kLocal, userId);
+  }
+  const innerWrapped = encryptMasterKey(masterKey, deriveEpochInnerKey(kLocal), masterKeyAAD(userId, orgId));
+  const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
+  saveMasterKey(orgId, outerWrapped, userId);
+}
+
+/**
+ * Recovers M from the on-disk double-wrapped blob via the service co-decrypt
+ * round trip, transparently migrating the inner wrap onto K_local on first
+ * sight of a legacy blob. Shared by resolveProjectKey and transport.
+ *
+ * M is stored double-wrapped: KMS_ENCRYPT(AES-GCM(M, HKDF(K_local))).
+ * 1. co-decrypt strips the KMS outer layer
+ * 2. unwrap the inner layer (K_local, falling back to legacy SHA256)
+ * 3. if legacy was used, re-wrap under K_local for future runs
+ */
+export async function unwrapMasterKey(
+  orgId: string,
+  userId: string,
+  service: KeyServiceOps,
+): Promise<Buffer> {
   const encryptedBlob = readMasterKey(orgId, userId);
   if (!encryptedBlob) {
     throw new CapyError(
@@ -78,30 +132,31 @@ export async function resolveProjectKey(
     );
   }
 
-  const innerKey = deriveWrappingKey(userId, orgId);
   const innerAAD = masterKeyAAD(userId, orgId);
 
-  // Try double-wrapped path: co-decrypt strips KMS outer, then inner unwrap
+  // Try double-wrapped path: co-decrypt strips KMS outer, then inner unwrap.
   try {
     const innerBlob = await service.coDecrypt(orgId, encryptedBlob);
-    const masterKey = decryptMasterKey(innerBlob, innerKey, innerAAD);
-    return deriveProjectKey(masterKey, projectId, orgId);
+    const { masterKey, usedLegacy } = unwrapInner(innerBlob, orgId, userId, innerAAD);
+    if (usedLegacy) {
+      // Transparent inner-wrap migration onto K_local. Never block resolution
+      // on it succeeding.
+      await rewrapUnderLocalRoot(masterKey, orgId, userId, service).catch(() => {});
+    }
+    return masterKey;
   } catch (err) {
     // 403 = membership revoked — do NOT fall through to legacy path.
-    // Re-throw so the caller can clean up appropriately.
     if (isPermissionDenied(err)) throw err;
-
-    // Network / connectivity failure — re-throw so a transient outage
-    // doesn't get misclassified as PERMISSION_DENIED and nuke local keys.
+    // Network / connectivity failure — re-throw so a transient outage isn't
+    // misclassified as PERMISSION_DENIED and used to nuke local keys.
     if (isNetworkError(err)) throw err;
-
-    // Other errors (e.g. blob isn't KMS-wrapped) → fall through to legacy
+    // Other errors (e.g. blob isn't KMS-wrapped) → fall through to legacy.
   }
 
-  // Migration: try legacy single-wrapped (no KMS outer layer)
+  // Migration: legacy single-wrapped (no KMS outer layer).
   let masterKey: Buffer;
   try {
-    masterKey = decryptMasterKey(encryptedBlob, innerKey, innerAAD);
+    ({ masterKey } = unwrapInner(encryptedBlob, orgId, userId, innerAAD));
   } catch {
     throw new CapyError(
       'You do not have access to this project\'s secrets.\n\n' +
@@ -111,25 +166,30 @@ export async function resolveProjectKey(
       { orgId },
     );
   }
+  // Legacy blob unwrapped — re-wrap (KMS outer + K_local inner) for future runs.
+  await rewrapUnderLocalRoot(masterKey, orgId, userId, service).catch(() => {});
+  return masterKey;
+}
 
-  // Legacy blob unwrapped — re-wrap with KMS outer layer for future runs
-  try {
-    const innerWrapped = encryptMasterKey(masterKey, innerKey, innerAAD);
-    // innerWrapped is already base64 — pass directly to wrapOuterLayer
-    const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
-    saveMasterKey(orgId, outerWrapped, userId);
-  } catch {
-    // Re-wrap failed (server unavailable?) — proceed with the unwrapped M this time.
-    // Next run will retry migration.
-  }
-
+/**
+ * Resolves the encryption key for a project: unwrap M, derive the project key.
+ */
+export async function resolveProjectKey(
+  orgId: string,
+  projectId: string,
+  userId: string,
+  service: KeyServiceOps,
+): Promise<string> {
+  const masterKey = await unwrapMasterKey(orgId, userId, service);
   return deriveProjectKey(masterKey, projectId, orgId);
 }
 
 /**
  * Double-wraps M for local storage.
- * Inner layer: AES-GCM with SHA256(userId:orgId)
- * Outer layer: KMS via service wrap endpoint
+ * Inner layer: AES-GCM with HKDF(K_local, "capy:inner:epoch") — NOT the legacy
+ * SHA256(userId:orgId), which the service could recompute. A fresh K_local is
+ * minted for this machine if none exists.
+ * Outer layer: KMS via service wrap endpoint.
  */
 export async function wrapAndSaveMasterKey(
   masterKey: Buffer,
@@ -137,11 +197,7 @@ export async function wrapAndSaveMasterKey(
   userId: string,
   service: KeyServiceOps,
 ): Promise<void> {
-  const innerKey = deriveWrappingKey(userId, orgId);
-  const innerWrapped = encryptMasterKey(masterKey, innerKey, masterKeyAAD(userId, orgId));
-  // innerWrapped is already base64 — pass directly to wrapOuterLayer
-  const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
-  saveMasterKey(orgId, outerWrapped, userId);
+  await rewrapUnderLocalRoot(masterKey, orgId, userId, service);
 }
 
 /**

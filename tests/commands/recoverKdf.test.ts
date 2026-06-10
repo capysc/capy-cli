@@ -15,6 +15,7 @@ import { mock, describe, test, expect, beforeAll, beforeEach, afterAll } from 'b
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { deriveEpochInnerKey } from '../../src/crypto/localKeyRoot';
 
 const tempHome = mkdtempSync(join(tmpdir(), 'capy-recover-kdf-'));
 mock.module('os', () => {
@@ -106,14 +107,18 @@ function envBlobForVersion(version: 1 | 2, phrase: string): string {
 }
 
 // Recover the M that recover wrote to disk (strip fake KMS layer, unwrap inner).
-// The inner blob is now AAD-bound (CAP-57), so pass the matching context AAD.
+// The inner blob is AAD-bound (CAP-57) AND, as of CAP-58, keyed by
+// HKDF(K_local) rather than the legacy SHA256(userId:orgId) — recover mints
+// K_local and stores it alongside key.enc, so we read it back to unwrap.
 function writtenMasterKey(): Buffer {
   const outer = gc.readMasterKey(ORG, FAKE_USER_ID);
   if (!outer) throw new Error('no key written');
   const inner = outer.replace(/^kms:/, '');
+  const kLocal = gc.readLocalRoot(ORG, FAKE_USER_ID);
+  if (!kLocal) throw new Error('no K_local written');
   return km.decryptMasterKey(
     inner,
-    km.deriveWrappingKey(FAKE_USER_ID, ORG),
+    deriveEpochInnerKey(kLocal),
     km.masterKeyAAD(FAKE_USER_ID, ORG),
   );
 }

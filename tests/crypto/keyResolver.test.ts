@@ -101,6 +101,35 @@ describe('KeyResolver', () => {
         .rejects.toThrow('You do not have access');
     });
 
+    it('migrates a legacy SHA256-wrapped blob onto K_local (CAP-58)', async () => {
+      const km = await import('../../src/crypto/keyManager');
+      const gc = await import('../../src/config/globalConfig');
+      const { deriveEpochInnerKey } = await import('../../src/crypto/localKeyRoot');
+      const mUser = 'user_mig';
+      const mOrg = 'org_mig';
+
+      // Legacy single-wrapped blob keyed by SHA256(userId:orgId); no K_local yet.
+      const legacyInner = km.deriveWrappingKey(mUser, mOrg);
+      saveMasterKey(mOrg, km.encryptMasterKey(masterKey, legacyInner, km.masterKeyAAD(mUser, mOrg)), mUser);
+      expect(gc.hasLocalRoot(mOrg, mUser)).toBe(false);
+
+      // Resolve via the double-wrap path. Passthrough KMS: inner blob == stored blob.
+      const ops = {
+        coDecrypt: async (_o: string, ct: string) => ct,
+        wrapOuterLayer: async (_o: string, pt: string) => pt,
+      };
+      const key = await resolveProjectKey(mOrg, projectId, mUser, ops);
+      expect(key).toBe(deriveProjectKey(masterKey, projectId, mOrg));
+
+      // Migration happened: K_local now exists and the stored blob opens with
+      // it — and NO LONGER with the legacy SHA256 key.
+      expect(gc.hasLocalRoot(mOrg, mUser)).toBe(true);
+      const kLocal = gc.readLocalRoot(mOrg, mUser)!;
+      const stored = gc.readMasterKey(mOrg, mUser)!;
+      expect(km.decryptMasterKey(stored, deriveEpochInnerKey(kLocal), km.masterKeyAAD(mUser, mOrg)).equals(masterKey)).toBe(true);
+      expect(() => km.decryptMasterKey(stored, legacyInner, km.masterKeyAAD(mUser, mOrg))).toThrow();
+    });
+
     it('should re-throw 403 instead of falling through to legacy', async () => {
       // Setup: save a valid single-wrapped key that legacy WOULD decrypt
       const wrappingKey = deriveWrappingKey(userId, orgId);

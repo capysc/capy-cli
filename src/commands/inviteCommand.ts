@@ -2,8 +2,7 @@ import inquirer from 'inquirer';
 import { resolveOrgContext } from '../core/orgContext';
 import { ProjectManager } from '../core/projectManager';
 import { readMasterKey } from '../config/globalConfig';
-import { decryptMasterKey, deriveWrappingKey, masterKeyAAD } from '../crypto/keyManager';
-import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
+import { unwrapMasterKey } from '../crypto/keyResolver';
 import {
   generateInviteToken,
   innerWrap,
@@ -113,28 +112,20 @@ export class InviteCommand {
         process.exit(1);
       }
 
+      // Recover M via the shared resolver: co-decrypt strips the KMS outer
+      // layer, the inner layer is unwrapped under K_local (legacy SHA256
+      // fallback + transparent migration). The invite payload re-wraps M under
+      // the invite token, so K_local never enters it.
       let masterKey: Buffer;
       try {
-        // Strip KMS outer layer via server co-decrypt
-        const { plaintext: innerBlob } = await serviceClient.coDecrypt(orgId, encryptedM);
-        // Strip local inner layer
-        const wrappingKey = deriveWrappingKey(userId, orgId);
-        masterKey = decryptMasterKey(innerBlob, wrappingKey, masterKeyAAD(userId, orgId));
-      } catch (err: any) {
-        // Fallback: try legacy single-wrapped (no KMS outer)
-        try {
-          const wrappingKey = deriveWrappingKey(userId, orgId);
-          masterKey = decryptMasterKey(encryptedM, wrappingKey, masterKeyAAD(userId, orgId));
-          // Migration: re-wrap with KMS outer layer
-          const keyOps = {
-            coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-            wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-          };
-          await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
-        } catch {
-          console.error('Failed to unwrap master key. Re-authenticate and try again.');
-          process.exit(1);
-        }
+        const keyOps = {
+          coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+          wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+        };
+        masterKey = await unwrapMasterKey(orgId, userId, keyOps);
+      } catch {
+        console.error('Failed to unwrap master key. Re-authenticate and try again.');
+        process.exit(1);
       }
 
       // If this email already belongs to an org member, reuse their role and
