@@ -28,6 +28,71 @@ export function getProjectKeyCachePath(orgId: string, projectId: string): string
   return join(getGlobalCapyDir(), 'orgs', orgId, 'projects', projectId, 'key.cache');
 }
 
+// --- K_local + device key (CAP-58) ---
+//
+// Both live beside key.enc under ~/.capy/orgs/<orgId>/users/<userId>/, the
+// recovery-equivalent area `capy logout` never wipes. K_local is the
+// device-local inner-wrap root (never transmitted); the device blob holds the
+// double-wrapped X25519 private key.
+
+export function getLocalRootPath(orgId: string, userId?: string): string {
+  const base = userId
+    ? join(getGlobalCapyDir(), 'orgs', orgId, 'users', userId)
+    : join(getGlobalCapyDir(), 'orgs', orgId);
+  return join(base, 'local.key');
+}
+
+export function getDeviceKeyPath(orgId: string, userId?: string): string {
+  const base = userId
+    ? join(getGlobalCapyDir(), 'orgs', orgId, 'users', userId)
+    : join(getGlobalCapyDir(), 'orgs', orgId);
+  return join(base, 'device.enc');
+}
+
+/** Persists K_local (raw 32 bytes, base64) 0600. */
+export function saveLocalRoot(orgId: string, kLocal: Buffer, userId?: string): void {
+  writeSecureFile(getLocalRootPath(orgId, userId), kLocal.toString('base64'));
+}
+
+/** Reads K_local, or null if this machine has never minted one for this org. */
+export function readLocalRoot(orgId: string, userId?: string): Buffer | null {
+  const content = readFileOrNull(getLocalRootPath(orgId, userId));
+  return content ? Buffer.from(content.trim(), 'base64') : null;
+}
+
+export function hasLocalRoot(orgId: string, userId?: string): boolean {
+  return existsSync(getLocalRootPath(orgId, userId));
+}
+
+export interface DeviceKeyRecord {
+  version: string;
+  /** opaque device id assigned by the service at registration */
+  device_id?: string;
+  /** base64 raw X25519 public key (registered with the service) */
+  public_key: string;
+  /** double-wrapped (KMS outer + K_local inner) PKCS#8 private key, base64 */
+  encrypted_private_key: string;
+  created_at: string;
+}
+
+export function saveDeviceKeyRecord(orgId: string, record: DeviceKeyRecord, userId?: string): void {
+  writeSecureFile(getDeviceKeyPath(orgId, userId), JSON.stringify(record, null, 2));
+}
+
+export function readDeviceKeyRecord(orgId: string, userId?: string): DeviceKeyRecord | null {
+  const content = readFileOrNull(getDeviceKeyPath(orgId, userId));
+  if (!content) return null;
+  try {
+    return JSON.parse(content) as DeviceKeyRecord;
+  } catch {
+    return null;
+  }
+}
+
+export function hasDeviceKey(orgId: string, userId?: string): boolean {
+  return existsSync(getDeviceKeyPath(orgId, userId));
+}
+
 export function getGlobalConfigPath(): string {
   return join(getGlobalCapyDir(), 'config.json');
 }
