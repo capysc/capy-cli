@@ -49,6 +49,15 @@ export interface KeyServiceOps {
   coDecrypt(orgId: string, ciphertext: string): Promise<string>;
   /** Add the KMS outer layer via POST /orgs/:orgId/wrap */
   wrapOuterLayer(orgId: string, plaintext: string): Promise<string>;
+  // --- Epoch awareness (CAP-58, optional) ---
+  // When present, resolveProjectKey transparently catches this machine up to the
+  // org's current epoch before deriving the data key (recovering the current
+  // epoch key from M + escrow). Absent → epoch 0 / legacy behavior. Old service
+  // builds that lack the endpoints simply make these reject, which is swallowed.
+  /** Current org epoch via GET /orgs/:orgId/epoch */
+  getEpoch?(orgId: string): Promise<number>;
+  /** All escrow blobs (epoch → blob) via GET /orgs/:orgId/epoch/escrow */
+  getEpochEscrows?(orgId: string): Promise<Record<string, string>>;
 }
 
 /**
@@ -172,7 +181,14 @@ export async function unwrapMasterKey(
 }
 
 /**
- * Resolves the encryption key for a project: unwrap M, derive the project key.
+ * Resolves the data-encryption key for a project at the org's CURRENT epoch
+ * (CAP-58). At epoch 0 the epoch key is M, so this is identical to the legacy
+ * deriveProjectKey(M, …); at epoch ≥1 it derives from the stored epoch key E_e.
+ * All sync/encrypt/decrypt sites route through here, so they transparently
+ * follow epoch bumps.
+ *
+ * Reading a snapshot pinned to an OLDER epoch (cross-epoch pinned checkout)
+ * needs the history walk — see resolveProjectKeyForEpoch (follow-up).
  */
 export async function resolveProjectKey(
   orgId: string,
@@ -180,8 +196,10 @@ export async function resolveProjectKey(
   userId: string,
   service: KeyServiceOps,
 ): Promise<string> {
-  const masterKey = await unwrapMasterKey(orgId, userId, service);
-  return deriveProjectKey(masterKey, projectId, orgId);
+  // Lazy import avoids a cycle (epochManager imports keyResolver.unwrapMasterKey).
+  const { getCurrentEpochKey } = await import('./epochManager');
+  const { key } = await getCurrentEpochKey(orgId, userId, service);
+  return deriveProjectKey(key, projectId, orgId);
 }
 
 /**

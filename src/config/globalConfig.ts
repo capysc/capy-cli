@@ -93,6 +93,47 @@ export function hasDeviceKey(orgId: string, userId?: string): boolean {
   return existsSync(getDeviceKeyPath(orgId, userId));
 }
 
+// --- Current epoch key (CAP-58) ---
+//
+// The org's current epoch key E_e, double-wrapped (KMS outer + K_local inner),
+// stored beside key.enc. Absent means epoch 0 — the legacy M-derived scheme,
+// where key.enc (wrapped M) IS the epoch-0 key. Written when the org bumps past
+// epoch 0 (first kick) and refreshed transparently on each run.
+
+export function getEpochKeyPath(orgId: string, userId?: string): string {
+  const base = userId
+    ? join(getGlobalCapyDir(), 'orgs', orgId, 'users', userId)
+    : join(getGlobalCapyDir(), 'orgs', orgId);
+  return join(base, 'epoch.enc');
+}
+
+export interface EpochKeyRecord {
+  version: string;
+  epoch: number;
+  /** double-wrapped (KMS outer + K_local inner) current epoch key, base64 */
+  encrypted_epoch_key: string;
+  updated_at: string;
+}
+
+export function saveEpochKeyRecord(orgId: string, record: EpochKeyRecord, userId?: string): void {
+  writeSecureFile(getEpochKeyPath(orgId, userId), JSON.stringify(record, null, 2));
+}
+
+export function readEpochKeyRecord(orgId: string, userId?: string): EpochKeyRecord | null {
+  const content = readFileOrNull(getEpochKeyPath(orgId, userId));
+  if (!content) return null;
+  try {
+    return JSON.parse(content) as EpochKeyRecord;
+  } catch {
+    return null;
+  }
+}
+
+/** Local epoch number (0 if no epoch.enc — i.e. legacy/epoch-0 state). */
+export function readLocalEpoch(orgId: string, userId?: string): number {
+  return readEpochKeyRecord(orgId, userId)?.epoch ?? 0;
+}
+
 export function getGlobalConfigPath(): string {
   return join(getGlobalCapyDir(), 'config.json');
 }

@@ -181,6 +181,8 @@ export class StatusCommand {
         const keyOps = {
           coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
           wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+          getEpoch: (oid: string) => this.serviceClient.getEpoch(oid).then(r => r.epoch),
+          getEpochEscrows: (oid: string) => this.serviceClient.getEpochEscrows(oid).then(r => r.escrows),
         };
         encryptionKey = await resolveProjectKey(
           projectState.organizationId!,

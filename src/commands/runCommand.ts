@@ -191,6 +191,8 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
       const keyServiceOps = {
         coDecrypt: (o: string, c: string) => svc.coDecrypt(o, c).then(r => r.plaintext),
         wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then(r => r.ciphertext),
+        getEpoch: (o: string) => svc.getEpoch(o).then(r => r.epoch),
+        getEpochEscrows: (o: string) => svc.getEpochEscrows(o).then(r => r.escrows),
       };
 
       projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);

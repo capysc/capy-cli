@@ -68,6 +68,8 @@ export class CapyCommand {
     return {
       coDecrypt: (orgId, ciphertext) => this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
       wrapOuterLayer: (orgId, plaintext) => this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
+      getEpoch: (orgId) => this.serviceClient.getEpoch(orgId).then(r => r.epoch),
+      getEpochEscrows: (orgId) => this.serviceClient.getEpochEscrows(orgId).then(r => r.escrows),
     };
   }
 

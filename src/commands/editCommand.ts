@@ -104,6 +104,8 @@ export class EditCommand {
         const keyOps = {
           coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
           wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+          getEpoch: (oid: string) => serviceClient!.getEpoch(oid).then((r) => r.epoch),
+          getEpochEscrows: (oid: string) => serviceClient!.getEpochEscrows(oid).then((r) => r.escrows),
         };
         projectKey = await resolveProjectKey(
           orgId,

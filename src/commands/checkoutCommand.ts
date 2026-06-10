@@ -77,6 +77,8 @@ export class CheckoutCommand {
     const keyOps: KeyServiceOps = {
       coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
       wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+      getEpoch: (oid) => this.serviceClient.getEpoch(oid).then(r => r.epoch),
+      getEpochEscrows: (oid) => this.serviceClient.getEpochEscrows(oid).then(r => r.escrows),
     };
     const encryptionKey = await resolveProjectKey(orgId, projectId, authResult.user_id!, keyOps);
 

@@ -50,6 +50,14 @@ export class KickCommand {
       process.exit(1);
     }
 
+    // NOTE (CAP-58): the cryptographic epoch BUMP on kick is implemented in
+    // crypto/epochManager.ts (bumpEpoch) and the service stage/commit
+    // endpoints, but is NOT wired here yet. Activating it requires per-snapshot
+    // epoch tagging so that data pushed under an older epoch stays readable
+    // after a bump (cross-epoch reads). Until that lands, kick remains a
+    // policy-layer revocation (WorkOS removal + the kicked user's co-decrypt is
+    // refused). See docs/epoch-key-design.md.
+
     console.log('');
     console.log(`  \x1b[33m${email}\x1b[0m has been removed from the organization.`);
     console.log(`  \x1b[90mMembership ${membershipId} deleted.\x1b[0m`);
