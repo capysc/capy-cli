@@ -28,12 +28,16 @@ describe('epoch key generation', () => {
     expect(a.equals(b)).toBe(false);
   });
 
-  it('deriveEpoch0 is deterministic from M and 32 bytes', () => {
+  it('deriveEpoch0 IS M (epoch 0 = legacy M path, CAP-58 migration decision)', () => {
     const M = randomBytes(32);
-    expect(deriveEpoch0(M).equals(deriveEpoch0(M))).toBe(true);
+    // E_0 == M so legacy ciphertext under deriveProjectKey(M, …) reads as
+    // epoch 0 with no re-encryption.
+    expect(deriveEpoch0(M).equals(M)).toBe(true);
     expect(deriveEpoch0(M)).toHaveLength(32);
-    // E_0 is NOT equal to M — it's a derived key.
-    expect(deriveEpoch0(M).equals(M)).toBe(false);
+    // Returns a copy — mutating it must not corrupt M.
+    const e0 = deriveEpoch0(M);
+    e0[0] ^= 0xff;
+    expect(deriveEpoch0(M).equals(M)).toBe(true);
   });
 });
 

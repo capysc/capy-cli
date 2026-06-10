@@ -22,15 +22,20 @@ export function generateEpochKey(): Buffer {
 }
 
 /**
- * The migration epoch key E_0 for an org that has data encrypted under the
- * legacy M-derived scheme. Deterministically derived from M so existing
- * (untagged) ciphertext reads as epoch 0 without re-encryption.
+ * The epoch-0 key. Per CAP-58's migration decision (epoch 0 = the legacy
+ * M-derived scheme — NOT HKDF(M)), E_0 IS M itself, so existing ciphertext
+ * encrypted under deriveProjectKey(M, …) reads unchanged as epoch 0 with no
+ * re-encryption. Every E_e for e >= 1 is fresh randomness (generateEpochKey).
  *
- * IMPORTANT: E_0 is the ONLY epoch key derived from M. Every E_e for e >= 1 is
- * fresh randomness from generateEpochKey().
+ * Returns a copy so callers can't mutate M through the returned buffer.
+ *
+ * NOTE: because E_0 = M, walking the ORG-WIDE history chain back to epoch 0
+ * yields M — so that chain is owner/admin-only. Project-scoped members use the
+ * PER-PROJECT chain, which bottoms out at deriveProjectKey(M, p) and never
+ * exposes M (see design doc §7).
  */
 export function deriveEpoch0(masterKey: Buffer): Buffer {
-  return Buffer.from(hkdfSync('sha256', masterKey, 'epoch-0', 'capy:epoch-0', EPOCH_KEY_LENGTH));
+  return Buffer.from(masterKey);
 }
 
 /**
