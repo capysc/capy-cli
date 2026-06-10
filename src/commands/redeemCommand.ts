@@ -145,12 +145,28 @@ export class RedeemCommand {
       process.exit(1);
     }
 
-    // 8. Double-wrap M (inner local key + outer KMS) and store locally
+    // 8. Double-wrap M (inner K_local + outer KMS) and store locally
     const keyOps = {
       coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
       wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
     };
     await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
+
+    // 8b. Mint + register this machine's device keypair (CAP-58). Used by
+    //     kick-time re-key to HPKE-seal new epoch keys to this device. The
+    //     private key is double-wrapped under K_local; the public key is
+    //     registered with the service. Best-effort — a registration hiccup
+    //     self-heals on the next run and never blocks redeem.
+    try {
+      const { ensureDeviceKey } = await import('../crypto/deviceManager');
+      await ensureDeviceKey(orgId, userId, {
+        coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+        registerDevice: (oid: string, pk: string) => serviceClient.registerDevice(oid, pk),
+      });
+    } catch {
+      // Device registration deferred to next run.
+    }
 
     console.log('');
     console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');

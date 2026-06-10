@@ -479,12 +479,68 @@ export class ServiceClient {
   }
 
 
-  async listMembers(orgId: string): Promise<{ members: any[] }> {
+  async listMembers(orgId: string): Promise<{ members: any[]; device_keys?: Record<string, Array<{ device_id: string; public_key: string }>> }> {
     return this.request('GET', `/orgs/${orgId}/members`);
   }
 
   async listMemberDetails(orgId: string): Promise<{ members: MemberDetail[] }> {
     return this.request('GET', `/orgs/${orgId}/members/details`);
+  }
+
+  // --- Epoch key model (CAP-58) ---
+
+  /** Current org epoch. */
+  async getEpoch(orgId: string): Promise<{ epoch: number }> {
+    return this.request('GET', `/orgs/${orgId}/epoch`);
+  }
+
+  /** Register this machine's device public key (append-only, idempotent). */
+  async registerDevice(orgId: string, publicKey: string): Promise<{ device_id: string }> {
+    return this.request('POST', `/orgs/${orgId}/devices`, { public_key: publicKey });
+  }
+
+  /** This caller's registered devices. */
+  async listDevices(orgId: string): Promise<{ devices: Array<{ device_id: string; public_key: string; created_at: string }> }> {
+    return this.request('GET', `/orgs/${orgId}/devices`);
+  }
+
+  /** Stage epoch e+1 blobs (kick transaction step 1). */
+  async stageEpoch(
+    orgId: string,
+    payload: {
+      epoch: number;
+      history_blob: string;
+      project_history_blobs?: Record<string, string>;
+      escrow_blob?: string;
+      sealed_blobs: Array<{ user_id: string; device_id: string; blob: string }>;
+    },
+  ): Promise<{ staged: boolean; epoch: number; uncovered_members: string[] }> {
+    return this.request('POST', `/orgs/${orgId}/epoch/stage`, payload);
+  }
+
+  /** Commit a staged epoch bump (kick transaction step 2). */
+  async commitEpoch(orgId: string, epoch: number): Promise<{ epoch: number }> {
+    return this.request('POST', `/orgs/${orgId}/epoch/commit`, { epoch });
+  }
+
+  /** History blobs for epoch e (org-wide + per-project). */
+  async getEpochHistory(orgId: string, epoch: number): Promise<{ epoch: number; history_blob: string; project_history_blobs: Record<string, string> }> {
+    return this.request('GET', `/orgs/${orgId}/epoch/history/${epoch}`);
+  }
+
+  /** All escrow blobs (epoch → blob); owner-openable. */
+  async getEpochEscrows(orgId: string): Promise<{ epoch: number; escrows: Record<string, string> }> {
+    return this.request('GET', `/orgs/${orgId}/epoch/escrow`);
+  }
+
+  /** Owner backfill of missing escrow blobs (fill-only). */
+  async backfillEscrows(orgId: string, escrows: Record<string, string>): Promise<{ written: number[] }> {
+    return this.request('POST', `/orgs/${orgId}/epoch/escrow`, { escrows });
+  }
+
+  /** This caller's pending sealed blobs at the current epoch. */
+  async getSealedBlobs(orgId: string): Promise<{ epoch: number; sealed_blobs: Array<{ device_id: string; blob: string }> }> {
+    return this.request('GET', `/orgs/${orgId}/epoch/sealed`);
   }
 
   async kickMember(orgId: string, membershipId: string): Promise<void> {
