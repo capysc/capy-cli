@@ -132,7 +132,8 @@ describe('CapyCommand', () => {
       setSessionUserId: mock(() => undefined),
       refreshToken: mock(() => Promise.resolve(false)),
       refreshWithCredentials: mock(() => Promise.resolve({ success: true })),
-      createOrganization: mock(() => undefined)
+      createOrganization: mock(() => undefined),
+      getLastRefreshFailure: mock(() => null)
     } as any;
 
     mockServiceClient = {
