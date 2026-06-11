@@ -110,10 +110,14 @@ function readFileOrNull(filePath: string): string | null {
 export function saveMasterKey(orgId: string, encryptedBlob: string, userId?: string): void {
   const keyPath = getOrgKeyPath(orgId, userId);
   const data = {
-    version: '1.0',
+    // Format stamp, not a parser input: readMasterKey only consumes
+    // encrypted_master_key, and pre-K_local binaries ignore these fields too.
+    // Stamping 2.0/local_root lets future versions tell "written by a newer
+    // capy" apart from a corrupt or foreign blob when the format moves again.
+    version: '2.0',
     org_id: orgId,
     encrypted_master_key: encryptedBlob,
-    wrapping_method: 'auth_token' as const,
+    wrapping_method: 'local_root' as const,
     created_at: new Date().toISOString(),
   };
   writeSecureFile(keyPath, JSON.stringify(data, null, 2));

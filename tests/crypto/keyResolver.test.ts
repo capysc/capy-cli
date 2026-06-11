@@ -1,4 +1,4 @@
-import { mock, describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { mock, spyOn, describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
@@ -28,6 +28,7 @@ let saveLocalRoot: typeof import('../../src/config/globalConfig').saveLocalRoot;
 let readLocalRoot: typeof import('../../src/config/globalConfig').readLocalRoot;
 let hasLocalRoot: typeof import('../../src/config/globalConfig').hasLocalRoot;
 let getLocalRootPath: typeof import('../../src/config/globalConfig').getLocalRootPath;
+let getOrgKeyPath: typeof import('../../src/config/globalConfig').getOrgKeyPath;
 let wrapAndSaveMasterKey: typeof import('../../src/crypto/keyResolver').wrapAndSaveMasterKey;
 let resolveProjectKey: typeof import('../../src/crypto/keyResolver').resolveProjectKey;
 let resolveFromSeedPhrase: typeof import('../../src/crypto/keyResolver').resolveFromSeedPhrase;
@@ -54,6 +55,7 @@ beforeAll(async () => {
   readLocalRoot = gc.readLocalRoot;
   hasLocalRoot = gc.hasLocalRoot;
   getLocalRootPath = gc.getLocalRootPath;
+  getOrgKeyPath = gc.getOrgKeyPath;
 
   const kr = await import('../../src/crypto/keyResolver');
   wrapAndSaveMasterKey = kr.wrapAndSaveMasterKey;
@@ -258,6 +260,61 @@ describe('KeyResolver', () => {
       const recovered = decryptMasterKey(inner2, deriveLocalInnerKey(rootAfterFailure), masterKeyAAD(user, org));
       expect(recovered.equals(masterKey)).toBe(true);
       expect(() => decryptMasterKey(inner2, deriveWrappingKey(user, org), masterKeyAAD(user, org))).toThrow();
+    });
+
+    it('prints the one-way downgrade notice exactly once, when the migration persists', async () => {
+      const org = 'org_notice1';
+      const user = 'user_notice1';
+      const legacyInner = encryptMasterKey(masterKey, deriveWrappingKey(user, org), masterKeyAAD(user, org));
+      saveMasterKey(org, KMS_PREFIX + legacyInner, user);
+
+      const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await resolveProjectKey(org, projectId, user, mockKeyServiceOps());
+        const notices = errSpy.mock.calls.filter(c => String(c[0]).includes('key storage'));
+        expect(notices.length).toBe(1);
+        expect(String(notices[0][0])).toContain('avoid downgrading');
+
+        // Steady-state resolve after migration: no further notice
+        await resolveProjectKey(org, projectId, user, mockKeyServiceOps());
+        expect(errSpy.mock.calls.filter(c => String(c[0]).includes('key storage')).length).toBe(1);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it('does NOT print the downgrade notice when the re-wrap fails (blob still legacy-readable)', async () => {
+      const org = 'org_notice2';
+      const user = 'user_notice2';
+      const legacyInner = encryptMasterKey(masterKey, deriveWrappingKey(user, org), masterKeyAAD(user, org));
+      saveMasterKey(org, KMS_PREFIX + legacyInner, user);
+
+      const brokenWrap = {
+        coDecrypt: mockKeyServiceOps().coDecrypt,
+        wrapOuterLayer: async () => { throw new Error('kms down'); },
+      };
+      const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await resolveProjectKey(org, projectId, user, brokenWrap);
+        expect(errSpy.mock.calls.filter(c => String(c[0]).includes('key storage')).length).toBe(0);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it('stamps the migrated key.enc with version 2.0 / wrapping_method local_root', async () => {
+      const org = 'org_stamp1';
+      const user = 'user_stamp1';
+      const legacyInner = encryptMasterKey(masterKey, deriveWrappingKey(user, org), masterKeyAAD(user, org));
+      saveMasterKey(org, KMS_PREFIX + legacyInner, user);
+
+      await resolveProjectKey(org, projectId, user, mockKeyServiceOps());
+
+      const raw = JSON.parse(require('fs').readFileSync(getOrgKeyPath(org, user), 'utf-8'));
+      expect(raw.version).toBe('2.0');
+      expect(raw.wrapping_method).toBe('local_root');
+      // readMasterKey ignores the stamp — the blob itself is what matters
+      expect(readMasterKey(org, user)).toBe(raw.encrypted_master_key);
     });
 
     it('concurrent wraps converge on a single root (no orphaned blob)', async () => {

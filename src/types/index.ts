@@ -180,7 +180,7 @@ export interface OrgKeyFile {
   version: string;
   org_id: string;
   encrypted_master_key: string;
-  wrapping_method: 'auth_token' | 'service_cosign';
+  wrapping_method: 'auth_token' | 'service_cosign' | 'local_root';
   created_at: string;
 }
 
