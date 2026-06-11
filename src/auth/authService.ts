@@ -18,6 +18,36 @@ export class HttpStatusError extends Error {
 }
 
 /**
+ * Why the last token refresh failed. Callers use this to pick the right
+ * recovery: `session_ended` → re-authenticate (browser), `network` → retry
+ * later (a browser round-trip can't fix an offline machine, so don't fall
+ * through to OAuth), `org_not_found` / `server_error` → surface the detail.
+ */
+export type RefreshFailureReason = 'session_ended' | 'org_not_found' | 'server_error' | 'network';
+
+export interface RefreshFailure {
+  reason: RefreshFailureReason;
+  status?: number;
+  /** Server `error` body or transport error message. Never contains tokens. */
+  detail?: string;
+}
+
+function classifyRefreshFailure(error: any): RefreshFailure {
+  if (error instanceof HttpStatusError) {
+    if (error.status === 401) {
+      // WorkOS rejected the refresh token — the backing session has ended
+      // (inactivity timeout, max duration, sign-out, or revocation).
+      return { reason: 'session_ended', status: error.status, detail: error.message };
+    }
+    if (error.status === 404) {
+      return { reason: 'org_not_found', status: error.status, detail: error.message };
+    }
+    return { reason: 'server_error', status: error.status, detail: error.message };
+  }
+  return { reason: 'network', detail: error?.message };
+}
+
+/**
  * Resolve the effective `expires_at` for a newly-issued access token. Normal
  * production: `Date.now() + expires_in * 1000` from WorkOS (~10 min).
  *
@@ -55,6 +85,7 @@ export class AuthService {
   private sessionUserId: string | undefined;
   private session: SessionStore | null = null;
   private currentOrgId: string | null = null;
+  private lastRefreshFailure: RefreshFailure | null = null;
 
   constructor(serviceApiUrl?: string, devMode: boolean = false, sessionUserId?: string) {
     this.devMode = devMode;
@@ -130,6 +161,7 @@ export class AuthService {
    * Never triggers interactive OAuth — returns failure instead.
    */
   async authenticateSilent(organizationId?: string): Promise<AuthResult> {
+    this.lastRefreshFailure = null;
     if (this.session && organizationId) {
       const orgSession = this.session.sessions[organizationId];
       if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(organizationId, orgSession.access_token)) {
@@ -160,7 +192,27 @@ export class AuthService {
       }
     }
 
-    return { success: false, error: 'No valid session available' };
+    return { success: false, error: this.describeSilentAuthFailure() };
+  }
+
+  /**
+   * Distinct, actionable failure message for a failed silent auth. Before
+   * this, an ended session, a network outage, and a genuinely missing
+   * session were all reported as "No valid session available".
+   */
+  private describeSilentAuthFailure(): string {
+    switch (this.lastRefreshFailure?.reason) {
+      case 'session_ended':
+        return 'Session expired — sign-in required';
+      case 'network':
+        return 'Could not reach the Capy service to refresh your session';
+      case 'org_not_found':
+        return 'Organization not found while refreshing your session';
+      case 'server_error':
+        return `Token refresh failed (HTTP ${this.lastRefreshFailure.status})`;
+      default:
+        return 'No valid session available';
+    }
   }
 
   private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
@@ -363,8 +415,18 @@ export class AuthService {
     };
   }
 
+  /**
+   * Reason the most recent refresh attempt failed, or null if the last
+   * attempt succeeded (or none was made). Command layers consult this after
+   * a failed silent auth to decide between re-auth and retry.
+   */
+  getLastRefreshFailure(): RefreshFailure | null {
+    return this.lastRefreshFailure;
+  }
+
   private async refreshForOrg(orgId: string): Promise<boolean> {
     if (!this.session?.refresh_token) return false;
+    this.lastRefreshFailure = null;
 
     const userId = this.sessionUserId || this.session.user_id;
     const sessionPath = getAuthSessionPath(userId);
@@ -451,7 +513,13 @@ export class AuthService {
       this.currentOrgId = resolvedOrgId;
       this.saveSession();
       return true;
-    } catch {
+    } catch (error: any) {
+      const failure = classifyRefreshFailure(error);
+      this.lastRefreshFailure = failure;
+      debug(
+        `[auth] token refresh failed for org ${orgId} (${failure.reason}` +
+        `${failure.status ? `, HTTP ${failure.status}` : ''}): ${failure.detail || 'no detail'}`
+      );
       return false;
     } finally {
       if (release) {

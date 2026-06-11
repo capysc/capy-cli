@@ -676,4 +676,100 @@ describe('AuthService', () => {
       expect(savedSession.sessions).toHaveProperty('org-A');
     });
   });
+
+  // ── Refresh-failure diagnostics ──────────────────────────────────────
+
+  describe('refresh failure diagnostics', () => {
+    /** Session whose only org token is expired, forcing the refresh path. */
+    function expiredSession(): SessionStore {
+      return makeSession({
+        sessions: {
+          'org-123': {
+            access_token: fakeJwt({ org_id: 'workos-org-123' }),
+            expires_at: Date.now() - 1000,
+          },
+        },
+      });
+    }
+
+    test('ended WorkOS session → distinct "session expired" failure', async () => {
+      mockReadAuthSession.mockReturnValue(expiredSession());
+      // What the service returns when the backing WorkOS session has ended
+      mockFetch.mockResolvedValueOnce(mockFetchResponse(
+        { error: 'Error: invalid_grant\nError Description: Session has already ended.' },
+        false,
+        401,
+      ));
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticateSilent('org-123');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Session expired — sign-in required');
+      const failure = service.getLastRefreshFailure();
+      expect(failure?.reason).toBe('session_ended');
+      expect(failure?.status).toBe(401);
+      expect(failure?.detail).toContain('Session has already ended');
+    });
+
+    test('network failure → distinct "could not reach service" failure', async () => {
+      mockReadAuthSession.mockReturnValue(expiredSession());
+      mockFetch.mockRejectedValueOnce(new TypeError('fetch failed'));
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticateSilent('org-123');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Could not reach the Capy service to refresh your session');
+      expect(service.getLastRefreshFailure()?.reason).toBe('network');
+    });
+
+    test('org missing from service DB → org_not_found', async () => {
+      mockReadAuthSession.mockReturnValue(expiredSession());
+      mockFetch.mockResolvedValueOnce(mockFetchResponse(
+        { error: 'Organization not found' },
+        false,
+        404,
+      ));
+
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticateSilent('org-123');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Organization not found while refreshing your session');
+      expect(service.getLastRefreshFailure()?.reason).toBe('org_not_found');
+    });
+
+    test('no session at all keeps the generic message and no failure record', async () => {
+      const service = new AuthService();
+      const result = await service.authenticateSilent('org-123');
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('No valid session available');
+      expect(service.getLastRefreshFailure()).toBeNull();
+    });
+
+    test('successful refresh clears a previous failure record', async () => {
+      mockReadAuthSession.mockReturnValue(expiredSession());
+      mockFetch.mockResolvedValueOnce(mockFetchResponse(
+        { error: 'Error: invalid_grant\nError Description: Session has already ended.' },
+        false,
+        401,
+      ));
+
+      const service = new AuthService(undefined, false, 'user-456');
+      await service.authenticateSilent('org-123');
+      expect(service.getLastRefreshFailure()?.reason).toBe('session_ended');
+
+      mockFetch.mockResolvedValueOnce(mockFetchResponse({
+        access_token: fakeJwt({ org_id: 'workos-org-123' }),
+        refresh_token: 'new-refresh',
+        expires_in: 3600,
+      }));
+      const result = await service.authenticateSilent('org-123');
+
+      expect(result.success).toBe(true);
+      expect(service.getLastRefreshFailure()).toBeNull();
+    });
+  });
 });
