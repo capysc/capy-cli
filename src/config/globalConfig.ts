@@ -28,6 +28,34 @@ export function getProjectKeyCachePath(orgId: string, projectId: string): string
   return join(getGlobalCapyDir(), 'orgs', orgId, 'projects', projectId, 'key.cache');
 }
 
+// --- K_local (machine-local inner-wrap root) ---
+//
+// Lives beside key.enc under ~/.capy/orgs/<orgId>/users/<userId>/ — the
+// recovery-equivalent area `capy logout` never wipes. Never transmitted.
+// Losing it means re-redeeming an invite, same as a lost device.
+
+export function getLocalRootPath(orgId: string, userId?: string): string {
+  const base = userId
+    ? join(getGlobalCapyDir(), 'orgs', orgId, 'users', userId)
+    : join(getGlobalCapyDir(), 'orgs', orgId);
+  return join(base, 'local.key');
+}
+
+/** Persists K_local (raw 32 bytes, base64) with mode 0600. */
+export function saveLocalRoot(orgId: string, kLocal: Buffer, userId?: string): void {
+  writeSecureFile(getLocalRootPath(orgId, userId), kLocal.toString('base64'));
+}
+
+/** Reads K_local, or null if this machine has never minted one for this org+user. */
+export function readLocalRoot(orgId: string, userId?: string): Buffer | null {
+  const content = readFileOrNull(getLocalRootPath(orgId, userId));
+  return content ? Buffer.from(content.trim(), 'base64') : null;
+}
+
+export function hasLocalRoot(orgId: string, userId?: string): boolean {
+  return existsSync(getLocalRootPath(orgId, userId));
+}
+
 export function getGlobalConfigPath(): string {
   return join(getGlobalCapyDir(), 'config.json');
 }

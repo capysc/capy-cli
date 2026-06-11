@@ -45,14 +45,19 @@ afterAll(() => {
 });
 
 /**
- * Mock KeyServiceOps that simulates the legacy migration path:
- * - coDecrypt always rejects (blob isn't KMS-wrapped in tests)
- * - wrapOuterLayer returns the plaintext as-is (no real KMS in tests)
+ * Fake KMS mirroring the real contract: wrapOuterLayer adds an outer layer,
+ * coDecrypt strips it (and rejects blobs that don't have one). Session 1
+ * exercises the legacy migration; later sessions exercise the steady-state
+ * co-decrypt + K_local path against the migrated blob.
  */
+const KMS_PREFIX = 'KMS1.';
 function mockKeyServiceOps() {
   return {
-    coDecrypt: async () => { throw new Error('not KMS-wrapped'); },
-    wrapOuterLayer: async (_orgId: string, plaintext: string) => plaintext,
+    coDecrypt: async (_orgId: string, ct: string) => {
+      if (!ct.startsWith(KMS_PREFIX)) throw new Error('not KMS-wrapped');
+      return ct.slice(KMS_PREFIX.length);
+    },
+    wrapOuterLayer: async (_orgId: string, plaintext: string) => KMS_PREFIX + plaintext,
   };
 }
 
