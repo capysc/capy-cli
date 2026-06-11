@@ -263,17 +263,19 @@ export class EditCommand {
         // push. In local-only mode there is no push — the local writes below
         // ARE the commit.
         const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
-        const keepHashForCache = localMode
-          ? localKeepHash
-          : (await serviceClient!.pushSecrets(
+        const pushResult = localMode
+          ? null
+          : await serviceClient!.pushSecrets(
               projectId,
               JSON.stringify(finalKeep),
               envBlob,
               branch,
-            )).keep_hash;
+            );
+        const keepHashForCache = pushResult ? pushResult.keep_hash : localKeepHash;
 
         writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
-        fileManager.writeKeepFile(finalKeep);
+        // Prefer the server's copy — it carries server-assigned changed_at
+        fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep));
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
         const existingSyncState = pm.readSyncState();

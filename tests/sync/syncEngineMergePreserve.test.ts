@@ -96,6 +96,23 @@ describe('SyncEngine.mergeWithKeep preserves extras', () => {
     expect(merged.variables.STRIPE_SECRET_KEY[0].connector).toEqual(baseConnector);
   });
 
+  test('changed_at survives a value_hash update on the same branch (server re-stamps on push)', () => {
+    const engine = new SyncEngine();
+    const keep = keepWithConnector('main');
+    keep.variables.STRIPE_SECRET_KEY[0].changed_at = '2026-01-15T08:30:00.000Z';
+
+    const merged = engine.mergeWithKeep(
+      keep,
+      { STRIPE_SECRET_KEY: { resource_id: 'res-1', value_hash: 'hash-new' } },
+      'main',
+    );
+
+    // The CLI never decides changed_at — it carries the old value through and
+    // the server replaces it on push. What must NOT happen is the merge
+    // silently dropping the field.
+    expect(merged.variables.STRIPE_SECRET_KEY[0].changed_at).toBe('2026-01-15T08:30:00.000Z');
+  });
+
   test('entry without value_hash falls back to empty string and preserves connector', () => {
     const engine = new SyncEngine();
     const keep = keepWithConnector('main');

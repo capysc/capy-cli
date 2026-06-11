@@ -32,6 +32,14 @@ export interface KeepVariableEntry {
   resource_id: string;
   branch?: string;
   value_hash: string;
+  /**
+   * ISO8601 UTC — when this branch's value last changed. Server-assigned on
+   * push (the server diffs value_hash against its stored copy and discards
+   * anything the client sends); the CLI only ever passes it through.
+   * Excluded from computeKeepHash. Absent = unknown (predates tracking, or
+   * local-only project).
+   */
+  changed_at?: string;
   /** Set when this variable was provisioned by `capy connect <provider>`. */
   connector?: ConnectorMetadata;
 }
