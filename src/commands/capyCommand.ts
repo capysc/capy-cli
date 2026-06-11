@@ -986,8 +986,23 @@ export class CapyCommand {
         result = await this.authService.authenticateSilent();
       }
 
-      // If still no session, fall through to interactive auth
+      // If still no session, fall through to interactive auth — except on
+      // network failures: a browser round-trip can't fix an unreachable
+      // service, and bouncing to OAuth there hides the real problem.
       if (!result.success) {
+        const refreshFailure = this.authService.getLastRefreshFailure();
+        if (refreshFailure?.reason === 'network') {
+          spinner.fail('Could not reach the Capy service to refresh your session');
+          throw new CapyError(
+            `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
+            ERROR_CODES.NETWORK_ERROR,
+            { detail: refreshFailure.detail }
+          );
+        }
+        if (refreshFailure?.reason === 'session_ended') {
+          // Say why the browser is about to open instead of silently bouncing.
+          spinner.text = 'Session expired — opening your browser to sign in again...';
+        }
         result = await this.authService.authenticate(projectState.organizationId);
       }
 
