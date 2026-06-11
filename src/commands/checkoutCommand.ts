@@ -4,12 +4,44 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import inquirer from 'inquirer';
-import { CapyError, ERROR_CODES, getSyncKeepHash } from '../types/index';
+import { CapyError, ERROR_CODES, getSyncKeepHash, KeepFile } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { SyncEngine } from '../sync/syncEngine';
 import { hashValue } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/**
+ * Pure dirty-check behind the checkout guard: does the decrypted .env differ
+ * from what keep.lock pins for `branch`? Returns the first offending variable
+ * name, or null when the working tree is clean.
+ *
+ * A variable is uncommitted when it is missing from .env (deletion), its hash
+ * differs from the pin (edit), or it exists in .env without a pin (addition).
+ * Presence is `=== undefined` deliberately: '' is a legitimate committed value
+ * (its hash pins as e3b0c44298fc1c14), and a falsy check misreads every
+ * empty-valued variable as a deletion — permanently blocking branch switches
+ * on any branch that pins empty placeholders.
+ */
+export function findUncommittedEnvChange(
+  localPlaintext: Record<string, string>,
+  variables: KeepFile['variables'],
+  branch: string,
+): string | null {
+  const pinnedKeys = new Set<string>();
+  for (const [varName, entries] of Object.entries(variables)) {
+    const entry = entries.find(e => e.branch === branch);
+    if (!entry) continue;
+    pinnedKeys.add(varName);
+    const localValue = localPlaintext[varName];
+    if (localValue === undefined) return varName; // uncommitted deletion
+    if (hashValue(localValue) !== entry.value_hash) return varName; // uncommitted edit
+  }
+  for (const varName of Object.keys(localPlaintext)) {
+    if (!pinnedKeys.has(varName)) return varName; // uncommitted addition
+  }
+  return null;
+}
 
 export class CheckoutCommand {
   private projectManager: ProjectManager;
@@ -89,41 +121,10 @@ export class CheckoutCommand {
         // Check A: uncommitted changes (.env differs from keep.lock)
         try {
           const localPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
-          const pinnedEntries = keep.variables;
-          let hasUncommitted = false;
+          const uncommitted = findUncommittedEnvChange(localPlaintext, keep.variables, currentBranch);
 
-          // Check for edits and deletions
-          const pinnedKeys = new Set<string>();
-          for (const [varName, entries] of Object.entries(pinnedEntries)) {
-            const entry = entries.find(e => e.branch === currentBranch);
-            if (entry) {
-              pinnedKeys.add(varName);
-              const localValue = localPlaintext[varName];
-              if (!localValue) {
-                // Variable in keep.lock but not in .env — uncommitted deletion
-                hasUncommitted = true;
-                break;
-              }
-              if (hashValue(localValue) !== entry.value_hash) {
-                // Value changed — uncommitted edit
-                hasUncommitted = true;
-                break;
-              }
-            }
-          }
-
-          // Check for additions (in .env but not in keep.lock for this branch)
-          if (!hasUncommitted) {
-            for (const varName of Object.keys(localPlaintext)) {
-              if (!pinnedKeys.has(varName)) {
-                hasUncommitted = true;
-                break;
-              }
-            }
-          }
-
-          if (hasUncommitted) {
-            console.error(`You have uncommitted changes on "${currentBranch}".`);
+          if (uncommitted != null) {
+            console.error(`You have uncommitted changes on "${currentBranch}" (${uncommitted}).`);
             console.error(`Run ${B('capy')} to commit before switching branches.`);
             process.exit(1);
           }
