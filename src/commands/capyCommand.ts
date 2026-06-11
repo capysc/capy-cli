@@ -541,14 +541,17 @@ export class CapyCommand {
           const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
           const keepJson = JSON.stringify(updatedKeep);
 
-          await this.serviceClient.pushSecrets(
+          const initPushResult = await this.serviceClient.pushSecrets(
             projectResult.project_id,
             keepJson,
             envBlob,
             initBranch,
           );
 
-          this.fileManager.writeKeepFile(updatedKeep);
+          // Prefer the server's copy — it carries server-assigned changed_at
+          this.fileManager.writeKeepFile(
+            SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep),
+          );
 
           // Cache encrypted blob locally
           const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
@@ -1507,12 +1510,15 @@ export class CapyCommand {
     // in local-only mode, where there is no remote. The local writes below
     // (keep cache, encrypted .env, sync-state) ARE the commit.
     if (action === 'commit_local' && !localMode) {
-      await this.serviceClient.pushSecrets(
+      const pushResult = await this.serviceClient.pushSecrets(
         projectState.projectId!,
         JSON.stringify(finalKeep),
         envBlob,
         branch,
       );
+      // Re-write keep.lock with the server's copy — it carries the
+      // server-assigned changed_at timestamps for this push.
+      this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult.keep_file, finalKeep));
     }
 
     writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, envBlob);

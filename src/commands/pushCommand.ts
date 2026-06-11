@@ -200,14 +200,15 @@ export class PushCommand {
     // keep_hash is computed locally; the server returns the same value on a
     // push. In local-only mode there is no push.
     const localKeepHash = SyncEngine.computeKeepHash(updatedKeep, branch);
-    const cacheKeepHash = localMode
-      ? localKeepHash
-      : (await this.serviceClient.pushSecrets(
+    const pushResult = localMode
+      ? null
+      : await this.serviceClient.pushSecrets(
           projectState.projectId!,
           keepFileContent,
           envBlob,
           branch,
-        )).keep_hash;
+        );
+    const cacheKeepHash = pushResult ? pushResult.keep_hash : localKeepHash;
     this.debug('push complete', { localMode, cacheKeepHash });
 
     // Cache encrypted blob locally
@@ -219,8 +220,9 @@ export class PushCommand {
     );
     this.debug('keep cache written');
 
-    // Update keep.lock with new state
-    this.fileManager.writeKeepFile(updatedKeep);
+    // Update keep.lock with new state, preferring the server's copy (it
+    // carries server-assigned changed_at timestamps)
+    this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult?.keep_file, updatedKeep));
     this.debug('keep.lock written to disk');
 
     // Update sync state with keep_hash so direction detection works

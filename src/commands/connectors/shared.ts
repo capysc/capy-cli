@@ -179,7 +179,8 @@ export async function writeAndSync(
   const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
 
   writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
-  fileManager.writeKeepFile(finalKeep);
+  // Prefer the server's copy — it carries server-assigned changed_at
+  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep));
   fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
   const existingSyncState = pm.readSyncState();

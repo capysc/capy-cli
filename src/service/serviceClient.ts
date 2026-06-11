@@ -361,13 +361,16 @@ export class ServiceClient {
 
   /**
    * v3: Push a single env blob to content-addressed storage.
+   * The response's keep_file (when the server sends one) is the pushed
+   * keep.lock with server-assigned changed_at timestamps — callers should
+   * adopt it as the local keep.lock (SyncEngine.adoptServerKeep).
    */
   async pushSecrets(
     projectId: string,
     keepFile: string,
     envBlob: string,
     branch: string,
-  ): Promise<{ keep_hash: string }> {
+  ): Promise<{ keep_hash: string; keep_file?: string }> {
     return this.request('POST', `/secrets/${projectId}`, {
       keep_file: keepFile,
       env_blob: envBlob,

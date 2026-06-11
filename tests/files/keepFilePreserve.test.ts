@@ -56,6 +56,32 @@ describe('FileManager.writeKeepFile preserves extras', () => {
     expect(round!.variables.UNTOUCHED[0].connector).toBeUndefined();
   });
 
+  test('changed_at round-trips through write/read per branch entry', () => {
+    const keep: KeepFile = {
+      version: '3.0',
+      org_id: 'org-1',
+      project_id: 'proj-1',
+      project_name: 'demo',
+      variables: {
+        API_KEY: [
+          { resource_id: 'r1', branch: 'development', value_hash: 'hd', changed_at: '2026-06-10T12:00:00.000Z' },
+          { resource_id: 'r2', branch: 'prod', value_hash: 'hp', changed_at: '2026-01-15T08:30:00.000Z' },
+          { resource_id: 'r3', branch: 'staging', value_hash: 'hs' },
+        ],
+      },
+    };
+
+    const fm = new FileManager(TEST_DIR);
+    fm.writeKeepFile(keep);
+
+    const pm = new ProjectManager(TEST_DIR);
+    const round = pm.readKeepFile()!;
+    const byBranch = Object.fromEntries(round.variables.API_KEY.map((e) => [e.branch, e]));
+    expect(byBranch.development.changed_at).toBe('2026-06-10T12:00:00.000Z');
+    expect(byBranch.prod.changed_at).toBe('2026-01-15T08:30:00.000Z');
+    expect(byBranch.staging.changed_at).toBeUndefined();
+  });
+
   test('multiple branch entries each keep their connector independently', () => {
     const devConnector: ConnectorMetadata = {
       provider: 'stripe', source: 'cli', mode: 'test',
