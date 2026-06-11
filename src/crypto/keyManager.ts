@@ -268,12 +268,14 @@ export function decryptMasterKey(
 }
 
 /**
- * Derives the inner wrapping key for the master key M.
- * This is one half of the double-wrap: AES-GCM(M, innerKey).
- * The other half is the KMS outer layer added by the service.
+ * LEGACY inner wrapping key for the master key M — kept ONLY so existing
+ * blobs can be unwrapped once and migrated. Do not key new writes with this.
  *
- * The inner key alone cannot unwrap M — the KMS outer layer must be
- * stripped first via the service's co-decrypt endpoint.
+ * Both inputs are public identifiers the service knows, so the service could
+ * recompute this key and recover M from the co-decrypt output it handles.
+ * New writes use HKDF(K_local) instead (crypto/localKeyRoot.ts) — a
+ * per-machine secret the service never sees. keyResolver.unwrapMasterKey
+ * transparently re-wraps any blob still keyed by this onto K_local.
  */
 export function deriveWrappingKey(userId: string, orgId: string): Buffer {
   return createHash('sha256').update(`${userId}:${orgId}`).digest();

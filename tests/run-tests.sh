@@ -20,6 +20,8 @@ ISOLATED_FILES=(
   tests/crypto/keyResolver.test.ts
   tests/crypto/localKey.test.ts
   tests/crypto/keyStability.test.ts
+  tests/crypto/zeroTrust.test.ts
+  tests/commands/logoutCleanup.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
   tests/commands/decryptCommand.test.ts

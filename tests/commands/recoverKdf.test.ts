@@ -78,12 +78,14 @@ const originalExit = process.exit;
 let RecoverCommand: any;
 let km: typeof import('../../src/crypto/keyManager');
 let gc: typeof import('../../src/config/globalConfig');
+let lkr: typeof import('../../src/crypto/localKeyRoot');
 let Encryptor: typeof import('../../src/crypto/encryptor').Encryptor;
 
 beforeAll(async () => {
   ({ RecoverCommand } = await import('../../src/commands/recoverCommand'));
   km = await import('../../src/crypto/keyManager');
   gc = await import('../../src/config/globalConfig');
+  lkr = await import('../../src/crypto/localKeyRoot');
   ({ Encryptor } = await import('../../src/crypto/encryptor'));
 });
 
@@ -106,14 +108,17 @@ function envBlobForVersion(version: 1 | 2, phrase: string): string {
 }
 
 // Recover the M that recover wrote to disk (strip fake KMS layer, unwrap inner).
-// The inner blob is now AAD-bound (CAP-57), so pass the matching context AAD.
+// The inner blob is AAD-bound and keyed by HKDF(K_local) — recover mints this
+// machine's local.key alongside key.enc, so unwrap with the root it wrote.
 function writtenMasterKey(): Buffer {
   const outer = gc.readMasterKey(ORG, FAKE_USER_ID);
   if (!outer) throw new Error('no key written');
   const inner = outer.replace(/^kms:/, '');
+  const kLocal = gc.readLocalRoot(ORG, FAKE_USER_ID);
+  if (!kLocal) throw new Error('no local.key written');
   return km.decryptMasterKey(
     inner,
-    km.deriveWrappingKey(FAKE_USER_ID, ORG),
+    lkr.deriveLocalInnerKey(kLocal),
     km.masterKeyAAD(FAKE_USER_ID, ORG),
   );
 }

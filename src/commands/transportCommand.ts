@@ -1,7 +1,6 @@
 import { resolveOrgContext } from '../core/orgContext';
-import { readMasterKey } from '../config/globalConfig';
-import { decryptMasterKey, deriveWrappingKey, masterKeyAAD } from '../crypto/keyManager';
-import { wrapAndSaveMasterKey } from '../crypto/keyResolver';
+import { hasOrgKey } from '../config/globalConfig';
+import { unwrapMasterKey } from '../crypto/keyResolver';
 import {
   generateInviteToken,
   innerWrap,
@@ -29,30 +28,23 @@ export class TransportCommand {
         process.exit(1);
       }
 
-      const encryptedM = readMasterKey(orgId, userId);
-      if (!encryptedM) {
+      if (!hasOrgKey(orgId, userId)) {
         console.error('No master key found for this organization on this machine.');
         process.exit(1);
       }
 
+      // Unwrap M (double-wrapped: KMS outer + K_local inner). unwrapMasterKey
+      // handles legacy blobs and transparently re-wraps them.
       let masterKey: Buffer;
       try {
-        const { plaintext: innerBlob } = await serviceClient.coDecrypt(orgId, encryptedM);
-        const wrappingKey = deriveWrappingKey(userId, orgId);
-        masterKey = decryptMasterKey(innerBlob, wrappingKey, masterKeyAAD(userId, orgId));
+        const keyOps = {
+          coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+          wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+        };
+        masterKey = await unwrapMasterKey(orgId, userId, keyOps);
       } catch {
-        try {
-          const wrappingKey = deriveWrappingKey(userId, orgId);
-          masterKey = decryptMasterKey(encryptedM, wrappingKey, masterKeyAAD(userId, orgId));
-          const keyOps = {
-            coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-            wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-          };
-          await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
-        } catch {
-          console.error('Failed to unwrap master key. Re-authenticate and try again.');
-          process.exit(1);
-        }
+        console.error('Failed to unwrap master key. Re-authenticate and try again.');
+        process.exit(1);
       }
 
       // Bind the inner key to the user's own email so only the same WorkOS
