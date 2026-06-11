@@ -68,6 +68,11 @@ export interface DeployStep {
 export interface DeployResult {
   ok: boolean;
   steps: DeployStep[];
+  /**
+   * Free-form block printed after the steps — for one-time follow-up the
+   * user must do by hand (e.g. aws-ssm's task-definition wiring snippet).
+   */
+  epilogue?: string;
 }
 
 export interface DeployContext {

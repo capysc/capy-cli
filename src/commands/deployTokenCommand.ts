@@ -30,6 +30,7 @@ const PLATFORM_TO_CONNECTOR: Record<string, string> = {
   'cloudflare-pages': 'cf-pages',
   'vercel': 'vercel',
   'github-actions': 'gh-actions',
+  'aws-ecs': 'aws-ssm',
   // Future:
   // 'fly':              'fly',
 };
