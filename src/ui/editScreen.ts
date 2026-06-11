@@ -2,6 +2,7 @@
 // detail view. Built on raw stdin + ANSI codes so we don't add a TUI dependency.
 
 import { formatSnippet } from '../commands/statusCommand';
+import { formatRelativeTime } from './relativeTime';
 
 const ESC = '\x1b';
 const HIDE_CURSOR = `${ESC}[?25l`;
@@ -36,6 +37,12 @@ export interface EditRow {
   remoteValue: string | undefined;
   status: 'in sync' | 'local' | 'remote' | 'conflict' | 'unknown';
   updatedLabel: string;
+  /**
+   * keep.lock changed_at for this variable on the active branch (ISO8601,
+   * server-assigned) — when the value last changed server-side. Drives the
+   * UPDATED column's recency label; absent = unknown/never pushed.
+   */
+  changedAt?: string;
 }
 
 export interface EditState {
@@ -52,7 +59,13 @@ export interface EditState {
 }
 
 export interface EditContext {
-  saveLocalEdits: (edits: Record<string, string>) => Promise<void>;
+  /**
+   * Commit (and in server mode, push) the given edits. Resolves to the
+   * server-assigned changed_at per variable for the active branch, taken
+   * from the push response's keep_file — empty in local mode or when the
+   * service didn't return timestamps.
+   */
+  saveLocalEdits: (edits: Record<string, string>) => Promise<Record<string, string>>;
 }
 
 /**
@@ -310,15 +323,18 @@ export class EditScreen {
     this.statusMessage = { text: `${verb} ${editedKeys.length} change(s)…`, isError: false };
     this.draw();
     try {
-      await this.ctx.saveLocalEdits(edits);
+      const changedAtByKey = await this.ctx.saveLocalEdits(edits);
       this.pendingEdits.clear();
-      // After commit, the committed baseline == local for the edited rows.
+      // After commit, the committed baseline == local for the edited rows,
+      // and the UPDATED column picks up the server-assigned changed_at from
+      // the push response (authoritative — not a client-side clock guess).
       for (const k of editedKeys) {
         const row = this.state.rows.find((r) => r.key === k);
         if (row && row.localValue !== undefined) {
+          if (changedAtByKey[k]) row.changedAt = changedAtByKey[k];
           row.remoteValue = row.localValue;
           row.status = this.reclassify(row);
-          row.updatedLabel = this.updatedLabelFor(row.status);
+          row.updatedLabel = this.updatedLabelFor(row);
         }
       }
       this.statusMessage = { text: `Committed ${editedKeys.length} change(s)`, isError: false };
@@ -402,7 +418,7 @@ export class EditScreen {
     if (row) {
       row.localValue = buffer;
       row.status = this.reclassify(row);
-      row.updatedLabel = this.updatedLabelFor(row.status);
+      row.updatedLabel = this.updatedLabelFor(row);
     }
     this.statusMessage = { text: `Edited ${key} (uncommitted)`, isError: false };
     this.draw();
@@ -447,10 +463,14 @@ export class EditScreen {
 
   // Local-only reclassification. We don't refetch remote, so the remote side
   // is treated as unchanged from when the TUI loaded.
-  /** UPDATED-column label for a status, mode-aware. */
-  private updatedLabelFor(status: EditRow['status']): string {
-    if (this.state.localMode) return status === 'in sync' ? 'committed' : 'uncommitted';
-    return status === 'in sync' ? 'in sync' : status;
+  /**
+   * UPDATED-column label, mode-aware. Local mode has no server timestamps,
+   * so it keeps the committed/uncommitted wording; otherwise show when the
+   * value last changed server-side.
+   */
+  private updatedLabelFor(row: EditRow): string {
+    if (this.state.localMode) return row.status === 'in sync' ? 'committed' : 'uncommitted';
+    return row.changedAt ? formatRelativeTime(row.changedAt) : NO_VALUE;
   }
 
   private reclassify(row: EditRow): EditRow['status'] {
