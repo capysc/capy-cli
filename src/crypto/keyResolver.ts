@@ -109,9 +109,10 @@ export async function unwrapMasterKey(
 
     // Legacy inner key — unwrap, then migrate the blob onto K_local.
     const masterKey = decryptMasterKey(innerBlob, legacyInnerKey, innerAAD);
-    await wrapAndSaveMasterKey(masterKey, orgId, userId, service).catch(() => {
-      // Best-effort: next run retries the migration.
-    });
+    const migrated = await wrapAndSaveMasterKey(masterKey, orgId, userId, service)
+      .then(() => true)
+      .catch(() => false); // Best-effort: next run retries the migration.
+    if (migrated) notifyKeyStorageUpgraded();
     return masterKey;
   } catch (err) {
     // 403 = membership revoked — do NOT fall through to legacy path.
@@ -141,12 +142,32 @@ export async function unwrapMasterKey(
   }
 
   // Legacy blob unwrapped — re-wrap (K_local inner + KMS outer) for future runs
-  await wrapAndSaveMasterKey(masterKey, orgId, userId, service).catch(() => {
-    // Re-wrap failed (server unavailable?) — proceed with the unwrapped M this
-    // time. Next run will retry migration.
-  });
+  const migrated = await wrapAndSaveMasterKey(masterKey, orgId, userId, service)
+    .then(() => true)
+    .catch(() => false);
+  // Re-wrap failure (server unavailable?) — proceed with the unwrapped M this
+  // time. Next run will retry migration. No notice: the legacy blob is still
+  // readable by every version.
+  if (migrated) notifyKeyStorageUpgraded();
 
   return masterKey;
+}
+
+/**
+ * One-time stderr notice after a legacy key.enc is re-keyed onto K_local.
+ * The migration is one-way: binaries that predate K_local cannot read the
+ * re-wrapped blob, so a downgrade on this machine loses access until the
+ * user re-redeems an invite or runs seed-phrase recovery. Printed only when
+ * the re-wrap actually persisted — a failed re-wrap leaves the legacy blob
+ * readable by every version, so there is nothing to warn about. Migration
+ * happens once per (org, user) per machine, which makes this self-limiting.
+ */
+function notifyKeyStorageUpgraded(): void {
+  console.error(
+    'capy upgraded this machine\'s key storage. Older capy versions on this machine ' +
+    'can no longer read it — avoid downgrading below this version.\n' +
+    '(If you must downgrade: restore access with capy redeem or seed-phrase recovery.)',
+  );
 }
 
 /**
