@@ -1301,7 +1301,9 @@ export class CapyCommand {
     const pinnedPlaintext: Record<string, string> = {};
     let needsFetch = false;
     for (const variable of Object.keys(pinned)) {
-      if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinned[variable]) {
+      // Presence is `!== undefined`: '' is a valid pinned value, and a falsy
+      // check forces a remote fetch on every sync for empty variables.
+      if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinned[variable]) {
         pinnedPlaintext[variable] = localPlaintext[variable];
       } else {
         needsFetch = true;
@@ -1321,7 +1323,7 @@ export class CapyCommand {
         if (blob?.env_file) {
           const encrypted = this.fileManager.parseEnvContent(blob.env_file);
           for (const [key, value] of Object.entries(encrypted)) {
-            if (pinned[key] && !pinnedPlaintext[key]) {
+            if (pinned[key] && pinnedPlaintext[key] === undefined) {
               try {
                 pinnedPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
               } catch (decryptErr) {
@@ -1684,9 +1686,13 @@ export class CapyCommand {
     for (const [variable, choice] of Object.entries(choices)) {
       if (choice === 'pinned') {
         const pinnedHash = pinned[variable];
-        if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinnedHash) {
+        // `!== undefined` like the 'local'/'remote' arms below: '' is a valid
+        // pinned value. With a falsy check, choosing "pinned" for an empty
+        // variable set nothing here, and the keep.lock cleanup that removes
+        // vars absent from finalEnv then silently deleted the variable.
+        if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) {
           result[variable] = localPlaintext[variable];
-        } else if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
+        } else if (remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash) {
           result[variable] = remotePlaintext[variable];
         }
       } else if (choice === 'local' && localPlaintext[variable] !== undefined) {
