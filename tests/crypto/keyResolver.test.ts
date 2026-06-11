@@ -1,6 +1,6 @@
 import { mock, describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
-import { join } from 'path';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
+import { join, dirname } from 'path';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 // Mock homedir to use a temp directory — must come before any import that uses os.homedir()
@@ -27,6 +27,8 @@ let readMasterKey: typeof import('../../src/config/globalConfig').readMasterKey;
 let saveLocalRoot: typeof import('../../src/config/globalConfig').saveLocalRoot;
 let readLocalRoot: typeof import('../../src/config/globalConfig').readLocalRoot;
 let hasLocalRoot: typeof import('../../src/config/globalConfig').hasLocalRoot;
+let getLocalRootPath: typeof import('../../src/config/globalConfig').getLocalRootPath;
+let wrapAndSaveMasterKey: typeof import('../../src/crypto/keyResolver').wrapAndSaveMasterKey;
 let resolveProjectKey: typeof import('../../src/crypto/keyResolver').resolveProjectKey;
 let resolveFromSeedPhrase: typeof import('../../src/crypto/keyResolver').resolveFromSeedPhrase;
 let hasOrgKey: typeof import('../../src/crypto/keyResolver').hasOrgKey;
@@ -51,8 +53,10 @@ beforeAll(async () => {
   saveLocalRoot = gc.saveLocalRoot;
   readLocalRoot = gc.readLocalRoot;
   hasLocalRoot = gc.hasLocalRoot;
+  getLocalRootPath = gc.getLocalRootPath;
 
   const kr = await import('../../src/crypto/keyResolver');
+  wrapAndSaveMasterKey = kr.wrapAndSaveMasterKey;
   resolveProjectKey = kr.resolveProjectKey;
   resolveFromSeedPhrase = kr.resolveFromSeedPhrase;
   hasOrgKey = kr.hasOrgKey;
@@ -254,6 +258,54 @@ describe('KeyResolver', () => {
       const recovered = decryptMasterKey(inner2, deriveLocalInnerKey(rootAfterFailure), masterKeyAAD(user, org));
       expect(recovered.equals(masterKey)).toBe(true);
       expect(() => decryptMasterKey(inner2, deriveWrappingKey(user, org), masterKeyAAD(user, org))).toThrow();
+    });
+
+    it('concurrent wraps converge on a single root (no orphaned blob)', async () => {
+      const org = 'org_race';
+      const user = 'user_race';
+      // Two concurrent wraps on a machine with no root yet, with skewed
+      // network latency so the local.key writes and key.enc writes can
+      // interleave across the wrapOuterLayer await. Whatever the
+      // interleaving, the invariant is: the blob on disk opens under the
+      // root on disk.
+      const svc = (delayMs: number) => ({
+        coDecrypt: mockKeyServiceOps().coDecrypt,
+        wrapOuterLayer: async (_o: string, pt: string) => {
+          await new Promise((r) => setTimeout(r, delayMs));
+          return KMS_PREFIX + pt;
+        },
+      });
+      await Promise.all([
+        wrapAndSaveMasterKey(masterKey, org, user, svc(30)),
+        wrapAndSaveMasterKey(masterKey, org, user, svc(0)),
+      ]);
+
+      const root = readLocalRoot(org, user)!;
+      const inner = innerOf(readMasterKey(org, user)!);
+      const recovered = decryptMasterKey(inner, deriveLocalInnerKey(root), masterKeyAAD(user, org));
+      expect(recovered.equals(masterKey)).toBe(true);
+    });
+
+    it('recovers from a corrupt local.key by minting a fresh root', async () => {
+      const org = 'org_corrupt_root';
+      const user = 'user_corrupt_root';
+      // Plant a corrupt (truncated) local.key and a legacy blob
+      const rootPath = getLocalRootPath(org, user);
+      mkdirSync(dirname(rootPath), { recursive: true, mode: 0o700 });
+      writeFileSync(rootPath, 'AAAA\n', { mode: 0o600 }); // 3 bytes — invalid
+      const legacyInner = encryptMasterKey(masterKey, deriveWrappingKey(user, org), masterKeyAAD(user, org));
+      saveMasterKey(org, KMS_PREFIX + legacyInner, user);
+
+      const key = await resolveProjectKey(org, projectId, user, mockKeyServiceOps());
+      expect(key).toBe(deriveProjectKey(masterKey, projectId, org));
+
+      // A real 32-byte root replaced the corrupt file and keys the new blob —
+      // never a zero-length/weak root
+      const root = readLocalRoot(org, user)!;
+      expect(root.length).toBe(32);
+      const inner = innerOf(readMasterKey(org, user)!);
+      const recovered = decryptMasterKey(inner, deriveLocalInnerKey(root), masterKeyAAD(user, org));
+      expect(recovered.equals(masterKey)).toBe(true);
     });
 
     it('seed-phrase resolution never touches K_local', () => {

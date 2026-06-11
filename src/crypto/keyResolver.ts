@@ -23,6 +23,7 @@ import {
   readLocalKeyRecord,
   readLocalRoot,
   saveLocalRoot,
+  saveLocalRootExclusive,
   LOCAL_ORG_ID,
 } from '../config/globalConfig';
 import { generateLocalRoot, deriveLocalInnerKey } from './localKeyRoot';
@@ -163,6 +164,36 @@ export async function resolveProjectKey(
 }
 
 /**
+ * Returns this machine's K_local, minting one if absent.
+ *
+ * Minting uses exclusive create (O_EXCL) so two processes racing through a
+ * first-run migration converge on ONE root. Without it, the network await in
+ * wrapAndSaveMasterKey lets the two saveLocalRoot writes and the two
+ * saveMasterKey writes interleave so the surviving local.key and the
+ * surviving key.enc come from different processes — an orphaned blob that
+ * costs the user a re-invite. With O_EXCL exactly one mint wins and the
+ * loser adopts the winner's root, so every subsequent key.enc write is keyed
+ * by the root that is actually on disk.
+ */
+function loadOrMintLocalRoot(orgId: string, userId: string): Buffer {
+  const existing = readLocalRoot(orgId, userId);
+  if (existing) return existing;
+
+  const fresh = generateLocalRoot();
+  if (saveLocalRootExclusive(orgId, fresh, userId)) return fresh;
+
+  // Lost the create race — adopt the winner's root.
+  const winner = readLocalRoot(orgId, userId);
+  if (winner) return winner;
+
+  // A file exists but doesn't parse as a 32-byte root (corrupt/truncated
+  // write). Any blob keyed by what that file used to hold is already
+  // unrecoverable; replacing it with a fresh root is the correct recovery.
+  saveLocalRoot(orgId, fresh, userId);
+  return fresh;
+}
+
+/**
  * Double-wraps M for local storage.
  * Inner layer: AES-GCM with HKDF(K_local) — a per-machine secret the service
  * never sees (NOT the legacy SHA256(userId:orgId), which it could recompute)
@@ -171,7 +202,9 @@ export async function resolveProjectKey(
  * Reuses this machine's K_local if one exists; mints one otherwise. local.key
  * is persisted BEFORE the re-wrapped blob: a crash between the two writes
  * leaves key.enc on its old key and the next run self-heals, whereas the
- * reverse order could write a key.enc whose root was never saved.
+ * reverse order could write a key.enc whose root was never saved. The root is
+ * re-read after the network await so a concurrent migration that won the mint
+ * race cannot leave key.enc keyed by a root that lost it.
  */
 export async function wrapAndSaveMasterKey(
   masterKey: Buffer,
@@ -179,14 +212,24 @@ export async function wrapAndSaveMasterKey(
   userId: string,
   service: KeyServiceOps,
 ): Promise<void> {
-  let kLocal = readLocalRoot(orgId, userId);
-  if (!kLocal) {
-    kLocal = generateLocalRoot();
-    saveLocalRoot(orgId, kLocal, userId);
-  }
-  const innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(userId, orgId));
+  let kLocal = loadOrMintLocalRoot(orgId, userId);
+  let innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(userId, orgId));
   // innerWrapped is already base64 — pass directly to wrapOuterLayer
   const outerWrapped = await service.wrapOuterLayer(orgId, innerWrapped);
+
+  // The await above yields: a concurrent process may have replaced local.key
+  // (corrupt-root recovery is the one path that overwrites). Never write a
+  // key.enc keyed by a root that is no longer on disk — re-check and re-wrap
+  // under the current root if it moved.
+  const currentRoot = readLocalRoot(orgId, userId);
+  if (currentRoot && !currentRoot.equals(kLocal)) {
+    kLocal = currentRoot;
+    innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(userId, orgId));
+    const reOuter = await service.wrapOuterLayer(orgId, innerWrapped);
+    saveMasterKey(orgId, reOuter, userId);
+    return;
+  }
+
   saveMasterKey(orgId, outerWrapped, userId);
 }
 

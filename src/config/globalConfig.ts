@@ -41,15 +41,43 @@ export function getLocalRootPath(orgId: string, userId?: string): string {
   return join(base, 'local.key');
 }
 
+const K_LOCAL_BYTES = 32;
+
 /** Persists K_local (raw 32 bytes, base64) with mode 0600. */
 export function saveLocalRoot(orgId: string, kLocal: Buffer, userId?: string): void {
   writeSecureFile(getLocalRootPath(orgId, userId), kLocal.toString('base64'));
 }
 
-/** Reads K_local, or null if this machine has never minted one for this org+user. */
+/**
+ * Persists K_local only if no local.key exists yet (O_EXCL). Returns false if
+ * the file already exists. This is the arbitration primitive for concurrent
+ * first-run migrations: exactly one process wins the create; the loser must
+ * re-read and adopt the winner's root, or both could wrap key.enc under
+ * different roots and orphan the blob.
+ */
+export function saveLocalRootExclusive(orgId: string, kLocal: Buffer, userId?: string): boolean {
+  const path = getLocalRootPath(orgId, userId);
+  ensureDir(join(path, '..'));
+  try {
+    writeFileSync(path, kLocal.toString('base64'), { mode: 0o600, flag: 'wx' });
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'EEXIST') return false;
+    throw err;
+  }
+}
+
+/**
+ * Reads K_local, or null if this machine has never minted one for this
+ * org+user. A file that does not decode to exactly 32 bytes (truncated or
+ * corrupt write) is treated as absent: deriving from a short buffer would
+ * silently wrap M under a weak or constant key.
+ */
 export function readLocalRoot(orgId: string, userId?: string): Buffer | null {
   const content = readFileOrNull(getLocalRootPath(orgId, userId));
-  return content ? Buffer.from(content.trim(), 'base64') : null;
+  if (!content) return null;
+  const kLocal = Buffer.from(content.trim(), 'base64');
+  return kLocal.length === K_LOCAL_BYTES ? kLocal : null;
 }
 
 export function hasLocalRoot(orgId: string, userId?: string): boolean {

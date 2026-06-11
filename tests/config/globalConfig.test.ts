@@ -30,6 +30,7 @@ let setForceLoginMarker: typeof import('../../src/config/globalConfig').setForce
 let consumeForceLoginMarker: typeof import('../../src/config/globalConfig').consumeForceLoginMarker;
 let getLocalRootPath: typeof import('../../src/config/globalConfig').getLocalRootPath;
 let saveLocalRoot: typeof import('../../src/config/globalConfig').saveLocalRoot;
+let saveLocalRootExclusive: typeof import('../../src/config/globalConfig').saveLocalRootExclusive;
 let readLocalRoot: typeof import('../../src/config/globalConfig').readLocalRoot;
 let hasLocalRoot: typeof import('../../src/config/globalConfig').hasLocalRoot;
 
@@ -53,6 +54,7 @@ beforeAll(async () => {
   consumeForceLoginMarker = mod.consumeForceLoginMarker;
   getLocalRootPath = mod.getLocalRootPath;
   saveLocalRoot = mod.saveLocalRoot;
+  saveLocalRootExclusive = mod.saveLocalRootExclusive;
   readLocalRoot = mod.readLocalRoot;
   hasLocalRoot = mod.hasLocalRoot;
 });
@@ -274,6 +276,30 @@ describe('GlobalConfig', () => {
       saveLocalRoot(ORG, other, 'user_other');
       expect(readLocalRoot(ORG, 'user_other')!.equals(other)).toBe(true);
       expect(readLocalRoot(ORG, USER)!.equals(other)).toBe(false);
+    });
+
+    it('treats a corrupt local.key as absent (never a weak root)', () => {
+      const { writeFileSync, mkdirSync } = require('fs');
+      const { dirname } = require('path');
+      // Whitespace-only: decodes to 0 bytes — must NOT become a usable root
+      const corruptPath = getLocalRootPath(ORG, 'user_corrupt');
+      mkdirSync(dirname(corruptPath), { recursive: true, mode: 0o700 });
+      writeFileSync(corruptPath, '  \n', { mode: 0o600 });
+      expect(readLocalRoot(ORG, 'user_corrupt')).toBeNull();
+      // Truncated: decodes to fewer than 32 bytes
+      const shortPath = getLocalRootPath(ORG, 'user_short');
+      mkdirSync(dirname(shortPath), { recursive: true, mode: 0o700 });
+      writeFileSync(shortPath, require('crypto').randomBytes(8).toString('base64'), { mode: 0o600 });
+      expect(readLocalRoot(ORG, 'user_short')).toBeNull();
+    });
+
+    it('exclusive save wins once, then refuses', () => {
+      const a = require('crypto').randomBytes(32);
+      const b = require('crypto').randomBytes(32);
+      expect(saveLocalRootExclusive(ORG, a, 'user_excl')).toBe(true);
+      expect(saveLocalRootExclusive(ORG, b, 'user_excl')).toBe(false);
+      // The winner's root is what's on disk
+      expect(readLocalRoot(ORG, 'user_excl')!.equals(a)).toBe(true);
     });
   });
 });
