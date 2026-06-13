@@ -286,12 +286,13 @@ async function runPicker(
     options = ans;
   } else if (adapter.id === 'vercel') {
     // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
-    // but capy pushes SECRETS_BLOB + PROJECT_KEY into the chosen Vercel
-    // environment via the vercel CLI. Capture the app dir, which Vercel
-    // environment these secrets go to, and — for Preview — exactly which git
-    // branch that Preview env is wired to. The Preview scope is a GIT branch
-    // Vercel knows about, which is NOT necessarily your capy branch name nor
-    // the branch you're checked out on, so we ask explicitly and default to
+    // but capy pushes each var as a plaintext Environment Variable into the
+    // chosen Vercel environment via the vercel CLI — so the build reads them
+    // natively with no `capy run` decrypt step. Capture the app dir, which
+    // Vercel environment these vars go to, and — for Preview — exactly which
+    // git branch that Preview env is wired to. The Preview scope is a GIT
+    // branch Vercel knows about, which is NOT necessarily your capy branch name
+    // nor the branch you're checked out on, so we ask explicitly and default to
     // the capy branch.
     const ans = await inquirer.prompt([
       {
@@ -365,10 +366,18 @@ async function runPicker(
   // build-time prefixes for cf-pages). The user is the authority: they can
   // toggle anything in or out. No silent exclusion.
   const cls = classify(keep.variables);
-  const presumedRelevant =
-    adapter.varKind === 'build-time' ? cls.buildTime : cls.runtime;
+  const presumedRelevant = adapter.presumeVars
+    ? adapter.presumeVars(cls)
+    : adapter.varKind === 'build-time'
+      ? cls.buildTime
+      : cls.runtime;
   const defaultPicks = existing?.vars ?? presumedRelevant;
   const verb = adapter.varKind === 'build-time' ? 'inline into' : 'push to';
+  const presetLabel = adapter.presumeVars
+    ? 'all vars'
+    : adapter.varKind === 'build-time'
+      ? 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_'
+      : 'non-public-prefixed';
   if (keep.variables.length === 0) {
     throw new Error(`keep.lock has no variables — nothing to deploy.`);
   }
@@ -376,7 +385,7 @@ async function runPicker(
     {
       type: 'checkbox',
       name: 'vars',
-      message: `Which vars to ${verb} ${adapter.label}? (pre-selected: ${adapter.varKind === 'build-time' ? 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_' : 'non-public-prefixed'})`,
+      message: `Which vars to ${verb} ${adapter.label}? (pre-selected: ${presetLabel})`,
       instructions: CHECKBOX_INSTRUCTIONS,
       theme: CHECKBOX_THEME,
       choices: keep.variables.map((v) => ({
@@ -641,7 +650,11 @@ export async function deployCommand(
         name: `${adapter.id}-adhoc`,
         kind: adapter.id,
         branch: keep.branches.includes('production') ? 'production' : keep.branches[0] ?? 'development',
-        vars: adapter.varKind === 'build-time' ? cls.buildTime : cls.runtime,
+        vars: adapter.presumeVars
+          ? adapter.presumeVars(cls)
+          : adapter.varKind === 'build-time'
+            ? cls.buildTime
+            : cls.runtime,
         options: detected.options ?? {},
         ...(adapter.ciOnly ? { mode: 'ci' as const } : {}),
       };
@@ -1093,12 +1106,19 @@ function buildDeployPrBody(target: TargetConfig): string {
         `time. capy does **not** ship code from the local machine — only the`,
         `keep.lock pin lands here.`,
       ].join('\n')
-    : [
-        `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
-        `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
-        `the secrets that were pushed above. capy itself does **not** ship code`,
-        `from the local machine in CI mode — only the keep.lock pin lands here.`,
-      ].join('\n');
+    : adapter?.ciOnly
+      ? [
+          `Merging this PR is the deploy signal. ${adapterLabel}'s git integration`,
+          `builds and deploys on merge, reading the env vars pushed above directly`,
+          `from its store — no decrypt step at build. capy does **not** ship code`,
+          `from the local machine — only the keep.lock pin lands here.`,
+        ].join('\n')
+      : [
+          `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
+          `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
+          `the secrets that were pushed above. capy itself does **not** ship code`,
+          `from the local machine in CI mode — only the keep.lock pin lands here.`,
+        ].join('\n');
 
   return [
     `Automated deploy PR opened by \`capy deploy\`.`,
