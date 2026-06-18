@@ -253,15 +253,30 @@ export class CapyError extends Error {
   }
 }
 
+// NOTE: duplicated verbatim in service/src/errorCodes.ts "for now" — keep in
+// sync until cli (a submodule) and @capy/service share a module. Per cardinal
+// Rule 4, control flow keys off these codes, never off message text.
 export const ERROR_CODES = {
   AUTH_FAILED: 'AUTH_FAILED',
   NO_ENV_FILE: 'NO_ENV_FILE',
   NO_KEEP_FILE: 'NO_KEEP_FILE',
   PERMISSION_DENIED: 'PERMISSION_DENIED',
+  MEMBERSHIP_REVOKED: 'MEMBERSHIP_REVOKED',
   NETWORK_ERROR: 'NETWORK_ERROR',
   ENCRYPTION_ERROR: 'ENCRYPTION_ERROR',
+  // AES-GCM auth-tag failure: wrong decryption key for this ciphertext.
+  DECRYPT_KEY_MISMATCH: 'DECRYPT_KEY_MISMATCH',
   INVALID_FORMAT: 'INVALID_FORMAT',
   CONFLICT_RESOLUTION: 'CONFLICT_RESOLUTION',
   SERVICE_ERROR: 'SERVICE_ERROR',
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
+  // not-found family — replaces server-prose string matching in serviceClient
+  PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
+  BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
+  SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
+  NO_SECRETS: 'NO_SECRETS',
+  DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
+  ORG_NOT_FOUND: 'ORG_NOT_FOUND',
 } as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

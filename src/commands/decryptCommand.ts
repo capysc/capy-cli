@@ -14,6 +14,7 @@ import {
   readRecoverySession,
   saveRecoverySession,
 } from '../config/globalConfig';
+import { ERROR_CODES } from '../types/index';
 
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -100,7 +101,7 @@ export class DecryptCommand {
         try {
           decrypted = decryptWith(masterKeyHex);
         } catch (error: any) {
-          if (error?.message?.includes("different project's key")) wrongSeedExit();
+          if (error?.code === ERROR_CODES.DECRYPT_KEY_MISMATCH) wrongSeedExit();
           throw error;
         }
       } else {
@@ -125,7 +126,7 @@ export class DecryptCommand {
             resolved = { hex: mkHex, decrypted: decryptWith(mkHex) };
             break;
           } catch (error: any) {
-            if (error?.message?.includes("different project's key")) continue;
+            if (error?.code === ERROR_CODES.DECRYPT_KEY_MISMATCH) continue;
             throw error;
           }
         }
