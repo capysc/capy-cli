@@ -865,6 +865,10 @@ export async function deployCommand(
   // Track state we'll need to unwind in CI mode after the PR is opened.
   let originalBranch: string | null = null;
   let stashedOthers = false;
+  // CI mode only: did keep.lock actually change vs origin/<base>? This gates the
+  // deploy PR (and the branch push) — but NOT the secrets push. Deploying the
+  // existing, unchanged secrets to a target is the base case, not a no-op.
+  let keepLockChanged = false;
 
   const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
 
@@ -932,24 +936,25 @@ export async function deployCommand(
     // 5. Replay the keep.lock content onto the new branch.
     writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
 
-    // 6. If the replayed keep.lock matches what's already at origin/<base>,
-    //    there's nothing to deploy — the target is already at this secrets
-    //    snapshot. Treat it as a clean no-op instead of opening an empty PR.
-    if (!hasKeepLockChanges(cwd)) {
+    // 6. Whether keep.lock changed decides only whether we open a deploy PR —
+    //    NOT whether we push secrets. An already-set-up keep.lock that matches
+    //    origin/<base> is still a real deploy: the target may be brand-new, or
+    //    the same secrets simply need (re-)pushing. So an unchanged keep.lock
+    //    skips the commit + PR, but the secrets push further down still runs.
+    keepLockChanged = hasKeepLockChanges(cwd);
+    if (keepLockChanged) {
+      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+      if (!commit.ok) {
+        console.error(`${RED('✗')} ${commit.error}`);
+        await unwindGitState(cwd, originalBranch, stashedOthers);
+        return 1;
+      }
+      console.log(`  ${GREEN('✓')} commit  ${msg}`);
+    } else {
       console.log(
-        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — nothing to deploy.`,
+        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — deploying secrets only (no PR).`,
       );
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 0;
     }
-
-    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-    if (!commit.ok) {
-      console.error(`${RED('✗')} ${commit.error}`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
-    }
-    console.log(`  ${GREEN('✓')} commit  ${msg}`);
   } else if (gitOk && keepLockDirty) {
     // Direct mode: stay on current branch. Stash WIP except keep.lock so
     // the deploy ships from HEAD + keep.lock, not WIP.
@@ -1013,9 +1018,10 @@ export async function deployCommand(
     return 1;
   }
 
-  // Direct mode: deploy is done. Pop the stash so the user's WIP is back
-  // in their working tree. (CI mode does this after the PR step below.)
-  if (mode === 'direct') {
+  // Deploy is done; restore the user's branch + WIP now for direct mode, and
+  // for CI mode when keep.lock didn't change (secrets-only, no PR to open).
+  // CI mode WITH a keep.lock change unwinds after the PR step below.
+  if (mode === 'direct' || !keepLockChanged) {
     await unwindGitState(cwd, originalBranch, stashedOthers);
   }
 
@@ -1024,7 +1030,7 @@ export async function deployCommand(
   // PR is opened (or fails), we always try to return the user to the branch
   // they started on and restore any changes we stashed — even on partial
   // failure — so a half-finished `capy deploy` never leaves them stranded.
-  if (mode === 'ci' && !options.dryRun) {
+  if (mode === 'ci' && !options.dryRun && keepLockChanged) {
     const branchNow = currentBranch(cwd);
     if (!branchNow) {
       console.error(`${RED('✗')} could not resolve current branch for push`);
