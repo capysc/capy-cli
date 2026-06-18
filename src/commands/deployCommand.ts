@@ -37,6 +37,7 @@ import {
   fetchRemoteBranch,
 } from '../deploy/git';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
+import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
 import { classify } from '../deploy/classify';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
 import { keypressConfirm } from '../ui/keypressConfirm';
@@ -358,6 +359,55 @@ async function runPicker(
       },
     ]);
     options = ans;
+  } else if (adapter.id === 'aws-ssm') {
+    // Show the live name transformation in the naming prompt so the
+    // env-var ↔ parameter mapping is never abstract.
+    const exampleVar =
+      classify(keep.variables).runtime[0] ?? 'DATABASE_URL';
+    const ans = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'region',
+        message: 'AWS region:',
+        default:
+          existingOpts.region ?? detectedOpts.region ?? detectAwsRegion() ?? 'us-east-1',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'pathPrefix',
+        message: 'Parameter path prefix:',
+        default:
+          existingOpts.pathPrefix ??
+          detectedOpts.pathPrefix ??
+          `/capy/${basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-')}/`,
+        validate: (v: string) =>
+          /^\/[a-zA-Z0-9_.\-/]*\/$/.test(v.trim())
+            ? true
+            : "must start and end with '/' (e.g. /capy/prod/)",
+        filter: (v: string) => v.trim(),
+      },
+      {
+        type: 'list',
+        name: 'naming',
+        message: 'Parameter naming:',
+        theme: LIST_THEME,
+        choices: [
+          {
+            name: `verbatim    ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'verbatim')}`)}`,
+            value: 'verbatim',
+            short: 'verbatim',
+          },
+          {
+            name: `kebab-case  ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'kebab')}`)}`,
+            value: 'kebab',
+            short: 'kebab',
+          },
+        ],
+        default: existingOpts.naming ?? detectedOpts.naming ?? 'verbatim',
+      },
+    ]);
+    options = ans;
   }
 
   // 5. Var picking — show every var in keep.lock and pre-select the ones
@@ -402,7 +452,7 @@ async function runPicker(
     mode = 'ci';
   } else {
     const ciHelp =
-      adapter.defaultMode === 'ci'
+      adapter.ciOnly
         ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
         : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
     mode = (await inquirer.prompt([
@@ -504,6 +554,10 @@ function renderResult(result: DeployResult): void {
     console.log(`  ${mark} ${step.label}${detail}${url}`);
   }
   console.log('');
+  if (result.epilogue) {
+    console.log(result.epilogue);
+    console.log('');
+  }
 }
 
 // ── Subcommand: list / remove ──────────────────────────────────────────────
