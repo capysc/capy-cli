@@ -66,6 +66,7 @@ import { FileManager } from '../../src/files/fileManager';
 import { AuthService } from '../../src/auth/authService';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
+import { hashValue } from '../../src/commands/statusCommand';
 
 const MockProjectManager = ProjectManager as any;
 const MockFileManager = FileManager as any;
@@ -243,5 +244,72 @@ describe('CapyCommand — branch/.env invariant', () => {
     // noisy to assert on; the "mismatch DOES exit" test above proves the
     // guard fires. This test proves the guard does NOT fire on a first run.
     expect(true).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CheckoutCommand — torn .capy/branch vs .env header (CAP-215)
+// ---------------------------------------------------------------------------
+// The deadlock: `capy` detects .capy/branch ≠ .env header and tells the user to
+// run `capy checkout <branch>`, but that command is itself blocked by the
+// dirty-tree guard — because the guard diffs the decrypted .env against the
+// STALE .capy/branch instead of the branch the .env ciphertext actually belongs
+// to (the .env header). Any var whose value differs across branches reads as a
+// phantom "uncommitted change", so BOTH recovery commands are unreachable.
+describe('CheckoutCommand — torn branch state (CAP-215)', () => {
+  let exitSpy: any;
+  beforeEach(() => {
+    exitSpy = spyOn(process, 'exit').mockImplementation((_code?: number) => {
+      throw new Error('PROCESS_EXIT');
+    });
+  });
+
+  test('REGRESSION: torn state must not phantom-block checkout — diff .env against its header branch, not stale .capy/branch', async () => {
+    const { fileManager, projectManager, serviceClient } = baseMocks({
+      getDecryptData: mock(() => Promise.resolve({
+        env_content: '',
+        keep_hash: 'h'.repeat(64),
+        keep_file: JSON.stringify({
+          version: '3.0', org_id: 'org-123', project_id: 'proj-123', variables: {},
+        }),
+      })),
+      activeBranch: 'development',                                                   // .capy/branch claims development
+      envMeta: { org_id: 'org-123', project_id: 'proj-123', branch: 'production' },  // .env was encrypted for production
+    });
+    // keep.lock pins TF_VAR_domain_name to a DIFFERENT value on each branch.
+    projectManager.readKeepFile = mock(() => ({
+      version: '3.0', org_id: 'org-123', project_id: 'proj-123', project_name: 'demo',
+      variables: {
+        TF_VAR_domain_name: [
+          { resource_id: 'rid-d', branch: 'development', value_hash: hashValue('dev.example.com') },
+          { resource_id: 'rid-p', branch: 'production', value_hash: hashValue('prod.example.com') },
+        ],
+      },
+    }));
+    // The on-disk .env decrypts to production's value: CLEAN for production,
+    // "dirty" only when (wrongly) compared against the development pin.
+    fileManager.readEncryptedEnvFile = mock(() => ({ TF_VAR_domain_name: 'prod.example.com' }));
+    serviceClient.listBranches = mock(() => Promise.resolve([
+      { name: 'development', is_protected: false },
+      { name: 'production', is_protected: true },
+    ]));
+
+    // Capture the guard's symptom directly. (Asserting on side-effects like
+    // writeEncryptedEnvFile is unreliable: the dirty guard's process.exit(1)
+    // sits inside a bare try/catch, so under test the mocked exit throws and is
+    // swallowed — execution continues even when the guard fired.)
+    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+    exitSpy.mockClear(); // process.exit spy is shared across the file; isolate this test's calls
+
+    const cmd = new CheckoutCommand(true);
+    // This is the recovery command `capy` prints. It must NOT be blocked by a
+    // phantom "uncommitted changes on development (TF_VAR_domain_name)".
+    await cmd.execute('production').catch(() => { /* assert via spies below */ });
+
+    const stderr = errSpy.mock.calls.map(c => c.join(' ')).join('\n');
+    errSpy.mockRestore();
+
+    expect(stderr).not.toContain('uncommitted changes');
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 });
