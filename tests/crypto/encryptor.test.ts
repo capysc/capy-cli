@@ -1,6 +1,21 @@
 import { Encryptor } from '../../src/crypto/encryptor';
+import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 const TEST_KEY = 'test-key-for-encryptor-tests';
+
+/**
+ * Capture the error a failing decrypt throws so tests can assert on its typed
+ * `code` (cardinal Rule 4) rather than the human-readable message, which is
+ * free to change.
+ */
+function decryptError(value: string, key: string): CapyError {
+  try {
+    Encryptor.decrypt(value, key);
+  } catch (e) {
+    return e as CapyError;
+  }
+  throw new Error('expected Encryptor.decrypt to throw');
+}
 
 describe('Encryptor', () => {
   describe('encrypt', () => {
@@ -40,22 +55,22 @@ describe('Encryptor', () => {
       }
     });
 
-    it('throws on wrong key', () => {
+    it('throws a typed DECRYPT_KEY_MISMATCH on wrong key', () => {
       const encrypted = Encryptor.encrypt('secret', TEST_KEY);
-      expect(() => Encryptor.decrypt(encrypted, 'wrong-key')).toThrow(
-        /Failed to decrypt/
-      );
+      const err = decryptError(encrypted, 'wrong-key');
+      expect(err).toBeInstanceOf(CapyError);
+      expect(err.code).toBe(ERROR_CODES.DECRYPT_KEY_MISMATCH);
     });
 
-    it('throws on tampered ciphertext (GCM auth tag rejects)', () => {
+    it('throws a typed DECRYPT_KEY_MISMATCH on tampered ciphertext (GCM auth tag rejects)', () => {
       const encrypted = Encryptor.encrypt('secret', TEST_KEY);
       const buf = Buffer.from(encrypted, 'base64');
       buf[buf.length - 5] ^= 0xff;
       const tampered = buf.toString('base64');
 
-      expect(() => Encryptor.decrypt(tampered, TEST_KEY)).toThrow(
-        /Failed to decrypt/
-      );
+      const err = decryptError(tampered, TEST_KEY);
+      expect(err).toBeInstanceOf(CapyError);
+      expect(err.code).toBe(ERROR_CODES.DECRYPT_KEY_MISMATCH);
     });
 
     it('throws when payload is too short', () => {
