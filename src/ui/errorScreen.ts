@@ -77,11 +77,10 @@ function renderAuthFailed(error: CapyError): string {
 }
 
 function renderPermissionDenied(error: CapyError, ctx: ErrorContext): string {
-  const msg = error.message || '';
   const variable = error.details?.variable;
 
-  // Wrong encryption key (e.g. after project re-init or org switch)
-  if (msg.includes("different project's key") || error.details?.error?.message?.includes("different project's key")) {
+  // Wrong decryption key — branch on the typed code, never message text (Rule 4).
+  if (error.code === ERROR_CODES.DECRYPT_KEY_MISMATCH || error.details?.cause?.code === ERROR_CODES.DECRYPT_KEY_MISMATCH) {
     const lines = [
       '',
       `  ${bold('Cannot decrypt secrets')}`,
