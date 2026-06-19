@@ -211,14 +211,27 @@ describe('awsSsm — deploy (no AWS calls)', () => {
     expect(r.epilogue).toBeUndefined();
   });
 
-  test('missing vars in branch fail before any AWS call', async () => {
+  test('an entirely-missing declared set fails before any AWS call', async () => {
     const r = await awsSsmAdapter.deploy(baseTarget(), {
-      env: { DATABASE_URL: 'postgres://x' }, // WORKOS_API_KEY absent
+      env: {}, // none of the declared vars present in the branch
       dryRun: false,
       cwd: ROOT,
     });
     expect(r.ok).toBe(false);
     expect(r.steps[0].status).toBe('fail');
+    expect(r.steps[0].detail).toContain('none present');
+  });
+
+  test('a partially-missing declared set skips the missing vars (does not fail the filter)', async () => {
+    const r = await awsSsmAdapter.deploy(baseTarget(), {
+      env: { DATABASE_URL: 'postgres://x' }, // WORKOS_API_KEY absent
+      dryRun: false,
+      cwd: ROOT,
+    });
+    // Filter passes: deploys DATABASE_URL, skips WORKOS_API_KEY with a note.
+    // (The deploy then proceeds past the filter to the AWS calls.)
+    expect(r.steps[0].status).toBe('ok');
+    expect(r.steps[0].detail).toContain('skipped');
     expect(r.steps[0].detail).toContain('WORKOS_API_KEY');
   });
 });

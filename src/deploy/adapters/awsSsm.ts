@@ -302,24 +302,32 @@ export const awsSsmAdapter: DeployAdapter = {
       return { ok: true, steps };
     }
 
-    // 1. Filter env to declared vars only (same contract as cf-worker).
+    // 1. Deploy the declared vars that are actually in the branch right now.
+    //    A declared var that's been removed from the branch is SKIPPED with a
+    //    warning, not fatal: the effective set is (declared ∩ branch), so the
+    //    live .env is the source of truth and a trimmed branch (e.g. dropping
+    //    box-set vars) doesn't block the deploy. Only an empty result fails.
     const filtered: Record<string, string> = {};
     for (const name of config.vars) {
       if (name in ctx.env) filtered[name] = ctx.env[name];
     }
     const missing = config.vars.filter((v) => !(v in ctx.env));
-    if (missing.length > 0) {
+    if (Object.keys(filtered).length === 0) {
       steps.push({
         label: `filter vars (${config.vars.length} declared)`,
         status: 'fail',
-        detail: `missing in branch ${config.branch}: ${missing.join(', ')}`,
+        detail: `none present in branch ${config.branch} — nothing to push`,
       });
       return { ok: false, steps };
     }
     steps.push({
-      label: 'filter vars',
+      label: `filter vars (${config.vars.length} declared)`,
       status: 'ok',
-      detail: `${Object.keys(filtered).length} runtime var(s) for ${opts.pathPrefix}`,
+      detail:
+        `${Object.keys(filtered).length} var(s) for ${opts.pathPrefix}` +
+        (missing.length > 0
+          ? ` — skipped ${missing.length} not in branch ${config.branch} (${missing.join(', ')})`
+          : ''),
     });
 
     // 2. Resolve the caller identity before any value leaves the process —
