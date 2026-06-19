@@ -224,6 +224,13 @@ async function runPicker(
   /** When set, skip adapter-selection (caller has already picked). */
   preselectedAdapterId?: string,
 ): Promise<TargetConfig> {
+  // Scope the picker to the ACTIVE branch's vars. keep.lock's `variables` is the
+  // union across EVERY branch, so it would offer vars that only exist on
+  // prod/development and then fail/skip at deploy. The materialized .env is the
+  // active branch's var set — that's what actually gets deployed.
+  const branchVarSet = new Set(Object.keys(new FileManager().readEnvFile()));
+  const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
+
   // 1. Pick adapter (when not pre-selected). Real adapters are selectable;
   // planned-but-not-shipped ones appear disabled with a fallback hint, so
   // the picker doubles as a roadmap and points users at `capy export` until
@@ -387,7 +394,7 @@ async function runPicker(
     // Show the live name transformation in the naming prompt so the
     // env-var ↔ parameter mapping is never abstract.
     const exampleVar =
-      classify(keep.variables).runtime[0] ?? 'DATABASE_URL';
+      classify(branchVars).runtime[0] ?? 'DATABASE_URL';
     const ans = await inquirer.prompt([
       {
         type: 'input',
@@ -438,13 +445,15 @@ async function runPicker(
   // most likely to be relevant for this adapter (runtime for cf-worker,
   // build-time prefixes for cf-pages). The user is the authority: they can
   // toggle anything in or out. No silent exclusion.
-  const cls = classify(keep.variables);
+  const cls = classify(branchVars);
   const presumedRelevant =
     adapter.varKind === 'build-time' ? cls.buildTime : cls.runtime;
   const defaultPicks = existing?.vars ?? presumedRelevant;
   const verb = adapter.varKind === 'build-time' ? 'inline into' : 'push to';
-  if (keep.variables.length === 0) {
-    throw new Error(`keep.lock has no variables — nothing to deploy.`);
+  if (branchVars.length === 0) {
+    throw new Error(
+      `no variables on the active branch — run \`capy\` to sync, or switch branches.`,
+    );
   }
   const varsAns = (await inquirer.prompt([
     {
@@ -453,7 +462,7 @@ async function runPicker(
       message: `Which vars to ${verb} ${adapter.label}? (pre-selected: ${adapter.varKind === 'build-time' ? 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_' : 'non-public-prefixed'})`,
       instructions: CHECKBOX_INSTRUCTIONS,
       theme: CHECKBOX_THEME,
-      choices: keep.variables.map((v) => ({
+      choices: branchVars.map((v) => ({
         name: v,
         value: v,
         checked: defaultPicks.includes(v),
