@@ -109,21 +109,16 @@ function spawnAsync(
 /**
  * Run an aws command whose input carries a secret value. The payload goes in
  * via --cli-input-json so the value never appears in argv (visible to `ps`).
- * POSIX reads it from the child's stdin through /dev/stdin; Windows has no
- * such path, so fall back to a 0600 temp file removed immediately after.
+ * Written to a 0600 temp file (removed immediately after) on every platform:
+ * piping through `file:///dev/stdin` is unreadable by the AWS CLI on some
+ * platforms (e.g. macOS — "Permission denied: '/dev/stdin'"), so the temp file
+ * is the portable path.
  */
 async function awsWithSecretInput(
   args: string[],
   payload: Record<string, unknown>,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   const json = JSON.stringify(payload);
-  if (process.platform !== 'win32') {
-    return spawnAsync(
-      'aws',
-      [...args, '--cli-input-json', 'file:///dev/stdin'],
-      json,
-    );
-  }
   const tmp = join(tmpdir(), `capy-ssm-${randomBytes(8).toString('hex')}.json`);
   writeFileSync(tmp, json, { mode: 0o600 });
   try {
