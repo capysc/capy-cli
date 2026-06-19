@@ -64,6 +64,11 @@ export interface DeployCliOptions {
   /** Force re-entry into the picker for an existing target. */
   edit?: boolean;
   /**
+   * Force a deploy even when keep.lock is unchanged: bump keep.lock with a
+   * deploy nonce so there's a change to commit + PR, triggering a fresh CI run.
+   */
+  force?: boolean;
+  /**
    * Run against the dev service (capy-dev). Propagated to the auth/service
    * clients used for decryption — without it they default to prod
    * (api.capy.sc) and co-decrypt fails for dev-only orgs.
@@ -189,6 +194,25 @@ async function mintForDeploy(
     userId: result.user_id,
   });
   return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
+}
+
+/**
+ * Inject a fresh deploy nonce into keep.lock so it differs from origin/<base>,
+ * giving git a real change to commit + PR. This is how `--force` triggers a CI
+ * run when the secrets themselves are unchanged. The nonce is appended (keys
+ * keep their existing order) so the diff is a single added line; a later
+ * `capy` sync normalizes formatting. No-op if keep.lock isn't valid JSON.
+ */
+function injectDeployNonce(content: string): string {
+  try {
+    const obj = JSON.parse(content);
+    obj.deploy_nonce = `${new Date().toISOString()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    return JSON.stringify(obj, null, 2) + '\n';
+  } catch {
+    return content;
+  }
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -942,6 +966,35 @@ export async function deployCommand(
     //    the same secrets simply need (re-)pushing. So an unchanged keep.lock
     //    skips the commit + PR, but the secrets push further down still runs.
     keepLockChanged = hasKeepLockChanges(cwd);
+
+    // --force (or an interactive confirm when nothing changed) bumps keep.lock
+    // with a deploy nonce so there IS a change to commit + PR. That's how you
+    // trigger a fresh CI run when the secrets are unchanged but the target
+    // needs a redeploy (e.g. to re-read rotated secrets).
+    if (!keepLockChanged) {
+      let force = !!options.force;
+      if (!force && !options.yes && !options.dryRun && process.stdin.isTTY) {
+        const ans = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'force',
+            message:
+              `keep.lock already matches origin/${baseBranch} — force a ` +
+              `redeploy (bump keep.lock to trigger CI)?`,
+            default: false,
+          },
+        ]);
+        force = !!ans.force;
+      }
+      if (force) {
+        writeFileSync(
+          join(cwd, 'keep.lock'),
+          injectDeployNonce(readFileSync(join(cwd, 'keep.lock'), 'utf-8')),
+        );
+        keepLockChanged = hasKeepLockChanges(cwd);
+      }
+    }
+
     if (keepLockChanged) {
       const commit = stageAndCommit(cwd, ['keep.lock'], msg);
       if (!commit.ok) {
@@ -952,7 +1005,7 @@ export async function deployCommand(
       console.log(`  ${GREEN('✓')} commit  ${msg}`);
     } else {
       console.log(
-        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — deploying secrets only (no PR).`,
+        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to redeploy + trigger CI.')}`,
       );
     }
   } else if (gitOk && keepLockDirty) {

@@ -262,6 +262,7 @@ const deploy = program
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
   .option('--yes', 'skip all prompts (CI)')
   .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
+  .option('--force', 'redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI')
   .option('--edit', 're-enter the picker for an existing connector target')
   .option('--connect', 'force connector mode (skip the token+docs path)')
   .option('--platform <id>', 'skip platform picker (token+docs flow; e.g. github-actions, vercel)')
@@ -282,6 +283,9 @@ const deploy = program
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
         edit: options.edit,
+        // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
+        // a different thing, so it must NOT be merged in here.
+        force: options.force,
       });
       process.exit(code);
     }
@@ -295,6 +299,7 @@ const deploy = program
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
+      force: !!options.force,
     });
     await c.execute();
   });
