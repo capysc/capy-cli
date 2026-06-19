@@ -64,6 +64,11 @@ export interface DeployCliOptions {
   /** Force re-entry into the picker for an existing target. */
   edit?: boolean;
   /**
+   * Force a deploy even when keep.lock is unchanged: bump keep.lock with a
+   * deploy nonce so there's a change to commit + PR, triggering a fresh CI run.
+   */
+  force?: boolean;
+  /**
    * Run against the dev service (capy-dev). Propagated to the auth/service
    * clients used for decryption — without it they default to prod
    * (api.capy.sc) and co-decrypt fails for dev-only orgs.
@@ -189,6 +194,25 @@ async function mintForDeploy(
     userId: result.user_id,
   });
   return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
+}
+
+/**
+ * Inject a fresh deploy nonce into keep.lock so it differs from origin/<base>,
+ * giving git a real change to commit + PR. This is how `--force` triggers a CI
+ * run when the secrets themselves are unchanged. The nonce is appended (keys
+ * keep their existing order) so the diff is a single added line; a later
+ * `capy` sync normalizes formatting. No-op if keep.lock isn't valid JSON.
+ */
+function injectDeployNonce(content: string): string {
+  try {
+    const obj = JSON.parse(content);
+    obj.deploy_nonce = `${new Date().toISOString()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    return JSON.stringify(obj, null, 2) + '\n';
+  } catch {
+    return content;
+  }
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -865,6 +889,10 @@ export async function deployCommand(
   // Track state we'll need to unwind in CI mode after the PR is opened.
   let originalBranch: string | null = null;
   let stashedOthers = false;
+  // CI mode only: did keep.lock actually change vs origin/<base>? This gates the
+  // deploy PR (and the branch push) — but NOT the secrets push. Deploying the
+  // existing, unchanged secrets to a target is the base case, not a no-op.
+  let keepLockChanged = false;
 
   const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
 
@@ -932,24 +960,54 @@ export async function deployCommand(
     // 5. Replay the keep.lock content onto the new branch.
     writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
 
-    // 6. If the replayed keep.lock matches what's already at origin/<base>,
-    //    there's nothing to deploy — the target is already at this secrets
-    //    snapshot. Treat it as a clean no-op instead of opening an empty PR.
-    if (!hasKeepLockChanges(cwd)) {
-      console.log(
-        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — nothing to deploy.`,
-      );
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 0;
+    // 6. Whether keep.lock changed decides only whether we open a deploy PR —
+    //    NOT whether we push secrets. An already-set-up keep.lock that matches
+    //    origin/<base> is still a real deploy: the target may be brand-new, or
+    //    the same secrets simply need (re-)pushing. So an unchanged keep.lock
+    //    skips the commit + PR, but the secrets push further down still runs.
+    keepLockChanged = hasKeepLockChanges(cwd);
+
+    // --force (or an interactive confirm when nothing changed) bumps keep.lock
+    // with a deploy nonce so there IS a change to commit + PR. That's how you
+    // trigger a fresh CI run when the secrets are unchanged but the target
+    // needs a redeploy (e.g. to re-read rotated secrets).
+    if (!keepLockChanged) {
+      let force = !!options.force;
+      if (!force && !options.yes && !options.dryRun && process.stdin.isTTY) {
+        const ans = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'force',
+            message:
+              `keep.lock already matches origin/${baseBranch} — force a ` +
+              `redeploy (bump keep.lock to trigger CI)?`,
+            default: false,
+          },
+        ]);
+        force = !!ans.force;
+      }
+      if (force) {
+        writeFileSync(
+          join(cwd, 'keep.lock'),
+          injectDeployNonce(readFileSync(join(cwd, 'keep.lock'), 'utf-8')),
+        );
+        keepLockChanged = hasKeepLockChanges(cwd);
+      }
     }
 
-    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-    if (!commit.ok) {
-      console.error(`${RED('✗')} ${commit.error}`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
+    if (keepLockChanged) {
+      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+      if (!commit.ok) {
+        console.error(`${RED('✗')} ${commit.error}`);
+        await unwindGitState(cwd, originalBranch, stashedOthers);
+        return 1;
+      }
+      console.log(`  ${GREEN('✓')} commit  ${msg}`);
+    } else {
+      console.log(
+        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to redeploy + trigger CI.')}`,
+      );
     }
-    console.log(`  ${GREEN('✓')} commit  ${msg}`);
   } else if (gitOk && keepLockDirty) {
     // Direct mode: stay on current branch. Stash WIP except keep.lock so
     // the deploy ships from HEAD + keep.lock, not WIP.
@@ -1013,9 +1071,10 @@ export async function deployCommand(
     return 1;
   }
 
-  // Direct mode: deploy is done. Pop the stash so the user's WIP is back
-  // in their working tree. (CI mode does this after the PR step below.)
-  if (mode === 'direct') {
+  // Deploy is done; restore the user's branch + WIP now for direct mode, and
+  // for CI mode when keep.lock didn't change (secrets-only, no PR to open).
+  // CI mode WITH a keep.lock change unwinds after the PR step below.
+  if (mode === 'direct' || !keepLockChanged) {
     await unwindGitState(cwd, originalBranch, stashedOthers);
   }
 
@@ -1024,7 +1083,7 @@ export async function deployCommand(
   // PR is opened (or fails), we always try to return the user to the branch
   // they started on and restore any changes we stashed — even on partial
   // failure — so a half-finished `capy deploy` never leaves them stranded.
-  if (mode === 'ci' && !options.dryRun) {
+  if (mode === 'ci' && !options.dryRun && keepLockChanged) {
     const branchNow = currentBranch(cwd);
     if (!branchNow) {
       console.error(`${RED('✗')} could not resolve current branch for push`);
