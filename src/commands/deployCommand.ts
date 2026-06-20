@@ -28,6 +28,7 @@ import {
   currentBranch,
   checkoutBranch,
   checkoutNewBranchFrom,
+  discardPaths,
   stashOtherChanges,
   stashAllChanges,
   popStash,
@@ -1154,6 +1155,12 @@ async function unwindGitState(
   stashedOthers: boolean,
 ): Promise<void> {
   if (originalBranch && currentBranch(cwd) !== originalBranch) {
+    // The CI secrets-only path replays keep.lock onto the deploy branch without
+    // committing it, so `git checkout <originalBranch>` aborts ("local changes
+    // to keep.lock would be overwritten"). Drop that replayed copy first — the
+    // user's real keep.lock is committed on originalBranch or in the stash we
+    // made (popped just below). Best-effort: ignore if there's nothing to drop.
+    discardPaths(cwd, ['keep.lock']);
     const co = checkoutBranch(cwd, originalBranch);
     if (co.ok) {
       console.log(`  ${DIM('↩')} back on ${originalBranch}`);
