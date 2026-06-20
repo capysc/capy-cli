@@ -10,6 +10,8 @@
  *   4. adapter shells out to vendor CLI / API to push secrets and ship code
  */
 
+import type { Classification } from './classify';
+
 export type DeployMode = 'direct' | 'ci';
 
 export interface TargetConfig {
@@ -116,6 +118,16 @@ export interface DeployAdapter {
    * leak or bundle-time miss).
    */
   varKind: AdapterVarKind;
+  /**
+   * Optional override for which vars the picker pre-checks by default (the user
+   * can still toggle any). When omitted, the picker uses the varKind bucket
+   * (build-time → public-prefixed names, runtime → the rest). Vercel sets this
+   * to "all" because its single env store serves BOTH build-time vars (which
+   * Vercel inlines into the browser bundle by prefix) and runtime secrets
+   * (server-side) — pre-checking only one bucket would silently drop half the
+   * app's env.
+   */
+  presumeVars?(cls: Classification): string[];
   /**
    * Mode the picker pre-selects on first config when there's no saved
    * preference. Adapters whose vendor has turnkey git-CI (Vercel, Netlify,
