@@ -117,14 +117,25 @@ export class CheckoutCommand {
       const keep = this.projectManager.readKeepFile();
       const currentBranch = this.projectManager.readActiveBranch();
 
+      // The decrypted .env belongs to the branch recorded in its own header,
+      // which can diverge from .capy/branch after an interrupted checkout
+      // (CAP-215). Diff the uncommitted-changes check against the branch the
+      // ciphertext was actually encrypted for — otherwise a value that simply
+      // differs across branches reads as a phantom "uncommitted change",
+      // deadlocking the very `capy checkout` the inconsistency error tells the
+      // user to run. Fall back to the active branch only when there is no
+      // header yet (first run); when the two agree, the header equals it anyway.
+      const envHeaderBranch = this.fileManager.readEnvMeta().branch;
+      const dirtyBranch = envHeaderBranch || currentBranch;
+
       if (keep && currentBranch) {
         // Check A: uncommitted changes (.env differs from keep.lock)
         try {
           const localPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
-          const uncommitted = findUncommittedEnvChange(localPlaintext, keep.variables, currentBranch);
+          const uncommitted = findUncommittedEnvChange(localPlaintext, keep.variables, dirtyBranch);
 
           if (uncommitted != null) {
-            console.error(`You have uncommitted changes on "${currentBranch}" (${uncommitted}).`);
+            console.error(`You have uncommitted changes on "${dirtyBranch}" (${uncommitted}).`);
             console.error(`Run ${B('capy')} to commit before switching branches.`);
             process.exit(1);
           }

@@ -156,6 +156,9 @@ function createCheckoutMocks(overrides: {
       API_KEY: 'dev-key-123',
       DB_URL: 'postgres://dev',
     }),
+    // No torn state in these cases: the .env header matches .capy/branch, so the
+    // dirty guard compares against the active branch (empty header → fallback).
+    readEnvMeta: mock(() => ({})),
   };
 
   const mockAuthService = {

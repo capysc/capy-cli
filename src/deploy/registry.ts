@@ -12,11 +12,13 @@ import { DeployAdapter } from './adapter';
 import { cfWorkerAdapter } from './adapters/cfWorker';
 import { cfPagesAdapter } from './adapters/cfPages';
 import { vercelAdapter } from './adapters/vercel';
+import { awsSsmAdapter } from './adapters/awsSsm';
 
 export const ALL_ADAPTERS: DeployAdapter[] = [
   cfWorkerAdapter,
   cfPagesAdapter,
   vercelAdapter,
+  awsSsmAdapter,
 ];
 
 export interface PlannedAdapter {

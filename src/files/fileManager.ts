@@ -115,9 +115,9 @@ export class FileManager {
         } catch (decryptError) {
           if (value.startsWith('capy:')) {
             throw new CapyError(
-              `Cannot decrypt "${key}": encrypted with a different project's key. This value cannot be transferred between orgs.`,
-              ERROR_CODES.PERMISSION_DENIED,
-              { variable: key }
+              `Cannot decrypt "${key}": wrong key for this project.`,
+              ERROR_CODES.DECRYPT_KEY_MISMATCH,
+              { variable: key, cause: decryptError }
             );
           }
           // Non-capy value that failed — keep as-is (likely plaintext)
@@ -126,10 +126,13 @@ export class FileManager {
       }
       return decrypted;
     } catch (error) {
+      // Preserve typed errors (e.g. DECRYPT_KEY_MISMATCH) — re-wrapping flattens
+      // the code and forces callers back to message-sniffing (cardinal Rule 4).
+      if (error instanceof CapyError) throw error;
       throw new CapyError(
         `Failed to read encrypted .env file at ${envPath}`,
-        ERROR_CODES.PERMISSION_DENIED,
-        { error, path: envPath }
+        ERROR_CODES.SERVICE_ERROR,
+        { cause: error, path: envPath }
       );
     }
   }

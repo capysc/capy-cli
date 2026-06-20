@@ -37,6 +37,7 @@ import {
   fetchRemoteBranch,
 } from '../deploy/git';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
+import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
 import { classify } from '../deploy/classify';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
 import { keypressConfirm } from '../ui/keypressConfirm';
@@ -62,6 +63,11 @@ export interface DeployCliOptions {
   dryRun?: boolean;
   /** Force re-entry into the picker for an existing target. */
   edit?: boolean;
+  /**
+   * Force a deploy even when keep.lock is unchanged: bump keep.lock with a
+   * deploy nonce so there's a change to commit + PR, triggering a fresh CI run.
+   */
+  force?: boolean;
   /**
    * Run against the dev service (capy-dev). Propagated to the auth/service
    * clients used for decryption — without it they default to prod
@@ -190,6 +196,25 @@ async function mintForDeploy(
   return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
 }
 
+/**
+ * Inject a fresh deploy nonce into keep.lock so it differs from origin/<base>,
+ * giving git a real change to commit + PR. This is how `--force` triggers a CI
+ * run when the secrets themselves are unchanged. The nonce is appended (keys
+ * keep their existing order) so the diff is a single added line; a later
+ * `capy` sync normalizes formatting. No-op if keep.lock isn't valid JSON.
+ */
+function injectDeployNonce(content: string): string {
+  try {
+    const obj = JSON.parse(content);
+    obj.deploy_nonce = `${new Date().toISOString()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    return JSON.stringify(obj, null, 2) + '\n';
+  } catch {
+    return content;
+  }
+}
+
 // ── Picker (interactive setup) ─────────────────────────────────────────────
 
 async function runPicker(
@@ -199,6 +224,13 @@ async function runPicker(
   /** When set, skip adapter-selection (caller has already picked). */
   preselectedAdapterId?: string,
 ): Promise<TargetConfig> {
+  // Scope the picker to the ACTIVE branch's vars. keep.lock's `variables` is the
+  // union across EVERY branch, so it would offer vars that only exist on
+  // prod/development and then fail/skip at deploy. The materialized .env is the
+  // active branch's var set — that's what actually gets deployed.
+  const branchVarSet = new Set(Object.keys(new FileManager().readEnvFile()));
+  const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
+
   // 1. Pick adapter (when not pre-selected). Real adapters are selectable;
   // planned-but-not-shipped ones appear disabled with a fallback hint, so
   // the picker doubles as a roadmap and points users at `capy export` until
@@ -359,13 +391,62 @@ async function runPicker(
       },
     ]);
     options = ans;
+  } else if (adapter.id === 'aws-ssm') {
+    // Show the live name transformation in the naming prompt so the
+    // env-var ↔ parameter mapping is never abstract.
+    const exampleVar =
+      classify(branchVars).runtime[0] ?? 'DATABASE_URL';
+    const ans = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'region',
+        message: 'AWS region:',
+        default:
+          existingOpts.region ?? detectedOpts.region ?? detectAwsRegion() ?? 'us-east-1',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'pathPrefix',
+        message: 'Parameter path prefix:',
+        default:
+          existingOpts.pathPrefix ??
+          detectedOpts.pathPrefix ??
+          `/capy/${basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-')}/`,
+        validate: (v: string) =>
+          /^\/[a-zA-Z0-9_.\-/]*\/$/.test(v.trim())
+            ? true
+            : "must start and end with '/' (e.g. /capy/prod/)",
+        filter: (v: string) => v.trim(),
+      },
+      {
+        type: 'list',
+        name: 'naming',
+        message: 'Parameter naming:',
+        theme: LIST_THEME,
+        choices: [
+          {
+            name: `verbatim    ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'verbatim')}`)}`,
+            value: 'verbatim',
+            short: 'verbatim',
+          },
+          {
+            name: `kebab-case  ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'kebab')}`)}`,
+            value: 'kebab',
+            short: 'kebab',
+          },
+        ],
+        default: existingOpts.naming ?? detectedOpts.naming ?? 'verbatim',
+      },
+    ]);
+    options = ans;
   }
 
   // 5. Var picking — show every var in keep.lock and pre-select the ones
   // most likely to be relevant for this adapter (runtime for cf-worker,
   // build-time prefixes for cf-pages). The user is the authority: they can
   // toggle anything in or out. No silent exclusion.
-  const cls = classify(keep.variables);
+  const cls = classify(branchVars);
   const presumedRelevant = adapter.presumeVars
     ? adapter.presumeVars(cls)
     : adapter.varKind === 'build-time'
@@ -378,8 +459,10 @@ async function runPicker(
     : adapter.varKind === 'build-time'
       ? 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_'
       : 'non-public-prefixed';
-  if (keep.variables.length === 0) {
-    throw new Error(`keep.lock has no variables — nothing to deploy.`);
+  if (branchVars.length === 0) {
+    throw new Error(
+      `no variables on the active branch — run \`capy\` to sync, or switch branches.`,
+    );
   }
   const varsAns = (await inquirer.prompt([
     {
@@ -388,7 +471,7 @@ async function runPicker(
       message: `Which vars to ${verb} ${adapter.label}? (pre-selected: ${presetLabel})`,
       instructions: CHECKBOX_INSTRUCTIONS,
       theme: CHECKBOX_THEME,
-      choices: keep.variables.map((v) => ({
+      choices: branchVars.map((v) => ({
         name: v,
         value: v,
         checked: defaultPicks.includes(v),
@@ -411,7 +494,7 @@ async function runPicker(
     mode = 'ci';
   } else {
     const ciHelp =
-      adapter.defaultMode === 'ci'
+      adapter.ciOnly
         ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
         : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
     mode = (await inquirer.prompt([
@@ -513,6 +596,10 @@ function renderResult(result: DeployResult): void {
     console.log(`  ${mark} ${step.label}${detail}${url}`);
   }
   console.log('');
+  if (result.epilogue) {
+    console.log(result.epilogue);
+    console.log('');
+  }
 }
 
 // ── Subcommand: list / remove ──────────────────────────────────────────────
@@ -824,6 +911,10 @@ export async function deployCommand(
   // Track state we'll need to unwind in CI mode after the PR is opened.
   let originalBranch: string | null = null;
   let stashedOthers = false;
+  // CI mode only: did keep.lock actually change vs origin/<base>? This gates the
+  // deploy PR (and the branch push) — but NOT the secrets push. Deploying the
+  // existing, unchanged secrets to a target is the base case, not a no-op.
+  let keepLockChanged = false;
 
   const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
 
@@ -891,24 +982,54 @@ export async function deployCommand(
     // 5. Replay the keep.lock content onto the new branch.
     writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
 
-    // 6. If the replayed keep.lock matches what's already at origin/<base>,
-    //    there's nothing to deploy — the target is already at this secrets
-    //    snapshot. Treat it as a clean no-op instead of opening an empty PR.
-    if (!hasKeepLockChanges(cwd)) {
-      console.log(
-        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — nothing to deploy.`,
-      );
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 0;
+    // 6. Whether keep.lock changed decides only whether we open a deploy PR —
+    //    NOT whether we push secrets. An already-set-up keep.lock that matches
+    //    origin/<base> is still a real deploy: the target may be brand-new, or
+    //    the same secrets simply need (re-)pushing. So an unchanged keep.lock
+    //    skips the commit + PR, but the secrets push further down still runs.
+    keepLockChanged = hasKeepLockChanges(cwd);
+
+    // --force (or an interactive confirm when nothing changed) bumps keep.lock
+    // with a deploy nonce so there IS a change to commit + PR. That's how you
+    // trigger a fresh CI run when the secrets are unchanged but the target
+    // needs a redeploy (e.g. to re-read rotated secrets).
+    if (!keepLockChanged) {
+      let force = !!options.force;
+      if (!force && !options.yes && !options.dryRun && process.stdin.isTTY) {
+        const ans = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'force',
+            message:
+              `keep.lock already matches origin/${baseBranch} — force a ` +
+              `redeploy (bump keep.lock to trigger CI)?`,
+            default: false,
+          },
+        ]);
+        force = !!ans.force;
+      }
+      if (force) {
+        writeFileSync(
+          join(cwd, 'keep.lock'),
+          injectDeployNonce(readFileSync(join(cwd, 'keep.lock'), 'utf-8')),
+        );
+        keepLockChanged = hasKeepLockChanges(cwd);
+      }
     }
 
-    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-    if (!commit.ok) {
-      console.error(`${RED('✗')} ${commit.error}`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
+    if (keepLockChanged) {
+      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+      if (!commit.ok) {
+        console.error(`${RED('✗')} ${commit.error}`);
+        await unwindGitState(cwd, originalBranch, stashedOthers);
+        return 1;
+      }
+      console.log(`  ${GREEN('✓')} commit  ${msg}`);
+    } else {
+      console.log(
+        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to redeploy + trigger CI.')}`,
+      );
     }
-    console.log(`  ${GREEN('✓')} commit  ${msg}`);
   } else if (gitOk && keepLockDirty) {
     // Direct mode: stay on current branch. Stash WIP except keep.lock so
     // the deploy ships from HEAD + keep.lock, not WIP.
@@ -972,9 +1093,10 @@ export async function deployCommand(
     return 1;
   }
 
-  // Direct mode: deploy is done. Pop the stash so the user's WIP is back
-  // in their working tree. (CI mode does this after the PR step below.)
-  if (mode === 'direct') {
+  // Deploy is done; restore the user's branch + WIP now for direct mode, and
+  // for CI mode when keep.lock didn't change (secrets-only, no PR to open).
+  // CI mode WITH a keep.lock change unwinds after the PR step below.
+  if (mode === 'direct' || !keepLockChanged) {
     await unwindGitState(cwd, originalBranch, stashedOthers);
   }
 
@@ -983,7 +1105,7 @@ export async function deployCommand(
   // PR is opened (or fails), we always try to return the user to the branch
   // they started on and restore any changes we stashed — even on partial
   // failure — so a half-finished `capy deploy` never leaves them stranded.
-  if (mode === 'ci' && !options.dryRun) {
+  if (mode === 'ci' && !options.dryRun && keepLockChanged) {
     const branchNow = currentBranch(cwd);
     if (!branchNow) {
       console.error(`${RED('✗')} could not resolve current branch for push`);
