@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "bin": {
     "capy": "bin/capy",
-    "capy-dev": "bin/capy-dev"
+    "capy-dev": "bin/capy-dev",
+    "capy-staging": "bin/capy-staging"
   },
   "repository": {
     "type": "git",
@@ -30,7 +31,7 @@
     "dev": "tsc --watch",
     "capy-dev": "bun run build && node bin/capy-dev",
     "preuninstall": "capy cleanup 2>/dev/null || true",
-    "prepublishOnly": "npm pkg delete bin.capy-dev",
+    "prepublishOnly": "npm pkg delete bin.capy-dev bin.capy-staging",
     "test": "bash tests/run-tests.sh",
     "typecheck": "tsc --noEmit",
     "test:e2e": "bun test tests/e2e/",

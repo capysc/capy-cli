@@ -41,7 +41,9 @@ if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
 const program = new Command();
 
 program
-  .name('capy')
+  // Bin name is overridable so sibling wrappers (e.g. bin/capy-staging) render
+  // their own name in --help/usage instead of the hardcoded "capy".
+  .name(process.env.CAPY_BIN_NAME || 'capy')
   .description('Capy CLI - SecretOps for the AI age')
   .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')

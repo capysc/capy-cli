@@ -4,6 +4,7 @@ import { lockSync, unlockSync } from 'proper-lockfile';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
 import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
+import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
 
 export class HttpStatusError extends Error {
@@ -89,7 +90,11 @@ export class AuthService {
 
   constructor(serviceApiUrl?: string, devMode: boolean = false, sessionUserId?: string) {
     this.devMode = devMode;
-    this.serviceApiUrl = serviceApiUrl || (devMode ? (process.env.CAPY_API_URL || 'http://localhost:3000') : 'https://api.capy.sc');
+    // Honor CAPY_API_URL / active profile in BOTH modes (same resolution as
+    // ServiceClient). Previously prod mode hardcoded api.capy.sc, so auth
+    // ignored CAPY_API_URL — capy-staging and byoc would authenticate against
+    // prod (returning prod orgs) even though every other call hit the override.
+    this.serviceApiUrl = serviceApiUrl || resolveActiveUrl(devMode);
     this.sessionUserId = sessionUserId;
     if (devMode) {
       // Suppress the dev diagnostic in local-only mode — no identity provider

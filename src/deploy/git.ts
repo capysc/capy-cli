@@ -234,6 +234,22 @@ export function checkoutBranch(
   return { ok: true };
 }
 
+/**
+ * Discard uncommitted working-tree changes to specific paths (best-effort).
+ * `capy deploy`'s CI secrets-only path replays keep.lock onto the deploy branch
+ * without committing it; that dirty file makes `git checkout <originalBranch>`
+ * abort ("local changes would be overwritten"). Dropping it is safe — the
+ * user's real keep.lock is committed on their branch or in the stash we made.
+ */
+export function discardPaths(
+  cwd: string,
+  paths: string[],
+): { ok: boolean; error?: string } {
+  const r = git(['checkout', '--', ...paths], cwd);
+  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
+  return { ok: true };
+}
+
 export function pushBranch(
   cwd: string,
   branch: string,
