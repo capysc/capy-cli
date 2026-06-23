@@ -23,6 +23,13 @@ export interface TargetConfig {
   branch: string;
   /** Variable names this target consumes. */
   vars: string[];
+  /**
+   * The full set of project vars available on `branch` when `vars` was last
+   * confirmed. Lets a deploy tell a genuinely-new project var (which would be
+   * silently dropped) apart from one the user intentionally left unselected,
+   * and re-confirm the selection when the project's var set drifts.
+   */
+  knownVars?: string[];
   /** Free-form adapter-specific options (worker name, build cmd, etc.). */
   options: Record<string, unknown>;
   /**

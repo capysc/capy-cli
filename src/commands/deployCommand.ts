@@ -27,16 +27,22 @@ import {
   stageAndCommit,
   currentBranch,
   checkoutBranch,
-  checkoutNewBranchFrom,
   discardPaths,
   stashOtherChanges,
-  stashAllChanges,
   popStash,
   pushBranch,
   createPr,
   listLocalBranches,
   fetchRemoteBranch,
+  repoRelPath,
+  readFileAtRef,
+  worktreeAddNewBranch,
+  worktreeRemove,
+  deleteLocalBranch,
 } from '../deploy/git';
+import { buildDeployKeep, touchDeployKeep, reconcileVars } from '../deploy/keepGate';
+import { KeepFile } from '../types/index';
+import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
 import { classify } from '../deploy/classify';
@@ -195,25 +201,6 @@ async function mintForDeploy(
     userId: result.user_id,
   });
   return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
-}
-
-/**
- * Inject a fresh deploy nonce into keep.lock so it differs from origin/<base>,
- * giving git a real change to commit + PR. This is how `--force` triggers a CI
- * run when the secrets themselves are unchanged. The nonce is appended (keys
- * keep their existing order) so the diff is a single added line; a later
- * `capy` sync normalizes formatting. No-op if keep.lock isn't valid JSON.
- */
-function injectDeployNonce(content: string): string {
-  try {
-    const obj = JSON.parse(content);
-    obj.deploy_nonce = `${new Date().toISOString()}-${Math.random()
-      .toString(36)
-      .slice(2, 8)}`;
-    return JSON.stringify(obj, null, 2) + '\n';
-  } catch {
-    return content;
-  }
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -565,6 +552,7 @@ async function runPicker(
     kind: adapter.id,
     branch,
     vars,
+    knownVars: branchVars,
     options,
     mode,
     gitBaseBranch,
@@ -846,6 +834,39 @@ export async function deployCommand(
     return 1;
   }
 
+  // Var-set reconcile: the saved selection can go stale when the
+  // project's variables change. Re-confirm rather than silently deploying a
+  // stale set — dropping a newly-added secret, or shipping a removed one.
+  {
+    const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
+    const currentVars = keep.variables.filter((v) => branchVarSet.has(v));
+    // Legacy targets have no `knownVars` baseline; treat current as known so we
+    // don't false-flag intentionally-unselected vars as "newly added".
+    const known = target.knownVars ?? currentVars;
+    const { added, removed, drifted } = reconcileVars(target.vars, known, currentVars);
+    if (drifted) {
+      if (added.length)
+        console.log(`  ${YELLOW('!')} new project var(s) not in this target: ${B(added.join(', '))}`);
+      if (removed.length)
+        console.log(`  ${YELLOW('!')} target var(s) no longer in the project: ${B(removed.join(', '))}`);
+      if (!options.yes && !options.dryRun && process.stdin.isTTY) {
+        console.log(`  ${DIM('The project\'s variables changed — re-confirm this target.')}`);
+        target = await runPicker(cwd, keep, target);
+        upsertTarget(cwd, target);
+        console.log(GREEN(`✓ Updated target "${target.name}" in .capy/deploy.json`));
+      } else if (options.yes && added.length) {
+        console.error(
+          `${RED('✗')} the project gained variable(s) since this target was saved: ${added.join(', ')}.\n` +
+            `    Re-run \`capy deploy ${target.name}\` interactively to include or skip them — refusing to silently drop a secret.`,
+        );
+        return 1;
+      } else if (options.yes && removed.length) {
+        // Non-interactive: a removed var can't be pushed; drop it and carry on.
+        target = { ...target, vars: target.vars.filter((v) => currentVars.includes(v)), knownVars: currentVars };
+      }
+    }
+  }
+
   renderPlan(target, adapter);
 
   // CI-only adapters (Vercel) always take the CI/PR path, even if a legacy or
@@ -909,154 +930,11 @@ export async function deployCommand(
     }
   }
 
-  // Track state we'll need to unwind in CI mode after the PR is opened.
-  let originalBranch: string | null = null;
-  let stashedOthers = false;
-  // CI mode only: did keep.lock actually change vs origin/<base>? This gates the
-  // deploy PR (and the branch push) — but NOT the secrets push. Deploying the
-  // existing, unchanged secrets to a target is the base case, not a no-op.
-  let keepLockChanged = false;
+  const msg = `chore(deploy): ${target.name} → ${target.branch} (${target.kind})`;
+  const baseBranch = target.gitBaseBranch ?? 'main';
 
-  const msg = `chore(deploy): bump keep.lock for ${target.name} (${target.branch})`;
-
-  if (gitOk && mode === 'ci') {
-    // CI mode ALWAYS opens its PR from a fresh branch cut off the target —
-    // never the user's current branch, and independent of whether keep.lock
-    // has uncommitted edits right now. (A clean keep.lock that's already
-    // *committed* on the current branch but ahead of origin/<base> is still a
-    // real deploy: the diff lives between the branches, not in the working
-    // tree.) Raising the PR from the current branch would drag everything that
-    // branch has ahead of the target into it; gating the branch cut on a dirty
-    // working tree would skip it entirely and do exactly that. So we branch
-    // unconditionally and replay the current keep.lock (committed or not).
-    originalBranch = currentBranch(cwd);
-    const baseBranch = target.gitBaseBranch ?? 'main';
-
-    // 1. Save the keep.lock content we want to ship before the branch switch
-    //    resets the working tree to origin/<base>'s state.
-    const keepLockContent = readFileSync(join(cwd, 'keep.lock'), 'utf-8');
-
-    // 2. Stash EVERYTHING (any keep.lock edit + WIP source) so the branch
-    //    switch is safe and we land on a clean origin/<base> tree.
-    const stash = stashAllChanges(cwd);
-    if (!stash.ok) {
-      console.error(`${RED('✗')} git stash: ${stash.error}`);
-      return 1;
-    }
-    stashedOthers = stash.stashed;
-
-    // 3. Fetch the target branch tip so we don't branch off a stale local
-    //    `origin/<base>`.
-    const fetched = fetchRemoteBranch(cwd, baseBranch);
-    if (!fetched.ok) {
-      console.error(
-        `${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`,
-      );
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
-    }
-
-    // 4. Create deploy branch off origin/<base>. Sortable timestamp +
-    //    random suffix; flat (no slashes) so it lists cleanly.
-    const now = new Date();
-    const ts =
-      now.toISOString().slice(0, 10).replace(/-/g, '') +
-      '-' +
-      now.toISOString().slice(11, 19).replace(/:/g, '');
-    const rand = Math.random().toString(36).slice(2, 6);
-    const branchName = `capy-deploy-${ts}-${rand}`;
-    const co = checkoutNewBranchFrom(cwd, branchName, `origin/${baseBranch}`);
-    if (!co.ok) {
-      console.error(
-        `${RED('✗')} git checkout -b ${branchName} origin/${baseBranch}: ${co.error}`,
-      );
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
-    }
-    console.log(`  ${GREEN('✓')} branch  ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
-    if (stashedOthers) {
-      console.log(
-        `  ${GREEN('✓')} stash   set aside working-tree changes (will restore)`,
-      );
-    }
-
-    // 5. Replay the keep.lock content onto the new branch.
-    writeFileSync(join(cwd, 'keep.lock'), keepLockContent);
-
-    // 6. Whether keep.lock changed decides only whether we open a deploy PR —
-    //    NOT whether we push secrets. An already-set-up keep.lock that matches
-    //    origin/<base> is still a real deploy: the target may be brand-new, or
-    //    the same secrets simply need (re-)pushing. So an unchanged keep.lock
-    //    skips the commit + PR, but the secrets push further down still runs.
-    keepLockChanged = hasKeepLockChanges(cwd);
-
-    // --force (or an interactive confirm when nothing changed) bumps keep.lock
-    // with a deploy nonce so there IS a change to commit + PR. That's how you
-    // trigger a fresh CI run when the secrets are unchanged but the target
-    // needs a redeploy (e.g. to re-read rotated secrets).
-    if (!keepLockChanged) {
-      let force = !!options.force;
-      if (!force && !options.yes && !options.dryRun && process.stdin.isTTY) {
-        const ans = await inquirer.prompt([
-          {
-            type: 'confirm',
-            name: 'force',
-            message:
-              `keep.lock already matches origin/${baseBranch} — force a ` +
-              `redeploy (bump keep.lock to trigger CI)?`,
-            default: false,
-          },
-        ]);
-        force = !!ans.force;
-      }
-      if (force) {
-        writeFileSync(
-          join(cwd, 'keep.lock'),
-          injectDeployNonce(readFileSync(join(cwd, 'keep.lock'), 'utf-8')),
-        );
-        keepLockChanged = hasKeepLockChanges(cwd);
-      }
-    }
-
-    if (keepLockChanged) {
-      const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-      if (!commit.ok) {
-        console.error(`${RED('✗')} ${commit.error}`);
-        await unwindGitState(cwd, originalBranch, stashedOthers);
-        return 1;
-      }
-      console.log(`  ${GREEN('✓')} commit  ${msg}`);
-    } else {
-      console.log(
-        `  ${DIM('·')} keep.lock already matches origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to redeploy + trigger CI.')}`,
-      );
-    }
-  } else if (gitOk && keepLockDirty) {
-    // Direct mode: stay on current branch. Stash WIP except keep.lock so
-    // the deploy ships from HEAD + keep.lock, not WIP.
-    const stash = stashOtherChanges(cwd);
-    if (!stash.ok) {
-      console.error(`${RED('✗')} git stash: ${stash.error}`);
-      return 1;
-    }
-    stashedOthers = stash.stashed;
-    if (stashedOthers) {
-      console.log(
-        `  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`,
-      );
-    }
-    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-    if (!commit.ok) {
-      console.error(`${RED('✗')} ${commit.error}`);
-      return 1;
-    }
-    console.log(`  ${GREEN('✓')} commit  ${msg}`);
-  }
-
-  // Prepare secret material — skipped in dry-run (the adapter short-circuits).
-  // Build-time adapters that inject via `capy run` get a minted SECRETS_BLOB +
-  // PROJECT_KEY; the rest get the decrypted env. On failure, unwind git state
-  // first so a half-finished deploy never strands the user on a deploy branch.
+  // ── Decrypt the secrets we're about to push. In CI mode these same values
+  //    drive the change-gate, so it measures exactly what ships.
   let env: Record<string, string> = {};
   let deployToken: { secretsBlob: string; projectKey: string } | undefined;
   if (options.dryRun) {
@@ -1066,7 +944,6 @@ export async function deployCommand(
       deployToken = await mintForDeploy(cwd, options.devMode);
     } catch (err: any) {
       console.error(`${RED('✗')} mint deploy token: ${err.message}`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
       return 1;
     }
   } else {
@@ -1074,11 +951,92 @@ export async function deployCommand(
       env = await decryptCurrentBranch(cwd, options.devMode);
     } catch (err: any) {
       console.error(`${RED('✗')} decrypt: ${err.message}`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
       return 1;
     }
   }
 
+  // ── CI change-gate ────────────────────────────────────────────
+  // "Does this deploy change what's recorded on the target branch?" — keyed off
+  // the decrypted values being pushed, folded into origin/<base>'s keep.lock,
+  // NOT the local keep.lock file (which can lag .env). The folded keep IS what
+  // we commit for the PR, so the gate and the committed artifact can't disagree.
+  let keepLockChanged = false;
+  let deployKeepContent = '';
+  if (gitOk && mode === 'ci' && !options.dryRun) {
+    const fetched = fetchRemoteBranch(cwd, baseBranch);
+    if (!fetched.ok) {
+      console.error(`${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`);
+      return 1;
+    }
+    const relKeep = repoRelPath(cwd, 'keep.lock');
+    const baseRaw = readFileAtRef(cwd, `origin/${baseBranch}`, relKeep);
+    let baseKeep: KeepFile;
+    if (baseRaw) {
+      baseKeep = JSON.parse(baseRaw);
+    } else {
+      // base branch has no keep.lock yet — scaffold identity from the local
+      // keep with no variables, so the PR creates keep.lock from the deploy.
+      const local = JSON.parse(readFileSync(join(cwd, 'keep.lock'), 'utf-8'));
+      baseKeep = { ...local, variables: {} };
+    }
+    const nowIso = new Date().toISOString();
+    const built = buildDeployKeep(baseKeep, env, target.vars, target.branch, nowIso);
+    keepLockChanged = built.changed;
+    deployKeepContent = built.content;
+
+    // No secret change vs the target. --force (or an interactive confirm) touches
+    // keep.lock's changed_at so there's a real diff to PR + re-trigger CI.
+    if (!keepLockChanged) {
+      let force = !!options.force;
+      if (!force && !options.yes && process.stdin.isTTY) {
+        const ans = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'force',
+            message:
+              `No secret changes vs origin/${baseBranch} — force a redeploy ` +
+              `(touch keep.lock to re-trigger CI)?`,
+            default: false,
+          },
+        ]);
+        force = !!ans.force;
+      }
+      if (force) {
+        deployKeepContent = touchDeployKeep(baseKeep, target.vars, target.branch, nowIso);
+        keepLockChanged = true;
+      }
+    }
+    if (!keepLockChanged) {
+      console.log(
+        `  ${DIM('·')} no secret changes vs origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to re-trigger CI.')}`,
+      );
+    }
+  }
+
+  // ── Direct mode only: commit keep.lock on the current branch, stashing other
+  //    WIP. CI mode never touches the user's tree — it builds the PR commit in
+  //    an isolated worktree below.
+  let directStashed = false;
+  if (gitOk && mode === 'direct' && keepLockDirty) {
+    const stash = stashOtherChanges(cwd);
+    if (!stash.ok) {
+      console.error(`${RED('✗')} git stash: ${stash.error}`);
+      return 1;
+    }
+    directStashed = stash.stashed;
+    if (directStashed) {
+      console.log(`  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`);
+    }
+    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      await unwindGitState(cwd, null, directStashed);
+      return 1;
+    }
+    console.log(`  ${GREEN('✓')} commit  ${msg}`);
+  }
+
+  // ── Push the secrets.
   const result = await adapter.deploy(target, {
     env,
     deployToken,
@@ -1087,68 +1045,73 @@ export async function deployCommand(
     cwd,
   });
   renderResult(result);
-
   if (!result.ok) {
-    // Even on failure, restore the user's WIP if we stashed it.
-    await unwindGitState(cwd, originalBranch, stashedOthers);
+    await unwindGitState(cwd, null, directStashed);
     return 1;
   }
+  if (mode === 'direct') await unwindGitState(cwd, null, directStashed);
 
-  // Deploy is done; restore the user's branch + WIP now for direct mode, and
-  // for CI mode when keep.lock didn't change (secrets-only, no PR to open).
-  // CI mode WITH a keep.lock change unwinds after the PR step below.
-  if (mode === 'direct' || !keepLockChanged) {
-    await unwindGitState(cwd, originalBranch, stashedOthers);
-  }
-
-  // CI mode: push the branch and open a PR for the keep.lock change. The
-  // actual code deploy runs in the user's CI when the PR merges. After the
-  // PR is opened (or fails), we always try to return the user to the branch
-  // they started on and restore any changes we stashed — even on partial
-  // failure — so a half-finished `capy deploy` never leaves them stranded.
+  // ── CI mode: open the keep.lock PR in an ISOLATED git worktree.
+  //    The user's working tree and current branch are NEVER touched — no stash,
+  //    no checkout-back, nothing to strand on failure.
   if (mode === 'ci' && !options.dryRun && keepLockChanged) {
-    const branchNow = currentBranch(cwd);
-    if (!branchNow) {
-      console.error(`${RED('✗')} could not resolve current branch for push`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
-    }
-    const push = pushBranch(cwd, branchNow);
-    if (!push.ok) {
-      console.error(`${RED('✗')} git push: ${push.error}`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
-    }
-    console.log(`  ${GREEN('✓')} push    ${branchNow}`);
+    const now = new Date();
+    const ts =
+      now.toISOString().slice(0, 10).replace(/-/g, '') + '-' +
+      now.toISOString().slice(11, 19).replace(/:/g, '');
+    const rand = Math.random().toString(36).slice(2, 6);
+    const branchName = `capy-deploy-${ts}-${rand}`;
+    const wt = join(tmpdir(), `capy-deploy-${ts}-${rand}`);
 
-    const title = `deploy: ${target.name} → ${target.branch} (${target.kind})`;
-    const body = buildDeployPrBody(target);
-    const prBase = target.gitBaseBranch ?? 'main';
-    const pr = createPr(cwd, title, body, prBase);
+    const added = worktreeAddNewBranch(cwd, wt, branchName, `origin/${baseBranch}`);
+    if (!added.ok) {
+      console.error(`${RED('✗')} git worktree add (off origin/${baseBranch}): ${added.error}`);
+      return 1;
+    }
 
     let prUrl: string | undefined;
-    if (pr.ok) {
-      prUrl = pr.url;
-      console.log(`  ${GREEN('✓')} PR      ${pr.url ?? '(open)'}`);
-    } else if (pr.manualHint) {
-      console.log(`  ${YELLOW('!')} ${pr.manualHint}`);
-    } else {
-      console.error(`${RED('✗')} gh pr create: ${pr.error}`);
-      await unwindGitState(cwd, originalBranch, stashedOthers);
-      return 1;
+    let failed = false;
+    try {
+      const relKeep = repoRelPath(cwd, 'keep.lock');
+      writeFileSync(join(wt, relKeep), deployKeepContent);
+      const commit = stageAndCommit(wt, [relKeep], msg);
+      if (!commit.ok) {
+        console.error(`${RED('✗')} ${commit.error}`);
+        failed = true;
+      } else {
+        const push = pushBranch(wt, branchName);
+        if (!push.ok) {
+          console.error(`${RED('✗')} git push: ${push.error}`);
+          failed = true;
+        } else {
+          console.log(`  ${GREEN('✓')} push    ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
+          const title = `deploy: ${target.name} → ${target.branch} (${target.kind})`;
+          const body = buildDeployPrBody(target);
+          const pr = createPr(wt, title, body, baseBranch);
+          if (pr.ok) {
+            prUrl = pr.url;
+            console.log(`  ${GREEN('✓')} PR      ${pr.url ?? '(open)'}`);
+          } else if (pr.manualHint) {
+            console.log(`  ${YELLOW('!')} ${pr.manualHint}`);
+          } else {
+            console.error(`${RED('✗')} gh pr create: ${pr.error}`);
+            failed = true;
+          }
+        }
+      }
+    } finally {
+      // Always tear down the worktree + local branch ref (the branch lives on
+      // origin once pushed). The user's tree was never touched, so there is
+      // nothing to restore and nothing to strand.
+      worktreeRemove(cwd, wt);
+      deleteLocalBranch(cwd, branchName);
     }
+    if (failed) return 1;
 
-    await unwindGitState(cwd, originalBranch, stashedOthers);
-
-    // Final summary — make the PR link unmissable, since this is the
-    // hand-off point. CI takes over once the user opens the PR.
     console.log('');
     console.log(`  ${B('Review and merge to deploy:')}`);
     if (prUrl) console.log(`    ${prUrl}`);
-    console.log(`    ${DIM('branch')}    ${branchNow}`);
-    if (originalBranch) {
-      console.log(`    ${DIM('you are on')} ${currentBranch(cwd) ?? originalBranch}`);
-    }
+    console.log(`    ${DIM('branch')}    ${branchName} ${DIM(`→ ${baseBranch}`)}`);
     console.log('');
   }
 
