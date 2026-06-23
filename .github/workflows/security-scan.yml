@@ -1,0 +1,40 @@
+# Security scanning via Radar CLI (EurekaDevSecOps/radarctl) — SAST (Opengrep),
+# secrets (Gitleaks), and SCA (Grype) in one job. Complements the existing
+# CodeQL coverage on this repo.
+#
+# Runs fully local: no EUREKA_AGENT_TOKEN is configured, so no findings leave
+# the runner. The gate enforces the "no criticals/highs to main" policy: radar
+# runs with `-t high`, so only high/critical findings fail the job — moderate
+# and low findings still print to the log for triage but do not block.
+#
+# Runs on ubuntu-latest (not the self-hosted CI runner) because Radar's
+# scanners run as Docker containers, which ubuntu-latest provides.
+name: Security Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  radar:
+    name: Radar (SAST + secrets + SCA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Radar CLI
+        run: npm i -g @eurekadevsecops/radar
+
+      # Scans the repo. `-t high` fails the job only on high/critical findings
+      # (the "no criticals/highs to main" policy); moderate/low still print for
+      # triage. Gitleaks auto-loads the repo-root .gitleaks.toml allowlist.
+      - name: Run Radar scan (SAST + secrets + SCA)
+        run: radar scan -s "opengrep,gitleaks,grype" -t high .
