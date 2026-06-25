@@ -172,13 +172,15 @@ function runWebIntake(params: IntakeParams): Promise<string> {
 }
 
 export class AddCommand {
+  constructor(private readonly devMode: boolean = false) {}
+
   async execute(varName: string, opts: AddOpts): Promise<void> {
     const name = varName.trim();
     if (!VAR_RE.test(name)) {
       throw new CapyError(`"${varName}" is not a valid environment variable name.`, ERROR_CODES.INVALID_FORMAT);
     }
 
-    const ctx = await resolveContext();
+    const ctx = await resolveContext({ devMode: this.devMode });
     const exists = name in ctx.localPlaintext;
 
     if (exists && !opts.force && !opts.web && !opts.nonTty) {

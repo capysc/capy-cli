@@ -695,6 +695,31 @@ program
   });
 
 program
+  .command('add <var>')
+  .description('Add a secret value to the project (encrypts + syncs)')
+  .option('--web', 'enter the value in a local browser form (supports multiline)')
+  .option('--reason <text>', 'short note shown on the intake page')
+  .option('--help-url <url>', 'link shown on the intake page for where to get the value')
+  .option('--no-open', 'do not auto-open the browser; print the URL only')
+  .option('--no-push', 'write to .env only; do not push to Capy')
+  .option('-f, --force', 'overwrite an existing value without prompting')
+  .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .action(async (varName, options, command) => {
+    const { AddCommand } = await import('./commands/addCommand');
+    const cmd = new AddCommand(true); // devMode: dev backend + ~/.capy-dev
+    const merged = command.optsWithGlobals();
+    await cmd.execute(varName, {
+      web: options.web,
+      reason: options.reason,
+      helpUrl: options.helpUrl,
+      open: options.open,
+      noPush: options.push === false,
+      force: merged.force,
+      nonTty: options.nonTty,
+    });
+  });
+
+program
   .command('connect [provider]')
   .description('Connect a third-party provider and pull a credential into .env')
   .option('--live', 'use live mode (default: test)')
