@@ -24,7 +24,7 @@ export class InfoCommand {
     this.devMode = devMode;
   }
 
-  async execute(): Promise<void> {
+  async execute(opts: { json?: boolean } = {}): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     const hasKeep = projectState.initialized && !!projectState.organizationId;
@@ -58,6 +58,7 @@ export class InfoCommand {
 
     // Resolve the user's role in the active org (best effort).
     let roleLabel = '—';
+    let roleSlug: string | null = null;
     if (activeOrgId && authService.getToken() && authResult.user_id) {
       try {
         const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
@@ -65,10 +66,31 @@ export class InfoCommand {
         const { members } = await serviceClient.listMembers(activeOrgId);
         const me = members.find((m: any) => m.userId === authResult.user_id);
         const slug = me?.role?.slug;
-        if (slug) roleLabel = ROLE_LABELS[slug] || slug;
+        if (slug) {
+          roleLabel = ROLE_LABELS[slug] || slug;
+          roleSlug = slug;
+        }
       } catch {
         // leave as —
       }
+    }
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            user: { email: authResult.user_email ?? null, userId: authResult.user_id ?? null },
+            org: { id: activeOrgId ?? null, name: activeOrgName ?? null, workosOrgId: workosOrgId ?? null, fromKeepLock: hasKeep },
+            role: roleSlug,
+            project: { name: projectState.projectName ?? null, id: projectState.projectId ?? null },
+            branch: hasKeep ? branch : null,
+            memberships: allOrgs.map((o) => ({ id: o.id, name: o.name ?? null, workosOrgId: o.workos_org_id ?? null })),
+          },
+          null,
+          2,
+        ),
+      );
+      return;
     }
 
     const activeOrgLabel = hasKeep

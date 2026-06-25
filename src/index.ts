@@ -534,11 +534,23 @@ program
 program
   .command('info')
   .description('Show current session info')
-  .action(async () => {
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
     assertNotLocalOnly('info');
     const { InfoCommand } = await import('./commands/infoCommand');
     const cmd = new InfoCommand();
-    await cmd.execute();
+    await cmd.execute({ json: options.json });
+  });
+
+program
+  .command('list')
+  .description('List variable names + connector metadata for the active branch (no values)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    assertNotLocalOnly('list');
+    const { ListCommand } = await import('./commands/listCommand');
+    const cmd = new ListCommand();
+    await cmd.execute({ json: options.json });
   });
 
 program
