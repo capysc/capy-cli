@@ -527,10 +527,21 @@ program
 program
   .command('info')
   .description('Show current session info')
-  .action(async () => {
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
     const { InfoCommand } = await import('./commands/infoCommand');
     const cmd = new InfoCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute();
+    await cmd.execute({ json: options.json });
+  });
+
+program
+  .command('list')
+  .description('List variable names + connector metadata for the active branch (no values)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { ListCommand } = await import('./commands/listCommand');
+    const cmd = new ListCommand(true);
+    await cmd.execute({ json: options.json });
   });
 
 program
