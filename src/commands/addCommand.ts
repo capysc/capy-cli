@@ -3,13 +3,14 @@ import { randomBytes } from 'crypto';
 import type { Socket } from 'net';
 import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync } from './connectors/shared';
-import { generateIntakeForm } from '../ui/intakePage';
+import { generateIntakeForm, type IntakeVar } from '../ui/intakePage';
 import { nonceEqual, isLoopbackHost, isAllowedOrigin } from './intakeSecurity';
 
 export interface AddOpts {
   web?: boolean;
   reason?: string;
-  helpUrl?: string;
+  /** Repeatable `--help-url NAME=URL` pairs: a per-variable "where to find this" link. */
+  helpUrls?: string[];
   /** false when --no-open was passed (commander negation). */
   open?: boolean;
   noPush?: boolean;
@@ -17,25 +18,58 @@ export interface AddOpts {
   nonTty?: boolean;
 }
 
+export interface SecretPair {
+  name: string;
+  value: string;
+}
+
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const INTAKE_TIMEOUT_MS = 5 * 60 * 1000;
 
-interface IntakeParams {
-  varName: string;
+export interface IntakeParams {
+  /** Suggested variables (name + optional per-variable help link) to pre-seed the form. */
+  vars: IntakeVar[];
   reason?: string;
-  helpUrl?: string;
-  exists: boolean;
   open: boolean;
+  /** Test-only hook: receives the loopback URL once the server is listening. Unset in production. */
+  onListen?: (url: string) => void;
+}
+
+/** Parse repeatable `--help-url NAME=URL` flags into a name→url map (http(s) only). */
+export function parseHelpUrls(pairs: string[] | undefined): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const pair of pairs ?? []) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const url = pair.slice(eq + 1).trim();
+    if (VAR_RE.test(name) && /^https?:\/\//i.test(url)) map[name] = url;
+  }
+  return map;
+}
+
+/** Validate + normalize the submitted {name,value}[] payload. Names only — values pass through. */
+export function parseVars(input: unknown): SecretPair[] | null {
+  if (!Array.isArray(input)) return null;
+  const out: SecretPair[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== 'object') return null;
+    const rec = item as Record<string, unknown>;
+    const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+    const value = rec.value;
+    if (!VAR_RE.test(name) || typeof value !== 'string') return null;
+    out.push({ name, value });
+  }
+  return out.length > 0 ? out : null;
 }
 
 /**
- * Open a local browser form and run `onSubmit` with the value the user enters.
- * The save runs INSIDE the request, so the browser learns whether it actually
- * succeeded: on success the page shows "Saved" and this resolves; on failure the
- * server returns 500 with the error message and the user can fix it and retry in
- * the form. The value is handled in-process — never printed, logged, or returned.
+ * Open a local browser key/value form (pre-seeded with the suggested names) and
+ * run `onSubmit` with the {name,value} pairs the user enters. The save runs INSIDE
+ * the request, so the browser learns whether it succeeded (200) or not (500 + the
+ * message, retryable). Values are handled in-process — never printed, logged, or returned.
  */
-function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise<void>): Promise<void> {
+export function runWebIntake(params: IntakeParams, onSubmit: (pairs: SecretPair[]) => Promise<void>): Promise<void> {
   const nonce = randomBytes(32).toString('hex');
   const connections = new Set<Socket>();
   let busy = false;
@@ -56,12 +90,11 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
           return;
         }
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(generateIntakeForm({ varName: params.varName, nonce, reason: params.reason, helpUrl: params.helpUrl, exists: params.exists }));
+        res.end(generateIntakeForm({ vars: params.vars, nonce, reason: params.reason }));
         return;
       }
 
       if (req.method === 'POST' && url.pathname === '/submit') {
-        // Anti DNS-rebinding: the request must target the loopback host we bound.
         if (!isLoopbackHost(req.headers.host, port)) {
           res.writeHead(403).end('bad host');
           return;
@@ -75,7 +108,7 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
         let aborted = false;
         req.on('data', (c: Buffer) => {
           body += c.toString();
-          if (body.length > 1_000_000) {
+          if (body.length > 5_000_000) {
             aborted = true;
             res.writeHead(413).end('too large');
             req.destroy();
@@ -83,7 +116,7 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
         });
         req.on('end', async () => {
           if (aborted) return;
-          let parsed: { nonce?: unknown; value?: unknown };
+          let parsed: { nonce?: unknown; vars?: unknown };
           try {
             parsed = JSON.parse(body);
           } catch {
@@ -94,8 +127,11 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
             res.writeHead(403).end('bad nonce');
             return;
           }
-          if (typeof parsed.value !== 'string') {
-            res.writeHead(400).end('missing value');
+          const pairs = parseVars(parsed.vars);
+          if (!pairs) {
+            res
+              .writeHead(400, { 'content-type': 'application/json' })
+              .end(JSON.stringify({ error: 'each variable needs a valid NAME and a value' }));
             return;
           }
           if (done) {
@@ -106,12 +142,10 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
             res.writeHead(409).end('a submission is already in progress');
             return;
           }
-          // Perform the actual save BEFORE responding, so the browser learns
-          // whether it really succeeded. On failure: 500 + the message, and
-          // leave the server open so the user can fix it and retry in the form.
+          // Save BEFORE responding, so the browser reflects real success/failure.
           busy = true;
           try {
-            await onSubmit(parsed.value);
+            await onSubmit(pairs);
             done = true;
             res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
             setTimeout(() => {
@@ -120,7 +154,7 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
             }, 250);
           } catch (err) {
             busy = false;
-            const message = err instanceof Error ? err.message : 'Failed to save the secret.';
+            const message = err instanceof Error ? err.message : 'Failed to save the secrets.';
             res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: message }));
           }
         });
@@ -158,7 +192,7 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
 
     timer = setTimeout(() => {
       cleanup();
-      reject(new CapyError('Timed out waiting for the value (5 minutes).', ERROR_CODES.SERVICE_ERROR));
+      reject(new CapyError('Timed out waiting for the values (5 minutes).', ERROR_CODES.SERVICE_ERROR));
     }, INTAKE_TIMEOUT_MS);
     timer.unref();
 
@@ -171,8 +205,10 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
       const addr = server.address();
       const port = addr && typeof addr === 'object' ? addr.port : 0;
       const url = `http://127.0.0.1:${port}/?n=${nonce}`;
+      params.onListen?.(url);
+      const label = params.vars.length === 1 ? params.vars[0].name : `${params.vars.length} secret(s)`;
       console.log('');
-      console.log(`  Enter ${params.varName} in your browser (the value never touches this terminal or the AI):`);
+      console.log(`  Enter ${label} in your browser (values never touch this terminal or the AI):`);
       console.log(`  ${url}`);
       console.log('');
       if (params.open) {
@@ -190,33 +226,55 @@ function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise
 export class AddCommand {
   constructor(private readonly devMode: boolean = false) {}
 
-  async execute(varName: string, opts: AddOpts): Promise<void> {
-    const name = varName.trim();
-    if (!VAR_RE.test(name)) {
-      throw new CapyError(`"${varName}" is not a valid environment variable name.`, ERROR_CODES.INVALID_FORMAT);
+  async execute(varNames: string[], opts: AddOpts): Promise<void> {
+    const names = varNames.map((n) => n.trim()).filter(Boolean);
+    if (names.length === 0) {
+      throw new CapyError('No variable name given.', ERROR_CODES.INVALID_FORMAT);
+    }
+    for (const name of names) {
+      if (!VAR_RE.test(name)) {
+        throw new CapyError(`"${name}" is not a valid environment variable name.`, ERROR_CODES.INVALID_FORMAT);
+      }
     }
 
     const ctx = await resolveContext({ devMode: this.devMode });
-    const exists = name in ctx.localPlaintext;
+    const push = opts.noPush !== true;
 
-    if (exists && !opts.force && !opts.web && !opts.nonTty) {
+    const existing = names.filter((n) => n in ctx.localPlaintext);
+    if (existing.length > 0 && !opts.force && !opts.web && !opts.nonTty) {
       const inquirer = (await import('inquirer')).default;
-      const { ok } = await inquirer.prompt([{ type: 'confirm', name: 'ok', message: `${name} already exists. Overwrite?`, default: false }]);
+      const { ok } = await inquirer.prompt([
+        { type: 'confirm', name: 'ok', message: `${existing.join(', ')} already exist(s). Overwrite?`, default: false },
+      ]);
       if (!ok) {
         console.log('Aborted.');
         return;
       }
     }
 
-    const push = opts.noPush !== true;
+    // Write all pairs, pushing once at the end (each write accumulates into the
+    // local env so the final push carries every variable).
+    const writeMany = async (pairs: SecretPair[]): Promise<void> => {
+      for (let i = 0; i < pairs.length; i++) {
+        const { name, value } = pairs[i];
+        await writeAndSync(ctx, name, value, { push: push && i === pairs.length - 1 });
+        ctx.localPlaintext[name] = value;
+      }
+    };
 
+    let savedNames: string[];
     if (opts.web) {
-      // The save runs inside the intake server, so the browser reflects success
-      // or failure of the actual encrypt+sync.
+      const helpUrls = parseHelpUrls(opts.helpUrls);
+      const vars: IntakeVar[] = names.map((name) => ({ name, helpUrl: helpUrls[name] }));
+      let captured: string[] = [];
       await runWebIntake(
-        { varName: name, reason: opts.reason, helpUrl: opts.helpUrl, exists, open: opts.open !== false },
-        (value) => writeAndSync(ctx, name, value, { push }),
+        { vars, reason: opts.reason, open: opts.open !== false },
+        async (pairs) => {
+          await writeMany(pairs);
+          captured = pairs.map((p) => p.name);
+        },
       );
+      savedNames = captured;
     } else {
       if (opts.nonTty) {
         throw new CapyError(
@@ -225,13 +283,17 @@ export class AddCommand {
         );
       }
       const inquirer = (await import('inquirer')).default;
-      const { value: entered } = await inquirer.prompt([{ type: 'password', name: 'value', message: `Value for ${name}:`, mask: '*' }]);
-      if (!entered) throw new CapyError('No value entered.', ERROR_CODES.INVALID_FORMAT);
-      await writeAndSync(ctx, name, entered, { push });
+      const pairs: SecretPair[] = [];
+      for (const name of names) {
+        const { value } = await inquirer.prompt([{ type: 'password', name: 'value', message: `Value for ${name}:`, mask: '*' }]);
+        if (!value) throw new CapyError(`No value entered for ${name}.`, ERROR_CODES.INVALID_FORMAT);
+        pairs.push({ name, value });
+      }
+      await writeMany(pairs);
+      savedNames = pairs.map((p) => p.name);
     }
 
-    const verb = exists ? 'Updated' : 'Added';
     const where = push ? ` and synced to ${ctx.branch}` : ' (.env only — not pushed)';
-    console.log(`✓ ${verb} ${name}${where}.`);
+    console.log(`✓ Saved ${savedNames.length} variable(s): ${savedNames.join(', ')}${where}.`);
   }
 }

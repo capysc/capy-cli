@@ -730,23 +730,31 @@ program
   });
 
 program
-  .command('add <var>')
-  .description('Add a secret value to the project (encrypts + syncs)')
-  .option('--web', 'enter the value in a local browser form (supports multiline)')
+  .command('add <vars...>')
+  .description('Add one or more secret values to the project (encrypts + syncs)')
+  .option('--web', 'enter the values in a local browser form (key/value editor, multiline)')
   .option('--reason <text>', 'short note shown on the intake page')
-  .option('--help-url <url>', 'link shown on the intake page for where to get the value')
+  .option(
+    '--help-url <NAME=URL>',
+    'per-variable "where to find this" link, e.g. STRIPE_SECRET_KEY=https://dashboard.stripe.com/apikeys (repeatable)',
+    (val: string, acc: string[]) => {
+      acc.push(val);
+      return acc;
+    },
+    [] as string[],
+  )
   .option('--no-open', 'do not auto-open the browser; print the URL only')
   .option('--no-push', 'write to .env only; do not push to Capy')
-  .option('-f, --force', 'overwrite an existing value without prompting')
+  .option('-f, --force', 'overwrite existing values without prompting')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
-  .action(async (varName, options, command) => {
+  .action(async (varNames, options, command) => {
     const { AddCommand } = await import('./commands/addCommand');
     const cmd = new AddCommand(true); // devMode: dev backend + ~/.capy-dev
     const merged = command.optsWithGlobals();
-    await cmd.execute(varName, {
+    await cmd.execute(varNames, {
       web: options.web,
       reason: options.reason,
-      helpUrl: options.helpUrl,
+      helpUrls: options.helpUrl,
       open: options.open,
       noPush: options.push === false,
       force: merged.force,
