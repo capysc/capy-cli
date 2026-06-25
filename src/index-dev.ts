@@ -119,6 +119,7 @@ program
   .command('branch')
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (options) => {
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
@@ -180,6 +181,27 @@ program
     const branches = await serviceClient.listBranches(projectState.projectId!);
     const activeBranch = projectState.activeBranch;
     const projectName = projectState.projectName || 'project';
+
+    if (options.json) {
+      console.log(
+        JSON.stringify(
+          {
+            projectName,
+            activeBranch,
+            branches: branches.map((b) => ({
+              id: b.id,
+              name: b.name,
+              isProtected: b.is_protected,
+              createdAt: b.created_at ?? null,
+              isCurrent: b.name === activeBranch,
+            })),
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
 
     // Tree view
     console.log('');
@@ -250,10 +272,11 @@ program
 program
   .command('status')
   .description('Show secret drift between local, pinned, and remote')
-  .action(async () => {
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
     const { StatusCommand } = await import('./commands/statusCommand');
     const cmd = new StatusCommand(false, true);
-    await cmd.execute();
+    await cmd.execute({ json: options.json });
   });
 
 program
@@ -547,10 +570,11 @@ program
 program
   .command('users')
   .description('List organization members and their project access')
-  .action(async () => {
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
     const { UsersCommand } = await import('./commands/usersCommand');
     const cmd = new UsersCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute();
+    await cmd.execute({ json: options.json });
   });
 
 program

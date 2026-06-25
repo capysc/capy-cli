@@ -129,9 +129,9 @@ export class StatusCommand {
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
-  async execute(): Promise<void> {
+  async execute(opts: { json?: boolean } = {}): Promise<void> {
     try {
-      await this._execute();
+      await this._execute(opts);
     } catch {
       // Exit silently on any error (auth, network, etc.)
       // Hooks must never block git operations
@@ -139,7 +139,7 @@ export class StatusCommand {
     }
   }
 
-  private async _execute(): Promise<void> {
+  private async _execute(opts: { json?: boolean } = {}): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       if (this.terse) return;
@@ -246,6 +246,28 @@ export class StatusCommand {
       ? classifyRemoteFailure(remoteSkipReason)
       : undefined;
     const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
+
+    if (opts.json) {
+      // diffs carry value HASHES only (sha256 prefix), never plaintext.
+      const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
+      console.log(
+        JSON.stringify(
+          {
+            projectName: keep.project_name,
+            branch,
+            totalSecrets,
+            inSync: diffs.length === 0,
+            localMatchesPinned: !showLocal,
+            remoteMatchesPinned: !showRemote,
+            remoteFailure: remoteFailure ?? null,
+            diffs,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
 
     if (this.terse) {
       // Terse mode for git hooks
