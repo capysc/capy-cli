@@ -27,4 +27,12 @@ describe('generateIntakeForm', () => {
     expect(h).not.toContain('</script><b>');
     expect(h).toContain('&lt;/script&gt;&lt;b&gt;');
   });
+
+  test('shows a saving state and renders a failed-save error (with retry)', () => {
+    expect(html).toContain('Saving');
+    expect(html).toContain('Could not save');
+    // surfaces the server error message and re-enables the button for retry
+    expect(html).toContain('b.error');
+    expect(html).toContain('btn.disabled = false');
+  });
 });

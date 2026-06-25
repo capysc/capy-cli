@@ -29,16 +29,19 @@ interface IntakeParams {
 }
 
 /**
- * Open a local browser form and resolve with the value the user submits. The
- * value is returned in-process — it is never printed to stdout/stderr or logged.
- * Only the (secret-free, single-use, loopback) URL is printed.
+ * Open a local browser form and run `onSubmit` with the value the user enters.
+ * The save runs INSIDE the request, so the browser learns whether it actually
+ * succeeded: on success the page shows "Saved" and this resolves; on failure the
+ * server returns 500 with the error message and the user can fix it and retry in
+ * the form. The value is handled in-process — never printed, logged, or returned.
  */
-function runWebIntake(params: IntakeParams): Promise<string> {
+function runWebIntake(params: IntakeParams, onSubmit: (value: string) => Promise<void>): Promise<void> {
   const nonce = randomBytes(32).toString('hex');
   const connections = new Set<Socket>();
-  let submitted = false;
+  let busy = false;
+  let done = false;
 
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     let timer: NodeJS.Timeout;
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -67,10 +70,6 @@ function runWebIntake(params: IntakeParams): Promise<string> {
           res.writeHead(403).end('bad origin');
           return;
         }
-        if (submitted) {
-          res.writeHead(409).end('already submitted');
-          return;
-        }
 
         let body = '';
         let aborted = false;
@@ -82,7 +81,7 @@ function runWebIntake(params: IntakeParams): Promise<string> {
             req.destroy();
           }
         });
-        req.on('end', () => {
+        req.on('end', async () => {
           if (aborted) return;
           let parsed: { nonce?: unknown; value?: unknown };
           try {
@@ -99,14 +98,31 @@ function runWebIntake(params: IntakeParams): Promise<string> {
             res.writeHead(400).end('missing value');
             return;
           }
-          submitted = true;
-          const value = parsed.value;
-          res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
-          // Let the success response flush before tearing down.
-          setTimeout(() => {
-            cleanup();
-            resolve(value);
-          }, 250);
+          if (done) {
+            res.writeHead(409).end('already submitted');
+            return;
+          }
+          if (busy) {
+            res.writeHead(409).end('a submission is already in progress');
+            return;
+          }
+          // Perform the actual save BEFORE responding, so the browser learns
+          // whether it really succeeded. On failure: 500 + the message, and
+          // leave the server open so the user can fix it and retry in the form.
+          busy = true;
+          try {
+            await onSubmit(parsed.value);
+            done = true;
+            res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
+            setTimeout(() => {
+              cleanup();
+              resolve();
+            }, 250);
+          } catch (err) {
+            busy = false;
+            const message = err instanceof Error ? err.message : 'Failed to save the secret.';
+            res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: message }));
+          }
         });
         return;
       }
@@ -192,25 +208,30 @@ export class AddCommand {
       }
     }
 
-    let value: string;
+    const push = opts.noPush !== true;
+
     if (opts.web) {
-      value = await runWebIntake({ varName: name, reason: opts.reason, helpUrl: opts.helpUrl, exists, open: opts.open !== false });
-    } else if (opts.nonTty) {
-      throw new CapyError(
-        'Non-interactive add requires --web (browser intake). Re-run with --web.',
-        ERROR_CODES.INVALID_FORMAT,
+      // The save runs inside the intake server, so the browser reflects success
+      // or failure of the actual encrypt+sync.
+      await runWebIntake(
+        { varName: name, reason: opts.reason, helpUrl: opts.helpUrl, exists, open: opts.open !== false },
+        (value) => writeAndSync(ctx, name, value, { push }),
       );
     } else {
+      if (opts.nonTty) {
+        throw new CapyError(
+          'Non-interactive add requires --web (browser intake). Re-run with --web.',
+          ERROR_CODES.INVALID_FORMAT,
+        );
+      }
       const inquirer = (await import('inquirer')).default;
       const { value: entered } = await inquirer.prompt([{ type: 'password', name: 'value', message: `Value for ${name}:`, mask: '*' }]);
-      value = entered;
-      if (!value) throw new CapyError('No value entered.', ERROR_CODES.INVALID_FORMAT);
+      if (!entered) throw new CapyError('No value entered.', ERROR_CODES.INVALID_FORMAT);
+      await writeAndSync(ctx, name, entered, { push });
     }
 
-    await writeAndSync(ctx, name, value, { push: opts.noPush !== true });
-
     const verb = exists ? 'Updated' : 'Added';
-    const where = opts.noPush ? ' (.env only — not pushed)' : ` and synced to ${ctx.branch}`;
+    const where = push ? ` and synced to ${ctx.branch}` : ' (.env only — not pushed)';
     console.log(`✓ ${verb} ${name}${where}.`);
   }
 }

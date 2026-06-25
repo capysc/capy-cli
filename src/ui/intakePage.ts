@@ -52,29 +52,36 @@ export function generateIntakeForm(o: IntakeFormOptions): string {
         class="w-full font-mono text-sm border border-black dark:border-white dark:bg-black p-3"></textarea>
       <button type="submit" class="bg-black text-white dark:bg-white dark:text-black px-4 py-2 text-sm uppercase tracking-wide">Save &amp; sync</button>
     </form>
-    <div id="status" class="text-sm text-red-600 dark:text-red-400 mt-3"></div>
+    <div id="status" class="text-sm mt-3"></div>
     <p class="text-xs text-neutral-500 dark:text-neutral-400 mt-8">This value is encrypted on your machine and synced to Capy. It never leaves in plaintext and never passes through the AI assistant.</p>
   </div>
   <script>
     const NONCE = ${jsStr(o.nonce)};
     const VAR = ${jsStr(o.varName)};
     const f = document.getElementById('f');
+    const btn = f.querySelector('button');
+    const status = document.getElementById('status');
+    function setStatus(msg, isError) {
+      status.textContent = msg;
+      status.className = 'text-sm mt-3 ' + (isError ? 'text-red-600 dark:text-red-400' : 'text-neutral-500 dark:text-neutral-400');
+    }
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
       const value = document.getElementById('v').value;
-      const btn = f.querySelector('button');
-      const status = document.getElementById('status');
-      btn.disabled = true; status.textContent = '';
+      btn.disabled = true;
+      setStatus('Saving…', false);
       try {
         const r = await fetch('/submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nonce: NONCE, value }) });
         if (r.ok) {
           document.body.innerHTML = '<div class="max-w-xl mx-auto px-5 py-12"><h1 class="text-xl font-semibold">\\u2713 Saved</h1><p class="mt-2">' + VAR + ' was encrypted and synced. You can close this tab.</p></div>';
-        } else {
-          status.textContent = 'Error: ' + (await r.text());
-          btn.disabled = false;
+          return;
         }
+        let detail = 'HTTP ' + r.status;
+        try { const b = await r.json(); if (b && b.error) detail = b.error; } catch (_) {}
+        setStatus('Could not save: ' + detail + ' — fix the issue and try again.', true);
+        btn.disabled = false;
       } catch (err) {
-        status.textContent = 'Error: ' + err;
+        setStatus('Could not reach the Capy CLI (' + err + '). Is it still running? Try again.', true);
         btn.disabled = false;
       }
     });
