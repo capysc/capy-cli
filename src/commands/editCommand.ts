@@ -13,6 +13,7 @@ import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash } from '../types/index';
+import { isReservedNamespace } from '../core/reservedNamespace';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -178,6 +179,9 @@ export class EditCommand {
 
     const rows: EditRow[] = [];
     for (const key of Array.from(allKeys).sort()) {
+      // Reserved namespace is cloud-managed and read-only — never offered for
+      // local editing.
+      if (isReservedNamespace(key)) continue;
       const localVal = localPlaintext[key];
       const remoteVal = remotePlaintext[key];
       const pinnedHash = pinned[key];

@@ -9,6 +9,7 @@ import {
   KeepVariableEntry,
   SyncState,
 } from '../types/index';
+import { isReservedNamespace } from '../core/reservedNamespace';
 
 export class SyncEngine {
   /**
@@ -44,6 +45,9 @@ export class SyncEngine {
 
     // Check local variables
     for (const key of localKeys) {
+      // Reserved namespace is cloud-authoritative: the CLI never pushes,
+      // conflicts, or otherwise reconciles these — the cloud value wins.
+      if (isReservedNamespace(key)) continue;
       if (!remoteKeys.has(key)) {
         // New local variable
         newLocal.push({
@@ -92,6 +96,9 @@ export class SyncEngine {
 
     // Check remote variables not in local
     for (const key of remoteKeys) {
+      // Reserved namespace is cloud-authoritative — never pulled into the
+      // local working set nor flagged as a local deletion.
+      if (isReservedNamespace(key)) continue;
       // Skip deleted markers if they don't exist locally (already handled above)
       if (!localKeys.has(key) && remote[key] !== 'capy:deleted') {
         // Check if this variable was previously synced to this machine

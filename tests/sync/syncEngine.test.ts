@@ -150,6 +150,48 @@ describe('SyncEngine', () => {
       expect(result.unchanged).toHaveLength(0);
     });
 
+    test('should never reconcile the reserved _SAGE_ namespace (cloud-authoritative)', () => {
+      const local = {
+        _SAGE_CONNECTOR_SENDGRID: 'local_manager_key',
+        _SAGE_ONLY_LOCAL: 'stray',
+        APP_VAR: 'app_local',
+      };
+      const remote = {
+        _SAGE_CONNECTOR_SENDGRID: 'remote_manager_key',
+        _SAGE_ONLY_REMOTE: 'cloud',
+        APP_VAR: 'app_local',
+      };
+
+      const result = syncEngine.compareEnvironments(local, remote);
+
+      // No reserved var appears in any reconciliation bucket — the cloud copy
+      // wins silently; it is never pushed, pulled, conflicted, or unchanged.
+      const names = [
+        ...result.newLocal,
+        ...result.newRemote,
+        ...result.unchanged,
+        ...result.deleted,
+        ...result.deletedLocal,
+      ].map((v) => v.name);
+      const conflictNames = result.conflicts.map((c) => c.name);
+      const allNames = [...names, ...conflictNames];
+      expect(allNames.some((n) => n.startsWith('_SAGE_'))).toBe(false);
+
+      // Ordinary vars are still reconciled as usual.
+      expect(result.unchanged.map((v) => v.name)).toContain('APP_VAR');
+    });
+
+    test('should not flag a reserved var as a local deletion even when previously synced', () => {
+      const local = {}; // user no longer has the reserved var locally
+      const remote = { _SAGE_CONNECTOR_SENDGRID: 'cloud_value' };
+      const syncState = { synced_variables: ['_SAGE_CONNECTOR_SENDGRID'] } as any;
+
+      const result = syncEngine.compareEnvironments(local, remote, undefined, undefined, syncState);
+
+      expect(result.deletedLocal).toHaveLength(0);
+      expect(result.newRemote).toHaveLength(0);
+    });
+
     test('should handle complex scenario with all types', () => {
       const local = {
         ONLY_LOCAL: 'local',

@@ -147,6 +147,20 @@ describe('capy run', () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('localhost:5432');
   });
+
+  test('strips the reserved _SAGE_* namespace from the child env (keeps app vars)', async () => {
+    writeFileSync(join(TEST_DIR, '.env'), '_SAGE_CONNECTOR_SENDGRID=manager-key\nAPP_VAR=visible\n');
+
+    const result = await capy([
+      '--', 'node', '-e',
+      'console.log(JSON.stringify({ sage: process.env._SAGE_CONNECTOR_SENDGRID ?? null, app: process.env.APP_VAR ?? null }))',
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.app).toBe('visible');
+    expect(out.sage).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -304,6 +318,33 @@ describe('capy run (deployed mode)', () => {
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/not found on .* different Capy service/);
+  });
+
+  test('strips the reserved _SAGE_* namespace from both the child env and next-env.js', async () => {
+    const envVars = { _SAGE_CONNECTOR_SENDGRID: 'manager-key', APP_VAR: 'visible' };
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+    fake = await startFakeService(serviceKeyHex);
+
+    const result = await capy([
+      '--', 'node', '-e',
+      'console.log(JSON.stringify({ sage: process.env._SAGE_CONNECTOR_SENDGRID ?? null, app: process.env.APP_VAR ?? null }))',
+    ], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.app).toBe('visible');
+    expect(out.sage).toBeNull();
+
+    // The build-time inlining module must not leak the reserved var either.
+    const content = readFileSync(join(TEST_DIR, '.capy', 'next-env.js'), 'utf-8');
+    expect(content).toContain('"APP_VAR"');
+    expect(content).not.toContain('_SAGE_CONNECTOR_SENDGRID');
   });
 
   test('shell-set env overrides decrypted value (dotenv precedence)', async () => {

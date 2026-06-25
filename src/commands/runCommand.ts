@@ -3,6 +3,24 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { FileManager } from '../files/fileManager';
 import { debug } from '../ui/debug';
+import { isReservedNamespace } from '../core/reservedNamespace';
+
+/**
+ * Drops the cloud-authoritative reserved namespace from an env map. These
+ * variables are the managing runtime's own tooling, not the application's
+ * secrets, so they never reach a `capy run` child process nor build-time
+ * inlining. See {@link isReservedNamespace}.
+ */
+export function stripReservedNamespace(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (isReservedNamespace(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -35,6 +53,9 @@ function emitNextEnvModule(keys: string[]): void {
  * and resolves with its exit code. Shared between local and deployed modes.
  */
 function spawnChild(args: string[], env: Record<string, string | undefined>): Promise<number> {
+  // The reserved namespace is cloud-authoritative tooling, never the app's
+  // own secrets — strip it before it can reach the child process.
+  const childEnv = stripReservedNamespace(env);
   let child: ChildProcess | null = null;
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
     process.on(sig, () => child?.kill(sig));
@@ -44,7 +65,7 @@ function spawnChild(args: string[], env: Record<string, string | undefined>): Pr
   // won't execute without a shell — bare `cross-env`/`nodemon` fail with
   // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
   child = spawn(args[0], args.slice(1), {
-    env: env as Record<string, string>,
+    env: childEnv as Record<string, string>,
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });
@@ -102,7 +123,7 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     // Auto-emit .capy/next-env.js for Next.js build-time inlining. Best-effort
     // — failure to write is non-fatal (e.g., read-only FS in exotic envs).
     try {
-      emitNextEnvModule(Object.keys(envMap));
+      emitNextEnvModule(Object.keys(envMap).filter((k) => !isReservedNamespace(k)));
     } catch {
       // No-op. next-env.js is a convenience; the child still gets the env.
     }
