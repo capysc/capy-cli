@@ -94,7 +94,7 @@ export class UsersCommand {
     return { projectId: project.id, branchId: (branch as any).id, userId: member.userId };
   }
 
-  async execute(): Promise<void> {
+  async execute(opts: { json?: boolean } = {}): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
 
@@ -139,6 +139,37 @@ export class UsersCommand {
       spinner.fail('Failed to load members');
       console.error(`  ${err.message}`);
       process.exit(1);
+    }
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            members: members.map((m: any) => ({
+              membershipId: m.membershipId,
+              userId: m.userId,
+              email: m.email,
+              role: m.role,
+              status: m.status,
+              joinedAt: m.createdAt,
+              projects: (m.projects || []).map((p: any) => ({
+                id: p.id,
+                name: p.name,
+                role: p.role ?? null,
+                branches: (p.branches || []).map((b: any) => ({
+                  id: b.id,
+                  name: b.name,
+                  isProtected: b.isProtected,
+                  hasAccess: b.hasAccess,
+                })),
+              })),
+            })),
+          },
+          null,
+          2,
+        ),
+      );
+      return;
     }
 
     if (members.length === 0) {
