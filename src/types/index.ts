@@ -217,6 +217,10 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
+  /** Render bare `capy`'s interactive steps (init trainstops / sync conflict resolver)
+   *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
+   *  interactive decision is actually reached (a clean sync stays terminal-only). */
+  web?: boolean;
 }
 
 export interface ProjectInitResult {

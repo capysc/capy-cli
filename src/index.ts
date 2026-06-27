@@ -50,6 +50,7 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
+  .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
@@ -84,7 +85,8 @@ program
       envPath: options.envPath,
       verbose: options.verbose,
       force: options.force,
-      dryRun: options.dryRun
+      dryRun: options.dryRun,
+      web: options.web
     };
 
     const command = new CapyCommand(cliOptions);
