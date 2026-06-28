@@ -394,9 +394,11 @@ program
 program
   .command('byoc [url]')
   .description('Connect to a self-hosted Capy (BYOC) instance')
-  .action(async (url: string | undefined) => {
+  .action(async (url: string | undefined, _options: unknown, command: Command) => {
     const { byocCommand } = await import('./commands/byocCommand');
-    process.exit(await byocCommand(url));
+    // `--web` is a global option on the root program, so read it via globals.
+    const web = command.optsWithGlobals().web === true;
+    process.exit(await byocCommand(url, { web }));
   });
 
 program

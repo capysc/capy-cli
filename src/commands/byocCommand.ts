@@ -331,6 +331,20 @@ async function promptForPassphrase(): Promise<string> {
 }
 
 /**
+ * Derive M from a recovery phrase, wrap it at rest with a passphrase, save the
+ * `local` profile, and open an unlocked session. Shared by the TTY (`localSetup`)
+ * and browser (`localSetupWeb`) onboarding paths so the crypto/writes are
+ * identical regardless of how the phrase + passphrase were collected. Throws on
+ * failure. The phrase is consumed here and never returned or logged.
+ */
+export function finalizeLocalSetup(phrase: string, passphrase: string): void {
+  const masterKey = seedPhraseToMasterKey(phrase);
+  saveLocalKey(masterKey, passphrase);
+  saveAndActivateProfile('local', { url: 'local://', localOnly: true, displayName: 'Local (this machine only)' });
+  saveLocalSession(masterKey.toString('hex'));
+}
+
+/**
  * Local-only setup: derive M from a recovery phrase, wrap it at rest with a
  * passphrase, save the `local` profile, and open an unlocked session. No URL,
  * no probe, no server.
@@ -342,13 +356,44 @@ async function localSetup(): Promise<number> {
   const phrase = await promptForRecoveryPhrase();
   const passphrase = await promptForPassphrase();
 
-  const masterKey = seedPhraseToMasterKey(phrase);
   try {
-    saveLocalKey(masterKey, passphrase);
-    saveAndActivateProfile('local', { url: 'local://', localOnly: true, displayName: 'Local (this machine only)' });
-    saveLocalSession(masterKey.toString('hex'));
+    finalizeLocalSetup(phrase, passphrase);
   } catch (err: any) {
     console.error(`Failed to set up local mode: ${err.message}`);
+    return 1;
+  }
+
+  console.log('');
+  console.log(`${GREEN('✓')} Local mode ready — profile ${B('local')} active`);
+  console.log('');
+  console.log(`  Run ${B('capy')} in a project directory to start.`);
+  console.log(DIM('  Lock the key any time with `capy lock`.'));
+  console.log('');
+  return 0;
+}
+
+/**
+ * Browser-rendered local-only setup (`capy byoc --web`). The recovery phrase is
+ * shown in the loopback page and never touches this terminal — so an agent
+ * driving this through the MCP never sees it.
+ */
+async function localSetupWeb(): Promise<number> {
+  const { runLocalOnboardingWeb } = await import('../ui/onboardingWeb');
+  console.log(DIM('  Setting up local mode in your browser — your recovery phrase stays in the page, never the terminal.'));
+
+  let ok = false;
+  try {
+    ok = await runLocalOnboardingWeb(
+      (phrase, passphrase) => finalizeLocalSetup(phrase, passphrase),
+      { open: !process.env.CAPY_WEB_NO_OPEN },
+    );
+  } catch (err: any) {
+    console.error(`Failed to set up local mode: ${err.message}`);
+    return 1;
+  }
+  if (!ok) {
+    console.log('');
+    console.log('  Setup cancelled.');
     return 1;
   }
 
@@ -374,8 +419,17 @@ async function promptUseLocalMode(): Promise<boolean> {
   return local;
 }
 
-export async function byocCommand(initialUrl?: string): Promise<number> {
+export async function byocCommand(
+  initialUrl?: string,
+  opts: { web?: boolean } = {},
+): Promise<number> {
   console.log('');
+
+  // --web currently drives the local-only setup in the browser (the offline
+  // first-run path, where the recovery phrase must stay off the terminal).
+  if (opts.web) {
+    return localSetupWeb();
+  }
 
   // Ask first: local-only mode skips the URL probe entirely — there is no
   // server to reach.
