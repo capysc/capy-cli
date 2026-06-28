@@ -24,7 +24,7 @@ const BTN =
   'width:100%;background:#000;color:#fff;border:none;border-radius:10px;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;';
 const NOTE = 'color:#6b7280;font-size:13px;margin:8px 0 0;';
 
-function chooseSourceScreen(): WizardScreen {
+export function chooseSourceScreen(): WizardScreen {
   return {
     html: `
       <p style="margin:0 0 18px;color:#374151;">Local mode keeps your secrets only on this machine, encrypted with a key derived from a recovery phrase.</p>
@@ -42,7 +42,7 @@ function chooseSourceScreen(): WizardScreen {
   };
 }
 
-function phraseDisplayScreen(phrase: string): WizardScreen {
+export function phraseDisplayScreen(phrase: string): WizardScreen {
   const words = phrase.split(/\s+/).filter(Boolean);
   const grid = words
     .map(
@@ -81,7 +81,7 @@ function enterPhraseScreen(): WizardScreen {
   };
 }
 
-function passphraseScreen(): WizardScreen {
+export function passphraseScreen(): WizardScreen {
   const field =
     'width:100%;box-sizing:border-box;font-size:15px;padding:11px 12px;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:10px;';
   return {

@@ -75,7 +75,7 @@ function rowHtml(row: ResolveRow, showLocal: boolean, showRemote: boolean): stri
     </fieldset>`;
 }
 
-function buildScreenHtml(p: WebResolveParams): string {
+export function buildScreenHtml(p: WebResolveParams): string {
   const n = p.rows.length;
   const intro = `<p style="margin:0 0 18px;color:#374151;">You have <strong>${n}</strong> environment variable${
     n !== 1 ? 's' : ''
