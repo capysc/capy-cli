@@ -1342,10 +1342,11 @@ export class CapyCommand {
 
     console.log(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
 
-    // Display comparison table
-    this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
-
-    console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
+    // Display comparison table (TTY only — the --web resolver renders its own).
+    if (!this.options.web) {
+      this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
+      console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
+    }
 
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
@@ -1416,12 +1417,31 @@ export class CapyCommand {
       }
     }
 
-    const { action } = await inquirer.prompt([{
-      type: 'list',
-      name: 'action',
-      message: 'What would you like to do?',
-      choices: menuChoices,
-    }]);
+    let action: string;
+    // When the conflict is resolved in the browser we already hold the final env;
+    // we tag the action 'individual' and skip the TTY ResolveTable below.
+    let webFinalEnv: Record<string, string> | undefined;
+    if (this.options.web) {
+      const resolved = await this.resolveConflictViaBrowser(
+        diffs, effectiveShowLocal, showRemote, pinned,
+        localPlaintext, remotePlaintext, pinnedPlaintext,
+        projectState.projectName || 'project', branch,
+      );
+      if (resolved === null) {
+        console.log('\n  No changes applied.');
+        return;
+      }
+      webFinalEnv = resolved;
+      action = 'individual';
+    } else {
+      const res = await inquirer.prompt([{
+        type: 'list',
+        name: 'action',
+        message: 'What would you like to do?',
+        choices: menuChoices,
+      }]);
+      action = res.action as string;
+    }
 
     // Apply the chosen action
     let finalEnv: Record<string, string>;
@@ -1468,8 +1488,8 @@ export class CapyCommand {
     } else if (action === 'skip') {
       return;
     } else {
-      // Individual resolution
-      const resolved = await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
+      // Individual resolution — already resolved in the browser when --web.
+      const resolved = webFinalEnv ?? await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
       if (!resolved) return; // Cancelled
       finalEnv = resolved;
     }
@@ -1681,16 +1701,38 @@ export class CapyCommand {
       return null;
     }
 
+    return this.mapResolveChoicesToEnv(choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
+  }
+
+  /**
+   * Map a per-variable resolve choice set ('pinned'|'local'|'remote'|'delete')
+   * to the final plaintext env. Shared by the TTY ResolveTable and the --web
+   * browser resolver so both paths produce byte-identical results. Variables not
+   * in `diffs` (unchanged) are carried over from local.
+   */
+  private mapResolveChoicesToEnv(
+    choices: Record<string, 'pinned' | 'local' | 'remote' | 'delete'>,
+    diffs: { variable: string }[],
+    pinned: Record<string, string>,
+    localPlaintext: Record<string, string>,
+    remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string> = {},
+  ): Record<string, string> {
     const result: Record<string, string> = {};
 
     for (const [variable, choice] of Object.entries(choices)) {
       if (choice === 'pinned') {
         const pinnedHash = pinned[variable];
-        // `!== undefined` like the 'local'/'remote' arms below: '' is a valid
-        // pinned value. With a falsy check, choosing "pinned" for an empty
-        // variable set nothing here, and the keep.lock cleanup that removes
-        // vars absent from finalEnv then silently deleted the variable.
-        if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) {
+        // Prefer the resolved pinned plaintext (from the keep cache / remote
+        // fetch). Without it, "pinned" could only be reconstructed when the
+        // pinned value happened to equal local or remote — so in local-only
+        // mode, choosing "pinned" for a locally-EDITED var matched nothing and
+        // the keep.lock cleanup then silently DELETED the variable. The cache
+        // holds the baseline, so consult it first.
+        // `!== undefined` throughout: '' is a valid pinned value.
+        if (pinnedPlaintext[variable] !== undefined) {
+          result[variable] = pinnedPlaintext[variable];
+        } else if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) {
           result[variable] = localPlaintext[variable];
         } else if (remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash) {
           result[variable] = remotePlaintext[variable];
@@ -1711,6 +1753,53 @@ export class CapyCommand {
     }
 
     return result;
+  }
+
+  /**
+   * Render the sync conflict resolver in the browser (`capy --web`). Builds the
+   * same per-variable rows as the TTY ResolveTable — SNIPPETS only, never full
+   * secret values — collects the user's choices over the loopback, and maps them
+   * to the final env. Returns null if the user cancelled.
+   */
+  private async resolveConflictViaBrowser(
+    diffs: { variable: string; type: string; pinned?: string; local?: string; remote?: string }[],
+    showLocal: boolean,
+    showRemote: boolean,
+    pinned: Record<string, string>,
+    localPlaintext: Record<string, string>,
+    remotePlaintext: Record<string, string>,
+    pinnedPlaintext: Record<string, string>,
+    projectName: string,
+    branch: string,
+  ): Promise<Record<string, string> | null> {
+    const { resolveConflictInBrowser } = await import('../ui/conflictWeb');
+
+    const pinnedSnippetFor = (variable: string): string | null => {
+      if (!pinned[variable]) return null;
+      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      return '\x1b[3munresolvable\x1b[0m';
+    };
+
+    const rows = diffs.map(diff => ({
+      variable: diff.variable,
+      pinned: pinnedSnippetFor(diff.variable),
+      local: localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : null,
+      remote: remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : null,
+    }));
+
+    const { choices, cancelled } = await resolveConflictInBrowser({
+      rows,
+      showLocal,
+      showRemote,
+      projectName,
+      branch,
+      // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless
+      // verification drive the loopback without hijacking a real browser.
+      open: !process.env.CAPY_WEB_NO_OPEN,
+    });
+    if (cancelled) return null;
+
+    return this.mapResolveChoicesToEnv(choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
   }
 
   private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
