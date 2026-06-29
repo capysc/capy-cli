@@ -80,7 +80,7 @@ function rowHtml(row: ResolveRow, cols: Col[]): string {
     .map((c) => {
       const v = cellValue(row, c.key);
       if (v === null) {
-        return `<td style="padding:6px 10px;text-align:center;color:${MUTED};border-top:1px solid ${LINE};">–</td>`;
+        return `<td style="padding:6px 10px;text-align:center;color:${MUTED};">–</td>`;
       }
       const checked = c.key === def ? ' checked' : '';
       const isDel = c.key === 'delete';
@@ -90,14 +90,14 @@ function rowHtml(row: ResolveRow, cols: Col[]): string {
       // The whole cell is the radio's label, so clicking anywhere selects. The td
       // padding insets the label a few px so the selected (filled) rectangle floats
       // inside the cell rather than sitting flush with the gridlines.
-      return `<td style="padding:4px;border-top:1px solid ${LINE};">
+      return `<td style="padding:4px;">
         <label style="display:flex;align-items:center;gap:8px;justify-content:center;padding:7px 8px;cursor:pointer;">
           <input type="radio" name="${name}" value="${c.key}"${checked} style="accent-color:${LINE};width:15px;height:15px;flex:none;">
           ${snippet}
         </label></td>`;
     })
     .join('');
-  return `<tr><td style="padding:8px 12px;font-family:${MONO};font-weight:600;font-size:13px;color:${FG};border-top:1px solid ${LINE};white-space:nowrap;">${name}</td>${cells}</tr>`;
+  return `<tr><td style="padding:8px 12px;font-family:${MONO};font-weight:600;font-size:13px;color:${FG};white-space:nowrap;">${name}</td>${cells}</tr>`;
 }
 
 export function buildScreenHtml(p: WebResolveParams): string {
@@ -118,8 +118,8 @@ export function buildScreenHtml(p: WebResolveParams): string {
   // `:has(:checked)` highlights the selected cell — the web analogue of the CLI's
   // inverse-video selection box. Injected with the screen so it travels with it.
   const style = `<style>
-    .cf-table{width:100%;border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;}
-    .cf-table thead tr{background:${ld('#f5f5f5', '#262626')};border-bottom:1px solid ${LINE};}
+    .cf-table{width:100%;border-collapse:collapse;margin:0 0 16px;}
+    .cf-table thead th{border-bottom:1px solid ${LINE};padding-bottom:8px;}
     .cf-table td label:has(input:checked){background:${LINE};}
     .cf-table td label:has(input:checked) .cf-snip{color:${ld('#fff', '#000')} !important;}
   </style>`;
