@@ -46,6 +46,21 @@ const screens: Array<[string, string, string]> = [
       branch: 'development',
     }),
   ],
+  [
+    '5-conflict-resolver-3way.html',
+    'Resolve 2 conflicts — demo/development',
+    // 3-way conflict (a teammate also pushed) → the Remote column appears too.
+    buildScreenHtml({
+      rows: [
+        { variable: 'API_KEY', pinned: 'sk_...001', local: 'sk_...999', remote: 'sk_...777' },
+        { variable: 'DATABASE_URL', pinned: 'pos...dev', local: 'pos...ing', remote: 'pos...prd' },
+      ],
+      showLocal: true,
+      showRemote: true,
+      projectName: 'demo',
+      branch: 'development',
+    }),
+  ],
 ];
 
 for (const [file, title, html] of screens) {
