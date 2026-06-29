@@ -21,8 +21,10 @@ function page(title: string, screenHtml: string, theme: 'light' | 'dark' = 'ligh
   // flip the screen's own wrapper (which declares `light dark`) to `dark` so its
   // light-dark() colours resolve dark even without OS emulation.
   const dark = theme === 'dark';
-  const inner = dark ? screenHtml.replaceAll('color-scheme:light dark', 'color-scheme:dark') : screenHtml;
-  const bodyBg = dark ? 'background:#000;color:#fff;' : 'background:#fff;color:#111;';
+  // Force the screen's wrapper to the chosen scheme so light-dark() resolves
+  // deterministically in headless (which otherwise follows the host's preference).
+  const inner = screenHtml.replaceAll('color-scheme:light dark', `color-scheme:${theme}`);
+  const bodyBg = dark ? 'background:#000;color:#fff;' : 'background:#fff;color:#171717;';
   return `<!DOCTYPE html><html lang="en" style="color-scheme:${theme}"><head><meta charset="UTF-8"><style>${DEPLOY_PAGE_CSS}</style></head>
 <body class="min-h-screen font-sans" style="${bodyBg}">
   <div class="max-w-xl mx-auto px-5 py-12">

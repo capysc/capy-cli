@@ -23,8 +23,9 @@ const esc = (s: string): string =>
 /** A CSS colour that follows the OS theme: light value first, dark value second. */
 const ld = (light: string, dark: string): string => `light-dark(${light},${dark})`;
 const MONO = 'ui-monospace,SFMono-Regular,Menlo,monospace';
-const FG = ld('#111', '#fff');
-const MUTED = ld('#6b7280', '#9ca3af');
+// Tailwind `neutral` palette (matches the rest of Capy's web pages), not `gray`.
+const FG = ld('#171717', '#fafafa'); // neutral-900 / neutral-50
+const MUTED = ld('#737373', '#a3a3a3'); // neutral-500 / neutral-400
 const LINE = ld('#000', '#fff');
 
 const BTN = `width:100%;background:${LINE};color:${ld('#fff', '#000')};border:none;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;`;
@@ -56,7 +57,7 @@ export function phraseDisplayScreen(phrase: string): WizardScreen {
   const grid = words
     .map(
       (w, i) =>
-        `<div style="display:flex;gap:8px;align-items:baseline;padding:7px 10px;background:${ld('#f9fafb', '#111')};border:1px solid ${ld('#eef0f2', '#333')};">
+        `<div style="display:flex;gap:8px;align-items:baseline;padding:7px 10px;background:${ld('#fafafa', '#171717')};border:1px solid ${ld('#e5e5e5', '#404040')};">
            <span style="color:${MUTED};font-size:12px;min-width:18px;text-align:right;">${i + 1}</span>
            <span style="font-family:${MONO};font-size:14px;color:${FG};">${esc(w)}</span>
          </div>`,

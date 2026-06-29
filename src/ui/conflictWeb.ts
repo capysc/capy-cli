@@ -36,8 +36,9 @@ const esc = (s: string): string =>
 const ld = (light: string, dark: string): string => `light-dark(${light},${dark})`;
 
 const MONO = 'ui-monospace,SFMono-Regular,Menlo,monospace';
-const FG = ld('#111', '#fff');
-const MUTED = ld('#6b7280', '#9ca3af');
+// Tailwind `neutral` palette (matches the rest of Capy's web pages), not `gray`.
+const FG = ld('#171717', '#fafafa'); // neutral-900 / neutral-50
+const MUTED = ld('#737373', '#a3a3a3'); // neutral-500 / neutral-400
 const LINE = ld('#000', '#fff');
 const DANGER = ld('#b91c1c', '#f87171');
 
@@ -86,9 +87,11 @@ function rowHtml(row: ResolveRow, cols: Col[]): string {
       const snippet = isDel
         ? `<span class="cf-snip" style="color:${DANGER};font-size:13px;">discard</span>`
         : `<code class="cf-snip" style="font-family:${MONO};font-size:13px;color:${FG};">${esc(v)}</code>`;
-      // The whole cell is the radio's label, so clicking anywhere in it selects.
-      return `<td style="padding:0;border-top:1px solid ${LINE};">
-        <label style="display:flex;align-items:center;gap:8px;justify-content:center;padding:8px 10px;cursor:pointer;">
+      // The whole cell is the radio's label, so clicking anywhere selects. The td
+      // padding insets the label a few px so the selected (filled) rectangle floats
+      // inside the cell rather than sitting flush with the gridlines.
+      return `<td style="padding:4px;border-top:1px solid ${LINE};">
+        <label style="display:flex;align-items:center;gap:8px;justify-content:center;padding:7px 8px;cursor:pointer;">
           <input type="radio" name="${name}" value="${c.key}"${checked} style="accent-color:${LINE};width:15px;height:15px;flex:none;">
           ${snippet}
         </label></td>`;
@@ -116,7 +119,7 @@ export function buildScreenHtml(p: WebResolveParams): string {
   // inverse-video selection box. Injected with the screen so it travels with it.
   const style = `<style>
     .cf-table{width:100%;border-collapse:collapse;border:1px solid ${LINE};margin:0 0 16px;}
-    .cf-table thead tr{background:${ld('#f5f5f5', '#111')};border-bottom:1px solid ${LINE};}
+    .cf-table thead tr{background:${ld('#f5f5f5', '#262626')};border-bottom:1px solid ${LINE};}
     .cf-table td label:has(input:checked){background:${LINE};}
     .cf-table td label:has(input:checked) .cf-snip{color:${ld('#fff', '#000')} !important;}
   </style>`;
