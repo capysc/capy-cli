@@ -29,67 +29,98 @@ const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-interface Opt {
-  value: Choice;
+interface Col {
+  key: Choice;
   label: string;
-  snippet: string;
 }
 
-/** The selectable sources for one variable, in default-preference order. */
-function optionsForRow(row: ResolveRow, showLocal: boolean, showRemote: boolean): Opt[] {
-  const opts: Opt[] = [];
-  if (showLocal && row.local) {
-    opts.push({ value: 'local', label: 'Local edit', snippet: stripAnsi(row.local) });
-  }
-  if (row.pinned && stripAnsi(row.pinned) !== 'unresolvable') {
-    opts.push({ value: 'pinned', label: 'Pinned baseline', snippet: stripAnsi(row.pinned) });
-  }
-  if (showRemote && row.remote) {
-    opts.push({ value: 'remote', label: 'Remote (teammate)', snippet: stripAnsi(row.remote) });
-  }
-  opts.push({ value: 'delete', label: 'Delete this variable', snippet: '—' });
-  return opts;
+const MONO = 'ui-monospace,SFMono-Regular,Menlo,monospace';
+
+/** The snippet to show for a given source on a row, or null if it has no value there. */
+function cellValue(row: ResolveRow, key: Choice): string | null {
+  if (key === 'pinned') return row.pinned && stripAnsi(row.pinned) !== 'unresolvable' ? stripAnsi(row.pinned) : null;
+  if (key === 'local') return row.local ? stripAnsi(row.local) : null;
+  if (key === 'remote') return row.remote ? stripAnsi(row.remote) : null;
+  return '✕'; // 'delete' is always a selectable column
 }
 
-function rowHtml(row: ResolveRow, showLocal: boolean, showRemote: boolean): string {
+/** Visible columns — Pinned/Local/Remote only when present, plus Delete. Mirrors the CLI table. */
+function columnsFor(rows: ResolveRow[], showLocal: boolean, showRemote: boolean): Col[] {
+  const cols: Col[] = [];
+  if (rows.some((r) => cellValue(r, 'pinned') !== null)) cols.push({ key: 'pinned', label: 'Pinned' });
+  if (showLocal) cols.push({ key: 'local', label: 'Local' });
+  if (showRemote) cols.push({ key: 'remote', label: 'Remote' });
+  cols.push({ key: 'delete', label: 'Delete' });
+  return cols;
+}
+
+/** First real source present on the row (Local → Remote → Pinned); never defaults to delete. */
+function defaultKey(row: ResolveRow, cols: Col[]): Choice {
+  for (const pref of ['local', 'remote', 'pinned'] as const) {
+    if (cols.some((c) => c.key === pref) && cellValue(row, pref) !== null) return pref;
+  }
+  return 'delete';
+}
+
+function rowHtml(row: ResolveRow, cols: Col[]): string {
   const name = esc(row.variable);
-  const opts = optionsForRow(row, showLocal, showRemote);
-  // Default to the first real source (Local edit when present) — never "delete".
-  const defaultValue = opts.find((o) => o.value !== 'delete')?.value ?? 'delete';
-  const optionsHtml = opts
-    .map((o) => {
-      const checked = o.value === defaultValue ? ' checked' : '';
-      const isDelete = o.value === 'delete';
-      return `
-      <label style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;cursor:pointer;border:1px solid transparent;">
-        <input type="radio" name="${name}" value="${o.value}"${checked} style="accent-color:#000;width:16px;height:16px;">
-        <span style="min-width:140px;font-weight:500;${isDelete ? 'color:#b91c1c;' : ''}">${esc(o.label)}</span>
-        <code style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#6b7280;">${esc(o.snippet)}</code>
-      </label>`;
+  const def = defaultKey(row, cols);
+  const cells = cols
+    .map((c) => {
+      const v = cellValue(row, c.key);
+      if (v === null) {
+        return `<td style="padding:6px 10px;text-align:center;color:#cbd5e1;border-top:1px solid #eef0f2;">–</td>`;
+      }
+      const checked = c.key === def ? ' checked' : '';
+      const isDel = c.key === 'delete';
+      const snippet = isDel
+        ? `<span style="color:#b91c1c;font-size:13px;">discard</span>`
+        : `<code style="font-family:${MONO};font-size:13px;">${esc(v)}</code>`;
+      // The whole cell is the radio's label, so clicking anywhere in it selects.
+      return `<td style="padding:0;border-top:1px solid #eef0f2;">
+        <label style="display:flex;align-items:center;gap:8px;justify-content:center;padding:8px 10px;cursor:pointer;">
+          <input type="radio" name="${name}" value="${c.key}"${checked} style="accent-color:#000;width:15px;height:15px;flex:none;">
+          ${snippet}
+        </label></td>`;
     })
     .join('');
-  return `
-    <fieldset style="border:1px solid #e5e7eb;border-radius:12px;padding:14px 16px;margin:0 0 14px;">
-      <legend style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;font-size:14px;padding:0 6px;">${name}</legend>
-      ${optionsHtml}
-    </fieldset>`;
+  return `<tr><td style="padding:8px 12px;font-family:${MONO};font-weight:600;font-size:13px;border-top:1px solid #eef0f2;white-space:nowrap;">${name}</td>${cells}</tr>`;
 }
 
 export function buildScreenHtml(p: WebResolveParams): string {
   const n = p.rows.length;
-  const intro = `<p style="margin:0 0 18px;color:#374151;">You have <strong>${n}</strong> environment variable${
+  const cols = columnsFor(p.rows, p.showLocal, p.showRemote);
+  const intro = `<p style="margin:0 0 16px;color:#374151;">You have <strong>${n}</strong> environment variable${
     n !== 1 ? 's' : ''
-  } that differ. Pick which value to keep for each, then apply.</p>`;
-  const rows = p.rows.map((r) => rowHtml(r, p.showLocal, p.showRemote)).join('');
+  } that differ. For each, pick which column's value to keep — then apply.</p>`;
+  const head = `<th style="text-align:left;padding:8px 12px;font-size:12px;color:#6b7280;font-weight:600;">Variable</th>${cols
+    .map(
+      (c) =>
+        `<th style="text-align:center;padding:8px 10px;font-size:12px;color:${
+          c.key === 'delete' ? '#b91c1c' : '#6b7280'
+        };font-weight:600;">${c.label}</th>`,
+    )
+    .join('')}`;
+  const body = p.rows.map((r) => rowHtml(r, cols)).join('');
+  // `:has(:checked)` highlights the selected cell — the web analogue of the CLI's
+  // inverse-video selection box. Injected with the screen so it travels with it.
+  const style = `<style>
+    .cf-table{width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;margin:0 0 16px;}
+    .cf-table thead tr{background:#f9fafb;}
+    .cf-table td label:has(input:checked){background:#111;border-radius:8px;}
+    .cf-table td label:has(input:checked) code{color:#fff;}
+    .cf-table td label:has(input:checked) span{color:#fff !important;}
+  </style>`;
   // Two forms so we can carry a distinct __action without per-screen JS (the shared
   // wizard handler serializes whichever form is submitted). The radios live in the
   // apply form; cancel is its own form.
   return `
+    ${style}
     ${intro}
     <form>
       <input type="hidden" name="__action" value="apply">
-      ${rows}
-      <button type="submit" style="margin-top:6px;width:100%;background:#000;color:#fff;border:none;border-radius:10px;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;">Apply &amp; commit locally</button>
+      <table class="cf-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+      <button type="submit" style="width:100%;background:#000;color:#fff;border:none;border-radius:10px;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;">Apply &amp; commit locally</button>
     </form>
     <form style="margin-top:10px;">
       <input type="hidden" name="__action" value="cancel">
