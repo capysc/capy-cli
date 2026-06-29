@@ -16,12 +16,18 @@ import { generateSeedPhrase } from '../../src/crypto/keyManager';
 const outDir = process.argv[2] || '/tmp/capy-preview';
 mkdirSync(outDir, { recursive: true });
 
-function page(title: string, screenHtml: string): string {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><style>${DEPLOY_PAGE_CSS}</style></head>
-<body class="min-h-screen bg-white font-sans text-neutral-900">
+function page(title: string, screenHtml: string, theme: 'light' | 'dark' = 'light'): string {
+  // Force the theme for the preview: set color-scheme on <html> and, for dark,
+  // flip the screen's own wrapper (which declares `light dark`) to `dark` so its
+  // light-dark() colours resolve dark even without OS emulation.
+  const dark = theme === 'dark';
+  const inner = dark ? screenHtml.replaceAll('color-scheme:light dark', 'color-scheme:dark') : screenHtml;
+  const bodyBg = dark ? 'background:#000;color:#fff;' : 'background:#fff;color:#111;';
+  return `<!DOCTYPE html><html lang="en" style="color-scheme:${theme}"><head><meta charset="UTF-8"><style>${DEPLOY_PAGE_CSS}</style></head>
+<body class="min-h-screen font-sans" style="${bodyBg}">
   <div class="max-w-xl mx-auto px-5 py-12">
     <h1 class="text-xl font-semibold mb-6">${title}</h1>
-    <div id="screen">${screenHtml}</div>
+    <div id="screen">${inner}</div>
   </div>
 </body></html>`;
 }
@@ -64,6 +70,9 @@ const screens: Array<[string, string, string]> = [
 ];
 
 for (const [file, title, html] of screens) {
-  writeFileSync(join(outDir, file), page(title, html));
+  writeFileSync(join(outDir, file), page(title, html, 'light'));
   console.log(join(outDir, file));
+  const darkFile = file.replace(/\.html$/, '-dark.html');
+  writeFileSync(join(outDir, darkFile), page(title, html, 'dark'));
+  console.log(join(outDir, darkFile));
 }

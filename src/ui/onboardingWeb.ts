@@ -20,25 +20,34 @@ export interface OnboardingWebOptions {
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-const BTN =
-  'width:100%;background:#000;color:#fff;border:none;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;';
-const NOTE = 'color:#6b7280;font-size:13px;margin:8px 0 0;';
+/** A CSS colour that follows the OS theme: light value first, dark value second. */
+const ld = (light: string, dark: string): string => `light-dark(${light},${dark})`;
+const MONO = 'ui-monospace,SFMono-Regular,Menlo,monospace';
+const FG = ld('#111', '#fff');
+const MUTED = ld('#6b7280', '#9ca3af');
+const LINE = ld('#000', '#fff');
+
+const BTN = `width:100%;background:${LINE};color:${ld('#fff', '#000')};border:none;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;`;
+const NOTE = `color:${MUTED};font-size:13px;margin:8px 0 0;`;
+// color-scheme on the wrapper enables light-dark() to follow the OS theme AND makes
+// native form controls (inputs) render dark when the OS is dark.
+const wrap = (inner: string): string => `<div style="color-scheme:light dark;color:${FG};">${inner}</div>`;
 
 export function chooseSourceScreen(): WizardScreen {
   return {
-    html: `
-      <p style="margin:0 0 18px;color:#374151;">Local mode keeps your secrets only on this machine, encrypted with a key derived from a recovery phrase.</p>
+    html: wrap(`
+      <p style="margin:0 0 18px;color:${FG};">Local mode keeps your secrets only on this machine, encrypted with a key derived from a recovery phrase.</p>
       <form>
-        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid #000;margin-bottom:10px;cursor:pointer;">
-          <input type="radio" name="mode" value="generate" checked style="margin-top:3px;accent-color:#000;">
+        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid ${LINE};margin-bottom:10px;cursor:pointer;">
+          <input type="radio" name="mode" value="generate" checked style="margin-top:3px;accent-color:${LINE};">
           <span><strong>Generate a new recovery phrase</strong><br><span style="${NOTE}">Recommended — a fresh 24-word phrase for this machine.</span></span>
         </label>
-        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid #000;margin-bottom:10px;cursor:pointer;">
-          <input type="radio" name="mode" value="enter" style="margin-top:3px;accent-color:#000;">
+        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid ${LINE};margin-bottom:10px;cursor:pointer;">
+          <input type="radio" name="mode" value="enter" style="margin-top:3px;accent-color:${LINE};">
           <span><strong>Enter an existing recovery phrase</strong><br><span style="${NOTE}">Restore from a phrase you already have.</span></span>
         </label>
         <button type="submit" style="${BTN}">Continue</button>
-      </form>`,
+      </form>`),
   };
 }
 
@@ -47,51 +56,50 @@ export function phraseDisplayScreen(phrase: string): WizardScreen {
   const grid = words
     .map(
       (w, i) =>
-        `<div style="display:flex;gap:8px;align-items:baseline;padding:7px 10px;background:#f9fafb;border:1px solid #eef0f2;">
-           <span style="color:#9ca3af;font-size:12px;min-width:18px;text-align:right;">${i + 1}</span>
-           <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">${esc(w)}</span>
+        `<div style="display:flex;gap:8px;align-items:baseline;padding:7px 10px;background:${ld('#f9fafb', '#111')};border:1px solid ${ld('#eef0f2', '#333')};">
+           <span style="color:${MUTED};font-size:12px;min-width:18px;text-align:right;">${i + 1}</span>
+           <span style="font-family:${MONO};font-size:14px;color:${FG};">${esc(w)}</span>
          </div>`,
     )
     .join('');
   return {
-    html: `
-      <p style="margin:0 0 8px;color:#374151;">Write down these <strong>24 words</strong> in order and keep them somewhere safe.</p>
-      <div style="background:#fff7ed;border:1px solid #fed7aa;padding:10px 14px;margin:0 0 16px;color:#9a3412;font-size:13px;">
+    html: wrap(`
+      <p style="margin:0 0 8px;color:${FG};">Write down these <strong>24 words</strong> in order and keep them somewhere safe.</p>
+      <div style="background:${ld('#fff7ed', '#2a1d0a')};border:1px solid ${ld('#fed7aa', '#7c4a03')};padding:10px 14px;margin:0 0 16px;color:${ld('#9a3412', '#fdba74')};font-size:13px;">
         This is the only time it is shown. It never leaves this machine — if you lose it, your secrets cannot be recovered.
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:18px;">${grid}</div>
       <form>
         <label style="display:flex;gap:10px;align-items:center;margin-bottom:6px;cursor:pointer;">
-          <input type="checkbox" name="saved" required style="width:16px;height:16px;accent-color:#000;">
+          <input type="checkbox" name="saved" required style="width:16px;height:16px;accent-color:${LINE};">
           <span>I have written down my recovery phrase</span>
         </label>
         <button type="submit" style="${BTN}">Continue</button>
-      </form>`,
+      </form>`),
   };
 }
 
 function enterPhraseScreen(): WizardScreen {
   return {
-    html: `
-      <p style="margin:0 0 12px;color:#374151;">Paste your existing 24-word recovery phrase.</p>
+    html: wrap(`
+      <p style="margin:0 0 12px;color:${FG};">Paste your existing 24-word recovery phrase.</p>
       <form>
-        <textarea name="phrase" rows="3" placeholder="word1 word2 word3 …" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;padding:12px;border:1px solid #000;resize:vertical;"></textarea>
+        <textarea name="phrase" rows="3" placeholder="word1 word2 word3 …" style="width:100%;box-sizing:border-box;font-family:${MONO};font-size:14px;padding:12px;border:1px solid ${LINE};color:${FG};background:transparent;resize:vertical;"></textarea>
         <button type="submit" style="${BTN}">Continue</button>
-      </form>`,
+      </form>`),
   };
 }
 
 export function passphraseScreen(): WizardScreen {
-  const field =
-    'width:100%;box-sizing:border-box;font-size:15px;padding:11px 12px;border:1px solid #000;margin-bottom:10px;';
+  const field = `width:100%;box-sizing:border-box;font-size:15px;padding:11px 12px;border:1px solid ${LINE};color:${FG};background:transparent;margin-bottom:10px;`;
   return {
-    html: `
-      <p style="margin:0 0 12px;color:#374151;">Set a passphrase to lock your key on this machine. You'll enter it to unlock secrets later.</p>
+    html: wrap(`
+      <p style="margin:0 0 12px;color:${FG};">Set a passphrase to lock your key on this machine. You'll enter it to unlock secrets later.</p>
       <form>
         <input type="password" name="passphrase" placeholder="Passphrase (at least 8 characters)" style="${field}">
         <input type="password" name="confirm" placeholder="Confirm passphrase" style="${field}">
         <button type="submit" style="${BTN}">Finish setup</button>
-      </form>`,
+      </form>`),
   };
 }
 
