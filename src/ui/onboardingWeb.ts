@@ -21,7 +21,7 @@ const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const BTN =
-  'width:100%;background:#000;color:#fff;border:none;border-radius:10px;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;';
+  'width:100%;background:#000;color:#fff;border:none;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;margin-top:8px;';
 const NOTE = 'color:#6b7280;font-size:13px;margin:8px 0 0;';
 
 export function chooseSourceScreen(): WizardScreen {
@@ -29,11 +29,11 @@ export function chooseSourceScreen(): WizardScreen {
     html: `
       <p style="margin:0 0 18px;color:#374151;">Local mode keeps your secrets only on this machine, encrypted with a key derived from a recovery phrase.</p>
       <form>
-        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:10px;cursor:pointer;">
+        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid #000;margin-bottom:10px;cursor:pointer;">
           <input type="radio" name="mode" value="generate" checked style="margin-top:3px;accent-color:#000;">
           <span><strong>Generate a new recovery phrase</strong><br><span style="${NOTE}">Recommended — a fresh 24-word phrase for this machine.</span></span>
         </label>
-        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:10px;cursor:pointer;">
+        <label style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid #000;margin-bottom:10px;cursor:pointer;">
           <input type="radio" name="mode" value="enter" style="margin-top:3px;accent-color:#000;">
           <span><strong>Enter an existing recovery phrase</strong><br><span style="${NOTE}">Restore from a phrase you already have.</span></span>
         </label>
@@ -47,7 +47,7 @@ export function phraseDisplayScreen(phrase: string): WizardScreen {
   const grid = words
     .map(
       (w, i) =>
-        `<div style="display:flex;gap:8px;align-items:baseline;padding:7px 10px;background:#f9fafb;border:1px solid #eef0f2;border-radius:8px;">
+        `<div style="display:flex;gap:8px;align-items:baseline;padding:7px 10px;background:#f9fafb;border:1px solid #eef0f2;">
            <span style="color:#9ca3af;font-size:12px;min-width:18px;text-align:right;">${i + 1}</span>
            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;">${esc(w)}</span>
          </div>`,
@@ -56,7 +56,7 @@ export function phraseDisplayScreen(phrase: string): WizardScreen {
   return {
     html: `
       <p style="margin:0 0 8px;color:#374151;">Write down these <strong>24 words</strong> in order and keep them somewhere safe.</p>
-      <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:10px 14px;margin:0 0 16px;color:#9a3412;font-size:13px;">
+      <div style="background:#fff7ed;border:1px solid #fed7aa;padding:10px 14px;margin:0 0 16px;color:#9a3412;font-size:13px;">
         This is the only time it is shown. It never leaves this machine — if you lose it, your secrets cannot be recovered.
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:18px;">${grid}</div>
@@ -75,7 +75,7 @@ function enterPhraseScreen(): WizardScreen {
     html: `
       <p style="margin:0 0 12px;color:#374151;">Paste your existing 24-word recovery phrase.</p>
       <form>
-        <textarea name="phrase" rows="3" placeholder="word1 word2 word3 …" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;padding:12px;border:1px solid #e5e7eb;border-radius:10px;resize:vertical;"></textarea>
+        <textarea name="phrase" rows="3" placeholder="word1 word2 word3 …" style="width:100%;box-sizing:border-box;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;padding:12px;border:1px solid #000;resize:vertical;"></textarea>
         <button type="submit" style="${BTN}">Continue</button>
       </form>`,
   };
@@ -83,7 +83,7 @@ function enterPhraseScreen(): WizardScreen {
 
 export function passphraseScreen(): WizardScreen {
   const field =
-    'width:100%;box-sizing:border-box;font-size:15px;padding:11px 12px;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:10px;';
+    'width:100%;box-sizing:border-box;font-size:15px;padding:11px 12px;border:1px solid #000;margin-bottom:10px;';
   return {
     html: `
       <p style="margin:0 0 12px;color:#374151;">Set a passphrase to lock your key on this machine. You'll enter it to unlock secrets later.</p>

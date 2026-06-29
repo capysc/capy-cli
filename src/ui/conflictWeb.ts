@@ -69,7 +69,7 @@ function rowHtml(row: ResolveRow, cols: Col[]): string {
     .map((c) => {
       const v = cellValue(row, c.key);
       if (v === null) {
-        return `<td style="padding:6px 10px;text-align:center;color:#cbd5e1;border-top:1px solid #eef0f2;">–</td>`;
+        return `<td style="padding:6px 10px;text-align:center;color:#cbd5e1;border-top:1px solid #000;">–</td>`;
       }
       const checked = c.key === def ? ' checked' : '';
       const isDel = c.key === 'delete';
@@ -77,14 +77,14 @@ function rowHtml(row: ResolveRow, cols: Col[]): string {
         ? `<span style="color:#b91c1c;font-size:13px;">discard</span>`
         : `<code style="font-family:${MONO};font-size:13px;">${esc(v)}</code>`;
       // The whole cell is the radio's label, so clicking anywhere in it selects.
-      return `<td style="padding:0;border-top:1px solid #eef0f2;">
+      return `<td style="padding:0;border-top:1px solid #000;">
         <label style="display:flex;align-items:center;gap:8px;justify-content:center;padding:8px 10px;cursor:pointer;">
           <input type="radio" name="${name}" value="${c.key}"${checked} style="accent-color:#000;width:15px;height:15px;flex:none;">
           ${snippet}
         </label></td>`;
     })
     .join('');
-  return `<tr><td style="padding:8px 12px;font-family:${MONO};font-weight:600;font-size:13px;border-top:1px solid #eef0f2;white-space:nowrap;">${name}</td>${cells}</tr>`;
+  return `<tr><td style="padding:8px 12px;font-family:${MONO};font-weight:600;font-size:13px;border-top:1px solid #000;white-space:nowrap;">${name}</td>${cells}</tr>`;
 }
 
 export function buildScreenHtml(p: WebResolveParams): string {
@@ -105,9 +105,9 @@ export function buildScreenHtml(p: WebResolveParams): string {
   // `:has(:checked)` highlights the selected cell — the web analogue of the CLI's
   // inverse-video selection box. Injected with the screen so it travels with it.
   const style = `<style>
-    .cf-table{width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;margin:0 0 16px;}
-    .cf-table thead tr{background:#f9fafb;}
-    .cf-table td label:has(input:checked){background:#111;border-radius:8px;}
+    .cf-table{width:100%;border-collapse:collapse;border:1px solid #000;margin:0 0 16px;}
+    .cf-table thead tr{background:#f5f5f5;border-bottom:1px solid #000;}
+    .cf-table td label:has(input:checked){background:#000;}
     .cf-table td label:has(input:checked) code{color:#fff;}
     .cf-table td label:has(input:checked) span{color:#fff !important;}
   </style>`;
@@ -120,11 +120,11 @@ export function buildScreenHtml(p: WebResolveParams): string {
     <form>
       <input type="hidden" name="__action" value="apply">
       <table class="cf-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
-      <button type="submit" style="width:100%;background:#000;color:#fff;border:none;border-radius:10px;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;">Apply &amp; commit locally</button>
+      <button type="submit" style="width:100%;background:#000;color:#fff;border:none;padding:12px 16px;font-size:15px;font-weight:600;cursor:pointer;">Apply &amp; commit locally</button>
     </form>
     <form style="margin-top:10px;">
       <input type="hidden" name="__action" value="cancel">
-      <button type="submit" style="width:100%;background:transparent;color:#6b7280;border:1px solid #e5e7eb;border-radius:10px;padding:10px 16px;font-size:14px;cursor:pointer;">Cancel — keep working, change nothing</button>
+      <button type="submit" style="width:100%;background:transparent;color:#000;border:1px solid #000;padding:10px 16px;font-size:14px;cursor:pointer;">Cancel — keep working, change nothing</button>
     </form>`;
 }
 
