@@ -11,6 +11,7 @@ import { join } from 'path';
 import { DEPLOY_PAGE_CSS } from '../../src/ui/deployPage/generatedAssets';
 import { chooseSourceScreen, phraseDisplayScreen, passphraseScreen } from '../../src/ui/onboardingWeb';
 import { buildScreenHtml } from '../../src/ui/conflictWeb';
+import { CAPY_LOGO_SVG } from '../../src/ui/browserWizard';
 import { generateSeedPhrase } from '../../src/crypto/keyManager';
 
 const outDir = process.argv[2] || '/tmp/capy-preview';
@@ -27,8 +28,11 @@ function page(title: string, screenHtml: string, theme: 'light' | 'dark' = 'ligh
   const bodyBg = dark ? 'background:#000;color:#fff;' : 'background:#fff;color:#171717;';
   return `<!DOCTYPE html><html lang="en" style="color-scheme:${theme}"><head><meta charset="UTF-8"><style>${DEPLOY_PAGE_CSS}</style></head>
 <body class="min-h-screen font-sans" style="${bodyBg}">
-  <div class="max-w-xl mx-auto px-5 py-12">
-    <h1 class="text-xl font-semibold mb-6">${title}</h1>
+  <div class="max-w-xl mx-auto px-0 py-12">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:24px;">
+      <div style="${dark ? 'filter:invert(1);' : ''}">${CAPY_LOGO_SVG}</div>
+      <h1 class="text-xl font-semibold">${title}</h1>
+    </div>
     <div id="screen">${inner}</div>
   </div>
 </body></html>`;

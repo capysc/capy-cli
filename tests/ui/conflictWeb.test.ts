@@ -41,11 +41,10 @@ describe('resolveConflictInBrowser (capy --web conflict resolver)', () => {
     expect(html).toContain('sk_...001'); // pinned snippet
     expect(html).toContain('sk_...999'); // local snippet
     expect(html).toContain('__action');
-    // Three-column table (mirrors the CLI): a Variable column + Pinned/Local headers.
-    expect(html).toContain('cf-table');
-    expect(html).toContain('Variable');
-    expect(html).toContain('Pinned');
-    expect(html).toContain('Local');
+    // Stacked per-variable options with descriptive labels.
+    expect(html).toContain('cf-opt');
+    expect(html).toContain('Local edit');
+    expect(html).toContain('Pinned baseline');
 
     // Submit: keep PINNED baseline for API_KEY, keep LOCAL edit for DATABASE_URL.
     const r = await fetch(`${base}/submit`, {

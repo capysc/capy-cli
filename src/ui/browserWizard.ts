@@ -22,7 +22,7 @@ import { DEPLOY_PAGE_CSS } from './deployPage/generatedAssets';
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_BODY = 5_000_000;
 
-const CAPY_LOGO_SVG = `<svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
+export const CAPY_LOGO_SVG = `<svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
 
 // Escapes `<` so a value can never close the surrounding <script> tag.
 const jsStr = (s: string): string => JSON.stringify(s).replace(/</g, '\\u003c');
@@ -235,7 +235,7 @@ export function wizardPage(title: string, firstScreenHtml: string, nonce: string
   <style>${DEPLOY_PAGE_CSS}</style>
 </head>
 <body class="min-h-screen bg-white dark:bg-black font-sans text-neutral-900 dark:text-white">
-  <div class="max-w-xl mx-auto px-5 py-12">
+  <div class="max-w-xl mx-auto px-0 py-12">
     <div class="flex items-center gap-3 mb-6">
       <div class="dark:invert">${CAPY_LOGO_SVG}</div>
       <h1 class="text-xl font-semibold">${title.replace(/</g, '&lt;')}</h1>
