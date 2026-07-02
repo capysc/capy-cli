@@ -1,4 +1,5 @@
 import { DEPLOY_PAGE_CSS } from './deployPage/generatedAssets';
+import { VENDOR_LOGOS } from './vendorLogos';
 
 const escHtml = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -14,6 +15,35 @@ const safeHttpUrl = (u: string | undefined): string | undefined => {
   const t = u?.trim();
   return t && /^https?:\/\//i.test(t) ? t : undefined;
 };
+
+// Common dashboard/console subdomains stripped so we key off the vendor's
+// registrable domain (dashboard.stripe.com → stripe.com).
+const VENDOR_SUBDOMAIN_RE = /^(www|dashboard|console|app|api|manage|admin|portal|my|account|secure)\./i;
+
+/**
+ * Confidently infer the single vendor these secrets belong to, from the
+ * per-variable `helpUrl` (which points at that provider's dashboard). Returns
+ * the registrable domain (e.g. "stripe.com") only when EVERY helpUrl-bearing
+ * variable resolves to the SAME vendor — otherwise undefined (not confident),
+ * so a mixed or unknown set shows no vendor logo.
+ */
+function detectVendorDomain(vars: IntakeVar[]): string | undefined {
+  const domains = new Set<string>();
+  for (const v of vars) {
+    const u = safeHttpUrl(v.helpUrl);
+    if (!u) continue;
+    let host: string;
+    try {
+      host = new URL(u).hostname;
+    } catch {
+      continue;
+    }
+    host = host.replace(VENDOR_SUBDOMAIN_RE, '');
+    const labels = host.split('.');
+    domains.add((labels.length > 2 ? labels.slice(-2).join('.') : host).toLowerCase());
+  }
+  return domains.size === 1 ? [...domains][0] : undefined;
+}
 
 const CAPY_LOGO_SVG = `<svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
 
@@ -39,6 +69,18 @@ export interface IntakeFormOptions {
  */
 export function generateIntakeForm(o: IntakeFormOptions): string {
   const reason = o.reason ? `<p class="text-sm text-neutral-500 dark:text-neutral-400 mb-2">${escHtml(o.reason)}</p>` : '';
+  // Confident vendor only (single provider across all helpUrl-bearing vars) AND
+  // one we ship a bundled inline SVG for. Logos are inlined from VENDOR_LOGOS —
+  // this page NEVER makes an external request (see the no-network rule in
+  // ./vendorLogos and the capy-mcp project).
+  const vendorDomain = detectVendorDomain(o.vars);
+  const vendorLogo = vendorDomain ? VENDOR_LOGOS[vendorDomain] : undefined;
+  const vendorCluster = vendorLogo
+    ? `<span class="flex items-center gap-3" title="${escHtml(vendorDomain as string)}">
+        <span class="text-black dark:text-white">${vendorLogo}</span>
+        <span class="text-neutral-400" aria-hidden="true">&rarr;</span>
+      </span>`
+    : '';
   // Sanitize per-variable links to http(s) only before they reach the client.
   const suggested = o.vars.map((v) => {
     const helpUrl = safeHttpUrl(v.helpUrl);
@@ -55,8 +97,11 @@ export function generateIntakeForm(o: IntakeFormOptions): string {
 </head>
 <body class="min-h-screen bg-white dark:bg-black font-sans text-neutral-900 dark:text-white">
   <div class="max-w-xl mx-auto px-5 py-12">
-    <div class="flex items-center gap-3 mb-6">
-      <div class="dark:invert">${CAPY_LOGO_SVG}</div>
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        ${vendorCluster}
+        <div class="dark:invert">${CAPY_LOGO_SVG}</div>
+      </div>
       <h1 class="text-xl font-semibold">Add secrets</h1>
     </div>
     ${reason}
@@ -68,7 +113,6 @@ export function generateIntakeForm(o: IntakeFormOptions): string {
       </div>
     </form>
     <div id="status" class="text-sm mt-3"></div>
-    <p class="text-xs text-neutral-500 dark:text-neutral-400 mt-8">Values are encrypted on your machine and synced to Capy. They never leave in plaintext and never pass through the AI assistant. (The AI suggested the names; you provide the values.)</p>
   </div>
   <script>
     const NONCE = ${jsStr(o.nonce)};
