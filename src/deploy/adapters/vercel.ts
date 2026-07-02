@@ -15,12 +15,22 @@
  *                    branch name or the branch you're checked out on — e.g.
  *                    sitting on git `main` with capy branch `development`, you
  *                    can still push to the Preview env for git `development`.
- *                    Falls back to `config.branch` for targets saved before
- *                    `options.gitBranch` existed.
+ *                    Required for preview targets — deployCommand heals
+ *                    targets saved before `options.gitBranch` existed by
+ *                    prompting once and persisting.
  */
-import { existsSync, readFileSync } from 'fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
 import { spawnSync, spawn } from 'child_process';
-import { join } from 'path';
+import { homedir } from 'os';
+import { basename, join } from 'path';
+import inquirer from 'inquirer';
+import { LIST_THEME } from '../../ui/promptStyle';
 import {
   DeployAdapter,
   DeployContext,
@@ -41,9 +51,9 @@ interface VercelOptions {
   /**
    * For `vercelEnv: 'preview'` only — the GIT branch the Vercel Preview env is
    * wired to (what `vercel env add … preview <gitBranch>` scopes the value to).
-   * This is a git branch Vercel knows about, NOT necessarily the capy branch
-   * name. Defaults to `config.branch` when unset for back-compat with targets
-   * saved before this field existed.
+   * This is a git branch Vercel knows about, NOT a capy branch name. Required:
+   * preflight rejects preview targets without it, and deployCommand prompts to
+   * backfill targets saved before this field existed.
    */
   gitBranch?: string;
 }
@@ -65,9 +75,24 @@ function setVercelEnv(
   args.push('--force', '--yes', '--cwd', cwd);
   const r = spawnSync('vercel', args, { input: value, stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' });
   if (r.status !== 0) {
-    return { ok: false, error: (r.stderr || r.stdout || 'vercel env add failed').trim().split('\n').pop() };
+    return { ok: false, error: extractVercelError(r.stderr, r.stdout) };
   }
   return { ok: true };
+}
+
+/**
+ * Pull the meaningful line out of vercel CLI output. The last line is often
+ * noise — e.g. the bottom border of the "Update available!" box — so prefer
+ * an explicit Error line, then fall back to the last line that isn't box
+ * drawing or blank.
+ */
+function extractVercelError(stderr: string, stdout: string): string {
+  const lines = `${stderr}\n${stdout}`
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !/^[╭╰│─╮╯\s]+$/.test(l));
+  const errLine = lines.find((l) => /error/i.test(l));
+  return errLine ?? lines.pop() ?? 'vercel env add failed';
 }
 
 function readPackageJson(dir: string): any | null {
@@ -126,6 +151,165 @@ function spawnAsync(
       resolve({ stdout, stderr, code: code ?? 1 }),
     );
   });
+}
+
+// ── Link by project picker ──────────────────────────────────────────────────
+// Instead of handing the user off to `vercel link`'s own wizard, ask which
+// Vercel project this is and write `.vercel/project.json` ourselves — that
+// file is the entirety of what `vercel link` produces. Project lists come from
+// the Vercel REST API using the login token the `vercel` CLI already saved.
+
+/**
+ * The CLI's login token: VERCEL_TOKEN env first, then auth.json from the
+ * CLI's data dirs (current platform-native location, then the legacy
+ * ~/.vercel one). Null when the user has never run `vercel login`.
+ */
+function readVercelCliToken(): string | null {
+  if (process.env.VERCEL_TOKEN) return process.env.VERCEL_TOKEN;
+  const home = homedir();
+  const xdgData = process.env.XDG_DATA_HOME ?? join(home, '.local', 'share');
+  const candidates = [
+    join(home, 'Library', 'Application Support', 'com.vercel.cli', 'auth.json'),
+    join(xdgData, 'com.vercel.cli', 'auth.json'),
+    join(home, '.vercel', 'auth.json'),
+  ];
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    try {
+      const raw = JSON.parse(readFileSync(p, 'utf-8'));
+      if (typeof raw.token === 'string' && raw.token) return raw.token;
+    } catch {
+      // unreadable — try the next location
+    }
+  }
+  return null;
+}
+
+async function vercelApi(token: string, path: string): Promise<any> {
+  const res = await fetch(`https://api.vercel.com${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Vercel API ${path.split('?')[0]} → HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+interface PickableProject {
+  projectId: string;
+  projectName: string;
+  /** Personal account uid or team id — what project.json calls orgId. */
+  orgId: string;
+  scopeLabel: string;
+}
+
+/** Every project visible to the token, across the personal scope and all teams. */
+async function listAllVercelProjects(token: string): Promise<PickableProject[]> {
+  const [userRes, teamsRes] = await Promise.all([
+    vercelApi(token, '/v2/user'),
+    vercelApi(token, '/v2/teams?limit=100'),
+  ]);
+  const user = userRes.user ?? userRes;
+  const personalId: string = user.uid ?? user.id;
+  const teams: Array<{ id: string; slug?: string; name?: string }> =
+    teamsRes.teams ?? [];
+
+  const scopes = [
+    { orgId: personalId, teamId: undefined as string | undefined, label: user.username ?? 'personal' },
+    ...teams.map((t) => ({ orgId: t.id, teamId: t.id, label: t.slug ?? t.name ?? t.id })),
+  ];
+  const perScope = await Promise.all(
+    scopes.map(async (s) => {
+      const q = s.teamId ? `?limit=100&teamId=${s.teamId}` : '?limit=100';
+      const res = await vercelApi(token, `/v9/projects${q}`);
+      const projects: Array<{ id: string; name: string }> = res.projects ?? [];
+      return projects.map((p) => ({
+        projectId: p.id,
+        projectName: p.name,
+        orgId: s.orgId,
+        scopeLabel: s.label,
+      }));
+    }),
+  );
+  return perScope.flat();
+}
+
+/** What `vercel link` leaves behind: project.json + a .gitignore entry. */
+function writeVercelLink(projectDir: string, p: PickableProject): void {
+  const dir = join(projectDir, '.vercel');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'project.json'),
+    JSON.stringify(
+      { projectId: p.projectId, orgId: p.orgId, projectName: p.projectName },
+      null,
+      2,
+    ) + '\n',
+  );
+  const gi = join(projectDir, '.gitignore');
+  if (existsSync(gi)) {
+    const lines = readFileSync(gi, 'utf-8').split('\n');
+    if (!lines.some((l) => l.trim() === '.vercel' || l.trim() === '.vercel/')) {
+      appendFileSync(gi, '\n.vercel\n');
+    }
+  }
+}
+
+/**
+ * Ask which Vercel project this is and link it. Returns false (so the caller
+ * can fall back to interactive `vercel link`) when there's no saved login
+ * token, the API calls fail, or the user picks "none of these".
+ */
+async function linkByProjectPicker(projectDir: string): Promise<boolean> {
+  const token = readVercelCliToken();
+  if (!token) return false;
+
+  let projects: PickableProject[];
+  try {
+    projects = await listAllVercelProjects(token);
+  } catch (e) {
+    process.stdout.write(
+      `\x1b[90m  could not list Vercel projects (${e instanceof Error ? e.message : e})\x1b[0m\n`,
+    );
+    return false;
+  }
+  if (projects.length === 0) return false;
+
+  // Best guess first: a project named like the directory it lives in.
+  const dirName = basename(projectDir);
+  projects.sort((a, b) => {
+    const aMatch = a.projectName === dirName;
+    const bMatch = b.projectName === dirName;
+    if (aMatch !== bMatch) return aMatch ? -1 : 1;
+    return a.projectName.localeCompare(b.projectName);
+  });
+
+  process.stdout.write(
+    '\n\x1b[33m▸ This directory is not linked to a Vercel project yet.\x1b[0m\n',
+  );
+  const ans: { picked: PickableProject | null } = (await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'picked',
+      message: 'Which Vercel project is this?',
+      theme: LIST_THEME,
+      choices: [
+        ...projects.map((p) => ({
+          name: `${p.scopeLabel}/${p.projectName}`,
+          value: p,
+        })),
+        { name: 'None of these — run `vercel link` instead', value: null },
+      ],
+    } as any,
+  ])) as any;
+  if (!ans.picked) return false;
+
+  writeVercelLink(projectDir, ans.picked);
+  process.stdout.write(
+    `\x1b[32m✓\x1b[0m linked ${ans.picked.scopeLabel}/${ans.picked.projectName} ` +
+      `\x1b[90m(.vercel/project.json)\x1b[0m\n`,
+  );
+  return true;
 }
 
 /**
@@ -221,6 +405,15 @@ export const vercelAdapter: DeployAdapter = {
         hint: `Set options.vercelEnv to "production" or "preview" (run \`capy deploy --edit ${config.name}\`).`,
       };
     }
+    if (opts.vercelEnv === 'preview' && !opts.gitBranch) {
+      return {
+        ok: false,
+        reason: 'vercel preview target missing options.gitBranch',
+        hint:
+          `Preview env vars are scoped to a GIT branch Vercel knows about ` +
+          `(not a capy branch). Run \`capy deploy --edit ${config.name}\` to pick one.`,
+      };
+    }
     // Linkage: either .vercel/project.json exists OR VERCEL_PROJECT_ID +
     // VERCEL_ORG_ID are in env (CI). Either is sufficient. If neither holds
     // AND we're sitting at an interactive TTY, auto-run `vercel link` so the
@@ -241,7 +434,13 @@ export const vercelAdapter: DeployAdapter = {
             `Or in CI, set VERCEL_PROJECT_ID + VERCEL_ORG_ID + VERCEL_TOKEN.`,
         };
       }
-      const linkOk = await runVercelLink(projectDir);
+      // Preferred: list the user's Vercel projects and ask which one this
+      // is, writing .vercel/project.json directly. Fall back to vercel
+      // link's own wizard when there's no saved token, the API fails, or
+      // the user picks "none of these".
+      const linkOk =
+        (await linkByProjectPicker(projectDir)) ||
+        (await runVercelLink(projectDir));
       if (!linkOk) {
         return {
           ok: false,
@@ -265,11 +464,11 @@ export const vercelAdapter: DeployAdapter = {
     const steps: DeployStep[] = [];
     const opts = config.options as Partial<VercelOptions>;
     const vercelEnv = opts.vercelEnv as VercelEnv;
-    // Preview scope = the git branch the Preview env is wired to. Prefer the
-    // explicit per-target option; fall back to the capy branch name for
-    // targets saved before gitBranch existed.
-    const gitBranch =
-      vercelEnv === 'preview' ? (opts.gitBranch ?? config.branch) : undefined;
+    // Preview scope = the git branch the Preview env is wired to. Always the
+    // explicit per-target option — preflight rejects preview targets without
+    // it, because the old fallback (the capy branch name) is not a git branch
+    // and made `vercel env add` fail with "Branch not found".
+    const gitBranch = vercelEnv === 'preview' ? opts.gitBranch : undefined;
     const projectDir = join(ctx.cwd, opts.projectDir ?? '.');
     const scope = vercelEnv === 'preview' ? `preview · branch=${gitBranch}` : 'production';
 
