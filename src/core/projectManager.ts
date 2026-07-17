@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join, basename } from 'path';
 import { ProjectState, KeepFile, SyncState, CapyError, ERROR_CODES } from '../types/index';
+import { branchesFromKeep, syncedBranchNames } from './branchResolver';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -47,7 +48,7 @@ export class ProjectManager {
       projectName,
       organizationId,
       projectId,
-      activeBranch: this.readActiveBranch(),
+      activeBranch: this.deriveActiveBranch(),
       userId: syncState?.user_id,
     };
   }
@@ -64,23 +65,80 @@ export class ProjectManager {
     return join(this.getCapyDir(), 'branch');
   }
 
-  readActiveBranch(): string {
+  /**
+   * Raw contents of `.capy/branch`, or null when absent/unreadable/empty.
+   * `.capy/` is gitignored, so a missing file is a normal state (fresh clone,
+   * new Conductor workspace) — never fabricate a branch name for it.
+   */
+  readActiveBranch(): string | null {
     const branchPath = this.getActiveBranchPath();
-    if (!existsSync(branchPath)) return 'development';
+    if (!existsSync(branchPath)) return null;
     try {
       const content = readFileSync(branchPath, 'utf-8').trim();
-      return content || 'development';
+      return content || null;
     } catch {
-      return 'development';
+      return null;
     }
   }
 
-  writeActiveBranch(branch: string | undefined): void {
+  /**
+   * Best-effort branch derivation for commands that need a branch without an
+   * interactive resolution flow: `.env` header (what the secrets on disk were
+   * actually encrypted for) → `.capy/branch` → sole branch in sync-state →
+   * sole branch in keep.lock. Returns null when nothing is known — callers
+   * must treat that as "no active branch", never substitute a default name.
+   */
+  deriveActiveBranch(): string | null {
+    const envBranch = this.readEnvHeaderBranch();
+    if (envBranch) return envBranch;
+
+    const fileBranch = this.readActiveBranch();
+    if (fileBranch) return fileBranch;
+
+    const synced = syncedBranchNames(this.readSyncState());
+    if (synced.length === 1) return synced[0];
+
+    try {
+      const keepBranches = branchesFromKeep(this.readKeepFile());
+      if (keepBranches.length === 1) return keepBranches[0];
+    } catch {
+      // Corrupt keep.lock is reported by the paths that actually need it.
+    }
+    return null;
+  }
+
+  /**
+   * Branch recorded in the .env metadata header (`# capy:branch=…`).
+   * Mirrors FileManager.readEnvMeta's header parse for the one key this
+   * class needs; kept local to avoid pulling crypto-heavy FileManager in.
+   */
+  private readEnvHeaderBranch(): string | null {
+    const envPath = this.getEnvPath();
+    if (!existsSync(envPath)) return null;
+    try {
+      const content = readFileSync(envPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        if (!line.startsWith('# capy:')) break;
+        const match = line.match(/^# capy:branch=(.+)$/);
+        if (match) return match[1].trim() || null;
+      }
+    } catch {
+      // Unreadable .env — treated the same as absent.
+    }
+    return null;
+  }
+
+  writeActiveBranch(branch: string): void {
+    const name = (branch || '').trim();
+    const branchPath = this.getActiveBranchPath();
+    if (!name) {
+      // Never fabricate a branch name — an empty write clears the cache.
+      if (existsSync(branchPath)) unlinkSync(branchPath);
+      return;
+    }
     const capyDir = this.getCapyDir();
     if (!existsSync(capyDir)) mkdirSync(capyDir, { recursive: true });
-    const branchPath = this.getActiveBranchPath();
-    // There is no "no branch". Falsy input becomes 'development'.
-    writeFileSync(branchPath, branch || 'development', { encoding: 'utf-8', mode: 0o600 });
+    writeFileSync(branchPath, name, { encoding: 'utf-8', mode: 0o600 });
   }
 
   getSyncStatePath(): string {

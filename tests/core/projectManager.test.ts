@@ -3,11 +3,13 @@ import { mock, jest, describe, test, expect, beforeEach, afterAll } from 'bun:te
 const mockExistsSync = jest.fn();
 const mockReadFileSync = jest.fn();
 const mockWriteFileSync = jest.fn();
+const mockUnlinkSync = jest.fn();
 mock.module('fs', () => ({
   existsSync: mockExistsSync,
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   mkdirSync: jest.fn(),
+  unlinkSync: mockUnlinkSync,
 }));
 
 afterAll(() => { mock.restore(); });
@@ -39,7 +41,9 @@ describe('ProjectManager', () => {
         initialized: false,
         hasKeepFile: false,
         hasEnvFile: true,
-        activeBranch: 'development',
+        // No .env header, no .capy/branch, nothing synced — the branch is
+        // unknown, never a fabricated 'development'.
+        activeBranch: null,
       });
     });
 
@@ -69,7 +73,7 @@ describe('ProjectManager', () => {
         projectName: 'test-project',
         organizationId: 'org_123',
         projectId: 'proj_456',
-        activeBranch: 'development',
+        activeBranch: null,
       });
     });
 
@@ -269,6 +273,114 @@ describe('ProjectManager', () => {
     test('should return correct env path', () => {
       const path = (projectManager as any).getEnvPath();
       expect(path).toBe(join(testRoot, '.env'));
+    });
+  });
+
+  describe('readActiveBranch / writeActiveBranch', () => {
+    const branchPath = join(testRoot, '.capy', 'branch');
+
+    test('returns null when .capy/branch is missing — never invents a branch', () => {
+      mockExistsSync.mockReturnValue(false);
+      expect(projectManager.readActiveBranch()).toBeNull();
+    });
+
+    test('returns null when .capy/branch is empty', () => {
+      mockExistsSync.mockImplementation((path) => path === branchPath);
+      mockReadFileSync.mockReturnValue('   \n');
+      expect(projectManager.readActiveBranch()).toBeNull();
+    });
+
+    test('returns the recorded branch, trimmed', () => {
+      mockExistsSync.mockImplementation((path) => path === branchPath);
+      mockReadFileSync.mockReturnValue('production\n');
+      expect(projectManager.readActiveBranch()).toBe('production');
+    });
+
+    test('writes the branch name', () => {
+      mockExistsSync.mockReturnValue(true);
+      projectManager.writeActiveBranch('staging');
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        branchPath, 'staging', { encoding: 'utf-8', mode: 0o600 },
+      );
+    });
+
+    test('empty write clears the cache file instead of fabricating a name', () => {
+      mockExistsSync.mockImplementation((path) => path === branchPath);
+      projectManager.writeActiveBranch('  ');
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(mockUnlinkSync).toHaveBeenCalledWith(branchPath);
+    });
+  });
+
+  describe('deriveActiveBranch', () => {
+    const envPath = join(testRoot, '.env');
+    const branchPath = join(testRoot, '.capy', 'branch');
+    const syncStatePath = join(testRoot, '.capy', 'sync-state');
+    const keepPath = join(testRoot, 'keep.lock');
+
+    const setupFiles = (files: Record<string, string>) => {
+      mockExistsSync.mockImplementation((path) => path in files);
+      mockReadFileSync.mockImplementation((path) => {
+        if (path in files) return files[path];
+        throw new Error(`ENOENT: ${path}`);
+      });
+    };
+
+    test('.env header wins — the secrets on disk define the branch (matrix row 3/4)', () => {
+      setupFiles({
+        [envPath]: '# capy:org_id=org_123\n# capy:project_id=proj_456\n# capy:branch=production\nAPI_KEY=capy:res:abc\n',
+        [branchPath]: 'staging',
+      });
+      expect(projectManager.deriveActiveBranch()).toBe('production');
+    });
+
+    test('falls back to .capy/branch when .env has no header (matrix row 5/6)', () => {
+      setupFiles({
+        [branchPath]: 'staging',
+      });
+      expect(projectManager.deriveActiveBranch()).toBe('staging');
+    });
+
+    test('falls back to the sole synced branch in sync-state (matrix row 7)', () => {
+      setupFiles({
+        [syncStatePath]: JSON.stringify({
+          last_sync: '2026-01-01T00:00:00Z',
+          synced_variables: [],
+          keep_hash: { production: 'h1' },
+        }),
+      });
+      expect(projectManager.deriveActiveBranch()).toBe('production');
+    });
+
+    test('multiple synced branches are ambiguous → null', () => {
+      setupFiles({
+        [syncStatePath]: JSON.stringify({
+          last_sync: '2026-01-01T00:00:00Z',
+          synced_variables: [],
+          keep_hash: { production: 'h1', staging: 'h2' },
+        }),
+      });
+      expect(projectManager.deriveActiveBranch()).toBeNull();
+    });
+
+    test('falls back to the sole branch in keep.lock (matrix row 8, single-branch project)', () => {
+      setupFiles({
+        [keepPath]: JSON.stringify({
+          version: '3.0',
+          org_id: 'org_123',
+          project_id: 'proj_456',
+          project_name: 'test-project',
+          variables: {
+            API_KEY: [{ resource_id: 'r1', branch: 'production', value_hash: 'h1' }],
+          },
+        }),
+      });
+      expect(projectManager.deriveActiveBranch()).toBe('production');
+    });
+
+    test('nothing known → null, never a fabricated development branch', () => {
+      setupFiles({});
+      expect(projectManager.deriveActiveBranch()).toBeNull();
     });
   });
 

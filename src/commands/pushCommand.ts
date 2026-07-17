@@ -143,6 +143,10 @@ export class PushCommand {
 
     const branch = projectState.activeBranch;
     this.debug('active branch', branch);
+    if (!branch) {
+      console.error('No active branch. Run capy to select a branch before pushing.');
+      process.exit(1);
+    }
 
     // Read and encrypt .env file
     const pushSpinner = ora(localMode ? 'Storing secrets locally...' : 'Pushing secrets to Keep...').start();
