@@ -84,6 +84,29 @@ export function hasLocalRoot(orgId: string, userId?: string): boolean {
   return existsSync(getLocalRootPath(orgId, userId));
 }
 
+// --- K_local backend mode marker ---
+//
+// Absence of this file means 'file' — today's plaintext-local.key behavior,
+// unchanged for every install that never opts into the keychain backend.
+// Only ever written when the keychain backend is actually chosen at mint
+// time, so existing installs and every test that doesn't explicitly opt in
+// are byte-identical to before this file existed.
+
+export function getLocalRootModePath(orgId: string, userId?: string): string {
+  return getLocalRootPath(orgId, userId) + '.mode';
+}
+
+export type LocalRootMode = 'file' | 'keychain';
+
+export function getLocalRootMode(orgId: string, userId?: string): LocalRootMode {
+  const content = readFileOrNull(getLocalRootModePath(orgId, userId));
+  return content?.trim() === 'keychain' ? 'keychain' : 'file';
+}
+
+export function setLocalRootMode(orgId: string, mode: LocalRootMode, userId?: string): void {
+  writeSecureFile(getLocalRootModePath(orgId, userId), mode);
+}
+
 export function getGlobalConfigPath(): string {
   return join(getGlobalCapyDir(), 'config.json');
 }

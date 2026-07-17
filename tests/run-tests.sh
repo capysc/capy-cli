@@ -18,6 +18,7 @@ ISOLATED_FILES=(
   tests/config/globalConfig.test.ts
   tests/core/projectManager.test.ts
   tests/crypto/keyResolver.test.ts
+  tests/crypto/keyResolverKeychainMode.test.ts
   tests/crypto/localKey.test.ts
   tests/crypto/keyStability.test.ts
   tests/crypto/zeroTrust.test.ts
