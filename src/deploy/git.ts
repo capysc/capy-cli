@@ -268,6 +268,22 @@ export function checkoutBranch(
   return { ok: true };
 }
 
+/**
+ * Discard uncommitted working-tree changes to specific paths (best-effort).
+ * `capy deploy`'s CI secrets-only path replays keep.lock onto the deploy branch
+ * without committing it; that dirty file makes `git checkout <originalBranch>`
+ * abort ("local changes would be overwritten"). Dropping it is safe — the
+ * user's real keep.lock is committed on their branch or in the stash we made.
+ */
+export function discardPaths(
+  cwd: string,
+  paths: string[],
+): { ok: boolean; error?: string } {
+  const r = git(['checkout', '--', ...paths], cwd);
+  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
+  return { ok: true };
+}
+
 export function pushBranch(
   cwd: string,
   branch: string,
@@ -276,6 +292,57 @@ export function pushBranch(
   if (r.code !== 0) {
     return { ok: false, error: r.stderr.trim() };
   }
+  return { ok: true };
+}
+
+/** Repo-root-relative path of a file in `cwd` (e.g. `service/keep.lock`). */
+export function repoRelPath(cwd: string, file: string): string {
+  const prefix = git(['rev-parse', '--show-prefix'], cwd).stdout.trim();
+  return prefix + file;
+}
+
+/**
+ * Read a file's content at a git ref without touching the working tree
+ * (`git show <ref>:<repo-rel-path>`). Returns null if the file doesn't exist
+ * there (e.g. a brand-new target whose base branch has no keep.lock yet).
+ */
+export function readFileAtRef(
+  cwd: string,
+  ref: string,
+  repoRelFile: string,
+): string | null {
+  const r = git(['show', `${ref}:${repoRelFile}`], cwd);
+  return r.code === 0 ? r.stdout : null;
+}
+
+/**
+ * Create an isolated linked worktree on a NEW branch off `startPoint`
+ * (e.g. `origin/staging`). The user's working tree and current branch are never
+ * touched — this fixes the stash/checkout/pop dance that
+ * stranded users on `capy-deploy-*` branches.
+ */
+export function worktreeAddNewBranch(
+  cwd: string,
+  dir: string,
+  branch: string,
+  startPoint: string,
+): { ok: boolean; error?: string } {
+  const r = git(['worktree', 'add', '-b', branch, dir, startPoint], cwd);
+  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
+  return { ok: true };
+}
+
+/** Tear down a linked worktree (best-effort; --force removes even if dirty). */
+export function worktreeRemove(cwd: string, dir: string): { ok: boolean; error?: string } {
+  const r = git(['worktree', 'remove', '--force', dir], cwd);
+  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
+  return { ok: true };
+}
+
+/** Delete a local branch (cleanup after the worktree PR is pushed). */
+export function deleteLocalBranch(cwd: string, branch: string): { ok: boolean; error?: string } {
+  const r = git(['branch', '-D', branch], cwd);
+  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
   return { ok: true };
 }
 

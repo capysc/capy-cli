@@ -1,0 +1,20 @@
+# Gitleaks configuration for capy-cli.
+#
+# Radar's secrets scanner (Gitleaks) runs `gitleaks dir <repo root>` in CI and
+# auto-loads this file. The default ruleset is kept in full (useDefault = true)
+# so real secrets in shipped code (src/, bin/, scripts/) still fail the gate.
+#
+# The test suite hardcodes intentional, obviously-fake credential-shaped
+# fixtures — dummy Stripe/connector keys, a throwaway RSA test key, sample
+# secret files — so tests can exercise parsing and encrypt/decrypt round-trips.
+# None are real secrets, so they must not fail the security gate. Allowlist the
+# tests/ tree only.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures: intentional fake/example credentials used by the test suite (not real secrets)."
+paths = [
+  '''tests/.*''',
+]

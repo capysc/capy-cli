@@ -156,6 +156,9 @@ function createCheckoutMocks(overrides: {
       API_KEY: 'dev-key-123',
       DB_URL: 'postgres://dev',
     }),
+    // No torn state in these cases: the .env header matches .capy/branch, so the
+    // dirty guard compares against the active branch (empty header → fallback).
+    readEnvMeta: mock(() => ({})),
   };
 
   const mockAuthService = {
@@ -546,6 +549,8 @@ describe('Direction detection — branch-aware keep_hash', () => {
     };
 
     mockProjectManager.readKeepFile.mockReturnValue(multiBranchKeep);
+    // Branch resolution reads .capy/branch (no .env header in this test)
+    mockProjectManager.readActiveBranch.mockReturnValue('staging');
 
     // sync-state has BOTH branch hashes (branch-aware format)
     mockProjectManager.readSyncState.mockReturnValue({

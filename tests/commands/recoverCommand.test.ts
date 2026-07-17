@@ -94,6 +94,12 @@ mock.module('../../src/core/projectManager', () => ({
 // ── Capture wrapAndSaveMasterKey calls ─────────────────────────────────────
 const wrapCalls: Array<{ orgId: string; userId: string; m: Buffer }> = [];
 mock.module('../../src/crypto/keyResolver', () => ({
+  // This fake ServiceClient has no listProjects, so findOrgCiphertextOracle
+  // finds no oracle and recover falls back to CURRENT_KDF_VERSION — the trial
+  // resolver is never reached here (its behavior is covered by
+  // kdfMigration.test.ts and recoverKdf.test.ts). The export must still exist
+  // to satisfy the static import binding in recoverCommand.
+  resolveProjectKeyByTrial: mock(() => null),
   hasOrgKey: mock((orgId: string, userId: string) => {
     return existsSync(join(tempHome, '.capy', 'orgs', orgId, 'users', userId, 'key.enc'));
   }),

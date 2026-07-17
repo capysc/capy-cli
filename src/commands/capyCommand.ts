@@ -25,6 +25,12 @@ import {
 } from '../types/index';
 import { validateSeedPhrase } from '../crypto/keyManager';
 import {
+  resolveBranchFromLocalState,
+  selectBranchWithServer,
+  branchesFromKeep,
+  syncedBranchNames,
+} from '../core/branchResolver';
+import {
   resolveProjectKey,
   hasOrgKey,
   KeyServiceOps,
@@ -111,7 +117,7 @@ export class CapyCommand {
           projectState.initialized = true;
           projectState.organizationId = envMeta.org_id;
           projectState.projectId = envMeta.project_id;
-          projectState.activeBranch = envMeta.branch || 'development';
+          projectState.activeBranch = envMeta.branch ?? null;
         } else if (isLocalOnly()) {
           // Local-only mode: bootstrap a project entirely on this machine
           // (synthetic org, generated projectId) instead of server onboarding.
@@ -122,12 +128,6 @@ export class CapyCommand {
           return;
         }
       }
-
-      // Invariant: the branch recorded in the .env header must match .capy/branch.
-      // A mismatch indicates a partially-completed checkout (or hand edit); if we
-      // proceed we'd push/pull the wrong branch's secrets. Refuse and show the
-      // recovery command.
-      this.assertBranchInvariant(projectState.activeBranch);
 
       await this.syncProject(projectState);
       const { printExpiryWarnings } = await import('./connectors/shared');
@@ -140,28 +140,124 @@ export class CapyCommand {
   }
 
   /**
-   * Refuse to proceed if .capy/branch disagrees with the branch recorded in
-   * the .env header. This prevents a stuck state where the user thinks they
-   * are on branch X but their secrets belong to branch Y.
+   * Resolve the branch this run operates on. Local signals first — the .env
+   * header (what the secrets on disk were actually encrypted for) outranks
+   * .capy/branch, and either alone suffices; .capy/* is a gitignored local
+   * cache, so its absence is a normal state that gets rebuilt, never errored
+   * on. Only when both files exist and genuinely disagree (an interrupted
+   * checkout) do we stop — and only after confirming the .capy/branch side
+   * names a real branch, so recovery instructions never point at a branch
+   * that doesn't exist. With no local signal at all, the server branch list
+   * decides: sole branch → use it; otherwise prompt, never preselecting a
+   * protected branch (keyed off is_protected, never the branch name).
+   *
+   * Runs after authentication — the server-assisted steps need a token.
+   * localMode skips all server steps; an unknown branch there falls back to
+   * the local-mode default (local-only projects have exactly one branch).
    */
-  private assertBranchInvariant(activeBranch: string): void {
+  private async resolveActiveBranch(projectState: ProjectState, localMode: boolean): Promise<string> {
     const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
-    const envBranch = envMeta.branch;
-    if (envBranch === undefined) return; // no header yet (first-run); nothing to reconcile
-    // Both sides are always a real branch name ('development' or otherwise);
-    // empty never appears in modern state.
-    const normalizedActive = activeBranch || 'development';
-    const normalizedHeader = envBranch || 'development';
-    if (normalizedActive === normalizedHeader) return;
+    const local = resolveBranchFromLocalState({
+      envBranch: envMeta.branch,
+      fileBranch: this.projectManager.readActiveBranch() ?? undefined,
+    });
+    this.debug('branch resolution (local signals)', local);
 
-    const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+    if (local.kind === 'resolved') {
+      if (local.rebuildBranchFile) {
+        // .capy/branch was missing — rebuild it from the .env header.
+        this.projectManager.writeActiveBranch(local.branch);
+      }
+      return local.branch;
+    }
+
+    if (local.kind === 'conflict') {
+      return this.reconcileBranchConflict(projectState, localMode, local.envBranch, local.fileBranch);
+    }
+
+    // No .env header and no .capy/branch.
+    if (localMode) {
+      // Local-only projects operate on a single branch (see localGate); the
+      // first run has no files yet, so the local-mode default applies.
+      this.projectManager.writeActiveBranch(SyncEngine.DEFAULT_BRANCH);
+      return SyncEngine.DEFAULT_BRANCH;
+    }
+
+    const selected = await selectBranchWithServer({
+      listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
+      syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
+      promptPick: async (branches, defaultName) => {
+        const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
+        console.log('\nNo branch is checked out in this directory yet.');
+        const { selected: pick } = await inquirer.prompt([{
+          type: 'list',
+          name: 'selected',
+          message: 'Which branch do you want to use?',
+          choices: branches.map(b => ({
+            name: b.is_protected ? `${b.name}  ${grey('(protected)')}` : b.name,
+            value: b.name,
+          })),
+          default: defaultName,
+        }]);
+        return pick;
+      },
+    });
+    this.projectManager.writeActiveBranch(selected);
+    return selected;
+  }
+
+  /**
+   * .env and .capy/branch both exist and disagree — usually an interrupted
+   * checkout. Before showing recovery instructions, verify the .capy/branch
+   * side is a real branch: if it isn't (stale or foreign cache), the .env
+   * header wins and the cache is rebuilt. A genuine conflict is a hard stop
+   * with both recovery paths spelled out.
+   */
+  private async reconcileBranchConflict(
+    projectState: ProjectState,
+    localMode: boolean,
+    envBranch: string,
+    fileBranch: string,
+  ): Promise<string> {
+    const knownLocally = new Set([
+      ...branchesFromKeep(this.safeReadKeep()),
+      ...syncedBranchNames(this.projectManager.readSyncState()),
+    ]);
+    let fileBranchIsReal = knownLocally.has(fileBranch);
+    if (!fileBranchIsReal && !localMode) {
+      try {
+        const branches = await this.serviceClient.listBranches(projectState.projectId!);
+        fileBranchIsReal = branches.some(b => b.name === fileBranch);
+      } catch (err) {
+        // Offline: can't verify. Both files exist, so treat the conflict as
+        // genuine rather than silently discarding one side.
+        this.debugError('listBranches failed during conflict reconciliation', err);
+        fileBranchIsReal = true;
+      }
+    }
+
+    if (!fileBranchIsReal) {
+      console.log(`Ignoring stale .capy/branch (${B(fileBranch)} is not a branch in this project); staying on ${B(envBranch)}.`);
+      this.projectManager.writeActiveBranch(envBranch);
+      return envBranch;
+    }
+
     console.error(`\nLocal state is inconsistent:`);
-    console.error(`  .capy/branch says ${B(normalizedActive)}`);
-    console.error(`  .env was encrypted for ${B(normalizedHeader)}`);
+    console.error(`  .capy/branch says ${B(fileBranch)}`);
+    console.error(`  .env was encrypted for ${B(envBranch)}`);
     console.error(`\nThis usually means a previous checkout was interrupted.`);
-    console.error(`Recover with: ${B(`capy checkout ${normalizedHeader}`)} (re-sync to the branch .env actually holds)`);
-    console.error(`           or: ${B(`capy checkout ${normalizedActive}`)} (pull the branch .capy/branch claims)\n`);
+    console.error(`Recover with: ${B(`capy checkout ${envBranch}`)} (re-sync to the branch .env actually holds)`);
+    console.error(`           or: ${B(`capy checkout ${fileBranch}`)} (finish switching to the branch .capy/branch claims)\n`);
     process.exit(1);
+  }
+
+  /** keep.lock contents, or null when absent or corrupt (corruption is reported by the paths that need it). */
+  private safeReadKeep(): KeepFile | null {
+    try {
+      return this.projectManager.readKeepFile();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -541,14 +637,17 @@ export class CapyCommand {
           const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
           const keepJson = JSON.stringify(updatedKeep);
 
-          await this.serviceClient.pushSecrets(
+          const initPushResult = await this.serviceClient.pushSecrets(
             projectResult.project_id,
             keepJson,
             envBlob,
             initBranch,
           );
 
-          this.fileManager.writeKeepFile(updatedKeep);
+          // Prefer the server's copy — it carries server-assigned changed_at
+          this.fileManager.writeKeepFile(
+            SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep),
+          );
 
           // Cache encrypted blob locally
           const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
@@ -789,56 +888,6 @@ export class CapyCommand {
   }
 
   /**
-   * Prompt the user to switch branches when their active branch no longer exists.
-   */
-  private async promptBranchSwitch(projectId: string, missingBranch: string): Promise<string | undefined> {
-    const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
-
-    console.log(`\n  Branch "${missingBranch}" cannot be found on Capy.\n`);
-
-    let branches;
-    try {
-      branches = await this.serviceClient.listBranches(projectId);
-    } catch (err) {
-      this.debugError('listBranches failed', err);
-      console.log('  Could not retrieve branches. Falling back to default.');
-      this.projectManager.writeActiveBranch(undefined);
-      return undefined;
-    }
-
-    if (branches.length === 0) {
-      console.log('  No branches found. Using default.');
-      this.projectManager.writeActiveBranch(undefined);
-      return undefined;
-    }
-
-    console.log(`  Available branches:`);
-    branches.forEach((b, i) => {
-      const isLast = i === branches.length - 1;
-      const connector = isLast ? '└──' : '├──';
-      const name = b.name;
-      const prot = b.is_protected ? `  ${grey('(protected)')}` : '';
-      console.log(`  ${connector} ${name}${prot}`);
-    });
-    console.log('');
-
-    const choices = branches.map(b => ({
-      name: b.name,
-      value: b.name,
-    }));
-
-    const { selected } = await inquirer.prompt([{
-      type: 'list',
-      name: 'selected',
-      message: 'Switch to:',
-      choices,
-    }]);
-
-    this.projectManager.writeActiveBranch(selected || undefined);
-    return selected || undefined;
-  }
-
-  /**
    * Clear local UX state after a CONFIRMED kick from the org.
    *
    * Implementation lives in `../cleanup/orgCleanup.ts` so `redeemCommand`
@@ -959,12 +1008,14 @@ export class CapyCommand {
     // session. Everything below this point is shared with the server path,
     // gated by `localMode` at the few seams that would otherwise call out.
     const localMode = isLocalOnly();
-    const branch = projectState.activeBranch;
+    let branch: string;
 
     let authResult: AuthResult;
 
     if (localMode) {
       authResult = { success: true, user_id: LOCAL_USER_ID };
+      branch = await this.resolveActiveBranch(projectState, true);
+      projectState.activeBranch = branch;
       this.displayHeader(
         projectState.projectName || 'local project',
         'local (this machine only)',
@@ -986,8 +1037,23 @@ export class CapyCommand {
         result = await this.authService.authenticateSilent();
       }
 
-      // If still no session, fall through to interactive auth
+      // If still no session, fall through to interactive auth — except on
+      // network failures: a browser round-trip can't fix an unreachable
+      // service, and bouncing to OAuth there hides the real problem.
       if (!result.success) {
+        const refreshFailure = this.authService.getLastRefreshFailure();
+        if (refreshFailure?.reason === 'network') {
+          spinner.fail('Could not reach the Capy service to refresh your session');
+          throw new CapyError(
+            `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
+            ERROR_CODES.NETWORK_ERROR,
+            { detail: refreshFailure.detail }
+          );
+        }
+        if (refreshFailure?.reason === 'session_ended') {
+          // Say why the browser is about to open instead of silently bouncing.
+          spinner.text = 'Session expired — opening your browser to sign in again...';
+        }
         result = await this.authService.authenticate(projectState.organizationId);
       }
 
@@ -1013,6 +1079,11 @@ export class CapyCommand {
       }
 
       spinner.succeed(`Authenticated as ${result.user_email || result.user_first_name} (${result._auth_method || 'oauth'})`);
+
+      // Branch resolution needs a token (server-assisted steps: branch list,
+      // conflict validation, fresh-clone prompt) — so it runs post-auth.
+      branch = await this.resolveActiveBranch(projectState, false);
+      projectState.activeBranch = branch;
 
       const orgName = result.organization_name
         || result.organizations?.find(o => o.id === result.organization_id)?.name
@@ -1283,7 +1354,9 @@ export class CapyCommand {
     const pinnedPlaintext: Record<string, string> = {};
     let needsFetch = false;
     for (const variable of Object.keys(pinned)) {
-      if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinned[variable]) {
+      // Presence is `!== undefined`: '' is a valid pinned value, and a falsy
+      // check forces a remote fetch on every sync for empty variables.
+      if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinned[variable]) {
         pinnedPlaintext[variable] = localPlaintext[variable];
       } else {
         needsFetch = true;
@@ -1303,7 +1376,7 @@ export class CapyCommand {
         if (blob?.env_file) {
           const encrypted = this.fileManager.parseEnvContent(blob.env_file);
           for (const [key, value] of Object.entries(encrypted)) {
-            if (pinned[key] && !pinnedPlaintext[key]) {
+            if (pinned[key] && pinnedPlaintext[key] === undefined) {
               try {
                 pinnedPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
               } catch (decryptErr) {
@@ -1507,12 +1580,15 @@ export class CapyCommand {
     // in local-only mode, where there is no remote. The local writes below
     // (keep cache, encrypted .env, sync-state) ARE the commit.
     if (action === 'commit_local' && !localMode) {
-      await this.serviceClient.pushSecrets(
+      const pushResult = await this.serviceClient.pushSecrets(
         projectState.projectId!,
         JSON.stringify(finalKeep),
         envBlob,
         branch,
       );
+      // Re-write keep.lock with the server's copy — it carries the
+      // server-assigned changed_at timestamps for this push.
+      this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult.keep_file, finalKeep));
     }
 
     writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, envBlob);
@@ -1663,9 +1739,13 @@ export class CapyCommand {
     for (const [variable, choice] of Object.entries(choices)) {
       if (choice === 'pinned') {
         const pinnedHash = pinned[variable];
-        if (localPlaintext[variable] && hashValue(localPlaintext[variable]) === pinnedHash) {
+        // `!== undefined` like the 'local'/'remote' arms below: '' is a valid
+        // pinned value. With a falsy check, choosing "pinned" for an empty
+        // variable set nothing here, and the keep.lock cleanup that removes
+        // vars absent from finalEnv then silently deleted the variable.
+        if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) {
           result[variable] = localPlaintext[variable];
-        } else if (remotePlaintext[variable] && hashValue(remotePlaintext[variable]) === pinnedHash) {
+        } else if (remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash) {
           result[variable] = remotePlaintext[variable];
         }
       } else if (choice === 'local' && localPlaintext[variable] !== undefined) {

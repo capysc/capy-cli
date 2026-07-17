@@ -132,7 +132,8 @@ describe('CapyCommand', () => {
       setSessionUserId: mock(() => undefined),
       refreshToken: mock(() => Promise.resolve(false)),
       refreshWithCredentials: mock(() => Promise.resolve({ success: true })),
-      createOrganization: mock(() => undefined)
+      createOrganization: mock(() => undefined),
+      getLastRefreshFailure: mock(() => null)
     } as any;
 
     mockServiceClient = {
@@ -737,6 +738,9 @@ describe('CapyCommand', () => {
     };
 
     beforeEach(() => {
+      // Branch resolution reads .capy/branch (no .env header in these tests)
+      mockProjectManager.readActiveBranch.mockReturnValue('development');
+
       // syncProject tries authenticateSilent first, then falls back to authenticate
       mockAuthService.authenticateSilent.mockResolvedValue({
         success: true,
@@ -859,6 +863,9 @@ describe('CapyCommand', () => {
     });
 
     beforeEach(() => {
+      // Branch resolution reads .capy/branch (no .env header in these tests)
+      mockProjectManager.readActiveBranch.mockReturnValue('development');
+
       mockAuthService.authenticateSilent.mockResolvedValue({
         success: true,
         organization_id: 'org-123',
@@ -1055,6 +1062,9 @@ describe('CapyCommand', () => {
     };
 
     beforeEach(() => {
+      // Branch resolution reads .capy/branch (no .env header in these tests)
+      mockProjectManager.readActiveBranch.mockReturnValue('development');
+
       mockAuthService.authenticateSilent.mockResolvedValue({
         success: true,
         organization_id: 'org-123',

@@ -1,11 +1,12 @@
 {
   "name": "@capysc/cli",
-  "version": "0.6.1",
+  "version": "0.8.0",
   "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",
   "bin": {
     "capy": "bin/capy",
-    "capy-dev": "bin/capy-dev"
+    "capy-dev": "bin/capy-dev",
+    "capy-staging": "bin/capy-staging"
   },
   "repository": {
     "type": "git",
@@ -30,7 +31,7 @@
     "dev": "tsc --watch",
     "capy-dev": "bun run build && node bin/capy-dev",
     "preuninstall": "capy cleanup 2>/dev/null || true",
-    "prepublishOnly": "npm pkg delete bin.capy-dev",
+    "prepublishOnly": "npm pkg delete bin.capy-dev bin.capy-staging",
     "test": "bash tests/run-tests.sh",
     "typecheck": "tsc --noEmit",
     "test:e2e": "bun test tests/e2e/",
@@ -38,9 +39,12 @@
     "test:plugins:cloudflare-workers": "bash tests/plugins/run-plugin-tests.sh cloudflare-workers",
     "test:plugins:cloudflare-pages": "bash tests/plugins/run-plugin-tests.sh cloudflare-pages",
     "test:plugins:vercel": "bash tests/plugins/run-plugin-tests.sh vercel",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist build bin-pkg",
+    "bundle": "node build.esbuild.mjs",
+    "build:binary": "node scripts/build-binary.mjs"
   },
   "dependencies": {
+    "@napi-rs/keyring": "^1.3.0",
     "commander": "^11.0.0",
     "dotenv": "^16.3.0",
     "inquirer": "^12.9.6",
@@ -51,6 +55,8 @@
     "@types/inquirer": "^9.0.0",
     "@types/node": "^20.0.0",
     "@types/proper-lockfile": "^4.1.4",
+    "@yao-pkg/pkg": "^6.14.2",
+    "esbuild": "^0.25.8",
     "typescript": "^5.0.0"
   },
   "license": "AGPL-3.0-only",

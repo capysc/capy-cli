@@ -41,6 +41,10 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
   const orgId = projectState.organizationId;
   const projectId = projectState.projectId;
   const branch = projectState.activeBranch;
+  if (!branch) {
+    console.error(`No active branch. Run ${B('capy')} to select a branch.`);
+    process.exit(1);
+  }
 
   const keep = pm.readKeepFile();
   if (!keep) {
@@ -179,7 +183,8 @@ export async function writeAndSync(
   const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
 
   writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
-  fileManager.writeKeepFile(finalKeep);
+  // Prefer the server's copy — it carries server-assigned changed_at
+  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep));
   fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
   const existingSyncState = pm.readSyncState();
@@ -272,7 +277,8 @@ export function checkExpiringKeys(windowDays: number = 7): ExpiringKey[] {
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
     if (!keep) return [];
-    const branch = pm.readActiveBranch();
+    const branch = pm.deriveActiveBranch();
+    if (!branch) return [];
     const managed = listManagedKeys(keep, branch);
     const now = Date.now() / 1000;
     const windowSec = windowDays * 86400;

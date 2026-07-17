@@ -10,6 +10,8 @@
  *   4. adapter shells out to vendor CLI / API to push secrets and ship code
  */
 
+import type { Classification } from './classify';
+
 export type DeployMode = 'direct' | 'ci';
 
 export interface TargetConfig {
@@ -21,6 +23,13 @@ export interface TargetConfig {
   branch: string;
   /** Variable names this target consumes. */
   vars: string[];
+  /**
+   * The full set of project vars available on `branch` when `vars` was last
+   * confirmed. Lets a deploy tell a genuinely-new project var (which would be
+   * silently dropped) apart from one the user intentionally left unselected,
+   * and re-confirm the selection when the project's var set drifts.
+   */
+  knownVars?: string[];
   /** Free-form adapter-specific options (worker name, build cmd, etc.). */
   options: Record<string, unknown>;
   /**
@@ -68,6 +77,11 @@ export interface DeployStep {
 export interface DeployResult {
   ok: boolean;
   steps: DeployStep[];
+  /**
+   * Free-form block printed after the steps — for one-time follow-up the
+   * user must do by hand (e.g. aws-ssm's task-definition wiring snippet).
+   */
+  epilogue?: string;
 }
 
 export interface DeployContext {
@@ -111,6 +125,16 @@ export interface DeployAdapter {
    * leak or bundle-time miss).
    */
   varKind: AdapterVarKind;
+  /**
+   * Optional override for which vars the picker pre-checks by default (the user
+   * can still toggle any). When omitted, the picker uses the varKind bucket
+   * (build-time → public-prefixed names, runtime → the rest). Vercel sets this
+   * to "all" because its single env store serves BOTH build-time vars (which
+   * Vercel inlines into the browser bundle by prefix) and runtime secrets
+   * (server-side) — pre-checking only one bucket would silently drop half the
+   * app's env.
+   */
+  presumeVars?(cls: Classification): string[];
   /**
    * Mode the picker pre-selects on first config when there's no saved
    * preference. Adapters whose vendor has turnkey git-CI (Vercel, Netlify,

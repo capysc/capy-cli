@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { CapyError, ERROR_CODES } from '../types/index';
 
 export class Encryptor {
   private static readonly algorithm = 'aes-256-gcm';
@@ -15,6 +16,11 @@ export class Encryptor {
       const iv = randomBytes(this.ivLength);
       const derivedKey = this.deriveKey(key);
 
+      // No setAAD: the key is already fully context-bound — `key` is the project
+      // key = HKDF(M, projectId, orgId), so a value can't be moved across
+      // projects/orgs (decryption fails). Binding per-value AAD (e.g. the
+      // resource_id) would require re-encrypting every stored secret for marginal
+      // gain; deferred (CAP-57).
       const cipher = createCipheriv(this.algorithm, derivedKey, iv, {
         authTagLength: this.authTagLength,
       });
@@ -35,19 +41,18 @@ export class Encryptor {
    * Decrypts a base64(iv + ciphertext + authTag) value using AES-256-GCM.
    */
   static decrypt(encryptedValue: string, key: string): string {
+    const combined = Buffer.from(encryptedValue, 'base64');
+
+    if (combined.length < this.ivLength + this.authTagLength) {
+      throw new CapyError('Encrypted payload too short', ERROR_CODES.INVALID_FORMAT);
+    }
+
+    const iv = combined.subarray(0, this.ivLength);
+    const authTag = combined.subarray(combined.length - this.authTagLength);
+    const encrypted = combined.subarray(this.ivLength, combined.length - this.authTagLength);
+    const derivedKey = this.deriveKey(key);
+
     try {
-      const combined = Buffer.from(encryptedValue, 'base64');
-
-      if (combined.length < this.ivLength + this.authTagLength) {
-        throw new Error('Encrypted payload too short');
-      }
-
-      const iv = combined.subarray(0, this.ivLength);
-      const authTag = combined.subarray(combined.length - this.authTagLength);
-      const encrypted = combined.subarray(this.ivLength, combined.length - this.authTagLength);
-
-      const derivedKey = this.deriveKey(key);
-
       const decipher = createDecipheriv(this.algorithm, derivedKey, iv, {
         authTagLength: this.authTagLength,
       });
@@ -59,7 +64,13 @@ export class Encryptor {
 
       return decrypted.toString('utf8');
     } catch (error) {
-      throw new Error(`Failed to decrypt value: ${error}`);
+      // AES-GCM auth-tag failure => the key is wrong for this ciphertext. Typed
+      // (code, not message) so callers branch on it — cardinal Rule 4.
+      throw new CapyError(
+        'Decryption failed: wrong key for this value',
+        ERROR_CODES.DECRYPT_KEY_MISMATCH,
+        { cause: error }
+      );
     }
   }
 

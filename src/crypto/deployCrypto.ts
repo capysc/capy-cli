@@ -73,7 +73,13 @@ export function parseDeployCode(deployCode: string): {
  *   service_key = HKDF-SHA256(innerBlob, salt=projectId+hex(deployId), info="capy:deploy:service-key", 32)
  *   DECRYPT_KEY = HKDF-SHA256(projectKey || service_key, salt=deployId, info="capy:deploy:decrypt", 32)
  *
- * Encrypted with AES-256-GCM(envBlob, DECRYPT_KEY) where envBlob is KEY=value\n lines.
+ * Encrypted with AES-256-GCM(envBlob, DECRYPT_KEY) where envBlob is a JSON
+ * object of { KEY: value } pairs. JSON is used (rather than KEY=value\n lines)
+ * so values may contain newlines, `=`, and `#` and still round-trip byte-for-byte
+ * — multi-line secrets like PEM private keys would otherwise be truncated at the
+ * first line and continuation lines containing `=` would mint phantom env vars.
+ * `decryptSecretsBlob` still accepts the legacy line format for blobs minted by
+ * older CLI versions.
  *
  * IMPORTANT: innerBlob MUST be the exact base64 string that was sent to the
  * service for KMS-wrapping. Do not recompute innerBlob here — deployInnerWrap
@@ -105,12 +111,15 @@ export function encryptEnvBlob(
     hkdfSync('sha256', combined, deployId, 'capy:deploy:decrypt', 32),
   );
 
-  const envBlob = Object.entries(envVars)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
-  const plaintext = Buffer.from(envBlob, 'utf-8');
+  // JSON encoding round-trips multi-line values (PEM keys, certs, JSON blobs)
+  // and values containing `=`/`#` faithfully. The decrypt side detects this
+  // format vs the legacy `KEY=value\n` lines by the leading `{`.
+  const plaintext = Buffer.from(JSON.stringify(envVars), 'utf-8');
 
   const iv = randomBytes(IV_LENGTH);
+  // No setAAD: decryptKey = HKDF(projectKey||serviceKey, salt=deployId,
+  // info="capy:deploy:decrypt") already binds the deploy/project context, so the
+  // blob can't be replayed under a different deploy. AAD would be redundant.
   const cipher = createCipheriv('aes-256-gcm', decryptKey, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });

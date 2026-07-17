@@ -3,9 +3,13 @@
  *
  * Code deploy is CI: `capy deploy` opens the keep.lock PR against the target
  * branch and Vercel's git integration builds + ships on merge. Secret delivery
- * is done HERE, by pushing each var into Vercel's Environment Variables (scoped
- * to the right Vercel environment) via the `vercel env` CLI — so the values are
- * live in Vercel before the build runs, not only inlined from the keep.lock.
+ * is done HERE, by pushing each var as a plaintext Environment Variable into
+ * Vercel (scoped to the right Vercel environment) via the `vercel env` CLI —
+ * the same shape as cf-worker's `wrangler secret bulk`. The values are live in
+ * Vercel's store before the build runs, so the build reads them natively and
+ * needs NO `capy run` decrypt step. Vercel's single env store serves both the
+ * build (it inlines `NEXT_PUBLIC_*`/`VITE_*` into the browser bundle by prefix)
+ * and the server runtime, so a target typically pushes all of the app's vars.
  *
  * Target → Vercel environment mapping is explicit, via `options.vercelEnv`:
  *   - 'production' → Vercel `production`
@@ -345,17 +349,21 @@ async function runVercelLink(projectDir: string): Promise<boolean> {
 export const vercelAdapter: DeployAdapter = {
   id: 'vercel',
   label: 'Vercel',
-  description: 'Opens a keep.lock PR; Vercel git CI builds + deploys on merge',
-  varKind: 'build-time',
-  // CI-only: capy never invokes the vercel CLI. The deploy PR is the deploy
-  // signal; Vercel's git integration builds and ships when it merges.
+  description: 'Pushes plaintext env vars; opens a keep.lock PR Vercel CI deploys on merge',
+  // Vercel's env store is consumed at both build and runtime, so we treat it
+  // as runtime ("push to Vercel") for picker copy, but pre-select ALL vars via
+  // presumeVars below — public-prefixed ones still get inlined by Vercel itself.
+  varKind: 'runtime',
+  // CI-only for CODE: capy never runs `vercel deploy`. The deploy PR is the
+  // deploy signal; Vercel's git integration builds and ships when it merges.
+  // (We do use the `vercel` CLI here, but only to set env vars, not to deploy.)
   defaultMode: 'ci',
   ciOnly: true,
-  // Inject secrets the capy way: push SECRETS_BLOB + PROJECT_KEY and let the
-  // build decrypt them via `capy run` — not individual plaintext vendor vars.
-  needsDeployToken: true,
+  // Pre-check every var: Vercel's single env store holds both build-time public
+  // vars (Vercel inlines them into the bundle by prefix) and runtime secrets.
+  presumeVars: (cls) => [...cls.buildTime, ...cls.runtime].sort(),
   requires: {
-    // Code deploy is CI (the PR), but we push the blob via the vercel CLI.
+    // Code deploy is CI (the PR), but we push the env vars via the vercel CLI.
     binaries: ['vercel'],
     env: [],
   },
@@ -476,27 +484,31 @@ export const vercelAdapter: DeployAdapter = {
       steps.push({
         label: 'set Vercel env',
         status: 'skip',
-        detail: `dry-run — would set SECRETS_BLOB + PROJECT_KEY on ${scope}, then open the deploy PR`,
+        detail: `dry-run — would push ${config.vars.length} var(s) to ${scope}, then open the deploy PR`,
       });
       return { ok: true, steps };
     }
 
-    // Push the capy build-time pair so the build can `capy run` to decrypt the
-    // secrets — not the plaintext secrets themselves. Scoped to the Vercel env.
-    if (!ctx.deployToken) {
+    // Push each declared var as a plaintext Vercel Environment Variable, scoped
+    // to the chosen Vercel env. Filter the decrypted branch env to the declared
+    // names; fail loudly if any are missing rather than pushing a partial set.
+    const filtered: Array<[string, string]> = [];
+    const missing: string[] = [];
+    for (const name of config.vars) {
+      if (name in ctx.env) filtered.push([name, ctx.env[name]]);
+      else missing.push(name);
+    }
+    if (missing.length > 0) {
       steps.push({
         label: 'set Vercel env',
         status: 'fail',
-        detail: 'no deploy token minted (SECRETS_BLOB + PROJECT_KEY unavailable)',
+        detail: `missing in branch ${config.branch}: ${missing.join(', ')}`,
       });
       return { ok: false, steps };
     }
-    const pairs: Array<[string, string]> = [
-      ['SECRETS_BLOB', ctx.deployToken.secretsBlob],
-      ['PROJECT_KEY', ctx.deployToken.projectKey],
-    ];
+
     const failed: string[] = [];
-    for (const [name, value] of pairs) {
+    for (const [name, value] of filtered) {
       const r = setVercelEnv(name, value, vercelEnv, gitBranch, projectDir);
       if (!r.ok) failed.push(`${name} (${r.error})`);
     }
@@ -512,10 +524,10 @@ export const vercelAdapter: DeployAdapter = {
     steps.push({
       label: 'set Vercel env',
       status: 'ok',
-      detail: `SECRETS_BLOB + PROJECT_KEY set on ${scope} (build decrypts via capy run)`,
+      detail: `${filtered.length} var(s) pushed to ${scope}`,
     });
     // Code ships via the keep.lock PR (opened by deployCommand); Vercel's git
-    // CI builds on merge and `capy run` injects the secrets from the blob.
+    // CI builds on merge and reads these env vars natively — no `capy run`.
     steps.push({
       label: 'vercel build + deploy',
       status: 'skip',

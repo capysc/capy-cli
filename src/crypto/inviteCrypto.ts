@@ -31,6 +31,10 @@ export function deriveInnerKey(token: Buffer, salt: string, info: string): Buffe
  */
 export function aesEncrypt(plaintext: Buffer, key: Buffer): string {
   const iv = randomBytes(IV_LENGTH);
+  // No setAAD: callers derive `key` via deriveInnerKey(token, salt, info), where
+  // salt/info already bind the context (e.g. "orgId:email" + "capy:invite", or
+  // deployId + "capy:deploy:decrypt"). The context lives in the key, so AAD here
+  // would be redundant.
   const cipher = createCipheriv(AES_ALGORITHM, key, iv, {
     authTagLength: AUTH_TAG_LENGTH,
   });

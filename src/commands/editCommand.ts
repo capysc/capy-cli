@@ -9,6 +9,7 @@ import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
 import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScreen';
+import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash } from '../types/index';
@@ -60,6 +61,10 @@ export class EditCommand {
     }
 
     const branch = projectState.activeBranch;
+    if (!branch) {
+      console.error(`No active branch. Run ${B('capy')} to select a branch.`);
+      process.exit(1);
+    }
     const fileManager = new FileManager();
 
     // Pinned hashes for the active branch
@@ -185,6 +190,10 @@ export class EditCommand {
 
       let status: EditRow['status'];
       let updatedLabel: string;
+      // Server-assigned changed_at for this branch — drives the UPDATED
+      // column's recency label ("5 hours ago"). Absent in local mode and for
+      // entries that predate rotation tracking.
+      const changedAt = keep.variables[key]?.find((e) => e.branch === branch)?.changed_at;
       if (localMode) {
         // committed-vs-working, via the shared classifier so the initial build
         // and the in-TUI reclassify can't drift. `remoteVal` holds the
@@ -192,12 +201,7 @@ export class EditCommand {
         ({ status, updatedLabel } = classifyLocalRow(localVal, remoteVal));
       } else {
         status = classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable);
-        if (!remoteAvailable) updatedLabel = '—';
-        else if (status === 'in sync') updatedLabel = 'in sync';
-        else if (status === 'local') updatedLabel = 'local';
-        else if (status === 'remote') updatedLabel = 'remote';
-        else if (status === 'conflict') updatedLabel = 'needs review';
-        else updatedLabel = '—';
+        updatedLabel = changedAt ? formatRelativeTime(changedAt) : '—';
       }
 
       rows.push({
@@ -206,6 +210,7 @@ export class EditCommand {
         remoteValue: remoteVal,
         status,
         updatedLabel,
+        changedAt,
       });
     }
 
@@ -263,17 +268,20 @@ export class EditCommand {
         // push. In local-only mode there is no push — the local writes below
         // ARE the commit.
         const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
-        const keepHashForCache = localMode
-          ? localKeepHash
-          : (await serviceClient!.pushSecrets(
+        const pushResult = localMode
+          ? null
+          : await serviceClient!.pushSecrets(
               projectId,
               JSON.stringify(finalKeep),
               envBlob,
               branch,
-            )).keep_hash;
+            );
+        const keepHashForCache = pushResult ? pushResult.keep_hash : localKeepHash;
 
         writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
-        fileManager.writeKeepFile(finalKeep);
+        // Prefer the server's copy — it carries server-assigned changed_at
+        const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep);
+        fileManager.writeKeepFile(adoptedKeep);
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
         const existingSyncState = pm.readSyncState();
@@ -284,6 +292,16 @@ export class EditCommand {
           user_id: userId,
           keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
         });
+
+        // Hand the server-assigned changed_at back to the TUI so the UPDATED
+        // column reflects the authoritative stamp for this commit, not a
+        // client-side guess.
+        const changedAtByKey: Record<string, string> = {};
+        for (const [varName, entries] of Object.entries(adoptedKeep.variables)) {
+          const stamp = entries.find((e) => e.branch === branch)?.changed_at;
+          if (stamp) changedAtByKey[varName] = stamp;
+        }
+        return changedAtByKey;
       },
     });
     await printExpiryAfter();

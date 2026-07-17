@@ -28,6 +28,11 @@ let fetchSecretsWithCache: typeof import('../../src/config/globalConfig').fetchS
 let getForceLoginMarkerPath: typeof import('../../src/config/globalConfig').getForceLoginMarkerPath;
 let setForceLoginMarker: typeof import('../../src/config/globalConfig').setForceLoginMarker;
 let consumeForceLoginMarker: typeof import('../../src/config/globalConfig').consumeForceLoginMarker;
+let getLocalRootPath: typeof import('../../src/config/globalConfig').getLocalRootPath;
+let saveLocalRoot: typeof import('../../src/config/globalConfig').saveLocalRoot;
+let saveLocalRootExclusive: typeof import('../../src/config/globalConfig').saveLocalRootExclusive;
+let readLocalRoot: typeof import('../../src/config/globalConfig').readLocalRoot;
+let hasLocalRoot: typeof import('../../src/config/globalConfig').hasLocalRoot;
 
 beforeAll(async () => {
   const mod = await import('../../src/config/globalConfig');
@@ -47,6 +52,11 @@ beforeAll(async () => {
   getForceLoginMarkerPath = mod.getForceLoginMarkerPath;
   setForceLoginMarker = mod.setForceLoginMarker;
   consumeForceLoginMarker = mod.consumeForceLoginMarker;
+  getLocalRootPath = mod.getLocalRootPath;
+  saveLocalRoot = mod.saveLocalRoot;
+  saveLocalRootExclusive = mod.saveLocalRootExclusive;
+  readLocalRoot = mod.readLocalRoot;
+  hasLocalRoot = mod.hasLocalRoot;
 });
 
 afterAll(() => {
@@ -229,6 +239,67 @@ describe('GlobalConfig', () => {
       const stat = statSync(getForceLoginMarkerPath());
       expect(stat.mode & 0o777).toBe(0o600);
       consumeForceLoginMarker();
+    });
+  });
+
+  describe('K_local root storage', () => {
+    const ORG = 'org_root';
+    const USER = 'user_root';
+
+    it('lives beside key.enc in the per-user org directory', () => {
+      expect(getLocalRootPath(ORG, USER)).toBe(
+        join(tempHome, '.capy', 'orgs', ORG, 'users', USER, 'local.key'),
+      );
+      expect(getLocalRootPath(ORG)).toBe(
+        join(tempHome, '.capy', 'orgs', ORG, 'local.key'),
+      );
+    });
+
+    it('round-trips raw 32-byte roots', () => {
+      const kLocal = require('crypto').randomBytes(32);
+      expect(hasLocalRoot(ORG, USER)).toBe(false);
+      expect(readLocalRoot(ORG, USER)).toBeNull();
+
+      saveLocalRoot(ORG, kLocal, USER);
+      expect(hasLocalRoot(ORG, USER)).toBe(true);
+      expect(readLocalRoot(ORG, USER)!.equals(kLocal)).toBe(true);
+    });
+
+    it('writes local.key with 0o600 permissions', () => {
+      const { statSync } = require('fs');
+      const stat = statSync(getLocalRootPath(ORG, USER));
+      expect(stat.mode & 0o777).toBe(0o600);
+    });
+
+    it('scopes roots per org+user', () => {
+      const other = require('crypto').randomBytes(32);
+      saveLocalRoot(ORG, other, 'user_other');
+      expect(readLocalRoot(ORG, 'user_other')!.equals(other)).toBe(true);
+      expect(readLocalRoot(ORG, USER)!.equals(other)).toBe(false);
+    });
+
+    it('treats a corrupt local.key as absent (never a weak root)', () => {
+      const { writeFileSync, mkdirSync } = require('fs');
+      const { dirname } = require('path');
+      // Whitespace-only: decodes to 0 bytes — must NOT become a usable root
+      const corruptPath = getLocalRootPath(ORG, 'user_corrupt');
+      mkdirSync(dirname(corruptPath), { recursive: true, mode: 0o700 });
+      writeFileSync(corruptPath, '  \n', { mode: 0o600 });
+      expect(readLocalRoot(ORG, 'user_corrupt')).toBeNull();
+      // Truncated: decodes to fewer than 32 bytes
+      const shortPath = getLocalRootPath(ORG, 'user_short');
+      mkdirSync(dirname(shortPath), { recursive: true, mode: 0o700 });
+      writeFileSync(shortPath, require('crypto').randomBytes(8).toString('base64'), { mode: 0o600 });
+      expect(readLocalRoot(ORG, 'user_short')).toBeNull();
+    });
+
+    it('exclusive save wins once, then refuses', () => {
+      const a = require('crypto').randomBytes(32);
+      const b = require('crypto').randomBytes(32);
+      expect(saveLocalRootExclusive(ORG, a, 'user_excl')).toBe(true);
+      expect(saveLocalRootExclusive(ORG, b, 'user_excl')).toBe(false);
+      // The winner's root is what's on disk
+      expect(readLocalRoot(ORG, 'user_excl')!.equals(a)).toBe(true);
     });
   });
 });

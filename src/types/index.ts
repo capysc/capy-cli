@@ -32,6 +32,14 @@ export interface KeepVariableEntry {
   resource_id: string;
   branch?: string;
   value_hash: string;
+  /**
+   * ISO8601 UTC — when this branch's value last changed. Server-assigned on
+   * push (the server diffs value_hash against its stored copy and discards
+   * anything the client sends); the CLI only ever passes it through.
+   * Excluded from computeKeepHash. Absent = unknown (predates tracking, or
+   * local-only project).
+   */
+  changed_at?: string;
   /** Set when this variable was provisioned by `capy connect <provider>`. */
   connector?: ConnectorMetadata;
 }
@@ -58,7 +66,8 @@ export interface ProjectState {
   projectName?: string;
   organizationId?: string;
   projectId?: string;
-  activeBranch: string;
+  /** Best-effort derived branch; null when no local signal exists (see ProjectManager.deriveActiveBranch). */
+  activeBranch: string | null;
   userId?: string;
 }
 
@@ -172,7 +181,7 @@ export interface OrgKeyFile {
   version: string;
   org_id: string;
   encrypted_master_key: string;
-  wrapping_method: 'auth_token' | 'service_cosign';
+  wrapping_method: 'auth_token' | 'service_cosign' | 'local_root';
   created_at: string;
 }
 
@@ -245,15 +254,33 @@ export class CapyError extends Error {
   }
 }
 
+// NOTE: duplicated verbatim in service/src/errorCodes.ts "for now" — keep in
+// sync until cli (a submodule) and @capy/service share a module. Per cardinal
+// Rule 4, control flow keys off these codes, never off message text.
 export const ERROR_CODES = {
   AUTH_FAILED: 'AUTH_FAILED',
   NO_ENV_FILE: 'NO_ENV_FILE',
   NO_KEEP_FILE: 'NO_KEEP_FILE',
   PERMISSION_DENIED: 'PERMISSION_DENIED',
+  MEMBERSHIP_REVOKED: 'MEMBERSHIP_REVOKED',
   NETWORK_ERROR: 'NETWORK_ERROR',
   ENCRYPTION_ERROR: 'ENCRYPTION_ERROR',
+  // AES-GCM auth-tag failure: wrong decryption key for this ciphertext.
+  DECRYPT_KEY_MISMATCH: 'DECRYPT_KEY_MISMATCH',
   INVALID_FORMAT: 'INVALID_FORMAT',
   CONFLICT_RESOLUTION: 'CONFLICT_RESOLUTION',
   SERVICE_ERROR: 'SERVICE_ERROR',
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
+  // not-found family — replaces server-prose string matching in serviceClient
+  PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
+  BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
+  // No .env header, no .capy/branch, and no unambiguous local fallback.
+  NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
+  SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
+  NO_SECRETS: 'NO_SECRETS',
+  DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
+  ORG_NOT_FOUND: 'ORG_NOT_FOUND',
+  LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
 } as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

@@ -2,6 +2,7 @@
 // detail view. Built on raw stdin + ANSI codes so we don't add a TUI dependency.
 
 import { formatSnippet } from '../commands/statusCommand';
+import { formatRelativeTime } from './relativeTime';
 
 const ESC = '\x1b';
 const HIDE_CURSOR = `${ESC}[?25l`;
@@ -11,6 +12,13 @@ const CLEAR_SCREEN = `${ESC}[2J`;
 const CLEAR_EOL = `${ESC}[K`;
 const ENTER_ALT_SCREEN = `${ESC}[?1049h`;
 const EXIT_ALT_SCREEN = `${ESC}[?1049l`;
+// Bracketed paste: when enabled the terminal wraps pasted text in these
+// markers, so we can append a multi-line paste (e.g. a PEM private key)
+// verbatim instead of treating its embedded newlines as Enter/commit.
+const ENABLE_BRACKETED_PASTE = `${ESC}[?2004h`;
+const DISABLE_BRACKETED_PASTE = `${ESC}[?2004l`;
+const PASTE_START = `${ESC}[200~`;
+const PASTE_END = `${ESC}[201~`;
 const INVERSE = `${ESC}[7m`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
@@ -29,6 +37,12 @@ export interface EditRow {
   remoteValue: string | undefined;
   status: 'in sync' | 'local' | 'remote' | 'conflict' | 'unknown';
   updatedLabel: string;
+  /**
+   * keep.lock changed_at for this variable on the active branch (ISO8601,
+   * server-assigned) — when the value last changed server-side. Drives the
+   * UPDATED column's recency label; absent = unknown/never pushed.
+   */
+  changedAt?: string;
 }
 
 export interface EditState {
@@ -45,7 +59,13 @@ export interface EditState {
 }
 
 export interface EditContext {
-  saveLocalEdits: (edits: Record<string, string>) => Promise<void>;
+  /**
+   * Commit (and in server mode, push) the given edits. Resolves to the
+   * server-assigned changed_at per variable for the active branch, taken
+   * from the push response's keep_file — empty in local mode or when the
+   * service didn't return timestamps.
+   */
+  saveLocalEdits: (edits: Record<string, string>) => Promise<Record<string, string>>;
 }
 
 /**
@@ -63,6 +83,33 @@ export function classifyLocalRow(
     : { status: 'local', updatedLabel: 'uncommitted' };
 }
 
+/**
+ * Normalizes bracketed-paste content for storage in an edit buffer. Pasted
+ * line breaks are kept (so multi-line secrets like PEM keys survive), CRLF/CR
+ * are folded to LF, and other control characters (besides tab) are dropped so a
+ * stray escape sequence in the paste can't corrupt the value or the terminal.
+ */
+export function sanitizePastedText(raw: string): string {
+  let out = '';
+  for (const ch of raw.replace(/\r\n?/g, '\n')) {
+    const code = ch.charCodeAt(0);
+    if (code === 0x0a || code === 0x09 || (code >= 0x20 && code !== 0x7f)) {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/**
+ * Collapses a (possibly multi-line) value to a single visible line for the
+ * single-row TUI table: newlines render as a ↵ marker and tabs as a space.
+ * Length is preserved 1:1 so callers that pan/clip by character offset stay
+ * correct.
+ */
+export function renderInlineValue(value: string): string {
+  return value.replace(/\n/g, '↵').replace(/\t/g, ' ');
+}
+
 export class EditScreen {
   private state: EditState = { projectName: '', branch: '', rows: [], remoteAvailable: false };
   private ctx: EditContext | null = null;
@@ -78,6 +125,9 @@ export class EditScreen {
   private quitPrompt: 'commit' | null = null;
   private popupOpen = false;
   private popupPanOffset = 0;
+  // Accumulates raw stdin between PASTE_START and PASTE_END markers when a
+  // bracketed paste spans multiple `data` chunks. null when not mid-paste.
+  private pasteBuffer: string | null = null;
 
   run(state: EditState, ctx: EditContext): Promise<void> {
     this.state = state;
@@ -94,7 +144,7 @@ export class EditScreen {
     this.popupPanOffset = 0;
 
     return new Promise<void>((resolve) => {
-      process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR);
+      process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR + ENABLE_BRACKETED_PASTE);
       if (process.stdin.isTTY) process.stdin.setRawMode(true);
       process.stdin.resume();
 
@@ -118,7 +168,7 @@ export class EditScreen {
   private cleanup(): void {
     if (this.cleanedUp) return;
     this.cleanedUp = true;
-    process.stdout.write(SHOW_CURSOR + EXIT_ALT_SCREEN);
+    process.stdout.write(DISABLE_BRACKETED_PASTE + SHOW_CURSOR + EXIT_ALT_SCREEN);
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
     if (this.onDataHandler) process.stdin.removeListener('data', this.onDataHandler);
@@ -127,6 +177,15 @@ export class EditScreen {
 
   private handleKeypress(data: Buffer, resolve: () => void): void {
     const key = data.toString();
+
+    // Bracketed paste arrives as ESC[200~ <content> ESC[201~, possibly split
+    // across data chunks. Intercept it before any key dispatch so pasted text
+    // (which may contain 'q', newlines, etc.) can never trigger quit/commit or
+    // navigation — its content is only ever appended to an active edit buffer.
+    if (this.pasteBuffer !== null || key.includes(PASTE_START)) {
+      this.consumePaste(key);
+      return;
+    }
 
     // Ctrl-C exits unconditionally
     if (key === '\x03') {
@@ -264,15 +323,18 @@ export class EditScreen {
     this.statusMessage = { text: `${verb} ${editedKeys.length} change(s)…`, isError: false };
     this.draw();
     try {
-      await this.ctx.saveLocalEdits(edits);
+      const changedAtByKey = await this.ctx.saveLocalEdits(edits);
       this.pendingEdits.clear();
-      // After commit, the committed baseline == local for the edited rows.
+      // After commit, the committed baseline == local for the edited rows,
+      // and the UPDATED column picks up the server-assigned changed_at from
+      // the push response (authoritative — not a client-side clock guess).
       for (const k of editedKeys) {
         const row = this.state.rows.find((r) => r.key === k);
         if (row && row.localValue !== undefined) {
+          if (changedAtByKey[k]) row.changedAt = changedAtByKey[k];
           row.remoteValue = row.localValue;
           row.status = this.reclassify(row);
-          row.updatedLabel = this.updatedLabelFor(row.status);
+          row.updatedLabel = this.updatedLabelFor(row);
         }
       }
       this.statusMessage = { text: `Committed ${editedKeys.length} change(s)`, isError: false };
@@ -280,6 +342,30 @@ export class EditScreen {
       this.statusMessage = { text: `Error committing: ${err?.message || err}`, isError: true };
     }
     this.draw();
+  }
+
+  // Accumulates a bracketed paste across data chunks and, once the closing
+  // marker arrives, appends the pasted text to the active edit buffer verbatim
+  // (newlines preserved). Pasted outside of edit mode, the content is dropped.
+  private consumePaste(chunk: string): void {
+    this.pasteBuffer = (this.pasteBuffer ?? '') + chunk;
+    const start = this.pasteBuffer.indexOf(PASTE_START);
+    if (start === -1) {
+      this.pasteBuffer = null;
+      return;
+    }
+    const end = this.pasteBuffer.indexOf(PASTE_END, start + PASTE_START.length);
+    if (end === -1) return; // paste spans more chunks — wait for the rest
+
+    const pasted = this.pasteBuffer.substring(start + PASTE_START.length, end);
+    this.pasteBuffer = null;
+
+    if (!this.editing) return;
+    const appended = sanitizePastedText(pasted);
+    if (appended) {
+      this.editing.buffer += appended;
+      this.draw();
+    }
   }
 
   private handleEditKey(key: string): void {
@@ -332,7 +418,7 @@ export class EditScreen {
     if (row) {
       row.localValue = buffer;
       row.status = this.reclassify(row);
-      row.updatedLabel = this.updatedLabelFor(row.status);
+      row.updatedLabel = this.updatedLabelFor(row);
     }
     this.statusMessage = { text: `Edited ${key} (uncommitted)`, isError: false };
     this.draw();
@@ -377,10 +463,14 @@ export class EditScreen {
 
   // Local-only reclassification. We don't refetch remote, so the remote side
   // is treated as unchanged from when the TUI loaded.
-  /** UPDATED-column label for a status, mode-aware. */
-  private updatedLabelFor(status: EditRow['status']): string {
-    if (this.state.localMode) return status === 'in sync' ? 'committed' : 'uncommitted';
-    return status === 'in sync' ? 'in sync' : status;
+  /**
+   * UPDATED-column label, mode-aware. Local mode has no server timestamps,
+   * so it keeps the committed/uncommitted wording; otherwise show when the
+   * value last changed server-side.
+   */
+  private updatedLabelFor(row: EditRow): string {
+    if (this.state.localMode) return row.status === 'in sync' ? 'committed' : 'uncommitted';
+    return row.changedAt ? formatRelativeTime(row.changedAt) : NO_VALUE;
   }
 
   private reclassify(row: EditRow): EditRow['status'] {
@@ -615,7 +705,7 @@ export class EditScreen {
   // and revealed state with horizontal panning when the value overflows.
   private renderValueField(row: EditRow, width: number): string {
     if (this.editing && this.editing.key === row.key) {
-      const display = `> ${this.editing.buffer}_`;
+      const display = `> ${renderInlineValue(this.editing.buffer)}_`;
       if (display.length <= width) return display;
       // Keep the cursor (end of buffer) visible — clip from the left.
       return '…' + display.slice(display.length - width + 1);
@@ -626,9 +716,13 @@ export class EditScreen {
       return this.maskedSnippet(row);
     }
 
-    const value = row.localValue ?? row.remoteValue;
-    if (value === undefined) return `${DIM}(no value)${RESET}`;
-    if (value === '') return `${DIM}(empty)${RESET}`;
+    const rawValue = row.localValue ?? row.remoteValue;
+    if (rawValue === undefined) return `${DIM}(no value)${RESET}`;
+    if (rawValue === '') return `${DIM}(empty)${RESET}`;
+    // Collapse newlines/tabs so a revealed multi-line value (e.g. a PEM key)
+    // stays on one row. renderInlineValue preserves length 1:1, so the panning
+    // math below remains correct.
+    const value = renderInlineValue(rawValue);
 
     if (value.length <= width) {
       this.popupPanOffset = 0;
@@ -694,6 +788,6 @@ export class EditScreen {
   private maskedSnippet(row: EditRow): string {
     const value = row.localValue ?? row.remoteValue;
     if (value === undefined || value === '') return NO_VALUE;
-    return formatSnippet(value);
+    return renderInlineValue(formatSnippet(value));
   }
 }

@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+
+// capy-staging — the production CLI codepath pointed at the staging backend.
+//
+// Staging runs the *real* service (against the test WorkOS tenant), so this is
+// real auth — it requires dist/index.js (prod), NOT index-dev.js (mock auth).
+//
+// Isolated home at ~/.capy-staging so it can never touch prod ~/.capy (which
+// holds recovery-equivalent wrapped keys) or dev ~/.capy-dev. Both env vars are
+// set only when unset, so `CAPY_API_URL=... capy-staging ...` still overrides.
+if (!process.env.CAPY_GLOBAL_DIR_NAME) {
+  process.env.CAPY_GLOBAL_DIR_NAME = '.capy-staging';
+}
+if (!process.env.CAPY_API_URL) {
+  process.env.CAPY_API_URL = 'https://staging-api.capy.sc';
+}
+if (!process.env.CAPY_BIN_NAME) {
+  process.env.CAPY_BIN_NAME = 'capy-staging';
+}
+require('../dist/index.js');

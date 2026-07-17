@@ -254,6 +254,25 @@ export class SyncEngine {
     return updatedKeep;
   }
 
+  /**
+   * Pick the keep.lock to write after a push. The push response's keep_file
+   * is the same file we sent with server-assigned `changed_at` timestamps —
+   * prefer it so the local copy (and the committed one) carries them
+   * immediately instead of waiting for the next pull's self-heal. Falls back
+   * to the locally-merged keep when the server didn't send one (older
+   * service) or sent something unparseable.
+   */
+  static adoptServerKeep(serverKeepJson: string | undefined, fallback: KeepFile): KeepFile {
+    if (!serverKeepJson) return fallback;
+    try {
+      const parsed = JSON.parse(serverKeepJson) as KeepFile;
+      if (!parsed || typeof parsed !== 'object' || !parsed.variables) return fallback;
+      return parsed;
+    } catch {
+      return fallback;
+    }
+  }
+
   formatSyncSummary(changeSet: ChangeSet): string {
     const lines: string[] = [];
 

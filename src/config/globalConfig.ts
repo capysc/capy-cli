@@ -28,6 +28,85 @@ export function getProjectKeyCachePath(orgId: string, projectId: string): string
   return join(getGlobalCapyDir(), 'orgs', orgId, 'projects', projectId, 'key.cache');
 }
 
+// --- K_local (machine-local inner-wrap root) ---
+//
+// Lives beside key.enc under ~/.capy/orgs/<orgId>/users/<userId>/ — the
+// recovery-equivalent area `capy logout` never wipes. Never transmitted.
+// Losing it means re-redeeming an invite, same as a lost device.
+
+export function getLocalRootPath(orgId: string, userId?: string): string {
+  const base = userId
+    ? join(getGlobalCapyDir(), 'orgs', orgId, 'users', userId)
+    : join(getGlobalCapyDir(), 'orgs', orgId);
+  return join(base, 'local.key');
+}
+
+const K_LOCAL_BYTES = 32;
+
+/** Persists K_local (raw 32 bytes, base64) with mode 0600. */
+export function saveLocalRoot(orgId: string, kLocal: Buffer, userId?: string): void {
+  writeSecureFile(getLocalRootPath(orgId, userId), kLocal.toString('base64'));
+}
+
+/**
+ * Persists K_local only if no local.key exists yet (O_EXCL). Returns false if
+ * the file already exists. This is the arbitration primitive for concurrent
+ * first-run migrations: exactly one process wins the create; the loser must
+ * re-read and adopt the winner's root, or both could wrap key.enc under
+ * different roots and orphan the blob.
+ */
+export function saveLocalRootExclusive(orgId: string, kLocal: Buffer, userId?: string): boolean {
+  const path = getLocalRootPath(orgId, userId);
+  ensureDir(join(path, '..'));
+  try {
+    writeFileSync(path, kLocal.toString('base64'), { mode: 0o600, flag: 'wx' });
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'EEXIST') return false;
+    throw err;
+  }
+}
+
+/**
+ * Reads K_local, or null if this machine has never minted one for this
+ * org+user. A file that does not decode to exactly 32 bytes (truncated or
+ * corrupt write) is treated as absent: deriving from a short buffer would
+ * silently wrap M under a weak or constant key.
+ */
+export function readLocalRoot(orgId: string, userId?: string): Buffer | null {
+  const content = readFileOrNull(getLocalRootPath(orgId, userId));
+  if (!content) return null;
+  const kLocal = Buffer.from(content.trim(), 'base64');
+  return kLocal.length === K_LOCAL_BYTES ? kLocal : null;
+}
+
+export function hasLocalRoot(orgId: string, userId?: string): boolean {
+  return existsSync(getLocalRootPath(orgId, userId));
+}
+
+// --- K_local backend mode marker ---
+//
+// Absence of this file means 'file' — today's plaintext-local.key behavior,
+// unchanged for every install that never opts into the keychain backend.
+// Only ever written when the keychain backend is actually chosen at mint
+// time, so existing installs and every test that doesn't explicitly opt in
+// are byte-identical to before this file existed.
+
+export function getLocalRootModePath(orgId: string, userId?: string): string {
+  return getLocalRootPath(orgId, userId) + '.mode';
+}
+
+export type LocalRootMode = 'file' | 'keychain';
+
+export function getLocalRootMode(orgId: string, userId?: string): LocalRootMode {
+  const content = readFileOrNull(getLocalRootModePath(orgId, userId));
+  return content?.trim() === 'keychain' ? 'keychain' : 'file';
+}
+
+export function setLocalRootMode(orgId: string, mode: LocalRootMode, userId?: string): void {
+  writeSecureFile(getLocalRootModePath(orgId, userId), mode);
+}
+
 export function getGlobalConfigPath(): string {
   return join(getGlobalCapyDir(), 'config.json');
 }
@@ -54,10 +133,14 @@ function readFileOrNull(filePath: string): string | null {
 export function saveMasterKey(orgId: string, encryptedBlob: string, userId?: string): void {
   const keyPath = getOrgKeyPath(orgId, userId);
   const data = {
-    version: '1.0',
+    // Format stamp, not a parser input: readMasterKey only consumes
+    // encrypted_master_key, and pre-K_local binaries ignore these fields too.
+    // Stamping 2.0/local_root lets future versions tell "written by a newer
+    // capy" apart from a corrupt or foreign blob when the format moves again.
+    version: '2.0',
     org_id: orgId,
     encrypted_master_key: encryptedBlob,
-    wrapping_method: 'auth_token' as const,
+    wrapping_method: 'local_root' as const,
     created_at: new Date().toISOString(),
   };
   writeSecureFile(keyPath, JSON.stringify(data, null, 2));

@@ -41,7 +41,9 @@ if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
 const program = new Command();
 
 program
-  .name('capy')
+  // Bin name is overridable so sibling wrappers (e.g. bin/capy-staging) render
+  // their own name in --help/usage instead of the hardcoded "capy".
+  .name(process.env.CAPY_BIN_NAME || 'capy')
   .description('Capy CLI - SecretOps for the AI age')
   .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')
@@ -225,7 +227,7 @@ program
       displayErrorAndExit(error, {
         projectName: projectState.projectName,
         projectId: projectState.projectId,
-        branch: projectState.activeBranch,
+        branch: projectState.activeBranch ?? undefined,
       });
     }
   });
@@ -262,6 +264,7 @@ const deploy = program
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
   .option('--yes', 'skip all prompts (CI)')
   .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
+  .option('--force', 'redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI')
   .option('--edit', 're-enter the picker for an existing connector target')
   .option('--connect', 'force connector mode (skip the token+docs path)')
   .option('--platform <id>', 'skip platform picker (token+docs flow; e.g. github-actions, vercel)')
@@ -282,6 +285,9 @@ const deploy = program
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
         edit: options.edit,
+        // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
+        // a different thing, so it must NOT be merged in here.
+        force: options.force,
       });
       process.exit(code);
     }
@@ -295,6 +301,7 @@ const deploy = program
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
+      force: !!options.force,
     });
     await c.execute();
   });
@@ -349,70 +356,8 @@ program
       return;
     }
 
-    const { existsSync, unlinkSync, rmSync } = await import('fs');
-    const { join } = await import('path');
-    const { getGlobalCapyDir } = await import('./config/globalConfig');
-
-    const capyDir = join(process.cwd(), '.capy');
-    const sessionFiles = ['token'];
-
-    let cleared = false;
-    for (const file of sessionFiles) {
-      const filePath = join(capyDir, file);
-      if (existsSync(filePath)) {
-        unlinkSync(filePath);
-        cleared = true;
-      }
-    }
-
-    // Drop user_id from .capy/sync-state so the next `capy` run doesn't pin
-    // the previous user's session — syncProject reads this and calls
-    // setSessionUserId before authenticating, which on shared eval machines
-    // silently re-auths the previous user.
-    try {
-      const { ProjectManager } = await import('./core/projectManager');
-      if (new ProjectManager().clearSyncStateUserId()) cleared = true;
-    } catch {
-      // best-effort
-    }
-
-    // Clear global auth session and project key caches
-    const globalCapyDir = getGlobalCapyDir();
-    const authSession = join(globalCapyDir, 'auth', 'session.json');
-    if (existsSync(authSession)) {
-      unlinkSync(authSession);
-      cleared = true;
-    }
-
-    // Clear per-user session files
-    const sessionsDir = join(globalCapyDir, 'auth', 'sessions');
-    if (existsSync(sessionsDir)) {
-      rmSync(sessionsDir, { recursive: true, force: true });
-      cleared = true;
-    }
-
-    // Clear project key caches (master keys survive logout — they require the seed phrase)
-    const orgsDir = join(globalCapyDir, 'orgs');
-    if (existsSync(orgsDir)) {
-      const { readdirSync } = await import('fs');
-      for (const orgId of readdirSync(orgsDir)) {
-        const projectsDir = join(orgsDir, orgId, 'projects');
-        if (existsSync(projectsDir)) {
-          rmSync(projectsDir, { recursive: true, force: true });
-          cleared = true;
-        }
-      }
-    }
-
-    // Drop a marker so the next interactive OAuth flow forces WorkOS to
-    // re-prompt instead of reusing the AuthKit SSO cookie. Without this,
-    // shared eval machines silently re-auth the previous user in the browser.
-    try {
-      const { setForceLoginMarker } = await import('./config/globalConfig');
-      setForceLoginMarker();
-    } catch {
-      // best-effort
-    }
+    const { performLogoutCleanup } = await import('./commands/logoutCommand');
+    const cleared = await performLogoutCleanup();
 
     if (cleared) {
       console.log('Logged out. Session cleared.');

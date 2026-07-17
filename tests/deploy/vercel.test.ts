@@ -5,9 +5,10 @@ import { tmpdir } from 'os';
 import { vercelAdapter } from '../../src/deploy/adapters/vercel';
 import { TargetConfig } from '../../src/deploy/adapter';
 
-// Vercel: code deploy is the keep.lock PR (CI), but env vars are pushed via the
-// `vercel env` CLI. So preflight requires a linked project + an explicit
-// vercelEnv, and deploy scopes vars to that environment.
+// Vercel: code deploy is the keep.lock PR (CI), but env vars are pushed as
+// plaintext via the `vercel env` CLI — no SECRETS_BLOB, no `capy run` decrypt
+// at build. So preflight requires a linked project + an explicit vercelEnv, and
+// deploy scopes each var to that environment.
 
 const ROOT = join(tmpdir(), `capy-vercel-adapter-${process.pid}`);
 
@@ -49,11 +50,23 @@ const baseTarget = (overrides: Partial<TargetConfig> = {}): TargetConfig => ({
 });
 
 describe('vercel — adapter shape', () => {
-  test('ships code via CI, pushes SECRETS_BLOB+PROJECT_KEY via the vercel CLI', () => {
+  test('ships code via CI, pushes plaintext env vars via the vercel CLI', () => {
     expect(vercelAdapter.ciOnly).toBe(true);
     expect(vercelAdapter.defaultMode).toBe('ci');
-    expect(vercelAdapter.needsDeployToken).toBe(true);
+    // No blob: vars are pushed plaintext, so the deploy flow decrypts ctx.env
+    // rather than minting a SECRETS_BLOB + PROJECT_KEY pair.
+    expect(vercelAdapter.needsDeployToken).toBeFalsy();
     expect(vercelAdapter.requires.binaries).toEqual(['vercel']);
+  });
+
+  test('pre-selects ALL vars (Vercel env store serves build + runtime)', () => {
+    const picked = vercelAdapter.presumeVars!({
+      buildTime: ['NEXT_PUBLIC_X', 'VITE_Y'],
+      runtime: ['DATABASE_URL', 'API_KEY'],
+    });
+    expect(picked.sort()).toEqual(
+      ['API_KEY', 'DATABASE_URL', 'NEXT_PUBLIC_X', 'VITE_Y'].sort(),
+    );
   });
 });
 
@@ -131,7 +144,7 @@ describe('vercel — preflight', () => {
 });
 
 describe('vercel — deploy', () => {
-  test('dry-run reports SECRETS_BLOB + PROJECT_KEY it would set, no side effects', async () => {
+  test('dry-run reports how many vars it would push, no side effects', async () => {
     const result = await vercelAdapter.deploy(baseTarget(), {
       env: {},
       dryRun: true,
@@ -140,21 +153,21 @@ describe('vercel — deploy', () => {
     expect(result.ok).toBe(true);
     expect(result.steps.length).toBe(1);
     expect(result.steps[0].status).toBe('skip');
-    expect(result.steps[0].detail).toMatch(/SECRETS_BLOB \+ PROJECT_KEY on production/);
+    expect(result.steps[0].detail).toMatch(/would push 2 var\(s\) to production/);
   });
 
-  test('fails (without touching the CLI) when no deploy token was minted', async () => {
-    // No ctx.deployToken — the adapter reports the failure before shelling out
-    // to `vercel`, so this is deterministic.
+  test('fails (without touching the CLI) when a declared var is missing from env', async () => {
+    // NEXT_PUBLIC_X is declared but absent from the decrypted env — the adapter
+    // reports the failure before shelling out to `vercel`, so it's deterministic.
     const result = await vercelAdapter.deploy(baseTarget(), {
-      env: {},
+      env: { DATABASE_URL: 'postgres://x' },
       dryRun: false,
       secretsOnly: true,
       cwd: ROOT,
     });
     expect(result.ok).toBe(false);
     expect(result.steps[0].status).toBe('fail');
-    expect(result.steps[0].detail).toMatch(/no deploy token/i);
+    expect(result.steps[0].detail).toMatch(/missing in branch production: NEXT_PUBLIC_X/);
   });
 
   test('preview without options.gitBranch is rejected at preflight', async () => {

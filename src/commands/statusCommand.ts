@@ -151,6 +151,11 @@ export class StatusCommand {
     if (!keep) return;
 
     const branch = projectState.activeBranch;
+    if (!branch) {
+      // Runs from git hooks — report and bail rather than guessing a branch.
+      if (!this.terse) console.log(`No active branch. Run ${B('capy')} to select a branch.`);
+      return;
+    }
     const branchLabel = branch;
 
     // Build pinned hashes from keep.lock for active branch

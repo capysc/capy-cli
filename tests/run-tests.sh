@@ -18,13 +18,17 @@ ISOLATED_FILES=(
   tests/config/globalConfig.test.ts
   tests/core/projectManager.test.ts
   tests/crypto/keyResolver.test.ts
+  tests/crypto/keyResolverKeychainMode.test.ts
   tests/crypto/localKey.test.ts
   tests/crypto/keyStability.test.ts
+  tests/crypto/zeroTrust.test.ts
+  tests/commands/logoutCleanup.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
   tests/commands/decryptCommand.test.ts
   tests/commands/roleAccessGuards.test.ts
   tests/commands/recoverCommand.test.ts
+  tests/commands/recoverKdf.test.ts
   tests/commands/cleanupOrgData.test.ts
   tests/config/profileConfig.test.ts
   tests/commands/byocCommand.test.ts

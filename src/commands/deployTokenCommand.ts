@@ -30,6 +30,7 @@ const PLATFORM_TO_CONNECTOR: Record<string, string> = {
   'cloudflare-pages': 'cf-pages',
   'vercel': 'vercel',
   'github-actions': 'gh-actions',
+  'aws-ecs': 'aws-ssm',
   // Future:
   // 'fly':              'fly',
 };
@@ -210,6 +211,8 @@ export interface DeployCommandOptions {
   envName?: string;
   /** Skip overwrite confirmations (assumes yes). */
   yes?: boolean;
+  /** Forwarded to the connector flow: force a redeploy even if keep.lock is unchanged. */
+  force?: boolean;
 }
 
 export class DeployCommand {
@@ -337,7 +340,7 @@ export class DeployCommand {
             process.exit(code);
           }
           const { deployCommand } = await import('./deployCommand');
-          const code = await deployCommand(undefined, { target: connectorId, yes: !!this.options.yes, devMode: this.devMode });
+          const code = await deployCommand(undefined, { target: connectorId, yes: !!this.options.yes, force: !!this.options.force, devMode: this.devMode });
           process.exit(code);
         }
         // else fall through to existing token+docs flow
