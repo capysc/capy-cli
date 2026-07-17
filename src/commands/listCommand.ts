@@ -25,6 +25,22 @@ export class ListCommand {
       process.exit(1);
     }
     const branch = projectState.activeBranch;
+    if (!branch) {
+      // No branch resolved (fresh clone / gitignored .capy) — report and bail
+      // rather than guessing one, mirroring status/checkout post-#264.
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            { projectName: keep.project_name, branch: null, variables: [] },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.error(`No active branch. Run ${B('capy')} to select a branch.`);
+      }
+      return;
+    }
 
     const managed = new Set(listManagedKeys(keep, branch).map((m) => m.varName));
     const variables = listAllVarsOnBranch(keep, branch).map((name) => {
