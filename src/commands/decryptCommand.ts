@@ -33,7 +33,11 @@ export class DecryptCommand {
 
       const orgId = keep.org_id;
       const projectId = keep.project_id;
-      const branch = pm.readActiveBranch();
+      const branch = pm.deriveActiveBranch();
+      if (!branch) {
+        console.error(`\n  No active branch. Run ${bold('capy')} to select a branch.\n`);
+        process.exit(1);
+      }
 
       // Belt-and-suspenders: if .env has metadata headers, verify they match keep.lock.
       // AES-GCM would catch a mismatch via auth tag failure, but this gives a clearer

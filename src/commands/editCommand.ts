@@ -61,6 +61,10 @@ export class EditCommand {
     }
 
     const branch = projectState.activeBranch;
+    if (!branch) {
+      console.error(`No active branch. Run ${B('capy')} to select a branch.`);
+      process.exit(1);
+    }
     const fileManager = new FileManager();
 
     // Pinned hashes for the active branch

@@ -227,7 +227,7 @@ program
       displayErrorAndExit(error, {
         projectName: projectState.projectName,
         projectId: projectState.projectId,
-        branch: projectState.activeBranch,
+        branch: projectState.activeBranch ?? undefined,
       });
     }
   });

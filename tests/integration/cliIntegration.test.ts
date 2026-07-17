@@ -54,7 +54,7 @@ describe('CLI Integration Tests', () => {
         initialized: false,
         hasKeepFile: false,
         hasEnvFile: true,
-        activeBranch: 'development',
+        activeBranch: null,
       });
     });
 
@@ -84,7 +84,7 @@ describe('CLI Integration Tests', () => {
         projectName: 'test-project',
         organizationId: 'org_123',
         projectId: 'proj_456',
-        activeBranch: 'development',
+        activeBranch: null,
       });
     });
   });

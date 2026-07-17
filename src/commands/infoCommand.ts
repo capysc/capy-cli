@@ -86,7 +86,7 @@ export class InfoCommand {
       ['Role', roleLabel],
       ['Project', projectState.projectName || '—'],
       ['Project ID', projectState.projectId || '—'],
-      ['Branch', hasKeep ? branch : '—'],
+      ['Branch', (hasKeep && branch) || '—'],
     ];
 
     const labelWidth = Math.max(...rows.map(([label]) => label.length));

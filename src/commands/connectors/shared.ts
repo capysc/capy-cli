@@ -41,6 +41,10 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
   const orgId = projectState.organizationId;
   const projectId = projectState.projectId;
   const branch = projectState.activeBranch;
+  if (!branch) {
+    console.error(`No active branch. Run ${B('capy')} to select a branch.`);
+    process.exit(1);
+  }
 
   const keep = pm.readKeepFile();
   if (!keep) {
@@ -273,7 +277,8 @@ export function checkExpiringKeys(windowDays: number = 7): ExpiringKey[] {
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
     if (!keep) return [];
-    const branch = pm.readActiveBranch();
+    const branch = pm.deriveActiveBranch();
+    if (!branch) return [];
     const managed = listManagedKeys(keep, branch);
     const now = Date.now() / 1000;
     const windowSec = windowDays * 86400;
