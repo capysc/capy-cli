@@ -26,7 +26,7 @@ permissions:
 jobs:
   radar:
     name: Radar (secrets + SCA)
-    runs-on: ubuntu-latest
+    runs-on: latchkey-small
     steps:
       - uses: actions/checkout@v4
 
