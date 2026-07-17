@@ -53,6 +53,34 @@ export function listLocalBranches(cwd: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Local + origin remote-tracking branch names (origin/ prefix and HEAD
+ * pointer stripped), deduped, most-recently-committed-first. These are the
+ * branches a Vercel Preview environment can plausibly be wired to — which
+ * is a superset of local branches (a teammate's branch exists only on the
+ * remote) and NOT the capy branch list.
+ */
+export function listAllBranches(cwd: string): string[] {
+  const r = git(
+    [
+      'for-each-ref',
+      '--sort=-committerdate',
+      '--format=%(refname:short)',
+      'refs/heads',
+      'refs/remotes/origin',
+    ],
+    cwd,
+  );
+  if (r.code !== 0) return [];
+  const seen = new Set<string>();
+  for (const line of r.stdout.split('\n')) {
+    const name = line.trim().replace(/^origin\//, '');
+    // 'origin' is the refname:short of the symbolic origin/HEAD pointer.
+    if (name && name !== 'HEAD' && name !== 'origin') seen.add(name);
+  }
+  return [...seen];
+}
+
 export function getStatus(cwd: string): GitStatusEntry[] {
   const r = git(['status', '--porcelain'], cwd);
   if (r.code !== 0) return [];
@@ -93,13 +121,19 @@ export function stageAndCommit(
   cwd: string,
   paths: string[],
   message: string,
+  opts?: { allowEmpty?: boolean },
 ): { ok: boolean; error?: string } {
   if (paths.length === 0) return { ok: true };
   const add = git(['add', '--', ...paths], cwd);
   if (add.code !== 0) {
     return { ok: false, error: `git add failed: ${add.stderr.trim()}` };
   }
-  const commit = git(['commit', '-m', message], cwd);
+  const commit = git(
+    opts?.allowEmpty
+      ? ['commit', '--allow-empty', '-m', message]
+      : ['commit', '-m', message],
+    cwd,
+  );
   if (commit.code !== 0) {
     return { ok: false, error: `git commit failed: ${commit.stderr.trim()}` };
   }
