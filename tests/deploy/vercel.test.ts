@@ -170,12 +170,18 @@ describe('vercel — deploy', () => {
     expect(result.steps[0].detail).toMatch(/missing in branch production: NEXT_PUBLIC_X/);
   });
 
-  test('preview scopes the step detail to the target git branch', async () => {
-    const result = await vercelAdapter.deploy(
+  test('preview without options.gitBranch is rejected at preflight', async () => {
+    // The old fallback scoped the Preview env to the CAPY branch name, which
+    // is not a git branch — `vercel env add` failed with "Branch not found in
+    // the connected Git repository". Now an explicit gitBranch is required.
+    writePkg(join(ROOT, 'web'));
+    link(join(ROOT, 'web'));
+    const result = await vercelAdapter.preflight(
       baseTarget({ branch: 'development', options: { projectDir: 'web', vercelEnv: 'preview' } }),
-      { env: {}, dryRun: true, cwd: ROOT },
+      { cwd: ROOT },
     );
-    expect(result.steps[0].detail).toMatch(/preview · branch=development/);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/gitBranch/);
   });
 
   test('explicit options.gitBranch decouples preview scope from the capy branch', async () => {

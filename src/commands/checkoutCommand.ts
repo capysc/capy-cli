@@ -128,7 +128,7 @@ export class CheckoutCommand {
       const envHeaderBranch = this.fileManager.readEnvMeta().branch;
       const dirtyBranch = envHeaderBranch || currentBranch;
 
-      if (keep && currentBranch) {
+      if (keep && dirtyBranch) {
         // Check A: uncommitted changes (.env differs from keep.lock)
         try {
           const localPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
@@ -145,11 +145,11 @@ export class CheckoutCommand {
 
         // Check B: unpushed changes (keep.lock differs from last sync)
         const syncState = this.projectManager.readSyncState();
-        const savedHash = getSyncKeepHash(syncState, currentBranch);
-        const currentKeepHash = SyncEngine.computeKeepHash(keep, currentBranch);
+        const savedHash = getSyncKeepHash(syncState, dirtyBranch);
+        const currentKeepHash = SyncEngine.computeKeepHash(keep, dirtyBranch);
 
         if (savedHash != null && savedHash !== currentKeepHash) {
-          console.error(`You have unpushed changes on "${currentBranch}".`);
+          console.error(`You have unpushed changes on "${dirtyBranch}".`);
           console.error(`Run ${B('capy push')} before switching branches.`);
           process.exit(1);
         }

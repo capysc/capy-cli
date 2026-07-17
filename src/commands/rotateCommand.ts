@@ -98,10 +98,14 @@ export class RotateCommand {
   ): Promise<void> {
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
-    const branch = pm.readActiveBranch();
+    const branch = pm.deriveActiveBranch();
 
     if (!keep) {
       console.error('\n  No keep.lock found. Run `capy` first to initialize.\n');
+      process.exit(1);
+    }
+    if (!branch) {
+      console.error(`\n  No active branch. Run ${B('capy')} to select a branch.\n`);
       process.exit(1);
     }
 

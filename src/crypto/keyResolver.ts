@@ -24,10 +24,47 @@ import {
   readLocalRoot,
   saveLocalRoot,
   saveLocalRootExclusive,
+  getLocalRootMode,
+  setLocalRootMode,
   LOCAL_ORG_ID,
 } from '../config/globalConfig';
 import { generateLocalRoot, deriveLocalInnerKey } from './localKeyRoot';
+import {
+  isKeychainAvailable,
+  readKeychainRoot,
+  saveKeychainRootExclusive,
+  saveKeychainRoot,
+  wantsKeychainBackend,
+} from './keychainBackend';
 import { CapyError, ERROR_CODES } from '../types/index';
+
+/** True for a LOCAL_KEY_BACKEND_ERROR — must propagate, never be swallowed as a generic error. */
+function isLocalKeyBackendError(err: unknown): boolean {
+  return err instanceof CapyError && err.code === ERROR_CODES.LOCAL_KEY_BACKEND_ERROR;
+}
+
+/**
+ * Mode-aware K_local read. If this (org, user) previously minted via the
+ * keychain backend (mode marker says 'keychain') but the entry is now
+ * missing or unreadable, this throws rather than treating it as "never
+ * minted" — silently falling through would mint a second root under the
+ * file backend and orphan the existing key.enc with no signal that
+ * anything went wrong.
+ */
+function readAnyLocalRoot(orgId: string, userId?: string): Buffer | null {
+  if (getLocalRootMode(orgId, userId) === 'keychain') {
+    const root = readKeychainRoot(orgId, userId);
+    if (root) return root;
+    throw new CapyError(
+      'This machine\'s K_local is stored in the OS keychain, but the entry is missing or unreadable.\n\n' +
+      'Not falling back to a plaintext key — that would silently orphan your existing access.\n' +
+      'Restore access with capy redeem or seed-phrase recovery, or investigate the OS keychain entry (service "capy").',
+      ERROR_CODES.LOCAL_KEY_BACKEND_ERROR,
+      { orgId, userId },
+    );
+  }
+  return readLocalRoot(orgId, userId);
+}
 
 /** Check whether an error is a server 403 (membership revoked). */
 function isPermissionDenied(err: unknown): boolean {
@@ -96,7 +133,7 @@ export async function unwrapMasterKey(
     const innerBlob = await service.coDecrypt(orgId, encryptedBlob);
 
     // K_local first — the steady state.
-    const kLocal = readLocalRoot(orgId, userId);
+    const kLocal = readAnyLocalRoot(orgId, userId);
     if (kLocal) {
       try {
         return decryptMasterKey(innerBlob, deriveLocalInnerKey(kLocal), innerAAD);
@@ -122,6 +159,10 @@ export async function unwrapMasterKey(
     // Network / connectivity failure — re-throw so a transient outage
     // doesn't get misclassified as PERMISSION_DENIED and nuke local keys.
     if (isNetworkError(err)) throw err;
+
+    // Keychain mode committed but broken — re-throw. Falling through here
+    // would mint a fresh file-backed root and silently mask the real problem.
+    if (isLocalKeyBackendError(err)) throw err;
 
     // Other errors (e.g. blob isn't KMS-wrapped) → fall through to legacy
   }
@@ -197,8 +238,34 @@ export async function resolveProjectKey(
  * by the root that is actually on disk.
  */
 function loadOrMintLocalRoot(orgId: string, userId: string): Buffer {
-  const existing = readLocalRoot(orgId, userId);
+  const existing = readAnyLocalRoot(orgId, userId);
   if (existing) return existing;
+
+  // First mint for this (org, user) on this machine — nothing committed
+  // yet, so a soft fallback to the file backend here is fine (matches
+  // "clean downgrade when unavailable", not the fail-closed case above,
+  // which only applies once a backend has actually been chosen).
+  if (wantsKeychainBackend() && isKeychainAvailable()) {
+    const fresh = generateLocalRoot();
+    if (saveKeychainRootExclusive(orgId, fresh, userId)) {
+      setLocalRootMode(orgId, 'keychain', userId);
+      return fresh;
+    }
+
+    // Lost the mint race — adopt the winner's root.
+    const winner = readKeychainRoot(orgId, userId);
+    if (winner) {
+      setLocalRootMode(orgId, 'keychain', userId);
+      return winner;
+    }
+
+    // An entry exists but doesn't parse as a 32-byte root (corrupt/foreign
+    // value). Same "unrecoverable, replace it" logic as the file backend's
+    // corrupt-write recovery below.
+    saveKeychainRoot(orgId, fresh, userId);
+    setLocalRootMode(orgId, 'keychain', userId);
+    return fresh;
+  }
 
   const fresh = generateLocalRoot();
   if (saveLocalRootExclusive(orgId, fresh, userId)) return fresh;
@@ -242,7 +309,7 @@ export async function wrapAndSaveMasterKey(
   // (corrupt-root recovery is the one path that overwrites). Never write a
   // key.enc keyed by a root that is no longer on disk — re-check and re-wrap
   // under the current root if it moved.
-  const currentRoot = readLocalRoot(orgId, userId);
+  const currentRoot = readAnyLocalRoot(orgId, userId);
   if (currentRoot && !currentRoot.equals(kLocal)) {
     kLocal = currentRoot;
     innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(userId, orgId));

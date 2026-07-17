@@ -33,6 +33,7 @@ import {
   pushBranch,
   createPr,
   listLocalBranches,
+  listAllBranches,
   fetchRemoteBranch,
   repoRelPath,
   readFileAtRef,
@@ -205,6 +206,61 @@ async function mintForDeploy(
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
 
+/**
+ * Ask which GIT branch the Vercel Preview environment is wired to, picking
+ * from the repo's real branches (local + origin) rather than free text — a
+ * typo or a capy branch name here fails at `vercel env add` with "Branch not
+ * found in the connected Git repository". Free input stays available behind
+ * an "other" choice for branches the local clone hasn't fetched.
+ */
+async function promptVercelGitBranch(
+  cwd: string,
+  preferred?: string,
+): Promise<string> {
+  const message = 'Which git branch is the Vercel Preview environment wired to?';
+  const branches = listAllBranches(cwd);
+  if (branches.length === 0) {
+    const ans = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'gitBranch',
+        message,
+        default: preferred,
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+    ]);
+    return (ans.gitBranch as string).trim();
+  }
+  const fallback = ['main', 'master'].find((b) => branches.includes(b));
+  const ans = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'gitBranch',
+      message,
+      theme: LIST_THEME,
+      choices: [
+        ...branches.map((b) => ({ name: b, value: b })),
+        new inquirer.Separator() as any,
+        { name: 'Other — type a branch name', value: '__other__' },
+      ],
+      default:
+        preferred && branches.includes(preferred)
+          ? preferred
+          : fallback ?? branches[0],
+    } as any,
+  ]);
+  if (ans.gitBranch !== '__other__') return ans.gitBranch;
+  const typed = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'gitBranch',
+      message,
+      validate: (v: string) => (v.trim() ? true : 'required'),
+    },
+  ]);
+  return (typed.gitBranch as string).trim();
+}
+
 async function runPicker(
   cwd: string,
   keep: KeepInfo,
@@ -311,9 +367,8 @@ async function runPicker(
     // natively with no `capy run` decrypt step. Capture the app dir, which
     // Vercel environment these vars go to, and — for Preview — exactly which
     // git branch that Preview env is wired to. The Preview scope is a GIT
-    // branch Vercel knows about, which is NOT necessarily your capy branch name
-    // nor the branch you're checked out on, so we ask explicitly and default to
-    // the capy branch.
+    // branch Vercel knows about, which is NOT a capy branch name nor necessarily
+    // the branch you're checked out on, so we pick from the repo's real branches.
     const ans = await inquirer.prompt([
       {
         type: 'input',
@@ -332,19 +387,15 @@ async function runPicker(
         ],
         default: existingOpts.vercelEnv ?? 'preview',
       },
-      {
-        type: 'input',
-        name: 'gitBranch',
-        message: 'Which git branch is that Vercel Preview environment wired to?',
-        default: existingOpts.gitBranch ?? branch,
-        when: (a: Record<string, unknown>) => a.vercelEnv === 'preview',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
     ]);
     // Drop gitBranch entirely for production — it has no meaning there.
     options =
       ans.vercelEnv === 'preview'
-        ? { projectDir: ans.projectDir, vercelEnv: 'preview', gitBranch: (ans.gitBranch as string).trim() }
+        ? {
+            projectDir: ans.projectDir,
+            vercelEnv: 'preview',
+            gitBranch: await promptVercelGitBranch(cwd, existingOpts.gitBranch),
+          }
         : { projectDir: ans.projectDir, vercelEnv: 'production' };
   } else if (adapter.id === 'cf-pages') {
     const ans = await inquirer.prompt([
@@ -834,6 +885,31 @@ export async function deployCommand(
     return 1;
   }
 
+  // Heal Vercel Preview targets saved before options.gitBranch existed. The
+  // old fallback scoped the Preview env to the CAPY branch name, which fails
+  // at `vercel env add` with "Branch not found in the connected Git
+  // repository" whenever the names don't coincide. Ask once and persist.
+  const targetOpts = target.options as Record<string, unknown>;
+  if (
+    target.kind === 'vercel' &&
+    targetOpts.vercelEnv === 'preview' &&
+    !targetOpts.gitBranch
+  ) {
+    if (options.yes) {
+      console.error(
+        `${RED('✗')} target "${target.name}" is missing options.gitBranch ` +
+          `(the git branch its Vercel Preview env is wired to).`,
+      );
+      console.error(`\nRun \`capy deploy --edit\` once interactively to set it.`);
+      return 1;
+    }
+    targetOpts.gitBranch = await promptVercelGitBranch(cwd);
+    upsertTarget(cwd, target);
+    console.log(
+      GREEN(`✓ Saved gitBranch=${targetOpts.gitBranch} to target "${target.name}"`),
+    );
+  }
+
   // Var-set reconcile: the saved selection can go stale when the
   // project's variables change. Re-confirm rather than silently deploying a
   // stale set — dropping a newly-added secret, or shipping a removed one.
@@ -1233,8 +1309,9 @@ function buildDeployPrBody(target: TargetConfig): string {
     ``,
     `## Diff scope`,
     ``,
-    `This PR contains exactly one file change: \`keep.lock\`. Other working-`,
-    `tree changes on the author's machine were not picked up.`,
+    `This PR touches at most one file: \`keep.lock\`. An empty diff means the`,
+    `pinned snapshot already matched and this is a forced redeploy. Other`,
+    `working-tree changes on the author's machine were not picked up.`,
     ``,
     `_Generated by \`capy deploy\`._`,
   ].join('\n');

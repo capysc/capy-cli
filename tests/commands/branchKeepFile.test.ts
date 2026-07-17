@@ -549,6 +549,8 @@ describe('Direction detection — branch-aware keep_hash', () => {
     };
 
     mockProjectManager.readKeepFile.mockReturnValue(multiBranchKeep);
+    // Branch resolution reads .capy/branch (no .env header in this test)
+    mockProjectManager.readActiveBranch.mockReturnValue('staging');
 
     // sync-state has BOTH branch hashes (branch-aware format)
     mockProjectManager.readSyncState.mockReturnValue({

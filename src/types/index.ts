@@ -66,7 +66,8 @@ export interface ProjectState {
   projectName?: string;
   organizationId?: string;
   projectId?: string;
-  activeBranch: string;
+  /** Best-effort derived branch; null when no local signal exists (see ProjectManager.deriveActiveBranch). */
+  activeBranch: string | null;
   userId?: string;
 }
 
@@ -273,10 +274,13 @@ export const ERROR_CODES = {
   // not-found family — replaces server-prose string matching in serviceClient
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
   BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
+  // No .env header, no .capy/branch, and no unambiguous local fallback.
+  NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',
   SNAPSHOT_NOT_FOUND: 'SNAPSHOT_NOT_FOUND',
   NO_SECRETS: 'NO_SECRETS',
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
   ORG_NOT_FOUND: 'ORG_NOT_FOUND',
+  LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
