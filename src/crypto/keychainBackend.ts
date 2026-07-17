@@ -1,5 +1,3 @@
-import { Entry } from '@napi-rs/keyring';
-
 /**
  * OS-keychain backend for K_local — Tier 1 (OS-gatekept software storage).
  *
@@ -25,6 +23,28 @@ import { Entry } from '@napi-rs/keyring';
 const SERVICE = 'capy';
 const K_LOCAL_BYTES = 32;
 
+/**
+ * `@napi-rs/keyring`'s `Entry`, loaded lazily. The keychain backend is opt-in
+ * (off unless `CAPY_LOCAL_KEY_BACKEND=keychain`), so we must NOT let its
+ * per-platform native binary sit on the default import path — a missing or
+ * unloadable prebuilt (unsupported arch, sandbox, failed optional install)
+ * would otherwise throw at module load and break the file backend too. The
+ * require is cached and its failure is swallowed to `null`, which every caller
+ * already treats identically to "keychain unavailable / entry absent".
+ */
+type EntryCtor = typeof import('@napi-rs/keyring').Entry;
+let cachedEntry: EntryCtor | null | undefined;
+function loadEntry(): EntryCtor | null {
+  if (cachedEntry !== undefined) return cachedEntry;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    cachedEntry = (require('@napi-rs/keyring') as typeof import('@napi-rs/keyring')).Entry;
+  } catch {
+    cachedEntry = null;
+  }
+  return cachedEntry;
+}
+
 function account(orgId: string, userId?: string): string {
   return userId ? `${orgId}:${userId}` : orgId;
 }
@@ -37,6 +57,8 @@ function account(orgId: string, userId?: string): string {
  * binary, sandboxed environment with no keychain access, etc).
  */
 export function isKeychainAvailable(): boolean {
+  const Entry = loadEntry();
+  if (!Entry) return false;
   try {
     const probe = new Entry(SERVICE, '__capy_keychain_probe__');
     probe.setPassword('ok');
@@ -50,6 +72,8 @@ export function isKeychainAvailable(): boolean {
 
 /** Reads K_local from the keychain, or null if absent / not a valid 32-byte root. */
 export function readKeychainRoot(orgId: string, userId?: string): Buffer | null {
+  const Entry = loadEntry();
+  if (!Entry) return null;
   try {
     const entry = new Entry(SERVICE, account(orgId, userId));
     const value = entry.getPassword();
@@ -72,6 +96,8 @@ export function readKeychainRoot(orgId: string, userId?: string): Buffer | null 
  * re-invite), not a security regression.
  */
 export function saveKeychainRootExclusive(orgId: string, kLocal: Buffer, userId?: string): boolean {
+  const Entry = loadEntry();
+  if (!Entry) throw new Error('OS keychain backend is unavailable on this machine.');
   const entry = new Entry(SERVICE, account(orgId, userId));
   // Found empirically: getPassword() returns null (no throw) for an account
   // that was never created, but throws for one that existed and was later
@@ -88,6 +114,8 @@ export function saveKeychainRootExclusive(orgId: string, kLocal: Buffer, userId?
 
 /** Unconditionally overwrites K_local in the keychain (corrupt-entry recovery path). */
 export function saveKeychainRoot(orgId: string, kLocal: Buffer, userId?: string): void {
+  const Entry = loadEntry();
+  if (!Entry) throw new Error('OS keychain backend is unavailable on this machine.');
   const entry = new Entry(SERVICE, account(orgId, userId));
   entry.setPassword(kLocal.toString('base64'));
 }
