@@ -6,6 +6,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Tests run with cwd inside this repo — never let a command flow's keep.lock
+# auto-commit (CAP-303) create real commits here.
+export CAPY_NO_AUTOCOMMIT=1
+
 FAIL=0
 
 # Files that use mock.module() — must run in isolation

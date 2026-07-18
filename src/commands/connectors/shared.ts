@@ -184,7 +184,7 @@ export async function writeAndSync(
 
   writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
   // Prefer the server's copy — it carries server-assigned changed_at
-  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep));
+  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep, branch));
   fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
   const existingSyncState = pm.readSyncState();
@@ -195,6 +195,10 @@ export async function writeAndSync(
     user_id: userId,
     keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
   });
+
+  // The new pin reaches teammates only through git.
+  const { autoCommitKeep } = await import('../../git/autoCommitKeep');
+  autoCommitKeep(branch);
 }
 
 /** Return a deep-cloned KeepFile with `connector` set on the (varName, branch) entry. */
