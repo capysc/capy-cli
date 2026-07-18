@@ -208,14 +208,16 @@ export class CheckoutCommand {
       }
     }
 
-    // Self-heal local keep.lock from server's keep_file if returned.
-    // keep.lock holds all branches' metadata, so writing it is safe regardless
-    // of which branch is active.
+    // Checkout is an explicit sync of the TARGET branch, so update that
+    // branch's pins from the server — but only that branch's (CAP-303).
+    // keep.lock holds all branches' metadata and is git-owned; the server's
+    // copy is whatever the last pusher had and must not rewrite branches this
+    // checkout didn't touch.
     let keepForWrite = this.projectManager.readKeepFile()!;
     if (decryptData.keep_file) {
-      const serverKeep = JSON.parse(decryptData.keep_file);
-      this.fileManager.writeKeepFile(serverKeep);
-      keepForWrite = serverKeep;
+      const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
+      keepForWrite = SyncEngine.spliceKeepBranch(keepForWrite, serverKeep, branchName);
+      this.fileManager.writeKeepFile(keepForWrite);
     }
 
     // Write .env BEFORE switching .capy/branch. The .env header records which

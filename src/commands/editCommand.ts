@@ -227,6 +227,9 @@ export class EditCommand {
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
     };
+    // Set when a save rewrote keep.lock. The auto-commit runs after the TUI
+    // exits — committing (and printing) mid-screen would corrupt the display.
+    let keepDirty = false;
     await screen.run(state, {
       saveLocalEdits: async (edits: Record<string, string>) => {
         // Same flow as the conflict-resolution "commit local" action and
@@ -280,8 +283,9 @@ export class EditCommand {
 
         writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
         // Prefer the server's copy — it carries server-assigned changed_at
-        const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep);
+        const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);
         fileManager.writeKeepFile(adoptedKeep);
+        keepDirty = true;
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
         const existingSyncState = pm.readSyncState();
@@ -304,6 +308,10 @@ export class EditCommand {
         return changedAtByKey;
       },
     });
+    if (keepDirty) {
+      const { autoCommitKeep } = await import('../git/autoCommitKeep');
+      autoCommitKeep(branch);
+    }
     await printExpiryAfter();
   }
 }

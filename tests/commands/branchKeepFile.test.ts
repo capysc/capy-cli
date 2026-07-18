@@ -33,8 +33,27 @@ mock.module('../../src/sync/syncEngine', () => {
   const MockSyncEngine = mock(() => ({}));
   (MockSyncEngine as any).computeKeepHash = computeKeepHash;
   (MockSyncEngine as any).DEFAULT_BRANCH = 'development';
+  // Faithful splice (mirrors the real static): checkout uses it to update
+  // only the target branch's entries from the server keep.
+  (MockSyncEngine as any).spliceKeepBranch = (local: any, server: any, branch: string) => {
+    if (!local) return server;
+    const variables: Record<string, any[]> = {};
+    const names = new Set([...Object.keys(local.variables), ...Object.keys(server.variables)]);
+    for (const name of names) {
+      const merged = [
+        ...(local.variables[name] || []).filter((e: any) => e.branch !== branch),
+        ...(server.variables[name] || []).filter((e: any) => e.branch === branch),
+      ];
+      if (merged.length > 0) variables[name] = merged;
+    }
+    return { ...local, variables };
+  };
+  (MockSyncEngine as any).adoptServerKeep = (_json: any, fallback: any) => fallback;
   return { SyncEngine: MockSyncEngine };
 });
+mock.module('../../src/git/autoCommitKeep', () => ({
+  autoCommitKeep: mock(() => ({ committed: false, reason: 'disabled' })),
+}));
 mock.module('../../src/ui/promptEngine', () => ({
   PromptEngine: mock(() => ({})),
 }));
