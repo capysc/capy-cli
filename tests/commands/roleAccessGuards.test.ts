@@ -19,6 +19,8 @@ mock.module('../../src/sync/syncEngine', () => {
   const MockSyncEngine = mock(() => ({}));
   (MockSyncEngine as any).computeKeepHash = mock(() => 'deadbeef'.repeat(8));
   (MockSyncEngine as any).DEFAULT_BRANCH = 'development';
+  (MockSyncEngine as any).spliceKeepBranch = mock((local: any, server: any) => local ?? server);
+  (MockSyncEngine as any).adoptServerKeep = mock((_json: any, fallback: any) => fallback);
   return { SyncEngine: MockSyncEngine };
 });
 mock.module('../../src/crypto/keyResolver', () => ({
