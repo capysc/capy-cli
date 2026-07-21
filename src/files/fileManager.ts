@@ -36,7 +36,15 @@ export function serializeKeep(keep: KeepFile): string {
   // (e.g. `connector` metadata set by `capy connect`). Without this, every
   // sync would strip extras off the entry.
   for (const key of Object.keys(keep.variables).sort()) {
-    const entries = keep.variables[key];
+    // Sort the per-branch entries by a stable key (branch, then resource_id)
+    // so serialization is invariant to the array's in-memory order. Otherwise a
+    // plain checkout — which reloads entries in a different order — reshuffles
+    // this array and bumps keep.lock even though no value changed.
+    const entries = [...keep.variables[key]].sort((a, b) => {
+      const branchCmp = (a.branch ?? '').localeCompare(b.branch ?? '');
+      if (branchCmp !== 0) return branchCmp;
+      return a.resource_id.localeCompare(b.resource_id);
+    });
     sorted.variables[key] = entries.map(e => {
       const obj: Record<string, any> = { resource_id: e.resource_id };
       if (e.branch) obj.branch = e.branch;
