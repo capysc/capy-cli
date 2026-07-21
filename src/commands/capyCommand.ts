@@ -246,19 +246,43 @@ export class CapyCommand {
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
 
     } else {
-      const { orgId } = await inquirer.prompt([{
-        type: 'list',
-        name: 'orgId',
-        message: 'Select organization for project:',
-        choices: [
-          ...orgs.map(o => ({
-            name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
-            value: o.id,
-          })),
-          { name: 'Create new organization +', value: CREATE_NEW_ORG },
-        ],
-        default: currentOrgId,
-      }]);
+      let orgId: string;
+      if (this.options.web) {
+        // No TTY under --web (e.g. driven through the MCP): render the picker in
+        // the browser instead of an inquirer list prompt that would hang forever.
+        const { selectInBrowser } = await import('../ui/selectWeb');
+        const chosen = await selectInBrowser({
+          title: 'Select organization',
+          intro: 'Choose the organization this project belongs to.',
+          options: [
+            ...orgs.map(o => ({
+              id: o.id,
+              name: o.name,
+              badge: o.id === currentOrgId ? '← current' : undefined,
+            })),
+            { id: CREATE_NEW_ORG, name: 'Create new organization +', note: 'Start a fresh org for this project.' },
+          ],
+          defaultId: currentOrgId,
+        }, { open: !process.env.CAPY_WEB_NO_OPEN });
+        if (chosen === null) {
+          throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
+        }
+        orgId = chosen;
+      } else {
+        ({ orgId } = await inquirer.prompt([{
+          type: 'list',
+          name: 'orgId',
+          message: 'Select organization for project:',
+          choices: [
+            ...orgs.map(o => ({
+              name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+              value: o.id,
+            })),
+            { name: 'Create new organization +', value: CREATE_NEW_ORG },
+          ],
+          default: currentOrgId,
+        }]));
+      }
 
       if (orgId === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
@@ -328,13 +352,31 @@ export class CapyCommand {
         })),
       ];
 
-      const { projectChoice } = await inquirer.prompt([{
-        type: 'list',
-        name: 'projectChoice',
-        message: 'Which project do you want to use?',
-        choices,
-        default: CREATE_NEW_PROJECT,
-      }]);
+      let projectChoice: string;
+      if (this.options.web) {
+        const { selectInBrowser } = await import('../ui/selectWeb');
+        const chosen = await selectInBrowser({
+          title: 'Select project',
+          intro: 'Which project do you want to use?',
+          options: [
+            { id: CREATE_NEW_PROJECT, name: 'New project', note: 'Create a fresh project for this repo.' },
+            ...existingProjects.map(p => ({ id: p.id, name: p.name })),
+          ],
+          defaultId: CREATE_NEW_PROJECT,
+        }, { open: !process.env.CAPY_WEB_NO_OPEN });
+        if (chosen === null) {
+          throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
+        }
+        projectChoice = chosen;
+      } else {
+        ({ projectChoice } = await inquirer.prompt([{
+          type: 'list',
+          name: 'projectChoice',
+          message: 'Which project do you want to use?',
+          choices,
+          default: CREATE_NEW_PROJECT,
+        }]));
+      }
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
@@ -349,7 +391,29 @@ export class CapyCommand {
 
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
-    const projectName = await this.promptEngine.promptForProjectName(defaultName);
+    let projectName: string;
+    if (this.options.web) {
+      const { promptTextInBrowser } = await import('../ui/selectWeb');
+      const entered = await promptTextInBrowser({
+        title: 'Name your project',
+        intro: 'Choose a name for this project.',
+        label: `Project name (default: "${defaultName}")`,
+        defaultValue: defaultName,
+        validate: (input: string) => {
+          if (!input || input.trim().length === 0) return 'Project name cannot be empty';
+          if (!/^[a-zA-Z0-9-_]+$/.test(input)) {
+            return 'Project name can only contain letters, numbers, hyphens, and underscores';
+          }
+          return true;
+        },
+      }, { open: !process.env.CAPY_WEB_NO_OPEN });
+      if (entered === null) {
+        throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      projectName = entered;
+    } else {
+      projectName = await this.promptEngine.promptForProjectName(defaultName);
+    }
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();

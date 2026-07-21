@@ -86,11 +86,18 @@ export class OAuthServer {
     return new Promise((resolve, reject) => {
       console.log(`🔐 Starting OAuth authentication...`);
 
+      // Always print the URL up front so it's available even if the browser
+      // never opens (no TTY, headless, --web driven through the MCP, or `open`
+      // silently failing). The auto-open below is a best-effort convenience.
+      console.log('');
+      console.log(`  If the browser doesn't open, visit:`);
+      console.log(`  ${authUrl}`);
+      console.log('');
+
       open(authUrl).then(() => {
         console.log(`✓ Opened browser for authentication`);
-        console.log(`  If the browser didn't open, visit: ${authUrl}`);
       }).catch(() => {
-        console.error(`❌ Failed to open browser. Please visit: ${authUrl}`);
+        console.error(`❌ Failed to open browser automatically — use the URL above.`);
       });
 
       const timeout = setTimeout(() => {
