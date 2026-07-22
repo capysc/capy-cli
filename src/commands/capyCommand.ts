@@ -1707,6 +1707,29 @@ export class CapyCommand {
   ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
+    type ColumnKey = import('../ui/resolveTable').ColumnKey;
+
+    // A pinned value is only usable if it resolves back to a concrete plaintext
+    // (some local or remote value hashes to the pinned hash). Mirrors the
+    // resolution logic below where 'pinned' is applied.
+    const pinnedResolves = (variable: string): boolean => {
+      const pinnedHash = pinned[variable];
+      if (!pinnedHash) return false;
+      return (
+        (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) ||
+        (remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash)
+      );
+    };
+
+    // Sensible per-row default: keep the pinned (last-agreed) value when it's
+    // resolvable — the safe choice for a genuine conflict — otherwise fall back
+    // to a concrete value that won't drop the secret (local, then remote).
+    const defaults: ColumnKey[] = diffs.map(diff => {
+      if (pinnedResolves(diff.variable)) return 'pinned';
+      if (showLocal && localPlaintext[diff.variable] !== undefined) return 'local';
+      if (showRemote && remotePlaintext[diff.variable] !== undefined) return 'remote';
+      return 'pinned';
+    });
 
     const pinnedSnippetFor = (variable: string): string | null => {
       if (!pinned[variable]) return null;
@@ -1725,7 +1748,7 @@ export class CapyCommand {
           : null,
     }));
 
-    const table = new ResolveTable(rows, showLocal, showRemote);
+    const table = new ResolveTable(rows, showLocal, showRemote, defaults);
     const { choices, cancelled } = await table.run();
 
     if (cancelled) {

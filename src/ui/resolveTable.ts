@@ -29,7 +29,7 @@ export interface ResolveResult {
   cancelled: boolean;
 }
 
-type ColumnKey = 'pinned' | 'local' | 'remote' | 'delete';
+export type ColumnKey = 'pinned' | 'local' | 'remote' | 'delete';
 
 export class ResolveTable {
   private rows: ResolveRow[];
@@ -42,11 +42,31 @@ export class ResolveTable {
   private cleanedUp = false;
   private totalLines = 0;
 
-  constructor(rows: ResolveRow[], showLocal: boolean, showRemote: boolean) {
+  constructor(
+    rows: ResolveRow[],
+    showLocal: boolean,
+    showRemote: boolean,
+    defaults?: ColumnKey[],
+  ) {
     this.rows = rows;
     this.showLocal = showLocal;
     this.showRemote = showRemote;
-    this.selections = rows.map(row => this.getAvailableColumns(row)[0]);
+    // Default each row's selection to the caller-provided choice when it's a
+    // valid (available) column for that row, otherwise fall back to the first
+    // available column ('pinned'). A per-row default lets the caller pick a
+    // safe, non-destructive value (e.g. avoid an unresolvable pinned value that
+    // would silently drop the variable).
+    this.selections = rows.map((row, i) => {
+      const avail = this.getAvailableColumns(row);
+      const wanted = defaults?.[i];
+      return wanted && avail.includes(wanted) ? wanted : avail[0];
+    });
+    // Highlight the active cell on the initial row's default so ← → move from
+    // the right starting point instead of always from column 0 ('pinned').
+    if (this.rows.length > 0) {
+      const avail0 = this.getAvailableColumns(this.rows[0]);
+      this.colIndex = Math.max(0, avail0.indexOf(this.selections[0]));
+    }
   }
 
   private getAvailableColumns(_row: ResolveRow): ColumnKey[] {
