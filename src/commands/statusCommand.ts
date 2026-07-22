@@ -55,6 +55,17 @@ export function compareSecrets(
     // If remote has data but this variable is missing, it's a real absence.
     const remoteHash = hasRemote ? remote[variable] : pinnedHash;
 
+    // Silent reconcile (CAP-307): no pinned baseline yet, but local and remote
+    // already agree. There is nothing to push (remote already holds this exact
+    // value) and nothing to pull — so don't report a diff and don't let this
+    // variable flip the showLocal/showRemote direction hints. The pin is adopted
+    // naturally via the "Everything is up to date!" path when no other variable
+    // differs. Scoped tightly: only when pinned is absent AND local === remote
+    // (both present); genuine divergence (local !== remote) still surfaces below.
+    if (!pinnedHash && localHash !== undefined && localHash === remoteHash) {
+      continue;
+    }
+
     // Track if local or remote differs from pinned at all
     if (localHash !== pinnedHash) localDiffersFromPinned = true;
     if (remoteHash !== pinnedHash) remoteDiffersFromPinned = true;
