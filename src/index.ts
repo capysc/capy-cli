@@ -50,6 +50,7 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
+  .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
@@ -84,7 +85,8 @@ program
       envPath: options.envPath,
       verbose: options.verbose,
       force: options.force,
-      dryRun: options.dryRun
+      dryRun: options.dryRun,
+      web: options.web
     };
 
     const command = new CapyCommand(cliOptions);
@@ -392,9 +394,11 @@ program
 program
   .command('byoc [url]')
   .description('Connect to a self-hosted Capy (BYOC) instance')
-  .action(async (url: string | undefined) => {
+  .action(async (url: string | undefined, _options: unknown, command: Command) => {
     const { byocCommand } = await import('./commands/byocCommand');
-    process.exit(await byocCommand(url));
+    // `--web` is a global option on the root program, so read it via globals.
+    const web = command.optsWithGlobals().web === true;
+    process.exit(await byocCommand(url, { web }));
   });
 
 program
@@ -638,7 +642,11 @@ program
 program
   .command('add <vars...>')
   .description('Add one or more secret values to the project (encrypts + syncs)')
-  .option('--web', 'enter the values in a local browser form (key/value editor, multiline)')
+  // NOTE: `--web` is intentionally NOT declared here. The root program already
+  // defines a global `--web`, and Commander binds a doubly-declared flag to the
+  // parent scope — so a local copy would silently shadow to undefined (the bug
+  // that made `capy add --web` fall through to the dead TTY prompt). Like `byoc`,
+  // we read the inherited global via `merged.web` below.
   .option('--reason <text>', 'short note shown on the intake page')
   .option(
     '--help-url <NAME=URL>',
@@ -659,7 +667,9 @@ program
     const cmd = new AddCommand();
     const merged = command.optsWithGlobals();
     await cmd.execute(varNames, {
-      web: options.web,
+      // `--web` is defined on both the root program and this subcommand, so Commander
+      // binds it to the global scope — read it from merged opts, not the local `options`.
+      web: merged.web,
       reason: options.reason,
       helpUrls: options.helpUrl,
       open: options.open,

@@ -389,7 +389,8 @@ export class DeployCommand {
           // a dead IPv6 port. The popup path happened to retry families and
           // hid this from users who relied on the auto-opened window.
           const url = `http://127.0.0.1:${addr.port}`;
-          console.log(`\n  Temporary deploy instructions opened at ${url}`);
+          console.log(`\n  Temporary deploy instructions — if the browser doesn't open, visit:`);
+          console.log(`  ${url}`);
           console.log('  Press Ctrl+C to close.\n');
 
           await openInBrowser(url);

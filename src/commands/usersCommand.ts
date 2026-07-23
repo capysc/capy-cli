@@ -120,9 +120,11 @@ export class UsersCommand {
       process.exit(1);
     }
 
-    // Fetch member details
-    const spinner = new Spinner('Loading members...');
-    spinner.start();
+    // Fetch member details. In --json mode emit NO progress at all so stdout stays
+    // pure JSON even on a TTY (the Spinner already routes to stderr when piped; this
+    // also covers an interactive run). CAP-273.
+    const spinner = opts.json ? null : new Spinner('Loading members...');
+    spinner?.start();
     let members;
     let callerRole = '';
     let currentUserId = '';
@@ -134,9 +136,9 @@ export class UsersCommand {
       members = result.members;
       callerRole = me.role;
       currentUserId = me.user_id;
-      spinner.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
+      spinner?.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
     } catch (err: any) {
-      spinner.fail('Failed to load members');
+      spinner?.fail('Failed to load members');
       console.error(`  ${err.message}`);
       process.exit(1);
     }
