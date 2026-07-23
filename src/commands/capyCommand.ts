@@ -1,6 +1,6 @@
 import ora from '../ui/spinner';
 import { ProjectManager } from '../core/projectManager';
-import { FileManager, serializeKeep } from '../files/fileManager';
+import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
@@ -710,7 +710,7 @@ export class CapyCommand {
 
           // Prefer the server's copy — it carries server-assigned changed_at
           this.fileManager.writeKeepFile(
-            SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep),
+            SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep, initBranch),
           );
 
           // Cache encrypted blob locally
@@ -731,6 +731,11 @@ export class CapyCommand {
           this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
 
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
+
+          // The freshly created pin only reaches teammates once committed —
+          // this is how "main was never committed" incidents start.
+          const { autoCommitKeep } = await import('../git/autoCommitKeep');
+          autoCommitKeep(initBranch);
 
           // Install git hooks
           this.installGitHooks();
@@ -1196,13 +1201,12 @@ export class CapyCommand {
       throw err;
     }
 
-    // Read keep.lock. currentKeep is mutable because the remote fetch may
-    // self-heal a stale local keep.lock — but `pinned` and `originalKeep` are
-    // FROZEN at the pre-self-heal values so the diff table reflects what was
-    // actually pinned on this machine and "Retrieve all pinned values"
-    // actually fetches the value shown in the Pinned column.
+    // Read keep.lock. The file is git-owned (CAP-303): the fetch below never
+    // rewrites an existing keep.lock, so currentKeep only mutates in the
+    // bootstrap case (no local file → reconstructed from the server, where
+    // `pinned` is empty anyway) and the diff table always reflects what was
+    // actually pinned on this machine.
     let currentKeep = this.projectManager.readKeepFile();
-    const originalKeep = currentKeep ? JSON.parse(JSON.stringify(currentKeep)) as KeepFile : null;
     this.debug('keep.lock', currentKeep ? {
       version: currentKeep.version,
       org_id: currentKeep.org_id,
@@ -1224,7 +1228,7 @@ export class CapyCommand {
       return next;
     };
     const pinned = rebuildPinned(currentKeep);
-    this.debug('pinned (pre-self-heal)', pinned);
+    this.debug('pinned', pinned);
 
     // Read local .env and compute hashes
     const localPlaintext: Record<string, string> = {};
@@ -1266,8 +1270,8 @@ export class CapyCommand {
     const fetchSpinner = ora('Fetching remote secrets...').start();
     try {
       // Always ask for the latest remote blob for this branch (no keep_hash).
-      // The server returns the env_blob AND the latest keep.json — the client
-      // uses keep.json to self-heal a stale local keep.lock.
+      // The server returns the env_blob AND the latest keep.json — used only
+      // to bootstrap a missing keep.lock (never to rewrite an existing one).
       this.debug('getDecryptData request', {
         projectId: projectState.projectId,
         branch,
@@ -1301,26 +1305,16 @@ export class CapyCommand {
       }
       this.debug('remote hashes', remoteHashes);
 
-      // Self-heal: if the server returned a keep_file and it differs from local,
-      // overwrite local keep.lock with the server's version and use it as the
-      // base for the post-resolution merge. We DO NOT touch `pinned` here —
-      // the diff table needs to show the user's pre-self-heal pinned values
-      // so that "Pinned vs Local vs Remote" is a true three-way comparison.
-      if (decryptData.keep_file) {
+      // Bootstrap only (CAP-303): an existing keep.lock is git-owned and is
+      // never overwritten outside an explicit user action — the old silent
+      // "self-heal" adopted whatever the last pusher's file looked like and
+      // could erase branches the pusher didn't have. Reconstruction from the
+      // server is only legitimate when there is no local file at all.
+      if (decryptData.keep_file && !currentKeep) {
         const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
-        // Compare in the canonical on-disk form. A keep read from disk carries
-        // `_comment` and is already sorted; the server's copy has neither, so a
-        // bare JSON.stringify comparison always reports a difference and would
-        // rewrite keep.lock on every sync. serializeKeep normalizes both sides.
-        const localSerialized = currentKeep ? serializeKeep(currentKeep) : '';
-        const serverSerialized = serializeKeep(serverKeep);
-        if (localSerialized !== serverSerialized) {
-          this.debug('self-heal: local keep.lock differs from server, overwriting');
-          this.fileManager.writeKeepFile(serverKeep);
-          currentKeep = serverKeep;
-        } else {
-          this.debug('self-heal: local keep.lock matches server, no change');
-        }
+        this.debug('bootstrap: no local keep.lock, reconstructing from server');
+        this.fileManager.writeKeepFile(serverKeep);
+        currentKeep = serverKeep;
       }
       fetchSpinner.stop();
     } catch (err: any) {
@@ -1426,9 +1420,9 @@ export class CapyCommand {
         needsFetch = true;
       }
     }
-    if (needsFetch && originalKeep && Object.keys(pinned).length > 0) {
+    if (needsFetch && currentKeep && Object.keys(pinned).length > 0) {
       try {
-        const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
+        const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
         const blob = localMode
           ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
           : await fetchSecretsWithCache(
@@ -1564,14 +1558,13 @@ export class CapyCommand {
     let finalEnv: Record<string, string>;
 
     if (action === 'retrieve_pinned') {
-      // Fetch the user's *original* pinned snapshot — the one displayed in the
-      // Pinned column of the diff table. We use originalKeep (pre-self-heal),
-      // not currentKeep, because currentKeep may have been overwritten with
-      // the server's latest. The original snapshot is still in S3 because
-      // env blobs are content-addressed and immutable.
+      // Fetch the pinned snapshot — the one displayed in the Pinned column of
+      // the diff table. currentKeep is exactly what keep.lock pins (the fetch
+      // never rewrites it), and the snapshot is still in S3 because env blobs
+      // are content-addressed and immutable.
       finalEnv = { ...localPlaintext };
-      if (originalKeep && Object.keys(pinned).length > 0) {
-        const keepHash = SyncEngine.computeKeepHash(originalKeep, branch);
+      if (currentKeep && Object.keys(pinned).length > 0) {
+        const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
         try {
           const blob = localMode
             ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
@@ -1672,7 +1665,7 @@ export class CapyCommand {
       );
       // Re-write keep.lock with the server's copy — it carries the
       // server-assigned changed_at timestamps for this push.
-      this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult.keep_file, finalKeep));
+      this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult.keep_file, finalKeep, branch));
     }
 
     writeKeepCache(projectState.organizationId!, projectState.projectId!, cacheKeepHash, envBlob);
@@ -1692,6 +1685,11 @@ export class CapyCommand {
 
     const changeCount = Object.keys(pushedVars).length;
     console.log(`\n> keep.lock updated (${diffs.length} changes)`);
+
+    // Every action above rewrites pins (retrieve updates them, commit pushes
+    // them) — commit the new pin so the team's keep.lock travels with git.
+    const { autoCommitKeep } = await import('../git/autoCommitKeep');
+    autoCommitKeep(branch);
 
     if (action === 'commit_local') {
       console.log(
@@ -1793,6 +1791,29 @@ export class CapyCommand {
   ): Promise<Record<string, string> | null> {
     const { ResolveTable } = await import('../ui/resolveTable');
     type Row = import('../ui/resolveTable').ResolveRow;
+    type ColumnKey = import('../ui/resolveTable').ColumnKey;
+
+    // A pinned value is only usable if it resolves back to a concrete plaintext
+    // (some local or remote value hashes to the pinned hash). Mirrors the
+    // resolution logic below where 'pinned' is applied.
+    const pinnedResolves = (variable: string): boolean => {
+      const pinnedHash = pinned[variable];
+      if (!pinnedHash) return false;
+      return (
+        (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) ||
+        (remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash)
+      );
+    };
+
+    // Sensible per-row default: keep the pinned (last-agreed) value when it's
+    // resolvable — the safe choice for a genuine conflict — otherwise fall back
+    // to a concrete value that won't drop the secret (local, then remote).
+    const defaults: ColumnKey[] = diffs.map(diff => {
+      if (pinnedResolves(diff.variable)) return 'pinned';
+      if (showLocal && localPlaintext[diff.variable] !== undefined) return 'local';
+      if (showRemote && remotePlaintext[diff.variable] !== undefined) return 'remote';
+      return 'pinned';
+    });
 
     const pinnedSnippetFor = (variable: string): string | null => {
       if (!pinned[variable]) return null;
@@ -1811,7 +1832,7 @@ export class CapyCommand {
           : null,
     }));
 
-    const table = new ResolveTable(rows, showLocal, showRemote);
+    const table = new ResolveTable(rows, showLocal, showRemote, defaults);
     const { choices, cancelled } = await table.run();
 
     if (cancelled) {

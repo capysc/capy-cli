@@ -16,8 +16,13 @@ mock.module('../../src/service/serviceClient', () => ({
 mock.module('../../src/sync/syncEngine', () => {
   const MockSyncEngine = mock(() => ({}));
   (MockSyncEngine as any).computeKeepHash = mock(() => 'mock-keep-hash');
+  (MockSyncEngine as any).spliceKeepBranch = mock((local: any, server: any) => local ?? server);
+  (MockSyncEngine as any).adoptServerKeep = mock((_json: any, fallback: any) => fallback);
   return { SyncEngine: MockSyncEngine };
 });
+mock.module('../../src/git/autoCommitKeep', () => ({
+  autoCommitKeep: mock(() => ({ committed: false, reason: 'disabled' })),
+}));
 mock.module('../../src/ui/promptEngine', () => ({
   PromptEngine: mock(() => ({})),
 }));

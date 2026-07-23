@@ -226,7 +226,7 @@ export class PushCommand {
 
     // Update keep.lock with new state, preferring the server's copy (it
     // carries server-assigned changed_at timestamps)
-    this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult?.keep_file, updatedKeep));
+    this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult?.keep_file, updatedKeep, branch));
     this.debug('keep.lock written to disk');
 
     // Update sync state with keep_hash so direction detection works
@@ -244,6 +244,10 @@ export class PushCommand {
         ? `Stored ${Object.keys(rawLocal).length} secret(s) locally (local-only mode)`
         : `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
     );
+
+    // The push is only visible to teammates' pins once keep.lock is in git.
+    const { autoCommitKeep } = await import('../git/autoCommitKeep');
+    autoCommitKeep(branch);
 
     const { printExpiryWarnings } = await import('./connectors/shared');
     printExpiryWarnings();

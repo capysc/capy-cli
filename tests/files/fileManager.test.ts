@@ -280,6 +280,73 @@ describe('FileManager', () => {
       expect(serializeKeep(a)).toBe(serializeKeep(b));
     });
 
+    test('is independent of per-branch entry array order within a variable', () => {
+      // Regression: a plain `capy checkout <branch>` reloads a variable's
+      // per-branch entries in a different order. serializeKeep sorted the
+      // top-level variable keys but NOT each entry array, so the reshuffled
+      // array serialized differently and bumped keep.lock even though no value
+      // changed. Sorting entries by (branch, resource_id) makes the canonical
+      // form invariant to in-memory order.
+      const a = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: {
+          API_KEY: [
+            { resource_id: 'r_main', branch: 'main', value_hash: 'hm' },
+            { resource_id: 'r_dev', branch: 'dev', value_hash: 'hd' },
+            { resource_id: 'r_stg', branch: 'staging', value_hash: 'hs' },
+          ],
+        },
+      } as KeepFile;
+      const b = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: {
+          API_KEY: [
+            { resource_id: 'r_stg', branch: 'staging', value_hash: 'hs' },
+            { resource_id: 'r_main', branch: 'main', value_hash: 'hm' },
+            { resource_id: 'r_dev', branch: 'dev', value_hash: 'hd' },
+          ],
+        },
+      } as KeepFile;
+
+      // Same entries, different array order → byte-identical canonical form.
+      expect(serializeKeep(a)).toBe(serializeKeep(b));
+      // Documents the root cause: bare stringify saw the reorder as a change.
+      expect(JSON.stringify(a)).not.toBe(JSON.stringify(b));
+    });
+
+    test('sorts branchless (undefined-branch) entries before branched ones, by resource_id', () => {
+      // `branch` is optional; undefined must sort deterministically (first),
+      // with resource_id as the total-order tiebreaker.
+      const a = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: {
+          TOKEN: [
+            { resource_id: 'r_b', branch: 'main', value_hash: 'h1' },
+            { resource_id: 'r_z', value_hash: 'h2' },
+            { resource_id: 'r_a', value_hash: 'h3' },
+          ],
+        },
+      } as KeepFile;
+      const b = {
+        version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
+        variables: {
+          TOKEN: [
+            { resource_id: 'r_a', value_hash: 'h3' },
+            { resource_id: 'r_b', branch: 'main', value_hash: 'h1' },
+            { resource_id: 'r_z', value_hash: 'h2' },
+          ],
+        },
+      } as KeepFile;
+
+      expect(serializeKeep(a)).toBe(serializeKeep(b));
+
+      // Canonical order: branchless entries (r_a, r_z) precede the branched one.
+      const parsed = JSON.parse(serializeKeep(a)) as any;
+      expect(parsed.variables.TOKEN.map((e: any) => e.resource_id)).toEqual([
+        'r_a', 'r_z', 'r_b',
+      ]);
+    });
+
     test('reports a real change when a value_hash differs', () => {
       const before = {
         version: '3.0', org_id: 'o', project_id: 'p', project_name: 'n',
