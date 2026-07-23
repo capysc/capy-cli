@@ -744,4 +744,28 @@ program
     });
   });
 
+program
+  .command('ui-preview <screen>')
+  .description('[dev] Serve an embedded browser screen via the secure local screen server')
+  .option('--data <json>', 'JSON payload to inject as window.__CAPY_DATA__')
+  .option('--no-open', 'print the URL instead of opening a browser')
+  .action(async (screen, options) => {
+    const { ScreenServer } = await import('./ui/screens/serve');
+    const { SCREEN_HTML } = await import('./ui/screens/generated');
+    if (!(screen in SCREEN_HTML)) {
+      console.error(`Unknown screen "${screen}". Available: ${Object.keys(SCREEN_HTML).join(', ')}`);
+      process.exit(1);
+    }
+    const name = screen as keyof typeof SCREEN_HTML;
+    const data = JSON.parse(options.data ?? '{}');
+    const server = new ScreenServer(name, data, { timeoutMs: 300000 });
+    const url = await server.start();
+    console.log(`Serving ${B(screen)} at ${url}`);
+    console.log('One-time token URL — a second request will 404. Ctrl+C to stop.');
+    if (options.open !== false) {
+      const { default: open } = await import('open');
+      await open(url);
+    }
+  });
+
 program.parse(process.argv);

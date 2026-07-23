@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'crypto';
 import { URL } from 'url';
 import open from 'open';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { renderScreen, screenHeaders } from '../ui/screens/serve';
 
 const CALLBACK_PORTS = [19420, 19421, 19422, 19423, 19424];
 
@@ -166,67 +167,13 @@ export class OAuthServer {
   }
 
   private sendSuccessResponse(res: ServerResponse): void {
-    const html = `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>Authentication Successful</title>
-          <script src="https://cdn.tailwindcss.com"></script>
-          <link rel="preconnect" href="https://fonts.googleapis.com">
-          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-          <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
-          <script>
-            tailwind.config = {
-              darkMode: 'media',
-              theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
-            }
-          </script>
-        </head>
-        <body class="flex items-center justify-center min-h-screen dark:bg-neutral-950 font-geist">
-          <div class="text-center p-8 rounded-lg border border-neutral-200 dark:border-neutral-800 dark:text-white">
-            <div class="flex justify-center mb-6 dark:invert"><svg width="48" height="48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#s0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="s0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg></div>
-            <h1>Authentication Successful</h1>
-            <p>You can now close this window and return to your terminal.</p>
-            <script>setTimeout(() => window.close(), 3000);</script>
-          </div>
-        </body>
-      </html>
-    `;
-
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(html);
+    res.writeHead(200, screenHeaders());
+    res.end(renderScreen('auth-success', { autoCloseSeconds: 3 }));
   }
 
-  private sendErrorResponse(res: ServerResponse, _error: string): void {
-    const html = `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>Authentication Failed</title>
-          <script src="https://cdn.tailwindcss.com"></script>
-          <link rel="preconnect" href="https://fonts.googleapis.com">
-          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-          <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet">
-          <script>
-            tailwind.config = {
-              darkMode: 'media',
-              theme: { extend: { fontFamily: { geist: ['Geist', 'system-ui', 'sans-serif'] } } }
-            }
-          </script>
-        </head>
-        <body class="flex items-center justify-center min-h-screen dark:bg-neutral-950 font-geist">
-          <div class="text-center p-8 rounded-lg border border-neutral-200 dark:border-neutral-800 max-w-md dark:text-white">
-            <div class="flex justify-center mb-6 dark:invert"><svg width="48" height="48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#e0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="e0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg></div>
-            <h1>Authentication Failed</h1>
-            <p>Please return to your terminal and try again.</p>
-            <div class="text-neutral-500">Something went wrong. Check your terminal for details.</div>
-          </div>
-        </body>
-      </html>
-    `;
-
-    res.writeHead(400, { 'Content-Type': 'text/html' });
-    res.end(html);
+  private sendErrorResponse(res: ServerResponse, error: string): void {
+    res.writeHead(400, screenHeaders());
+    res.end(renderScreen('auth-error', { message: error }));
   }
 
   private cleanup(): void {
