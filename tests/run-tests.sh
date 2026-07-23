@@ -37,6 +37,7 @@ ISOLATED_FILES=(
   tests/commands/cleanupOrgData.test.ts
   tests/config/profileConfig.test.ts
   tests/commands/byocCommand.test.ts
+  tests/service/serviceClient.test.ts
   tests/commands/profileCommand.test.ts
   tests/commands/localOnlyFlow.test.ts
 )

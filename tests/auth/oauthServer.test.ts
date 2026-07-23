@@ -166,7 +166,10 @@ describe('OAuthServer', () => {
       (oauthServer as any).handleCallback(url, mockRes);
 
       expect((oauthServer as any).error).toBe('Invalid state parameter');
-      expect(mockRes.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'text/html' });
+      expect(mockRes.writeHead).toHaveBeenCalledWith(
+        400,
+        expect.objectContaining({ 'Content-Type': 'text/html; charset=utf-8' })
+      );
     });
 
     test('should handle OAuth errors', () => {
@@ -180,7 +183,10 @@ describe('OAuthServer', () => {
       (oauthServer as any).handleCallback(url, mockRes);
 
       expect((oauthServer as any).error).toBe('User denied');
-      expect(mockRes.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'text/html' });
+      expect(mockRes.writeHead).toHaveBeenCalledWith(
+        400,
+        expect.objectContaining({ 'Content-Type': 'text/html; charset=utf-8' })
+      );
     });
 
     test('should handle missing authorization code', () => {
@@ -207,7 +213,10 @@ describe('OAuthServer', () => {
       (oauthServer as any).handleCallback(url, mockRes);
 
       expect((oauthServer as any).authorizationCode).toBe('test-auth-code');
-      expect(mockRes.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'text/html' });
+      expect(mockRes.writeHead).toHaveBeenCalledWith(
+        200,
+        expect.objectContaining({ 'Content-Type': 'text/html; charset=utf-8' })
+      );
     });
   });
 
@@ -220,9 +229,15 @@ describe('OAuthServer', () => {
 
       (oauthServer as any).sendSuccessResponse(mockRes);
 
-      expect(mockRes.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'text/html' });
+      expect(mockRes.writeHead).toHaveBeenCalledWith(
+        200,
+        expect.objectContaining({ 'Content-Type': 'text/html; charset=utf-8' })
+      );
       expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('Authentication Successful'));
-      expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('setTimeout(() => window.close(), 3000)'));
+      // Auto-close now flows through the __CAPY_DATA__ contract of the embedded screen
+      expect(mockRes.end).toHaveBeenCalledWith(
+        expect.stringContaining('window.__CAPY_DATA__ = {"autoCloseSeconds":3}')
+      );
     });
   });
 
@@ -236,12 +251,16 @@ describe('OAuthServer', () => {
 
       (oauthServer as any).sendErrorResponse(mockRes, errorMessage);
 
-      expect(mockRes.writeHead).toHaveBeenCalledWith(400, { 'Content-Type': 'text/html' });
+      expect(mockRes.writeHead).toHaveBeenCalledWith(
+        400,
+        expect.objectContaining({ 'Content-Type': 'text/html; charset=utf-8' })
+      );
       expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('Authentication Failed'));
-      // Raw error string must NOT appear in HTML output (XSS prevention)
+      // Raw error string must NOT appear in HTML output (XSS prevention).
+      // The message is JSON-inlined with `<` escaped, so markup can never
+      // execute; the screen renders it as text.
       expect(mockRes.end).toHaveBeenCalledWith(expect.not.stringContaining(errorMessage));
-      // Should show a safe, static message instead
-      expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('Check your terminal'));
+      expect(mockRes.end).toHaveBeenCalledWith(expect.stringContaining('\\u003cscript>alert'));
     });
   });
 
