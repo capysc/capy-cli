@@ -52,6 +52,14 @@ for (const match of generated.matchAll(/\bhttps?:\/\/[^\s"'`<>\\)]+/g)) {
   fail(`embedded screens contain external URL: ${match[0]}`);
 }
 
+// No private leakage: embedded artifacts must be minified output only —
+// no source maps, no private filesystem paths from the build machine.
+for (const needle of ['sourceMappingURL', '/Users/', '/home/', 'conductor/workspaces']) {
+  if (generated.includes(needle)) {
+    fail(`embedded screens contain "${needle}"`);
+  }
+}
+
 const docCount = (generated.match(/'[\w-]+': "/g) ?? []).length;
 const placeholderCount = (generated.match(/\/\*__CAPY_DATA__\*\/ null/g) ?? []).length;
 if (docCount === 0) fail('no embedded screens found in src/ui/screens/generated.ts');
