@@ -81,6 +81,40 @@ export function phraseDisplayScreen(phrase: string): WizardScreen {
   };
 }
 
+/**
+ * Show an already-generated recovery phrase in the browser and gate on the
+ * "I have written it down" checkbox. Used by cloud org creation under `--web`,
+ * where the TTY path would otherwise print the 24 words to stdout — captured by
+ * whatever is driving the CLI (e.g. the MCP). Resolves false if cancelled.
+ *
+ * Like runLocalOnboardingWeb, the phrase is never part of the return value.
+ */
+export async function showRecoveryPhraseInBrowser(
+  phrase: string,
+  bodyLines: string[],
+  opts: OnboardingWebOptions = {},
+): Promise<boolean> {
+  const note = bodyLines.filter(Boolean).join(' ');
+  const screen = phraseDisplayScreen(phrase);
+  const result = await runBrowserWizard(
+    {
+      title: 'Save your recovery phrase',
+      firstScreen: {
+        html: `${screen.html}<p style="${NOTE}">${esc(note)}</p>`,
+      },
+      open: opts.open ?? true,
+      onListen: opts.onListen,
+      timeoutMs: opts.timeoutMs,
+      doneMessage: 'Recovery phrase saved — back to your terminal.',
+    },
+    async (_step, payload) => {
+      if (!payload.saved) return { error: 'Please confirm you have written down the phrase.' };
+      return { done: true, result: 'ok' };
+    },
+  );
+  return result === 'ok';
+}
+
 function enterPhraseScreen(): WizardScreen {
   return {
     html: wrap(`

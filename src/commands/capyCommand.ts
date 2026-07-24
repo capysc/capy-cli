@@ -189,6 +189,23 @@ export class CapyCommand {
       promptPick: async (branches, defaultName) => {
         const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
         console.log('\nNo branch is checked out in this directory yet.');
+        if (this.options.web) {
+          const { selectInBrowser } = await import('../ui/selectWeb');
+          const chosen = await selectInBrowser({
+            title: 'Select branch',
+            intro: 'No branch is checked out in this directory yet. Which branch do you want to use?',
+            options: branches.map(b => ({
+              id: b.name,
+              name: b.name,
+              badge: b.is_protected ? 'protected' : undefined,
+            })),
+            defaultId: defaultName,
+          }, { open: !process.env.CAPY_WEB_NO_OPEN });
+          if (chosen === null) {
+            throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
+          }
+          return chosen;
+        }
         const { selected: pick } = await inquirer.prompt([{
           type: 'list',
           name: 'selected',
@@ -546,25 +563,60 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
-    const { initialBranchChoice } = await inquirer.prompt([{
-      type: 'list',
-      name: 'initialBranchChoice',
-      message: 'What branch should this project start with?',
-      choices: [
-        { name: 'development (default)', value: 'development' },
-        { name: 'another branch', value: 'other' },
-      ],
-    }]);
+    let initialBranchChoice: string;
+    if (this.options.web) {
+      // No TTY under --web: without a browser screen here, init dies one step
+      // before createBranch/writeActiveBranch and leaves a branchless project.
+      const { selectInBrowser } = await import('../ui/selectWeb');
+      const chosen = await selectInBrowser({
+        title: 'Choose the first branch',
+        intro: 'What branch should this project start with?',
+        options: [
+          { id: 'development', name: 'development', note: 'The default. You can add more branches later.' },
+          { id: 'other', name: 'Another branch', note: 'Pick your own name on the next screen.' },
+        ],
+        defaultId: 'development',
+      }, { open: !process.env.CAPY_WEB_NO_OPEN });
+      if (chosen === null) {
+        throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      initialBranchChoice = chosen;
+    } else {
+      ({ initialBranchChoice } = await inquirer.prompt([{
+        type: 'list',
+        name: 'initialBranchChoice',
+        message: 'What branch should this project start with?',
+        choices: [
+          { name: 'development (default)', value: 'development' },
+          { name: 'another branch', value: 'other' },
+        ],
+      }]));
+    }
 
     let initialBranchName: string;
     if (initialBranchChoice === 'other') {
-      const { branchName } = await inquirer.prompt([{
-        type: 'input',
-        name: 'branchName',
-        message: 'Branch name:',
-        validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-      }]);
-      initialBranchName = String(branchName).trim();
+      if (this.options.web) {
+        const { promptTextInBrowser } = await import('../ui/selectWeb');
+        const entered = await promptTextInBrowser({
+          title: 'Name the branch',
+          intro: 'What should this project’s first branch be called?',
+          label: 'Branch name',
+          defaultValue: 'development',
+          validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+        }, { open: !process.env.CAPY_WEB_NO_OPEN });
+        if (entered === null) {
+          throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
+        }
+        initialBranchName = entered;
+      } else {
+        const { branchName } = await inquirer.prompt([{
+          type: 'input',
+          name: 'branchName',
+          message: 'Branch name:',
+          validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+        }]);
+        initialBranchName = String(branchName).trim();
+      }
     } else {
       initialBranchName = 'development';
     }
@@ -661,12 +713,28 @@ export class CapyCommand {
         // Confirm before encrypting + pushing — user may not be in the
         // right project on first setup. After this step .env is rewritten
         // with ciphertext, so getting it wrong is painful to recover from.
-        const { confirmEncrypt } = await inquirer.prompt([{
-          type: 'confirm',
-          name: 'confirmEncrypt',
-          message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
-          default: true,
-        }]);
+        let confirmEncrypt: boolean;
+        if (this.options.web) {
+          const { selectInBrowser } = await import('../ui/selectWeb');
+          const chosen = await selectInBrowser({
+            title: 'Encrypt and push?',
+            intro: `Encrypt these ${localVarCount} secrets and push to ${projectName} (${selectedOrg.name}) on ${initBranch}?`,
+            options: [
+              { id: 'yes', name: 'Yes, encrypt and push', note: 'Your .env is rewritten with ciphertext.' },
+              { id: 'no', name: 'No, leave my .env alone', note: 'Nothing is encrypted or pushed.' },
+            ],
+            defaultId: 'yes',
+          }, { open: !process.env.CAPY_WEB_NO_OPEN });
+          // A cancelled/closed page is a "no" — never encrypt on an unanswered prompt.
+          confirmEncrypt = chosen === 'yes';
+        } else {
+          ({ confirmEncrypt } = await inquirer.prompt([{
+            type: 'confirm',
+            name: 'confirmEncrypt',
+            message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
+            default: true,
+          }]));
+        }
 
         if (!confirmEncrypt) {
           console.log(`\nSkipped. Your .env was not modified.`);
@@ -1942,6 +2010,6 @@ export class CapyCommand {
 
   private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
     const { createNewOrganization } = await import('./orgCreation');
-    return createNewOrganization(this.authService, this.serviceClient, refreshToken, userId);
+    return createNewOrganization(this.authService, this.serviceClient, refreshToken, userId, this.options.web);
   }
 }

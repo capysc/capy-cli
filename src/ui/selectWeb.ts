@@ -116,7 +116,8 @@ export async function promptTextInBrowser(
     intro: string;
     label: string;
     defaultValue?: string;
-    validate?: (input: string) => true | string;
+    /** Sync or async — org-name entry checks availability against the server. */
+    validate?: (input: string) => true | string | Promise<true | string>;
   },
   opts: SelectWebOptions = {},
 ): Promise<string | null> {
@@ -131,7 +132,7 @@ export async function promptTextInBrowser(
     },
     async (_step, payload) => {
       const value = typeof payload.value === 'string' ? payload.value.trim() : '';
-      const verdict = params.validate ? params.validate(value) : (value ? true : 'This field is required.');
+      const verdict = params.validate ? await params.validate(value) : (value ? true : 'This field is required.');
       if (verdict !== true) return { error: verdict };
       return { done: true, result: value };
     },
