@@ -1,6 +1,6 @@
 import { describe, test, expect, afterEach } from 'bun:test';
 import { get, type IncomingHttpHeaders } from 'http';
-import { renderScreen, screenHeaders, ScreenServer, SCREEN_CSP } from '../../src/ui/screens/serve';
+import { renderScreen, screenHeaders, ScreenServer, SCREEN_CSP, INTERACTIVE_SCREEN_CSP } from '../../src/ui/screens/serve';
 import { SCREEN_HTML } from '../../src/ui/screens/generated';
 
 /**
@@ -102,5 +102,34 @@ describe('ScreenServer', () => {
     expect(headers['Content-Security-Policy']).toContain("default-src 'none'");
     expect(headers['Content-Security-Policy']).not.toContain('http');
     expect(headers['Referrer-Policy']).toBe('no-referrer');
+  });
+
+  test('a display screen cannot open a socket, and that is the default', () => {
+    // The load-bearing line: a page that renders a secret and cannot connect
+    // anywhere cannot exfiltrate it, whatever ends up in its markup.
+    expect(screenHeaders()['Content-Security-Policy']).toContain("connect-src 'none'");
+    // Opt-in, so forgetting to think about it fails closed.
+    expect(screenHeaders({})['Content-Security-Policy']).toBe(SCREEN_CSP);
+    expect(screenHeaders({ interactive: false })['Content-Security-Policy']).toBe(SCREEN_CSP);
+  });
+
+  test('an interactive screen may reach its own origin and nothing else', () => {
+    const csp = screenHeaders({ interactive: true })['Content-Security-Policy'];
+    expect(csp).toBe(INTERACTIVE_SCREEN_CSP);
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).not.toContain("connect-src 'none'");
+    // Widening connect-src must be the ONLY difference, or "interactive"
+    // quietly becomes a way to opt out of the whole header.
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("base-uri 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    // Native form posts stay off in both modes: an interactive screen answers
+    // through fetch, which connect-src governs. An open form-action would be a
+    // second way out of the page, under a directive nobody is watching.
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).not.toContain('http');
+    expect(csp).not.toContain('unsafe-eval');
+    // Same directives, same order — only the connect-src value differs.
+    expect(csp.replace("connect-src 'self'", "connect-src 'none'")).toBe(SCREEN_CSP);
   });
 });

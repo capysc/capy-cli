@@ -19,6 +19,7 @@ import type { Socket } from 'net';
 import { CapyError, ERROR_CODES } from '../types';
 import { nonceEqual, isLoopbackHost, isAllowedOrigin } from '../commands/intakeSecurity';
 import { DEPLOY_PAGE_CSS } from './deployPage/generatedAssets';
+import { screenHeaders } from './screens/serve';
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_BODY = 5_000_000;
@@ -94,7 +95,13 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
           res.writeHead(403).end('forbidden');
           return;
         }
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        // The wizard page went out with only a content-type. It is a page that
+        // renders credentials and can open sockets, so it gets the same policy
+        // as any other interactive screen: no remote origins, no eval, no
+        // framing, no native form posts, and `connect-src` limited to the
+        // loopback origin it was served from — which is the only place its
+        // answers are supposed to go.
+        res.writeHead(200, screenHeaders({ interactive: true }));
         res.end(wizardPage(params.title, params.firstScreen.html, nonce, params.doneMessage));
         return;
       }

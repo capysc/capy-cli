@@ -7,26 +7,58 @@ import type { ScreenDataMap, ScreenName } from './contract';
 const DATA_PLACEHOLDER = '/*__CAPY_DATA__*/ null';
 
 /**
- * Strict CSP for locally served screens: no remote origins of any kind, no
- * eval. Screens are single-file documents, so inline script/style is the
- * only thing allowed to run.
+ * Content-Security-Policy — the browser header that limits what a page may
+ * load, run and connect to — for locally served screens.
+ *
+ * No remote origins of any kind, no eval. Screens are single-file documents,
+ * so inline script and style are the only things allowed to run.
+ *
+ * `connect-src` is the load-bearing line, and it is why there are two policies
+ * below rather than one. A display screen — an auth callback, a result page —
+ * has nothing to say back, so it is given no way to speak at all: a page that
+ * cannot open a socket cannot exfiltrate what it renders, whatever ends up in
+ * its markup.
  */
-export const SCREEN_CSP = [
+const BASE_CSP = [
   "default-src 'none'",
   "script-src 'unsafe-inline'",
   "style-src 'unsafe-inline'",
   'img-src data:',
   'font-src data:',
-  "connect-src 'none'",
   "base-uri 'none'",
+  // Native form posts stay off in both modes. An interactive screen answers by
+  // fetching its own origin, which `connect-src` governs; leaving this open
+  // would be a second way out of the page, governed by a different directive.
   "form-action 'none'",
   "frame-ancestors 'none'",
-].join('; ');
+];
 
-export function screenHeaders(): Record<string, string> {
+/** A screen that only displays. It cannot talk to anything, including us. */
+export const SCREEN_CSP = [...BASE_CSP, "connect-src 'none'"].join('; ');
+
+/**
+ * A screen that has to answer.
+ *
+ * A step asking a question posts back to the loopback server that served it,
+ * so `connect-src` cannot be `'none'` — but it widens to exactly one origin,
+ * its own, and nothing else moves. Everything that made the strict policy
+ * strict still holds: no remote anything, no eval, no framing, no native form
+ * posts.
+ *
+ * Two named policies rather than one parameterised default, so a screen that
+ * merely displays cannot quietly acquire the ability to speak.
+ */
+export const INTERACTIVE_SCREEN_CSP = [...BASE_CSP, "connect-src 'self'"].join('; ');
+
+/**
+ * Response headers for a served screen.
+ *
+ * `interactive` is opt-in, so forgetting to think about it fails closed.
+ */
+export function screenHeaders(opts: { interactive?: boolean } = {}): Record<string, string> {
   return {
     'Content-Type': 'text/html; charset=utf-8',
-    'Content-Security-Policy': SCREEN_CSP,
+    'Content-Security-Policy': opts.interactive ? INTERACTIVE_SCREEN_CSP : SCREEN_CSP,
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
     'Cache-Control': 'no-store',
@@ -54,7 +86,7 @@ const sha256 = (s: string) => createHash('sha256').update(s).digest();
  *  - the opened URL carries a single-use 256-bit token; requests without it
  *    (or after first use) get 404 with no body detail
  *  - token comparison is constant-time
- *  - responses carry a strict CSP (no remote origins, no eval)
+ *  - responses carry a strict Content-Security-Policy (no remote origins, no eval)
  *  - server closes itself after serving once, or on timeout
  */
 export class ScreenServer<K extends ScreenName> {
