@@ -262,8 +262,26 @@ program
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
+  .option('--no-protected', 'Create it open to the project')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
   .action(async (branch, options) => {
     assertNotLocalOnly('checkout');
+
+    // `--json` on a create describes the route rather than travelling it: the
+    // same stop array the browser screen is served, so a headless caller can
+    // see which stops a flag already settled and which it would be asked
+    // about. Printed before any network call, because the plan is knowable
+    // without one — that is what makes it a plan.
+    if (options.json && options.create) {
+      const { branchCreatePlan, unansweredStops } = await import('./core/branchCreatePlan');
+      // Commander sets `protected` to false only when `--no-protected` was
+      // typed; an untouched flag leaves it undefined, which is the difference
+      // between "answered open" and "not answered".
+      const stops = branchCreatePlan({ branchName: branch, isProtected: options.protected });
+      console.log(JSON.stringify({ stops, unanswered: unansweredStops(stops) }, null, 2));
+      return;
+    }
+
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand();
     await cmd.execute(branch, { create: options.create, protected: options.protected });
