@@ -177,6 +177,12 @@ export function generateIntakeForm(o: IntakeFormOptions): string {
       </div>
       <h1 class="text-xl font-semibold">Add secrets</h1>
     </div>
+    <!-- The reason this page exists, said where the person typing can read it.
+         The CLI prints the same promise to the terminal, but the terminal is
+         not where the secret gets typed — and an agent asking for credentials
+         is exactly the moment someone wants to know who ends up seeing them.
+         tests/ui/intakePage.test.ts asserts this line is present. -->
+    <p class="text-sm text-neutral-500 dark:text-neutral-400 mb-2">Values you type here go straight to the Capy CLI on this machine — they never pass through the AI, and never leave in plaintext.</p>
     ${reason}
     <form id="f" class="space-y-4">
       <div id="rows" class="space-y-4"></div>

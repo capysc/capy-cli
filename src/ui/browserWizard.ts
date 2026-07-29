@@ -9,15 +9,17 @@
 // only new capability is statefulness: each POST advances to the next screen, and
 // the caller's reducer decides the next screen / done / inline error.
 //
-// What flows where: the browser submits each screen's form fields; the reducer turns
-// those into the NEXT screen or a final result. Values the user types stay in the
-// browser→CLI loopback; this transport never prints or logs them.
+// What flows where: the browser submits each screen's answer — serialized from its
+// form fields, or built by the screen itself and handed to `window.capySubmit` — and
+// the reducer turns that into the NEXT screen or a final result. Values the user types
+// stay in the browser→CLI loopback; this transport never prints or logs them.
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
 import type { Socket } from 'net';
 import { CapyError, ERROR_CODES } from '../types';
 import { nonceEqual, isLoopbackHost, isAllowedOrigin } from '../commands/intakeSecurity';
 import { DEPLOY_PAGE_CSS } from './deployPage/generatedAssets';
+import { screenHeaders } from './screens/serve';
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_BODY = 5_000_000;
@@ -27,12 +29,41 @@ export const CAPY_LOGO_SVG = `<svg width="36" height="36" viewBox="0 0 100 100" 
 // Escapes `<` so a value can never close the surrounding <script> tag.
 const jsStr = (s: string): string => JSON.stringify(s).replace(/</g, '\\u003c');
 
-/** One screen of the wizard: the inner HTML for `#screen` — a `<form>` with named
- *  fields. The wizard serializes those fields (FormData) into the reducer payload. */
+/**
+ * One screen of the wizard: the inner HTML for `#screen`.
+ *
+ * Two ways to answer it, both arriving at the same reducer:
+ *
+ *   - a `<form>` with named fields, which the wizard serializes (FormData)
+ *   - any markup that calls `window.capySubmit(payload)` with its own object
+ *
+ * The second exists because FormData flattens to string keys and string
+ * values. That is enough for a page of text inputs and not enough for the
+ * answers some steps carry — a decision per variable, an array of name/value
+ * pairs — which would otherwise be encoded into field NAMES and parsed back
+ * out by the reducer, making a naming convention into an undeclared second
+ * wire format.
+ */
 export interface WizardScreen {
   html: string;
   /** Optional override for the in-browser "done" message when this screen finishes. */
   doneMessage?: string;
+  /**
+   * Serve this step as a whole document rather than inside the wizard shell.
+   *
+   * A compiled screen from `packages/ui` is already a complete page — its own
+   * head, its own inlined styles and script — so it cannot be dropped into
+   * `#screen` as a fragment, and it does not want the shell's header or CSS
+   * around it.
+   *
+   * The consequence is that advancing is a NAVIGATION rather than an innerHTML
+   * swap. The reducer's next screen is not pushed down the open request; it is
+   * held, and the browser re-requests the page to receive it. `standalone`
+   * steps therefore answer a submit with `{ next: true }` and reload, which is
+   * exactly the contract the ui `Wizard` component already implements ("Saved.
+   * Opening the next step…").
+   */
+  standalone?: boolean;
 }
 
 export interface WizardParams {
@@ -66,6 +97,15 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
   let step = 0;
   let busy = false;
   let done = false;
+  /**
+   * The step the browser gets if it asks for the page right now.
+   *
+   * A shell flow never re-requests — it swaps `#screen` in place — so this only
+   * moves for standalone steps, which advance by reloading. Holding it here
+   * rather than always serving `firstScreen` is what makes a reload return the
+   * step the flow is actually on.
+   */
+  let current: WizardScreen = params.firstScreen;
 
   return new Promise<unknown>((resolve, reject) => {
     let timer: NodeJS.Timeout;
@@ -80,8 +120,23 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
           res.writeHead(403).end('forbidden');
           return;
         }
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end(wizardPage(params.title, params.firstScreen.html, nonce, params.doneMessage));
+        // The wizard page went out with only a content-type. It is a page that
+        // renders credentials and can open sockets, so it gets the same policy
+        // as any other interactive screen: no remote origins, no eval, no
+        // framing, no native form posts, and `connect-src` limited to the
+        // loopback origin it was served from — which is the only place its
+        // answers are supposed to go.
+        res.writeHead(200, screenHeaders({ interactive: true }));
+        // A standalone step is its own document and is served as-is. Every
+        // other step is a fragment and gets the shell. `current` rather than
+        // `firstScreen`, because a standalone flow advances by reloading this
+        // same URL — the browser comes back for step 2 and must not be handed
+        // step 1 again.
+        res.end(
+          current.standalone
+            ? current.html
+            : wizardPage(params.title, current.html, nonce, params.doneMessage),
+        );
         return;
       }
 
@@ -147,7 +202,21 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
             }
             // advance to the next screen
             step += 1;
+            current = decision.screen;
             busy = false;
+            if (decision.screen.standalone) {
+              // The next step is a whole document, so it cannot be handed back
+              // as a fragment for the current page to swap in. It is held in
+              // `current`, and the browser is told there IS a next step so it
+              // reloads and receives it from the GET above.
+              //
+              // `{ next: true }` is the contract the ui `Wizard` component
+              // already implements: it freezes its controls and says "Saved.
+              // Opening the next step…", precisely because this stop's token
+              // is spent and the page is about to be replaced.
+              res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ next: true }));
+              return;
+            }
             res
               .writeHead(200, { 'content-type': 'application/json' })
               .end(JSON.stringify({ screen: decision.screen.html, doneMessage: decision.screen.doneMessage }));
@@ -259,32 +328,59 @@ export function wizardPage(title: string, firstScreenHtml: string, nonce: string
       document.body.querySelector('p').textContent = DONE_MSG;
     }
 
-    // One delegated handler — survives screen swaps. Serializes the submitted form's
-    // named fields into a payload object and POSTs it; renders whatever comes back.
-    document.addEventListener('submit', async (e) => {
-      const form = e.target;
-      if (!form || form.tagName !== 'FORM') return;
-      e.preventDefault();
-      const payload = {};
-      for (const [k, v] of new FormData(form).entries()) payload[k] = v;
-      const btn = form.querySelector('button[type=submit], button:not([type])');
+    // The one place a payload becomes a request. Both entry points below go
+    // through it, so the nonce, the response contract and the error handling
+    // have a single implementation rather than one per screen technology.
+    //
+    // Returns an outcome the caller can act on: a screen rendering its own
+    // controls needs to know whether to re-enable them. A form does not — this
+    // re-enables its button itself.
+    async function post(payload, btn) {
       if (btn) btn.disabled = true;
       setStatus('Working…', false);
       try {
         const r = await fetch('/submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nonce: NONCE, payload }) });
         let b = {};
         try { b = await r.json(); } catch (_) {}
-        if (!r.ok) { setStatus((b && b.error) || ('HTTP ' + r.status), true); if (btn) btn.disabled = false; return; }
-        if (b.error) { setStatus(b.error, true); if (btn) btn.disabled = false; return; }
-        if (b.done) { finish(); return; }
+        if (!r.ok) { const m = (b && b.error) || ('HTTP ' + r.status); setStatus(m, true); if (btn) btn.disabled = false; return { kind: 'error', error: m }; }
+        if (b.error) { setStatus(b.error, true); if (btn) btn.disabled = false; return { kind: 'error', error: b.error }; }
+        if (b.done) { finish(); return { kind: 'done', result: b.result }; }
         if (typeof b.doneMessage === 'string') DONE_MSG = b.doneMessage;
         setStatus('', false);
         screenEl.innerHTML = b.screen || '';
+        return { kind: 'next' };
       } catch (err) {
-        setStatus('Could not reach the Capy CLI (' + err + '). Is it still running? Try again.', true);
+        const m = 'Could not reach the Capy CLI (' + err + '). Is it still running? Try again.';
+        setStatus(m, true);
         if (btn) btn.disabled = false;
+        return { kind: 'unreachable', error: m };
       }
+    }
+
+    // One delegated handler — survives screen swaps. Serializes the submitted
+    // form's named fields into a payload object and POSTs it.
+    document.addEventListener('submit', async (e) => {
+      const form = e.target;
+      if (!form || form.tagName !== 'FORM') return;
+      e.preventDefault();
+      const payload = {};
+      for (const [k, v] of new FormData(form).entries()) payload[k] = v;
+      await post(payload, form.querySelector('button[type=submit], button:not([type])'));
     });
+
+    // The other entry point, for a screen that builds its own payload.
+    //
+    // FormData flattens to string keys and string values, which is enough for
+    // a page of text inputs and not enough for the answers some steps carry:
+    // the conflict resolver decides per variable, and secret intake sends an
+    // array of name/value pairs. Those screens would otherwise have to encode
+    // structure into field NAMES and have the reducer parse it back out — a
+    // second wire format, undeclared, living in a naming convention.
+    //
+    // The transport is unchanged: same endpoint, same nonce, same single-use
+    // token, same response contract. Only the construction of the payload
+    // differs, so this widens nothing a page can reach.
+    window.capySubmit = (payload) => post(payload, null);
   </script>
 </body>
 </html>`;
