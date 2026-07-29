@@ -48,6 +48,22 @@ export interface WizardScreen {
   html: string;
   /** Optional override for the in-browser "done" message when this screen finishes. */
   doneMessage?: string;
+  /**
+   * Serve this step as a whole document rather than inside the wizard shell.
+   *
+   * A compiled screen from `packages/ui` is already a complete page — its own
+   * head, its own inlined styles and script — so it cannot be dropped into
+   * `#screen` as a fragment, and it does not want the shell's header or CSS
+   * around it.
+   *
+   * The consequence is that advancing is a NAVIGATION rather than an innerHTML
+   * swap. The reducer's next screen is not pushed down the open request; it is
+   * held, and the browser re-requests the page to receive it. `standalone`
+   * steps therefore answer a submit with `{ next: true }` and reload, which is
+   * exactly the contract the ui `Wizard` component already implements ("Saved.
+   * Opening the next step…").
+   */
+  standalone?: boolean;
 }
 
 export interface WizardParams {
@@ -81,6 +97,15 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
   let step = 0;
   let busy = false;
   let done = false;
+  /**
+   * The step the browser gets if it asks for the page right now.
+   *
+   * A shell flow never re-requests — it swaps `#screen` in place — so this only
+   * moves for standalone steps, which advance by reloading. Holding it here
+   * rather than always serving `firstScreen` is what makes a reload return the
+   * step the flow is actually on.
+   */
+  let current: WizardScreen = params.firstScreen;
 
   return new Promise<unknown>((resolve, reject) => {
     let timer: NodeJS.Timeout;
@@ -102,7 +127,16 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
         // loopback origin it was served from — which is the only place its
         // answers are supposed to go.
         res.writeHead(200, screenHeaders({ interactive: true }));
-        res.end(wizardPage(params.title, params.firstScreen.html, nonce, params.doneMessage));
+        // A standalone step is its own document and is served as-is. Every
+        // other step is a fragment and gets the shell. `current` rather than
+        // `firstScreen`, because a standalone flow advances by reloading this
+        // same URL — the browser comes back for step 2 and must not be handed
+        // step 1 again.
+        res.end(
+          current.standalone
+            ? current.html
+            : wizardPage(params.title, current.html, nonce, params.doneMessage),
+        );
         return;
       }
 
@@ -168,7 +202,21 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
             }
             // advance to the next screen
             step += 1;
+            current = decision.screen;
             busy = false;
+            if (decision.screen.standalone) {
+              // The next step is a whole document, so it cannot be handed back
+              // as a fragment for the current page to swap in. It is held in
+              // `current`, and the browser is told there IS a next step so it
+              // reloads and receives it from the GET above.
+              //
+              // `{ next: true }` is the contract the ui `Wizard` component
+              // already implements: it freezes its controls and says "Saved.
+              // Opening the next step…", precisely because this stop's token
+              // is spent and the page is about to be replaced.
+              res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ next: true }));
+              return;
+            }
             res
               .writeHead(200, { 'content-type': 'application/json' })
               .end(JSON.stringify({ screen: decision.screen.html, doneMessage: decision.screen.doneMessage }));

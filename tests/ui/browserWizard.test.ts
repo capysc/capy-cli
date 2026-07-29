@@ -184,4 +184,82 @@ describe('runBrowserWizard loopback server', () => {
     });
     await done;
   });
+
+  test('a standalone step is served whole, and advancing is a reload', async () => {
+    // The bridge to the compiled screens. Those are complete documents — their
+    // own head, their own inlined styles and script — so they cannot be handed
+    // back as a fragment for the current page to splice in. The CLI holds the
+    // next one and the browser re-requests the page to get it.
+    let url = '';
+    const done = runBrowserWizard(
+      {
+        title: 'Compiled flow',
+        firstScreen: { html: '<!DOCTYPE html><html><body>STEP ONE</body></html>', standalone: true },
+        open: false,
+        onListen: (u) => (url = u),
+      },
+      async (step) =>
+        step === 0
+          ? { screen: { html: '<!DOCTYPE html><html><body>STEP TWO</body></html>', standalone: true } }
+          : { done: true, result: { finished: true } },
+    );
+
+    const u = new URL(await waitForUrl(() => url));
+    const base = `http://127.0.0.1:${u.port}`;
+    const nonce = u.searchParams.get('n') ?? '';
+
+    // Served as itself: no wizard shell wrapped around it.
+    const first = await (await fetch(url)).text();
+    expect(first).toContain('STEP ONE');
+    expect(first).not.toContain('id="screen"');
+    expect(first).not.toContain('window.capySubmit');
+
+    // Advancing does NOT push the markup down the open request — it says only
+    // that another step exists.
+    const advance = await fetch(`${base}/submit`, { method: 'POST', headers, body: JSON.stringify({ nonce, payload: {} }) });
+    const body = await advance.json();
+    expect(body.next).toBe(true);
+    expect(body.screen).toBeUndefined();
+
+    // The same URL now returns the NEXT step. This is what makes the reload in
+    // the ui Wizard land somewhere new instead of redrawing the question that
+    // was just answered.
+    const second = await (await fetch(url)).text();
+    expect(second).toContain('STEP TWO');
+    expect(second).not.toContain('STEP ONE');
+
+    const finish = await fetch(`${base}/submit`, { method: 'POST', headers, body: JSON.stringify({ nonce, payload: {} }) });
+    expect((await finish.json()).done).toBe(true);
+    expect(await done).toEqual({ finished: true });
+  });
+
+  test('a shell step still swaps in place and is not affected by standalone', async () => {
+    // The existing hand-written screens must keep advancing without a reload:
+    // their markup IS pushed down the open request.
+    let url = '';
+    const done = runBrowserWizard(
+      {
+        title: 'Shell flow',
+        firstScreen: { html: '<form><button type="submit">go</button></form>' },
+        open: false,
+        onListen: (u) => (url = u),
+      },
+      async (step) =>
+        step === 0 ? { screen: { html: '<form id="s2"></form>' } } : { done: true, result: {} },
+    );
+
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+    const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce, payload: {} }),
+    });
+    const body = await res.json();
+    expect(body.screen).toContain('id="s2"');
+    expect(body.next).toBeUndefined();
+
+    await fetch(`http://127.0.0.1:${u.port}/submit`, { method: 'POST', headers, body: JSON.stringify({ nonce, payload: {} }) });
+    await done;
+  });
 });
