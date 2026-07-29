@@ -9,9 +9,10 @@
 // only new capability is statefulness: each POST advances to the next screen, and
 // the caller's reducer decides the next screen / done / inline error.
 //
-// What flows where: the browser submits each screen's form fields; the reducer turns
-// those into the NEXT screen or a final result. Values the user types stay in the
-// browser→CLI loopback; this transport never prints or logs them.
+// What flows where: the browser submits each screen's answer — serialized from its
+// form fields, or built by the screen itself and handed to `window.capySubmit` — and
+// the reducer turns that into the NEXT screen or a final result. Values the user types
+// stay in the browser→CLI loopback; this transport never prints or logs them.
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
 import type { Socket } from 'net';
@@ -27,8 +28,21 @@ export const CAPY_LOGO_SVG = `<svg width="36" height="36" viewBox="0 0 100 100" 
 // Escapes `<` so a value can never close the surrounding <script> tag.
 const jsStr = (s: string): string => JSON.stringify(s).replace(/</g, '\\u003c');
 
-/** One screen of the wizard: the inner HTML for `#screen` — a `<form>` with named
- *  fields. The wizard serializes those fields (FormData) into the reducer payload. */
+/**
+ * One screen of the wizard: the inner HTML for `#screen`.
+ *
+ * Two ways to answer it, both arriving at the same reducer:
+ *
+ *   - a `<form>` with named fields, which the wizard serializes (FormData)
+ *   - any markup that calls `window.capySubmit(payload)` with its own object
+ *
+ * The second exists because FormData flattens to string keys and string
+ * values. That is enough for a page of text inputs and not enough for the
+ * answers some steps carry — a decision per variable, an array of name/value
+ * pairs — which would otherwise be encoded into field NAMES and parsed back
+ * out by the reducer, making a naming convention into an undeclared second
+ * wire format.
+ */
 export interface WizardScreen {
   html: string;
   /** Optional override for the in-browser "done" message when this screen finishes. */
@@ -259,32 +273,59 @@ export function wizardPage(title: string, firstScreenHtml: string, nonce: string
       document.body.querySelector('p').textContent = DONE_MSG;
     }
 
-    // One delegated handler — survives screen swaps. Serializes the submitted form's
-    // named fields into a payload object and POSTs it; renders whatever comes back.
-    document.addEventListener('submit', async (e) => {
-      const form = e.target;
-      if (!form || form.tagName !== 'FORM') return;
-      e.preventDefault();
-      const payload = {};
-      for (const [k, v] of new FormData(form).entries()) payload[k] = v;
-      const btn = form.querySelector('button[type=submit], button:not([type])');
+    // The one place a payload becomes a request. Both entry points below go
+    // through it, so the nonce, the response contract and the error handling
+    // have a single implementation rather than one per screen technology.
+    //
+    // Returns an outcome the caller can act on: a screen rendering its own
+    // controls needs to know whether to re-enable them. A form does not — this
+    // re-enables its button itself.
+    async function post(payload, btn) {
       if (btn) btn.disabled = true;
       setStatus('Working…', false);
       try {
         const r = await fetch('/submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ nonce: NONCE, payload }) });
         let b = {};
         try { b = await r.json(); } catch (_) {}
-        if (!r.ok) { setStatus((b && b.error) || ('HTTP ' + r.status), true); if (btn) btn.disabled = false; return; }
-        if (b.error) { setStatus(b.error, true); if (btn) btn.disabled = false; return; }
-        if (b.done) { finish(); return; }
+        if (!r.ok) { const m = (b && b.error) || ('HTTP ' + r.status); setStatus(m, true); if (btn) btn.disabled = false; return { kind: 'error', error: m }; }
+        if (b.error) { setStatus(b.error, true); if (btn) btn.disabled = false; return { kind: 'error', error: b.error }; }
+        if (b.done) { finish(); return { kind: 'done', result: b.result }; }
         if (typeof b.doneMessage === 'string') DONE_MSG = b.doneMessage;
         setStatus('', false);
         screenEl.innerHTML = b.screen || '';
+        return { kind: 'next' };
       } catch (err) {
-        setStatus('Could not reach the Capy CLI (' + err + '). Is it still running? Try again.', true);
+        const m = 'Could not reach the Capy CLI (' + err + '). Is it still running? Try again.';
+        setStatus(m, true);
         if (btn) btn.disabled = false;
+        return { kind: 'unreachable', error: m };
       }
+    }
+
+    // One delegated handler — survives screen swaps. Serializes the submitted
+    // form's named fields into a payload object and POSTs it.
+    document.addEventListener('submit', async (e) => {
+      const form = e.target;
+      if (!form || form.tagName !== 'FORM') return;
+      e.preventDefault();
+      const payload = {};
+      for (const [k, v] of new FormData(form).entries()) payload[k] = v;
+      await post(payload, form.querySelector('button[type=submit], button:not([type])'));
     });
+
+    // The other entry point, for a screen that builds its own payload.
+    //
+    // FormData flattens to string keys and string values, which is enough for
+    // a page of text inputs and not enough for the answers some steps carry:
+    // the conflict resolver decides per variable, and secret intake sends an
+    // array of name/value pairs. Those screens would otherwise have to encode
+    // structure into field NAMES and have the reducer parse it back out — a
+    // second wire format, undeclared, living in a naming convention.
+    //
+    // The transport is unchanged: same endpoint, same nonce, same single-use
+    // token, same response contract. Only the construction of the payload
+    // differs, so this widens nothing a page can reach.
+    window.capySubmit = (payload) => post(payload, null);
   </script>
 </body>
 </html>`;

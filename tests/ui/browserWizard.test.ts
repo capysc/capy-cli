@@ -103,4 +103,85 @@ describe('runBrowserWizard loopback server', () => {
     expect((await ok.json()).done).toBe(true);
     expect(await done).toEqual({ x: 'v' });
   });
+
+  test('a screen may submit a structured payload, not just flat form fields', async () => {
+    // The reason `window.capySubmit` exists. FormData flattens to string keys
+    // and string values, so a step whose answer is a decision per variable —
+    // the conflict resolver — or an array of name/value pairs — secret intake
+    // — could only travel by encoding structure into field NAMES and having
+    // the reducer parse it back out. This asserts the reducer receives the
+    // shape the screen sent, nested and typed, over the same endpoint.
+    let url = '';
+    let received: Record<string, unknown> | undefined;
+    const done = runBrowserWizard(
+      {
+        title: 'Resolve conflicts',
+        firstScreen: { html: '<div id="resolver"></div>' },
+        open: false,
+        onListen: (u) => (url = u),
+      },
+      async (_step, payload) => {
+        received = payload;
+        return { done: true, result: payload };
+      },
+    );
+
+    const u = new URL(await waitForUrl(() => url));
+    const base = `http://127.0.0.1:${u.port}`;
+    const nonce = u.searchParams.get('n') ?? '';
+
+    const structured = {
+      resolutions: [
+        { key: 'STRIPE_KEY', take: 'remote' },
+        { key: 'DATABASE_URL', take: 'local' },
+      ],
+      applyToAll: false,
+      count: 2,
+    };
+    const res = await fetch(`${base}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce, payload: structured }),
+    });
+    expect((await res.json()).done).toBe(true);
+    await done;
+
+    // Arrays stay arrays, booleans stay booleans, numbers stay numbers — none
+    // of which survives a FormData round trip.
+    expect(received).toEqual(structured);
+    expect(Array.isArray((received as { resolutions: unknown }).resolutions)).toBe(true);
+    expect((received as { applyToAll: unknown }).applyToAll).toBe(false);
+    expect((received as { count: unknown }).count).toBe(2);
+  });
+
+  test('the page exposes capySubmit and still serializes plain forms', async () => {
+    // Both entry points must be present: the JSON path is additive, and every
+    // hand-written screen on this branch is a form.
+    let url = '';
+    const done = runBrowserWizard(
+      {
+        title: 'Both paths',
+        firstScreen: { html: '<form><button type="submit">go</button></form>' },
+        open: false,
+        onListen: (u) => (url = u),
+      },
+      async () => ({ done: true, result: {} }),
+    );
+
+    const html = await (await fetch(await waitForUrl(() => url))).text();
+    expect(html).toContain('window.capySubmit');
+    // The delegated form handler survives — it is what the existing screens use.
+    expect(html).toContain('new FormData(form)');
+    // One transport, not two: both paths reach the same POST, so the nonce and
+    // the response contract cannot drift apart per screen technology.
+    expect(html.match(/fetch\('\/submit'/g) ?? []).toHaveLength(1);
+
+    const u = new URL(url);
+    await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce: u.searchParams.get('n'), payload: {} }),
+    });
+    await done;
+  });
 });
