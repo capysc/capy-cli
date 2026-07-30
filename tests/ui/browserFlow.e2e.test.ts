@@ -19,7 +19,7 @@
  * still runs its suite. Install one with:
  *   bunx @puppeteer/browsers install chrome-headless-shell@stable
  */
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect, afterAll, afterEach, beforeAll } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -52,10 +52,43 @@ async function evaluate<T>(page: CdpSession, expression: string): Promise<T> {
   return res.result?.value as T;
 }
 
-/** Poll a predicate in the page until it holds, or fail loudly. */
+/**
+ * Evaluate something whose whole purpose is to navigate the page.
+ *
+ * `Runtime.evaluate` is bound to a target, and a target that navigates while a
+ * call is pending kills it with "Inspected target navigated or closed". For an
+ * expression that awaits a submit and then reloads, that error IS the success
+ * path — the step advanced. What arrived next is the following poll's job to
+ * say; nothing is asserted from the return value here.
+ */
+async function evaluateThatNavigates(page: CdpSession, expression: string): Promise<void> {
+  try {
+    await evaluate(page, expression);
+  } catch {
+    /* the navigation is the point */
+  }
+}
+
+/**
+ * Poll a predicate in the page until it holds, or fail loudly.
+ *
+ * A poll that spans a NAVIGATION has to survive one, and every standalone step
+ * advances by reloading: an evaluation issued while the target is swapping
+ * documents comes back as a CDP error rather than as `false`, and treating that
+ * as a failure made these tests flake on exactly the transition they exist to
+ * check. A poll that cannot read the page has not seen the predicate hold, so
+ * it waits — and a predicate that never holds still fails, by timing out with
+ * the same message it always did.
+ */
 async function until(page: CdpSession, expression: string, what: string): Promise<void> {
   for (let i = 0; i < 200; i++) {
-    if (await evaluate<boolean>(page, `!!(${expression})`)) return;
+    let held = false;
+    try {
+      held = await evaluate<boolean>(page, `!!(${expression})`);
+    } catch {
+      held = false;
+    }
+    if (held) return;
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error(`timed out waiting for ${what}`);
@@ -222,11 +255,13 @@ describeBrowser('browser flow, driven by a real browser', () => {
     expect(await evaluate<string>(page, `document.getElementById('h').textContent`)).toBe('STEP ONE');
     expect(await evaluate<boolean>(page, `!document.getElementById('screen')`)).toBe(true);
 
-    // Answering reloads, and the same URL yields the NEXT step.
-    await evaluate(page, `window.answer()`);
+    // Answering reloads, and the same URL yields the NEXT step. The reload is
+    // what this call is for, so the evaluation being cut short by it is the
+    // expected outcome rather than a failure.
+    await evaluateThatNavigates(page, `window.answer()`);
     await until(page, `document.getElementById('h') && document.getElementById('h').textContent === 'STEP TWO'`, 'step two');
 
-    await evaluate(page, `window.answer()`);
+    await evaluateThatNavigates(page, `window.answer()`);
     expect(await done).toEqual({ finished: true });
   }, 60_000);
 
@@ -563,5 +598,315 @@ describeBrowser('capy checkout, driven by a real browser', () => {
     );
 
     await done.catch(() => undefined);
+  }, 60_000);
+});
+
+describeBrowser('org and onboarding, driven by a real browser', () => {
+  /**
+   * ONE headless shell for the whole block, with a fresh tab per test.
+   *
+   * The blocks above launch and kill a browser per test, which is fine at four
+   * tests and starts costing seconds and the occasional early-exit at sixteen —
+   * the profile directory is removed the instant SIGTERM is sent, so a shell
+   * that has not finished shutting down is racing a deletion. Nothing here
+   * needs a clean profile: these pages are loopback documents with no storage,
+   * no cookies and no service worker, and each test navigates a tab it opened
+   * itself.
+   */
+  let browser: Browser | null = null;
+  let session: CdpSession | null = null;
+  let profile = '';
+
+  beforeAll(async () => {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+  });
+
+  afterEach(() => {
+    session?.close();
+    session = null;
+  });
+
+  afterAll(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    const page = await browser!.newPage(1280, 820);
+    session = page;
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /**
+   * Type into a field the way a person does.
+   *
+   * Assigning `.value` alone is invisible to the screen: `bind:value` listens
+   * for `input`, so a test that only sets the property proves the CLI can read
+   * a field nobody could have filled in.
+   */
+  const type = (selector: string, value: string): string =>
+    `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  /** Click the button whose visible text contains `text`. */
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  /** Click the option row whose label is exactly `label`. */
+  const clickOption = (label: string): string =>
+    `[...document.querySelectorAll('[role=radio]')]
+       .find(el => el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)}).click()`;
+
+  /** Uncover the phrase grid and tick the write-it-down consent. */
+  const REVEAL = `document.querySelector('.reveal').click()`;
+  const CONSENT = `document.querySelector('[role=checkbox]').click()`;
+
+  test('local setup: the phrase is covered, gated, and never sent back', async () => {
+    // The flow the whole browser path exists for. Three things are checked
+    // here that no fetch-driven test can see: the grid really is covered on
+    // load, the consent really is held closed until it has been uncovered, and
+    // the words the page renders are the words the CLI derives the key from.
+    const { runLocalOnboardingWeb } = await import('../../src/ui/onboardingWeb');
+    let url = '';
+    let finalized: { phrase: string; passphrase: string } | null = null;
+    const done = runLocalOnboardingWeb(
+      (phrase, passphrase) => (finalized = { phrase, passphrase }),
+      {
+        open: false,
+        bodyLines: ['IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!'],
+        onListen: (u) => (url = u),
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The route is drawn whole before anything is answered — including the
+    // write-it-down step, which is the one you want to know about while there
+    // is still time to find a pen.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Recovery phrase')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Passphrase')`)).toBe(true);
+
+    await evaluate(page, clickButton('Show recovery phrase'));
+    await until(page, `document.querySelector('.reveal')`, 'the covered phrase grid');
+
+    // Covered: the words are in the document but not on offer, and the consent
+    // cannot be ticked until they have been read.
+    expect(await evaluate<string>(page, `document.querySelector('.words').getAttribute('aria-hidden')`)).toBe('true');
+    expect(await evaluate<boolean>(page, `document.querySelector('[role=checkbox]').disabled`)).toBe(true);
+
+    const words = await evaluate<string[]>(page, `window.__CAPY_DATA__.phraseWords`);
+    expect(words).toHaveLength(24);
+
+    await evaluate(page, REVEAL);
+    await evaluate(page, CONSENT);
+    await evaluate(page, clickButton('Set a passphrase'));
+
+    await until(page, `document.getElementById('pp2')`, 'the passphrase step');
+    // Stop one is settled on the rail and the words are gone from the page.
+    expect(await evaluate<unknown>(page, `window.__CAPY_DATA__.phraseWords`)).toBeUndefined();
+
+    await evaluate(page, type('#pp', 'correct-horse-battery'));
+    await evaluate(page, type('#pp2', 'correct-horse-battery'));
+    await evaluate(page, clickButton('Finish setup'));
+
+    expect(await done).toBe(true);
+    expect(finalized!.phrase).toBe(words.join(' '));
+    expect(finalized!.passphrase).toBe('correct-horse-battery');
+  }, 60_000);
+
+  test('creating an organization: both stops walked, phrase confirmed by a boolean', async () => {
+    const { createOrganizationInBrowser } = await import('../../src/ui/onboardingWeb');
+    let url = '';
+    const phrase = Array.from({ length: 24 }, (_, i) => `word${i + 1}`).join(' ');
+    const done = createOrganizationInBrowser({
+      phrase,
+      bodyLines: ['Capy is a ZERO TRUST secrets platform.'],
+      learnMoreUrl: 'https://capy.sc/zero-trust',
+      maxNameLength: 100,
+      checkName: async (n) => (n === 'Acme' ? 'taken' : 'available'),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // A name the server refuses comes back as this same step, carrying the
+    // name so it can be edited rather than retyped — and the phrase is still
+    // nowhere on the page.
+    await evaluate(page, type('.field input', 'Acme'));
+    await evaluate(page, clickButton('Show recovery phrase'));
+    await until(page, `document.body.textContent.includes('already taken')`, 'the collision');
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('word1')`)).toBe(false);
+
+    await evaluate(page, type('.field input', 'Acme Labs'));
+    await evaluate(page, clickButton('Show recovery phrase'));
+    await until(page, `document.querySelector('.reveal')`, 'the phrase step');
+
+    await evaluate(page, REVEAL);
+    await until(page, `document.body.textContent.includes('word24')`, 'all 24 words');
+    await evaluate(page, CONSENT);
+    await evaluate(page, clickButton('Create organization'));
+
+    expect(await done).toEqual({ name: 'Acme Labs', cancelled: false });
+  }, 60_000);
+
+  test('capy org: a row with no key on this machine cannot be picked', async () => {
+    // The terminal picker offers it, re-scopes the session, prints
+    // `Organization: acme`, and only then discovers there is no key. Here the
+    // row says so and refuses to be chosen.
+    const { switchOrganizationInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = switchOrganizationInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: 'o1',
+      orgs: [
+        { id: 'o1', name: 'mikes-market', hasLocalKey: true },
+        { id: 'o2', name: 'northwind', hasLocalKey: true },
+        { id: 'o3', name: 'acme', hasLocalKey: false },
+      ],
+      hasKeepLock: false,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      onOrgChosen: async () => ({ ok: true, projects: [{ id: 'p1', name: 'storefront' }] }),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // Opens on the org this directory is already pinned to, so the button
+    // starts held down: "switch to where you already are" is not a switch.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Switch organization')).disabled`,
+      ),
+    ).toBe(true);
+    expect(
+      await evaluate<string>(
+        page,
+        `[...document.querySelectorAll('[role=radio]')]
+           .find(el => el.querySelector('.label').textContent.trim() === 'acme')
+           .getAttribute('aria-disabled')`,
+      ),
+    ).toBe('true');
+    // And it says why, rather than leaving a dead row.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('No encryption key for this organization')`),
+    ).toBe(true);
+
+    await evaluate(page, clickOption('northwind'));
+    await evaluate(page, clickButton('Switch organization'));
+
+    await until(page, `document.body.textContent.includes('storefront')`, 'the project stop');
+    await evaluate(page, clickOption('storefront'));
+    await evaluate(page, clickButton('Switch project'));
+
+    expect(await done).toEqual({
+      action: 'select-project',
+      orgId: 'o2',
+      projectId: 'p1',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('capy byoc: a failed probe says which failure it was, then the run recovers', async () => {
+    // The terminal prints `connection failed (ENOTFOUND)` and asks for a URL
+    // again. ENOTFOUND, ECONNREFUSED and a timeout are three problems with
+    // three fixes, and the prompt treats them as one.
+    const { connectByocInBrowser } = await import('../../src/ui/byocScreens');
+    let url = '';
+    const done = connectByocInBrowser({
+      defaultUrl: 'https://capy.internal',
+      urlSource: 'builtin',
+      suggestName: () => 'acme',
+      existingProfiles: [],
+      probe: async (u) =>
+        u.includes('acme')
+          ? { url: u, code: 'ok', reason: 'found (capy service detected)' }
+          : {
+              url: u,
+              code: 'connection_failed',
+              reason: 'connection failed (ENOTFOUND)',
+              transportCode: 'ENOTFOUND',
+            },
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The built-in guess is named as a guess. The terminal probes it without
+    // ever saying that is what it is doing.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('built-in guess')`)).toBe(true);
+
+    await evaluate(page, clickButton('Verify'));
+    await until(page, `document.body.textContent.includes('did not resolve')`, 'the named failure');
+    // The CLI's own sentence is quoted rather than paraphrased away.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('connection failed (ENOTFOUND)')`),
+    ).toBe(true);
+
+    await evaluate(page, type('.field input', 'capy.acme.com'));
+    await evaluate(page, clickButton('Try again'));
+
+    await until(page, `document.body.textContent.includes('Name this profile')`, 'the name step');
+    await evaluate(page, clickButton('Save profile'));
+
+    expect(await done).toMatchObject({
+      url: 'https://capy.acme.com',
+      profileName: 'acme',
+      replaced: false,
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('the local passphrase: a wrong one offers the field again', async () => {
+    // The terminal turns a wrong passphrase into a typed error and the command
+    // dies; at three of its five call sites the words "Incorrect passphrase."
+    // never reach the user at all.
+    const { unlockPassphraseInBrowser } = await import('../../src/ui/onboardingWeb');
+    let url = '';
+    const done = unlockPassphraseInBrowser(
+      (pass) => (pass === 'right-one' ? { ok: true, masterKeyHex: 'deadbeef' } : { ok: false }),
+      {
+        triggeredBy: 'run',
+        triggerCommand: 'capy run -- npm start',
+        projectName: 'mikes-market',
+        lockedBy: 'idle',
+        idleTimeoutMs: 3_600_000,
+        open: false,
+        onListen: (u) => (url = u),
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+
+    // It says who is asking and why it is asking again — neither of which the
+    // bare `Enter your local passphrase:` prompt can.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('put your secrets in the environment')`),
+    ).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('idle timer')`)).toBe(true);
+
+    await evaluate(page, type('.passphrase-field input', 'wrong-one'));
+    await evaluate(page, clickButton('Unlock'));
+    await until(page, `document.body.textContent.includes('Incorrect passphrase')`, 'the refusal');
+
+    // Still the same step, with the field live again.
+    expect(await evaluate<boolean>(page, `!!document.querySelector('.passphrase-field input')`)).toBe(true);
+
+    await evaluate(page, type('.passphrase-field input', 'right-one'));
+    await evaluate(page, clickButton('Unlock'));
+
+    expect(await done).toBe('deadbeef');
   }, 60_000);
 });
