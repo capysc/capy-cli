@@ -111,3 +111,27 @@ Cross-command journeys (init → connect → deploy) are Phase 3, not a parcel.
 - UI source lives in the monorepo (`packages/ui`), not here. This repo carries
   only the compiled `generated.ts`. If a screen needs changing, change it there
   and run `bun run sync-assets` from the monorepo root.
+
+## Post-merge: the argv wiring (coordinator)
+
+`--web` is declared ONCE, on the root program (`src/index.ts:53`), so Commander
+binds it to the global scope. A subcommand reading `options.web` always gets
+`undefined`; it has to read `command.optsWithGlobals().web`. Two call sites
+already do this and say so in a comment — `capy add` at :690, and the `force`
+merge in `connect` at :719 — but no other subcommand threads it.
+
+The effect is worse than a missing feature: `capy connect --web` PARSES, is
+silently ignored, and hands an agent a TTY prompt it cannot answer with no
+indication why. Every reviewer that looked for it flagged it.
+
+This must land AFTER the parcels merge, not before: the wiring calls signatures
+the parcels introduce (`ConnectCommand.list({ web })` does not exist until
+`web/connectors` lands). Attempting it early fails the typecheck, which is how
+this note came to be written.
+
+Checklist when the parcels are in — for each command with a converted flow:
+
+    web: command.optsWithGlobals().web === true
+
+and a test that asserts the flag actually reaches the command's options, since
+the failure mode here is silence rather than an error.
