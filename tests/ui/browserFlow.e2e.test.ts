@@ -41,6 +41,9 @@ async function waitForUrl(getUrl: () => string): Promise<string> {
   return getUrl();
 }
 
+/** The expression threw INSIDE the page, as opposed to the call failing. */
+class PageThrew extends Error {}
+
 /** Evaluate an expression in the page and return its JSON value. */
 async function evaluate<T>(page: CdpSession, expression: string): Promise<T> {
   const res = (await page.send('Runtime.evaluate', {
@@ -48,7 +51,10 @@ async function evaluate<T>(page: CdpSession, expression: string): Promise<T> {
     awaitPromise: true,
     returnByValue: true,
   })) as { result?: { value?: T }; exceptionDetails?: { text?: string } };
-  if (res.exceptionDetails) throw new Error(res.exceptionDetails.text ?? 'page threw');
+  // `exceptionDetails` means the EXPRESSION threw inside the page — a distinct
+  // fact from `page.send` rejecting, which means the target went away. `until`
+  // treats them differently and must not have to read a message to tell.
+  if (res.exceptionDetails) throw new PageThrew(res.exceptionDetails.text ?? 'page threw');
   return res.result?.value as T;
 }
 
@@ -77,21 +83,37 @@ async function evaluateThatNavigates(page: CdpSession, expression: string): Prom
  * documents comes back as a CDP error rather than as `false`, and treating that
  * as a failure made these tests flake on exactly the transition they exist to
  * check. A poll that cannot read the page has not seen the predicate hold, so
- * it waits — and a predicate that never holds still fails, by timing out with
- * the same message it always did.
+ * it waits — and a predicate that never holds still fails, by timing out.
+ *
+ * What it must not do is go blind. Swallowing everything made a genuine
+ * page-side error — a selector that returned null, a component that never
+ * mounted, a getter that threw — indistinguishable from a slow page, leaving a
+ * five-second timeout and a generic sentence as the only signal. So the two are
+ * told apart STRUCTURALLY, never by matching CDP's wording: a page-side throw
+ * arrives as `exceptionDetails` on an otherwise successful evaluation, and a
+ * target that navigated mid-call arrives as a protocol error on the call
+ * itself. The last page-side exception is carried into the timeout, which is
+ * where a human is looking anyway.
  */
 async function until(page: CdpSession, expression: string, what: string): Promise<void> {
+  let lastPageError: string | undefined;
   for (let i = 0; i < 200; i++) {
     let held = false;
     try {
       held = await evaluate<boolean>(page, `!!(${expression})`);
-    } catch {
+    } catch (err) {
+      // A page-side throw is a fact about the page and is kept; a protocol
+      // failure is the navigation this poll exists to survive.
+      if (err instanceof PageThrew) lastPageError = err.message;
       held = false;
     }
     if (held) return;
     await new Promise((r) => setTimeout(r, 25));
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw new Error(
+    `timed out waiting for ${what}` +
+      (lastPageError ? ` — the page kept throwing: ${lastPageError}` : ''),
+  );
 }
 
 describeBrowser('browser flow, driven by a real browser', () => {
@@ -669,6 +691,20 @@ describeBrowser('org and onboarding, driven by a real browser', () => {
   const REVEAL = `document.querySelector('.reveal').click()`;
   const CONSENT = `document.querySelector('[role=checkbox]').click()`;
 
+  /**
+   * One row of the rail, by the label the CLI put on it.
+   *
+   * The rail is a `<nav class="route">` of `<li class="{state}">` (Trainstops),
+   * so the row's class IS the claim the payload made about that stop and its
+   * text is what the reader is told: `← you are here` on the current stop,
+   * `not needed` on a skipped one, the answer on a done one.
+   */
+  const railRow = (label: string): string =>
+    `[...document.querySelectorAll('nav.route li')]
+       .find(li => li.querySelector('.label').textContent.trim() === ${JSON.stringify(label)})`;
+  const railClass = (label: string): string => `${railRow(label)}.className`;
+  const railText = (label: string): string => `${railRow(label)}.textContent`;
+
   test('local setup: the phrase is covered, gated, and never sent back', async () => {
     // The flow the whole browser path exists for. Three things are checked
     // here that no fetch-driven test can see: the grid really is covered on
@@ -867,6 +903,220 @@ describeBrowser('org and onboarding, driven by a real browser', () => {
       replaced: false,
       cancelled: false,
     });
+  }, 60_000);
+
+  test('capy byoc: a failed probe takes the rail back to the address with the page', async () => {
+    // THE RAIL DEFECT, in the browser that showed it. `capy byoc <host> --web`
+    // with the host mistyped — the commonest path this flow has — used to serve
+    // the address question with a rail beside it reading `● Server URL
+    // https://nope.invalid`, `● Verify ← you are here`, `● Certificate not
+    // needed`: three false statements at once, the last of them struck through
+    // on the strength of a probe that never completed a handshake.
+    const { connectByocInBrowser } = await import('../../src/ui/byocScreens');
+    let url = '';
+    const done = connectByocInBrowser({
+      defaultUrl: 'https://nope.invalid',
+      urlSource: 'argv',
+      suggestName: () => 'acme',
+      existingProfiles: [],
+      probe: async (u) =>
+        u.includes('acme')
+          ? { url: u, code: 'ok', reason: 'found (capy service detected)' }
+          : {
+              url: u,
+              code: 'connection_failed',
+              reason: 'connection failed (ENOTFOUND)',
+              transportCode: 'ENOTFOUND',
+            },
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickButton('Verify'));
+    await until(page, `document.body.textContent.includes('did not resolve')`, 'the named failure');
+
+    // Back on the address question — and so is the rail.
+    expect(await evaluate<string>(page, railClass('Server URL'))).toContain('current');
+    expect(await evaluate<string>(page, railText('Server URL'))).not.toContain('nope.invalid');
+    expect(await evaluate<string>(page, railText('Verify'))).not.toContain('you are here');
+    expect(await evaluate<string>(page, railText('Certificate'))).not.toContain('not needed');
+    // A route has one traveller: exactly one station may say where they are.
+    expect(
+      await evaluate<number>(
+        page,
+        `document.querySelectorAll('nav.route li .here').length`,
+      ),
+    ).toBe(1);
+
+    // And an address that IS accepted still settles: the fix is a rail that
+    // follows the run, not a rail that never commits.
+    await evaluate(page, type('.field input', 'capy.acme.com'));
+    await evaluate(page, clickButton('Try again'));
+    await until(page, `document.body.textContent.includes('Name this profile')`, 'the name step');
+    expect(await evaluate<string>(page, railText('Server URL'))).toContain('https://capy.acme.com');
+    expect(await evaluate<string>(page, railClass('Verify'))).toContain('done');
+    // The certificate never came up, and only now is that a settled fact.
+    expect(await evaluate<string>(page, railText('Certificate'))).toContain('not needed');
+
+    await evaluate(page, clickButton('Save profile'));
+    expect(await done).toMatchObject({ url: 'https://capy.acme.com', cancelled: false });
+  }, 60_000);
+
+  test('capy org: a refusal the terminal bolded reaches the page as words, not escapes', async () => {
+    // `firstProjectRefusal` writes its sentence with `\x1b[1m…\x1b[0m` because
+    // the TTY path raises the same string as a CapyError in a scrollback. Handed
+    // to a browser unchanged, the page rendered `a project in [1mnorthwind[0m
+    // would make those values unreadable.` — reachable whenever the chosen org
+    // has no projects and this directory's .env holds an encrypted value.
+    const { switchOrganizationInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = switchOrganizationInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: 'o1',
+      orgs: [
+        { id: 'o1', name: 'mikes-market', hasLocalKey: true },
+        { id: 'o2', name: 'northwind', hasLocalKey: true },
+      ],
+      hasKeepLock: false,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      onOrgChosen: async () => ({
+        ok: false,
+        reason:
+          'This directory is bound to another project and its .env contains 2 encrypted value(s).\n\n' +
+          '  Binding it to a project in \x1b[1mnorthwind\x1b[0m would make those values unreadable.',
+      }),
+      open: false,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('northwind'));
+    await evaluate(page, clickButton('Switch organization'));
+    await until(
+      page,
+      `document.body.textContent.includes('would make those values unreadable')`,
+      'the refusal to reach the page',
+    );
+
+    const text = await evaluate<string>(page, `document.body.textContent`);
+    expect(text).not.toContain('\x1b');
+    expect(text).not.toContain('[1m');
+    expect(text).not.toContain('[0m');
+    // The sentence survives whole; only the formatting is gone.
+    expect(text).toContain('a project in northwind would make those values unreadable');
+
+    // Still the organization step, so another row is one click away.
+    expect(
+      await evaluate<boolean>(page, `!!document.querySelector('[role=radio]')`),
+    ).toBe(true);
+    await evaluate(page, clickButton('Cancel'));
+    await done.catch(() => undefined);
+  }, 60_000);
+
+  test('capy org in a directory that already has a keep.lock draws no rail', async () => {
+    // THE PRODUCTION DEFAULT, pinned because it is the case the other org test
+    // does not cover. `hasKeepLock: true` is what `capy org` ships from any
+    // directory that has been initialised, and the screen's `showStops`
+    // (packages/ui switch-organization/Screen.svelte) is `mode === 'init' ||
+    // onCreateRoute || (mode === 'switch' && hasKeepLock === false)`, so the
+    // five stops the CLI computed are discarded before they are drawn.
+    //
+    // CAP-316's reasoning is that a switch onto an existing org is one decision
+    // — but this CLI still asks for a project afterwards either way, so the
+    // route is two stops and the traveller is shown none of it. The CLI half is
+    // right (the payload below carries all five) and the fix belongs in the
+    // screen, which this parcel may not edit. WHEN THAT SCREEN CHANGES, this
+    // assertion is the one to update: it is here so the gap cannot ship quietly
+    // a second time.
+    const { switchOrganizationInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = switchOrganizationInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: 'o1',
+      orgs: [
+        { id: 'o1', name: 'mikes-market', hasLocalKey: true },
+        { id: 'o2', name: 'northwind', hasLocalKey: true },
+      ],
+      hasKeepLock: true,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      onOrgChosen: async () => ({ ok: true, projects: [{ id: 'p1', name: 'storefront' }] }),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The command computed the whole route…
+    expect(
+      await evaluate<number>(page, `window.__CAPY_DATA__.stops.length`),
+    ).toBe(5);
+    expect(await evaluate<boolean>(page, `window.__CAPY_DATA__.hasKeepLock`)).toBe(true);
+    // …and the screen drew none of it.
+    expect(
+      await evaluate<number>(page, `document.querySelectorAll('nav.route li').length`),
+    ).toBe(0);
+
+    // Both questions are still asked and still answerable, rail or no rail.
+    await evaluate(page, clickOption('northwind'));
+    await evaluate(page, clickButton('Switch organization'));
+    await until(page, `document.body.textContent.includes('storefront')`, 'the project stop');
+    await evaluate(page, clickOption('storefront'));
+    await evaluate(page, clickButton('Switch project'));
+
+    expect(await done).toEqual({
+      action: 'select-project',
+      orgId: 'o2',
+      projectId: 'p1',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('naming the first project: the create route just walked is behind you', async () => {
+    // This window opens straight after Name → Recovery phrase → Create. The
+    // route was built from the org name alone, so all three stops arrived
+    // `skipped` — the rail telling somebody who had written down 24 words a
+    // minute earlier that the step was "not needed".
+    //
+    // It also cost the rail entirely. The screen's `onCreateRoute` reads the
+    // payload back on any view past the picker — "a create-only stop that is
+    // not `skipped` means this run went that way" — so three skipped stops plus
+    // this directory's keep.lock left `showStops` false and no rail at all.
+    const { nameFirstProjectInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = nameFirstProjectInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: undefined,
+      orgs: [{ id: 'new', name: 'northwind', hasLocalKey: true }],
+      hasKeepLock: true,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      orgId: 'new',
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(
+      await evaluate<number>(page, `document.querySelectorAll('nav.route li').length`),
+    ).toBeGreaterThan(0);
+    for (const label of ['Name', 'Recovery phrase', 'Create']) {
+      expect(await evaluate<string>(page, railClass(label))).toContain('done');
+      expect(await evaluate<string>(page, railText(label))).not.toContain('not needed');
+    }
+    // The one stop left is the question on screen.
+    expect(await evaluate<string>(page, railClass('Project'))).toContain('current');
+    // The phrase stop still carries the consent and nothing else — never words.
+    expect(await evaluate<string>(page, railText('Recovery phrase'))).toContain('written down');
+
+    await evaluate(page, type('.field input', 'storefront'));
+    await evaluate(page, clickButton('Create project'));
+    expect(await done).toBe('storefront');
   }, 60_000);
 
   test('the local passphrase: a wrong one offers the field again', async () => {

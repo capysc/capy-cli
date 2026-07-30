@@ -71,7 +71,14 @@ export interface ByocState {
   bundleRequested?: boolean;
   /** The last path typed, prefilled so a typo is edited rather than retyped. */
   typedBundlePath?: string;
-  /** The user declined the bundle offer, so the cert question is behind us. */
+  /**
+   * The certificate offer is spent for this address.
+   *
+   * Two ways to spend it, both ending at the same place — the address question.
+   * The user declined it, or they accepted and the bundle they named was
+   * readable and still did not chain, which is the terminal's own conclusion
+   * that the address (or the instance) is the problem rather than the path.
+   */
   declinedBundle?: boolean;
   verified?: boolean;
   profileName?: string;
@@ -110,6 +117,27 @@ const NON_TTY: ByocConnectData['nonTty'] = {
   why: 'The address is a positional argument. The profile name and any CA bundle have no flags at all, so a run with nowhere to ask has nothing to fall back on and refuses rather than naming a profile for you.',
 };
 
+/**
+ * What this run has learned about the instance's certificate, in three states.
+ *
+ * A handshake that COMPLETED is the only thing that answers the question.
+ * `connection_failed`, `http_status`, `not_json` and `not_capy` all happened
+ * without a certificate ever being judged — the name did not resolve, nothing
+ * was listening, the thing that answered was not Capy — so they say nothing
+ * about one, and answering `false` for them is what struck `Certificate — not
+ * needed` through the rail on the strength of a probe that never got that far.
+ *
+ * `ca_unreadable` only ever follows an untrusted certificate: it is produced
+ * when a bundle offered FOR one could not be opened, so the question is still
+ * very much open.
+ */
+function certVerdict(probe: ByocState['probe']): boolean | undefined {
+  if (!probe) return undefined;
+  if (probe.code === 'ok') return false;
+  if (probe.code === 'tls_untrusted' || probe.code === 'ca_unreadable') return true;
+  return undefined;
+}
+
 export function buildByocConnectData(
   p: WebByocParams & { state?: ByocState },
   nonce: string,
@@ -117,18 +145,29 @@ export function buildByocConnectData(
   const s = p.state ?? {};
   const view = byocView(s);
   const url = s.url ?? p.defaultUrl;
+  /**
+   * Whether the address this run is working from is SETTLED.
+   *
+   * Everything a probe answered belongs to the address that produced it. While
+   * the flow is standing back on the address question — the probe failed, or
+   * the certificate offer was declined — that address is not an answer, and
+   * neither is anything downstream of it. The rail goes back with the page
+   * instead of keeping a tick against a question being asked again.
+   */
+  const settled = view !== 'url';
 
   return {
     nonce,
     step: view,
     stops: byocConnectPlan({
-      url: s.url,
+      url: settled ? s.url : undefined,
       urlFromArgv: s.urlFromArgv ?? p.urlSource === 'argv',
       verified: s.verified,
-      // Undefined until a probe has run: the rail draws that stop as a blank
-      // it still needs an answer for, rather than promising to skip it.
-      certUntrusted: s.probe ? s.probe.code === 'tls_untrusted' : undefined,
-      caBundle: s.caBundle || undefined,
+      // Undefined until something has actually judged a certificate: the rail
+      // draws that stop as a blank it still needs an answer for, rather than
+      // promising to skip it.
+      certUntrusted: settled ? certVerdict(s.probe) : undefined,
+      caBundle: (settled && s.caBundle) || undefined,
       profileName: s.profileName,
     }),
     defaultUrl: url,
@@ -181,9 +220,15 @@ export async function connectByocInBrowser(p: WebByocParams): Promise<WebByocRes
     if (caBundle !== undefined && outcome.code !== 'ca_unreadable') {
       // The path was readable and still did not chain, so the answer is not a
       // better path — the address or the instance is the problem. Back to the
-      // URL question, which is where the terminal lands too.
+      // URL question, which is where the terminal lands too: its loop only
+      // offers `promptForCaBundle` while `!caBundle`, so a second failure with
+      // one in hand falls straight through to `promptForUrl`.
+      //
+      // Both flags, or `byocView` reads `tls_untrusted` with neither set and
+      // asks "trust it via a CA bundle?" all over again — the one question
+      // this run has already answered twice.
       state.bundleRequested = false;
-      state.declinedBundle = false;
+      state.declinedBundle = true;
     }
   };
 

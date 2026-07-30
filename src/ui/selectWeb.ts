@@ -42,6 +42,19 @@ export interface SelectWebOptions {
 const esc = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+/**
+ * Strip terminal colour codes on the way into a payload.
+ *
+ * The refusals this file hands back are sentences the CLI wrote for a terminal
+ * — `firstProjectRefusal` bolds the organization name with `\x1b[1m…\x1b[0m`
+ * so it stands out in a scrollback — and a payload is not a terminal. Left in,
+ * the page renders `Binding it to a project in [1mnorthwind[0m would make
+ * those values unreadable.` Applied at the boundary rather than at the source
+ * because the source is shared: the TTY path raises the same sentence as a
+ * CapyError, where the bold is the point.
+ */
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
 /** A CSS colour that follows the OS theme: light value first, dark value second. */
 const ld = (light: string, dark: string): string => `light-dark(${light},${dark})`;
 const MONO = 'ui-monospace,SFMono-Regular,Menlo,monospace';
@@ -149,7 +162,9 @@ export async function promptTextInBrowser(
     async (_step, payload) => {
       const value = typeof payload.value === 'string' ? payload.value.trim() : '';
       const verdict = params.validate ? await params.validate(value) : (value ? true : 'This field is required.');
-      if (verdict !== true) return { error: verdict };
+      // The validator belongs to the caller and may well have formatted its
+      // refusal for a terminal.
+      if (verdict !== true) return { error: stripAnsi(verdict) };
       return { done: true, result: value };
     },
   );
@@ -229,7 +244,18 @@ function switchOrgView(s: SwitchOrgState): SwitchOrgView {
 }
 
 export function buildSwitchOrganizationData(
-  p: OrgScreenFacts & { state?: SwitchOrgState },
+  p: OrgScreenFacts & {
+    state?: SwitchOrgState;
+    /**
+     * This window opened AFTER the create route was walked — the organization
+     * was named, its recovery phrase was written down, and it exists.
+     *
+     * Without it the rail on the very next screen strikes those three stops
+     * through as "not needed", which is the route describing a different run
+     * than the one that just happened.
+     */
+    created?: boolean;
+  },
   nonce: string,
 ): SwitchOrganizationData {
   const s = p.state ?? {};
@@ -243,7 +269,7 @@ export function buildSwitchOrganizationData(
     currentOrgId: p.currentOrgId,
     orgs: p.orgs,
     allowCreate: true,
-    stops: orgSwitchPlan({ orgName: chosen?.name }),
+    stops: orgSwitchPlan({ orgName: chosen?.name, created: p.created }),
     createStopIds: ORG_CREATE_STOP_IDS,
     projects: view === 'project' ? s.projects : undefined,
     view,
@@ -321,7 +347,11 @@ export async function switchOrganizationInBrowser(
         }
 
         const outcome = await p.onOrgChosen(orgId);
-        if (!outcome.ok) return { error: outcome.reason };
+        // The reason is the CLI's own sentence, written for a scrollback: the
+        // first-project refusal bolds the organization name and the auth layer
+        // hands back whatever the service said. It reaches a browser here, so
+        // the escapes come off before it does.
+        if (!outcome.ok) return { error: stripAnsi(outcome.reason) };
         state.orgId = orgId;
         state.projects = outcome.projects;
         return { screen: { html: render(), standalone: true } };
@@ -389,7 +419,13 @@ export async function nameFirstProjectInBrowser(
       timeoutMs: p.timeoutMs,
       doneMessage: 'Named — back to your terminal.',
       renderFirst: (nonce) =>
-        renderScreen('switch-organization', buildSwitchOrganizationData({ ...p, state }, nonce)),
+        renderScreen(
+          'switch-organization',
+          // `created`, because this window is only ever served after the create
+          // route has been walked — the rail behind this question is history,
+          // not a branch this run declined.
+          buildSwitchOrganizationData({ ...p, state, created: true }, nonce),
+        ),
     },
     async (_step, payload) => {
       if (payload.__action === 'cancel') return { done: true, result: { name: null } };

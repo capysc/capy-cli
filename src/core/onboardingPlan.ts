@@ -41,8 +41,26 @@ export const ORG_CREATE_STOP_IDS = ['name', 'phrase', 'create'];
 export interface OrgSwitchInput {
   /** The organization chosen so far, by name. Undefined means unanswered. */
   orgName?: string;
-  /** The create-a-new-organization row was chosen instead of an existing org. */
+  /**
+   * The create-a-new-organization row is the one selected, and its three stops
+   * are ahead of this run.
+   *
+   * Applied client-side rather than here on the live picker: the CLI serves the
+   * list once and the screen re-labels `createStopIds` as the selection moves,
+   * because that transition happens between two renders the command never sees.
+   * The command's own use of this input is the moment the row is submitted.
+   */
   creating?: boolean;
+  /**
+   * The create route has been WALKED: the organization was named, its recovery
+   * phrase was shown and confirmed, and it exists.
+   *
+   * Distinct from `creating`, which puts those stops ahead of the traveller.
+   * `nameFirstProjectInBrowser` is served immediately after all three happened,
+   * and a rail that struck them through there would tell a user who had just
+   * written down 24 words that the step was "not needed".
+   */
+  created?: boolean;
   /** The project chosen (or named) so far. Undefined means unanswered. */
   projectName?: string;
 }
@@ -62,9 +80,10 @@ export interface OrgSwitchInput {
  * stop would be describing a command that does not exist yet.
  */
 export function orgSwitchPlan(input: OrgSwitchInput): Stop[] {
-  const orgAnswered = input.creating === true || (input.orgName ?? '') !== '';
+  const created = input.created === true;
+  const creating = input.creating === true && !created;
+  const orgAnswered = creating || created || (input.orgName ?? '') !== '';
   const projectAnswered = (input.projectName ?? '') !== '';
-  const creating = input.creating === true;
 
   const org: Stop = orgAnswered
     ? {
@@ -72,30 +91,38 @@ export function orgSwitchPlan(input: OrgSwitchInput): Stop[] {
         label: 'Organization',
         state: 'done',
         // The create row's own wording, verbatim from the screen's option list,
-        // so the rail names what was picked rather than paraphrasing it.
+        // so the rail names what was picked rather than paraphrasing it. Once
+        // the organization exists it has a name, and the name is the answer.
         answer: creating ? 'Create a new organization' : input.orgName!,
       }
     : { id: 'org', label: 'Organization', state: 'current' };
 
-  /** A create-only stop: struck through on the switch branch, live on create. */
-  const createStop = (id: string, label: string, state: Stop['state']): Stop => ({
+  /**
+   * A create-only stop, in one of its three lives: struck through on the switch
+   * branch, ahead of the traveller while the create row is merely selected, and
+   * behind them once the route has been walked.
+   */
+  const createStop = (id: string, label: string, answer?: string): Stop => ({
     id,
     label,
-    state: creating ? state : 'skipped',
+    state: created ? 'done' : creating ? 'upcoming' : 'skipped',
+    ...(created && answer ? { answer } : {}),
   });
 
   return [
     org,
-    createStop('name', 'Name', 'upcoming'),
-    createStop('phrase', 'Recovery phrase', 'upcoming'),
-    createStop('create', 'Create', 'upcoming'),
+    createStop('name', 'Name', input.orgName),
+    // No `answer` beyond the consent, ever: see `createOrgPlan`.
+    createStop('phrase', 'Recovery phrase', 'written down'),
+    createStop('create', 'Create', input.orgName),
     projectAnswered
       ? { id: 'project', label: 'Project', state: 'done', answer: input.projectName! }
       : {
           id: 'project',
           label: 'Project',
           // Only the first unanswered stop is where the traveller stands, and
-          // on the create branch three stations sit in front of this one.
+          // while the create branch is still ahead, three stations sit in front
+          // of this one. Once they are behind, this is where the run is.
           state: orgAnswered && !creating ? 'current' : 'upcoming',
         },
   ];
@@ -202,7 +229,16 @@ export function localOnboardingPlan(input: LocalOnboardingInput): Stop[] {
 // ---------------------------------------------------------------------------
 
 export interface ByocConnectInput {
-  /** The URL settled so far, normalized. */
+  /**
+   * The URL SETTLED so far, normalized.
+   *
+   * Settled, not attempted. A probe that failed puts the page back on the
+   * address question, and an address the run is standing on again is not an
+   * answer — the rail said `Server URL https://capy.internal` with a tick
+   * beside it while the field underneath was asking for the address a third
+   * time. The field keeps the text (it is edited, not retyped); the rail keeps
+   * only what was agreed.
+   */
   url?: string;
   /** It came from the argv positional rather than from a question. */
   urlFromArgv?: boolean;
@@ -211,10 +247,14 @@ export interface ByocConnectInput {
   /**
    * Whether this run has a certificate to answer for.
    *
-   * Three states on purpose. `undefined` is "no probe has run yet", which is
-   * not the same as "the certificate is fine": the stop is declared `blank`
-   * so the rail shows a station the plan still needs an answer for, rather
-   * than quietly promising it will be skipped.
+   * Three states on purpose, and the third is the load-bearing one.
+   * `undefined` is "nothing has learned anything about a certificate yet",
+   * which is not the same as "the certificate is fine": the stop is declared
+   * `blank` so the rail shows a station the plan still needs an answer for,
+   * rather than quietly promising it will be skipped. Only a completed
+   * handshake may pass `false` — a name that did not resolve, a refused
+   * connection or a /health that was not Capy never reached a certificate and
+   * so cannot strike that station through.
    */
   certUntrusted?: boolean;
   /** The CA bundle path settled so far. */
@@ -260,17 +300,21 @@ export function byocConnectPlan(input: ByocConnectInput): ByocStop[] {
     detail: 'name the authority that signed it',
     // Finding a root certificate on disk is work the user does outside Capy,
     // which is what a dotted track means.
-    manual: true,
-    state:
-      input.certUntrusted === false
+    state: input.caBundle
+      ? // A bundle that made the instance verify is an ANSWER to this stop, so
+        // it is read before the verdict that produced the question. The other
+        // order struck the station through and then hung the bundle path off
+        // it as the answer to a question it claimed was never asked.
+        'done'
+      : input.certUntrusted === false
         ? 'skipped'
-        : input.caBundle
-          ? 'done'
-          : input.certUntrusted === true
-            ? 'current'
-            : 'upcoming',
+        : input.certUntrusted === true
+          ? 'current'
+          : 'upcoming',
+    manual: true,
     ...(input.caBundle ? { answer: input.caBundle } : {}),
-    // Not yet probed: the plan needs an answer here and does not have one.
+    // Nothing has looked yet: the plan needs an answer here and does not have
+    // one. A failed probe that never reached a certificate lands here too.
     ...(input.certUntrusted === undefined ? { blank: true } : {}),
   };
 
@@ -280,7 +324,15 @@ export function byocConnectPlan(input: ByocConnectInput): ByocStop[] {
       id: 'verify',
       label: 'Verify',
       detail: 'ask /health whether it is Capy',
-      state: verified ? 'done' : urlAnswered ? 'current' : 'upcoming',
+      // One stop is `current`, and it is the one the page is standing on. An
+      // untrusted certificate moves the run to the station that answers it —
+      // the handshake will be tried again from there — so `verify` waits its
+      // turn rather than lighting up beside the stop that overtook it.
+      state: verified
+        ? 'done'
+        : urlAnswered && input.certUntrusted !== true
+          ? 'current'
+          : 'upcoming',
     },
     trust,
     named

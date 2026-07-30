@@ -51,6 +51,28 @@ describe('orgSwitchPlan', () => {
     expect(stops.find((s) => s.id === 'project')!.state).toBe('current');
   });
 
+  test('a walked create route is behind the traveller, not struck through', () => {
+    // The screen served immediately after Name → Recovery phrase → Create. With
+    // only `orgName` to go on the rail called all three "not needed" on the very
+    // page that follows them, to a user who had just written down 24 words.
+    const stops = orgSwitchPlan({ orgName: 'Northwind', created: true });
+    for (const id of ORG_CREATE_STOP_IDS) {
+      expect(stops.find((s) => s.id === id)!.state).toBe('done');
+    }
+    expect(stops[0]).toMatchObject({ state: 'done', answer: 'Northwind' });
+    // The one stop left is where the traveller is.
+    expect(stops.find((s) => s.id === 'project')!.state).toBe('current');
+    expect(stops.filter((s) => s.state === 'current')).toHaveLength(1);
+  });
+
+  test('the walked phrase stop still carries only the consent', () => {
+    const phrase = orgSwitchPlan({ orgName: 'Northwind', created: true }).find(
+      (s) => s.id === 'phrase',
+    )!;
+    expect(phrase.answer).toBe('written down');
+    expect(phrase.answer!.split(/\s+/)).toHaveLength(2);
+  });
+
   test('a chosen project is done, carrying its own name', () => {
     const stops = orgSwitchPlan({ orgName: 'mikes-market', projectName: 'storefront' });
     expect(stops.find((s) => s.id === 'project')).toMatchObject({
@@ -180,5 +202,52 @@ describe('byocConnectPlan', () => {
     const stops = byocConnectPlan({ url: 'https://capy.acme.com', verified: true });
     expect(stops.find((s) => s.id === 'verify')!.state).toBe('done');
     expect(stops.find((s) => s.id === 'name')!.state).toBe('current');
+  });
+
+  test('an unsettled address leaves everything behind it unanswered', () => {
+    // What a run that mistyped the host is looking at. `url` unset is the whole
+    // statement: nothing downstream of an address nobody accepted may claim an
+    // answer, and the traveller is standing on the question, not past it.
+    const stops = byocConnectPlan({ urlFromArgv: true });
+    expect(stops.find((s) => s.id === 'url')).toMatchObject({ state: 'current' });
+    expect(stops.find((s) => s.id === 'url')!.answer).toBeUndefined();
+    expect(stops.find((s) => s.id === 'verify')!.state).toBe('upcoming');
+    expect(stops.find((s) => s.id === 'trust')).toMatchObject({ state: 'upcoming', blank: true });
+    expect(stops.filter((s) => s.state === 'current')).toHaveLength(1);
+  });
+
+  test('the certificate question overtakes verify rather than lighting up beside it', () => {
+    // Both stops were `current` at once: the run cannot be at two stations.
+    const stops = byocConnectPlan({ url: 'https://capy.acme.com', certUntrusted: true });
+    expect(stops.find((s) => s.id === 'trust')!.state).toBe('current');
+    expect(stops.find((s) => s.id === 'verify')!.state).toBe('upcoming');
+    expect(stops.filter((s) => s.state === 'current')).toHaveLength(1);
+  });
+
+  test('a bundle that made the instance verify is an answer, not a skipped stop', () => {
+    // `certUntrusted` is false once the handshake completes — with the bundle in
+    // it. Read in the other order the rail struck the station through and then
+    // hung the bundle path off it as the answer to a question it never asked.
+    const trust = byocConnectPlan({
+      url: 'https://capy.acme.com',
+      verified: true,
+      certUntrusted: false,
+      caBundle: '~/certs/acme-root.crt',
+    }).find((s) => s.id === 'trust')!;
+    expect(trust).toMatchObject({ state: 'done', answer: '~/certs/acme-root.crt' });
+  });
+
+  test('exactly one stop is current in every state this flow can reach', () => {
+    const states = [
+      {},
+      { url: 'u' },
+      { url: 'u', certUntrusted: true },
+      { url: 'u', certUntrusted: true, caBundle: '~/c.crt' },
+      { url: 'u', verified: true, certUntrusted: false },
+      { url: 'u', verified: true, certUntrusted: false, profileName: 'acme' },
+    ];
+    for (const input of states) {
+      expect(byocConnectPlan(input).filter((s) => s.state === 'current').length).toBeLessThanOrEqual(1);
+    }
   });
 });

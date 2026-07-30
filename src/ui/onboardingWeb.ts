@@ -489,6 +489,20 @@ export function buildPassphraseUnlockData(
  * Ask for the local passphrase in the browser and hand back the unwrapped
  * master key.
  *
+ * NOT YET CALLED IN PRODUCTION, and the missing hop is not in this parcel.
+ * The prompt this replaces is `unlockLocalKey` (src/core/localUnlock.ts), which
+ * takes no options and reaches inquirer directly:
+ *
+ *     const masterKeyHex = decryptLocalMasterKeyHex(passphrase);
+ *
+ * Lighting this up means giving that function a `web` option and passing it
+ * from the five commands that call it — `capy`, `push`, `status`, `edit`,
+ * `run`. Two of those files belong to the init-sync parcel, one to secrets, and
+ * `run`/`push` have no `--web` flag at all because `src/index.ts` declares the
+ * global and only `byoc`/`add`/`capy` read it back. So the wiring is the same
+ * argv-threading job as `capy org --web`, spread across three other agents'
+ * files; the screen, its payload builder and its browser test are ready for it.
+ *
  * `attempt` does the unwrapping inside this process and answers with a shape,
  * not an exception: `decryptLocalMasterKeyHex` throws the same
  * PERMISSION_DENIED for a wrong passphrase and for a keystore that does not

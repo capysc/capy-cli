@@ -648,6 +648,15 @@ export async function byocCommand(
     // `capy byoc` with nothing to connect to is the offline path. Until now
     // the URL was accepted and silently dropped, and local mode was set up
     // regardless.
+    //
+    // KNOWN DIVERGENCE, and it is a divergence in LOGIC rather than rendering,
+    // which is the one thing `--web` is not supposed to do: `capy byoc <url>`
+    // in a terminal can still answer yes and land in local mode, and here it
+    // cannot. Closing it needs the question to exist as a step somebody can
+    // answer — a fork at the head of `byoc-connect`, or a first stop of its
+    // own — which is a packages/ui change this parcel reports rather than
+    // makes. Until then the argument is the only signal there is, and reading
+    // it beats dropping it.
     return initialUrl ? connectSetupWeb(initialUrl) : localSetupWeb();
   }
 

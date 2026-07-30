@@ -24,9 +24,17 @@ export interface OrgCommandOptions {
   /**
    * Serve the three questions as browser screens instead of inquirer prompts.
    *
-   * Agent-only. `src/index.ts` does not yet read the root program's global
-   * `--web` for `org`, so this is live and tested but not reachable from argv;
-   * that wiring belongs with whoever owns index.ts.
+   * Agent-only, and NOT REACHABLE FROM ARGV YET. `src/index.ts` declares
+   * `--web` once, on the root program; a subcommand has to read the inherited
+   * global for itself, which `byoc` does in two lines:
+   *
+   *     const web = command.optsWithGlobals().web === true;
+   *
+   * `org`'s own action takes no `command` argument and never calls
+   * `optsWithGlobals`, so `new OrgCommand()` is always built without this. The
+   * flow below is live and browser-tested; the missing hop is argv wiring,
+   * which the coordinator owns centrally along with the rest of the command
+   * registry — this parcel may not edit index.ts.
    */
   web?: boolean;
 }

@@ -267,6 +267,36 @@ describe('switchOrganizationInBrowser', () => {
     expect((await done).action).toBe('select-project');
   });
 
+  test('a refusal the terminal formatted arrives without its escape codes', async () => {
+    // `firstProjectRefusal` bolds the organization name with `\x1b[1m…\x1b[0m`
+    // because it is also raised as a CapyError in a scrollback. A payload is not
+    // a terminal: uncorrected, the page renders `a project in [1mnorthwind[0m`.
+    let url = '';
+    const done = switchOrganizationInBrowser({
+      ...BASE,
+      timeoutMs: 4_000,
+      onOrgChosen: async () => ({
+        ok: false,
+        reason:
+          'This directory is bound to another project and its .env contains 2 encrypted value(s).\n\n' +
+          '  Binding it to a project in \x1b[1mnorthwind\x1b[0m would make those values unreadable.',
+      }),
+      onListen: (u) => (url = u),
+    });
+    void done.catch(() => undefined);
+
+    const d = driver(await waitForUrl(() => url));
+    const refused = await d.post({ __action: 'switch', orgId: 'o2' });
+    const reason = String(refused.error);
+    expect(reason).not.toContain('\x1b');
+    expect(reason).not.toContain('[1m');
+    // The sentence survives whole — only the formatting is gone.
+    expect(reason).toContain('a project in northwind would make those values unreadable');
+
+    await d.post({ __action: 'cancel' });
+    await done;
+  });
+
   test('a project outside the chosen organization is refused', async () => {
     let url = '';
     const done = switchOrganizationInBrowser({
@@ -328,7 +358,16 @@ describe('nameFirstProjectInBrowser', () => {
       onListen: (u) => (url = u),
     });
     const d = driver(await waitForUrl(() => url));
-    expect(await d.page()).toContain('"view":"first-project"');
+    const page = await d.page();
+    expect(page).toContain('"view":"first-project"');
+    // The three stops this run has just walked — Name, Recovery phrase, Create —
+    // are behind it. Struck through as "not needed", which is what a plan built
+    // from the org name alone produced, the rail would be telling somebody who
+    // had written down 24 words a minute ago that they had not.
+    for (const id of ORG_CREATE_STOP_IDS) {
+      expect(page).toContain(`"id":"${id}"`);
+    }
+    expect(page).not.toContain('"state":"skipped"');
     await d.post({ __action: 'create-project', name: ' storefront ' });
     expect(await done).toBe('storefront');
   });
