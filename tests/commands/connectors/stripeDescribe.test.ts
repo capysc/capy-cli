@@ -9,6 +9,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   currentVarState,
   describeIncomingKey,
+  noRunnableMode,
   parseStripeConfig,
   stripeModeOptions,
   stripeVarSlots,
@@ -103,6 +104,54 @@ describe('stripeModeOptions', () => {
   test('nothing paired yet offers both, because nothing has been read', () => {
     const modes = stripeModeOptions([], undefined, false);
     expect(modes.every((m) => m.available)).toBe(true);
+  });
+
+  test('a value too short to redact gets no prefix at all', () => {
+    // Eight characters of a nine-character value is a redaction; eight
+    // characters of an eight-character value is the value. `safeSnippet`
+    // already withholds a fingerprint on the same rule and this is the other
+    // half of it. Unreachable with a real Stripe key, which is exactly why it
+    // has to be written down rather than left to the shape of the input.
+    const short = parseStripeConfig(`
+[default]
+account_id = 'acct_short'
+test_mode_api_key = 'rk_test1'
+`);
+    const test_ = stripeModeOptions(short, 'acct_short', false).find((m) => m.id === 'test')!;
+    expect(test_.available).toBe(true);
+    expect(test_.keyPrefix).toBeUndefined();
+    expect(JSON.stringify(test_)).not.toContain('rk_test1');
+    expect(describeIncomingKey(short, 'test', 'acct_short').keyPrefix).toBe('');
+  });
+});
+
+describe('noRunnableMode', () => {
+  test('says nothing while a mode can still run', () => {
+    expect(noRunnableMode(stripeModeOptions(SECTIONS, 'acct_1234', false))).toBeUndefined();
+  });
+
+  test('a live-only config under capy-dev is a wall, not a question', () => {
+    // The state the mode question cannot ask its way out of: live is refused
+    // by the dev firewall, test has no key, the screen disables both rows and
+    // the reducer refuses either. Asking here parks the run on a dead page
+    // until the wizard times out.
+    const liveOnly = parseStripeConfig(`
+[default]
+account_id = 'acct_5678'
+live_mode_api_key = 'rk_live_51HzyxwvutSRQPONML'
+`);
+    const wall = noRunnableMode(stripeModeOptions(liveOnly, 'acct_5678', true))!;
+    expect(wall.code).toBe('DEV_MODE_NO_TEST_KEY');
+    expect(wall.remedy).toBe('stripe login');
+  });
+
+  test('a section with no key at all is the other wall', () => {
+    const keyless = parseStripeConfig(`
+[default]
+account_id = 'acct_none'
+`);
+    const wall = noRunnableMode(stripeModeOptions(keyless, 'acct_none', false))!;
+    expect(wall.code).toBe('NO_STRIPE_KEY');
   });
 });
 

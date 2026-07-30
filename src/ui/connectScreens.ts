@@ -28,9 +28,11 @@
 // holds the decrypted .env while these screens are served and none of it
 // crosses.
 import { runBrowserWizard } from './browserWizard';
-import { renderScreen, ScreenServer } from './screens/serve';
+import { renderScreen } from './screens/serve';
+import { serveEndingPage } from './endingPage';
 import { connectPlan, type ConnectPlanInput } from '../commands/connectors/plans';
 import type {
+  Blocked,
   ConnectIncomingKey,
   ConnectLiveAction,
   ConnectLiveGateData,
@@ -42,6 +44,7 @@ import type {
   ConnectResultData,
   ConnectSetupData,
   ConnectStep,
+  ConnectStop,
   ConnectVarSlot,
   ConnectVarState,
   ConnectorChoice,
@@ -568,32 +571,81 @@ export function buildConnectResultData(p: WebConnectResultParams): ConnectResult
 }
 
 /**
- * Show what the run did, and do not wait for anything.
+ * Show what the run did, and do not ask for anything.
  *
- * A `ScreenServer` rather than the wizard: this screen reports, and a page with
- * nothing to send back is given no way to speak at all — the strict
- * `connect-src 'none'` policy `screenHeaders()` serves by default.
+ * A display-only ending: `serveEndingPage` serves it under the strict
+ * `connect-src 'none'` policy `screenHeaders()` applies by default, so a page
+ * that names which key landed where cannot open a socket at all.
  *
- * The listening socket is what keeps the process alive long enough for the
- * browser to arrive, and the server closes itself 250ms after serving, so a run
- * whose browser opens ends immediately. The timeout is the ceiling for a run
- * whose browser never comes: the work is already done, and a finished command
- * must not sit for the ScreenServer's two-minute default waiting for a report
- * nobody is reading.
+ * IT DOES NOT RETURN UNTIL THE BROWSER HAS THE PAGE. Both callers are at the
+ * end of a run — one of them is a push that failed, which is the ending whose
+ * whole reason for existing is that the user cannot otherwise tell whether
+ * .env holds a key nobody else has — and a command that exits on the next line
+ * closes the loopback server that is serving this. The wait is bounded by
+ * `timeoutMs`.
  */
 export async function showConnectResultInBrowser(p: WebConnectResultParams): Promise<string> {
-  const server = new ScreenServer('connect-result', buildConnectResultData(p), {
-    timeoutMs: p.timeoutMs ?? 60_000,
+  const { url } = await serveEndingPage('connect-result', buildConnectResultData(p), {
+    ...(p.open === undefined ? {} : { open: p.open }),
+    ...(p.onListen ? { onListen: p.onListen } : {}),
+    ...(p.timeoutMs === undefined ? {} : { timeoutMs: p.timeoutMs }),
+    lead: 'What this run did, in your browser:',
   });
-  const url = await server.start();
-  p.onListen?.(url);
-  if (p.open ?? true) {
-    try {
-      const open = (await import('open')).default;
-      await open(url);
-    } catch {
-      /* best-effort; the printed URL is the fallback */
-    }
-  }
+  return url;
+}
+
+// ---------------------------------------------------------------------------
+// connect-setup, as a wall
+// ---------------------------------------------------------------------------
+
+export interface WebConnectBlockedParams extends ServeOptions {
+  provider: string;
+  projectName: string;
+  branch: string;
+  /**
+   * The step the run died on, so the rail keeps standing where it stopped.
+   *
+   * Only the four steps that are questions: a wall replaces a question, and
+   * `auth` and `push` are not ones — which is also why the type is narrowed
+   * here rather than mapped, since each of these has a `nonTtyEscape` and
+   * neither of those does.
+   */
+  step: Extract<ConnectStep, 'var' | 'mode' | 'account' | 'refresh'>;
+  stops: ConnectStop[];
+  blocked: Blocked;
+}
+
+/**
+ * A question this run cannot ask, served as the reason instead.
+ *
+ * `connect-setup` renders `blocked` in place of its controls — no submit, no
+ * cancel, nothing to answer — so it must NOT be served through the wizard: a
+ * wizard waits for a submit, and a page with no control to produce one leaves
+ * the run sitting there until the five-minute timeout. That is the failure
+ * this exists to prevent, so it goes out as an ending: served, read, over.
+ *
+ * The nonce is empty and that is deliberate. A page with nothing to submit
+ * needs no token to submit it with, and minting one would be handing out a
+ * credential for a channel that does not exist.
+ */
+export async function showConnectBlockedInBrowser(
+  p: WebConnectBlockedParams,
+): Promise<string> {
+  const data: ConnectSetupData = {
+    nonce: '',
+    provider: p.provider,
+    projectName: stripAnsi(p.projectName),
+    branch: p.branch,
+    stops: p.stops,
+    step: p.step,
+    blocked: p.blocked,
+    nonTty: nonTtyEscape(p.step),
+  };
+  const { url } = await serveEndingPage('connect-setup', data, {
+    ...(p.open === undefined ? {} : { open: p.open }),
+    ...(p.onListen ? { onListen: p.onListen } : {}),
+    ...(p.timeoutMs === undefined ? {} : { timeoutMs: p.timeoutMs }),
+    lead: 'Why this run cannot continue, in your browser:',
+  });
   return url;
 }

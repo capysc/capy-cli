@@ -10,6 +10,7 @@
  */
 import { describe, test, expect } from 'bun:test';
 import { connectPlan, rotationPlan, cap } from '../../src/commands/connectors/plans';
+import { pushOutcomeFor } from '../../src/commands/connectCommand';
 
 describe('connectPlan', () => {
   const BASE = { provider: 'stripe', branch: 'development', requiresTool: 'stripe', requiresAuth: true, push: true };
@@ -108,6 +109,39 @@ describe('connectPlan', () => {
     const json = JSON.stringify(connectPlan({ ...BASE, standing: null, varName: 'K', mode: 'live', account: 'acct_1' }));
     expect(json).not.toContain('sk_');
     expect(json).not.toContain('rk_');
+  });
+
+  test('a finished run says what became of the push, rather than promising it', () => {
+    // The result page draws this rail. `upcoming` beside a body reading "The
+    // push did not land" is the rail contradicting the page it sits on — and
+    // the rail is the half that looks authoritative.
+    const failed = connectPlan({ ...BASE, standing: null, varName: 'K', pushOutcome: 'failed' });
+    const push = failed[failed.length - 1];
+    expect(push.state).toBe('current');
+    expect(push.blank).toBe(true);
+    expect(push.detail).toBe('did not reach Capy (branch: development)');
+    expect(push.answer).toBeUndefined();
+
+    const landed = connectPlan({ ...BASE, standing: null, varName: 'K', pushOutcome: 'landed' });
+    const done = landed[landed.length - 1];
+    expect(done.state).toBe('done');
+    expect(done.answer).toBe('pushed to development');
+
+    // A run that ended before the push ever ran leaves the stop where it was.
+    const notReached = connectPlan({ ...BASE, standing: null, varName: 'K', pushOutcome: 'not-reached' });
+    expect(notReached[notReached.length - 1].state).toBe('upcoming');
+  });
+});
+
+describe('pushOutcomeFor', () => {
+  test('maps every ending, off the outcome enum rather than its prose', () => {
+    expect(pushOutcomeFor('pushed')).toBe('landed');
+    expect(pushOutcomeFor('push-failed')).toBe('failed');
+    // Three endings that never attempted a push: `--no-push`, a local write
+    // that failed, and a live gate that was declined.
+    expect(pushOutcomeFor('local-only')).toBe('not-reached');
+    expect(pushOutcomeFor('write-failed')).toBe('not-reached');
+    expect(pushOutcomeFor('cancelled')).toBe('not-reached');
   });
 });
 

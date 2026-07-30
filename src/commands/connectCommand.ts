@@ -1,5 +1,5 @@
-import { resolveContext, writeAndSync, listManagedKeys } from './connectors/shared';
-import { listProviders, loadProvider, ConnectOpts } from './connectors/registry';
+import { resolveContext, writeAndSync, listManagedKeys, keyTypePrefix } from './connectors/shared';
+import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { connectPlan } from './connectors/plans';
 import { isInteractive } from '../ui/interactive';
 import { ProjectManager } from '../core/projectManager';
@@ -59,6 +59,22 @@ export async function describeConnectors(): Promise<ConnectorChoice[]> {
     });
   }
   return out;
+}
+
+/**
+ * What the result page's Push stop should say, given how the run ended.
+ *
+ * One mapping, keyed off the outcome enum rather than off prose, so the rail
+ * and the body of the page cannot disagree: a `push-failed` page that reads
+ * "The push did not land" beside a rail drawing Push as a stop still ahead of
+ * the traveller is the drift the declared plan exists to remove.
+ */
+export function pushOutcomeFor(outcome: ConnectOutcome): 'landed' | 'failed' | 'not-reached' {
+  if (outcome === 'pushed') return 'landed';
+  if (outcome === 'push-failed') return 'failed';
+  // `local-only` never attempted it, `write-failed` never got that far, and
+  // `cancelled` stopped at the gate before it.
+  return 'not-reached';
 }
 
 export class ConnectCommand {
@@ -125,21 +141,29 @@ export class ConnectCommand {
     // exiting two screens later.
     const effective: ConnectOpts = { ...opts, devMode: this.devMode };
 
-    const mod = await loadProvider(provider).catch(async (err) => {
+    let mod: ConnectorModule;
+    try {
+      mod = await loadProvider(provider);
+    } catch (err) {
       if (opts.web) {
         // The terminal answers a bad provider with `Unknown connector: x` and a
         // pointer back to the bare `capy connect`, which is a second command
         // for a list the CLI could have shown with the mistake. Here it does.
         const picked = await this.chooseProviderInBrowser(opts, provider);
         if (picked) {
+          // RETURN, never `process.exit(0)`: the run that just finished served
+          // its own ending page from a loopback server in this process, and
+          // exiting here would close the socket underneath it. Returning lets
+          // the process end on its own once that page has been read, carrying
+          // whatever exit code the inner run set.
           await this.execute(picked, opts);
-          process.exit(0);
+          return;
         }
       }
-      console.error(`\n  ${err.message}`);
+      console.error(`\n  ${(err as Error).message}`);
       console.error('  Run `capy connect` to see available providers.\n');
       process.exit(1);
-    });
+    }
 
     if (mod.precheck) mod.precheck();
 
@@ -168,7 +192,10 @@ export class ConnectCommand {
             branch: ctx.branch,
             varName,
             accountId: entry.account_id ?? null,
-            keyPrefix: value.slice(0, 8),
+            // Guarded, unlike the terminal's own `value.slice(0, 8)` below: a
+            // value with nothing more than eight characters in it would
+            // otherwise travel whole.
+            ...(keyTypePrefix(value) ? { keyPrefix: keyTypePrefix(value) as string } : {}),
             push: !opts.noPush,
             pushFromFlag: opts.noPush === true,
             accountFromFlag: Boolean(opts.account),
@@ -200,14 +227,22 @@ export class ConnectCommand {
           });
       if (!ok) {
         console.log('  Cancelled.');
-        if (opts.web) {
-          await this.showResult(ctx.keep.project_name, ctx.branch, provider, mod.requiresTool, opts, {
-            outcome: 'cancelled',
-            varName,
-            mode: entry.mode as 'test' | 'live' | undefined,
-          });
-        }
-        process.exit(0);
+        // The terminal path is unchanged: nothing was written, and the command
+        // is over.
+        if (!opts.web) process.exit(0);
+        // Under `--web` the decline gets a page saying what it left behind —
+        // and that page is served from THIS process, so the run ends by
+        // returning rather than by exiting. `process.exit(0)` here closed the
+        // loopback server microseconds after it started listening, which made
+        // the ending unreachable and the refusal indistinguishable from a
+        // successful connect.
+        await this.showResult(ctx.keep.project_name, ctx.branch, provider, mod.requiresTool, opts, {
+          outcome: 'cancelled',
+          varName,
+          mode: entry.mode as 'test' | 'live' | undefined,
+          requiresAuth: mod.requiresAuth === true,
+        });
+        return;
       }
     }
 
@@ -224,32 +259,43 @@ export class ConnectCommand {
       detail = err instanceof Error ? err.message : String(err);
     }
 
+    // The terminal's own lines first, then the page. The other order made the
+    // whole summary wait on a human loading a browser tab, because the ending
+    // page holds the run open until it has been delivered.
+    const failed = outcome === 'push-failed' || outcome === 'write-failed';
+    console.log('');
+    if (failed) {
+      console.error(`  ✗ ${B(varName)}: ${detail}`);
+      console.log('');
+    } else if (opts.noPush) {
+      console.log(`  ✓ wrote ${B(varName)} to .env (encrypted, not pushed).`);
+      console.log(`  Run ${B('capy push')} to share with teammates.`);
+      console.log('');
+    } else {
+      console.log(`  ✓ ${B(varName)} written, encrypted, and pushed (branch: ${ctx.branch}).`);
+      console.log('');
+    }
+
     if (opts.web) {
       await this.showResult(ctx.keep.project_name, ctx.branch, provider, mod.requiresTool, opts, {
         outcome,
         varName,
         mode: entry.mode as 'test' | 'live' | undefined,
         accountId: entry.account_id,
-        keyPrefix: value.slice(0, 8),
+        ...(keyTypePrefix(value) ? { keyPrefix: keyTypePrefix(value) as string } : {}),
         fingerprint: entry.fingerprint,
         expiresAt: entry.expires_at,
         detail,
+        requiresAuth: mod.requiresAuth === true,
       });
     }
 
-    console.log('');
-    if (outcome === 'push-failed' || outcome === 'write-failed') {
-      console.error(`  ✗ ${B(varName)}: ${detail}`);
-      console.log('');
-      process.exit(1);
-    }
-    if (opts.noPush) {
-      console.log(`  ✓ wrote ${B(varName)} to .env (encrypted, not pushed).`);
-      console.log(`  Run ${B('capy push')} to share with teammates.`);
-    } else {
-      console.log(`  ✓ ${B(varName)} written, encrypted, and pushed (branch: ${ctx.branch}).`);
-    }
-    console.log('');
+    // `process.exitCode`, never `process.exit`. The failure endings above are
+    // only reachable under `--web` (without it the throw propagates), and the
+    // page explaining them is served from this process — an exit here is what
+    // made "the push did not land" a page nobody could open. The code is
+    // delivered when the loop drains, which is after the browser has the page.
+    if (failed) process.exitCode = 1;
   }
 
   /** The tail of the command, as a page. Reports only — nothing here decides. */
@@ -268,6 +314,8 @@ export class ConnectCommand {
       fingerprint?: string;
       expiresAt?: number;
       detail?: string;
+      /** The provider's own flag, not an assumption about every connector. */
+      requiresAuth: boolean;
     },
   ): Promise<void> {
     const { showConnectResultInBrowser } = await import('../ui/connectScreens');
@@ -279,7 +327,7 @@ export class ConnectCommand {
       provider,
       branch,
       requiresTool,
-      requiresAuth: true,
+      requiresAuth: run.requiresAuth,
       standing: null,
       varName: run.varName,
       varFromFlag: Boolean(opts.var),
@@ -287,8 +335,14 @@ export class ConnectCommand {
       modeFromFlag: Boolean(opts.live),
       ...(run.accountId ? { account: run.accountId } : {}),
       accountFromFlag: Boolean(opts.account),
+      // Every outcome this page reports arrives AFTER `mod.connect()` returned
+      // a key, so the provider session existed by then however it got there.
+      // Drawing "Sign in" as still upcoming on a finished run is the same
+      // drift as drawing Push as upcoming on a run that pushed.
+      signedIn: true,
       push: !opts.noPush,
       pushFromFlag: opts.noPush === true,
+      pushOutcome: pushOutcomeFor(run.outcome),
     });
     await showConnectResultInBrowser({
       outcome: run.outcome,

@@ -94,6 +94,22 @@ export interface ConnectPlanInput {
   push: boolean;
   /** `--no-push` was explicit rather than the default. */
   pushFromFlag?: boolean;
+  /**
+   * What became of the push, once the run is over.
+   *
+   * Absent while the route is still ahead of the traveller, which is every
+   * screen that asks a question. It exists for the result page: a rail drawn
+   * on a FINISHED run that still says `○ Push — encrypt and push to Capy`
+   * beside a body reading "the push did not land" is the drift these plans
+   * were built to remove, and it is worse than no rail at all because it is
+   * the half of the page that looks authoritative.
+   *
+   * `landed` — the push went through.
+   * `failed` — it ran and did not land; the run stopped here.
+   * `not-reached` — the run ended before the push was attempted (a declined
+   *   gate, a local write that failed), so the stop is still ahead of it.
+   */
+  pushOutcome?: 'landed' | 'failed' | 'not-reached';
 }
 
 /**
@@ -197,12 +213,35 @@ export function connectPlan(input: ConnectPlanInput): ConnectStop[] {
     label: 'Push',
     // Never a question: `--no-push` settles it and nothing else asks. It is
     // the terminal stop of the route, which is why it is `upcoming` rather
-    // than `current` even when everything before it is answered.
-    state: 'upcoming',
-    detail: input.push
-      ? `encrypt and push to Capy (branch: ${input.branch})`
-      : 'write to .env on this machine only',
-    ...(input.push ? {} : { answer: 'local only' }),
+    // than `current` even when everything before it is answered — until the
+    // run is over and `pushOutcome` says what became of it.
+    //
+    // A failed push is drawn as the stop the traveller is STANDING on, which
+    // is where the run stopped. There is no `failed` in `StopState` (the four
+    // states are done, current, upcoming, skipped), and the other three would
+    // each be a lie: `done` claims it worked, `upcoming` claims it has not
+    // happened yet, `skipped` claims it was not needed. `blank` on top of it
+    // is the CLI's own ◌ — the plan has a hole here — which is exactly the
+    // fact. REPORTED, not patched: the screens' `StopState` has no way to say
+    // "this stop was attempted and failed", and it should.
+    state:
+      input.pushOutcome === 'landed'
+        ? 'done'
+        : input.pushOutcome === 'failed'
+          ? 'current'
+          : 'upcoming',
+    detail:
+      input.pushOutcome === 'failed'
+        ? `did not reach Capy (branch: ${input.branch})`
+        : input.push
+          ? `encrypt and push to Capy (branch: ${input.branch})`
+          : 'write to .env on this machine only',
+    ...(input.pushOutcome === 'failed' ? { blank: true } : {}),
+    ...(input.pushOutcome === 'landed'
+      ? { answer: `pushed to ${input.branch}` }
+      : input.push
+        ? {}
+        : { answer: 'local only' }),
     ...(input.pushFromFlag ? { flag: '--no-push' } : {}),
   });
 

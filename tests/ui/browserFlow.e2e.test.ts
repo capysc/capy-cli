@@ -20,9 +20,10 @@
  *   bunx @puppeteer/browsers install chrome-headless-shell@stable
  */
 import { describe, test, expect, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { Browser, findHeadlessShell, type CdpSession } from '../helpers/cdp';
 import { runBrowserWizard } from '../../src/ui/browserWizard';
 
@@ -59,20 +60,32 @@ async function evaluate<T>(page: CdpSession, expression: string): Promise<T> {
  * "Inspected target navigated or closed". That is not a failed predicate — it
  * is the page doing the exact thing the caller is waiting for it to do, since
  * every standalone step advances by RELOADING — so it is swallowed and the
- * next tick asks again. The timeout below is what actually fails, and it fails
- * with the caller's own description rather than with a CDP transport error
- * about the test's instrumentation.
+ * next tick asks again.
+ *
+ * The exception is REMEMBERED rather than dropped, and reported with the
+ * timeout. This is the shared harness every flow appends to: a predicate with
+ * a typo in it throws on every tick, and a bare `catch {}` turned that into
+ * five seconds of silence and "timed out waiting for X" — the one message that
+ * sends the reader looking at the product instead of at the test. It is not
+ * MATCHED on: the navigation race and a broken predicate arrive as the same
+ * CDP error with nothing structured to tell them apart, and keying test
+ * control flow off the wording of a Chrome error message would be a harness
+ * that breaks when Chrome rewords it.
  */
 async function until(page: CdpSession, expression: string, what: string): Promise<void> {
+  let last: Error | undefined;
   for (let i = 0; i < 200; i++) {
     try {
       if (await evaluate<boolean>(page, `!!(${expression})`)) return;
-    } catch {
-      /* navigating; ask again on the next tick */
+      last = undefined;
+    } catch (err) {
+      last = err as Error;
     }
     await new Promise((r) => setTimeout(r, 25));
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw new Error(
+    `timed out waiting for ${what}${last ? ` (last page error: ${last.message})` : ''}`,
+  );
 }
 
 describeBrowser('browser flow, driven by a real browser', () => {
@@ -907,6 +920,141 @@ describeBrowser('capy connect, driven by a real browser', () => {
     await evaluate(page, clickButton('Set up connector'));
     expect(await done).toEqual({ provider: 'acme', cancelled: false });
   }, 60_000);
+
+  test('the account step lists config.toml and returns the section that was clicked', async () => {
+    // `pickAccount` refuses outright without a TTY — "2 Stripe accounts in
+    // config.toml; can't pick one without a prompt" — so for the caller `--web`
+    // exists for this question does not exist at all. The rows are the config's
+    // sections verbatim, and the answer is the SECTION name while the row is
+    // labelled with the account id: two different strings, and the CLI writes
+    // the one it can hand back to `stripe login --project-name=`.
+    const { askConnectInBrowser } = await import('../../src/ui/connectScreens');
+    let url = '';
+    const done = askConnectInBrowser({
+      provider: 'stripe',
+      projectName: 'mikes-market',
+      branch: 'development',
+      plan: PLAN,
+      questions: [
+        {
+          kind: 'account',
+          accounts: [
+            { id: 'sandbox', accountId: 'acct_0001', hasTestKey: true, hasLiveKey: false },
+            {
+              id: 'prod',
+              displayName: 'Mike’s Market (prod)',
+              accountId: 'acct_9999',
+              hasTestKey: true,
+              hasLiveKey: true,
+            },
+          ],
+        },
+      ],
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Stripe account')`)).toBe(true);
+    // Which modes an account can serve, from the config rather than from a
+    // failure two questions later.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('test + live')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('test only')`)).toBe(true);
+
+    await evaluate(page, clickOption('acct_9999'));
+    await evaluate(page, clickButton('Use this account'));
+
+    // The section name, which is what the CLI looks the key up by — not the
+    // account id the row was labelled with.
+    expect(await done).toEqual({ answers: { account: 'prod' }, cancelled: false });
+  }, 60_000);
+
+  test('the near-expiry offer can be declined, and the decline comes back as false', async () => {
+    // `expiringSoonPrompt` never asks a headless caller: it prints "skipping
+    // re-login (non-interactive)" and takes the key that is there. Here the
+    // offer is made, and the answer this test gives is the one that is NOT the
+    // default — a screen that only ever returns its own default has proved
+    // nothing.
+    const { askConnectInBrowser } = await import('../../src/ui/connectScreens');
+    let url = '';
+    const done = askConnectInBrowser({
+      provider: 'stripe',
+      projectName: 'mikes-market',
+      branch: 'development',
+      plan: PLAN,
+      questions: [{ kind: 'refresh', mode: 'live', expiresInDays: 1, command: 'stripe login' }],
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // A real plural from a number, not the CLI's `day(s)`.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Expires in 1 day')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('day(s)')`)).toBe(false);
+
+    await evaluate(page, clickOption('Use the key Stripe already has'));
+    await evaluate(page, clickButton('Continue'));
+
+    expect(await done).toEqual({ answers: { refresh: false }, cancelled: false });
+  }, 60_000);
+
+  test('a mode question with no runnable answer is a wall, not a question', async () => {
+    // One config section holding only a live key, read by `capy-dev`: live is
+    // blocked by the dev firewall, test has no key. The screen disables both
+    // rows and the reducer refuses either, so ASKING would leave the run
+    // sitting on a dead page until the wizard's five-minute timeout. It is
+    // served as an ending instead — no controls, a reason, and a command.
+    const { showConnectBlockedInBrowser } = await import('../../src/ui/connectScreens');
+    const { noRunnableMode, stripeModeOptions } = await import(
+      '../../src/commands/connectors/stripe'
+    );
+    const { connectPlan } = await import('../../src/commands/connectors/plans');
+
+    // The CLI's own condition, not a hand-written payload: one section, live
+    // key only, under capy-dev.
+    const modes = stripeModeOptions(
+      [{ name: 'default', account_id: 'acct_1234', live_mode_api_key: 'rk_live_51Habcdefg' }],
+      undefined,
+      true,
+    );
+    const blocked = noRunnableMode(modes);
+    expect(blocked?.code).toBe('DEV_MODE_NO_TEST_KEY');
+
+    let url = '';
+    const served = showConnectBlockedInBrowser({
+      provider: 'stripe',
+      projectName: 'mikes-market',
+      branch: 'development',
+      step: 'mode',
+      stops: connectPlan({ ...PLAN, standing: 'mode', varName: 'STRIPE_SECRET_KEY' }),
+      blocked: blocked!,
+      open: false,
+      timeoutMs: 30_000,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(
+      await evaluate<boolean>(
+        page,
+        `document.body.textContent.includes('capy-dev cannot use the only key Stripe is holding')`,
+      ),
+    ).toBe(true);
+    // Nothing to answer, and nothing that looks like it could be answered.
+    expect(await evaluate<boolean>(page, `!document.querySelector('button[type=submit]')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `!document.querySelector('[role=radio]')`)).toBe(true);
+    // The way on without a browser is on the page.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('stripe login')`)).toBe(true);
+    // The key that caused it is not on it.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('rk_live_51Habcdefg')`)).toBe(false);
+
+    // The wall ends the run rather than holding it: this resolves once the
+    // browser has the page, and the command exits after it.
+    expect(await served).toBe(url);
+  }, 60_000);
 });
 
 describeBrowser('capy rotate, driven by a real browser', () => {
@@ -1098,7 +1246,11 @@ describeBrowser('capy rotate, driven by a real browser', () => {
     const { showRotateProgressInBrowser } = await import('../../src/ui/rotateScreens');
     const { rotationPlan } = await import('../../src/commands/connectors/plans');
     let url = '';
-    await showRotateProgressInBrowser({
+    // STARTED, not awaited: an ending now holds the run open until the browser
+    // has the page, which is the whole point of it — so awaiting it before
+    // opening the browser would be waiting for a reader who has not been let
+    // in yet.
+    const served = showRotateProgressInBrowser({
       outcome: 'deploy-failed',
       projectName: 'mikes-market',
       branch: 'development',
@@ -1148,5 +1300,287 @@ describeBrowser('capy rotate, driven by a real browser', () => {
     // It reports; it does not decide. There is nothing here a click could send.
     expect(await evaluate<boolean>(page, `!document.querySelector('button[type=submit]')`)).toBe(true);
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('rk_live_')`)).toBe(false);
+
+    // And the run ends once the page has been read, rather than sitting on the
+    // socket for its timeout.
+    expect(await served).toBe(url);
   }, 60_000);
+
+  test('the integration step is a real list, and picking one returns it', async () => {
+    // The step a piped `capy rotate <VAR>` never asks: off a TTY the CLI
+    // auto-picks the single registered provider with no output at all, and the
+    // connect flow it hands off to runs with `force: true` — so the value in
+    // that variable is replaced rather than rotated.
+    const { askRotateIntegrationInBrowser } = await import('../../src/ui/rotateScreens');
+    const { rotationPlan } = await import('../../src/commands/connectors/plans');
+    let url = '';
+    const done = askRotateIntegrationInBrowser({
+      step: 'integration',
+      projectName: 'mikes-market',
+      branch: 'development',
+      devMode: false,
+      all: false,
+      noPush: false,
+      stops: rotationPlan({
+        branch: 'development',
+        varName: 'DATABASE_URL',
+        needsIntegration: true,
+        standing: 'integration',
+      }),
+      integrations: [
+        { name: 'stripe', description: 'Stripe API key (test or live, restricted)' },
+        { name: 'acme', description: 'Acme token' },
+      ],
+      varName: 'DATABASE_URL',
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The consequence the terminal never states, before the list rather than
+    // after the write.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('This replaces the current value')`),
+    ).toBe(true);
+    // Nothing pre-selected, however few are registered.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('[role=radio]')].some(el => el.getAttribute('aria-checked') === 'true')`,
+      ),
+    ).toBe(false);
+
+    await evaluate(page, clickOption('acme'));
+    await evaluate(page, clickButton('Continue'));
+
+    expect(await done).toEqual({ provider: 'acme', cancelled: false });
+  }, 60_000);
+});
+
+/**
+ * The endings, driven the way a real run reaches them: in a CHILD PROCESS that
+ * ends the moment the page has been handed over.
+ *
+ * WHY A CHILD. Every other test in this file holds the server open because the
+ * test process keeps running. A real `capy rotate --web` does not: it serves
+ * the page that explains what happened and then ends — `process.exit`, or
+ * simply the last statement of the command — and the loopback server serving
+ * that page dies with it. `ScreenServer.start()` resolves when the socket is
+ * LISTENING, not when a browser has read anything, so the exit won that race
+ * every time and the pages built for the worst outcomes this command has (a
+ * live key rotated and pushed with the rollout failed; a connect whose push
+ * did not land) were served into a socket that closed microseconds later.
+ *
+ * These two spawn a child that does exactly that — awaits the ending helper,
+ * then `process.exit(1)` on the very next line — and then load the URL with a
+ * real browser. They fail if the helper ever stops waiting for delivery.
+ */
+describeBrowser('a --web ending outlives the exit code that follows it', () => {
+  const CLI_ROOT = resolve(import.meta.dir, '../..');
+  const SERVED_URL = /http:\/\/127\.0\.0\.1:\d+\/s\/[A-Za-z0-9_-]+/;
+
+  let browser: Browser | null = null;
+  let profile = '';
+  let scratch = '';
+  let child: ChildProcess | null = null;
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    child?.kill('SIGKILL');
+    child = null;
+    for (const dir of [profile, scratch]) if (dir) rmSync(dir, { recursive: true, force: true });
+    profile = '';
+    scratch = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /** Run one snippet in a child `bun`, and hand back its URL and exit code. */
+  function spawnEnding(source: string): {
+    url: Promise<string>;
+    exit: Promise<number>;
+    output: () => string;
+  } {
+    scratch = mkdtempSync(join(tmpdir(), 'capy-ending-'));
+    const file = join(scratch, 'ending.ts');
+    writeFileSync(file, source);
+    // NEVER without CAPY_WEB_NO_OPEN: the child calls the same helper the CLI
+    // calls, and that helper opens a browser.
+    child = spawn('bun', [file], {
+      cwd: CLI_ROOT,
+      env: { ...process.env, CAPY_WEB_NO_OPEN: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout?.on('data', (c: Buffer) => (out += String(c)));
+    child.stderr?.on('data', (c: Buffer) => (out += String(c)));
+    const exit = new Promise<number>((res) => child!.on('exit', (code) => res(code ?? -1)));
+    const url = (async () => {
+      for (let i = 0; i < 800; i++) {
+        const m = out.match(SERVED_URL);
+        if (m) return m[0];
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error(`the child never printed a URL. Output:\n${out}`);
+    })();
+    return { url, exit, output: () => out };
+  }
+
+  const imp = (rel: string): string => JSON.stringify(join(CLI_ROOT, rel));
+
+  test('the rollout-failed page is still there after the command exits 1', async () => {
+    // The marquee page of this parcel: the keys are live in Capy, every running
+    // system still holds the old ones, and the instinct is to re-run rotate —
+    // which fetches a third key. `planAndRotate` reports this state and then
+    // hands the process the deploy's exit code.
+    const { url, exit, output } = spawnEnding(`
+      import { showRotateProgressInBrowser } from ${imp('src/ui/rotateScreens.ts')};
+      import { travelledStops } from ${imp('src/commands/rotateCommand.ts')};
+      import { rotationPlan } from ${imp('src/commands/connectors/plans.ts')};
+
+      const steps = [
+        { id: 'rotate', label: 'Rotate', state: 'ok', detail: '1/1' },
+        { id: 'push', label: 'Push', state: 'ok', detail: 'development' },
+        { id: 'deploy', label: 'Deploy', state: 'fail', detail: 'prod' },
+      ];
+
+      await showRotateProgressInBrowser({
+        outcome: 'deploy-failed',
+        projectName: 'mikes-market',
+        branch: 'development',
+        all: false,
+        noPush: false,
+        devMode: false,
+        // Exactly what \`reportRun\` sends: the declared route, redrawn as the
+        // route the run travelled.
+        stops: travelledStops(
+          rotationPlan({
+            branch: 'development',
+            varName: 'STRIPE_SECRET_KEY',
+            needsIntegration: false,
+            providers: ['stripe'],
+            authProviders: ['stripe'],
+            deployDetail: 'ship directly to prod',
+          }),
+          steps,
+        ),
+        steps,
+        keys: [
+          { name: 'STRIPE_SECRET_KEY', provider: 'stripe', outcome: 'rotated',
+            pushed: true, mode: 'live', issuedByCapy: true },
+        ],
+        deploy: { targetName: 'prod', targetCount: 1 },
+        open: false,
+        timeoutMs: 45000,
+        onListen: (u) => console.log('LISTENING ' + u),
+      });
+      process.exit(1);
+    `);
+
+    const page = await open(await url);
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Rollout failed')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Do not run')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('rk_live_')`)).toBe(false);
+
+    // The rail agrees with the step log beside it: two stops travelled, and
+    // the run standing on the one that failed. The plan handed over untouched
+    // drew all three as still ahead of it.
+    const li = (cls: string, label: string): string =>
+      `[...document.querySelectorAll('li')].some(el =>
+         el.className.includes(${JSON.stringify(cls)}) && el.textContent.includes(${JSON.stringify(label)}))`;
+    expect(await evaluate<boolean>(page, li('done', 'Rotate'))).toBe(true);
+    expect(await evaluate<boolean>(page, li('done', 'Push'))).toBe(true);
+    expect(await evaluate<boolean>(page, li('current', 'Deploy'))).toBe(true);
+    expect(await evaluate<boolean>(page, li('upcoming', 'Deploy'))).toBe(false);
+
+    // The code the deploy failed with, delivered after the page rather than
+    // instead of it.
+    expect(await exit).toBe(1);
+    // And the address was written down, because `open()` resolves on spawn and
+    // under CAPY_WEB_NO_OPEN nothing is spawned at all.
+    expect(output()).toContain('What this rotation did, in your browser:');
+  }, 90_000);
+
+  test('the push-failed page is still there after the command exits 1', async () => {
+    // `writeAndSync` has no try/catch around `pushSecrets`, so this used to be
+    // a stack trace: the key is in .env, encrypted, and nobody else has it —
+    // and the user could not tell that from "nothing happened".
+    const { url, exit, output } = spawnEnding(`
+      import { showConnectResultInBrowser } from ${imp('src/ui/connectScreens.ts')};
+      import { connectPlan } from ${imp('src/commands/connectors/plans.ts')};
+
+      await showConnectResultInBrowser({
+        outcome: 'push-failed',
+        provider: 'stripe',
+        projectName: 'mikes-market',
+        branch: 'development',
+        varName: 'STRIPE_SECRET_KEY',
+        mode: 'test',
+        accountId: 'acct_1234',
+        keyPrefix: 'rk_test_',
+        fingerprint: 'rk_…xyz',
+        detail: 'connect ECONNREFUSED 127.0.0.1:8787',
+        stops: connectPlan({
+          provider: 'stripe',
+          branch: 'development',
+          requiresTool: 'stripe',
+          requiresAuth: true,
+          standing: null,
+          varName: 'STRIPE_SECRET_KEY',
+          mode: 'test',
+          account: 'acct_1234',
+          signedIn: true,
+          push: true,
+          pushOutcome: 'failed',
+        }),
+        open: false,
+        timeoutMs: 45000,
+        onListen: (u) => console.log('LISTENING ' + u),
+      });
+      process.exit(1);
+    `);
+
+    const page = await open(await url);
+
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('Written here, not shared')`),
+    ).toBe(true);
+    // The rail on a finished run agrees with the body of the page it sits on:
+    // Push is where the run stopped, not a stop still ahead of it.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('did not reach Capy')`),
+    ).toBe(true);
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('li')].some(li =>
+           li.className.includes('current') && li.textContent.includes('Push'))`,
+      ),
+    ).toBe(true);
+    // Sign in happened — the run got a key — so the rail says so rather than
+    // drawing it as a stop still to come.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('li')].some(li =>
+           li.className.includes('done') && li.textContent.includes('Sign in'))`,
+      ),
+    ).toBe(true);
+    // A prefix and a fingerprint. Never a key.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('rk_test_…')`)).toBe(true);
+
+    expect(await exit).toBe(1);
+    expect(output()).toContain('What this run did, in your browser:');
+  }, 90_000);
 });

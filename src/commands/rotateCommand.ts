@@ -20,6 +20,7 @@ import type {
   RotatePlanStop,
   RotateRunOutcome,
   RotateRunStep,
+  RotateRunStop,
 } from '../ui/screens/contract';
 import { writeSync } from 'fs';
 
@@ -452,9 +453,18 @@ export class RotateCommand {
                 branch: ctx.branch,
                 varName: name,
                 accountId: connector.account_id ?? null,
-                ...(connector.fingerprint
-                  ? { keyPrefix: connector.fingerprint.slice(0, 8) }
-                  : {}),
+                // NO `keyPrefix`. The gate's is `value.slice(0, 8)` — the
+                // literal `rk_live_` the terminal prints as "Key type" — and a
+                // rotation has no value to slice: the new key does not exist
+                // yet and the old one was never stored. What keep.lock holds
+                // is `fingerprint()`'s redacted `rk_…tst`, and passing its
+                // first eight characters rendered as `rk_…tst…`, a key type
+                // that does not exist. The screen omits the row when the field
+                // is absent, which is the honest reading.
+                //
+                // REPORTED, not patched: `ConnectLiveGateData` has no field
+                // for a fingerprint, so rotate's gate cannot say anything at
+                // all about which key is being replaced. It should.
                 push: !opts.noPush,
                 pushFromFlag: opts.noPush === true,
                 stops: rotateLiveGateStops({
@@ -695,10 +705,20 @@ export class RotateCommand {
     }
 
     // ── Apply ────────────────────────────────────────────────────────────────
+    //
+    // EVERY `--web` ending below sets `process.exitCode` and returns; none of
+    // them calls `process.exit`. The page each one serves comes off a loopback
+    // server in THIS process, and exiting closes that socket microseconds
+    // after it started listening — so the exit code arrived and the page that
+    // explained it never did. `rotateMany` already carried this rule inside
+    // itself (`stopped` instead of an inline exit); these are the call sites
+    // that dropped it.
     const report = await this.rotateMany(targets, opts);
     if (report.succeeded.length === 0) {
-      if (web) await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, null, configuredTargets.length);
-      if (web && report.keys.some((k) => k.outcome === 'failed')) process.exit(1);
+      if (web) {
+        await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, null, configuredTargets.length);
+        if (report.keys.some((k) => k.outcome === 'failed')) process.exitCode = 1;
+      }
       return;
     }
 
@@ -710,8 +730,14 @@ export class RotateCommand {
       if (code !== 0) {
         // The keys are already live in Capy and every running system still
         // holds the old ones. Under `--web` that state gets its own page
-        // before the exit code, because re-running rotate here makes it worse.
-        if (web) await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
+        // before the exit code, because re-running rotate here makes it worse
+        // — and the page is the whole reason this branch exists, so the exit
+        // waits for it rather than racing it.
+        if (web) {
+          await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
+          process.exitCode = code;
+          return;
+        }
         process.exit(code);
       }
     } else if (!opts.noPush) {
@@ -723,7 +749,7 @@ export class RotateCommand {
 
     if (web) {
       await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
-      if (report.stopped) process.exit(1);
+      if (report.stopped) process.exitCode = 1;
     }
   }
 
@@ -827,8 +853,11 @@ export class RotateCommand {
       all: opts.all === true,
       noPush: opts.noPush === true,
       devMode: this.devMode,
-      // The route travelled, with the questions behind it already `done`.
-      stops,
+      // The route TRAVELLED, which is what this screen's payload asks for —
+      // not the route declared. Handing the plan over untouched drew Rotate,
+      // Push and Deploy as stops still ahead of a run that had already been
+      // through all three, on the one page whose subject is how far it got.
+      stops: travelledStops(stops, steps),
       steps,
       keys: report.keys,
       deploy: {
@@ -921,6 +950,54 @@ export function buildRotateCandidates(
       // the copy every teammate is holding.
       ...(c.source === 'cli' ? { issuedByCapy: true } : {}),
     };
+  });
+}
+
+/**
+ * The declared route, redrawn as the route the run actually travelled.
+ *
+ * The rail on the progress page is documented as "the declared route, with the
+ * stops travelled marked done", and the CLI was handing over the plan it built
+ * BEFORE anything ran: on the `deploy-failed` page — the state this screen
+ * exists for — Rotate, Push and Deploy all still read as stops ahead of the
+ * traveller, next to a step log saying two of them were done and the third had
+ * failed. A rail that contradicts the page it sits on is worse than no rail,
+ * because it is the half that looks authoritative.
+ *
+ * The mapping is off `RotateRunStep.state`, which is a four-value enum, and
+ * never off any of the prose beside it:
+ *
+ *   ok      → done
+ *   skip    → skipped, the same struck-through station `--no-push` draws
+ *   fail    → current: where the run stopped, and `blank` because the plan
+ *             still has a hole there. `StopState` has no `failed`, and the
+ *             other three would each say something untrue. REPORTED.
+ *   pending → upcoming, which is exactly what it is: queued behind a failure.
+ *
+ * Stops with no step — Variable, Integration — are the questions, already
+ * settled by the time the run began, and are passed through untouched.
+ */
+export function travelledStops(
+  stops: RotatePlanStop[],
+  steps: RotateRunStep[],
+): RotateRunStop[] {
+  const state = new Map(steps.map((s) => [s.id as string, s.state]));
+  const rotateOk = state.get('rotate') === 'ok';
+  return stops.map((stop) => {
+    // The manual hand-off has no step of its own: `mod.rotate` runs `stripe
+    // login` inside the Rotate step and only returns a key once the pairing
+    // came back. So a rotation that produced one went through it, and a rail
+    // still pointing at Auth would be telling the reader to go and do a thing
+    // they have already done.
+    if (stop.id === 'auth') {
+      return rotateOk ? { ...stop, state: 'done' as const, answer: 'paired' } : stop;
+    }
+    const ran = state.get(stop.id);
+    if (!ran) return stop;
+    if (ran === 'ok') return { ...stop, state: 'done' as const };
+    if (ran === 'skip') return { ...stop, state: 'skipped' as const };
+    if (ran === 'fail') return { ...stop, state: 'current' as const, blank: true };
+    return { ...stop, state: 'upcoming' as const };
   });
 }
 

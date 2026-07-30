@@ -26,7 +26,8 @@
 // device code, not a credential, and is already on the terminal and in the
 // provider's own browser tab.
 import { runBrowserWizard } from './browserWizard';
-import { renderScreen, ScreenServer } from './screens/serve';
+import { renderScreen } from './screens/serve';
+import { serveEndingPage } from './endingPage';
 import { stripAnsi } from './connectScreens';
 import type {
   RotateAdvisory,
@@ -297,33 +298,28 @@ export function buildRotateProgressData(p: WebRotateProgressParams): RotateProgr
 }
 
 /**
- * Show what the rotation did, and do not wait for an answer.
+ * Show what the rotation did, and do not ask for anything.
  *
- * A `ScreenServer` rather than the wizard: this screen reports, and a page with
- * nothing to send back is given no way to speak at all — `screenHeaders()`
- * serves it under `connect-src 'none'`, so a page that renders a rotation's
- * outcome cannot open a socket to anywhere, including us.
+ * A display-only ending: `serveEndingPage` serves it under `connect-src
+ * 'none'`, so a page that renders a rotation's outcome cannot open a socket to
+ * anywhere, including us.
  *
- * The listening socket keeps the process alive until the browser arrives, and
- * the server closes 250ms after serving. The timeout is the ceiling for a run
- * whose browser never comes — the rotation is already over by then, and a
- * finished command must not sit waiting on a report nobody is reading.
+ * IT DOES NOT RETURN UNTIL THE BROWSER HAS THE PAGE. Every caller of this
+ * function is at the end of a run and several of them exit the process on the
+ * next line — and an exit closes the loopback server that is serving this. The
+ * `deploy-failed` page in particular reports keys that are live in Capy while
+ * every running system still holds the old ones, which is the single worst
+ * state this command can leave and the one a user must not be left guessing
+ * about. The wait is bounded by `timeoutMs`.
  */
 export async function showRotateProgressInBrowser(
   p: WebRotateProgressParams,
 ): Promise<string> {
-  const server = new ScreenServer('rotate-progress', buildRotateProgressData(p), {
-    timeoutMs: p.timeoutMs ?? 60_000,
+  const { url } = await serveEndingPage('rotate-progress', buildRotateProgressData(p), {
+    ...(p.open === undefined ? {} : { open: p.open }),
+    ...(p.onListen ? { onListen: p.onListen } : {}),
+    ...(p.timeoutMs === undefined ? {} : { timeoutMs: p.timeoutMs }),
+    lead: 'What this rotation did, in your browser:',
   });
-  const url = await server.start();
-  p.onListen?.(url);
-  if (p.open ?? true) {
-    try {
-      const open = (await import('open')).default;
-      await open(url);
-    } catch {
-      /* best-effort; the printed URL is the fallback */
-    }
-  }
   return url;
 }

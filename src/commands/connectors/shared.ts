@@ -264,6 +264,27 @@ export function fingerprint(value: string): string {
   return `${value.slice(0, 3)}…${value.slice(-3)}`;
 }
 
+/**
+ * `rk_live_` — the first eight characters of a key, for a browser payload, and
+ * ONLY when there is more of the value than that.
+ *
+ * The terminal prints `value.slice(0, 8)` as "Key type" and can go on doing
+ * so: it is showing eight characters to the person whose key it is, on a
+ * screen they are already looking at. A payload is a different thing. Eight
+ * characters of a forty-character key is a redaction; eight characters of an
+ * eight-character value is the value, and the difference is a length check
+ * nobody performs by eye.
+ *
+ * The same rule `fingerprint()` above needs and does not have — it returns
+ * anything seven characters or shorter VERBATIM — which is why the browser
+ * paths wrap it rather than calling it directly. Undefined means "say
+ * nothing": every screen renders the absence, and none of them renders a
+ * short secret.
+ */
+export function keyTypePrefix(value: string): string | undefined {
+  return value.length > 8 ? value.slice(0, 8) : undefined;
+}
+
 export interface ExpiringKey {
   varName: string;
   provider: string;

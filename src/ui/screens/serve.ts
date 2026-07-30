@@ -95,12 +95,37 @@ export class ScreenServer<K extends ScreenName> {
   private token = randomBytes(32).toString('base64url');
   private served = false;
   private timeout: NodeJS.Timeout | null = null;
+  private settle: (delivered: boolean) => void = () => {};
+
+  /**
+   * Resolves TRUE once the page has been flushed to a browser, and FALSE when
+   * the server closes — timeout, or an explicit `close()` — having never
+   * served it.
+   *
+   * `start()` resolves when the socket is LISTENING, which is a different fact
+   * and was the only one a caller could await. A caller that ends the run on
+   * the next line — `process.exit`, or simply a last statement with nothing
+   * else holding the loop open — tears this server down microseconds before
+   * the browser connects, and the page it just built is never delivered. That
+   * is not a hypothetical: the pages served here are the ENDINGS (a rotation
+   * whose rollout failed, a connect whose push did not land), and an ending is
+   * exactly where a command exits.
+   *
+   * So: await this before finishing. It is bounded by the same `timeoutMs`
+   * that closes the server, so a browser that never comes costs that ceiling
+   * and not the process.
+   */
+  readonly delivered: Promise<boolean>;
 
   constructor(
     private screen: K,
     private data: ScreenDataMap[K],
     private opts: { timeoutMs?: number; closeAfterServe?: boolean } = {},
-  ) {}
+  ) {
+    this.delivered = new Promise<boolean>((resolve) => {
+      this.settle = resolve;
+    });
+  }
 
   /** Start listening and return the tokenized URL to open in the browser. */
   async start(): Promise<string> {
@@ -145,14 +170,21 @@ export class ScreenServer<K extends ScreenName> {
     res.writeHead(200, screenHeaders());
     res.end(renderScreen(this.screen, this.data));
 
-    if (this.opts.closeAfterServe !== false) {
+    // `finish` is the response fully handed to the socket — the earliest point
+    // at which the browser is holding the page and the process is free to end.
+    res.on('finish', () => {
+      this.settle(true);
       // Let the response flush before tearing the server down.
-      res.on('finish', () => setTimeout(() => this.close(), 250));
-    }
+      if (this.opts.closeAfterServe !== false) setTimeout(() => this.close(), 250);
+    });
   }
 
   close(): void {
     if (this.timeout) clearTimeout(this.timeout);
+    // A close before anything was served is the page NOT being delivered, and
+    // a caller waiting on it has to be released either way — resolving a
+    // promise twice is a no-op, so a served-then-closed server keeps its true.
+    this.settle(false);
     if (!this.server) return;
     this.server.close();
     for (const conn of this.connections) conn.destroy();

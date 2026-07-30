@@ -4,7 +4,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { ConnectorModule, ConnectResult, RotateResult, ConnectOpts, RotateOpts } from './registry';
 import { ConnectorMetadata } from '../../types/index';
-import { ResolvedContext, fingerprint, findManagedConnector } from './shared';
+import { ResolvedContext, fingerprint, findManagedConnector, keyTypePrefix } from './shared';
 import { formatRelativeTime } from '../../ui/relativeTime';
 import { isInteractive, refuseNonInteractive } from '../../ui/interactive';
 import { connectPlan, type ConnectPlanInput } from './plans';
@@ -397,12 +397,45 @@ export function stripeModeOptions(
       id,
       available: possible,
       ...(possible ? {} : { blockedBy: 'NO_KEY' as const }),
-      ...(key ? { keyPrefix: key.value.slice(0, 8) } : {}),
+      ...(key && keyTypePrefix(key.value) ? { keyPrefix: keyTypePrefix(key.value) as string } : {}),
       ...(key && daysUntil(key.expiresAt) !== undefined
         ? { expiresInDays: daysUntil(key.expiresAt) as number }
         : {}),
     };
   });
+}
+
+/**
+ * The condition where the mode question has no answer — or nothing, when at
+ * least one mode can still run.
+ *
+ * `stripeModeOptions` can refuse BOTH: one config section holding only a live
+ * key, read by `capy-dev`, makes live `DEV_MODE` and test `NO_KEY`. The screen
+ * disables an unavailable row and `askConnectInBrowser` refuses one on submit,
+ * so what is left is a page with two dead options and no way forward. A state
+ * with no runnable answer is a wall, and a wall says why.
+ *
+ * Keyed off `blockedBy` codes, never off the copy the screen renders for them.
+ */
+export function noRunnableMode(modes: ConnectModeOption[]): Blocked | undefined {
+  if (modes.some((m) => m.available)) return undefined;
+  const blockedBy = new Set(modes.map((m) => m.blockedBy));
+  if (blockedBy.has('DEV_MODE')) {
+    return {
+      code: 'DEV_MODE_NO_TEST_KEY',
+      title: 'capy-dev cannot use the only key Stripe is holding',
+      detail:
+        'The Stripe config has a live-mode key and no test-mode key, and capy-dev refuses live mode outright — a dev build points at a dev service, and a live key must never cross that line.',
+      remedy: 'stripe login',
+    };
+  }
+  return {
+    code: 'NO_STRIPE_KEY',
+    title: 'No Stripe API key on this machine',
+    detail:
+      'The Stripe CLI config holds neither a test-mode nor a live-mode key for this account, so there is no key for Capy to read. Pairing again writes one.',
+    remedy: 'stripe login',
+  };
 }
 
 /** The variables already on this branch, as the variable step's rows. */
@@ -458,7 +491,7 @@ export function describeIncomingKey(
   const section = resolveSection(sections, requested);
   const key = section ? keyForMode(section, mode) : undefined;
   return {
-    keyPrefix: key ? key.value.slice(0, 8) : '',
+    keyPrefix: (key && keyTypePrefix(key.value)) || '',
     mode,
     ...(section?.account_id ? { accountId: section.account_id } : {}),
     fingerprint: key ? (safeSnippet(key.value) ?? '') : '',
@@ -673,7 +706,18 @@ async function confirmOverwrite(
 async function askConnectPhaseA(
   ctx: ResolvedContext,
   opts: ConnectOpts,
-): Promise<{ varName: string; mode: StripeMode; cancelled: boolean }> {
+): Promise<{
+  varName: string;
+  mode: StripeMode;
+  cancelled: boolean;
+  /**
+   * The run stopped because it could not ask, not because someone declined.
+   * Kept apart from `cancelled` so the exit code can be: a refusal is a 0, a
+   * wall is a 1, and reporting one as the other is how a caller learns the
+   * wrong thing from a run that did nothing.
+   */
+  blocked?: boolean;
+}> {
   const { askConnectInBrowser } = await import('../../ui/connectScreens');
 
   // `--var` settles the variable, with the same validation the terminal path
@@ -710,10 +754,31 @@ async function askConnectPhaseA(
     questions.push({ kind: 'var', vars: stripeVarSlots(ctx), defaultVarName: DEFAULT_VAR });
   }
   if (!mode) {
-    questions.push({
-      kind: 'mode',
-      modes: stripeModeOptions(sections, opts.account, opts.devMode === true),
-    });
+    const modes = stripeModeOptions(sections, opts.account, opts.devMode === true);
+    const wall = noRunnableMode(modes);
+    if (wall) {
+      // Both modes refused. The screen disables an unavailable row and the
+      // reducer refuses one, so asking here would be serving a question with
+      // no answer: the run would sit on that page until the wizard's
+      // five-minute timeout, having told the user nothing. A wall is an
+      // ending, not a question — it goes out through the ending server, which
+      // waits for the browser to have it and then lets the command finish.
+      const { showConnectBlockedInBrowser } = await import('../../ui/connectScreens');
+      await showConnectBlockedInBrowser({
+        provider: 'stripe',
+        projectName: ctx.keep.project_name,
+        branch: ctx.branch,
+        step: 'mode',
+        stops: connectPlan({
+          ...planFor(ctx, opts, { ...settled, ...(varName ? { varName } : {}) }),
+          standing: 'mode',
+        }),
+        blocked: wall,
+        open: !process.env.CAPY_WEB_NO_OPEN,
+      });
+      return { varName, mode: 'test', cancelled: true, blocked: true };
+    }
+    questions.push({ kind: 'mode', modes });
   }
   if (questions.length > 0) {
     const out = await askConnectInBrowser(
@@ -819,8 +884,14 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
   if (web) {
     const answered = await askConnectPhaseA(ctx, opts);
     if (answered.cancelled) {
-      console.log('Cancelled.');
-      process.exit(0);
+      // Two endings, and they are not the same fact. A decline wrote nothing
+      // and that was the point (0); a wall wrote nothing because the run could
+      // not proceed (1). Both pages have already been delivered by the time
+      // this line runs — `askConnectInBrowser` returns after its wizard has
+      // closed, and `showConnectBlockedInBrowser` waits for the browser to
+      // hold the page — so exiting here can no longer outrun either.
+      console.log(answered.blocked ? '  Nothing to connect.' : 'Cancelled.');
+      process.exit(answered.blocked ? 1 : 0);
     }
     varName = answered.varName;
     mode = answered.mode;

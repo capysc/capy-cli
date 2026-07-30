@@ -3,6 +3,7 @@ import {
   buildRotateCandidates,
   buildRotatePickerChoices,
   rotationPlanLines,
+  travelledStops,
 } from '../../src/commands/rotateCommand';
 import { rotationPlan } from '../../src/commands/connectors/plans';
 import { KeepFile } from '../../src/types/index';
@@ -202,5 +203,64 @@ describe('rotationPlanLines', () => {
     expect(text).toContain('│');
     // `--all` settled the variable stop, and the rail names the flag.
     expect(text).toContain('(--all)');
+  });
+});
+
+describe('travelledStops', () => {
+  const PLAN = rotationPlan({
+    branch: 'development',
+    varName: 'STRIPE_SECRET_KEY',
+    needsIntegration: false,
+    providers: ['stripe'],
+    authProviders: ['stripe'],
+    deployDetail: 'ship directly to prod',
+    standing: 'plan',
+  });
+  const at = (stops: Array<{ id: string; state: string }>, id: string) =>
+    stops.find((s) => s.id === id)!;
+
+  test('a rollout that failed puts the rail on the stop the run died at', () => {
+    // The page this screen exists for. The plan handed over untouched drew
+    // Rotate, Push and Deploy as stops still ahead of a run that had been
+    // through all three.
+    const stops = travelledStops(PLAN, [
+      { id: 'rotate', label: 'Rotate', state: 'ok', detail: '1/1' },
+      { id: 'push', label: 'Push', state: 'ok', detail: 'development' },
+      { id: 'deploy', label: 'Deploy', state: 'fail', detail: 'prod' },
+    ]);
+    expect(at(stops, 'rotate').state).toBe('done');
+    expect(at(stops, 'push').state).toBe('done');
+    expect(at(stops, 'deploy').state).toBe('current');
+    expect(at(stops, 'deploy').blank).toBe(true);
+    // The pairing is inside the Rotate step, and it produced a key.
+    expect(at(stops, 'auth').state).toBe('done');
+    expect(at(stops, 'auth').answer).toBe('paired');
+    // A question settled before the run began is left exactly as declared.
+    expect(at(stops, 'variable')).toEqual(at(PLAN as never, 'variable') as never);
+  });
+
+  test('a deploy queued behind a failed rotation is upcoming, not skipped', () => {
+    // `pending` and `skip` are different facts: one never ran and might still
+    // have worked; the other was never going to.
+    const stops = travelledStops(PLAN, [
+      { id: 'rotate', label: 'Rotate', state: 'fail', detail: '0/1' },
+      { id: 'push', label: 'Push', state: 'pending', detail: 'development' },
+      { id: 'deploy', label: 'Deploy', state: 'pending', detail: 'prod' },
+    ]);
+    expect(at(stops, 'rotate').state).toBe('current');
+    expect(at(stops, 'push').state).toBe('upcoming');
+    expect(at(stops, 'deploy').state).toBe('upcoming');
+    // Nothing rotated, so nothing proves the pairing happened.
+    expect(at(stops, 'auth').state).not.toBe('done');
+  });
+
+  test('--no-push strikes through the stops it skipped', () => {
+    const stops = travelledStops(PLAN, [
+      { id: 'rotate', label: 'Rotate', state: 'ok', detail: '1/1' },
+      { id: 'push', label: 'Push', state: 'skip', detail: 'skipped by --no-push' },
+      { id: 'deploy', label: 'Deploy', state: 'skip', detail: 'nothing was pushed' },
+    ]);
+    expect(at(stops, 'push').state).toBe('skipped');
+    expect(at(stops, 'deploy').state).toBe('skipped');
   });
 });
