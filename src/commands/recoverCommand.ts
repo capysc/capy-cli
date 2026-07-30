@@ -352,7 +352,7 @@ export class RecoverCommand {
     console.log(`  Signed in as ${B(userEmail || userId)}.`);
 
     const { recoverInBrowser } = await import('../ui/recoveryScreens');
-    const result = await recoverInBrowser({
+    const pending = recoverInBrowser({
       userEmail,
       // Which organizations already hold a key here decides whether the
       // overwrite stop is a station or a struck-out one, and the rail says so
@@ -405,6 +405,7 @@ export class RecoverCommand {
         },
       },
     });
+    const result = await this.orReportRefusal(pending);
 
     if (result.cancelled) {
       console.log('  Aborted. No changes made.');
@@ -431,5 +432,35 @@ export class RecoverCommand {
     console.log(`  Verify by running ${B('capy')} in a project for this org — a wrong recovery`);
     console.log(`  phrase will surface as a decryption failure on the first encrypted variable.`);
     console.log('');
+  }
+
+  /**
+   * A browser flow that never answered is a refusal, and it is said out loud.
+   *
+   * There are three ways out of `capy recover --web`: the key is written, the
+   * user cancels, or the window is closed. The third resolves nothing, so the
+   * wizard eventually gives up and rejects — and with no handler here that
+   * rejection reached index.ts's global `unhandledRejection`, which dumps the
+   * raw error object. A stack trace is not one of the endings, and it is a
+   * particularly bad one on the command whose subject is a master key: it
+   * says nothing about whether a key was written.
+   *
+   * Nothing derives or wraps a key outside `ops.writeKey`, and that returns
+   * its failures rather than throwing, so every rejection reaching here is a
+   * run that wrote nothing. That is what gets stated, before the CLI's own
+   * error screen renders the reason.
+   */
+  private async orReportRefusal<T>(pending: Promise<T>): Promise<T> {
+    try {
+      return await pending;
+    } catch (err) {
+      console.log('');
+      console.log('  Nothing was written. No key on this device was created or replaced.');
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      displayErrorAndExit(err);
+      // Unreachable: the line above exits. Present so this function has no
+      // path that falls out of the catch returning nothing.
+      throw err;
+    }
   }
 }

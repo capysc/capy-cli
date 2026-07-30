@@ -103,6 +103,21 @@ describe('recoverPlan', () => {
     expect(byId(stops, 'write').state).toBe('current');
   });
 
+  test('the write stop stops promising a verification that could not run', () => {
+    // Standing at this stop means the trial decryption is the thing that DID
+    // NOT happen. A rail still describing it as "verify it, then save it" is
+    // describing a step that failed as though it were ahead of you.
+    const stopped = byId(
+      recoverPlan({ ...BASE, orgName: 'Demos', hasKeyOnThisDevice: false, phraseEntered: true }),
+      'write',
+    );
+    expect(stopped.detail).toBe('nothing here could verify it, so saving it is a decision');
+
+    // Everywhere else the stop is still ahead, and it still promises it.
+    const ahead = byId(recoverPlan({ ...BASE, orgName: 'Demos', hasKeyOnThisDevice: false }), 'write');
+    expect(ahead.detail).toContain('verify it against');
+  });
+
   test('nothing on the rail is or describes phrase material', () => {
     const stops = recoverPlan({
       ...BASE,

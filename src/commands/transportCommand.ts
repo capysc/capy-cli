@@ -148,25 +148,51 @@ export class TransportCommand {
     }
 
     const { showTransportInBrowser } = await import('../ui/recoveryScreens');
-    const out = await showTransportInBrowser({
-      orgName,
-      boundEmail: p.userEmail,
-      expiresAtIso: new Date(p.notAfter).toISOString(),
-      redeemCommand: p.redeemCommand,
-      // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
-      // headless verification drive the loopback without hijacking a real one.
-      open: !process.env.CAPY_WEB_NO_OPEN,
-    });
 
-    console.log('');
-    console.log(`  Transport code created for ${B(p.userEmail)}`);
-    console.log(
-      out.acknowledged
-        ? '  It was shown in your browser and not printed here.'
-        : '  You closed the page without taking it. It was not printed here.',
-    );
-    console.log(`  \x1b[90mThe code was minted before the page opened, so it is live either way.\x1b[0m`);
-    console.log(`  \x1b[90mExpires ${new Date(p.notAfter).toISOString()}.\x1b[0m`);
-    console.log('');
+    /**
+     * The one ending, printed however this run got here.
+     *
+     * `capy transport` mints the code BEFORE the page opens, so a live bearer
+     * credential for this account exists whether the page was closed out,
+     * cancelled, or never answered at all. That sentence is the only thing
+     * standing between the user and a credential they do not know is out
+     * there, which is why it is not on the success path.
+     */
+    const report = (took: 'closed-out' | 'refused' | 'unanswered'): void => {
+      console.log('');
+      console.log(`  Transport code created for ${B(p.userEmail)}`);
+      if (took === 'closed-out') {
+        console.log('  It was shown in your browser and not printed here.');
+      } else if (took === 'refused') {
+        console.log('  You cancelled without taking it. It was not printed here.');
+      } else {
+        console.log('  The page was never answered. It was not printed here.');
+      }
+      console.log(`  \x1b[90mThe code was minted before the page opened, so it is live either way.\x1b[0m`);
+      console.log(`  \x1b[90mExpires ${new Date(p.notAfter).toISOString()}.\x1b[0m`);
+      console.log('');
+    };
+
+    let out;
+    try {
+      out = await showTransportInBrowser({
+        orgName,
+        boundEmail: p.userEmail,
+        expiresAtIso: new Date(p.notAfter).toISOString(),
+        redeemCommand: p.redeemCommand,
+        // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
+        // headless verification drive the loopback without hijacking a real one.
+        open: !process.env.CAPY_WEB_NO_OPEN,
+      });
+    } catch (err) {
+      // Closing the window is a refusal the server cannot see, so the wizard
+      // ends by timing out. That used to surface as the error screen alone —
+      // an exit code over a page that had just been handed a live key, with
+      // nothing anywhere saying the key existed.
+      report('unanswered');
+      throw err;
+    }
+
+    report(out.acknowledged ? 'closed-out' : 'refused');
   }
 }

@@ -65,6 +65,9 @@ export interface EndRecoverOptions {
    * below. What `--web` adds is the chance to see the list first and untick
    * something — and a report of what actually happened, which the terminal
    * cannot give because it swallows unlink failures and prints ✓ regardless.
+   *
+   * What it does NOT add is a file. Both paths sweep in exactly one state —
+   * a recovery session is open — and both refuse in exactly the other.
    */
   web?: boolean;
 }
@@ -72,13 +75,18 @@ export interface EndRecoverOptions {
 export class EndRecoverCommand {
   async execute(options: EndRecoverOptions = {}): Promise<void> {
     try {
-      if (options.web) {
-        await this.executeInBrowser();
+      // The one gate, read before either path branches. It used to sit inside
+      // the terminal path only, so `--web` offered the sweep in a state the
+      // terminal returns early on — with every row ticked, which made
+      // unlinking files `capy end-recover` never touches the DEFAULT answer to
+      // a page the flag alone had opened.
+      if (!isRecoveryActive()) {
+        this.reportNoSession();
         return;
       }
 
-      if (!isRecoveryActive()) {
-        console.log('\n  No recovery session active.\n');
+      if (options.web) {
+        await this.executeInBrowser();
         return;
       }
 
@@ -115,60 +123,86 @@ export class EndRecoverCommand {
   }
 
   /**
+   * There is nothing to close, said the same way on both paths.
+   *
+   * The sentence is the terminal's, unchanged. What is new is the second half:
+   * this state is reached with plaintext still lying in the directory — a
+   * session cleared some other way leaves its `.env.*.decrypted` files behind
+   * — and `capy end-recover` used to print "No recovery session active" over
+   * the top of them and exit, so the files read as swept.
+   *
+   * Naming them is a report, not a sweep. Neither path deletes anything here,
+   * because the difference between the two paths must never be a file.
+   */
+  private reportNoSession(): void {
+    console.log('\n  No recovery session active.\n');
+
+    const cwd = process.cwd();
+    const left = listDecryptedFiles(cwd);
+    if (left.length === 0) return;
+
+    console.log(
+      `  ${left.length === 1 ? 'One decrypted file is' : `${left.length} decrypted files are`} still here, left by a session that is already closed:`,
+    );
+    for (const f of left) console.log(`    ${f.name}`);
+    console.log(`\n  They are readable plaintext in ${bold(cwd)}. Delete them by hand.\n`);
+  }
+
+  /**
    * The sweep, shown before it happens.
    *
-   * Two things differ from the terminal form, and both are consequences of
-   * there being a page at all rather than of `--web` deciding anything:
+   * One thing differs from the terminal form, and it is a consequence of there
+   * being a page at all rather than of `--web` deciding anything: files that
+   * could not be removed are reported. The terminal swallows the failure and
+   * still prints ✓, which is the one outcome where the user needs to know the
+   * plaintext is still there.
    *
-   *   - a directory holding plaintext with NO session open is offered the
-   *     sweep. The terminal returns early there, so files written by a session
-   *     that was cleared some other way sit in the working directory forever
-   *     and `capy end-recover` says "No recovery session active" over the top
-   *     of them. Nothing is removed without being ticked.
-   *   - files that could not be removed are reported. The terminal swallows
-   *     the failure and still prints ✓, which is the one outcome where the
-   *     user needs to know the plaintext is still there.
+   * What does NOT differ is which files are candidates. This runs only with a
+   * session open, exactly like the terminal path, and the page it serves
+   * arrives with every row ticked — so the default answer to it is the sweep
+   * the terminal would have performed, and unticking is the only way to get a
+   * smaller one.
    */
   private async executeInBrowser(): Promise<void> {
     const cwd = process.cwd();
     const files = listDecryptedFiles(cwd);
-    const active = isRecoveryActive();
-
-    if (!active && files.length === 0) {
-      // Nothing to ask about, so no browser: the screen for this state draws
-      // no control, and opening a page with no way out of it is worse than
-      // the sentence the terminal already prints.
-      console.log('\n  No recovery session active.\n');
-      return;
-    }
 
     const { endRecoverInBrowser } = await import('../ui/recoveryScreens');
-    const answer = await endRecoverInBrowser({
-      session: active ? readSessionSummary() : undefined,
-      cwd,
-      files,
-      // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
-      // headless verification drive the loopback without hijacking a real one.
-      open: !process.env.CAPY_WEB_NO_OPEN,
-    });
+    let answer;
+    try {
+      answer = await endRecoverInBrowser({
+        session: readSessionSummary(),
+        cwd,
+        files,
+        // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
+        // headless verification drive the loopback without hijacking a real one.
+        open: !process.env.CAPY_WEB_NO_OPEN,
+      });
+    } catch (err) {
+      // The page was never answered — the window was closed, or the wizard
+      // gave up waiting. Both are refusals, and the only thing this run can
+      // still say for itself is that it acted on none of them.
+      console.log('\n  Nothing was removed, and the recovery session is still open.\n');
+      throw err;
+    }
 
     if (answer.cancelled) {
       console.log('\n  Cancelled. Nothing was removed.\n');
       return;
     }
 
+    // A session is always open by the time this runs — it is what the command
+    // gated on — so this happens on every accepted submit.
     let sessionCleared = false;
-    if (answer.endSession) {
-      try {
-        deleteRecoverySession();
-        sessionCleared = true;
-      } catch (err: any) {
-        // `deleteRecoverySession` sits outside the terminal path's best-effort
-        // try, so an EPERM there escapes as a raw error screen. Here the sweep
-        // has already been agreed to and the files still deserve their turn.
-        console.log(`\n  Could not clear the recovery session: ${err?.message || err}`);
-        console.log(`  It is at ${bold(getRecoverySessionPath())} — remove it by hand.`);
-      }
+    try {
+      deleteRecoverySession();
+      sessionCleared = true;
+    } catch (err: any) {
+      // `deleteRecoverySession` sits outside the terminal path's best-effort
+      // try, so an EPERM there escapes as a raw error screen. Here the sweep
+      // has already been agreed to and the files still deserve their turn.
+      console.log(`\n  Could not clear the recovery session: ${err?.message || err}`);
+      console.log(`  It is at ${bold(getRecoverySessionPath())} — remove it by hand.`);
     }
 
     const outcomes: RemovalOutcome[] = answer.remove.map(name => {
@@ -188,10 +222,6 @@ export class EndRecoverCommand {
     console.log('');
     if (sessionCleared) {
       console.log('  ✓ Recovery session ended.');
-    } else if (!answer.endSession) {
-      // There was none to end. Said plainly, because this run swept a
-      // directory the terminal form would have refused to look at.
-      console.log('  No recovery session was open — only files were swept.');
     }
     if (removed > 0) {
       console.log(`  ✓ Removed ${removed} decrypted file(s).`);
@@ -214,17 +244,25 @@ export class EndRecoverCommand {
  * with is the honest thing to show; inventing a name would mean a network call
  * in a command whose whole job is to work when nothing else does.
  *
+ * Always a summary, never `undefined`. The caller has already established that
+ * a session exists, and a file that is present but unreadable is still a
+ * session to close — falling back to nothing there would have handed the
+ * browser path the one shape it refuses to serve.
+ *
  * The session file also holds the cached master key. It is read here and only
  * `org_id` and `created_at` are taken off it; the key never leaves this
  * function and is never returned, printed or serialised.
  */
-function readSessionSummary(): { orgName: string; startedAt: string } | undefined {
-  const session = readRecoverySession() as
-    | { org_id?: string; created_at?: string }
-    | null;
-  if (!session) return undefined;
+function readSessionSummary(): { orgName: string; startedAt: string } {
+  let session: { org_id?: string; created_at?: string } | null = null;
+  try {
+    session = readRecoverySession() as { org_id?: string; created_at?: string } | null;
+  } catch {
+    // An unreadable session file is still a session file. The sweep below is
+    // what removes it, so this must not become a reason to refuse the page.
+  }
   return {
-    orgName: session.org_id || 'unknown organization',
-    startedAt: session.created_at ? formatRelativeTime(session.created_at) : 'unknown',
+    orgName: session?.org_id || 'unknown organization',
+    startedAt: session?.created_at ? formatRelativeTime(session.created_at) : 'unknown',
   };
 }

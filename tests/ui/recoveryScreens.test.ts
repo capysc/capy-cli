@@ -144,9 +144,10 @@ describe('buildRecoverData', () => {
     expect(JSON.stringify(d)).not.toContain('does not match any secrets');
   });
 
-  test('strips the terminal colour codes off an organization name', () => {
+  test('strips the terminal colour codes off every field, including the rail', () => {
     const d = buildRecoverData(
       {
+        userEmail: '\x1b[90mvince@capy.sc\x1b[0m',
         orgs: [{ id: 'o', name: '\x1b[1mDemos\x1b[0m', hasKeyOnThisDevice: false }],
         wordCount: 24,
         orgId: 'o',
@@ -154,7 +155,17 @@ describe('buildRecoverData', () => {
       'n',
     );
     expect(d.orgName).toBe('Demos');
+    expect(d.userEmail).toBe('vince@capy.sc');
+    // The stops read the answers back, and they were the one surface still
+    // carrying escapes — cleaned everywhere else, handed to `recoverPlan` raw.
+    expect(d.stops.find((s) => s.id === 'organization')!.answer).toBe('Demos');
+    expect(d.stops.find((s) => s.id === 'auth')!.answer).toBe('vince@capy.sc');
+    // Both spellings. `JSON.stringify` writes an escape as the six characters
+    // `\u001b` in the text, so testing only for the raw byte passes over a
+    // payload full of them — which is how this got through the first time.
     expect(JSON.stringify(d)).not.toContain('\x1b');
+    expect(JSON.stringify(d)).not.toContain('\\u001b');
+    expect(JSON.stringify(d)).not.toContain('[1m');
   });
 
   test('carries no phrase, no key, and no field that could hold either', () => {
@@ -515,11 +526,13 @@ describe('buildEndRecoverData', () => {
     expect(JSON.stringify(d)).not.toContain('=');
   });
 
-  test('a directory with plaintext and no session is a real state, not an error', () => {
-    // The terminal returns early here and never sweeps, so files a cleared
-    // session left behind outlive it.
-    const d = buildEndRecoverData({ ...SWEEP, session: undefined }, 'n');
-    expect(d.session).toBeUndefined();
+  test('every payload names the session the sweep is closing', () => {
+    // There is no sessionless payload to build. The screen still renders that
+    // state — the contract keeps `session` optional — but nothing in this CLI
+    // produces one, because `capy end-recover` sweeps in exactly one state and
+    // `--web` is not allowed to add a second.
+    const d = buildEndRecoverData(SWEEP, 'n');
+    expect(d.session).toEqual({ orgName: 'org-uuid-demos', startedAt: '2 hours ago' });
     expect(d.files).toHaveLength(2);
     expect(d.blocked).toBeUndefined();
   });
@@ -597,21 +610,36 @@ describe('endRecoverInBrowser', () => {
     // The screen computes it from the payload it was served, so a disagreement
     // means the submit did not come from that screen.
     let url = '';
-    const done = endRecoverInBrowser({
-      ...SWEEP,
-      session: undefined,
-      onListen: (u) => (url = u),
-    });
+    const done = endRecoverInBrowser({ ...SWEEP, onListen: (u) => (url = u) });
     const u = new URL(await waitForUrl(() => url));
     const nonce = u.searchParams.get('n') ?? '';
 
-    const res = await submit(u, nonce, { __action: 'submit', endSession: true, remove: [] });
+    const res = await submit(u, nonce, { __action: 'submit', endSession: false, remove: [] });
     expect(res.body.error).toContain('not an answer this step can produce');
 
-    // With no session, the honest answer is false — and the CLI's own value is
-    // what comes back, not the page's.
-    await submit(u, nonce, { __action: 'submit', endSession: false, remove: [] });
-    expect(await done).toEqual({ endSession: false, remove: [], cancelled: false });
+    // And the value that comes back is this run's, not the page's.
+    await submit(u, nonce, { __action: 'submit', endSession: true, remove: [] });
+    expect(await done).toEqual({ endSession: true, remove: [], cancelled: false });
+  });
+
+  test('a sweep with no session is refused before a port is opened', async () => {
+    // The state `capy end-recover` returns early on. Serving it under `--web`
+    // made the flag decide what gets DELETED rather than where a question is
+    // drawn — and the page arrives with every row ticked, so the sweep the
+    // terminal refuses was the DEFAULT answer to it.
+    //
+    // Refused before `listen`, so there is no URL, no page and nothing for a
+    // browser to click. See browserFlow.e2e for the version that goes looking
+    // for one with a real browser.
+    let url = '';
+    await expect(
+      endRecoverInBrowser({
+        ...SWEEP,
+        session: undefined as unknown as { orgName: string; startedAt: string },
+        onListen: (u) => (url = u),
+      }),
+    ).rejects.toThrow();
+    expect(url).toBe('');
   });
 
   test('cancelling removes nothing and ends no session', async () => {

@@ -199,7 +199,19 @@ function nonTtyEscape(view: RecoverView): RecoverMasterKeyData['nonTty'] {
 
 export function buildRecoverData(s: RecoverScreenState, nonce: string): RecoverMasterKeyData {
   const view = recoverScreenView(s);
-  const org = s.orgs.find((o) => o.id === s.orgId);
+
+  // Stripped ONCE, at the edge, before anything downstream can hold a copy.
+  // Doing it per-field is how the rail ended up as the one surface still
+  // carrying escapes: `orgs[].name` and `orgName` were cleaned and the same
+  // name went into `recoverPlan` raw, so the station that reads back your
+  // answer rendered a literal `[1m` beside the clean one in the body.
+  const userEmail = s.userEmail === undefined ? undefined : stripAnsi(s.userEmail);
+  const orgs = s.orgs.map((o) => ({
+    id: o.id,
+    name: stripAnsi(o.name),
+    hasKeyOnThisDevice: o.hasKeyOnThisDevice,
+  }));
+  const org = orgs.find((o) => o.id === s.orgId);
 
   return {
     nonce,
@@ -209,7 +221,7 @@ export function buildRecoverData(s: RecoverScreenState, nonce: string): RecoverM
     // anything: by the time a screen exists, that stop is history.
     stops: recoverPlan({
       signedIn: true,
-      userEmail: s.userEmail,
+      userEmail,
       orgName: org?.name,
       hasKeyOnThisDevice: org?.hasKeyOnThisDevice,
       overwriteAgreed: s.overwriteAgreed,
@@ -217,13 +229,9 @@ export function buildRecoverData(s: RecoverScreenState, nonce: string): RecoverM
       phraseEntered: s.oracleGap !== undefined,
       wordCount: s.wordCount,
     }),
-    userEmail: s.userEmail,
-    orgs: s.orgs.map((o) => ({
-      id: o.id,
-      name: stripAnsi(o.name),
-      hasKeyOnThisDevice: o.hasKeyOnThisDevice,
-    })),
-    orgName: org ? stripAnsi(org.name) : undefined,
+    userEmail,
+    orgs,
+    orgName: org?.name,
     orgId: org?.id,
     wordCount: s.wordCount,
     phraseError: s.phraseError,
@@ -307,9 +315,11 @@ export async function recoverInBrowser(p: WebRecoverParams): Promise<WebRecoverR
         // failure `recover` exists to undo.
         if (!org) return { error: 'That organization is not one this session can reach.' };
         if (!(await p.ops.scopeToOrg(org.id))) {
-          // The CLI's own sentence for this, minus the terminal's bolding.
+          // The CLI's own sentence for this, minus the terminal's bolding —
+          // which is stripped rather than assumed absent, because this string
+          // is rendered into a page and an escape shows up there as `[1m`.
           return {
-            error: `Failed to scope session to ${org.name}. Run capy and select this org, then retry.`,
+            error: `Failed to scope session to ${stripAnsi(org.name)}. Run capy and select this org, then retry.`,
           };
         }
         state = { ...state, orgId: org.id };
@@ -394,12 +404,18 @@ export async function recoverInBrowser(p: WebRecoverParams): Promise<WebRecoverR
 
 export interface WebEndRecoverParams {
   /**
-   * The active recovery session, if there is one. Absent with files present is
-   * a real state rather than an error: the terminal returns early when there
-   * is no session and never sweeps, so plaintext outlives a session that was
-   * cleared some other way.
+   * The session this sweep is closing. REQUIRED, and that is the whole of the
+   * guarantee: `capy end-recover` returns early with no session and removes
+   * nothing, so a page served without one would let a click unlink files the
+   * terminal form would never have touched — and every row on it arrives
+   * ticked, which makes that the DEFAULT answer rather than an opt-in.
+   *
+   * `--web` moves where a question is drawn. It does not move what a command
+   * deletes, and the shape of this parameter is what stops the next edit from
+   * making it. The screen still renders a sessionless state (see
+   * `EndRecoverCleanupData.session`); nothing in this CLI produces one.
    */
-  session?: { orgName: string; startedAt: string };
+  session: { orgName: string; startedAt: string };
   /** The directory being swept. It is only ever this one. */
   cwd: string;
   /** Files matching `.env.*.decrypted` here. Names only — never contents. */
@@ -421,9 +437,7 @@ export function buildEndRecoverData(p: WebEndRecoverParams, nonce: string): EndR
   return {
     nonce,
     view: 'review',
-    session: p.session
-      ? { orgName: stripAnsi(p.session.orgName), startedAt: stripAnsi(p.session.startedAt) }
-      : undefined,
+    session: { orgName: stripAnsi(p.session.orgName), startedAt: stripAnsi(p.session.startedAt) },
     cwd: stripAnsi(p.cwd),
     // Names, ages and sizes. Every one of these files is readable plaintext
     // and not a byte of their contents belongs in a payload.
@@ -446,6 +460,17 @@ export function buildEndRecoverData(p: WebEndRecoverParams, nonce: string): EndR
  * never trusted: the answer to this page is a set of unlink calls.
  */
 export async function endRecoverInBrowser(p: WebEndRecoverParams): Promise<WebEndRecoverResult> {
+  // Nothing is served without a session — refused BEFORE the socket exists,
+  // so there is no page for a browser to reach and no window to tick. The
+  // type says the same thing; this is the check a JavaScript caller gets, and
+  // it is here rather than only in the command because this is the function
+  // that opens the port.
+  if (!p.session) {
+    throw new Error(
+      'end-recover has no session to close, so there is nothing to serve: `capy end-recover` removes nothing in this state.',
+    );
+  }
+
   const out = await runBrowserWizard(
     {
       title: 'End recovery session',
@@ -463,9 +488,10 @@ export async function endRecoverInBrowser(p: WebEndRecoverParams): Promise<WebEn
 
       // Whether the session is cleared is this run's fact, not the page's
       // answer: the screen computes the flag from the payload it was served,
-      // so a disagreement means the submit did not come from that screen.
-      // Checked rather than obeyed — the value used below is the CLI's.
-      if (payload.endSession !== !!p.session) {
+      // and this page is only ever served with a session, so anything but
+      // `true` means the submit did not come from that screen. Checked rather
+      // than obeyed — the value used below is the CLI's.
+      if (payload.endSession !== true) {
         return { error: 'That is not an answer this step can produce.' };
       }
 
@@ -479,7 +505,7 @@ export async function endRecoverInBrowser(p: WebEndRecoverParams): Promise<WebEn
       // Rebuilt from the CLI's own list so the order is the one the page
       // showed and a duplicate cannot turn into a second unlink.
       const remove = p.files.map((f) => f.name).filter((n) => raw.includes(n));
-      return { done: true, result: { endSession: !!p.session, remove, cancelled: false } };
+      return { done: true, result: { endSession: true, remove, cancelled: false } };
     },
   );
   return out as WebEndRecoverResult;

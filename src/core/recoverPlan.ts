@@ -151,7 +151,13 @@ export function recoverPlan(input: RecoverPlanInput): RecoverMasterKeyStop[] {
       // decryption could not run and the user is asked to write anyway. On
       // every other run the phrase stop verifies and writes in one move.
       state: input.phraseEntered ? 'current' : 'upcoming',
-      detail: 'verify it against this organization’s own ciphertext, then save it here',
+      // Which is why the detail cannot be one sentence. Standing here means
+      // the verification this stop describes is the thing that DID NOT
+      // happen, and a rail that still promised it would be describing a step
+      // that failed as though it were ahead of you.
+      detail: input.phraseEntered
+        ? 'nothing here could verify it, so saving it is a decision'
+        : 'verify it against this organization’s own ciphertext, then save it here',
     },
   ];
 }
