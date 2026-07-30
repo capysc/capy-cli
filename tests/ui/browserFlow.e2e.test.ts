@@ -3695,3 +3695,396 @@ describeBrowser('the recovery flows, driven by a real browser', () => {
     await done.catch(() => undefined);
   }, 60_000);
 });
+
+describeBrowser('capy deploy, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /**
+   * Type into a field the way a person does.
+   *
+   * Assigning `.value` alone is invisible to the screen: `bind:value` listens
+   * for `input`, so a test that only sets the property proves the CLI can read
+   * a field nobody could have filled in.
+   */
+  const typeInto = (label: string, value: string): string =>
+    `(() => {
+        const lab = [...document.querySelectorAll('.field label')]
+          .find(l => l.textContent.trim() === ${JSON.stringify(label)});
+        const el = document.getElementById(lab.getAttribute('for'));
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+     })()`;
+
+  /** Click the button whose visible text contains `text`. */
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  /**
+   * Click the option row whose label is exactly `label`.
+   *
+   * Exact, and on the label element rather than the row: which row is chosen
+   * here decides whose secrets ship and where they land, and half these labels
+   * are substrings of the copy around them.
+   */
+  const clickOption = (label: string): string =>
+    `[...document.querySelectorAll('[role=radio],[role=checkbox]')]
+       .find(el => el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)}).click()`;
+
+  const PLATFORMS = [
+    {
+      id: 'cloudflare-workers',
+      name: 'Cloudflare Workers',
+      hasConnector: true,
+      connectorId: 'cf-worker',
+      connectorLabel: 'Cloudflare Workers',
+      connectorDetail: ['Server-side, runtime secrets pushed via wrangler secret bulk'],
+    },
+    { id: 'heroku', name: 'Heroku', hasConnector: false },
+    { id: 'other', name: 'Other...', hasConnector: false },
+  ];
+
+  test('both stops of the destination route are walked by clicking', async () => {
+    // The standalone path end to end: answering stop one is a page RELOAD, not
+    // a markup swap, and the same URL then serves stop two.
+    const { chooseDeployDestinationInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = chooseDeployDestinationInBrowser({
+      platforms: PLATFORMS,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The route is drawn whole before the first answer — including the stops
+    // this page is not standing on. The terminal asks these as two lists with
+    // nothing between them, so nobody can tell whether the flow is two stops
+    // or nine.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('How to deploy')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Save as')`)).toBe(true);
+
+    // The button names the answer, so the fork is visible before it is taken.
+    await evaluate(page, clickOption('Cloudflare Workers'));
+    await evaluate(page, clickButton('Use Cloudflare Workers'));
+
+    // Stop two arrives by navigation, at the same address.
+    await until(page, `document.body.textContent.includes('How should Capy deploy it?')`, 'the mode stop');
+    // …with stop one now settled on the rail.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Cloudflare Workers')`)).toBe(true);
+
+    await evaluate(page, clickOption('Set up CI deploy token + docs (capy run in your CI)'));
+    await evaluate(page, clickButton('Mint a deploy token'));
+
+    expect(await done).toEqual({
+      platform: 'cloudflare-workers',
+      mode: 'token',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('a platform with no connector says the mode question is skipped', async () => {
+    // The terminal skips it in silence, so the flow just gets shorter and
+    // nobody is told why.
+    const { chooseDeployDestinationInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = chooseDeployDestinationInBrowser({
+      platforms: PLATFORMS,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, clickOption('Heroku'));
+    await until(
+      page,
+      `document.body.textContent.includes('No connector for Heroku yet')`,
+      'the no-connector callout',
+    );
+    await evaluate(page, clickButton('Use Heroku'));
+
+    // `null`, not a mode nobody chose: that question does not exist for Heroku.
+    expect(await done).toEqual({ platform: 'heroku', mode: null, cancelled: false });
+  }, 60_000);
+
+  const CF_WORKER = {
+    id: 'cf-worker',
+    label: 'Cloudflare Workers',
+    detail: ['Server-side, runtime secrets pushed via wrangler secret bulk'],
+    detected: 'wrangler.toml → api',
+    defaults: { workerName: 'api', workerDir: '.' },
+    vars: [
+      { name: 'DATABASE_URL', buildTime: false, checked: true },
+      { name: 'STRIPE_SECRET_KEY', buildTime: false, checked: true },
+      { name: 'VITE_API_URL', buildTime: true, checked: false },
+    ],
+    presetLabel: 'non-public-prefixed',
+    delivery: { mode: 'direct' as const, prBase: 'main' },
+    gitBranches: ['main', 'develop'],
+    regionDetected: false,
+    exampleVar: 'DATABASE_URL',
+  };
+
+  test('the whole picker is walked by clicking, and folds into one target', async () => {
+    const { setUpDeployTargetInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = setUpDeployTargetInBrowser({
+      intent: 'create',
+      steps: ['branch', 'settings', 'variables', 'delivery', 'name'],
+      adapterId: 'cf-worker',
+      capyBranches: ['development', 'production'],
+      branch: 'production',
+      existingNames: [],
+      resolveAdapter: async () => CF_WORKER,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The rail is the CLI's plan, drawn whole before anything was answered,
+    // and the mode question is counted as a stop this run never asked rather
+    // than being dropped out of the route.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Delivery')`)).toBe(true);
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('nav.route .detail')]
+           .some(el => el.textContent.trim() === '1 not needed')`,
+      ),
+    ).toBe(true);
+
+    await evaluate(page, clickOption('development'));
+    await evaluate(page, clickButton('Ship this branch'));
+
+    await until(page, `document.body.textContent.includes('Cloudflare Workers settings')`, 'the settings stop');
+    // The terminal's `Detected: …` line, above the fields it prefilled.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('wrangler.toml')`)).toBe(true);
+    await evaluate(page, typeInto('Worker name', 'api'));
+    await evaluate(page, typeInto('Worker directory', 'worker'));
+    await evaluate(page, clickButton('Save settings'));
+
+    await until(page, `document.body.textContent.includes('Which variables ship')`, 'the variables stop');
+    // Variable NAMES only. Nothing has been decrypted at this point in the
+    // flow, and no value could reach this payload if it had.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    await evaluate(page, clickButton('Ship these variables'));
+
+    await until(page, `document.body.textContent.includes('How should this target deploy?')`, 'the delivery stop');
+    await evaluate(page, clickOption('Via CI/CD'));
+    await until(page, `!!document.querySelector('.field')`, 'the PR base field');
+    await evaluate(page, typeInto('PR base branch', 'release'));
+    await evaluate(page, clickButton('Open a pull request'));
+
+    await until(page, `document.body.textContent.includes('Save this target')`, 'the name stop');
+    await evaluate(page, typeInto('Target name', 'cf-worker-development'));
+    await evaluate(page, clickButton('Save target'));
+
+    expect(await done).toEqual({
+      adapterId: 'cf-worker',
+      branch: 'development',
+      options: { workerName: 'api', workerDir: 'worker' },
+      vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+      mode: 'ci',
+      gitBaseBranch: 'release',
+      name: 'cf-worker-development',
+      cancelled: false,
+    });
+  }, 90_000);
+
+  test('ticking a runtime secret on a Pages build is called out before it ships', async () => {
+    // The variable checkbox is the only boundary between a runtime secret and
+    // a public browser bundle: a Pages build inlines whatever it is given into
+    // JavaScript the browser downloads, and it can never be un-published.
+    // Nothing in the terminal says so.
+    const { setUpDeployTargetInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = setUpDeployTargetInBrowser({
+      intent: 'create',
+      steps: ['variables'],
+      adapterId: 'cf-pages',
+      capyBranches: ['production'],
+      branch: 'production',
+      existingNames: [],
+      resolveAdapter: async () => ({
+        ...CF_WORKER,
+        id: 'cf-pages',
+        label: 'Cloudflare Pages',
+        detected: undefined,
+        defaults: {
+          projectName: 'site',
+          buildCwd: '.',
+          buildCmd: 'bun run build',
+          distDir: 'dist',
+        },
+        vars: [
+          { name: 'VITE_API_URL', buildTime: true, checked: true },
+          { name: 'STRIPE_SECRET_KEY', buildTime: false, checked: false },
+        ],
+        presetLabel: 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_',
+      }),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('would be published')`)).toBe(false);
+
+    await evaluate(page, clickOption('STRIPE_SECRET_KEY'));
+    await until(page, `document.body.textContent.includes('would be published')`, 'the leak warning');
+
+    // Unticking it clears the warning, and the target ships only the public one.
+    await evaluate(page, clickOption('STRIPE_SECRET_KEY'));
+    await until(
+      page,
+      `!document.body.textContent.includes('would be published')`,
+      'the leak warning to clear',
+    );
+    await evaluate(page, clickButton('Ship these variables'));
+
+    expect((await done).vars).toEqual(['VITE_API_URL']);
+  }, 60_000);
+
+  const PLAN = {
+    target: {
+      name: 'cf-worker-production',
+      adapterId: 'cf-worker',
+      adapterLabel: 'Cloudflare Workers',
+      branch: 'production',
+      mode: 'direct' as const,
+      options: [
+        { key: 'workerName', value: 'api' },
+        { key: 'workerDir', value: '.' },
+      ],
+      vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+      saved: true,
+    },
+    action: 'direct' as const,
+    dryRun: false,
+    preflight: [
+      { id: 'preflight', label: 'Cloudflare Workers preflight', state: 'ok' as const },
+    ],
+    signedIn: true,
+    open: false,
+  };
+
+  test('the last gate before anything is decrypted is answered by clicking', async () => {
+    const { confirmDeployInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = confirmDeployInBrowser({ ...PLAN, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The plan, at the resolution the terminal prints it — and no value:
+    // preflight runs before anything is decrypted and this page sits in the
+    // same window.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    // The terminal prints only the first preflight failure; every check keeps
+    // a row here, and the ones that passed stay visible.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('preflight')`)).toBe(true);
+
+    await evaluate(page, clickButton('Deploy now'));
+    expect(await done).toEqual({ decision: 'deploy', force: false, cancelled: false });
+  }, 60_000);
+
+  test('deleting a target wants its name typed, not one keypress', async () => {
+    // The terminal deletes on `d` with no second question and no summary of
+    // what is going. The settings behind that name took seven prompts to
+    // produce and `.capy/deploy.json` keeps no history.
+    const { confirmDeployInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = confirmDeployInBrowser({ ...PLAN, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, `document.querySelector('[data-test=delete-target]').click()`);
+    await until(page, `document.body.textContent.includes('This cannot be undone')`, 'the delete view');
+
+    // Held down until the name matches, character for character.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Delete target')).disabled`,
+      ),
+    ).toBe(true);
+
+    await evaluate(page, typeInto('Type the target name to confirm', 'cf-worker-production'));
+    await until(
+      page,
+      `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Delete target')).disabled`,
+      'the delete button to go live',
+    );
+    await evaluate(page, clickButton('Delete target'));
+
+    expect(await done).toEqual({ decision: 'delete', force: false, cancelled: false });
+  }, 60_000);
+
+  test('the saved-target listing answers "which target?" by clicking a row', async () => {
+    // Three prompts in this command ask that with three different sentences.
+    // The listing also carries the two fields the printed one omits: mode, and
+    // what a CI target's pull request opens against.
+    const { chooseDeployTargetInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = chooseDeployTargetInBrowser({
+      projectName: 'mikes-market',
+      configPath: '/repo/.capy/deploy.json',
+      purpose: 'pick',
+      targets: [
+        {
+          name: 'cf-worker-production',
+          kind: 'cf-worker',
+          adapterLabel: 'Cloudflare Workers',
+          branch: 'production',
+          mode: 'direct',
+          options: [{ key: 'workerName', value: 'api' }],
+          vars: ['DATABASE_URL'],
+        },
+        {
+          name: 'legacy',
+          kind: 'cf-worker',
+          adapterLabel: 'Cloudflare Workers',
+          branch: 'development',
+          options: [],
+          vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+        },
+      ],
+      allow: ['use', 'new'],
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // A target saved before `mode` existed resolves to `direct` — the
+    // irreversible one — and the terminal listing says nothing at all.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Mode was never saved')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    await evaluate(page, clickOption('legacy'));
+    await evaluate(page, clickButton('Use this target'));
+
+    expect(await done).toEqual({ action: 'use', target: 'legacy', cancelled: false });
+  }, 60_000);
+});
