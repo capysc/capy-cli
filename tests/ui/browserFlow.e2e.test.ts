@@ -264,3 +264,94 @@ describeBrowser('browser flow, driven by a real browser', () => {
     expect(reducerCalled).toBe(false);
   }, 60_000);
 });
+
+describeBrowser('the sync conflict resolver, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  const PARAMS = {
+    rows: [
+      { variable: 'STRIPE_KEY', pinned: 'sk_…001', local: 'sk_…002', remote: 'sk_…003' },
+      { variable: 'DB_URL', pinned: 'pos…dev', local: 'pos…loc', remote: 'pos…rem' },
+    ],
+    unresolvable: new Set<string>(),
+    showLocal: true,
+    showRemote: true,
+    localMode: false,
+    isOnboarding: false,
+    isBehind: false,
+    remoteState: 'ok' as const,
+    actions: [
+      { value: 'commit_local' as const, label: 'Commit and push all local values' },
+      { value: 'retrieve_pinned' as const, label: 'Retrieve all pinned values' },
+      { value: 'individual' as const, label: 'Individually resolve' },
+      { value: 'skip' as const, label: 'Continue working' },
+    ],
+    projectName: 'mikes-market',
+    branch: 'development',
+    open: false,
+  };
+
+  test('a whole-run action can be chosen and applied by clicking', async () => {
+    // The level the old browser resolver did not have. It discarded the CLI's
+    // menu and hard-coded per-variable resolution, so "take theirs" meant
+    // answering once per variable.
+    const { resolveConflictInBrowser } = await import('../../src/ui/syncConflictScreen');
+    let url = '';
+    const done = resolveConflictInBrowser({ ...PARAMS, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The review stop renders the diff the CLI computed.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_KEY')`)).toBe(true);
+    // Snippets only — no full secret reaches the page.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    await evaluate(page, `document.querySelector('[data-test=to-choose]').click()`);
+    await until(page, `document.querySelector('[data-test=apply-action]')`, 'the action menu');
+
+    // Pick the CLI's own wording, the way a person would.
+    await evaluate(
+      page,
+      `[...document.querySelectorAll('[role=radio],[role=option],li,label')]
+         .find(el => el.textContent.trim().startsWith('Retrieve all pinned values')).click()`,
+    );
+    await evaluate(page, `document.querySelector('[data-test=apply-action]').click()`);
+
+    expect(await done).toEqual({ action: 'retrieve_pinned', choices: {}, cancelled: false });
+  }, 60_000);
+
+  test('closing the window resolves nothing', async () => {
+    // An unanswered conflict is a refusal. Nothing about leaving may look like
+    // agreement to rewrite somebody's .env.
+    const { resolveConflictInBrowser } = await import('../../src/ui/syncConflictScreen');
+    let url = '';
+    let settled = false;
+    const done = resolveConflictInBrowser({ ...PARAMS, timeoutMs: 1_500, onListen: (u) => (url = u) });
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.navigate', { url: 'about:blank' });
+
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    await done.catch(() => undefined);
+  }, 60_000);
+});

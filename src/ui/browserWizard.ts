@@ -74,6 +74,17 @@ export interface WizardParams {
   onListen?: (url: string) => void;
   timeoutMs?: number;
   doneMessage?: string;
+  /**
+   * Build the first screen's HTML once the nonce exists, replacing
+   * `firstScreen.html`.
+   *
+   * A compiled screen carries the nonce inside its own payload — that is how
+   * it addresses its answer back — but the nonce is minted in here, after the
+   * caller has already constructed its params. Without this the caller would
+   * have to mint one itself and hand it in, which would put the security token
+   * of every browser flow in the hands of each flow rather than in one place.
+   */
+  renderFirst?: (nonce: string) => string;
 }
 
 /** The reducer's verdict for a submitted screen. */
@@ -105,7 +116,9 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
    * rather than always serving `firstScreen` is what makes a reload return the
    * step the flow is actually on.
    */
-  let current: WizardScreen = params.firstScreen;
+  let current: WizardScreen = params.renderFirst
+    ? { ...params.firstScreen, html: params.renderFirst(nonce) }
+    : params.firstScreen;
 
   return new Promise<unknown>((resolve, reject) => {
     let timer: NodeJS.Timeout;

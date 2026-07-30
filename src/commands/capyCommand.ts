@@ -1601,17 +1601,30 @@ export class CapyCommand {
     // we tag the action 'individual' and skip the TTY ResolveTable below.
     let webFinalEnv: Record<string, string> | undefined;
     if (this.options.web) {
+      // The browser now answers the same two-level question the terminal asks,
+      // so the whole-run menu goes to it verbatim — same wording, same order,
+      // and that order is the CLI's recommendation. It used to be discarded
+      // here and `individual` forced in its place.
       const resolved = await this.resolveConflictViaBrowser(
         diffs, effectiveShowLocal, showRemote, pinned,
         localPlaintext, remotePlaintext, pinnedPlaintext,
         projectState.projectName || 'project', branch,
+        {
+          localMode,
+          isOnboarding,
+          isBehind,
+          remoteState: showRemote ? 'ok' : 'empty',
+          actions: menuChoices.map(c => ({ value: c.value, label: c.name })),
+        },
       );
       if (resolved === null) {
         console.log('\n  No changes applied.');
         return;
       }
-      webFinalEnv = resolved;
-      action = 'individual';
+      // Only individual resolution hands back an env; every other action is
+      // applied below by the same branch the terminal path takes.
+      webFinalEnv = resolved.finalEnv;
+      action = resolved.action;
     } else {
       const res = await inquirer.prompt([{
         type: 'list',
@@ -1962,10 +1975,19 @@ export class CapyCommand {
   }
 
   /**
-   * Render the sync conflict resolver in the browser (`capy --web`). Builds the
-   * same per-variable rows as the TTY ResolveTable — SNIPPETS only, never full
-   * secret values — collects the user's choices over the loopback, and maps them
-   * to the final env. Returns null if the user cancelled.
+   * Render the sync conflict resolver in the browser (`capy --web`).
+   *
+   * Serves the compiled `sync-conflict` screen, which asks BOTH levels the
+   * terminal asks: the whole-run action first, in the CLI's own order so the
+   * recommended answer sits at the top, and the per-variable table only when
+   * the user chooses to resolve individually. The previous browser path threw
+   * the first level away and hard-coded individual resolution, so someone who
+   * wanted "take theirs" answered once per variable and never saw the ordering
+   * that carried the recommendation.
+   *
+   * SNIPPETS only, never full secret values — the same rule the TTY table
+   * follows. Returns the chosen action so the caller can apply a whole-run
+   * answer directly, or null when nothing was decided.
    */
   private async resolveConflictViaBrowser(
     diffs: { variable: string; type: string; pinned?: string; local?: string; remote?: string }[],
@@ -1977,26 +1999,47 @@ export class CapyCommand {
     pinnedPlaintext: Record<string, string>,
     projectName: string,
     branch: string,
-  ): Promise<Record<string, string> | null> {
-    const { resolveConflictInBrowser } = await import('../ui/conflictWeb');
+    context: {
+      localMode: boolean;
+      isOnboarding: boolean;
+      isBehind: boolean;
+      remoteState: 'ok' | 'empty' | 'unreachable';
+      actions: { value: string; label: string }[];
+    },
+  ): Promise<{ action: string; finalEnv?: Record<string, string> } | null> {
+    const { resolveConflictInBrowser } = await import('../ui/syncConflictScreen');
 
-    const pinnedSnippetFor = (variable: string): string | null => {
-      if (!pinned[variable]) return null;
-      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
-      return '\x1b[3munresolvable\x1b[0m';
-    };
+    // Which pins cannot be reconstructed. The terminal encodes this by writing
+    // an ANSI-italic `unresolvable` into the value column and testing for that
+    // string later; a variable whose snippet read "unresolvable" would defeat
+    // it. The screen takes a set of names, which no value can spoof.
+    const unresolvable = new Set(
+      diffs
+        .map(d => d.variable)
+        .filter(v => pinned[v] !== undefined && pinnedPlaintext[v] === undefined),
+    );
 
     const rows = diffs.map(diff => ({
       variable: diff.variable,
-      pinned: pinnedSnippetFor(diff.variable),
+      pinned: pinnedPlaintext[diff.variable]
+        ? formatSnippet(pinnedPlaintext[diff.variable])
+        : pinned[diff.variable] !== undefined
+          ? ''
+          : null,
       local: localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : null,
       remote: remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : null,
     }));
 
-    const { choices, cancelled } = await resolveConflictInBrowser({
+    const { action, choices, cancelled } = await resolveConflictInBrowser({
       rows,
+      unresolvable,
       showLocal,
       showRemote,
+      localMode: context.localMode,
+      isOnboarding: context.isOnboarding,
+      isBehind: context.isBehind,
+      remoteState: context.remoteState,
+      actions: context.actions.map(a => ({ value: a.value as never, label: a.label })),
       projectName,
       branch,
       // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless
@@ -2005,7 +2048,16 @@ export class CapyCommand {
     });
     if (cancelled) return null;
 
-    return this.mapResolveChoicesToEnv(choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
+    // A whole-run action is applied by the same code the terminal path uses;
+    // only individual resolution produces an env here.
+    if (action !== 'individual') return { action };
+
+    return {
+      action,
+      finalEnv: this.mapResolveChoicesToEnv(
+        choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext,
+      ),
+    };
   }
 
   private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {

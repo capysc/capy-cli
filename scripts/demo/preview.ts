@@ -10,7 +10,8 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { DEPLOY_PAGE_CSS } from '../../src/ui/deployPage/generatedAssets';
 import { chooseSourceScreen, phraseDisplayScreen, passphraseScreen } from '../../src/ui/onboardingWeb';
-import { buildScreenHtml } from '../../src/ui/conflictWeb';
+import { buildConflictData } from '../../src/ui/syncConflictScreen';
+import { renderScreen } from '../../src/ui/screens/serve';
 import { CAPY_LOGO_SVG } from '../../src/ui/browserWizard';
 import { generateSeedPhrase } from '../../src/crypto/keyManager';
 
@@ -47,31 +48,65 @@ const screens: Array<[string, string, string]> = [
   [
     '4-conflict-resolver.html',
     'Resolve 2 conflicts — demo/development',
-    buildScreenHtml({
-      rows: [
-        { variable: 'API_KEY', pinned: 'sk_...001', local: 'sk_...999', remote: null },
-        { variable: 'DATABASE_URL', pinned: 'pos...dev', local: 'pos...ing', remote: null },
-      ],
-      showLocal: true,
-      showRemote: false,
-      projectName: 'demo',
-      branch: 'development',
-    }),
+    renderScreen(
+      'sync-conflict',
+      buildConflictData(
+        {
+          rows: [
+            { variable: 'API_KEY', pinned: 'sk_...001', local: 'sk_...999', remote: null },
+            { variable: 'DATABASE_URL', pinned: 'pos...dev', local: 'pos...ing', remote: null },
+          ],
+          unresolvable: new Set<string>(),
+          showLocal: true,
+          showRemote: false,
+          localMode: false,
+          isOnboarding: false,
+          isBehind: false,
+          remoteState: 'empty',
+          actions: [
+            { value: 'commit_local', label: 'Commit and push all local values' },
+            { value: 'retrieve_pinned', label: 'Retrieve all pinned values' },
+            { value: 'individual', label: 'Individually resolve' },
+            { value: 'skip', label: 'Continue working' },
+          ],
+          projectName: 'demo',
+          branch: 'development',
+        },
+        'preview-nonce',
+      ),
+    ),
   ],
   [
     '5-conflict-resolver-3way.html',
     'Resolve 2 conflicts — demo/development',
     // 3-way conflict (a teammate also pushed) → the Remote column appears too.
-    buildScreenHtml({
-      rows: [
-        { variable: 'API_KEY', pinned: 'sk_...001', local: 'sk_...999', remote: 'sk_...777' },
-        { variable: 'DATABASE_URL', pinned: 'pos...dev', local: 'pos...ing', remote: 'pos...prd' },
-      ],
-      showLocal: true,
-      showRemote: true,
-      projectName: 'demo',
-      branch: 'development',
-    }),
+    renderScreen(
+      'sync-conflict',
+      buildConflictData(
+        {
+          rows: [
+            { variable: 'API_KEY', pinned: 'sk_...001', local: 'sk_...999', remote: 'sk_...777' },
+            { variable: 'DATABASE_URL', pinned: 'pos...dev', local: 'pos...ing', remote: 'pos...prd' },
+          ],
+          unresolvable: new Set<string>(),
+          showLocal: true,
+          showRemote: true,
+          localMode: false,
+          isOnboarding: false,
+          isBehind: false,
+          remoteState: 'ok',
+          actions: [
+            { value: 'commit_local', label: 'Commit and push all local values' },
+            { value: 'retrieve_pinned', label: 'Retrieve all pinned values' },
+            { value: 'individual', label: 'Individually resolve' },
+            { value: 'skip', label: 'Continue working' },
+          ],
+          projectName: 'demo',
+          branch: 'development',
+        },
+        'preview-nonce',
+      ),
+    ),
   ],
 ];
 
