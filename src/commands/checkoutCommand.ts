@@ -4,12 +4,38 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import inquirer from 'inquirer';
-import { CapyError, ERROR_CODES, getSyncKeepHash, KeepFile } from '../types/index';
+import { Branch, CapyError, ERROR_CODES, getSyncKeepHash, KeepFile } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { SyncEngine } from '../sync/syncEngine';
 import { hashValue } from './statusCommand';
+import { branchCreatePlan, unansweredStops } from '../core/branchCreatePlan';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/**
+ * How many variables each branch pins, from keep.lock alone.
+ *
+ * Feeds the branch list's per-row count. Local knowledge deliberately: the
+ * server's branch list carries no counts, and keep.lock is the file this
+ * directory already trusts for what a branch holds. A branch this checkout has
+ * never touched is simply absent from the map, which the screen renders as no
+ * count rather than as zero.
+ */
+export function countVariablesPerBranch(keep: KeepFile | null): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const entries of Object.values(keep?.variables ?? {})) {
+    // Per VARIABLE, not per entry: the number the screen prints is "variables
+    // held on this branch", and a variable with two entries pinned to one
+    // branch is still one variable.
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      if (!entry?.branch || seen.has(entry.branch)) continue;
+      seen.add(entry.branch);
+      counts[entry.branch] = (counts[entry.branch] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
 
 /**
  * Pure dirty-check behind the checkout guard: does the decrypted .env differ
@@ -43,6 +69,20 @@ export function findUncommittedEnvChange(
   return null;
 }
 
+export interface CheckoutOptions {
+  create?: boolean;
+  /** Settled by `--protected` / `--no-protected`; undefined means ask. */
+  protected?: boolean;
+  /**
+   * Ask this run's questions in a browser instead of at the TTY.
+   *
+   * Changes only where a question is RENDERED. The same plan decides which
+   * questions exist, the same answers reach the same code, and nothing about
+   * what is written to keep.lock or .env moves.
+   */
+  web?: boolean;
+}
+
 export class CheckoutCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
@@ -60,7 +100,7 @@ export class CheckoutCommand {
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
-  async execute(branchName: string, options: { create?: boolean; protected?: boolean } = {}): Promise<void> {
+  async execute(branchName: string, options: CheckoutOptions = {}): Promise<void> {
     try {
       await this._execute(branchName, options);
     } catch (error: any) {
@@ -77,7 +117,7 @@ export class CheckoutCommand {
     }
   }
 
-  private async _execute(branchName: string, options: { create?: boolean; protected?: boolean }): Promise<void> {
+  private async _execute(branchName: string, options: CheckoutOptions): Promise<void> {
     // Read keep.lock — must be initialized
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
@@ -157,7 +197,22 @@ export class CheckoutCommand {
     }
 
     if (options.create) {
-      await this.createBranch(projectId, branchName, encryptionKey, options.protected);
+      const created = await this.createBranch(
+        projectId,
+        branchName,
+        encryptionKey,
+        options.protected,
+        options.web,
+        projectState.projectName || 'project',
+      );
+      // Cancelling in the browser is a refusal, so nothing was registered and
+      // nothing below may run: the rest of this method switches the directory
+      // onto a branch that does not exist.
+      if (!created) {
+        console.log('\nNo branch created.');
+        return;
+      }
+      branchName = created.name;
     } else {
       // Verify the branch exists
       const branchSpinner = ora(`Switching to ${branchName}...`).start();
@@ -165,17 +220,40 @@ export class CheckoutCommand {
       const branch = branches.find(b => b.name === branchName);
       if (!branch) {
         branchSpinner.stop();
-        console.log(`Branch "${branchName}" not found\n`);
-        console.log('Available branches:');
-        for (const b of branches) {
-          const label = b.name;
-          const prod = b.is_protected ? ' \x1b[90m(protected)\x1b[0m' : '';
-          console.log(`  ${label}${prod}`);
+
+        // The terminal's answer to a name that does not exist is a listing and
+        // exit 1: the branch the user meant is on the screen, and the only way
+        // to reach it is to type the command again. In the browser the listing
+        // IS the picker, so a wrong name becomes a question rather than a dead
+        // end. Only when there is something to pick — a list with no row this
+        // directory could move to is a page with no way out of it.
+        const switchable = branches.filter(b => b.name !== projectState.activeBranch);
+        if (options.web && switchable.length > 0) {
+          const picked = await this.pickBranchInBrowser(
+            branchName,
+            branches,
+            projectState.projectName || 'project',
+            projectState.activeBranch ?? null,
+          );
+          if (!picked) {
+            console.log('\nNo branch selected — nothing changed.');
+            return;
+          }
+          branchName = picked;
+        } else {
+          console.log(`Branch "${branchName}" not found\n`);
+          console.log('Available branches:');
+          for (const b of branches) {
+            const label = b.name;
+            const prod = b.is_protected ? ' \x1b[90m(protected)\x1b[0m' : '';
+            console.log(`  ${label}${prod}`);
+          }
+          console.log(`\nCreate it with: ${B(`capy checkout -b ${branchName}`)}`);
+          process.exit(1);
         }
-        console.log(`\nCreate it with: ${B(`capy checkout -b ${branchName}`)}`);
-        process.exit(1);
+      } else {
+        branchSpinner.stop();
       }
-      branchSpinner.stop();
     }
 
     // Pull latest secrets for this branch from the server BEFORE switching
@@ -274,12 +352,36 @@ export class CheckoutCommand {
     console.log(`\nNow on branch: ${branchName}`);
   }
 
+  /**
+   * Create the branch, asking whatever the plan left unanswered.
+   *
+   * Returns the branch that now exists, or null when the browser was
+   * cancelled — a step nobody answered has not been approved, and the caller
+   * must not go on to switch this directory onto it.
+   */
   private async createBranch(
     projectId: string,
     branchName: string,
     encryptionKey: string,
-    isProtected?: boolean,
-  ): Promise<void> {
+    isProtected: boolean | undefined,
+    web: boolean | undefined,
+    projectName: string,
+  ): Promise<{ name: string } | null> {
+    // The whole route, computed before anything opens — the same array
+    // `capy checkout -b <name> --json` prints. Asking it what is outstanding,
+    // rather than testing `isProtected === undefined` a second time here, is
+    // what keeps the questions this run asks and the rail it draws in step.
+    const outstanding = unansweredStops(branchCreatePlan({ branchName, isProtected }));
+
+    if (web && outstanding.length > 0) {
+      const answer = await this.askCreateInBrowser(
+        projectId, branchName, encryptionKey, isProtected, projectName,
+      );
+      if (answer.cancelled) return null;
+      branchName = answer.name;
+      isProtected = answer.isProtected;
+    }
+
     if (isProtected === undefined) {
       const { protect } = await inquirer.prompt([{
         type: 'confirm',
@@ -300,10 +402,92 @@ export class CheckoutCommand {
       if (isProtected) {
         console.log(`\n"${branchName}" is a protected branch — access is invite-only`);
       }
+      return { name: branchName };
     } catch (error: any) {
       branchSpinner.stop();
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       displayErrorAndExit(error);
+      return null;
     }
+  }
+
+  /**
+   * The protection confirm (and the name, when argv gave none), in a browser.
+   *
+   * The seed preview is the reason this reads .env at all: `-b` skips both
+   * dirty guards, so whatever is in this directory right now is copied onto
+   * the new branch and left unpushed, and the terminal only says so afterwards
+   * as `Seeded 12 variable(s)`. NAMES and a count cross — never a value. The
+   * plaintext read here stays in this frame.
+   */
+  private async askCreateInBrowser(
+    projectId: string,
+    branchName: string,
+    encryptionKey: string,
+    isProtected: boolean | undefined,
+    projectName: string,
+  ): Promise<{ name: string; isProtected: boolean; cancelled: boolean }> {
+    let seedVarNames: string[] = [];
+    let seedUnreadable = false;
+    try {
+      // Missing .env yields {} rather than throwing, which is an empty seed
+      // and not an unreadable one — the two say different things on the page.
+      seedVarNames = Object.keys(this.fileManager.readEncryptedEnvFile(encryptionKey)).sort();
+    } catch {
+      seedUnreadable = true;
+    }
+
+    // Existing names, so a collision is answered while the user is typing
+    // instead of arriving as the server's prose after a round trip. Best
+    // effort: without the list the screen simply cannot pre-empt a clash, and
+    // `POST /branches` still refuses one.
+    let existingBranches: Array<{ name: string; isProtected: boolean }> = [];
+    try {
+      const branches = await this.serviceClient.listBranches(projectId);
+      existingBranches = branches.map(b => ({ name: b.name, isProtected: b.is_protected }));
+    } catch {
+      /* leave it empty; the server remains the authority on a taken name */
+    }
+
+    const { createBranchInBrowser } = await import('../ui/branchScreens');
+    return createBranchInBrowser({
+      projectName,
+      branchName,
+      isProtected,
+      existingBranches,
+      seedFrom: this.fileManager.readEnvMeta().branch || this.projectManager.readActiveBranch() || null,
+      seedVarNames,
+      seedUnreadable,
+      // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless
+      // verification drive the loopback without hijacking a real browser.
+      open: !process.env.CAPY_WEB_NO_OPEN,
+    });
+  }
+
+  /**
+   * The branch list, served as a picker.
+   *
+   * Reached only from the not-found path, so it is a correction rather than a
+   * menu: the user asked for a branch this project does not have. Deleting is
+   * off — `capy checkout` has never deleted anything, and the screen draws no
+   * delete control without it.
+   */
+  private async pickBranchInBrowser(
+    missing: string,
+    branches: Branch[],
+    projectName: string,
+    activeBranch: string | null,
+  ): Promise<string | null> {
+    console.log(`Branch "${missing}" not found\n`);
+    const { chooseBranchInBrowser } = await import('../ui/branchScreens');
+    const picked = await chooseBranchInBrowser({
+      projectName,
+      activeBranch,
+      branches,
+      variableCounts: countVariablesPerBranch(this.projectManager.readKeepFile()),
+      canDelete: false,
+      open: !process.env.CAPY_WEB_NO_OPEN,
+    });
+    return picked.cancelled ? null : picked.branch;
   }
 }
