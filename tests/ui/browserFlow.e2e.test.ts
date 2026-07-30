@@ -355,3 +355,213 @@ describeBrowser('the sync conflict resolver, driven by a real browser', () => {
     await done.catch(() => undefined);
   }, 60_000);
 });
+
+describeBrowser('capy checkout, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /**
+   * Type into a field the way a person does.
+   *
+   * Assigning `.value` alone is invisible to the screen: `bind:value` listens
+   * for `input`, so a test that only sets the property proves the CLI can read
+   * a field nobody could have filled in.
+   */
+  const type = (selector: string, value: string): string =>
+    `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  /** Click the button whose visible text contains `text`. */
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  /**
+   * Click the option row whose label is exactly `label`.
+   *
+   * Exact, on the label element rather than the row: `protected` is a suffix
+   * of `unprotected`, and this flow's whole subject is which of those two it
+   * ends up being.
+   */
+  const clickOption = (label: string): string =>
+    `[...document.querySelectorAll('[role=radio]')]
+       .find(el => el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)}).click()`;
+
+  const EXISTING = [
+    { name: 'development', isProtected: false },
+    { name: 'production', isProtected: true },
+  ];
+
+  const CREATE = {
+    projectName: 'mikes-market',
+    existingBranches: EXISTING,
+    seedFrom: 'development',
+    seedVarNames: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+    open: false,
+  };
+
+  test('both stops of the create route are walked by clicking', async () => {
+    // The whole point of the standalone path: answering stop one is a page
+    // RELOAD, not a markup swap, and the same URL then serves stop two. Three
+    // inventions this session died on exactly this.
+    const { createBranchInBrowser } = await import('../../src/ui/branchScreens');
+    let url = '';
+    // No name in argv, so the plan leaves both stops outstanding.
+    const done = createBranchInBrowser({ ...CREATE, branchName: '', onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The rail is the CLI's plan, drawn whole before anything was answered —
+    // including the stop this page is not standing on.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Protection')`)).toBe(true);
+
+    await evaluate(page, type('input[type=text], .field input', 'release'));
+    await evaluate(page, clickButton('Use this name'));
+
+    // Stop two arrives by navigation, at the same address.
+    await until(page, `document.body.textContent.includes('Protect this branch?')`, 'the protection stop');
+    // …with stop one now settled on the rail.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('release')`)).toBe(true);
+    // The commit point says what comes across: variable NAMES, never a value.
+    // `-b` skips both dirty guards, so this is the only warning there is.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    await evaluate(page, clickOption('protected'));
+    await evaluate(page, clickButton('Create branch'));
+
+    expect(await done).toEqual({ name: 'release', isProtected: true, cancelled: false });
+  }, 60_000);
+
+  test('a name the branch list already holds never reaches the button', async () => {
+    // The terminal validates nothing: the name is a positional that goes
+    // straight to POST /branches, so "already taken" is the server's prose
+    // after a round trip. The screen holds the list, so it answers while the
+    // user is still typing — and this is the check that it is wired up.
+    const { createBranchInBrowser } = await import('../../src/ui/branchScreens');
+    let url = '';
+    let settled = false;
+    const done = createBranchInBrowser({
+      ...CREATE,
+      branchName: '',
+      timeoutMs: 4_000,
+      onListen: (u) => (url = u),
+    });
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, type('input[type=text], .field input', 'production'));
+    await until(
+      page,
+      `document.body.textContent.includes('already exists in this project')`,
+      'the collision to be named',
+    );
+    // It says WHICH kind of branch took it, which the server's error does not.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('as a protected branch')`),
+    ).toBe(true);
+    expect(
+      await evaluate<boolean>(page, `document.querySelector('button[type=submit]').disabled`),
+    ).toBe(true);
+
+    // Nothing was sent, so nothing was created.
+    expect(settled).toBe(false);
+    await done.catch(() => undefined);
+  }, 60_000);
+
+  test('a wrong branch name becomes a picker instead of an exit code', async () => {
+    // `capy checkout <typo>` prints the list and exits 1: the branch the user
+    // meant is on the screen and unreachable. Here the listing IS the answer.
+    const { chooseBranchInBrowser } = await import('../../src/ui/branchScreens');
+    let url = '';
+    const done = chooseBranchInBrowser({
+      projectName: 'mikes-market',
+      activeBranch: 'development',
+      branches: [
+        { id: 'b1', name: 'development', project_id: 'p1', is_protected: false },
+        { id: 'b2', name: 'staging', project_id: 'p1', is_protected: false },
+        { id: 'b3', name: 'spike', project_id: 'p1', is_protected: true },
+      ],
+      variableCounts: { development: 14 },
+      canDelete: false,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // Protection is drawn from `is_protected`, so the invite-only branch is
+    // marked here — the terminal picker marks nothing and lets a 403 explain.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('protected')`)).toBe(true);
+    // A run that cannot delete draws no delete control.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `![...document.querySelectorAll('button')].some(b => b.textContent.includes('Delete'))`,
+      ),
+    ).toBe(true);
+
+    await evaluate(page, clickOption('staging'));
+    await evaluate(page, clickButton('Switch branch'));
+
+    expect(await done).toEqual({ branch: 'staging', cancelled: false });
+  }, 60_000);
+
+  test('the branch this directory is already on cannot be picked', async () => {
+    // The list opens on the current row, so the button starts held down:
+    // "switch to where you already are" is not a thing a checkout can do.
+    const { chooseBranchInBrowser } = await import('../../src/ui/branchScreens');
+    let url = '';
+    const done = chooseBranchInBrowser({
+      projectName: 'mikes-market',
+      activeBranch: 'development',
+      branches: [
+        { id: 'b1', name: 'development', project_id: 'p1', is_protected: false },
+        { id: 'b2', name: 'staging', project_id: 'p1', is_protected: false },
+      ],
+      canDelete: false,
+      open: false,
+      timeoutMs: 4_000,
+      onListen: (u) => (url = u),
+    });
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Switch branch')).disabled`,
+      ),
+    ).toBe(true);
+
+    // Choosing another row releases it.
+    await evaluate(page, clickOption('staging'));
+    await until(
+      page,
+      `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Switch branch')).disabled`,
+      'the switch button to go live',
+    );
+
+    await done.catch(() => undefined);
+  }, 60_000);
+});
