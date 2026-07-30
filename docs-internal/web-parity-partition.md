@@ -4,6 +4,29 @@ Phase 0 output. Every interactive command gets a `--web` twin that serves a
 compiled screen instead of an `inquirer` prompt. This file says who owns what,
 so agents working in parallel never touch the same file.
 
+## CORRECTION — how to find the work
+
+The first version of this file scoped the work by grepping for `inquirer`,
+which found 16 commands. That was the wrong filter and it missed half the
+product: a command does not need to ask a question to have a screen. `capy
+users` prints a table, `capy info` prints session state, `capy targets` prints
+a listing — under the MCP an agent gets a wall of ANSI where the screen is a
+real table, and several of them (`grant-branch`, `revoke`, `cleanup`,
+`targets-remove`) are destructive and already have a consent gate drawn.
+
+**The authoritative map already exists.** From the monorepo root:
+
+    bun run scripts/check-coverage.ts
+
+It reads the CLI's own `.command()` registry and the workbench's declared
+screens and prints the mapping — 35 commands, 41 screens, 33 covered. Use it.
+Do not re-derive coverage from a grep, and do not treat this table as the list
+of what needs doing; the checker is.
+
+Only `capy run` and `capy add` declare no screen. `run` is correct — it wraps a
+child process and has no question to ask. `add` has the intake page already
+(`intakePage.ts`) and predates the screen contract.
+
 ## The rule that decides the partition
 
 **Ownership is by FILE, never by command.** Several commands share files —
