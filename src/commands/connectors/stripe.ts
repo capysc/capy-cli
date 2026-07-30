@@ -4,8 +4,19 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { ConnectorModule, ConnectResult, RotateResult, ConnectOpts, RotateOpts } from './registry';
 import { ConnectorMetadata } from '../../types/index';
-import { ResolvedContext, fingerprint } from './shared';
+import { ResolvedContext, fingerprint, findManagedConnector } from './shared';
+import { formatRelativeTime } from '../../ui/relativeTime';
 import { isInteractive, refuseNonInteractive } from '../../ui/interactive';
+import { connectPlan, type ConnectPlanInput } from './plans';
+import type {
+  Blocked,
+  ConnectIncomingKey,
+  ConnectModeOption,
+  ConnectVarSlot,
+  ConnectVarState,
+  StripeAccount,
+} from '../../ui/screens/contract';
+import type { ConnectQuestion, WebConnectSetupParams } from '../../ui/connectScreens';
 
 type StripeMode = 'test' | 'live';
 
@@ -132,15 +143,39 @@ function readStripeConfig(): StripeConfigSection[] {
   return parseStripeConfig(readFileSync(path, 'utf-8'));
 }
 
-function ensureStripeCliInstalled(): void {
+/**
+ * The refusal a missing Stripe CLI produces.
+ *
+ * Declared once because the same condition is met twice: as a preview beside
+ * the connector in the picker, and as the wall `capy connect stripe` runs into.
+ * Two screens colouring and wording one condition differently is a bug in the
+ * product, and the only structural fix is for both to render this object.
+ */
+export const STRIPE_CLI_MISSING: Blocked = {
+  code: 'PROVIDER_CLI_MISSING',
+  title: 'stripe CLI not found.',
+  detail:
+    'Capy reads the key the Stripe CLI already holds, so the CLI has to be on your PATH before this connector can run.',
+  link: { label: 'Install the Stripe CLI', url: 'https://docs.stripe.com/stripe-cli#install' },
+  remedy: 'brew install stripe/stripe-cli/stripe',
+};
+
+/** Is `stripe` on the PATH? The non-exiting half of `ensureStripeCliInstalled`. */
+function stripeCliInstalled(): boolean {
   try {
     execSync('stripe --version', { stdio: 'pipe' });
+    return true;
   } catch {
-    console.error(`\n  ${B('stripe')} CLI not found.`);
-    console.error('  Install: https://docs.stripe.com/stripe-cli#install');
-    console.error(`  Or: ${B('brew install stripe/stripe-cli/stripe')}\n`);
-    process.exit(1);
+    return false;
   }
+}
+
+function ensureStripeCliInstalled(): void {
+  if (stripeCliInstalled()) return;
+  console.error(`\n  ${B('stripe')} CLI not found.`);
+  console.error(`  Install: ${STRIPE_CLI_MISSING.link!.url}`);
+  console.error(`  Or: ${B(STRIPE_CLI_MISSING.remedy!)}\n`);
+  process.exit(1);
 }
 
 /**
@@ -261,6 +296,212 @@ async function pickMode(forceLive: boolean, nonTty?: boolean): Promise<StripeMod
     default: 'test',
   }]);
   return mode;
+}
+
+// ---------------------------------------------------------------------------
+// What the browser screens are told
+//
+// Every describer below is a pure read of state the command already has:
+// keep.lock, the decrypted .env in `ctx.localPlaintext`, and Stripe's own
+// config.toml. NONE of them puts a key value in a payload — the two that touch
+// one reduce it to `fingerprint()`'s `abc…xyz` form or to `slice(0, 8)`, which
+// is the same rule the terminal's tables already follow.
+// ---------------------------------------------------------------------------
+
+/** Days until `expiresAt`, negative once past. Undefined when nothing is recorded. */
+function daysUntil(expiresAt: number | undefined): number | undefined {
+  if (typeof expiresAt !== 'number') return undefined;
+  return Math.floor((expiresAt - Date.now() / 1000) / 86400);
+}
+
+/**
+ * `abc…xyz` of a value, or nothing at all when the value is too short to
+ * redact.
+ *
+ * `fingerprint()` returns anything seven characters or shorter VERBATIM, which
+ * is right for a terminal the user is already looking at and wrong for a
+ * payload: a short value in `.env` would travel whole. The screen renders an
+ * absent fingerprint as "not recorded", which is the honest reading.
+ */
+function safeSnippet(value: string): string | undefined {
+  return value.length > 7 ? fingerprint(value) : undefined;
+}
+
+/** The section a run would use, without exiting when there isn't one. */
+function resolveSection(
+  sections: StripeConfigSection[],
+  requested?: string,
+): StripeConfigSection | undefined {
+  if (requested) {
+    return sections.find(
+      (s) => s.account_id === requested || s.name === requested || s.display_name === requested,
+    );
+  }
+  return sections.length === 1 ? sections[0] : undefined;
+}
+
+/** The key a section holds for a mode, without exiting when it holds none. */
+function keyForMode(
+  section: StripeConfigSection,
+  mode: StripeMode,
+): { value: string; expiresAt?: number } | undefined {
+  const value = mode === 'live' ? section.live_mode_api_key : section.test_mode_api_key;
+  if (!value) return undefined;
+  return {
+    value,
+    expiresAt: mode === 'live' ? section.live_mode_key_expires_at : section.test_mode_key_expires_at,
+  };
+}
+
+/** config.toml's sections, as the account picker's rows. */
+export function toStripeAccounts(sections: StripeConfigSection[]): StripeAccount[] {
+  return sections.map((s) => ({
+    id: s.name,
+    ...(s.display_name ? { displayName: s.display_name } : {}),
+    ...(s.account_id ? { accountId: s.account_id } : {}),
+    hasTestKey: Boolean(s.test_mode_api_key),
+    hasLiveKey: Boolean(s.live_mode_api_key),
+  }));
+}
+
+/**
+ * The two modes, and whether this machine can actually serve each of them.
+ *
+ * The terminal offers `Test` and `Live` unconditionally and finds out
+ * afterwards, in `readKeyFromSection`, that there is no key of that mode — an
+ * exit, one question too late. Availability is known here, from the same
+ * config the key is read out of.
+ */
+export function stripeModeOptions(
+  sections: StripeConfigSection[],
+  requested: string | undefined,
+  devMode: boolean,
+): ConnectModeOption[] {
+  const section = resolveSection(sections, requested);
+  return (['test', 'live'] as const).map((id) => {
+    if (id === 'live' && devMode) {
+      // capy-dev points at a dev service and a live key must never cross that
+      // line. The command refuses it twice already; saying so beside the
+      // option is the same refusal, one question earlier.
+      return { id, available: false, blockedBy: 'DEV_MODE' as const };
+    }
+    const key = section ? keyForMode(section, id) : undefined;
+    // With no section resolved — several accounts and none named, or nothing
+    // paired yet — availability is genuinely unknown, so the mode is offered
+    // when ANY section could serve it. A definite `false` here would be a
+    // claim this code cannot make.
+    const possible = section
+      ? Boolean(key)
+      : sections.length === 0 || sections.some((s) => keyForMode(s, id));
+    return {
+      id,
+      available: possible,
+      ...(possible ? {} : { blockedBy: 'NO_KEY' as const }),
+      ...(key ? { keyPrefix: key.value.slice(0, 8) } : {}),
+      ...(key && daysUntil(key.expiresAt) !== undefined
+        ? { expiresInDays: daysUntil(key.expiresAt) as number }
+        : {}),
+    };
+  });
+}
+
+/** The variables already on this branch, as the variable step's rows. */
+export function stripeVarSlots(ctx: ResolvedContext): ConnectVarSlot[] {
+  const { matches, others } = rankStripeVars(Object.keys(ctx.localPlaintext).sort());
+  return [...matches, ...others].map((name) => ({
+    name,
+    looksRelated: looksStripey(name),
+    // Every row here is a name .env already holds, so every one of them routes
+    // through the overwrite guard. `hasValue` is that fact, not a test for
+    // emptiness — the guard fires on presence.
+    hasValue: true,
+    ...(findManagedConnector(ctx.keep, name, ctx.branch)?.provider
+      ? { managedBy: findManagedConnector(ctx.keep, name, ctx.branch)!.provider }
+      : {}),
+  }));
+}
+
+/** What is sitting in the slot the key would replace. Shape only, never the value. */
+export function currentVarState(ctx: ResolvedContext, varName: string): ConnectVarState {
+  const connector = findManagedConnector(ctx.keep, varName, ctx.branch);
+  const entry = (ctx.keep.variables[varName] ?? []).find((e) => e.branch === ctx.branch);
+  const snippet = safeSnippet(ctx.localPlaintext[varName] ?? '');
+  return {
+    ...(snippet ? { fingerprint: snippet } : {}),
+    ...(connector?.provider ? { managedBy: connector.provider } : {}),
+    ...(connector?.mode === 'test' || connector?.mode === 'live' ? { mode: connector.mode } : {}),
+    ...(typeof connector?.created_at === 'number'
+      ? { age: formatRelativeTime(new Date(connector.created_at * 1000).toISOString()) }
+      : {}),
+    // A keep.lock entry seeded by `attachConnector` before any push carries an
+    // empty resource_id and value_hash. Anything else came back from the
+    // service, which means teammates on this branch are holding it.
+    pushed: Boolean(entry && entry.value_hash !== ''),
+  };
+}
+
+/**
+ * The key that would replace it, as far as the run has committed to one.
+ *
+ * KNOWN LIMITATION, reported rather than papered over: `confirmOverwrite` runs
+ * before the account is settled and before any `stripe login`, so when several
+ * accounts are paired and none was named there is no key to describe yet. The
+ * contract makes `keyPrefix` and `fingerprint` required, so they arrive empty
+ * in that case — `ConnectVarState` already models the same absence properly on
+ * the other side of the comparison, and `ConnectIncomingKey` needs to as well.
+ */
+export function describeIncomingKey(
+  sections: StripeConfigSection[],
+  mode: StripeMode,
+  requested?: string,
+): ConnectIncomingKey {
+  const section = resolveSection(sections, requested);
+  const key = section ? keyForMode(section, mode) : undefined;
+  return {
+    keyPrefix: key ? key.value.slice(0, 8) : '',
+    mode,
+    ...(section?.account_id ? { accountId: section.account_id } : {}),
+    fingerprint: key ? (safeSnippet(key.value) ?? '') : '',
+  };
+}
+
+/** Everything `connectPlan` needs that is not an answer this session collects. */
+function planFor(
+  ctx: ResolvedContext,
+  opts: ConnectOpts,
+  settled: Partial<ConnectPlanInput> = {},
+): ConnectPlanInput {
+  return {
+    provider: 'stripe',
+    branch: ctx.branch,
+    requiresTool: 'stripe',
+    requiresAuth: true,
+    ...(opts.var ? { varName: opts.var.trim(), varFromFlag: true } : {}),
+    ...(opts.live ? { mode: 'live' as const, modeFromFlag: true } : {}),
+    ...(opts.account ? { account: opts.account, accountFromFlag: true } : {}),
+    push: !opts.noPush,
+    ...(opts.noPush ? { pushFromFlag: true } : {}),
+    ...settled,
+  };
+}
+
+/** The params every `connect-setup` serve in this file shares. */
+function webParams(
+  ctx: ResolvedContext,
+  opts: ConnectOpts,
+  questions: ConnectQuestion[],
+  settled: Partial<ConnectPlanInput> = {},
+): WebConnectSetupParams {
+  return {
+    provider: 'stripe',
+    projectName: ctx.keep.project_name,
+    branch: ctx.branch,
+    plan: planFor(ctx, opts, settled),
+    questions,
+    // Honoured by every browser path so a test never opens the developer's
+    // real browser; the URL is printed either way.
+    open: !process.env.CAPY_WEB_NO_OPEN,
+  };
 }
 
 function readKeyFromSection(section: StripeConfigSection, mode: StripeMode): { value: string; expiresAt?: number } {
@@ -416,17 +657,189 @@ async function confirmOverwrite(
   return ok;
 }
 
-async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<ConnectResult> {
-  const varName = await pickVarName(ctx, opts);
-  if (!(await confirmOverwrite(varName, ctx, opts.force ?? false, opts.nonTty))) {
-    console.log('Cancelled.');
-    process.exit(0);
+/**
+ * The two questions that need nothing from Stripe, plus the guard between
+ * them, served as one browser session.
+ *
+ * ONE ORDERING DIFFERENCE FROM THE TERMINAL, and it is deliberate. The terminal
+ * asks variable → overwrite? → mode, because its overwrite guard is a bare
+ * `STRIPE_SECRET_KEY already has a value. Overwrite?` and needs to know nothing
+ * to ask it. The browser guard shows what is in the slot beside what would
+ * replace it, and the replacement cannot be described until the mode is
+ * settled — so the mode is settled first. Both orders ask the same three
+ * questions, refuse on the same answer and write the same thing; only the guard
+ * is better informed on one of them.
+ */
+async function askConnectPhaseA(
+  ctx: ResolvedContext,
+  opts: ConnectOpts,
+): Promise<{ varName: string; mode: StripeMode; cancelled: boolean }> {
+  const { askConnectInBrowser } = await import('../../ui/connectScreens');
+
+  // `--var` settles the variable, with the same validation the terminal path
+  // applies — a flag is not an excuse to write a name .env cannot hold.
+  let varName = '';
+  if (opts.var) {
+    const problem = validateVarName(opts.var);
+    if (problem !== true) {
+      console.error(`\n  ${problem} (got "${opts.var}")\n`);
+      process.exit(1);
+    }
+    varName = opts.var.trim();
+  }
+  let mode: StripeMode | undefined = opts.live ? 'live' : undefined;
+
+  // Read once, before anything opens: it is a pure read of Stripe's own
+  // config, and it is what lets the rail say whether a sign-in is coming and
+  // the mode question say which modes this machine can actually serve.
+  const sections = readStripeConfig();
+  // `connect()` runs `stripe login` exactly when there is no section, so this
+  // is not a guess about the future — it is the condition that decides it.
+  const settled: Partial<ConnectPlanInput> = {
+    alreadySignedIn: sections.length > 0,
+    ...(resolveSection(sections, opts.account)?.account_id
+      ? { account: resolveSection(sections, opts.account)!.account_id }
+      : {}),
+  };
+
+  // Both in one session, so answering the first is a page reload rather than a
+  // second URL to relay. They are separable from the guard below because
+  // neither depends on the other's answer — the guard depends on both.
+  const questions: ConnectQuestion[] = [];
+  if (!varName) {
+    questions.push({ kind: 'var', vars: stripeVarSlots(ctx), defaultVarName: DEFAULT_VAR });
+  }
+  if (!mode) {
+    questions.push({
+      kind: 'mode',
+      modes: stripeModeOptions(sections, opts.account, opts.devMode === true),
+    });
+  }
+  if (questions.length > 0) {
+    const out = await askConnectInBrowser(
+      webParams(ctx, opts, questions, { ...settled, ...(varName ? { varName } : {}) }),
+    );
+    if (out.cancelled) return { varName, mode: mode ?? 'test', cancelled: true };
+    varName = out.answers.var ?? varName;
+    mode = out.answers.mode ?? mode;
+  }
+  // A session that came back without an answer to a question it was given has
+  // not answered it. Falling through on a default would write a key nobody
+  // asked for, into a variable nobody named.
+  if (!varName || !mode) return { varName, mode: mode ?? 'test', cancelled: true };
+  const settledMode: StripeMode = mode;
+
+  if (!opts.force && varName in ctx.localPlaintext) {
+    const questions: ConnectQuestion[] = [
+      {
+        kind: 'overwrite',
+        varName,
+        current: currentVarState(ctx, varName),
+        incoming: describeIncomingKey(sections, settledMode, opts.account),
+      },
+    ];
+    const out = await askConnectInBrowser(
+      webParams(ctx, opts, questions, { ...settled, varName, mode: settledMode }),
+    );
+    if (out.cancelled || out.answers.overwrite !== true) {
+      return { varName, mode: settledMode, cancelled: true };
+    }
   }
 
-  const mode = await pickMode(opts.live ?? false, opts.nonTty);
+  return { varName, mode: settledMode, cancelled: false };
+}
+
+/** The account picker, in a browser. Rows are config.toml's sections, verbatim. */
+async function pickAccountInBrowser(
+  ctx: ResolvedContext,
+  opts: ConnectOpts,
+  sections: StripeConfigSection[],
+  settled: { varName: string; mode: StripeMode } & Partial<ConnectPlanInput>,
+): Promise<StripeConfigSection> {
+  const requested = resolveSection(sections, opts.account);
+  if (opts.account && !requested) {
+    console.error(`\n  No Stripe account matching "${opts.account}" in config.toml.`);
+    process.exit(1);
+  }
+  if (requested) return requested;
+
+  const { askConnectInBrowser } = await import('../../ui/connectScreens');
+  const out = await askConnectInBrowser(
+    webParams(ctx, opts, [{ kind: 'account', accounts: toStripeAccounts(sections) }], settled),
+  );
+  if (out.cancelled || !out.answers.account) {
+    console.log('  Cancelled.');
+    process.exit(0);
+  }
+  return sections.find((s) => s.name === out.answers.account)!;
+}
+
+/**
+ * The near-expiry offer, in a browser.
+ *
+ * Same threshold and same two outcomes as `expiringSoonPrompt`; what changes is
+ * that a headless run gets asked at all. Without a browser it takes the key
+ * as-is, because the alternative is a `stripe login` nobody is there to
+ * approve.
+ */
+async function offerRefreshInBrowser(
+  ctx: ResolvedContext,
+  opts: ConnectOpts,
+  expiresAt: number | undefined,
+  settled: { varName: string; mode: StripeMode; account: string } & Partial<ConnectPlanInput>,
+): Promise<boolean> {
+  const remainingDays = daysUntil(expiresAt);
+  if (remainingDays === undefined || remainingDays > 7) return false;
+  const { askConnectInBrowser } = await import('../../ui/connectScreens');
+  const out = await askConnectInBrowser(
+    webParams(
+      ctx,
+      opts,
+      [
+        {
+          kind: 'refresh',
+          mode: settled.mode,
+          expiresInDays: remainingDays,
+          command: 'stripe login',
+        },
+      ],
+      settled,
+    ),
+  );
+  // Cancelling the offer is not cancelling the connect: the terminal's default
+  // here is "re-pair", and its decline is "take the key that is there".
+  return out.cancelled ? false : out.answers.refresh === true;
+}
+
+async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<ConnectResult> {
+  const web = opts.web === true;
+
+  let varName: string;
+  let mode: StripeMode;
+  if (web) {
+    const answered = await askConnectPhaseA(ctx, opts);
+    if (answered.cancelled) {
+      console.log('Cancelled.');
+      process.exit(0);
+    }
+    varName = answered.varName;
+    mode = answered.mode;
+  } else {
+    varName = await pickVarName(ctx, opts);
+    if (!(await confirmOverwrite(varName, ctx, opts.force ?? false, opts.nonTty))) {
+      console.log('Cancelled.');
+      process.exit(0);
+    }
+    mode = await pickMode(opts.live ?? false, opts.nonTty);
+  }
 
   // Read from the Stripe CLI's config. Login if needed.
   let sections = readStripeConfig();
+  // Whether the sign-in stop is one this run travelled or one it skipped. The
+  // rail states it either way, because "Capy did not have to sign you in" is a
+  // fact about the route, not an absence.
+  const auth: Partial<ConnectPlanInput> =
+    sections.length > 0 ? { alreadySignedIn: true } : { signedIn: true };
   if (sections.length === 0) {
     // No paired session yet. `stripe login` is a browser flow; in non-interactive
     // (assisted-agent) mode we still run it — the human completes the pairing in
@@ -444,11 +857,21 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
       process.exit(1);
     }
   }
-  const section = await pickAccount(sections, opts.account, opts.nonTty);
+  const section = web
+    ? await pickAccountInBrowser(ctx, opts, sections, { ...auth, varName, mode })
+    : await pickAccount(sections, opts.account, opts.nonTty);
 
   // If the existing key is already near expiry, offer to refresh first.
   const initial = readKeyFromSection(section, mode);
-  if (await expiringSoonPrompt(initial.expiresAt, opts.nonTty)) {
+  const relogin = web
+    ? await offerRefreshInBrowser(ctx, opts, initial.expiresAt, {
+        ...auth,
+        varName,
+        mode,
+        account: section.account_id ?? section.name,
+      })
+    : await expiringSoonPrompt(initial.expiresAt, opts.nonTty);
+  if (relogin) {
     runStripeLogin(section.name, opts.nonTty);
     sections = readStripeConfig();
     const refreshed = sections.find((s) => s.name === section.name);
@@ -610,6 +1033,9 @@ export const stripeConnector: ConnectorModule = {
   name: 'stripe',
   description: 'Stripe API key (test or live, restricted)',
   requiresAuth: true, // rotate shells out to `stripe login` (browser flow)
+  requiresTool: 'stripe',
+  toolInstalled: stripeCliInstalled,
+  toolMissing: STRIPE_CLI_MISSING,
   precheck: ensureStripeCliInstalled,
   connect,
   rotate,

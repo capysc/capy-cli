@@ -5,65 +5,82 @@ import {
   listAllVarsOnBranch,
   findManagedConnector,
 } from './connectors/shared';
-import { ConnectCommand, confirmLiveAction } from './connectCommand';
+import { ConnectCommand, confirmLiveAction, rotateLiveGateStops } from './connectCommand';
 import { loadProvider, listProviders, RotateOpts } from './connectors/registry';
+import { cap, rotationPlan, type RotationPlanInput } from './connectors/plans';
 import { ProjectManager } from '../core/projectManager';
 import { ConnectorMetadata, KeepFile } from '../types/index';
 import { TargetConfig } from '../deploy/adapter';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { confirmLiveActionInBrowser } from '../ui/connectScreens';
+import type {
+  RotateAdvisory,
+  RotateCandidate,
+  RotateKeyResult,
+  RotatePlanStop,
+  RotateRunOutcome,
+  RotateRunStep,
+} from '../ui/screens/contract';
 import { writeSync } from 'fs';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const CYAN = (s: string) => `\x1b[36m${s}\x1b[0m`;
-const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
-interface PlanStop {
-  label: string;
-  detail: string;
-  /**
-   * A manual, user-driven stop (e.g. an interactive `stripe login`, or deploy
-   * connector setup). Any track touching a manual stop — leaving it or
-   * arriving at it — is drawn dotted, so the diagram visually separates "you
-   * do this by hand" from the solid run of steps capy performs on its own.
-   */
-  manual?: boolean;
-  /**
-   * An unresolved stop — a blank in the plan. Rendered dimmed with a hollow
-   * placeholder node so the user sees exactly what still needs an answer.
-   * Resolution (selectors / agent needs-input) fills these before the Y/N.
-   */
-  blank?: boolean;
-}
+/** Browser paths honour this so a test never opens the developer's real browser. */
+const shouldOpen = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
 
 /**
  * Render the rotation plan as a vertical train-stop diagram: each stage is a
- * station (● intermediate, ○ terminal) joined by track, with a dimmed
- * one-line description. A track segment is dotted (┊) when either station it
- * connects is manual, else solid (│). It's a confirmation aid — the route the
- * rotation will travel — not a progress bar; the ✓ lines printed during
- * execution report what actually happened.
+ * station (✓ answered, ● intermediate, ○ terminal, ◌ blank, · never visited)
+ * joined by track, with a dimmed one-line description. A track segment is
+ * dotted (┊) when either station it connects is manual, else solid (│). It's a
+ * confirmation aid — the route the rotation will travel — not a progress bar;
+ * the ✓ lines printed during execution report what actually happened.
+ *
+ * The stops are `rotationPlan`'s, not this function's. They used to be built
+ * inline here, printed and dropped, which is why the browser had no rail to
+ * draw and `--json` had no route to emit — and why the diagram began at the
+ * Auth stop, with the variable and the integration the user had just answered
+ * missing from the picture of what they were agreeing to.
  */
-function renderRotationPlan(stops: PlanStop[]): void {
+export function rotationPlanLines(stops: RotatePlanStop[]): string[] {
   const width = Math.max(...stops.map((s) => s.label.length));
   const lines: string[] = ['', `  ${B('Rotation plan')}`, ''];
   stops.forEach((s, i) => {
     const last = i === stops.length - 1;
-    const node = s.blank ? DIM('◌') : last ? CYAN('○') : CYAN('●');
-    const label = s.blank ? DIM(s.label.padEnd(width)) : B(s.label.padEnd(width));
-    lines.push(`  ${node}  ${label}   ${DIM(s.detail)}`);
+    const faint = s.blank || s.state === 'skipped';
+    const node = s.blank
+      ? DIM('◌')
+      : s.state === 'skipped'
+        ? DIM('·')
+        : s.state === 'done'
+          ? CYAN('✓')
+          : last
+            ? CYAN('○')
+            : CYAN('●');
+    const label = faint ? DIM(s.label.padEnd(width)) : B(s.label.padEnd(width));
+    // An answered stop says what answered it. `Variable · STRIPE_SECRET_KEY`
+    // with no marker is indistinguishable from a question still to come, and
+    // the flag is the honest answer to "why was I never asked?".
+    const settled = s.answer ? DIM(` · ${s.answer}${s.flag ? ` (${s.flag})` : ''}`) : '';
+    lines.push(`  ${node}  ${label}   ${DIM(s.detail ?? '')}${settled}`);
     if (!last) {
       const dotted = s.manual || stops[i + 1].manual;
       lines.push(`  ${DIM(dotted ? '┊' : '│')}`);
     }
   });
   lines.push('');
+  return lines;
+}
+
+function renderRotationPlan(stops: RotatePlanStop[]): void {
   // Write synchronously to fd 1. A backgrounded run pipes stdout, where
   // console.log is buffered and would only flush AFTER the blocking
   // `stripe login` spawnSync — so the plan would be missing from the captured
   // output during the auth wait (when the agent reads it to relay the pairing
   // code). writeSync lands the whole plan now, before that block.
-  writeSync(1, lines.join('\n') + '\n');
+  writeSync(1, rotationPlanLines(stops).join('\n') + '\n');
 }
 
 /** One-line description of how a configured target ships, for the Deploy stop. */
@@ -120,7 +137,10 @@ export class RotateCommand {
         console.error(`  Connect one with ${B('capy connect <provider>')}, or run ${B('capy rotate')} to set up an existing var.\n`);
         process.exit(1);
       }
-      await this.planAndRotate(managed, branch, opts);
+      // `--all` ignores a positional variable and says nothing about it. The
+      // plan screen carries that as an advisory rather than letting the user
+      // approve a run they think is about one credential.
+      await this.planAndRotate(managed, branch, { ...opts, varIgnored: varName });
       return;
     }
 
@@ -147,23 +167,46 @@ export class RotateCommand {
         console.error(`  Add one to .env and run ${B('capy')}, or run ${B('capy connect <provider>')}.\n`);
         process.exit(1);
       }
-      if (!isInteractive(opts.nonTty)) {
-        refuseNonInteractive(
-          'no variable specified and the picker needs a prompt',
-          `Pass the variable name: capy rotate <VAR> (available: ${allVars.join(', ')}).`,
-        );
+      let picked: string;
+      if (opts.web) {
+        const candidates = buildRotateCandidates(allVars, keep, branch);
+        const { askRotateVariableInBrowser } = await import('../ui/rotateScreens');
+        const answer = await askRotateVariableInBrowser({
+          step: 'variable',
+          projectName: keep.project_name,
+          branch,
+          devMode: this.devMode,
+          all: false,
+          noPush: opts.noPush === true,
+          stops: await this.planStops(keep, branch, opts, { standing: 'variable' }),
+          candidates,
+          open: shouldOpen(),
+        });
+        if (answer.cancelled) {
+          console.log('\n  Cancelled.\n');
+          return;
+        }
+        picked = answer.variable;
+      } else {
+        if (!isInteractive(opts.nonTty)) {
+          refuseNonInteractive(
+            'no variable specified and the picker needs a prompt',
+            `Pass the variable name: capy rotate <VAR> (available: ${allVars.join(', ')}).`,
+          );
+        }
+        const inquirer = (await import('inquirer')).default;
+        const answer = await inquirer.prompt([
+          {
+            type: 'list',
+            name: 'picked',
+            message: 'Which variable to rotate:',
+            choices: buildRotatePickerChoices(allVars, keep, branch).map(
+              ({ name, value }) => ({ name, value }),
+            ),
+          },
+        ]);
+        picked = answer.picked;
       }
-      const inquirer = (await import('inquirer')).default;
-      const { picked } = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'picked',
-          message: 'Which variable to rotate:',
-          choices: buildRotatePickerChoices(allVars, keep, branch).map(
-            ({ name, value }) => ({ name, value }),
-          ),
-        },
-      ]);
       const connector = findManagedConnector(keep, picked, branch);
       target = connector ? { varName: picked, connector } : { varName: picked, unmanaged: true };
     }
@@ -193,7 +236,40 @@ export class RotateCommand {
     }
 
     let provider: string;
-    if (!isInteractive(opts.nonTty)) {
+    if (opts.web) {
+      // Never pre-selected, however few are registered. Off a TTY the CLI
+      // auto-picks the single provider with no output at all — for a variable
+      // the user never associated with it — and what follows runs with
+      // `force: true`, so the value in that variable is replaced rather than
+      // rotated. The screen says that before the list, not after the write.
+      const pm = new ProjectManager();
+      const keep = pm.readKeepFile();
+      const branch = pm.deriveActiveBranch() ?? '';
+      const { askRotateIntegrationInBrowser } = await import('../ui/rotateScreens');
+      const answer = await askRotateIntegrationInBrowser({
+        step: 'integration',
+        projectName: keep?.project_name ?? 'project',
+        branch,
+        devMode: this.devMode,
+        all: false,
+        noPush: opts.noPush === true,
+        stops: keep
+          ? await this.planStops(keep, branch, opts, {
+              standing: 'integration',
+              varName,
+              needsIntegration: true,
+            })
+          : [],
+        integrations: providers,
+        varName,
+        open: shouldOpen(),
+      });
+      if (answer.cancelled) {
+        console.log('\n  Cancelled.\n');
+        return;
+      }
+      provider = answer.provider;
+    } else if (!isInteractive(opts.nonTty)) {
       // Non-interactive: resolve the integration from --provider, or auto-pick
       // it only when there's exactly one registered (unambiguous). Otherwise
       // refuse — we won't silently guess which provider owns this credential.
@@ -245,6 +321,44 @@ export class RotateCommand {
       force: true,
       noPush: opts.noPush,
       nonTty: opts.nonTty,
+      // The connect flow takes over from here, and it has to keep serving
+      // screens: dropping `--web` at the hand-off is how a browser flow ends
+      // up at a TTY prompt nobody is watching.
+      web: opts.web,
+    });
+  }
+
+  /**
+   * The route this run will travel, resolved before anything opens.
+   *
+   * One builder, so the diagram `renderRotationPlan` prints, the rail the
+   * browser draws and the array `--json` would emit cannot describe different
+   * journeys.
+   */
+  private async planStops(
+    keep: KeepFile | null,
+    branch: string,
+    opts: RotateOpts & { all?: boolean; provider?: string },
+    settled: Partial<RotationPlanInput> = {},
+  ): Promise<RotatePlanStop[]> {
+    const providers =
+      settled.providers ??
+      (keep
+        ? Array.from(new Set(listManagedKeys(keep, branch).map((m) => m.connector.provider)))
+        : []);
+    const authProviders: string[] = [];
+    for (const p of providers) {
+      const mod = await loadProvider(p).catch(() => undefined);
+      if (mod?.requiresAuth) authProviders.push(p);
+    }
+    return rotationPlan({
+      branch,
+      all: opts.all === true,
+      noPush: opts.noPush === true,
+      ...(opts.provider ? { integration: opts.provider, integrationFromFlag: true } : {}),
+      ...settled,
+      providers,
+      authProviders,
     });
   }
 
@@ -255,8 +369,14 @@ export class RotateCommand {
   private async rotateMany(
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
     opts: RotateOpts & { all?: boolean },
-  ): Promise<string[]> {
+  ): Promise<RotateRunReport> {
     let toRotate = targets;
+    const web = opts.web === true;
+    // Every credential the run touched keeps a row, including the ones it
+    // never reached. `Rotated 2/3 key(s).` says nothing about which of the
+    // three never started, and that is the one the user still has to deal with.
+    const keys: RotateKeyResult[] = [];
+    let stopped = false;
 
     if (this.devMode) {
       const liveOnes = toRotate.filter((m) => m.connector.mode === 'live');
@@ -273,6 +393,13 @@ export class RotateCommand {
           console.log(
             `  \x1b[33m⚠ skipping ${m.varName} (live mode — not allowed in capy-dev)\x1b[0m`,
           );
+          keys.push({
+            name: m.varName,
+            provider: m.connector.provider,
+            outcome: 'skipped',
+            skipReason: 'dev-live-firewall',
+            mode: 'live',
+          });
         }
         toRotate = toRotate.filter((m) => m.connector.mode !== 'live');
         if (toRotate.length === 0) {
@@ -296,23 +423,73 @@ export class RotateCommand {
     const failed: { name: string; err: any }[] = [];
 
     for (const { varName: name, connector } of toRotate) {
+      if (stopped) {
+        // The batch stopped at an earlier key, so this one never started —
+        // which is a different fact from "it failed", and the terminal draws
+        // neither.
+        keys.push({
+          name,
+          provider: connector.provider,
+          outcome: 'not-run',
+          skipReason: 'batch-stopped',
+          ...(connector.mode === 'test' || connector.mode === 'live' ? { mode: connector.mode } : {}),
+        });
+        continue;
+      }
       try {
         // Prod live rotation normally gates on a human typing the account ID.
         // In assisted non-interactive mode we skip that echo: the rotation
         // re-runs `stripe login`, and completing that browser pairing is itself
         // the human-presence proof (see docs/rotate-deploy-agent-flow.md). The
-        // typed confirmation only runs in an interactive terminal.
-        if (!this.devMode && connector.mode === 'live' && isInteractive(opts.nonTty)) {
-          const ok = await confirmLiveAction({
-            action: 'rotate',
-            varName: name,
-            accountId: connector.account_id ?? '(unknown)',
-            keyPrefix: connector.fingerprint?.slice(0, 8),
-          });
+        // typed confirmation only runs in an interactive terminal — or in a
+        // browser, which is the only way an agent-driven run gets asked at all.
+        if (!this.devMode && connector.mode === 'live' && (web || isInteractive(opts.nonTty))) {
+          const ok = web
+            ? await confirmLiveActionInBrowser({
+                action: 'rotate',
+                provider: connector.provider,
+                projectName: ctx.keep.project_name,
+                branch: ctx.branch,
+                varName: name,
+                accountId: connector.account_id ?? null,
+                ...(connector.fingerprint
+                  ? { keyPrefix: connector.fingerprint.slice(0, 8) }
+                  : {}),
+                push: !opts.noPush,
+                pushFromFlag: opts.noPush === true,
+                stops: rotateLiveGateStops({
+                  provider: connector.provider,
+                  branch: ctx.branch,
+                  varName: name,
+                  ...(connector.account_id ? { accountId: connector.account_id } : {}),
+                  push: !opts.noPush,
+                  pushFromFlag: opts.noPush === true,
+                }),
+                open: shouldOpen(),
+              })
+            : await confirmLiveAction({
+                action: 'rotate',
+                varName: name,
+                accountId: connector.account_id ?? '(unknown)',
+                keyPrefix: connector.fingerprint?.slice(0, 8),
+              });
           if (!ok) {
             console.log(`  Cancelled ${name}.`);
             failed.push({ name, err: new Error('confirmation declined') });
+            keys.push({
+              name,
+              provider: connector.provider,
+              outcome: 'failed',
+              mode: 'live',
+              failureCode: 'declined-live-confirm',
+              detail: 'the account ID was not confirmed, so nothing was fetched',
+              retry: `capy rotate ${name}`,
+            });
             if (opts.all) continue;
+            if (web) {
+              stopped = true;
+              continue;
+            }
             process.exit(1);
           }
         }
@@ -326,6 +503,16 @@ export class RotateCommand {
         await writeAndSync(freshCtx, name, value, { push: !opts.noPush, connector: updated });
 
         succeeded.push(name);
+        keys.push({
+          name,
+          provider: connector.provider,
+          outcome: 'rotated',
+          pushed: !opts.noPush,
+          ...(updated.mode === 'test' || updated.mode === 'live' ? { mode: updated.mode } : {}),
+          // A key Capy issued through the provider's CLI: every teammate's copy
+          // stopped working the moment this ran.
+          ...(connector.source === 'cli' ? { issuedByCapy: true } : {}),
+        });
         console.log('');
         console.log(`  ✓ ${B(name)} rotated${opts.noPush ? ' (local only)' : ' and pushed'}.`);
         if (connector.source === 'cli') {
@@ -336,10 +523,25 @@ export class RotateCommand {
         console.log('');
       } catch (err) {
         failed.push({ name, err });
+        keys.push({
+          name,
+          provider: connector.provider,
+          outcome: 'failed',
+          ...(connector.mode === 'test' || connector.mode === 'live' ? { mode: connector.mode } : {}),
+          // No stable code to mint here: this is whatever the provider threw,
+          // and the screen branches on `failureCode`, never on the sentence.
+          failureCode: 'other',
+          detail: (err as Error).message,
+          retry: `capy rotate ${name}`,
+        });
         console.error('');
         console.error(`  ✗ Failed to rotate ${B(name)}: ${(err as Error).message}`);
         console.error('');
         if (opts.all) continue;
+        if (web) {
+          stopped = true;
+          continue;
+        }
         process.exit(1);
       }
     }
@@ -349,12 +551,16 @@ export class RotateCommand {
       console.log(`  Rotated ${succeeded.length}/${toRotate.length} key(s).`);
       if (failed.length > 0) {
         console.log(`  Failed: ${failed.map((f) => f.name).join(', ')}`);
-        process.exit(1);
+        // Under `--web` the caller still has a page to serve, and `process.exit`
+        // would kill the loopback server before the browser could fetch it.
+        if (!web) process.exit(1);
+        stopped = true;
+      } else {
+        console.log('');
       }
-      console.log('');
     }
 
-    return succeeded;
+    return { succeeded, keys, stopped };
   }
 
   /**
@@ -368,15 +574,25 @@ export class RotateCommand {
    *   Apply   — rotate → push → deploy. Deploy is the automatic terminal step,
    *             never a separate, optional action.
    *
-   * --no-push is local-only with nothing to ship, so it skips the diagram and
-   * rotates directly.
+   * --no-push is local-only with nothing to ship, so in the terminal it skips
+   * the diagram and rotates directly. Under `--web` it does not: it still
+   * invalidates the old key at the provider, so the plan is drawn for that run
+   * too, with the stops it will not travel struck through.
    */
   private async planAndRotate(
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
     branch: string,
-    opts: RotateOpts & { all?: boolean; skipPrompts?: boolean },
+    opts: RotateOpts & {
+      all?: boolean;
+      skipPrompts?: boolean;
+      provider?: string;
+      /** A positional variable `--all` dropped, so the plan can say so. */
+      varIgnored?: string;
+    },
   ): Promise<void> {
-    if (opts.noPush) {
+    const web = opts.web === true;
+
+    if (opts.noPush && !web) {
       await this.rotateMany(targets, opts);
       return;
     }
@@ -395,7 +611,12 @@ export class RotateCommand {
     const { listTargets } = await import('../deploy/config');
     const configuredTargets = listTargets(process.cwd());
     let deployTarget: TargetConfig | null = null;
-    if (isTTY) {
+    if (opts.noPush) {
+      // `--no-push` ships nothing, so there is no target to resolve. The plan
+      // is still drawn for that run — the destructive half is unchanged — with
+      // the stops it will not travel struck through.
+      deployTarget = null;
+    } else if (isTTY) {
       // Interactive: ensure a target exists, setting one up inline if needed.
       const { ensureDeployTarget } = await import('./deployCommand');
       deployTarget = await ensureDeployTarget(process.cwd());
@@ -420,47 +641,49 @@ export class RotateCommand {
     }
 
     // ── Build the (now fully resolved) train-stop ───────────────────────────
+    const pm = new ProjectManager();
+    const keep = pm.readKeepFile();
     const providers = Array.from(new Set(targets.map((t) => t.connector.provider)));
-    const providerLabel = providers.map(cap).join(', ');
-    const rotateDetail =
-      targets.length === 1
-        ? `fetch a fresh key from ${providerLabel}`
-        : `fetch fresh keys for ${targets.length} credentials from ${providerLabel}`;
-
-    // Providers that hand off to an interactive login (Stripe → `stripe
-    // login`) get a leading, dotted "Auth" stop.
-    const authProviders: string[] = [];
-    for (const p of providers) {
-      const mod = await loadProvider(p);
-      if (mod.requiresAuth) authProviders.push(p);
-    }
-
-    const stops: PlanStop[] = [];
-    if (authProviders.length > 0) {
-      stops.push({
-        label: 'Auth',
-        detail: `authenticate with ${authProviders.map(cap).join(', ')} (requires manual user auth)`,
-        manual: true,
-      });
-    }
-    stops.push({ label: 'Rotate', detail: rotateDetail });
-    stops.push({ label: 'Push', detail: `encrypt + push to Capy (branch: ${branch})` });
-    // Deploy is always a stop — it's the terminal step of every rotation, dev
-    // included. When unresolved it's a blank stop the user resolves via the
-    // deploy flow after rotate + push.
-    stops.push(
-      deployTarget
-        ? { label: 'Deploy', detail: describeDeploy(deployTarget) }
-        : { label: 'Deploy', detail: 'set up a deploy target — opens a rollout PR (CI deploys on merge)', blank: true },
-    );
+    const stops = await this.planStops(keep, branch, opts, {
+      standing: 'plan',
+      providers,
+      targetCount: targets.length,
+      needsIntegration: false,
+      ...(opts.all ? {} : { varName: targets[0]?.varName }),
+      ...(deployTarget ? { deployDetail: describeDeploy(deployTarget) } : {}),
+    });
 
     renderRotationPlan(stops);
 
     // ── Confirm: single Y/N gate ─────────────────────────────────────────────
-    // Interactive only. Non-interactive (--non-tty / --skip-prompts / piped)
-    // skips it; Apply still runs rotate → push → deploy when a target resolved,
-    // else rotate + push and kick into the deploy flow.
-    if (!opts.skipPrompts && isTTY) {
+    // The one approval the whole rotate → push → deploy chain has, and in the
+    // terminal `!opts.skipPrompts && isTTY` drops it the moment stdin is piped
+    // — which is every agent-driven run. Under `--web` it is asked of every
+    // caller, because a gate that disappears when nobody is watching is not a
+    // gate.
+    if (!opts.skipPrompts && web) {
+      const { confirmRotatePlanInBrowser } = await import('../ui/rotateScreens');
+      const proceed = await confirmRotatePlanInBrowser({
+        step: 'plan',
+        projectName: keep?.project_name ?? 'project',
+        branch,
+        devMode: this.devMode,
+        all: opts.all === true,
+        noPush: opts.noPush === true,
+        stops,
+        ...(keep
+          ? { targets: buildRotateCandidates(targets.map((t) => t.varName), keep, branch) }
+          : {}),
+        ...(opts.all ? {} : { varName: targets[0]?.varName }),
+        deployTargetCount: configuredTargets.length,
+        advisories: this.advisories(targets, deployTarget, configuredTargets, opts),
+        open: shouldOpen(),
+      });
+      if (!proceed) {
+        console.log('\n  Cancelled.\n');
+        return;
+      }
+    } else if (!opts.skipPrompts && isTTY) {
       const inquirer = (await import('inquirer')).default;
       const { proceed } = await inquirer.prompt([
         { type: 'confirm', name: 'proceed', message: 'Proceed?', default: true },
@@ -472,19 +695,148 @@ export class RotateCommand {
     }
 
     // ── Apply ────────────────────────────────────────────────────────────────
-    const rotated = await this.rotateMany(targets, opts);
-    if (rotated.length === 0) return;
+    const report = await this.rotateMany(targets, opts);
+    if (report.succeeded.length === 0) {
+      if (web) await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, null, configuredTargets.length);
+      if (web && report.keys.some((k) => k.outcome === 'failed')) process.exit(1);
+      return;
+    }
 
+    let deployed: { name: string; ok: boolean } | null = null;
     if (deployTarget) {
       const { deployCommand } = await import('./deployCommand');
       const code = await deployCommand(deployTarget.name, { yes: true, devMode: this.devMode });
-      if (code !== 0) process.exit(code);
-    } else {
+      deployed = { name: deployTarget.name, ok: code === 0 };
+      if (code !== 0) {
+        // The keys are already live in Capy and every running system still
+        // holds the old ones. Under `--web` that state gets its own page
+        // before the exit code, because re-running rotate here makes it worse.
+        if (web) await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
+        process.exit(code);
+      }
+    } else if (!opts.noPush) {
       // No target resolved (none configured, several to disambiguate, or a
       // dev direct-mode target we skipped). The key is already rotated +
       // pushed; kick the user into the deploy flow to open the rollout PR.
       this.deployHint(configuredTargets.length);
     }
+
+    if (web) {
+      await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
+      if (report.stopped) process.exit(1);
+    }
+  }
+
+  /**
+   * The yellow lines the terminal prints above the plan — and the two it does
+   * not print at all.
+   *
+   * `--provider` at a TTY and a positional variable under `--all` are both
+   * accepted and then silently dropped, and a user who typed one is entitled to
+   * know it did nothing before they approve a plan built as though they had not.
+   */
+  private advisories(
+    targets: Array<{ varName: string; connector: ConnectorMetadata }>,
+    deployTarget: TargetConfig | null,
+    configuredTargets: TargetConfig[],
+    opts: RotateOpts & { all?: boolean; provider?: string; varIgnored?: string },
+  ): RotateAdvisory[] {
+    const out: RotateAdvisory[] = [];
+    if (this.devMode && targets.some((t) => t.connector.mode === 'live')) {
+      out.push({
+        code: 'dev-skips-live-key',
+        detail: 'capy-dev refuses live keys, so they are left out of this run.',
+      });
+    }
+    if (this.devMode && !deployTarget && configuredTargets.some((t) => (t.mode ?? 'direct') !== 'ci')) {
+      out.push({
+        code: 'dev-skips-direct-deploy',
+        detail: 'capy-dev never runs a direct vendor ship, so the resolved target was dropped.',
+      });
+    }
+    if (opts.provider && targets.length > 0) {
+      out.push({
+        code: 'provider-flag-ignored',
+        detail: `--provider ${opts.provider} only applies to a variable with no integration yet. These are already managed.`,
+      });
+    }
+    if (opts.all && opts.varIgnored) {
+      out.push({
+        code: 'var-ignored-with-all',
+        detail: `--all rotates every managed credential on this branch, so ${opts.varIgnored} was not treated as the target.`,
+      });
+    }
+    return out;
+  }
+
+  /** What the run actually did, as a page. Reports only — nothing here decides. */
+  private async reportRun(
+    projectName: string,
+    branch: string,
+    opts: RotateOpts & { all?: boolean },
+    report: RotateRunReport,
+    stops: RotatePlanStop[],
+    deployed: { name: string; ok: boolean } | null,
+    targetCount: number,
+  ): Promise<void> {
+    const rotated = report.keys.filter((k) => k.outcome === 'rotated');
+    const failed = report.keys.filter((k) => k.outcome === 'failed');
+    const outcome: RotateRunOutcome =
+      rotated.length === 0
+        ? 'failed'
+        : failed.length > 0 || report.keys.some((k) => k.outcome === 'not-run')
+          ? 'partial'
+          : deployed && !deployed.ok
+            ? 'deploy-failed'
+            : deployed
+              ? 'deployed'
+              : opts.noPush
+                ? 'rotated-local'
+                : 'rotated';
+
+    const steps: RotateRunStep[] = [
+      {
+        id: 'rotate',
+        label: 'Rotate',
+        state: rotated.length === 0 ? 'fail' : failed.length > 0 ? 'fail' : 'ok',
+        detail: `${rotated.length}/${report.keys.length}`,
+      },
+      {
+        id: 'push',
+        label: 'Push',
+        // `skip` and `pending` are different facts: a `--no-push` run skips the
+        // push, while one queued behind a failed rotation never ran.
+        state: opts.noPush ? 'skip' : rotated.length > 0 ? 'ok' : 'pending',
+        detail: opts.noPush ? 'skipped by --no-push' : branch,
+      },
+      {
+        id: 'deploy',
+        label: 'Deploy',
+        state: deployed ? (deployed.ok ? 'ok' : 'fail') : opts.noPush ? 'skip' : 'pending',
+        ...(deployed
+          ? { detail: deployed.name }
+          : { detail: 'no target resolved', prose: true, fix: 'capy deploy' }),
+      },
+    ];
+
+    const { showRotateProgressInBrowser } = await import('../ui/rotateScreens');
+    await showRotateProgressInBrowser({
+      outcome,
+      projectName,
+      branch,
+      all: opts.all === true,
+      noPush: opts.noPush === true,
+      devMode: this.devMode,
+      // The route travelled, with the questions behind it already `done`.
+      stops,
+      steps,
+      keys: report.keys,
+      deploy: {
+        ...(deployed ? { targetName: deployed.name } : {}),
+        targetCount,
+      },
+      open: shouldOpen(),
+    });
   }
 
   /**
@@ -532,4 +884,56 @@ export function buildRotatePickerChoices(
       managed: !!c,
     };
   });
+}
+
+/**
+ * The same rows, for the browser.
+ *
+ * The terminal's are pre-formatted strings with ANSI in them — `STRIPE_KEY
+ * (stripe, rk_…tst, expires in 30d)` — which a payload cannot use: the escapes
+ * would render as literal `[90m`, and the expiry is glued into the sentence so
+ * the screen could not pluralise it. Same facts, structured, from the same
+ * keep.lock lookup — which is why this sits beside `buildRotatePickerChoices`
+ * rather than in the screen module.
+ *
+ * NEVER key material. `fingerprint` is the redacted `abc…xyz` form keep.lock
+ * already stores; no value has ever been in a connector entry.
+ */
+export function buildRotateCandidates(
+  allVars: string[],
+  keep: KeepFile,
+  branch: string,
+): RotateCandidate[] {
+  return allVars.map((v) => {
+    const c = findManagedConnector(keep, v, branch);
+    if (!c) return { name: v, managed: false };
+    return {
+      name: v,
+      managed: true,
+      provider: c.provider,
+      ...(c.fingerprint ? { fingerprint: c.fingerprint } : {}),
+      ...(typeof c.expires_at === 'number'
+        ? { expiresInDays: Math.floor((c.expires_at - Date.now() / 1000) / 86400) }
+        : {}),
+      ...(c.mode === 'test' || c.mode === 'live' ? { mode: c.mode } : {}),
+      ...(c.account_id ? { accountId: c.account_id } : {}),
+      // Issued by Capy through the provider's CLI, so rotating it invalidates
+      // the copy every teammate is holding.
+      ...(c.source === 'cli' ? { issuedByCapy: true } : {}),
+    };
+  });
+}
+
+/** What one pass of `rotateMany` did, so the caller can report it and exit. */
+interface RotateRunReport {
+  /** Names that rotated. The terminal's own tally counts these. */
+  succeeded: string[];
+  /** One row per credential the run touched, including ones it never reached. */
+  keys: RotateKeyResult[];
+  /**
+   * The run stopped rather than finishing. Under `--web` this replaces the
+   * inline `process.exit(1)`: exiting there would kill the loopback server
+   * before the browser could fetch the page that explains what happened.
+   */
+  stopped: boolean;
 }

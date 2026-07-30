@@ -1,4 +1,5 @@
 import { ConnectorMetadata } from '../../types/index';
+import type { Blocked } from '../../ui/screens/contract';
 import { ResolvedContext } from './shared';
 
 export interface ConnectOpts {
@@ -9,12 +10,28 @@ export interface ConnectOpts {
   force?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
+  /**
+   * Render this command's questions as compiled screens in a local browser.
+   *
+   * Not the same axis as `nonTty`, and the pairing is the whole point: the
+   * caller `--web` exists for runs with piped stdio, so `isInteractive()` is
+   * already false and every picker below has either defaulted or refused
+   * without asking. `--web` is what turns those back into questions.
+   */
+  web?: boolean;
+  /**
+   * A `capy-dev` binary. Live mode is refused outright, so the mode question
+   * says so beside the option rather than accepting it and exiting afterwards.
+   */
+  devMode?: boolean;
 }
 
 export interface RotateOpts {
   noPush?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
+  /** Render this command's questions as compiled screens in a local browser. */
+  web?: boolean;
 }
 
 /** Result of provider.connect(): the provider hands us a value + the connector metadata to record on the keep.lock entry. */
@@ -40,6 +57,23 @@ export interface ConnectorModule {
    * manual hand-off is coming. Omit for providers that rotate unattended.
    */
   requiresAuth?: boolean;
+  /** Local binary `precheck` looks for, e.g. `stripe`. */
+  requiresTool?: string;
+  /**
+   * Non-exiting form of `precheck`, for a list that previews whether a
+   * connector can run. `precheck` itself exits the process, so the only way to
+   * learn this today is to pick the connector and be refused.
+   */
+  toolInstalled?(): boolean;
+  /**
+   * The refusal `precheck` makes when `requiresTool` is missing.
+   *
+   * ONE object, so the preview in the connector list and the wall the command
+   * runs into are the same condition rather than two — same code, same install
+   * link, same command to run. Two screens wording one condition differently is
+   * a bug in the product.
+   */
+  toolMissing?: Blocked;
   /**
    * Synchronous pre-check that runs before any auth or network. Use to bail
    * early on missing local dependencies (e.g. provider CLI not installed) so
