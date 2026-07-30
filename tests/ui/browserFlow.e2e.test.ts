@@ -61,6 +61,47 @@ async function until(page: CdpSession, expression: string, what: string): Promis
   throw new Error(`timed out waiting for ${what}`);
 }
 
+/**
+ * The same poll, tolerating the moment a document is being replaced.
+ *
+ * A standalone step advances by NAVIGATION, so between a click and the next
+ * assertion there is a window where the execution context the last evaluate
+ * used no longer exists — CDP answers "Inspected target navigated or closed"
+ * instead of a value. That transition is the mechanism these flows are built
+ * on, not a failure, so it is retried against the new context rather than
+ * thrown. `until` keeps its stricter behaviour for the shell flows above,
+ * which swap markup in place and never navigate.
+ */
+async function untilSettled(page: CdpSession, expression: string, what: string): Promise<void> {
+  let last = '';
+  for (let i = 0; i < 400; i++) {
+    try {
+      if (await evaluate<boolean>(page, `!!(${expression})`)) return;
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for ${what}${last ? ` (last: ${last})` : ''}`);
+}
+
+/**
+ * Navigate, and wait until the document we asked for is the one running.
+ *
+ * `Page.loadEventFired` can be the tab's own initial empty document rather than
+ * the target, so awaiting it alone leaves the first evaluate racing the real
+ * navigation — and CDP answers an evaluate in a context that has just gone away
+ * with "Inspected target navigated or closed" rather than with a value. That
+ * surfaced as a suite that failed roughly one run in three, on whichever test
+ * happened to lose the race, so every `open` below goes through here.
+ */
+async function navigate(page: CdpSession, url: string): Promise<void> {
+  const loaded = page.once('Page.loadEventFired', 20_000);
+  await page.send('Page.navigate', { url });
+  await loaded;
+  await untilSettled(page, `document.body && document.body.innerHTML.length > 0`, 'the page to be running');
+}
+
 describeBrowser('browser flow, driven by a real browser', () => {
   let browser: Browser | null = null;
   let profile = '';
@@ -76,9 +117,7 @@ describeBrowser('browser flow, driven by a real browser', () => {
     profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
     browser = await Browser.launch(profile);
     const page = await browser.newPage(1280, 820);
-    const loaded = page.once('Page.loadEventFired', 20_000);
-    await page.send('Page.navigate', { url });
-    await loaded;
+    await navigate(page, url);
     return page;
   }
 
@@ -223,10 +262,20 @@ describeBrowser('browser flow, driven by a real browser', () => {
     expect(await evaluate<boolean>(page, `!document.getElementById('screen')`)).toBe(true);
 
     // Answering reloads, and the same URL yields the NEXT step.
-    await evaluate(page, `window.answer()`);
-    await until(page, `document.getElementById('h') && document.getElementById('h').textContent === 'STEP TWO'`, 'step two');
+    //
+    // `void` rather than awaiting the page's promise: `answer()` resolves only
+    // after `location.reload()`, so awaiting it means awaiting a value from an
+    // execution context that the reload has already destroyed — CDP answers
+    // that with "Inspected target navigated or closed" and the test fails on
+    // the very transition it exists to check. The poll below is what waits.
+    await evaluate(page, `void window.answer()`);
+    await untilSettled(
+      page,
+      `document.getElementById('h') && document.getElementById('h').textContent === 'STEP TWO'`,
+      'step two',
+    );
 
-    await evaluate(page, `window.answer()`);
+    await evaluate(page, `void window.answer()`);
     expect(await done).toEqual({ finished: true });
   }, 60_000);
 
@@ -280,9 +329,7 @@ describeBrowser('the sync conflict resolver, driven by a real browser', () => {
     profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
     browser = await Browser.launch(profile);
     const page = await browser.newPage(1280, 820);
-    const loaded = page.once('Page.loadEventFired', 20_000);
-    await page.send('Page.navigate', { url });
-    await loaded;
+    await navigate(page, url);
     return page;
   }
 
@@ -371,9 +418,7 @@ describeBrowser('capy checkout, driven by a real browser', () => {
     profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
     browser = await Browser.launch(profile);
     const page = await browser.newPage(1280, 820);
-    const loaded = page.once('Page.loadEventFired', 20_000);
-    await page.send('Page.navigate', { url });
-    await loaded;
+    await navigate(page, url);
     return page;
   }
 
@@ -562,6 +607,354 @@ describeBrowser('capy checkout, driven by a real browser', () => {
       'the switch button to go live',
     );
 
+    await done.catch(() => undefined);
+  }, 60_000);
+});
+
+describeBrowser('capy invite, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 900);
+    await navigate(page, url);
+    // A compiled screen mounts itself from an inline script, so "the document
+    // arrived" and "the screen is on it" are two different moments.
+    await untilSettled(page, `document.querySelector('h1')`, 'the screen to mount');
+    return page;
+  }
+
+  /**
+   * The rows this page is currently offering, by label.
+   *
+   * Every predicate below reads the DOM defensively, because a standalone step
+   * advances by NAVIGATION: between the click and the next assertion the
+   * document is being replaced, and a selector chained off a `.find()` that
+   * momentarily returns undefined throws rather than polls.
+   */
+  const optionLabels = `[...document.querySelectorAll('[role=radio],[role=checkbox]')]
+       .map(el => el.querySelector('.label')).filter(Boolean).map(el => el.textContent.trim())`;
+
+  /** Wait for an option row to exist, then click it. */
+  async function chooseOption(page: CdpSession, label: string): Promise<void> {
+    await untilSettled(page, `${optionLabels}.includes(${JSON.stringify(label)})`, `the ${label} option`);
+    await evaluate(
+      page,
+      `[...document.querySelectorAll('[role=radio],[role=checkbox]')]
+         .find(el => el.querySelector('.label') && el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)})
+         .click()`,
+    );
+  }
+
+  /** Wait for a button to exist, then click it by its visible text. */
+  async function press(page: CdpSession, text: string): Promise<void> {
+    await untilSettled(
+      page,
+      `[...document.querySelectorAll('button')].some(b => b.textContent.includes(${JSON.stringify(text)}))`,
+      `the ${text} button`,
+    );
+    await evaluate(
+      page,
+      `[...document.querySelectorAll('button')]
+         .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`,
+    );
+  }
+
+  /** Does the page currently read this? Null-safe across a navigation. */
+  const says = (text: string): string =>
+    `(document.body ? document.body.textContent : '').includes(${JSON.stringify(text)})`;
+
+  const INVITE = {
+    email: 'bob@example.com',
+    orgName: 'mikes-market',
+    callerEmail: 'mike@example.com',
+    callerRole: 'owner',
+    grantableRoles: ['member', 'project-admin', 'admin'],
+    projects: [
+      { id: 'p1', name: 'storefront', isCwd: true },
+      { id: 'p2', name: 'warehouse', isCwd: false },
+    ],
+    plan: { defaultTtl: '7d', canAskExpiry: true },
+    open: false,
+    now: new Date('2026-07-30T00:00:00Z'),
+  };
+
+  test('all three stops of the invite route are walked by clicking', async () => {
+    // The standalone path end to end: answering a stop is a page RELOAD, not a
+    // markup swap, and the same URL then serves the next one. The expiry stop
+    // is the one with no terminal counterpart at all — `resolveNotAfter` never
+    // prompts — so this is the only place it can be shown to work.
+    const { askInviteInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    const done = askInviteInBrowser({ ...INVITE, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The rail is the CLI's plan, drawn whole before anything was answered —
+    // including the stops this page is not standing on.
+    await untilSettled(page, says('Role'), 'the role stop');
+    for (const label of ['Role', 'Projects', 'Expiry', 'Code']) {
+      expect(await evaluate<boolean>(page, says(label))).toBe(true);
+    }
+    // The slug the `--role` flag takes, not the picker's `Project Admin`.
+    expect(await evaluate<boolean>(page, says('project-admin'))).toBe(true);
+    // Nothing has been minted, so there is no code anywhere on a question page.
+    expect(await evaluate<boolean>(page, says('capy redeem'))).toBe(false);
+
+    await chooseOption(page, 'member');
+    await press(page, 'Continue');
+
+    // Stop two arrives by navigation, at the same address.
+    await untilSettled(page, says('Which projects?'), 'the projects stop');
+    expect(await evaluate<boolean>(page, says('storefront'))).toBe(true);
+    // The cwd tick says where it came from, which the terminal never does.
+    expect(await evaluate<boolean>(page, says('Ticked because you ran this from here'))).toBe(true);
+
+    await chooseOption(page, 'warehouse');
+    await press(page, 'Continue');
+
+    await untilSettled(page, says('How long should it last?'), 'the expiry stop');
+    // The service's silent ceiling, said out loud.
+    expect(await evaluate<boolean>(page, says('caps invites at 30 days'))).toBe(true);
+
+    await chooseOption(page, '24h');
+    await press(page, 'Create invite');
+
+    expect(await done).toEqual({
+      role: 'member',
+      projectIds: ['p1', 'p2'],
+      ttl: '24h',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('picking an org-wide role walks past the project stop', async () => {
+    // The rail says `admin` reaches every project before the choice is made,
+    // and the run then proves it by never asking.
+    const { askInviteInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    const done = askInviteInBrowser({ ...INVITE, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+    await chooseOption(page, 'admin');
+    await press(page, 'Continue');
+
+    await untilSettled(page, says('How long should it last?'), 'the expiry stop');
+    expect(await evaluate<boolean>(page, says('Which projects?'))).toBe(false);
+
+    await chooseOption(page, '7d');
+    await press(page, 'Create invite');
+
+    expect(await done).toEqual({ role: 'admin', projectIds: [], ttl: '7d', cancelled: false });
+  }, 60_000);
+
+  test('the projects step holds its button until something is ticked', async () => {
+    // The CLI validates this after the fact with `Pick at least one project`.
+    // Here the control never lets the empty answer be sent at all.
+    const { askInviteInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    let settled = false;
+    const done = askInviteInBrowser({
+      ...INVITE,
+      projects: [{ id: 'p2', name: 'warehouse', isCwd: false }],
+      timeoutMs: 8_000,
+      onListen: (u) => (url = u),
+    });
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await chooseOption(page, 'member');
+    await press(page, 'Continue');
+    await untilSettled(page, says('Which projects?'), 'the projects stop');
+
+    // Nothing is ticked: this run has no cwd project for the CLI to tick.
+    const submit = `document.querySelector('button[type=submit]')`;
+    await untilSettled(page, submit, 'the continue button');
+    expect(await evaluate<boolean>(page, `${submit}.disabled`)).toBe(true);
+    expect(settled).toBe(false);
+
+    await chooseOption(page, 'warehouse');
+    await untilSettled(page, `${submit} && !${submit}.disabled`, 'the continue button to go live');
+
+    await done.catch(() => undefined);
+  }, 60_000);
+
+  test('closing the window mints nothing', async () => {
+    // An unanswered invite is a refusal. Nothing about leaving may look like
+    // agreement to hand somebody a copy of the organization key.
+    const { askInviteInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    let settled = false;
+    const done = askInviteInBrowser({ ...INVITE, timeoutMs: 1_500, onListen: (u) => (url = u) });
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.navigate', { url: 'about:blank' });
+
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    await done.catch(() => undefined);
+  }, 60_000);
+
+  test('the minted code renders on a page that cannot send it back', async () => {
+    // Why `--web` stops printing the code: an agent shelling `capy` reads
+    // stdout. It goes to a page instead — and that page is served with
+    // `connect-src 'none'`, so the browser itself refuses to let it speak.
+    const { serveInviteCode } = await import('../../src/ui/memberScreens');
+    const served = await serveInviteCode(
+      INVITE,
+      {
+        redeemCommand: 'capy redeem AgTESTREDEEMCODE00001',
+        expiresAtIso: '2026-08-06T00:00:00.000Z',
+        expiresRelative: 'in 7 days',
+        role: 'member',
+        reissued: false,
+        grantedProjects: [{ id: 'p1', name: 'storefront' }],
+        assignmentFailures: [],
+      },
+      { role: 'member', projectIds: ['p1'] },
+      { open: false },
+    );
+
+    const page = await open(served.url);
+
+    await untilSettled(page, says('AgTESTREDEEMCODE00001'), 'the code to render');
+    expect(await evaluate<boolean>(page, says('This code is a key, not a link'))).toBe(true);
+    // A page you are handed, not one you answer: no form, and nothing on it
+    // that could post the credential anywhere.
+    expect(await evaluate<number>(page, `document.querySelectorAll('form').length`)).toBe(0);
+    expect(await evaluate<boolean>(page, `typeof window.capySubmit === 'undefined'`)).toBe(true);
+
+    // And if something in the page tried anyway, the browser stops it.
+    const spoke = await evaluate<string>(
+      page,
+      `fetch('/submit', { method: 'POST', body: 'x' }).then(() => 'sent').catch(() => 'blocked')`,
+    );
+    expect(spoke).toBe('blocked');
+
+    served.close();
+  }, 60_000);
+});
+
+describeBrowser('capy kick, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 900);
+    await navigate(page, url);
+    // A compiled screen mounts itself from an inline script, so "the document
+    // arrived" and "the screen is on it" are two different moments.
+    await untilSettled(page, `document.querySelector('h1')`, 'the screen to mount');
+    return page;
+  }
+
+  /** Type into a field the way a person does — `bind:value` listens for `input`. */
+  const type = (selector: string, value: string): string =>
+    `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  /** Does the page currently read this? Null-safe across a navigation. */
+  const says = (text: string): string =>
+    `(document.body ? document.body.textContent : '').includes(${JSON.stringify(text)})`;
+
+  const KICK = {
+    orgName: 'mikes-market',
+    callerRole: 'owner',
+    currentUserId: 'u-mike',
+    member: {
+      membershipId: 'mem-bob-2',
+      userId: 'u-bob',
+      email: 'bob@example.com',
+      role: 'member',
+      status: 'active',
+      createdAt: '2026-01-01T00:00:00Z',
+      projects: [{ id: 'p1', name: 'storefront', role: 'member' as const }],
+    },
+    open: false,
+  };
+
+  test('the consequence is stated above the button, and the button waits for the address', async () => {
+    // The terminal asks one line — `Remove <email> from this organization? They
+    // will lose access to all secrets.` — defaulting to No, with the whole
+    // consequence folded into the question itself. Here it is two callouts
+    // ABOVE the control, and the control is held until the address is typed.
+    const { confirmKickInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    const done = confirmKickInBrowser({ ...KICK, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    await untilSettled(page, says('This cannot be undone'), 'the removal confirm');
+    // The thing the terminal never says: removing the membership does not
+    // reach the key already on their machine.
+    expect(await evaluate<boolean>(page, says('still on their machine'))).toBe(true);
+    // Both callouts sit before the button in the document, never inside it.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `(() => {
+           const btn = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Remove member');
+           const callout = [...document.querySelectorAll('*')].find(e => e.className && String(e.className).includes('callout'));
+           return !!btn && !!callout && !btn.contains(callout) &&
+             (callout.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+         })()`,
+      ),
+    ).toBe(true);
+
+    const remove = `[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Remove member')`;
+    expect(await evaluate<boolean>(page, `!!${remove} && ${remove}.disabled`)).toBe(true);
+
+    // A near miss is not the address.
+    await evaluate(page, type('input[type=text]', 'bob@example.co'));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(await evaluate<boolean>(page, `${remove}.disabled`)).toBe(true);
+
+    await evaluate(page, type('input[type=text]', 'bob@example.com'));
+    await untilSettled(page, `${remove} && !${remove}.disabled`, 'the remove button to go live');
+    await evaluate(page, clickButton('Remove member'));
+
+    expect(await done).toBe(true);
+    // The CLI answered, and the page then says what removal did NOT reach.
+    await untilSettled(page, says('no longer a member'), 'the removal receipt');
+  }, 60_000);
+
+  test('closing the window removes nobody', async () => {
+    // A destructive step nobody answered has not been approved.
+    const { confirmKickInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    let settled = false;
+    const done = confirmKickInBrowser({ ...KICK, timeoutMs: 1_500, onListen: (u) => (url = u) });
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.navigate', { url: 'about:blank' });
+
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
     await done.catch(() => undefined);
   }, 60_000);
 });
