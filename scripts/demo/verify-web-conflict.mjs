@@ -60,11 +60,27 @@ async function main() {
         headers: { 'content-type': 'application/json', origin: base },
         body: JSON.stringify({
           nonce,
-          payload: { __action: 'apply', API_KEY: 'pinned', DATABASE_URL: 'local' },
+          // The compiled screen answers two levels: the whole-run action, and
+          // the per-variable sources only when that action is `individual`.
+          // The old flat shape ({ API_KEY: 'pinned' }) is refused now rather
+          // than half-applied, which is what this script proved by hanging on
+          // the refusal it did not expect.
+          payload: {
+            __action: 'submit',
+            action: 'individual',
+            choices: { API_KEY: 'pinned', DATABASE_URL: 'local' },
+          },
         }),
       });
       const body = await res.json();
       console.log(`• POST /submit → ${res.status} ${JSON.stringify(body)}`);
+      // An inline refusal keeps the wizard open by design, so a script that
+      // ignores one waits for the idle timeout and is killed with no reason
+      // printed. Say what happened instead.
+      if (body && body.error) {
+        console.error(`\n✗ E2E FAIL: the CLI refused the submit — ${body.error}`);
+        process.exit(1);
+      }
     },
   });
   if (web.code !== 0) throw new Error(`capy --web exited ${web.code}:\n${web.err}\n${web.out}`);
