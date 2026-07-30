@@ -1892,6 +1892,23 @@ export type InitStep =
   | 'auth'
   | 'organization'
   | 'organization-name'
+  /**
+   * A signed-in user with access to the organization but no encryption key
+   * on this device. Until CAP-319 this was a dead end: the CLI rendered
+   * `blocked` with remedy `capy redeem <code>` and the only way through was
+   * abandoning the wizard, running that command in a terminal, and starting
+   * `capy` over from scratch. It is a stop like any other now — the page
+   * collects the code an organization owner sends and redeems it in place,
+   * so the wizard carries straight on to `project` instead of handing back
+   * to a terminal for one command and losing everything answered so far.
+   *
+   * Still conditional (see `CONDITIONAL` in the screen): most sign-ins never
+   * see it, because most people already hold the key their session needs.
+   * It exists on the declared route precisely so a run that DOES need it has
+   * a station to stand on rather than being told, mid-flow, about a stop
+   * nobody drew.
+   */
+  | 'redeem'
   | 'project'
   | 'project-name'
   | 'branch'
@@ -2013,6 +2030,12 @@ export interface InitWizardData {
    * Prefill for a text step: the directory-derived default project name, or
    * the answer that was just refused, re-served so it can be edited rather
    * than retyped.
+   *
+   * Never set for `redeem`. The value there is a bearer credential, and
+   * re-serving a refused one back into the payload just to save a retype
+   * would put it a second time on a surface it has already left once — the
+   * page shows why the code was refused and leaves the field for a fresh
+   * paste instead.
    */
   value?: string;
   /**
@@ -2055,8 +2078,16 @@ export interface InitWizardData {
    * The root `capy` command has none of these flags today — it has no
    * `--non-tty` either, so all six prompts hang forever on a closed stdin.
    * The declared route is what makes them expressible: one flag per stop, and
-   * a refusal (exit 3, naming the stop) for the two stops that mint key
+   * a refusal (exit 3, naming the stop) for the two stops that carry key
    * material and therefore can never take an answer from argv.
+   *
+   * `redeem` is one of them still, even after CAP-319 turned it into a live
+   * browser stop: the code is a bearer credential exactly like the recovery
+   * phrase is, and a flag would leave it in shell history and `ps` output
+   * whether a human or an agent supplied it. What changed is only which
+   * *browser* window can finish the stop — a headless run refuses here
+   * exactly as it always has, and is handed the same `capy redeem <code>`
+   * it would have been given before this page could take a paste at all.
    */
   nonTty?: NonTtyEscape;
 }
@@ -3051,8 +3082,27 @@ export type RedeemOutcome =
   | { kind: 'co-decrypt-failed'; detail: string }
   | { kind: 'unreachable' };
 
-/** The stops the flow declares before it asks anything. */
-export type RedeemStop = 'code' | 'signin' | 'membership' | 'access';
+/**
+ * The stops the flow declares before it asks anything.
+ *
+ * Two, not four. `membership` and `access` used to sit on this rail as
+ * `Join the organization` and `Unwrap your key`, but neither is a station a
+ * traveller visits — they are what redeeming DOES, decided and finished in
+ * the same round trip as `code` itself, with nobody waiting on a browser in
+ * between. A stop is a place the run pauses for a person to answer something;
+ * `switchLocalContext` and the key unwrap never pause, so drawing them as
+ * stations promised a wait that was never coming. They surface instead as
+ * facts on the result, once there is a result to have facts about — see
+ * `RedeemOutcome` and the `success` case that carries `RedeemGrant` alongside
+ * it.
+ *
+ * `signin` leads for the same reason `renderRotationPlan` puts its own
+ * precondition first: there is no code to check, no membership to join and
+ * no key to unwrap for someone the service cannot identify yet. A route that
+ * asked about the code before it knew who was asking was a screen pretending
+ * to make progress on a question it could not yet answer.
+ */
+export type RedeemStop = 'signin' | 'code';
 
 /**
  * One station on the redeem route.
@@ -3081,6 +3131,14 @@ export interface RedeemInviteData {
    * the organization key. Absent when the screen has to collect it, which is
    * the safer of the two paths — `capy redeem <code>` leaves the credential in
    * shell history and in `ps` output.
+   *
+   * Present or absent changes what the `code` stop DOES, not just what it
+   * shows: present, the credential the CLI already holds is never sent back —
+   * the screen only asks you to say go. Absent, the browser is the one place
+   * the code exists until the moment it is typed or pasted in, and pasting
+   * redeems it immediately — there is no preview to confirm first, because
+   * nothing about the invite is known until the CLI has unwrapped it, and no
+   * second step where the credential sits in a box waiting for a click.
    */
   code?: string;
   preview?: RedeemPreview;
@@ -3093,8 +3151,12 @@ export interface RedeemInviteData {
   /** Set when the code never parsed: there is nothing to preview or accept. */
   blocked?: Blocked;
   /**
-   * Which stop to open on. The CLI serves `code`; the rest exist so the
-   * workbench can reach a stop without completing a real redemption.
+   * Which stop to open on. A real redemption always opens on `code` — by the
+   * time the CLI can show this screen at all, either it already held a
+   * session or `signin` just finished elsewhere, and `code` is the one stop
+   * left to have an opinion about. `signin` exists as a value so the
+   * workbench can preview the rail mid-route without completing a real
+   * redemption; the CLI does not serve it.
    */
   step?: RedeemStop;
   /**
@@ -3674,7 +3736,6 @@ export interface SecretCommitReviewData {
     | 'done'
     | 'discarded'
     | 'kept'
-    | 'handed-back'
     | 'error';
   /** Failure detail from the CLI. Display only, never parsed. */
   errorMessage?: string;
@@ -3910,7 +3971,7 @@ export interface SecretTableData {
    * the three endings are here so each one — otherwise reachable only by
    * completing a real commit or discard — is one click away in the workbench.
    */
-  view?: 'table' | 'confirm-commit' | 'done' | 'cancelled' | 'terminal';
+  view?: 'table' | 'confirm-commit' | 'done' | 'cancelled';
   /**
    * How many changes the ending views report on, when the run that produced
    * them is no longer in `rows`. Defaults to the pending count.
@@ -4065,7 +4126,7 @@ export interface SecretValueEditorData {
    * `cancelled` changed nothing, `terminal` handed the step back. Closing the
    * window is a fourth thing — a refusal — and renders nothing at all.
    */
-  view?: 'inspect' | 'revealed' | 'edit' | 'saved' | 'cancelled' | 'terminal';
+  view?: 'inspect' | 'revealed' | 'edit' | 'saved' | 'cancelled';
 
   /**
    * THE CLI MUST NEVER SET THIS. Reveal is a round trip precisely so the
@@ -4222,20 +4283,6 @@ export type AuthFailureReason =
   | 'network'
   | 'no_session';
 
-/** One thing signing out either deletes or deliberately leaves alone. */
-export interface ScopeItem {
-  /** Where it lives. Machine state, so mono. */
-  path: string;
-  /** What it is, in prose. */
-  what: string;
-  /**
-   * Present but nothing to remove — the project token when `capy logout` runs
-   * outside a project. The CLI clears whatever it finds and prints one line
-   * either way, so "there was no project token here" is invisible.
-   */
-  absent?: boolean;
-}
-
 /** Which view the screen opens on. The CLI serves `review`. */
 export type SignoutView = 'review' | 'signed-out' | 'nothing-cleared' | 'locked';
 
@@ -4252,16 +4299,31 @@ export interface SessionAndSignoutData {
    */
   inProject: boolean;
   projectName?: string;
-  /** Everything `performLogoutCleanup` deletes (logoutCommand.ts:20-65). */
-  willClear: ScopeItem[];
   /**
-   * The recovery-equivalent area, never touched (logoutCommand.ts:3-10).
+   * Whether `performLogoutCleanup` actually found something to remove
+   * (logoutCommand.ts:20-65).
    *
-   * Deleting `local.key` would orphan `key.enc` and force a re-redeem, so the
-   * invariant is load-bearing. Today it is a code comment; a user signing out
-   * on a shared machine has no way to learn that their wrapped key survives.
+   * The CLI's own line is one sentence for two different facts: `Logged out.
+   * Session cleared.` prints whether or not any of five files or directories
+   * was actually deleted, and there is no way from the terminal alone to
+   * tell "ended a live session" apart from "there was nothing to end." This
+   * screen used to carry two itemised lists — everything the cleanup would
+   * remove, and everything it would deliberately leave alone — and infer the
+   * distinction by checking whether every item in the first list was already
+   * absent. That was a client re-derivation of a fact the cleanup call
+   * already knows first-hand, built on top of reassurance copy that told the
+   * user nothing they could act on (the wrapped master key and its local
+   * wrap are never touched by `capy logout` regardless of what this flag
+   * says).
+   *
+   * The true answer exists only once the cleanup has actually run, so the
+   * field the screen reads for its ending is not this one — it is the
+   * identically named `cleared` on the `POST /submit` response for
+   * `__action: 'logout'`. Present here, optionally, only so the two
+   * forced-ending fixtures (`signed-out`, `nothing-cleared`) can carry the
+   * fact they are illustrating alongside `view`.
    */
-  willKeep: ScopeItem[];
+  cleared?: boolean;
   /**
    * Why the session needs attention at all. `reason` is the discriminator;
    * `message` is the CLI's sentence and is display-only.
@@ -4413,6 +4475,17 @@ export interface SwitchOrganizationData {
    * from the start. Without them the rail promised "Organization → Project" to
    * an account with no organizations, whose only reachable path is four stops
    * long and includes a recovery-phrase reveal that cannot be undone.
+   *
+   * CAP-316: the screen only ever DRAWS this as a rail on the create route
+   * and in `init` mode. Trainstops are an onboarding thing and an
+   * organization-creation thing; a plain switch onto an organization that
+   * already exists is neither — it is a one-step decision with one
+   * consequence, and a rail in front of it dresses that up as a journey it
+   * never was. The field stays populated regardless of whether anything ends
+   * up drawing it, because a headless caller reading `--json` still needs
+   * the plan on the run that draws no rail for it. A plain switch's `stops`
+   * therefore shrinks to the one real stop (`org`) rather than declaring a
+   * `project` stop that CAP-316 says never happens while keep.lock exists.
    */
   stops?: Stop[];
   /**
@@ -4423,6 +4496,12 @@ export interface SwitchOrganizationData {
    * covers both journeys. Ids rather than a flag on `Stop`, so the knowledge
    * of which route a stop belongs to stays in the payload that computed the
    * route instead of being hardcoded in the screen that draws it.
+   *
+   * That strike-through only ever runs where a rail is actually being drawn
+   * (the create route, or `init` mode) — see `stops` above. A plain switch
+   * draws no rail at all, so `createStopIds` goes unconsulted for that run;
+   * it is still safe to omit there, since there is nothing left for it to
+   * annotate.
    */
   createStopIds?: string[];
   /**
@@ -4438,9 +4517,25 @@ export interface SwitchOrganizationData {
   /** The project `switched` is about. */
   subjectProjectName?: string;
   /**
-   * Whether the cwd has a keep.lock. Changes the closing hint: the CLI says
-   * "Run capy to sync secrets." inside a project and "Run capy in a project
-   * directory to sync secrets." outside one.
+   * Whether the cwd already has a keep.lock, pinning it to some project.
+   *
+   * CAP-316: this is the fact the whole ticket turns on. `true` means the
+   * directory is already bound to a project, so a plain switch changes only
+   * which organization the session talks to — there is no project step, no
+   * trainstops (see `stops`), and the run leaves keep.lock exactly as it
+   * found it. The directory keeps following its old project, which after an
+   * org switch usually means it stops decrypting, and that is fine: nothing
+   * needs to guard against using it against the wrong org, because the
+   * `.env` crypto already refuses on its own. `view: 'switched'` reports
+   * this ending without a `subjectProjectName`, because none was chosen.
+   *
+   * `false` means there is nothing to leave alone, so the project step still
+   * runs — unchanged from before this ticket — `view` can be `'project'` or
+   * `'first-project'`, and the eventual `'switched'` payload carries a
+   * `subjectProjectName`. A `'project'` / `'first-project'` payload with
+   * `hasKeepLock: true` is not a shape the CLI should ever send once its half
+   * of CAP-316 lands: those views only exist for the branch this flag says
+   * skips them.
    */
   hasKeepLock?: boolean;
   /** Suggested name for the first project, prefilled by the CLI. */
@@ -4590,8 +4685,104 @@ export interface SyncConflictData {
    * so the three endings would otherwise have no fixture — and they are the
    * three the CLI conflates today.
    */
-  ending?: 'submitted' | 'cancelled' | 'terminal';
+  ending?: 'submitted' | 'cancelled';
   /** How the same decision is made without a browser. */
+  nonTty?: NonTtyEscape;
+}
+
+/**
+ * `capy` — the tail of a sync that had nothing left to resolve.
+ *
+ * docs/command-coverage.md says it plainly: "A clean sync stays silent and
+ * opens nothing." `capyCommand.ts` earns that line today: when the 3-way
+ * comparison finds `diffs.length === 0` it prints one line — "Everything is
+ * up to date!" — unconditionally re-encrypts `.env` from what is already on
+ * disk, and returns. Nothing pulled, nothing pushed, and the rewrite happens
+ * whether or not it needed to. That branch, and the sibling one where the
+ * bulk/individual resolution actually moves variables in one direction or
+ * the other and today only ever gets a bare `> keep.lock updated (N
+ * changes)` printed to stdout, are both "ran and finished" with no screen to
+ * show for it. This is that screen, for both.
+ *
+ * No `push-failed` outcome here, on purpose. `commit_local` does await
+ * `this.serviceClient.pushSecrets(...)` with no try/catch around it, so a
+ * network failure there is real and does surface as a stack trace today —
+ * but nothing in the CLI catches it into a `SyncResultData` yet, and today's
+ * bulk actions never pull and push in the same run (`commit_local` builds
+ * its payload from local plaintext alone; it never merges in a pulled
+ * value), so the "pulled landed, push didn't" scenario a three-state model
+ * would exist to carry cannot happen yet either. Modelling an outcome no CLI
+ * path can produce is exactly the fabricated-state contract §5 flags —
+ * add it back, with a fixture that matches whatever the CLI actually does
+ * on a push failure, when a change lands that lets this screen render it.
+ *
+ * Not sync-status, and not a replacement for it. `capy status` is present
+ * tense — "where do local, pinned and remote stand right now" — answerable
+ * at any moment, unconnected to a run. This page is past tense: every fact on
+ * it is something the run just did, seconds ago, and it has no reason to
+ * exist except that a run happened.
+ *
+ * Renders no secret values in any form — not even snippets, the same
+ * invariant `capy status` keeps. A sync moves whole values across the wire
+ * and onto disk; nothing this screen needs to say requires showing one.
+ *
+ * A report, so it posts nothing and carries no nonce — same construction as
+ * `sync-status` and `connect-result`.
+ */
+
+/**
+ * One variable that moved in this run, and how.
+ *
+ * `type` reuses the vocabulary `capy status` and the conflict resolver
+ * already share (`_shared.ts`'s `DiffType`), so "new", "changed" and
+ * "deleted" describe the same thing wherever a diff is drawn. Direction is
+ * deliberately not a field here: `SyncResultData` already carries two
+ * separate lists, `pulled` and `pushed`, so which way a variable moved is
+ * which list it is in, not a value repeated on every row.
+ */
+export interface SyncResultChange {
+  variable: string;
+  type: DiffType;
+}
+
+/**
+ * How the run actually ended.
+ *
+ * Two today, not three. An earlier draft of this screen added `push-failed`
+ * for the same reason `DeployRunOutcome` is five and not two — `ok: boolean`
+ * hides the case that matters most — but the CLI has no path that produces
+ * it yet (see the header comment above), so it was a state on the contract
+ * with nothing that could ever set it. Widen this the day a real path can:
+ * the fixture and the outcome should describe an actual `commit_local`
+ * failure, not the pull-then-push narrative the earlier draft imagined.
+ */
+export type SyncResultOutcome =
+  /** Everything that needed to move, moved. */
+  | 'synced'
+  /** Local, pinned and remote already agreed. Nothing came down, nothing went up. */
+  | 'nothing-to-do';
+
+export interface SyncResultData {
+  projectName: string;
+  /** Null when the CLI could not tell which branch this directory is on. */
+  branch: string | null;
+  outcome: SyncResultOutcome;
+  /** Variables the remote held that this run wrote into the working `.env`. */
+  pulled: SyncResultChange[];
+  /** Variables this run encrypted and pushed up from the working `.env`. */
+  pushed: SyncResultChange[];
+  /**
+   * Whether the working `.env` changed on disk.
+   *
+   * Kept separate from `pulled.length > 0` rather than derived from it:
+   * `capyCommand.ts` re-encrypts and rewrites the whole file even on the
+   * `diffs.length === 0` path, where nothing pulled and nothing pushed — the
+   * write is unconditional, not a reaction to a diff. Carrying this as its
+   * own field means the screen never has to infer "did the file on disk
+   * change" from a list that was never built to answer that question.
+   */
+  envRewritten: boolean;
+  /** How the same report is read without a browser. */
   nonTty?: NonTtyEscape;
 }
 
@@ -4780,6 +4971,7 @@ export interface ScreenDataMap {
   "session-info": SessionInfoData;
   "switch-organization": SwitchOrganizationData;
   "sync-conflict": SyncConflictData;
+  "sync-result": SyncResultData;
   "sync-status": SyncStatusData;
   "transport-machine": TransportMachineData;
 }
@@ -4825,6 +5017,7 @@ export const SCREEN_NAMES: readonly ScreenName[] = [
   "session-info",
   "switch-organization",
   "sync-conflict",
+  "sync-result",
   "sync-status",
   "transport-machine",
 ];
