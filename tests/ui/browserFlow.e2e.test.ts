@@ -565,3 +565,261 @@ describeBrowser('capy checkout, driven by a real browser', () => {
     await done.catch(() => undefined);
   }, 60_000);
 });
+
+describeBrowser('the first run, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /**
+   * Type into a field the way a person does.
+   *
+   * `.value` alone is invisible to the screen — `bind:value` listens for
+   * `input` — and `:not(.filter)` because a choice list's own search box is
+   * also an input on some of these steps.
+   */
+  const type = (value: string): string =>
+    `(() => { const el = document.querySelector('input:not(.filter)');
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  const clickOption = (label: string): string =>
+    `[...document.querySelectorAll('[role=radio]')]
+       .find(el => el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)}).click()`;
+
+  /**
+   * Answer the step, and wait for the one that replaces it.
+   *
+   * The wait is on the page's own load event, then on a control only the NEXT
+   * step draws. Every stop's label is on the rail of every page — that is the
+   * point of the rail — so waiting for a label would pass without the page
+   * having moved at all, and the next `evaluate` would then land in an
+   * execution context that was being torn down.
+   */
+  async function advance(page: CdpSession, click: string, button: string, what: string): Promise<void> {
+    const reloaded = page.once('Page.loadEventFired', 20_000);
+    await evaluate(page, click);
+    await reloaded;
+    await until(
+      page,
+      `[...document.querySelectorAll('button')].some(b => b.textContent.includes(${JSON.stringify(button)}))`,
+      what,
+    );
+  }
+
+  const ORGS = [
+    { id: 'org-1', name: 'mikes-market-hq', isCurrent: true },
+    { id: 'org-2', name: 'side-project-labs', isCurrent: false },
+  ];
+
+  const LOCAL_ENV = { count: 2, names: ['STRIPE_SECRET_KEY', 'DATABASE_URL'] };
+  const TARGET = { projectName: 'mikes-market', orgName: 'mikes-market-hq', branch: 'development' };
+
+  test('four stops of the first run are walked in one window, by clicking', async () => {
+    // The property that replaced six unrelated pages: answering a stop RELOADS
+    // this same address, and what comes back is the step the CLI actually
+    // reached after doing the work that answer unlocked. Three inventions this
+    // session died on exactly this.
+    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
+    let url = '';
+    const session = new InitWizardSession({ open: false, onListen: (u) => (url = u) });
+
+    const done = (async () => {
+      session.record({ signedInAs: 'mike@market.example', orgCount: 2 });
+      const org = await session.askOrganization(ORGS);
+      // The work that answer unlocked: scope the session, check the key, look
+      // for projects. This org has none, so that stop is never asked.
+      session.record({ hasOrgKey: true, projectCount: 0 });
+      const project = await session.askProjectName('mikes-market');
+      const branch = await session.askBranchChoice();
+      session.record({ localEnvCount: 2 });
+      const encrypt = await session.askEncrypt(LOCAL_ENV, TARGET);
+      await session.finish();
+      return { org, project, branch, encrypt };
+    })();
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The rail is the CLI's plan, drawn whole before anything was answered —
+    // including the consent gate three stops away, and the fork this run has
+    // not reached yet.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Encrypt and push')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Recovery phrase')`)).toBe(true);
+
+    await evaluate(page, clickOption('side-project-labs'));
+    // Stop two arrives by navigation, at the same address.
+    await advance(page, clickButton('Use this organization'), 'Create project', 'the project name stop');
+
+    // …with stop one settled on the rail, under the name the CLI resolved.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('side-project-labs')`)).toBe(true);
+    // The four stops the CLI has since worked out this run does not need are
+    // no longer stations on it, while the ones still ahead are. Which is
+    // which was decided by the plan, not by the page.
+    const stations = `[...document.querySelectorAll('nav.route li')].map(li => li.textContent).join(' ')`;
+    expect(await evaluate<boolean>(page, `!(${stations}).includes('Redeem a code')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `(${stations}).includes('Encrypt and push')`)).toBe(true);
+
+    await evaluate(page, type('mikes-market'));
+    await advance(page, clickButton('Create project'), 'Use this branch', 'the branch stop');
+
+    await evaluate(page, clickOption('development'));
+    // The consent gate names what it is asking about: variable NAMES, and
+    // never a value — they are still plaintext on disk and this is the
+    // question of whether they may stop being.
+    await advance(page, clickButton('Use this branch'), 'Encrypt and push', 'the consent gate');
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('DATABASE_URL')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    // It says where this is going, which the terminal's one-line confirm does
+    // in prose and this run must not get wrong.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('mikes-market-hq')`)).toBe(true);
+
+    await evaluate(page, clickButton('Encrypt and push'));
+
+    expect(await done).toEqual({
+      org: 'org-2',
+      project: 'mikes-market',
+      branch: 'development',
+      encrypt: true,
+    });
+  }, 90_000);
+
+  test('cancelling the consent gate is a NO, and nothing is encrypted', async () => {
+    // `confirmEncrypt = chosen === 'yes'` already meant this. After this step
+    // the .env in the directory is ciphertext, so the refusal has to come back
+    // as a refusal rather than as an error the caller might treat as a retry.
+    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
+    let url = '';
+    const session = new InitWizardSession({ open: false, onListen: (u) => (url = u) });
+    const done = (async () => {
+      session.record({ signedInAs: 'mike@market.example', orgCount: 0, localEnvCount: 2 });
+      return session.askEncrypt(LOCAL_ENV, TARGET);
+    })();
+
+    const page = await open(await waitForUrl(() => url));
+    await until(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`, 'the consent gate');
+
+    await evaluate(page, clickButton('Cancel'));
+
+    expect(await done).toBe(false);
+  }, 90_000);
+
+  test('closing the window on the consent gate encrypts nothing', async () => {
+    // An unanswered gate has not been agreed to. Leaving must not resolve as
+    // consent, and it must not resolve at all.
+    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
+    let url = '';
+    let settled = false;
+    const session = new InitWizardSession({ open: false, timeoutMs: 1_500, onListen: (u) => (url = u) });
+    const done = session.askEncrypt(LOCAL_ENV, TARGET);
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.navigate', { url: 'about:blank' });
+
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+
+    // It ends by timing out, not by treating the close as an answer.
+    await done.catch(() => undefined);
+    expect(settled).toBe(false);
+  }, 90_000);
+});
+
+describeBrowser('the sync reports, driven by a real browser', () => {
+  // A report has nothing to click, which is exactly why it needs loading in a
+  // real browser: a payload the screen cannot read renders a blank page and
+  // every server-side test still passes. These open the page the CLI serves
+  // and read what a person would read off it.
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  test('capy status renders its report, and no value is on it', async () => {
+    const { showSyncStatusInBrowser } = await import('../../src/ui/syncScreens');
+    const url = await showSyncStatusInBrowser({
+      projectName: 'mikes-market',
+      branch: 'development',
+      totalSecrets: 14,
+      localMatchesPinned: false,
+      remoteMatchesPinned: false,
+      hasRemote: true,
+      diffs: [
+        { variable: 'STRIPE_SECRET_KEY', type: 'changed', pinned: 'a1b2c3d4e5f60718', local: '0718f6e5d4c3b2a1', remote: 'a1b2c3d4e5f60718' },
+        { variable: 'DATABASE_URL', type: 'new', local: 'ffeeddccbbaa9988' },
+      ],
+      expiring: [{ variable: 'STRIPE_SECRET_KEY', expiresInDays: 2 }],
+      json: JSON.stringify({ projectName: 'mikes-market', inSync: false }, null, 2),
+      open: false,
+      timeoutMs: 20_000,
+    });
+
+    const page = await open(url);
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('mikes-market')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('DATABASE_URL')`)).toBe(true);
+    // Values never reach this page — and neither do the hashes it compared.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('a1b2c3d4e5f60718')`)).toBe(false);
+    // The command that moves this forward, which the terminal also offers.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('capy')`)).toBe(true);
+  }, 90_000);
+
+  test('the end of a run renders what moved, and which way', async () => {
+    const { showSyncResultInBrowser } = await import('../../src/ui/syncScreens');
+    const url = await showSyncResultInBrowser({
+      projectName: 'mikes-market',
+      branch: 'development',
+      outcome: 'synced',
+      pulled: [{ variable: 'DATABASE_URL', type: 'changed' }],
+      pushed: [{ variable: 'STRIPE_SECRET_KEY', type: 'new' }],
+      envRewritten: true,
+      open: false,
+      timeoutMs: 20_000,
+    });
+
+    const page = await open(url);
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('DATABASE_URL')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+  }, 90_000);
+});
