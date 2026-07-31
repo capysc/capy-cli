@@ -132,7 +132,7 @@ program
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
     const { ProjectManager } = await import('./core/projectManager');
@@ -247,7 +247,7 @@ program
       if (selected !== '__stay__') {
         const { CheckoutCommand } = await import('./commands/checkoutCommand');
         const cmd = new CheckoutCommand(true);
-        await cmd.execute(selected, {});
+        await cmd.execute(selected, { web: command.optsWithGlobals().web === true });
       }
     }
 
@@ -266,10 +266,14 @@ program
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
-  .action(async (branch, options) => {
+  .action(async (branch, options, command) => {
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
-    await cmd.execute(branch, { create: options.create, protected: options.protected });
+    await cmd.execute(branch, {
+      create: options.create,
+      protected: options.protected,
+      web: command.optsWithGlobals().web === true,
+    });
   });
 
 program
@@ -285,10 +289,10 @@ program
   .command('status')
   .description('Show secret drift between local, pinned, and remote')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { StatusCommand } = await import('./commands/statusCommand');
     const cmd = new StatusCommand(false, true);
-    await cmd.execute({ json: options.json });
+    await cmd.execute({ json: options.json, web: command.optsWithGlobals().web === true });
   });
 
 program
@@ -344,18 +348,22 @@ const deploy = program
 deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
-  .action(async (deployId: string) => {
+  .action(async (deployId: string, _options: unknown, command: any) => {
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployRevokeCommand(process.env.CAPY_API_URL, true);
+    const cmd = new DeployRevokeCommand(process.env.CAPY_API_URL, true, {
+      web: command.optsWithGlobals().web === true,
+    });
     await cmd.execute(deployId);
   });
 
 deploy
   .command('list')
   .description('List deploy tokens for this project')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployListCommand(process.env.CAPY_API_URL, true);
+    const cmd = new DeployListCommand(process.env.CAPY_API_URL, true, {
+      web: command.optsWithGlobals().web === true,
+    });
     await cmd.execute();
   });
 
@@ -368,10 +376,11 @@ program
   .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
-  .action(async (email, options) => {
+  .action(async (email, options, command) => {
     const { InviteCommand } = await import('./commands/inviteCommand');
     const cmd = new InviteCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(email, {
+      web: command.optsWithGlobals().web === true,
       role: options.role,
       projects: options.project,
       ttl: options.ttl,
@@ -393,19 +402,19 @@ program
 program
   .command('transport')
   .description('Generate a redeem code to move your account to another machine')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { TransportCommand } = await import('./commands/transportCommand');
     const cmd = new TransportCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
-  .action(async (email) => {
+  .action(async (email, _options, command) => {
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute(email);
+    await cmd.execute(email, { web: command.optsWithGlobals().web === true });
   });
 
 program
@@ -553,9 +562,13 @@ program
 program
   .command('org')
   .description('Switch organization')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { OrgCommand } = await import('./commands/orgCommand');
-    const cmd = new OrgCommand(process.env.CAPY_API_URL, true);
+    // OrgCommand takes it at construction — see its own note on why a
+    // subcommand must read the inherited global rather than its own options.
+    const cmd = new OrgCommand(process.env.CAPY_API_URL, true, {
+      web: command.optsWithGlobals().web === true,
+    });
     await cmd.execute();
   });
 
@@ -610,9 +623,9 @@ program
 program
   .command('byoc [url]')
   .description('Connect to a self-hosted Capy (BYOC) instance')
-  .action(async (url: string | undefined) => {
+  .action(async (url: string | undefined, _options: unknown, command: any) => {
     const { byocCommand } = await import('./commands/byocCommand');
-    process.exit(await byocCommand(url));
+    process.exit(await byocCommand(url, { web: command.optsWithGlobals().web === true }));
   });
 
 program
@@ -713,19 +726,19 @@ program
 program
   .command('end-recover')
   .description('End recovery session and clean up decrypted files')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
     const cmd = new EndRecoverCommand();
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
   .command('recover')
   .description('Reconstruct the wrapped master key from a 24-word recovery phrase')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { RecoverCommand } = await import('./commands/recoverCommand');
     const cmd = new RecoverCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
@@ -744,7 +757,6 @@ program
 program
   .command('add <vars...>')
   .description('Add one or more secret values to the project (encrypts + syncs)')
-  .option('--web', 'enter the values in a local browser form (key/value editor, multiline)')
   .option('--reason <text>', 'short note shown on the intake page')
   .option(
     '--help-url <NAME=URL>',
@@ -764,7 +776,7 @@ program
     const cmd = new AddCommand(true); // devMode: dev backend + ~/.capy-dev
     const merged = command.optsWithGlobals();
     await cmd.execute(varNames, {
-      web: options.web,
+      web: command.optsWithGlobals().web === true,
       reason: options.reason,
       helpUrls: options.helpUrl,
       open: options.open,
@@ -812,10 +824,11 @@ program
   .option('--skip-prompts', 'alias for --yes')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
-  .action(async (varName, options) => {
+  .action(async (varName, options, command) => {
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand(true); // devMode: skips live entries
     await cmd.execute(varName, {
+      web: command.optsWithGlobals().web === true,
       all: options.all,
       noPush: options.push === false,
       skipPrompts: !!(options.yes || options.skipPrompts),
