@@ -19,7 +19,7 @@
  * still runs its suite. Install one with:
  *   bunx @puppeteer/browsers install chrome-headless-shell@stable
  */
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach, afterAll, beforeAll } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -86,6 +86,35 @@ async function until(page: CdpSession, expression: string, what: string): Promis
   throw new Error(
     `timed out waiting for ${what}${last ? ` (last page error: ${last.message})` : ''}`,
   );
+}
+
+/** The members parcel's name for `until`. One helper, not two that can drift. */
+const untilSettled = until;
+
+/** Click as soon as the control exists, rather than assuming it already does. */
+async function clickWhenReady(page: CdpSession, finder: string, what: string): Promise<void> {
+  let last = '';
+  for (let i = 0; i < 300; i++) {
+    try {
+      const hit = await evaluate<boolean>(
+        page,
+        `(() => { const el = ${finder}; if (!el) return false; el.click(); return true; })()`,
+      );
+      if (hit) return;
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out clicking ${what}${last ? ` (last: ${last})` : ''}`);
+}
+
+/** Navigate and wait until the page is actually running, not merely loaded. */
+async function navigate(page: CdpSession, url: string): Promise<void> {
+  const loaded = page.once('Page.loadEventFired', 20_000);
+  await page.send('Page.navigate', { url });
+  await loaded;
+  await untilSettled(page, `document.body && document.body.innerHTML.length > 0`, 'the page to be running');
 }
 
 describeBrowser('browser flow, driven by a real browser', () => {
