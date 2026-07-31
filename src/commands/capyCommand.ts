@@ -190,18 +190,26 @@ export class CapyCommand {
         const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
         console.log('\nNo branch is checked out in this directory yet.');
         if (this.options.web) {
-          const { selectInBrowser } = await import('../ui/selectWeb');
-          const chosen = await selectInBrowser({
-            title: 'Select branch',
-            intro: 'No branch is checked out in this directory yet. Which branch do you want to use?',
-            options: branches.map(b => ({
-              id: b.name,
-              name: b.name,
-              badge: b.is_protected ? 'protected' : undefined,
-            })),
-            defaultId: defaultName,
-          }, { open: !process.env.CAPY_WEB_NO_OPEN });
-          if (chosen === null) {
+          // The compiled branch list, which is the same listing `capy checkout`
+          // serves. It marks protection off `is_protected` — the terminal
+          // picker prints `(protected)` and then lets a 403 explain — and the
+          // rows come from the server, so a name that is not one of them did
+          // not come from this page.
+          //
+          // No row opens selected: this directory is on no branch, so there is
+          // nothing for the list to open on, and the CLI's `defaultName`
+          // preselection has no field on that screen to land in.
+          const { chooseBranchInBrowser } = await import('../ui/branchScreens');
+          const { branch: chosen, cancelled } = await chooseBranchInBrowser({
+            projectName: projectState.projectName || 'project',
+            activeBranch: null,
+            branches,
+            canDelete: false,
+            // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
+            // headless verification drive the loopback without hijacking one.
+            open: !process.env.CAPY_WEB_NO_OPEN,
+          });
+          if (cancelled) {
             throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
           }
           return chosen;
@@ -306,7 +314,42 @@ export class CapyCommand {
     await this.syncProject(projectState);
   }
 
+  /**
+   * First run in this directory.
+   *
+   * Under `--web` the six questions below are stops on ONE declared route,
+   * served into one browser window by `InitWizardSession`. The window is opened
+   * by the first question and released here — on the way out, or on the way out
+   * through a failure, so a run that dies between two stops does not leave a
+   * page claiming to still be working on it.
+   */
   private async initializeProject(): Promise<void> {
+    // Imported only on the `--web` path: the module pulls in every compiled
+    // screen, and a terminal run has no use for them.
+    //
+    // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless
+    // verification drive the loopback without hijacking a real browser.
+    const wizard = this.options.web
+      ? new (await import('../ui/initWizardScreen')).InitWizardSession({
+          open: !process.env.CAPY_WEB_NO_OPEN,
+        })
+      : null;
+    try {
+      await this.runInitialization(wizard);
+      await wizard?.finish();
+    } catch (err) {
+      // The browser is holding a submit at this point, and it must not be told
+      // that submit worked. `abort` replaces the question with what stopped
+      // the run — carrying the error's CODE, and the remedy any call site that
+      // knew one declared with `willBlock` just before it threw.
+      await wizard?.abort(err);
+      throw err;
+    }
+  }
+
+  private async runInitialization(
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+  ): Promise<void> {
     this.debug('initializeProject start', { cwd: process.cwd() });
     console.log('Welcome to Capy\n');
 
@@ -336,6 +379,13 @@ export class CapyCommand {
 
     spinner.succeed(`Authenticated as ${authResult.user_email || authResult.user_first_name} (${authResult._auth_method || 'oauth'})`);
 
+    // The first stop is settled before anything opens: the browser is only
+    // reached once there is a session, so `auth` is drawn done from the start.
+    wizard?.record({
+      signedInAs: authResult.user_email || authResult.user_first_name || undefined,
+      orgCount: authResult.organizations?.length ?? 0,
+    });
+
     // Persist user ID to sync state immediately so the next `capy` run can find
     // the user-scoped session file at ~/.capy/auth/sessions/{userId}.json.
     // Without this, sync-state has no user_id, detectProjectState returns
@@ -357,30 +407,25 @@ export class CapyCommand {
     if (orgs.length === 0) {
       console.log('\nNo organization found. Let\'s create one.');
       selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+      wizard?.record({
+        organization: { kind: 'new', name: selectedOrg.name },
+        recoveryShown: true,
+      });
 
     } else {
       let orgId: string;
-      if (this.options.web) {
-        // No TTY under --web (e.g. driven through the MCP): render the picker in
-        // the browser instead of an inquirer list prompt that would hang forever.
-        const { selectInBrowser } = await import('../ui/selectWeb');
-        const chosen = await selectInBrowser({
-          title: 'Select organization',
-          intro: 'Choose the organization this project belongs to.',
-          options: [
-            ...orgs.map(o => ({
-              id: o.id,
-              name: o.name,
-              badge: o.id === currentOrgId ? '← current' : undefined,
-            })),
-            { id: CREATE_NEW_ORG, name: 'Create new organization +', note: 'Start a fresh org for this project.' },
-          ],
-          defaultId: currentOrgId,
-        }, { open: !process.env.CAPY_WEB_NO_OPEN });
+      if (wizard) {
+        // No TTY under --web (e.g. driven through the MCP): the picker is the
+        // wizard's `organization` stop, which carries the same list and the
+        // same "create new" row an inquirer prompt would have shown — and, on
+        // the rail beside it, the five stops that come after.
+        const chosen = await wizard.askOrganization(
+          orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId })),
+        );
         if (chosen === null) {
           throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
-        orgId = chosen;
+        orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
       } else {
         ({ orgId } = await inquirer.prompt([{
           type: 'list',
@@ -399,6 +444,13 @@ export class CapyCommand {
 
       if (orgId === CREATE_NEW_ORG) {
         selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+        // Naming it and being shown the phrase both happened, elsewhere. The
+        // rail settles those two stops rather than leaving them ◌ behind a
+        // fork this run has already taken.
+        wizard?.record({
+          organization: { kind: 'new', name: selectedOrg.name },
+          recoveryShown: true,
+        });
 
       } else if (currentOrg && orgId === currentOrg.id) {
         selectedOrg = currentOrg;
@@ -430,7 +482,28 @@ export class CapyCommand {
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
-    if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
+    const orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+    wizard?.record({ hasOrgKey: orgKeyPresent });
+    if (!orgKeyPresent) {
+      // The most common way this run stops, and it stops one step after the
+      // browser answered a question — so the page would otherwise be told the
+      // organization it just picked went through. `redeem` is on the rail from
+      // the start for exactly this; the run stops standing on it.
+      //
+      // Stated in fields rather than left for the message below to be mined
+      // for: the remedy is a command, not a sentence that happens to contain
+      // one.
+      wizard?.willBlock(
+        'redeem',
+        {
+          code: ERROR_CODES.AUTH_FAILED,
+          title: 'This device does not hold this organization\'s key',
+          detail:
+            'You have access to the organization, but the shared encryption key has never been transferred to this device. An owner can send you an invite code; redeeming it moves the key here. Then run capy again in this directory.',
+          remedy: 'capy redeem <code>',
+        },
+        { facts: [{ label: 'Organization', value: selectedOrg.name }] },
+      );
       throw new CapyError(
         `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
         '  Ask your org owner for an invite code, then run:\n\n' +
@@ -445,6 +518,10 @@ export class CapyCommand {
     // a teammate hits when cloning a repo with no committed keep.lock.
     const CREATE_NEW_PROJECT = '__create_new_project__';
     let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
+    // "The lookup failed" and "this org has none" both end up as an empty list
+    // here, and they are not the same fact: one walks the user into creating a
+    // second project alongside one they already have. The rail says which.
+    let projectsUnavailable = false;
     try {
       const listSpinner = ora('Looking for existing projects...').start();
       existingProjects = await this.serviceClient.listProjects();
@@ -454,7 +531,9 @@ export class CapyCommand {
       this.debugError('listProjects failed', err);
       // Network or auth issue — fall through to new-project flow
       existingProjects = [];
+      projectsUnavailable = true;
     }
+    wizard?.record({ projectCount: existingProjects.length, projectsUnavailable });
 
     if (existingProjects.length > 0) {
       const choices = [
@@ -466,21 +545,14 @@ export class CapyCommand {
       ];
 
       let projectChoice: string;
-      if (this.options.web) {
-        const { selectInBrowser } = await import('../ui/selectWeb');
-        const chosen = await selectInBrowser({
-          title: 'Select project',
-          intro: 'Which project do you want to use?',
-          options: [
-            { id: CREATE_NEW_PROJECT, name: 'New project', note: 'Create a fresh project for this repo.' },
-            ...existingProjects.map(p => ({ id: p.id, name: p.name })),
-          ],
-          defaultId: CREATE_NEW_PROJECT,
-        }, { open: !process.env.CAPY_WEB_NO_OPEN });
+      if (wizard) {
+        const chosen = await wizard.askProject(
+          existingProjects.map(p => ({ id: p.id, name: p.name })),
+        );
         if (chosen === null) {
           throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
-        projectChoice = chosen;
+        projectChoice = chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
       } else {
         ({ projectChoice } = await inquirer.prompt([{
           type: 'list',
@@ -505,21 +577,11 @@ export class CapyCommand {
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
     let projectName: string;
-    if (this.options.web) {
-      const { promptTextInBrowser } = await import('../ui/selectWeb');
-      const entered = await promptTextInBrowser({
-        title: 'Name your project',
-        intro: 'Choose a name for this project.',
-        label: `Project name (default: "${defaultName}")`,
-        defaultValue: defaultName,
-        validate: (input: string) => {
-          if (!input || input.trim().length === 0) return 'Project name cannot be empty';
-          if (!/^[a-zA-Z0-9-_]+$/.test(input)) {
-            return 'Project name can only contain letters, numbers, hyphens, and underscores';
-          }
-          return true;
-        },
-      }, { open: !process.env.CAPY_WEB_NO_OPEN });
+    if (wizard) {
+      // Same two refusals the TTY validator makes, in the same words — the
+      // screen holds its button on both, so either arriving here means the
+      // submit did not come from the screen.
+      const entered = await wizard.askProjectName(defaultName);
       if (entered === null) {
         throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
       }
@@ -564,19 +626,10 @@ export class CapyCommand {
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
     let initialBranchChoice: string;
-    if (this.options.web) {
+    if (wizard) {
       // No TTY under --web: without a browser screen here, init dies one step
       // before createBranch/writeActiveBranch and leaves a branchless project.
-      const { selectInBrowser } = await import('../ui/selectWeb');
-      const chosen = await selectInBrowser({
-        title: 'Choose the first branch',
-        intro: 'What branch should this project start with?',
-        options: [
-          { id: 'development', name: 'development', note: 'The default. You can add more branches later.' },
-          { id: 'other', name: 'Another branch', note: 'Pick your own name on the next screen.' },
-        ],
-        defaultId: 'development',
-      }, { open: !process.env.CAPY_WEB_NO_OPEN });
+      const chosen = await wizard.askBranchChoice();
       if (chosen === null) {
         throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
       }
@@ -595,15 +648,8 @@ export class CapyCommand {
 
     let initialBranchName: string;
     if (initialBranchChoice === 'other') {
-      if (this.options.web) {
-        const { promptTextInBrowser } = await import('../ui/selectWeb');
-        const entered = await promptTextInBrowser({
-          title: 'Name the branch',
-          intro: 'What should this project’s first branch be called?',
-          label: 'Branch name',
-          defaultValue: 'development',
-          validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-        }, { open: !process.env.CAPY_WEB_NO_OPEN });
+      if (wizard) {
+        const entered = await wizard.askBranchName();
         if (entered === null) {
           throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
         }
@@ -660,6 +706,10 @@ export class CapyCommand {
     if (hasLocalEnv) {
       const localEnv = this.fileManager.readEnvFile(this.options.envPath);
       const localVarCount = Object.keys(localEnv).length;
+      // The last stop stops being a blank the moment the directory is read: an
+      // empty .env is a stop this run will not visit, and the rail says so
+      // rather than leaving it looking outstanding.
+      wizard?.record({ localEnvCount: localVarCount });
 
       if (localVarCount > 0) {
         // Cross-org exfiltration guard
@@ -682,6 +732,22 @@ export class CapyCommand {
               console.error(`  ${key}`);
             }
             console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
+            // The stop this run dies at is the consent gate, and the variables
+            // are the whole subject — so they go as NAMES, in the field that
+            // draws them as a list of things to go and find in a file, rather
+            // than as a count inside a red sentence. Names only: these values
+            // cannot be read by this key, which is the problem.
+            wizard?.willBlock(
+              'encrypt',
+              {
+                code: ERROR_CODES.PERMISSION_DENIED,
+                title: 'This .env holds values encrypted to a different project',
+                detail:
+                  'These variables cannot be read with this organization\'s key, so they cannot be pushed to it. Delete the .env file, or replace those values with plaintext, and run capy again.',
+                remedy: 'capy',
+              },
+              { names: foreignKeys },
+            );
             throw new CapyError(
               'Cannot push secrets encrypted with a different project\'s key to a new org',
               ERROR_CODES.PERMISSION_DENIED,
@@ -714,19 +780,18 @@ export class CapyCommand {
         // right project on first setup. After this step .env is rewritten
         // with ciphertext, so getting it wrong is painful to recover from.
         let confirmEncrypt: boolean;
-        if (this.options.web) {
-          const { selectInBrowser } = await import('../ui/selectWeb');
-          const chosen = await selectInBrowser({
-            title: 'Encrypt and push?',
-            intro: `Encrypt these ${localVarCount} secrets and push to ${projectName} (${selectedOrg.name}) on ${initBranch}?`,
-            options: [
-              { id: 'yes', name: 'Yes, encrypt and push', note: 'Your .env is rewritten with ciphertext.' },
-              { id: 'no', name: 'No, leave my .env alone', note: 'Nothing is encrypted or pushed.' },
-            ],
-            defaultId: 'yes',
-          }, { open: !process.env.CAPY_WEB_NO_OPEN });
-          // A cancelled/closed page is a "no" — never encrypt on an unanswered prompt.
-          confirmEncrypt = chosen === 'yes';
+        if (wizard) {
+          // NAMES and a count reach the page — never a value, and not even a
+          // snippet of one. The whole question this stop asks is whether these
+          // may stop being plaintext, and showing more than the terminal shows
+          // in order to ask it would answer part of it first.
+          //
+          // A closed window is a "no": `askEncrypt` resolves false on cancel,
+          // which is the same thing `chosen === 'yes'` already meant.
+          confirmEncrypt = await wizard.askEncrypt(
+            { count: localVarCount, names: varNames },
+            { projectName, orgName: selectedOrg.name, branch: initBranch },
+          );
         } else {
           ({ confirmEncrypt } = await inquirer.prompt([{
             type: 'confirm',
@@ -743,6 +808,16 @@ export class CapyCommand {
         }
 
         const syncSpinner = ora('Syncing local variables...').start();
+
+        // What this actually got done, for the report a failure has to make.
+        // Read off the writes themselves rather than inferred afterwards: the
+        // three facts that matter are whether the values reached Keep, whether
+        // the plaintext copy was kept, and whether the .env in this directory
+        // is now ciphertext — and the third one is the reason this cannot be
+        // answered by looking at the error.
+        let pushedToKeep = false;
+        let backupWritten = false;
+        let envRewritten = false;
 
         try {
           const { createHash } = await import('crypto');
@@ -775,6 +850,7 @@ export class CapyCommand {
             envBlob,
             initBranch,
           );
+          pushedToKeep = true;
 
           // Prefer the server's copy — it carries server-assigned changed_at
           this.fileManager.writeKeepFile(
@@ -794,9 +870,11 @@ export class CapyCommand {
 
           // Backup plaintext .env before encrypting
           this.fileManager.backupPlaintextEnv(this.options.envPath);
+          backupWritten = true;
 
           // Encrypt the local .env file
           this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
+          envRewritten = true;
 
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
 
@@ -815,6 +893,20 @@ export class CapyCommand {
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
           console.log(`You can run ${B('capy')} again to retry syncing`);
+          // This is the one failure that happens after the last question, and
+          // the terminal path swallows it and carries on — which under --web
+          // used to mean the run ended with `finish()` and the page drew a
+          // green check over a push that did not happen. The browser gets the
+          // same three facts the terminal cannot state: whether the values
+          // reached Keep, whether the plaintext copy was kept, and whether the
+          // .env in this directory is ciphertext now.
+          await wizard?.reportEncryptFailure({
+            code: syncError instanceof CapyError ? syncError.code : ERROR_CODES.SERVICE_ERROR,
+            reason: syncError?.message ? String(syncError.message) : 'The push failed.',
+            envRewritten,
+            backupWritten,
+            pushed: pushedToKeep,
+          });
         }
       } else {
         console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
@@ -824,6 +916,7 @@ export class CapyCommand {
         this.installGitHooks();
       }
     } else {
+      wizard?.record({ localEnvCount: 0 });
       console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
       console.log('to share them with your team.');
 
@@ -1461,6 +1554,17 @@ export class CapyCommand {
       const finalKeep = this.projectManager.readKeepFile();
       this.fileManager.writeEncryptedEnvFile(localPlaintext, encryptionKey, undefined, finalKeep, branch);
       this.installGitHooks();
+      // NO BROWSER PAGE HERE, deliberately. This is the path a synced
+      // directory takes on every single run: nothing was asked, nothing
+      // differed, and the one line above says so. Serving a report anyway
+      // opened a tab per run — and where `--web` actually lives, which is a
+      // headless or remote host, `open()` fails quietly and the listening
+      // socket holds the process for its whole 120-second timeout waiting for
+      // a browser that is never coming. A no-op that takes two minutes to
+      // exit is worse than a no-op nobody rendered.
+      //
+      // The three ENDS below still report: they follow a question somebody
+      // answered in a window that is demonstrably in use.
       return;
     }
 
@@ -1619,6 +1723,14 @@ export class CapyCommand {
       );
       if (resolved === null) {
         console.log('\n  No changes applied.');
+        // A closed window changed nothing on disk, and the report says exactly
+        // that rather than reporting a sync that did not happen.
+        await this.reportSyncResult(projectState, branch, {
+          outcome: 'nothing-to-do',
+          pulled: [],
+          pushed: [],
+          envRewritten: false,
+        });
         return;
       }
       // Only individual resolution hands back an env; every other action is
@@ -1677,6 +1789,12 @@ export class CapyCommand {
     } else if (action === 'commit_local') {
       finalEnv = { ...localPlaintext };
     } else if (action === 'skip') {
+      await this.reportSyncResult(projectState, branch, {
+        outcome: 'nothing-to-do',
+        pulled: [],
+        pushed: [],
+        envRewritten: false,
+      });
       return;
     } else {
       // Individual resolution — already resolved in the browser when --web.
@@ -1782,6 +1900,56 @@ export class CapyCommand {
 
     // Install hooks on every run (idempotent)
     this.installGitHooks();
+
+    // Which way each variable moved is which list it lands in.
+    //
+    // Pulled is computed rather than assumed: it is the variables whose value
+    // in the file actually CHANGED, which is the only definition that stays
+    // true for individual resolution, where the answer is per variable and a
+    // row resolved to "keep mine" moved nowhere at all.
+    //
+    // Pushed is `commit_local` and only `commit_local`: it is the one action
+    // that sends anything up. Individual resolution rewrites the file and
+    // repins, and never pushes — see the guard above.
+    const changes = (rows: { variable: string; type: 'new' | 'changed' | 'deleted' }[]) =>
+      rows.map(d => ({ variable: d.variable, type: d.type }));
+    await this.reportSyncResult(projectState, branch, {
+      outcome: 'synced',
+      pulled: action === 'commit_local'
+        ? []
+        : changes(diffs.filter(d => finalEnv[d.variable] !== localPlaintext[d.variable])),
+      pushed: action === 'commit_local' ? changes(diffs) : [],
+      envRewritten: true,
+    });
+  }
+
+  /**
+   * The end-of-run report, in the browser, under `--web`.
+   *
+   * `capy --web` is agent-driven, so the three console lines above go to a
+   * stream nobody is necessarily watching. The same facts render as the
+   * compiled `sync-result` screen instead — variable NAMES and directions, no
+   * values, and `envRewritten` carried rather than inferred, because the .env
+   * is rewritten on a path where nothing moved at all.
+   */
+  private async reportSyncResult(
+    projectState: ProjectState,
+    branch: string | null,
+    result: {
+      outcome: 'synced' | 'nothing-to-do';
+      pulled: { variable: string; type: 'new' | 'changed' | 'deleted' }[];
+      pushed: { variable: string; type: 'new' | 'changed' | 'deleted' }[];
+      envRewritten: boolean;
+    },
+  ): Promise<void> {
+    if (!this.options.web) return;
+    const { showSyncResultInBrowser } = await import('../ui/syncScreens');
+    await showSyncResultInBrowser({
+      projectName: projectState.projectName || 'project',
+      branch,
+      ...result,
+      open: !process.env.CAPY_WEB_NO_OPEN,
+    });
   }
 
   private displayComparisonTable(

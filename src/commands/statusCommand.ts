@@ -140,7 +140,7 @@ export class StatusCommand {
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
-  async execute(opts: { json?: boolean } = {}): Promise<void> {
+  async execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
     try {
       await this._execute(opts);
     } catch {
@@ -150,7 +150,7 @@ export class StatusCommand {
     }
   }
 
-  private async _execute(opts: { json?: boolean } = {}): Promise<void> {
+  private async _execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       if (this.terse) return;
@@ -263,25 +263,52 @@ export class StatusCommand {
       : undefined;
     const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
 
+    // ONE report object, rendered three ways. `--json` prints it, `--web`
+    // carries it into the page verbatim, and the TTY draws the same numbers
+    // below — so what a person reads and what a script parses cannot describe
+    // different states. diffs carry value HASHES only (sha256 prefix), never
+    // plaintext.
+    const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
+    const report = {
+      projectName: keep.project_name,
+      branch,
+      totalSecrets,
+      inSync: diffs.length === 0,
+      localMatchesPinned: !showLocal,
+      remoteMatchesPinned: !showRemote,
+      remoteFailure: remoteFailure ?? null,
+      diffs,
+    };
+
     if (opts.json) {
-      // diffs carry value HASHES only (sha256 prefix), never plaintext.
-      const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
-      console.log(
-        JSON.stringify(
-          {
-            projectName: keep.project_name,
-            branch,
-            totalSecrets,
-            inSync: diffs.length === 0,
-            localMatchesPinned: !showLocal,
-            remoteMatchesPinned: !showRemote,
-            remoteFailure: remoteFailure ?? null,
-            diffs,
-          },
-          null,
-          2,
-        ),
-      );
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    if (opts.web) {
+      // No TTY under --web (this is the agent-driven path), so the report goes
+      // to the browser instead of to a stream nobody is reading. The page is
+      // display-only: it posts nothing, carries no nonce, and is served under
+      // the strict policy that cannot open a socket at all.
+      const { showSyncStatusInBrowser } = await import('../ui/syncScreens');
+      const { checkExpiringKeys } = await import('./connectors/shared');
+      await showSyncStatusInBrowser({
+        projectName: keep.project_name ?? '',
+        branch,
+        totalSecrets,
+        localMatchesPinned: !showLocal,
+        remoteMatchesPinned: !showRemote,
+        hasRemote,
+        remoteFailure,
+        diffs,
+        // The warnings `printExpiryWarnings` puts on stderr after every run,
+        // where they can still be acted on.
+        expiring: checkExpiringKeys().map(k => ({ variable: k.varName, expiresInDays: k.expiresIn })),
+        json: JSON.stringify(report, null, 2),
+        // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
+        // headless verification drive the loopback without hijacking one.
+        open: !process.env.CAPY_WEB_NO_OPEN,
+      });
       return;
     }
 
@@ -297,8 +324,6 @@ export class StatusCommand {
     // Full output
     console.log(`${B('capy')}: ${keep.project_name} (${branchLabel})`);
     console.log('');
-
-    const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
 
     if (diffs.length === 0) {
       console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);
