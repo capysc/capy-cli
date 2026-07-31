@@ -104,6 +104,61 @@ describe('runBrowserWizard loopback server', () => {
     expect(await done).toEqual({ x: 'v' });
   });
 
+  test('a side-route answer re-arms the question deadline', async () => {
+    /*
+     * `secret-table` asks for one value's plaintext with `{ __action:
+     * 'reveal' }` — a question, not an answer — and the reducer replies with
+     * `{ body }`, leaving the flow on the same step.
+     *
+     * Every POST disarms the per-question clock, because while the reducer is
+     * working the browser owes us nothing. A branch that never re-arms it
+     * therefore removes the deadline for the REST OF THE RUN: a `capy edit
+     * --web` where one value was revealed could have its window closed and the
+     * command would wait for a browser that is never coming back.
+     *
+     * So: reveal, then go silent, and the run must still end.
+     */
+    let url = '';
+    let rejected: unknown = null;
+    const done = runBrowserWizard(
+      {
+        title: 'Reveal then vanish',
+        firstScreen: { html: '<form><button type="submit">go</button></form>' },
+        open: false,
+        timeoutMs: 400,
+        onListen: (u) => (url = u),
+      },
+      async (_step, payload) =>
+        payload.__action === 'reveal'
+          ? { body: { value: 'sk_test_…' } }
+          : { done: true, result: { finished: true } },
+    );
+    void done.catch((e) => (rejected = e));
+
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+
+    const revealed = await (
+      await fetch(`http://127.0.0.1:${u.port}/submit`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ nonce, payload: { __action: 'reveal', key: 'STRIPE_KEY' } }),
+      })
+    ).json();
+    // The side route really did answer, and did not advance the flow.
+    expect(revealed.value).toBe('sk_test_…');
+    expect(revealed.done).toBeUndefined();
+    expect(revealed.screen).toBeUndefined();
+
+    // Now say nothing. The same question is still on screen, so the clock the
+    // reveal disarmed has to be running again.
+    await new Promise((r) => setTimeout(r, 900));
+    expect(
+      rejected,
+      'the run outlived its deadline after a reveal — the side route disarmed the clock and never re-armed it',
+    ).not.toBeNull();
+  });
+
   test('a screen may submit a structured payload, not just flat form fields', async () => {
     // The reason `window.capySubmit` exists. FormData flattens to string keys
     // and string values, so a step whose answer is a decision per variable —
@@ -375,5 +430,209 @@ describe('runBrowserWizard loopback server', () => {
 
     expect(await done).toEqual({ cancelled: true });
     expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  test('a wizard that finishes normally takes its SIGINT handler with it', async () => {
+    // Every run registered one and removed none. One flow opens two wizards
+    // per edited variable, so a normal editing session walked the listener
+    // count up until node started warning about a leak — and every stale
+    // handler still holds a closure over a server that is long gone.
+    const before = process.listenerCount('SIGINT');
+
+    for (let i = 0; i < 4; i++) {
+      let url = '';
+      const done = runBrowserWizard(
+        { title: 'x', firstScreen: { html: '<form></form>' }, open: false, onListen: (u) => (url = u) },
+        async () => ({ done: true, result: { i } }),
+      );
+      const u = new URL(await waitForUrl(() => url));
+      await fetch(`http://127.0.0.1:${u.port}/submit`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ nonce: u.searchParams.get('n'), payload: {} }),
+      });
+      await done;
+    }
+
+    expect(process.listenerCount('SIGINT')).toBe(before);
+  });
+});
+
+describe('closing the window, when a flow says that is a refusal', () => {
+  const params = (onListen: (u: string) => void) => ({
+    title: 'Close me',
+    firstScreen: { html: '<!DOCTYPE html><html><body><h1>step</h1></body></html>', standalone: true },
+    open: false,
+    onListen,
+    timeoutMs: 30_000,
+    closeIsRefusal: { result: { action: 'cancel' }, graceMs: 200 },
+  });
+
+  /**
+   * The beacon the served document actually sends: the nonce, and the
+   * GENERATION of the document that is leaving. Nothing read off the page.
+   */
+  const beacon = (base: string, nonce: string, gen: number) =>
+    fetch(`${base}/__closed`, { method: 'POST', headers, body: JSON.stringify({ nonce, payload: { gen } }) });
+
+  const submit = (base: string, nonce: string) =>
+    fetch(`${base}/submit`, { method: 'POST', headers, body: JSON.stringify({ nonce, payload: {} }) });
+
+  test('the beacon is only in the document when the flow asked for one', async () => {
+    let withUrl = '';
+    let withoutUrl = '';
+    const opted = runBrowserWizard(params((u) => (withUrl = u)), async () => ({ done: true, result: {} }));
+    const plain = runBrowserWizard(
+      { ...params((u) => (withoutUrl = u)), closeIsRefusal: undefined },
+      async () => ({ done: true, result: {} }),
+    );
+    void opted.catch(() => undefined);
+    void plain.catch(() => undefined);
+
+    expect(await (await fetch(await waitForUrl(() => withUrl))).text()).toContain('/__closed');
+    // Unchanged for every other flow: nothing is injected, and a closed window
+    // stays what it was — a step nobody answered.
+    expect(await (await fetch(await waitForUrl(() => withoutUrl))).text()).not.toContain('/__closed');
+
+    for (const [url, p] of [[withUrl, opted], [withoutUrl, plain]] as const) {
+      const u = new URL(url);
+      await submit(`http://127.0.0.1:${u.port}`, u.searchParams.get('n') ?? '');
+      await p;
+    }
+  });
+
+  test('each served document is stamped with its own generation', async () => {
+    // The stamp is what a beacon carries back, so it has to differ per serve —
+    // two documents claiming to be the same one is the whole defect, restated.
+    let url = '';
+    const done = runBrowserWizard(params((u) => (url = u)), async () => ({ done: true, result: {} }));
+    void done.catch(() => undefined);
+
+    const first = await (await fetch(await waitForUrl(() => url))).text();
+    const second = await (await fetch(url)).text();
+    expect(first).toContain('gen:1');
+    expect(second).toContain('gen:2');
+
+    const u = new URL(url);
+    await submit(`http://127.0.0.1:${u.port}`, u.searchParams.get('n') ?? '');
+    await done;
+  });
+
+  test('it goes through the same guards as an answer', async () => {
+    let url = '';
+    const done = runBrowserWizard(params((u) => (url = u)), async () => ({ done: true, result: {} }));
+    void done.catch(() => undefined);
+
+    const u = new URL(await waitForUrl(() => url));
+    const base = `http://127.0.0.1:${u.port}`;
+    const nonce = u.searchParams.get('n') ?? '';
+    // The document has to have gone out for its generation to be the current one.
+    await fetch(url);
+
+    // A refusal that ends a run is a request that has to prove where it came
+    // from: same Origin pin and same constant-time nonce as `/submit`.
+    expect(
+      (await fetch(`${base}/__closed`, {
+        method: 'POST',
+        headers: { ...headers, origin: 'http://evil.com' },
+        body: JSON.stringify({ nonce, payload: { gen: 1 } }),
+      })).status,
+    ).toBe(403);
+    expect(
+      (await fetch(`${base}/__closed`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ nonce: 'wrong', payload: { gen: 1 } }),
+      })).status,
+    ).toBe(403);
+
+    const ok = await beacon(base, nonce, 1);
+    expect(ok.status).toBe(204);
+    expect(await done).toEqual({ action: 'cancel' });
+  });
+
+  test('a beacon from a document that was already REPLACED is a reload, not a close', async () => {
+    // THE REGRESSION THIS EXISTS FOR. A standalone step advances by reloading,
+    // so `pagehide` fires on a perfectly healthy advance — and `sendBeacon` is
+    // fire-and-forget, so it is processed AFTER the GET for the next document,
+    // measured at about +4ms, every run. A flow that believed the beacon unless
+    // something re-requested the page inside a grace therefore armed a
+    // self-destruct on EVERY advance: the re-request had already happened, so
+    // there was nothing left to cancel it, and the run ended ~1.2s later while
+    // the person was still reading the step in front of them.
+    //
+    // The ordering below is that measured one, written down: re-serve first,
+    // beacon for the OLD generation second. Nothing here waits on a race.
+    let url = '';
+    let settled: unknown = 'not settled';
+    const done = runBrowserWizard(params((u) => (url = u)), async (step) =>
+      step === 0
+        ? { screen: { html: '<!DOCTYPE html><html><body><h1>step two</h1></body></html>', standalone: true } }
+        : { done: true, result: { answered: true } },
+    );
+    void done.then((r) => (settled = r)).catch((e) => (settled = e));
+
+    const u = new URL(await waitForUrl(() => url));
+    const base = `http://127.0.0.1:${u.port}`;
+    const nonce = u.searchParams.get('n') ?? '';
+
+    // Generation 1 goes out, and is answered.
+    expect(await (await fetch(url)).text()).toContain('gen:1');
+    expect(await (await submit(base, nonce)).json()).toEqual({ next: true });
+
+    // The advance: the browser reloads and receives generation 2 …
+    expect(await (await fetch(url)).text()).toContain('step two');
+    // … and only THEN does generation 1's `pagehide` beacon land.
+    expect((await beacon(base, nonce, 1)).status).toBe(204);
+
+    // Wait out several graces — the pause a person takes reading a new step.
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(settled).toBe('not settled');
+
+    // The step the person is looking at still answers, which is what the defect
+    // took away: the CLI had already returned and the socket was gone.
+    await submit(base, nonce);
+    expect(await done).toEqual({ answered: true });
+  });
+
+  test('a page that comes straight back was reloading, not leaving', async () => {
+    // The other ordering — beacon first, reload second. The generation is still
+    // current when the beacon lands, so the grace is armed; the reload bumps it
+    // and the timer finds itself stale when it fires.
+    let url = '';
+    let settled = false;
+    const done = runBrowserWizard(params((u) => (url = u)), async () => ({ done: true, result: { answered: true } }));
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const u = new URL(await waitForUrl(() => url));
+    const base = `http://127.0.0.1:${u.port}`;
+    const nonce = u.searchParams.get('n') ?? '';
+
+    await fetch(url);
+    await beacon(base, nonce, 1);
+    // The reload lands well inside the 200ms grace.
+    expect((await fetch(url)).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+
+    // …and the step it came back to still answers.
+    await submit(base, nonce);
+    expect(await done).toEqual({ answered: true });
+  });
+
+  test('a window that really closes still ends the run, promptly', async () => {
+    // The property the beacon is FOR, kept: nothing comes back for the
+    // generation that left, so it is a refusal and the run stops saying so.
+    let url = '';
+    const started = Date.now();
+    const done = runBrowserWizard(params((u) => (url = u)), async () => ({ done: true, result: { answered: true } }));
+
+    const u = new URL(await waitForUrl(() => url));
+    await fetch(url);
+    await beacon(`http://127.0.0.1:${u.port}`, u.searchParams.get('n') ?? '', 1);
+
+    expect(await done).toEqual({ action: 'cancel' });
+    // Not the 30s question deadline: an ending, not a timeout.
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

@@ -54,6 +54,68 @@ const MAX_BODY = 5_000_000;
  */
 const DEFAULT_FINAL_GRACE_MS = 10 * 1000;
 
+/**
+ * Where the page reports that it is going away, and how long the flow waits
+ * before believing it.
+ *
+ * The wait exists because a standalone step ADVANCES by reloading (see
+ * `WizardScreen.standalone`), and a reload is a page going away followed
+ * immediately by the same page coming back.
+ *
+ * THE WAIT IS NOT WHAT TELLS THEM APART. `sendBeacon` is fire-and-forget and
+ * the reload's GET is a fresh connection, so the two arrive in whichever order
+ * the kernel feels like — measured, the beacon lands about 4ms AFTER the GET it
+ * was supposed to be cancelled by, every time. A flow that believed the beacon
+ * unless something re-requested the document inside a grace therefore armed a
+ * self-destruct on every healthy advance, and a mistyped recovery phrase ended
+ * the run while the user was still retyping. What tells them apart is the
+ * GENERATION the beacon carries (see `servedGen`): a document that has already
+ * been replaced was reloaded, whichever order the requests land in. The grace
+ * below is now only for the other ordering, and it no longer has to be right.
+ */
+const CLOSED_PATH = '/__closed';
+const CLOSE_GRACE_MS = 1_200;
+
+/**
+ * The beacon's generation field: which served document is reporting that it is
+ * going away.
+ *
+ * A name, so the check that reads it and the script that writes it cannot
+ * drift apart silently.
+ */
+const BEACON_GEN = 'gen';
+
+/**
+ * How a browser flow ended without an answer.
+ *
+ * An enum rather than a sentence, because every caller has to tell these three
+ * apart to say the true thing in the terminal, and two of them are not errors:
+ *
+ *   declined  a control on the page said no — the screen's own Cancel/Discard
+ *   closed    the window went away, which is a refusal and never consent
+ *   timeout   nobody answered before the step's deadline
+ */
+export type WebRefusal = 'declined' | 'closed' | 'timeout';
+
+/**
+ * Nobody answered.
+ *
+ * A typed error rather than a message to match on. `runBrowserWizard` rejects
+ * for three different reasons — a socket that would not bind, a deadline that
+ * passed, a Ctrl+C — and only the first is a fault. A flow that wants to end a
+ * silent run as the refusal it is has to be able to tell them apart, and
+ * `SERVICE_ERROR` covers all three; `reason` is the signal that does not.
+ */
+export class BrowserRefusal extends CapyError {
+  constructor(
+    message: string,
+    public readonly reason: 'timeout' | 'interrupt',
+  ) {
+    super(message, ERROR_CODES.SERVICE_ERROR);
+    this.name = 'BrowserRefusal';
+  }
+}
+
 export const CAPY_LOGO_SVG = `<svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
 
 // Escapes `<` so a value can never close the surrounding <script> tag.
@@ -139,6 +201,64 @@ export interface WizardParams {
    * of every browser flow in the hands of each flow rather than in one place.
    */
   renderFirst?: (nonce: string) => string;
+  /**
+   * POST paths this flow answers besides `/submit`, by pathname.
+   *
+   * One screen needs it: `secret-value-editor` asks for a plaintext over
+   * `POST /reveal` rather than over `/submit`, because reading a value is not
+   * answering the step — the page stays exactly where it was and the CLI hands
+   * back one secret. Without a route the request 404s, `submitToCli` reports it
+   * as a CLI that has gone away, and the editor can never open its buffer.
+   *
+   * Handlers get the same treatment as `/submit`: the Host and Origin pinning,
+   * the constant-time nonce, the body cap, and the same `WizardDecision`. They
+   * do not advance the step — a route that returned `{ screen }` would move the
+   * flow without the page that asked knowing it had.
+   */
+  routes?: Record<string, WizardSubmit>;
+  /**
+   * What this flow resolves to when the window is closed without answering.
+   *
+   * A browser flow has two endings, submitted and cancelled, plus closing the
+   * window — which is a refusal, never consent. Without this, closing it is not
+   * an ending at all: the CLI holds the socket until the step's deadline and
+   * then throws, so "look at the table and leave" costs five minutes and exits
+   * non-zero. That is the whole bug this exists for, and it is opt-in because
+   * `result` is the flow's own word for a refusal and only the flow knows it.
+   *
+   * It is a REFUSAL: `result` must be the outcome that changes nothing. Never
+   * wire a confirmation to it — a closed window has agreed to nothing.
+   */
+  closeIsRefusal?: { result: unknown; graceMs?: number };
+}
+
+/**
+ * The script that makes leaving the page an answer.
+ *
+ * Appended to the served document rather than built into any screen, because
+ * it is transport: it renders nothing, reads nothing off the page and adds no
+ * control. `pagehide` is the one event that fires for every way a document
+ * stops being on screen — closed tab, closed window, navigation away, back
+ * button — and `sendBeacon` is the one request that survives it.
+ *
+ * Carries the nonce the page was served with, which is already in the URL and
+ * (for a compiled screen) already in its payload, so this discloses nothing
+ * the document did not hold. Besides that it sends ONE number, the generation
+ * of the document it is leaving — never anything read off the page.
+ */
+function closeBeaconScript(nonce: string, gen: number): string {
+  return `<script>(function(){var sent=false;function gone(){if(sent)return;sent=true;
+  var body=JSON.stringify({nonce:${jsStr(nonce)},payload:{${BEACON_GEN}:${gen}}});
+  try{if(navigator.sendBeacon&&navigator.sendBeacon(${jsStr(CLOSED_PATH)},new Blob([body],{type:'application/json'})))return;}catch(e){}
+  try{fetch(${jsStr(CLOSED_PATH)},{method:'POST',keepalive:true,headers:{'content-type':'application/json'},body:body});}catch(e){}}
+  addEventListener('pagehide',gone);})();</script>`;
+}
+
+/** Put the beacon inside the document it belongs to, whatever shape it is. */
+function withCloseBeacon(html: string, nonce: string, gen: number): string {
+  const script = closeBeaconScript(nonce, gen);
+  const end = html.lastIndexOf('</body>');
+  return end === -1 ? html + script : html.slice(0, end) + script + html.slice(end);
 }
 
 /**
@@ -151,7 +271,17 @@ export interface WizardParams {
 export type WizardDecision =
   | { screen: WizardScreen; result?: unknown }
   | { done: true; result: unknown }
-  | { error: string };
+  | { error: string }
+  /**
+   * Answer this POST with `body` and leave the flow exactly where it was.
+   *
+   * A step is not the only thing a screen posts. `secret-table` asks for one
+   * variable's plaintext with `{ __action: 'reveal', key }` — a question, not
+   * an answer — and it needs the value in the response. Every other decision
+   * either advances, finishes or refuses, so without this the only way to hand
+   * a value back would be to finish the flow, which is not what happened.
+   */
+  | { body: Record<string, unknown> };
 
 /** Called for each submitted screen. `step` is the 0-based index of the screen being
  *  submitted (0 = the first). Return the next screen, a final result, or an inline
@@ -185,6 +315,35 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
     let timer: NodeJS.Timeout | null = null;
     /** Set once a `final` screen is waiting to be collected. Its `result`. */
     let ending: { result: unknown } | null = null;
+    /**
+     * How many documents this flow has served.
+     *
+     * This is the structural half of the close signal, and the half that does
+     * not depend on which of two racing requests wins. A reload comes back and
+     * asks for the page again, which bumps this; a closed window never does. So
+     * a beacon whose generation is no longer the one on screen is reporting a
+     * document that was REPLACED, not abandoned, and is ignored outright.
+     */
+    let servedGen = 0;
+    /**
+     * Set while a page that said it was leaving might still come back.
+     *
+     * Only armed by a beacon for the CURRENT generation, and re-checked when it
+     * fires, so this is a courtesy delay rather than the thing the decision
+     * rests on.
+     */
+    let goneTimer: NodeJS.Timeout | null = null;
+
+    /** Ctrl+C at the terminal the browser was opened from. A refusal, not a fault. */
+    const onSigint = (): void => {
+      cleanup();
+      reject(new BrowserRefusal('Cancelled.', 'interrupt'));
+    };
+
+    const stillHere = (): void => {
+      if (goneTimer) clearTimeout(goneTimer);
+      goneTimer = null;
+    };
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       const addr = server.address();
@@ -196,6 +355,9 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
           res.writeHead(403).end('forbidden');
           return;
         }
+        // The document is being asked for, so whatever left a moment ago came
+        // back: this is a reload, not a closed window.
+        stillHere();
         // The wizard page went out with only a content-type. It is a page that
         // renders credentials and can open sockets, so it gets the same policy
         // as any other interactive screen: no remote origins, no eval, no
@@ -208,11 +370,13 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
         // `firstScreen`, because a standalone flow advances by reloading this
         // same URL — the browser comes back for step 2 and must not be handed
         // step 1 again.
-        res.end(
-          current.standalone
-            ? current.html
-            : wizardPage(params.title, current.html, nonce, params.doneMessage),
-        );
+        // A new document is going out, so anything the old one said about
+        // leaving is now about a generation that no longer exists.
+        servedGen += 1;
+        const html = current.standalone
+          ? current.html
+          : wizardPage(params.title, current.html, nonce, params.doneMessage);
+        res.end(params.closeIsRefusal ? withCloseBeacon(html, nonce, servedGen) : html);
         // The flow ended on this document. It has now been delivered, which is
         // the whole reason the server was still up — so let the bytes flush and
         // stop. A run that dies must not be kept alive by its own error page.
@@ -229,7 +393,18 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
         return;
       }
 
-      if (req.method === 'POST' && new URL(req.url ?? '/', `http://127.0.0.1:${port}`).pathname === '/submit') {
+      // `/submit` advances the flow; a `routes` entry answers beside it without
+      // moving the step. Both go through the identical guards below, so a route
+      // cannot become a second, laxer door into the same server.
+      const path = new URL(req.url ?? '/', `http://127.0.0.1:${port}`).pathname;
+      const route = path === '/submit' ? onSubmit : params.routes?.[path];
+      // The page reporting that it is going away. Not a route: it carries no
+      // answer and the reducer is never told about it — but it goes through
+      // every guard below, because a request that can end a run is a request
+      // that has to prove it came from the page we served.
+      const closing = params.closeIsRefusal !== undefined && path === CLOSED_PATH;
+      if (req.method === 'POST' && (route || closing)) {
+        const advances = path === '/submit';
         if (!isLoopbackHost(req.headers.host, port)) {
           res.writeHead(403).end('bad host');
           return;
@@ -263,6 +438,35 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
           }
           const payload =
             parsed.payload && typeof parsed.payload === 'object' ? (parsed.payload as Record<string, unknown>) : {};
+          if (closing) {
+            // Answered before it is believed: a beacon is fire-and-forget and
+            // the tab is already gone. A flow that has finished, or is mid
+            // submit, is not waiting on this page any more.
+            res.writeHead(204).end();
+            // WHICH document is leaving. A standalone step advances by
+            // RELOADING, so `pagehide` fires on a perfectly healthy advance and
+            // the beacon it sends usually arrives just AFTER the GET for the
+            // next document. That beacon names the generation that has already
+            // been replaced, and a replaced document was reloaded, not closed.
+            // Ordering cannot change that, which is the whole point: the old
+            // grace-window test was a race this lost every time it was measured.
+            const gen = payload[BEACON_GEN];
+            if (typeof gen !== 'number' || gen !== servedGen) return;
+            if (done || busy || goneTimer) return;
+            goneTimer = setTimeout(() => {
+              goneTimer = null;
+              // Re-checked rather than assumed: if the page came back inside the
+              // grace, `servedGen` moved on and this beacon is stale after all.
+              if (done || gen !== servedGen) return;
+              done = true;
+              cleanup();
+              resolve(params.closeIsRefusal!.result);
+            }, params.closeIsRefusal!.graceMs ?? CLOSE_GRACE_MS);
+            return;
+          }
+          // Something is still answering this step, so the page that said it
+          // was leaving was reloading.
+          stillHere();
           if (done) {
             res.writeHead(409).end('already finished');
             return;
@@ -277,13 +481,39 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
           // own business and none of it is the browser keeping us waiting.
           disarm();
           try {
-            const decision = await onSubmit(step, payload);
+            const decision = await route!(step, payload);
             if ('error' in decision) {
               busy = false;
               // Refused inline: the page keeps this step, so the same question
               // is outstanding again and the clock goes back on.
               arm();
               res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ error: decision.error }));
+              return;
+            }
+            if ('body' in decision) {
+              // A question, not an answer: the flow has not moved, so the step
+              // counter does not either and the server stays open for the step
+              // that is still on screen.
+              busy = false;
+              // And the clock goes back on. Every POST disarms it, because an
+              // answer means the browser owes us nothing while the reducer
+              // works — but this branch leaves the SAME question outstanding,
+              // so it is outstanding again the moment this response goes out.
+              // Without this a run that revealed one value had no deadline at
+              // all from then on: the page could be closed and the command
+              // would wait for a browser that was never coming back.
+              arm();
+              res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(decision.body));
+              return;
+            }
+            if (!advances) {
+              // A side route may only answer or refuse. Advancing from one
+              // would move the flow past a step whose page never asked to
+              // leave it, and that page would keep posting to a spent token.
+              busy = false;
+              res
+                .writeHead(500, { 'content-type': 'application/json' })
+                .end(JSON.stringify({ error: 'That request cannot advance this flow.' }));
               return;
             }
             if ('done' in decision) {
@@ -358,10 +588,14 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
       const ms = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       timer = setTimeout(() => {
         cleanup();
+        // A `BrowserRefusal`, not a bare `CapyError`: same message, same
+        // `SERVICE_ERROR` code, but `reason` lets a caller tell "nobody
+        // answered" apart from "the socket would not bind" without reading the
+        // sentence. Flows that end a silent run as the refusal it is need that.
         reject(
-          new CapyError(
+          new BrowserRefusal(
             `Timed out waiting for the browser (${Math.round(ms / 1000)}s with the question unanswered).`,
-            ERROR_CODES.SERVICE_ERROR,
+            'timeout',
           ),
         );
       }, ms);
@@ -388,6 +622,12 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
 
     const cleanup = (): void => {
       disarm();
+      stillHere();
+      // A wizard that resolved normally used to leave its SIGINT handler on the
+      // process for the rest of the run. One flow here opens two wizards per
+      // edited variable, so the listener count grew without bound and node
+      // started warning about a leak partway through a normal session.
+      process.off('SIGINT', onSigint);
       try {
         server.close();
       } catch {
@@ -415,10 +655,7 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
     // The first question is outstanding from the moment there is a URL to open.
     arm();
 
-    process.once('SIGINT', () => {
-      cleanup();
-      reject(new CapyError('Cancelled.', ERROR_CODES.SERVICE_ERROR));
-    });
+    process.once('SIGINT', onSigint);
 
     server.listen(0, '127.0.0.1', async () => {
       const addr = server.address();

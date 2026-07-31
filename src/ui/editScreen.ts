@@ -84,6 +84,46 @@ export function classifyLocalRow(
 }
 
 /**
+ * How a row reads after it has been edited in this session.
+ *
+ * The remote side is not refetched once a session is open, so it is treated as
+ * unchanged from when the screen loaded — the same assumption the TUI has
+ * always made.
+ *
+ * Pulled out of `EditScreen` so the browser path classifies with this code
+ * rather than with a second copy of it. Two implementations of "what changed"
+ * is exactly the drift `classifyLocalRow` above was extracted to prevent, and
+ * a browser that disagreed with the terminal about which rows are in conflict
+ * would be the product disagreeing with itself about somebody's secrets.
+ */
+export function reclassifyRow(
+  row: EditRow,
+  mode: { localMode?: boolean; remoteAvailable: boolean },
+): EditRow['status'] {
+  // Local mode: committed-vs-working. remoteValue holds the committed value.
+  if (mode.localMode) return classifyLocalRow(row.localValue, row.remoteValue).status;
+  if (!mode.remoteAvailable) return 'unknown';
+  const localPresent = row.localValue !== undefined;
+  const remotePresent = row.remoteValue !== undefined;
+  if (localPresent && remotePresent && row.localValue === row.remoteValue) return 'in sync';
+  if (!localPresent && remotePresent) return 'remote';
+  if (localPresent && !remotePresent) return 'local';
+  if (row.localValue !== row.remoteValue) return 'conflict';
+  return 'in sync';
+}
+
+/**
+ * The UPDATED column's label, mode-aware.
+ *
+ * Local mode has no server timestamps, so it keeps the committed/uncommitted
+ * wording; otherwise the label says when the value last changed server-side.
+ */
+export function updatedLabelForRow(row: EditRow, mode: { localMode?: boolean }): string {
+  if (mode.localMode) return row.status === 'in sync' ? 'committed' : 'uncommitted';
+  return row.changedAt ? formatRelativeTime(row.changedAt) : NO_VALUE;
+}
+
+/**
  * Normalizes bracketed-paste content for storage in an edit buffer. Pasted
  * line breaks are kept (so multi-line secrets like PEM keys survive), CRLF/CR
  * are folded to LF, and other control characters (besides tab) are dropped so a
@@ -469,25 +509,14 @@ export class EditScreen {
    * value last changed server-side.
    */
   private updatedLabelFor(row: EditRow): string {
-    if (this.state.localMode) return row.status === 'in sync' ? 'committed' : 'uncommitted';
-    return row.changedAt ? formatRelativeTime(row.changedAt) : NO_VALUE;
+    return updatedLabelForRow(row, { localMode: this.state.localMode });
   }
 
   private reclassify(row: EditRow): EditRow['status'] {
-    // Local mode: committed-vs-working. remoteValue holds the committed value.
-    if (this.state.localMode) {
-      return classifyLocalRow(row.localValue, row.remoteValue).status;
-    }
-    if (!this.state.remoteAvailable) return 'unknown';
-    const localPresent = row.localValue !== undefined;
-    const remotePresent = row.remoteValue !== undefined;
-    if (localPresent && remotePresent && row.localValue === row.remoteValue) {
-      return 'in sync';
-    }
-    if (!localPresent && remotePresent) return 'remote';
-    if (localPresent && !remotePresent) return 'local';
-    if (row.localValue !== row.remoteValue) return 'conflict';
-    return 'in sync';
+    return reclassifyRow(row, {
+      localMode: this.state.localMode,
+      remoteAvailable: this.state.remoteAvailable,
+    });
   }
 
   private draw(): void {

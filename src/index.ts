@@ -119,10 +119,10 @@ program
 program
   .command('edit')
   .description('Inspect and edit secrets in an interactive TUI')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const cmd = new EditCommand();
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
@@ -645,10 +645,10 @@ program
 program
   .command('decrypt')
   .description('Decrypt secrets offline using seed phrase (owner only)')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { DecryptCommand } = await import('./commands/decryptCommand');
     const cmd = new DecryptCommand();
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
