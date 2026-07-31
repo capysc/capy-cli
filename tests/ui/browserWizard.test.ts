@@ -104,6 +104,61 @@ describe('runBrowserWizard loopback server', () => {
     expect(await done).toEqual({ x: 'v' });
   });
 
+  test('a side-route answer re-arms the question deadline', async () => {
+    /*
+     * `secret-table` asks for one value's plaintext with `{ __action:
+     * 'reveal' }` — a question, not an answer — and the reducer replies with
+     * `{ body }`, leaving the flow on the same step.
+     *
+     * Every POST disarms the per-question clock, because while the reducer is
+     * working the browser owes us nothing. A branch that never re-arms it
+     * therefore removes the deadline for the REST OF THE RUN: a `capy edit
+     * --web` where one value was revealed could have its window closed and the
+     * command would wait for a browser that is never coming back.
+     *
+     * So: reveal, then go silent, and the run must still end.
+     */
+    let url = '';
+    let rejected: unknown = null;
+    const done = runBrowserWizard(
+      {
+        title: 'Reveal then vanish',
+        firstScreen: { html: '<form><button type="submit">go</button></form>' },
+        open: false,
+        timeoutMs: 400,
+        onListen: (u) => (url = u),
+      },
+      async (_step, payload) =>
+        payload.__action === 'reveal'
+          ? { body: { value: 'sk_test_…' } }
+          : { done: true, result: { finished: true } },
+    );
+    void done.catch((e) => (rejected = e));
+
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+
+    const revealed = await (
+      await fetch(`http://127.0.0.1:${u.port}/submit`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ nonce, payload: { __action: 'reveal', key: 'STRIPE_KEY' } }),
+      })
+    ).json();
+    // The side route really did answer, and did not advance the flow.
+    expect(revealed.value).toBe('sk_test_…');
+    expect(revealed.done).toBeUndefined();
+    expect(revealed.screen).toBeUndefined();
+
+    // Now say nothing. The same question is still on screen, so the clock the
+    // reveal disarmed has to be running again.
+    await new Promise((r) => setTimeout(r, 900));
+    expect(
+      rejected,
+      'the run outlived its deadline after a reveal — the side route disarmed the clock and never re-armed it',
+    ).not.toBeNull();
+  });
+
   test('a screen may submit a structured payload, not just flat form fields', async () => {
     // The reason `window.capySubmit` exists. FormData flattens to string keys
     // and string values, so a step whose answer is a decision per variable —

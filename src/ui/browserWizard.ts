@@ -495,6 +495,14 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
               // counter does not either and the server stays open for the step
               // that is still on screen.
               busy = false;
+              // And the clock goes back on. Every POST disarms it, because an
+              // answer means the browser owes us nothing while the reducer
+              // works — but this branch leaves the SAME question outstanding,
+              // so it is outstanding again the moment this response goes out.
+              // Without this a run that revealed one value had no deadline at
+              // all from then on: the page could be closed and the command
+              // would wait for a browser that was never coming back.
+              arm();
               res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(decision.body));
               return;
             }
