@@ -180,6 +180,38 @@ describe('buildInviteData', () => {
     expect(d.issued!.grantedProjects).toEqual([{ id: 'p1', name: 'storefront' }]);
   });
 
+  test('a minted code closes the route: nothing is left outstanding', () => {
+    // The expiry stop is a question only while there is somewhere to ask it. On
+    // the code page the lifetime is already bound into the KMS wrap, so a stop
+    // sitting at `current` would be describing a question this run never had.
+    const d = buildInviteData(INVITE, 'display-only', { role: 'member', projectIds: ['p1'] }, ISSUED);
+    const byId = Object.fromEntries(d.stops.map((s) => [s.id, s]));
+    expect(byId.expiry.state).toBe('done');
+    expect(byId.expiry.answer).toBe('7d');
+    expect(byId.expiry.flag).toBe('default');
+    expect(d.stops.filter((s) => s.state === 'upcoming').map((s) => s.id)).toEqual([]);
+  });
+
+  test('the service\'s own prose reaches the code page as words, not escapes', () => {
+    // The receipt carries two things the CLI also PRINTS: the projects granted
+    // and the service's message for each one it could not assign. A payload is
+    // not a terminal.
+    const d = buildInviteData(INVITE, 'display-only', { role: 'member' }, {
+      ...ISSUED,
+      grantedProjects: [{ id: 'p1', name: '\x1b[90mstorefront\x1b[0m' }],
+      assignmentFailures: [
+        { project: { id: 'p2', name: '\x1b[90mwarehouse\x1b[0m' }, error: '\x1b[31m503\x1b[0m' },
+      ],
+    });
+    expect(d.issued!.grantedProjects).toEqual([{ id: 'p1', name: 'storefront' }]);
+    expect(d.issued!.assignmentFailures).toEqual([
+      { project: { id: 'p2', name: 'warehouse' }, error: '503' },
+    ]);
+    expect(JSON.stringify(d)).not.toContain('\x1b');
+    // The code itself is untouched: it is not prose and every byte matters.
+    expect(d.issued!.redeemCommand).toBe(ISSUED.redeemCommand);
+  });
+
   test('both escapes are offered, and the code stop\'s one is a warning', () => {
     const d = buildInviteData(INVITE, 'n');
     expect(d.nonTty!.questions.command).toContain('--role');
@@ -466,6 +498,31 @@ describe('buildKickData', () => {
 });
 
 describe('confirmKickInBrowser', () => {
+  test('the document carries the decline this screen cannot send by itself', async () => {
+    // `confirm-remove`'s decline — the answer the terminal DEFAULTS to — flips
+    // the view client-side and tells the CLI nothing, so the served document
+    // gets a bridge that reports it. Driven for real in browserFlow.e2e; what
+    // is checked here is that it ships with the page and addresses its cancel
+    // with this run's own single-use nonce.
+    let url = '';
+    const done = confirmKickInBrowser({ ...KICK, timeoutMs: 3_000, onListen: (u) => (url = u) });
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+
+    const page = await (await fetch(u.href)).text();
+    expect(page).toContain("__action: 'cancel'");
+    expect(page).toContain(nonce);
+    // Inside the document, not appended past it.
+    expect(page.lastIndexOf("__action: 'cancel'")).toBeLessThan(page.lastIndexOf('</body>'));
+
+    await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce, payload: { __action: 'cancel' } }),
+    });
+    expect(await done).toBe(false);
+  });
+
   test('an explicit removal of this member is the only thing that returns true', async () => {
     let url = '';
     const done = confirmKickInBrowser({ ...KICK, onListen: (u) => (url = u) });

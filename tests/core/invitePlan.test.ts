@@ -151,6 +151,30 @@ describe('invitePlan', () => {
     expect(stops[2].detail).toBe('invite lifetime, e.g. 30m, 24h, 7d');
   });
 
+  test('a stop only names what the run actually got, and says what it did not', () => {
+    // The fan-out assigns one project at a time and can fail one at a time. A
+    // stop is a claim about what this run DID, so a project the service refused
+    // cannot appear in `answer` — and dropping it silently would hide the
+    // failure rather than report it, which is what `note` is for.
+    const stops = invitePlan({
+      ...WEB,
+      role: { value: 'member' },
+      projects: {
+        names: ['storefront'],
+        note: '1 more the service refused: warehouse',
+      },
+    });
+    expect(stops[1]).toMatchObject({
+      state: 'done',
+      answer: 'storefront',
+      detail: '1 more the service refused: warehouse',
+    });
+    // Without one, the stop keeps the flag's own description.
+    expect(invitePlan({ ...WEB, role: { value: 'member' }, projects: { names: ['storefront'] } })[1].detail).toBe(
+      'grant project access',
+    );
+  });
+
   test('§8 parity: the browser payload and --json carry the same array', () => {
     const input = {
       ...WEB,

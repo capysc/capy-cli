@@ -611,6 +611,33 @@ describeBrowser('capy checkout, driven by a real browser', () => {
   }, 60_000);
 });
 
+/**
+ * Find the control and click it in ONE evaluation, retrying until it lands.
+ *
+ * Polling for an element and then clicking it in a second `evaluate` leaves a
+ * window between the two: these steps advance by NAVIGATION, so the document
+ * the poll saw can be gone by the time the click is dispatched — CDP answers
+ * "Inspected target navigated or closed" and the run fails on a race rather
+ * than on a defect. Finding and clicking in the same expression closes the
+ * window, and retrying absorbs the replacement itself.
+ */
+async function clickWhenReady(page: CdpSession, finder: string, what: string): Promise<void> {
+  let last = '';
+  for (let i = 0; i < 300; i++) {
+    try {
+      const hit = await evaluate<boolean>(
+        page,
+        `(() => { const el = ${finder}; if (!el) return false; el.click(); return true; })()`,
+      );
+      if (hit) return;
+    } catch (err) {
+      last = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out clicking ${what}${last ? ` (last: ${last})` : ''}`);
+}
+
 describeBrowser('capy invite, driven by a real browser', () => {
   let browser: Browser | null = null;
   let profile = '';
@@ -647,25 +674,20 @@ describeBrowser('capy invite, driven by a real browser', () => {
   /** Wait for an option row to exist, then click it. */
   async function chooseOption(page: CdpSession, label: string): Promise<void> {
     await untilSettled(page, `${optionLabels}.includes(${JSON.stringify(label)})`, `the ${label} option`);
-    await evaluate(
+    await clickWhenReady(
       page,
       `[...document.querySelectorAll('[role=radio],[role=checkbox]')]
-         .find(el => el.querySelector('.label') && el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)})
-         .click()`,
+         .find(el => el.querySelector('.label') && el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)})`,
+      `the ${label} option`,
     );
   }
 
   /** Wait for a button to exist, then click it by its visible text. */
   async function press(page: CdpSession, text: string): Promise<void> {
-    await untilSettled(
+    await clickWhenReady(
       page,
-      `[...document.querySelectorAll('button')].some(b => b.textContent.includes(${JSON.stringify(text)}))`,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes(${JSON.stringify(text)}))`,
       `the ${text} button`,
-    );
-    await evaluate(
-      page,
-      `[...document.querySelectorAll('button')]
-         .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`,
     );
   }
 
@@ -710,6 +732,12 @@ describeBrowser('capy invite, driven by a real browser', () => {
     // Nothing has been minted, so there is no code anywhere on a question page.
     expect(await evaluate<boolean>(page, says('capy redeem'))).toBe(false);
 
+    // Every stop keeps a way out. A step that can only be answered forwards is
+    // a step whose only refusal is closing the window, and this run holds a
+    // copy of the organization key at the end of it.
+    const hasCancel = `[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Cancel')`;
+    expect(await evaluate<boolean>(page, hasCancel)).toBe(true);
+
     await chooseOption(page, 'member');
     await press(page, 'Continue');
 
@@ -718,6 +746,7 @@ describeBrowser('capy invite, driven by a real browser', () => {
     expect(await evaluate<boolean>(page, says('storefront'))).toBe(true);
     // The cwd tick says where it came from, which the terminal never does.
     expect(await evaluate<boolean>(page, says('Ticked because you ran this from here'))).toBe(true);
+    expect(await evaluate<boolean>(page, hasCancel)).toBe(true);
 
     await chooseOption(page, 'warehouse');
     await press(page, 'Continue');
@@ -725,6 +754,7 @@ describeBrowser('capy invite, driven by a real browser', () => {
     await untilSettled(page, says('How long should it last?'), 'the expiry stop');
     // The service's silent ceiling, said out loud.
     expect(await evaluate<boolean>(page, says('caps invites at 30 days'))).toBe(true);
+    expect(await evaluate<boolean>(page, hasCancel)).toBe(true);
 
     await chooseOption(page, '24h');
     await press(page, 'Create invite');
@@ -788,6 +818,30 @@ describeBrowser('capy invite, driven by a real browser', () => {
     await done.catch(() => undefined);
   }, 60_000);
 
+  test('the no on the page is a no the CLI receives, and says so', async () => {
+    // The other ending, clicked rather than inferred. Closing the window is
+    // covered below, but a flow whose only tested refusal is an abandoned tab
+    // has never proved that its Cancel is wired to anything — which is exactly
+    // how `capy kick`'s decline shipped reaching nothing at all.
+    const { askInviteInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    let settled: unknown = 'PENDING';
+    const done = askInviteInBrowser({ ...INVITE, timeoutMs: 8_000, onListen: (u) => (url = u) });
+    void done.then((v) => (settled = v)).catch((e) => (settled = `REJECTED: ${e.message}`));
+
+    const page = await open(await waitForUrl(() => url));
+    await untilSettled(page, says('What can they reach?'), 'the role stop');
+
+    await press(page, 'Cancel');
+
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(settled).toEqual({ role: '', projectIds: [], cancelled: true });
+    expect(await done).toEqual({ role: '', projectIds: [], cancelled: true });
+    // Visibly, on the page the click happened on.
+    await untilSettled(page, says('Cancelled'), 'the cancelled ending');
+    expect(await evaluate<boolean>(page, says('nothing was changed'))).toBe(true);
+  }, 60_000);
+
   test('closing the window mints nothing', async () => {
     // An unanswered invite is a refusal. Nothing about leaving may look like
     // agreement to hand somebody a copy of the organization key.
@@ -843,6 +897,45 @@ describeBrowser('capy invite, driven by a real browser', () => {
 
     served.close();
   }, 60_000);
+
+  test('a service message reaches the page as words, not as escape codes', async () => {
+    // The code page carries two things the CLI also PRINTS — the projects this
+    // invite granted, and the service's own message for each one it could not.
+    // A payload is not a terminal: `\x1b[90m` renders in a browser as the
+    // literal `[90m`, and a receipt that reads `[31mproject not found[0m` is
+    // the CLI's colour scheme leaking into somebody's browser.
+    const { serveInviteCode } = await import('../../src/ui/memberScreens');
+    const served = await serveInviteCode(
+      { ...INVITE, orgName: '\x1b[1mmikes-market\x1b[0m' },
+      {
+        redeemCommand: 'capy redeem AgTESTREDEEMCODE00002',
+        expiresAtIso: '2026-08-06T00:00:00.000Z',
+        expiresRelative: 'in 7 days',
+        role: 'member',
+        reissued: false,
+        grantedProjects: [{ id: 'p1', name: '\x1b[90mstorefront\x1b[0m' }],
+        assignmentFailures: [
+          { project: { id: 'p2', name: '\x1b[90mwarehouse\x1b[0m' }, error: '\x1b[31m503 from the service\x1b[0m' },
+        ],
+      },
+      { role: 'member', projectIds: ['p1'] },
+      { open: false },
+    );
+
+    const page = await open(served.url);
+    await untilSettled(page, says('AgTESTREDEEMCODE00002'), 'the code to render');
+
+    const text = await evaluate<string>(page, `document.body.textContent`);
+    expect(text).not.toContain('\x1b');
+    expect(text).not.toContain('[90m');
+    expect(text).not.toContain('[31m');
+    // Still says everything it was given, just in words.
+    expect(text).toContain('storefront');
+    expect(text).toContain('503 from the service');
+    expect(text).toContain('mikes-market');
+
+    served.close();
+  }, 60_000);
 });
 
 describeBrowser('capy kick, driven by a real browser', () => {
@@ -873,9 +966,13 @@ describeBrowser('capy kick, driven by a real browser', () => {
         el.value = ${JSON.stringify(value)};
         el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
 
-  const clickButton = (text: string): string =>
-    `[...document.querySelectorAll('button')]
-       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+  /** Press a button by its visible text, retrying across a re-render. */
+  const press = (page: CdpSession, text: string): Promise<void> =>
+    clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes(${JSON.stringify(text)}))`,
+      `the ${text} button`,
+    );
 
   /** Does the page currently read this? Null-safe across a navigation. */
   const says = (text: string): string =>
@@ -935,11 +1032,54 @@ describeBrowser('capy kick, driven by a real browser', () => {
 
     await evaluate(page, type('input[type=text]', 'bob@example.com'));
     await untilSettled(page, `${remove} && !${remove}.disabled`, 'the remove button to go live');
-    await evaluate(page, clickButton('Remove member'));
+    await press(page, 'Remove member');
 
     expect(await done).toBe(true);
     // The CLI answered, and the page then says what removal did NOT reach.
     await untilSettled(page, says('no longer a member'), 'the removal receipt');
+
+    // The removal receipt is the LAST thing this page says. The decline bridge
+    // watches for the question leaving the document, and a confirmed removal
+    // takes it away too — so this is the check that a yes cannot be repainted
+    // as a cancel by the very code that exists to report a no.
+    await new Promise((r) => setTimeout(r, 600));
+    expect(await evaluate<boolean>(page, says('no longer a member'))).toBe(true);
+    expect(await evaluate<boolean>(page, says('is still a member of'))).toBe(false);
+  }, 60_000);
+
+  test('the answer the terminal defaults to is an answer the CLI receives', async () => {
+    // `Remove …? (y/N)` defaults to No, and this screen's No is `Keep them`.
+    // It is CLIENT-SIDE ONLY: it flips the view back to the roster and tells
+    // the CLI nothing, so before the bridge this click left the run pending
+    // until the wizard's timeout — five minutes in production — on a page with
+    // nothing left to answer. A flow has two endings and both must be
+    // reachable from the page.
+    //
+    // `timeoutMs` is the guard rail: without the fix this promise cannot
+    // resolve, so the test fails on the rejection instead of hanging.
+    const { confirmKickInBrowser } = await import('../../src/ui/memberScreens');
+    let url = '';
+    let settled: boolean | string = 'PENDING';
+    const done = confirmKickInBrowser({ ...KICK, timeoutMs: 8_000, onListen: (u) => (url = u) });
+    void done.then((v) => (settled = v)).catch((e) => (settled = `REJECTED: ${e.message}`));
+
+    const page = await open(await waitForUrl(() => url));
+    await untilSettled(page, says('This cannot be undone'), 'the removal confirm');
+
+    await press(page, 'Keep them');
+
+    // Promptly, not eventually: the decline is a round trip to the loopback.
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(settled).toBe(false);
+    expect(await done).toBe(false);
+
+    // And the page says so, rather than dropping the user on a roster that
+    // cannot answer the question they were asked.
+    await untilSettled(page, says('Cancelled'), 'the cancelled ending');
+    expect(await evaluate<boolean>(page, says('bob@example.com is still a member of mikes-market.'))).toBe(true);
+    expect(
+      await evaluate<number>(page, `document.querySelectorAll('button.danger').length`),
+    ).toBe(0);
   }, 60_000);
 
   test('closing the window removes nobody', async () => {

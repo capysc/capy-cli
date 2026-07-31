@@ -77,8 +77,16 @@ export interface SettledAnswer {
 export interface InvitePlanInput {
   /** `--role`, an inherited membership role, or a role the browser answered. */
   role?: SettledAnswer;
-  /** Project NAMES this invite will grant, once something settled them. */
-  projects?: { names: string[]; flag?: string };
+  /**
+   * Project NAMES this invite will grant, once something settled them.
+   *
+   * `note` replaces the stop's description on a finished run that did not get
+   * everything it asked for. `names` is a claim about what this invite GRANTED,
+   * so a project the fan-out could not assign never appears in it — and a stop
+   * that quietly lists fewer projects than the run set out to grant would be
+   * hiding the failure rather than reporting it.
+   */
+  projects?: { names: string[]; flag?: string; note?: string };
   /** `--expires` / `--ttl`, or a lifetime the browser answered. */
   expiry?: SettledAnswer;
   /** `CAPY_INVITE_TTL_SECONDS` rendered in `--ttl`'s own vocabulary, when set. */
@@ -144,9 +152,8 @@ export function invitePlan(input: InvitePlanInput): InviteTeammateStop[] {
   if (input.role && !roleNeedsProjects(input.role.value)) {
     stops.push(stop('projects', 'skipped', { detail: 'not asked: this role reaches every project' }));
   } else if (input.projects && input.projects.names.length > 0) {
-    stops.push(
-      settled('projects', { value: input.projects.names.join(', '), flag: input.projects.flag }),
-    );
+    const p = settled('projects', { value: input.projects.names.join(', '), flag: input.projects.flag });
+    stops.push(input.projects.note ? { ...p, detail: input.projects.note } : p);
   } else {
     stops.push(stop('projects', 'upcoming'));
   }

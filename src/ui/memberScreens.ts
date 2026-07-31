@@ -101,7 +101,15 @@ const TTL_PRESETS = ['30m', '24h', '7d'] as const;
 const SERVER_CAP_DAYS = 30;
 
 export interface WebInviteParams {
-  /** The address the invite is minted for, exactly as the CLI will use it. */
+  /**
+   * The address the redeem code is BOUND to.
+   *
+   * `innerWrap` lowercases into the HKDF salt (`${orgId}:${email.toLowerCase()}`),
+   * so the lowercased address is the one that decides whether the code can ever
+   * be redeemed — and it is therefore the one the page names. It does NOT trim,
+   * and neither does this: a page that showed a trimmed address would be
+   * claiming a binding the code does not have.
+   */
   email: string;
   /** Argv as typed, when normalising changed it. */
   rawEmail?: string;
@@ -205,8 +213,14 @@ function currentStep(p: WebInviteParams, answered: InviteAnswers): InviteStop | 
  *
  * Recomputed from one builder on every render rather than mutated in place, so
  * the rail redraws itself and this file never decides what a stop's state is.
+ *
+ * `minted` closes the route. Once the code exists nothing is outstanding, and a
+ * lifetime nobody was asked about was decided by `resolveNotAfter` — so the
+ * stop is `done`, marked with the source that settled it, rather than `current`
+ * on a run that has already finished. That is the difference between a rail and
+ * a decoration: every state on it describes something the run did.
  */
-function planFor(p: WebInviteParams, answered: InviteAnswers): ReturnType<typeof invitePlan> {
+function planFor(p: WebInviteParams, answered: InviteAnswers, minted = false): ReturnType<typeof invitePlan> {
   const names = (answered.projectIds ?? [])
     .map((id) => p.projects.find((x) => x.id === id)?.name)
     .filter((n): n is string => !!n);
@@ -217,6 +231,7 @@ function planFor(p: WebInviteParams, answered: InviteAnswers): ReturnType<typeof
   // `p.plan`'s, made before this browser opened.
   return invitePlan({
     ...p.plan,
+    canAskExpiry: p.plan.canAskExpiry && !minted,
     role: p.plan.role ?? (answered.role ? { value: answered.role } : undefined),
     projects: names.length > 0 ? { names } : p.plan.projects,
     expiry: p.plan.expiry ?? (answered.ttl ? { value: answered.ttl } : undefined),
@@ -254,8 +269,24 @@ export function buildInviteData(
       }
     : undefined;
 
-  const stops = planFor(p, answered);
+  const stops = planFor(p, answered, !!issued);
   const step = issued ? 'code' : (currentStep(p, answered) ?? 'code');
+
+  // The code page carries two things the CLI also PRINTS — the names of the
+  // projects this invite granted, and the service's own message for each one it
+  // could not — and a payload is not a terminal. `\x1b[90m` renders in a
+  // browser as the literal `[90m`, so the same stripping the org name gets
+  // applies here rather than only on the way to stdout.
+  const cleaned: IssuedInvite | undefined = issued
+    ? {
+        ...issued,
+        grantedProjects: issued.grantedProjects.map((x) => ({ id: x.id, name: stripAnsi(x.name) })),
+        assignmentFailures: issued.assignmentFailures.map((f) => ({
+          project: { id: f.project.id, name: stripAnsi(f.project.name) },
+          error: stripAnsi(f.error),
+        })),
+      }
+    : undefined;
 
   return {
     nonce,
@@ -297,7 +328,7 @@ export function buildInviteData(
           }
         : {}),
     },
-    ...(issued ? { issued } : {}),
+    ...(cleaned ? { issued: cleaned } : {}),
     stops,
     step,
     nonTty: nonTtyEscapes(p.email),
@@ -523,13 +554,126 @@ export function buildKickData(p: WebKickParams, nonce: string): OrgMembersData {
 }
 
 /**
+ * The "no" this screen has no way to send.
+ *
+ * `confirm-remove` offers two controls. The destructive one POSTs. The decline
+ * — `Keep them`, which is the answer the terminal DEFAULTS to — is CLIENT-SIDE
+ * ONLY: it clears the field and flips the view back to the roster, and the CLI
+ * is never told. Driven in a real browser, the run is still pending 1.5s after
+ * that click and ends on the wizard's five-minute timeout, on a page that has
+ * nothing left to answer with. A flow whose most common ending cannot be
+ * reached is not a flow, and "the user waited five minutes" is not a refusal
+ * anyone should have to perform.
+ *
+ * The real fix is the screen's and is reported as such: `confirm-remove`'s
+ * decline should POST `{__action:'cancel'}`, exactly the way the same package's
+ * `Wizard` cancel already does — which is why `capy invite`'s Cancel needs
+ * nothing here. Until it does, this is the CLI holding up its own end of the
+ * contract: a browser flow has exactly two endings, and both must be reachable
+ * from the page.
+ *
+ * WHAT IT WATCHES is the question, not a button. The destructive control is the
+ * only thing on this page that can answer, so a document with no such control
+ * left in it is a document where this run can no longer be answered — which is
+ * a refusal, whatever route the page took to get there. Deliberately not bound
+ * to the decline button's label: copy is written for humans and is never what
+ * code keys off.
+ *
+ * IT CANNOT TURN A REMOVAL INTO A CANCEL. The wizard marks itself done inside
+ * the handler that resolved it, so a cancel that arrives after a confirmed
+ * removal is answered 409 and this script leaves the page exactly as the screen
+ * drew it.
+ */
+function declineBridge(nonce: string, stillAMember: string): string {
+  const js = (s: string): string => JSON.stringify(s).replace(/</g, '\\u003c');
+  return `<script>
+(function () {
+  // Out of the document before anything else. A script element's source counts
+  // as page text — document.body.textContent returns it — and this page's text
+  // is the screen's copy, not the CLI's plumbing. Removing the node does not
+  // stop the code already running from it.
+  var self = document.currentScript;
+  if (self && self.parentNode) self.parentNode.removeChild(self);
+
+  var NONCE = ${js(nonce)};
+  var STILL = ${js(stillAMember)};
+  // The control this view answers with, by its design-system variant — the
+  // structural attribute, never the label rendered inside it.
+  var ANSWERS_WITH = 'button.danger';
+  var sent = false;
+
+  function ending() {
+    document.title = 'Cancelled';
+    document.body.textContent = '';
+    var wrap = document.createElement('div');
+    wrap.setAttribute('style', 'max-width:34rem;margin:4rem auto;padding:0 1.5rem;font:16px/1.6 ui-sans-serif,system-ui,sans-serif');
+    var h = document.createElement('h1');
+    h.setAttribute('style', 'font-size:1.25rem;margin:0 0 .5rem;font-weight:600');
+    h.textContent = 'Cancelled \\u2014 nothing was changed.';
+    var p = document.createElement('p');
+    p.setAttribute('style', 'margin:0;opacity:.7');
+    p.textContent = STILL + ' You can close this tab.';
+    wrap.appendChild(h);
+    wrap.appendChild(p);
+    document.body.appendChild(wrap);
+  }
+
+  function decline() {
+    fetch('/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ nonce: NONCE, payload: { __action: 'cancel' } })
+    }).then(function (r) {
+      // Not ok is the removal that already went through (409 already
+      // finished): the CLI has its answer and this page is not it.
+      if (!r.ok) return null;
+      return r.json().catch(function () { return null; });
+    }).then(function (b) {
+      if (b && b.done) ending();
+    }).catch(function () {
+      /* the CLI is gone: it already has its answer, or its timeout. */
+    });
+  }
+
+  // Watching from the first mutation, never from a poll that could start after
+  // the click it exists to catch. The screen mounts itself from its own inline
+  // script, so the control may arrive before or after this runs — either way
+  // the mount is a mutation, and it is the mutation that records having seen
+  // the question. A question that never rendered at all leaves this inert: a
+  // page that failed to draw is a page problem, and answering it with a cancel
+  // would hide that behind a tidy ending.
+  var seen = !!document.querySelector(ANSWERS_WITH);
+  var obs = new MutationObserver(function () {
+    if (sent) return;
+    if (document.querySelector(ANSWERS_WITH)) {
+      seen = true;
+      return;
+    }
+    if (!seen) return;
+    sent = true;
+    obs.disconnect();
+    decline();
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+})();
+</script>`;
+}
+
+/** Put the bridge inside the document the screen build produced. */
+function withDeclineBridge(html: string, nonce: string, stillAMember: string): string {
+  const script = declineBridge(nonce, stillAMember);
+  const close = html.lastIndexOf('</body>');
+  return close === -1 ? html + script : html.slice(0, close) + script + html.slice(close);
+}
+
+/**
  * Serve the removal confirm and wait for it.
  *
  * Returns false for every ending that is not an explicit confirmation:
- * cancelled, closed, timed out, interrupted. That is not defensive coding — a
- * step nobody answered has not been approved, and the one thing this flow must
- * never do is read a closed window as agreement to cut somebody off from every
- * secret in the organization.
+ * cancelled, declined, closed, timed out, interrupted. That is not defensive
+ * coding — a step nobody answered has not been approved, and the one thing this
+ * flow must never do is read a closed window as agreement to cut somebody off
+ * from every secret in the organization.
  */
 export async function confirmKickInBrowser(p: WebKickParams): Promise<boolean> {
   const out = await runBrowserWizard(
@@ -540,7 +684,12 @@ export async function confirmKickInBrowser(p: WebKickParams): Promise<boolean> {
       onListen: p.onListen,
       timeoutMs: p.timeoutMs,
       doneMessage: 'Removed — back to your terminal.',
-      renderFirst: (nonce) => renderScreen('org-members', buildKickData(p, nonce)),
+      renderFirst: (nonce) =>
+        withDeclineBridge(
+          renderScreen('org-members', buildKickData(p, nonce)),
+          nonce,
+          `${stripAnsi(p.member.email)} is still a member of ${stripAnsi(p.orgName)}.`,
+        ),
     },
     async (_step, payload) => {
       if (payload.__action === 'cancel') return { done: true, result: false };

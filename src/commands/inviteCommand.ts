@@ -461,15 +461,40 @@ export class InviteCommand {
         id,
         name: webParams?.projects.find((x) => x.id === id)?.name ?? id,
       }));
+      // What the fan-out actually landed. A stop is a claim about what this run
+      // DID, so a project the service refused cannot be listed as one this
+      // invite granted — that is the exact failure the markers exist to
+      // prevent, one level down: `Projects · storefront, warehouse` beside
+      // `warehouse: 503` is a rail arguing with the receipt printed under it.
+      const assignedProjectRefs = grantedProjectRefs.filter(
+        (p) => !failures.some((f) => f.projectId === p.id),
+      );
 
       // The route as it ended up: the same builder, fed what actually settled
       // each stop. `--json` and the browser payload cannot describe different
       // runs, because neither of them builds a rail of its own.
+      //
+      // `canAskExpiry` goes false here — this rail describes a FINISHED run and
+      // nothing on a finished run is still outstanding. Left true, a re-issue
+      // that never opened a browser (existing member, no `--role`) reports
+      // `expiry · current` on a run that already minted the code, which is a
+      // stop whose state does not describe what the run did.
       const finalStops: InviteTeammateStop[] = invitePlan({
         ...planInput,
+        canAskExpiry: false,
         role: { value: role, flag: roleSource },
-        projects: grantedProjectRefs.length > 0
-          ? { names: grantedProjectRefs.map((p) => p.name), flag: projectSource }
+        projects: assignedProjectRefs.length > 0
+          ? {
+              names: assignedProjectRefs.map((p) => p.name),
+              flag: projectSource,
+              ...(failures.length > 0
+                ? {
+                    note: `${failures.length} more the service refused: ${failures
+                      .map((f) => grantedProjectRefs.find((p) => p.id === f.projectId)?.name ?? f.projectId)
+                      .join(', ')}`,
+                  }
+                : {}),
+            }
           : undefined,
         expiry: planInput.expiry ?? (chosenTtl ? { value: chosenTtl } : undefined),
       });
@@ -516,7 +541,10 @@ export class InviteCommand {
             expiresRelative: formatRelativeFuture(notAfter),
             role,
             reissued: reissuing,
-            grantedProjects: grantedProjectRefs,
+            // What landed, not what was asked for. The failures travel in their
+            // own field right below, and a project that appears in both is a
+            // page contradicting itself about what this invite reaches.
+            grantedProjects: assignedProjectRefs,
             assignmentFailures: failures.map((f) => ({
               project: {
                 id: f.projectId,
@@ -525,7 +553,7 @@ export class InviteCommand {
               error: f.error,
             })),
           },
-          { role, projectIds: grantedProjectIds, ttl: chosenTtl },
+          { role, projectIds: assignedProjectRefs.map((p) => p.id), ttl: chosenTtl },
           // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
           // headless verification drive the loopback without hijacking one.
           { open: !process.env.CAPY_WEB_NO_OPEN },
@@ -619,7 +647,22 @@ export class InviteCommand {
     }
 
     return {
-      email,
+      // What the CODE is bound to, not what argv typed. `innerWrap` derives the
+      // inner key from `${orgId}:${email.toLowerCase()}`, so the lowercased
+      // address is the one that decides whether this invite can ever be
+      // redeemed, and it is the one the page names. Argv travels beside it: the
+      // screen draws "The address was cleaned up" when the two differ, which is
+      // the only warning anybody gets that `capy invite Bob@X.com` mints a code
+      // bound to something they did not type.
+      //
+      // Lowercased and NOT trimmed, because the CLI lowercases and does not
+      // trim. A page that showed a trimmed address would be claiming a binding
+      // the code does not have — and ` bob@x.com` really does mint a code
+      // nobody can redeem. Fixing THAT is a change to what the command mints,
+      // for every path and not only this one, so it is reported rather than
+      // smuggled in behind a flag that is supposed to change rendering only.
+      email: email.toLowerCase(),
+      rawEmail: email,
       orgName,
       callerEmail: callerEmail ?? '',
       callerRole: me.role,
