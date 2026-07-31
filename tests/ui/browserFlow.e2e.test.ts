@@ -3096,3 +3096,573 @@ describeBrowser('capy kick, driven by a real browser', () => {
     await done.catch(() => undefined);
   }, 60_000);
 });
+
+describeBrowser('the recovery flows, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /** Click the button whose visible text contains `text`. */
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  /** Click the option row whose label is exactly `label`. */
+  const clickOption = (role: 'radio' | 'checkbox', label: string): string =>
+    `[...document.querySelectorAll('[role=${role}]')]
+       .find(el => el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)}).click()`;
+
+  /**
+   * Fill the word grid the way a person does, box by box.
+   *
+   * Assigning `.value` alone is invisible to the screen: each box listens for
+   * `input`, and the screen refuses to submit until its own BIP-39 check
+   * passes — so a test that only set the property would prove the CLI can read
+   * a phrase nobody could have entered.
+   */
+  const typePhrase = (phrase: string): string =>
+    `(() => {
+       ${JSON.stringify(phrase)}.split(' ').forEach((word, i) => {
+         const el = document.querySelector('input[aria-label="Word ' + (i + 1) + '"]');
+         el.value = word;
+         el.dispatchEvent(new Event('input', { bubbles: true }));
+       });
+     })()`;
+
+  const ORGS = [
+    { id: 'org-demos', name: 'Demos', hasKeyOnThisDevice: false },
+    { id: 'org-capy', name: 'Capy', hasKeyOnThisDevice: true },
+  ];
+
+  test('capy recover walks all three stops by clicking, and the key is written once', async () => {
+    // The whole route in one run: pick the organization that already holds a
+    // key here, agree to destroy it, then type the phrase. Each answer is a
+    // page RELOAD serving the next stop at the same address.
+    const { recoverInBrowser } = await import('../../src/ui/recoveryScreens');
+    const { generateSeedPhrase } = await import('../../src/crypto/keyManager');
+    const phrase = generateSeedPhrase();
+
+    const scoped: string[] = [];
+    const verified: string[] = [];
+    const written: Array<{ orgId: string; phrase: string }> = [];
+    let url = '';
+    const done = recoverInBrowser({
+      userEmail: 'vince@capy.sc',
+      orgs: ORGS,
+      wordCount: 24,
+      open: false,
+      onListen: (u) => (url = u),
+      ops: {
+        scopeToOrg: async (orgId) => {
+          scoped.push(orgId);
+          return true;
+        },
+        verifyPhrase: async (_orgId, p) => {
+          verified.push(p);
+          return { code: 'MATCH', kdfVersion: 2 };
+        },
+        writeKey: async (orgId, p) => {
+          written.push({ orgId, phrase: p });
+          return { ok: true, keyPath: `~/.capy/orgs/${orgId}/users/u1/key.enc` };
+        },
+      },
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The rail is the CLI's plan, drawn whole before anything was answered —
+    // including the destructive stop the terminal springs on you afterwards.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Overwrite')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Recovery phrase')`)).toBe(true);
+
+    await evaluate(page, clickOption('radio', 'Capy'));
+    await evaluate(page, clickButton('Use this organization'));
+
+    // Stop two arrives by navigation, at the same address.
+    await until(
+      page,
+      `document.body.textContent.includes('Overwrite the key on this device')`,
+      'the overwrite stop',
+    );
+    expect(scoped).toEqual(['org-capy']);
+    // It is held down until the consent is ticked: nothing is replaced by the
+    // act of arriving here.
+    expect(
+      await evaluate<boolean>(page, `document.querySelector('button[type=submit]').disabled`),
+    ).toBe(true);
+
+    await evaluate(page, `document.querySelector('button.box-row[role=checkbox]').click()`);
+    await evaluate(page, clickButton('Overwrite key'));
+
+    await until(page, `document.querySelector('input[aria-label="Word 24"]')`, 'the phrase stop');
+    // The words are masked as they are typed, like the terminal's prompt.
+    expect(
+      await evaluate<string>(page, `document.querySelector('input[aria-label="Word 1"]').type`),
+    ).toBe('password');
+
+    await evaluate(page, typePhrase(phrase));
+    await evaluate(page, clickButton('Recover key'));
+
+    expect(await done).toEqual({
+      orgId: 'org-capy',
+      orgName: 'Capy',
+      kdfVersion: 2,
+      keyPath: '~/.capy/orgs/org-capy/users/u1/key.enc',
+      cancelled: false,
+    });
+    // The phrase crossed the loopback once, because the CLI has to check it,
+    // and the key was written once.
+    expect(verified).toEqual([phrase]);
+    expect(written).toEqual([{ orgId: 'org-capy', phrase }]);
+  }, 90_000);
+
+  test('a phrase that matches nothing comes back as the same stop, with the boxes empty', async () => {
+    // The terminal exits 1 here and the whole command has to be re-run. The
+    // requirement is a refusal the user can retry — never a crash, and never a
+    // key written from a phrase that proved nothing.
+    const { recoverInBrowser } = await import('../../src/ui/recoveryScreens');
+    const { generateSeedPhrase } = await import('../../src/crypto/keyManager');
+    const right = generateSeedPhrase();
+    let wrong = generateSeedPhrase();
+    while (wrong === right) wrong = generateSeedPhrase();
+
+    const written: string[] = [];
+    let url = '';
+    const done = recoverInBrowser({
+      orgs: [ORGS[0]],
+      wordCount: 24,
+      open: false,
+      onListen: (u) => (url = u),
+      ops: {
+        scopeToOrg: async () => true,
+        verifyPhrase: async (_o, p) =>
+          p === right ? { code: 'MATCH', kdfVersion: 1 } : { code: 'NO_MATCH' },
+        writeKey: async (orgId) => {
+          written.push(orgId);
+          return { ok: true, keyPath: 'k' };
+        },
+      },
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('radio', 'Demos'));
+    await evaluate(page, clickButton('Use this organization'));
+    await until(page, `document.querySelector('input[aria-label="Word 24"]')`, 'the phrase stop');
+
+    await evaluate(page, typePhrase(wrong));
+    await evaluate(page, clickButton('Recover key'));
+
+    // The CLI's own sentence, worded by the screen off the code it sent.
+    await until(
+      page,
+      `document.body.textContent.includes('does not match any secrets in Demos')`,
+      'the refusal',
+    );
+    expect(written).toEqual([]);
+    // Every box is empty again — a rejected phrase leaves nothing behind, and
+    // the page it came back on carries none of it.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('input[aria-label^="Word "]')].every(el => el.value === '')`,
+      ),
+    ).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes(${JSON.stringify(wrong.split(' ')[0] + ' ' + wrong.split(' ')[1])})`)).toBe(false);
+
+    // Typing the right one now finishes the run.
+    await evaluate(page, typePhrase(right));
+    await evaluate(page, clickButton('Recover key'));
+    expect((await done).kdfVersion).toBe(1);
+    expect(written).toEqual(['org-demos']);
+  }, 90_000);
+
+  test('a bolded organization name reaches the page as text, never as escape codes', async () => {
+    // The CLI bolds an org name and dims an email everywhere it PRINTS them,
+    // and hands the same strings to the screen. Three of the four places they
+    // land were stripped and the rail was not, so the station that reads your
+    // own answer back rendered a literal `[1m` beside the clean copy in the
+    // body — a browser is not a terminal and nothing there interprets an
+    // escape.
+    const { recoverInBrowser } = await import('../../src/ui/recoveryScreens');
+    const ESC = String.fromCharCode(27);
+    let url = '';
+    const done = recoverInBrowser({
+      userEmail: `${ESC}[90mvince@capy.sc${ESC}[0m`,
+      orgs: [{ id: 'org-demos', name: `${ESC}[1mDemos${ESC}[0m`, hasKeyOnThisDevice: false }],
+      wordCount: 24,
+      open: false,
+      onListen: (u) => (url = u),
+      ops: {
+        scopeToOrg: async () => true,
+        verifyPhrase: async () => ({ code: 'MATCH', kdfVersion: 2 }),
+        writeKey: async () => ({ ok: true, keyPath: 'k' }),
+      },
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The email is on the rail's finished sign-in stop from the first paint.
+    const clean = `!document.body.textContent.includes(String.fromCharCode(27))
+       && !document.body.textContent.includes('[90m')
+       && !document.body.textContent.includes('[1m')`;
+    expect(await evaluate<boolean>(page, clean)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('vince@capy.sc')`)).toBe(
+      true,
+    );
+
+    // Answering puts the ORGANIZATION name on the rail too, which is the field
+    // that was travelling raw.
+    await evaluate(page, clickOption('radio', 'Demos'));
+    await evaluate(page, clickButton('Use this organization'));
+    await until(page, `document.querySelector('input[aria-label="Word 24"]')`, 'the phrase stop');
+
+    expect(await evaluate<boolean>(page, clean)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Demos')`)).toBe(true);
+
+    // Out through the exit every stop draws, so the run ends rather than
+    // waiting out the wizard's timeout.
+    await evaluate(page, clickButton('Cancel'));
+    expect((await done).cancelled).toBe(true);
+  }, 90_000);
+
+  test('the unverified fork is a decision someone takes, and it writes once', async () => {
+    // The one control this flow invents. With nothing to trial-decrypt
+    // against, the terminal prints a warning and writes a key under the
+    // current KDF version on the user's behalf — silently wrong for a legacy
+    // v1 organization caught by an outage. Here it is a stop, and until this
+    // test nobody had clicked it.
+    const { recoverInBrowser } = await import('../../src/ui/recoveryScreens');
+    const { generateSeedPhrase } = await import('../../src/crypto/keyManager');
+    const phrase = generateSeedPhrase();
+
+    const written: Array<{ orgId: string; kdfVersion: 1 | 2 | undefined }> = [];
+    let url = '';
+    const done = recoverInBrowser({
+      orgs: [ORGS[0]],
+      wordCount: 24,
+      open: false,
+      onListen: (u) => (url = u),
+      ops: {
+        scopeToOrg: async () => true,
+        // The check DID NOT RUN, which is not the same as passing.
+        verifyPhrase: async () => ({ code: 'NO_ORACLE', gap: 'list-failed' }),
+        writeKey: async (orgId, _p, kdfVersion) => {
+          written.push({ orgId, kdfVersion });
+          return { ok: true, keyPath: `~/.capy/orgs/${orgId}/users/u1/key.enc` };
+        },
+      },
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('radio', 'Demos'));
+    await evaluate(page, clickButton('Use this organization'));
+    await until(page, `document.querySelector('input[aria-label="Word 24"]')`, 'the phrase stop');
+
+    await evaluate(page, typePhrase(phrase));
+    await evaluate(page, clickButton('Recover key'));
+
+    // Which of the four reasons it was, named — the CLI reports one null.
+    await until(
+      page,
+      `document.body.textContent.includes('Could not list')`,
+      'the reason the trial could not run',
+    );
+    // …and the rail stops promising the verification that could not happen.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `document.body.textContent.includes('nothing here could verify it, so saving it is a decision')`,
+      ),
+    ).toBe(true);
+    expect(
+      await evaluate<boolean>(
+        page,
+        `document.body.textContent.includes('verify it against this organization')`,
+      ),
+    ).toBe(false);
+
+    // Held down until the consent is ticked. Arriving here writes nothing.
+    expect(
+      await evaluate<boolean>(page, `document.querySelector('button[type=submit]').disabled`),
+    ).toBe(true);
+    expect(written).toEqual([]);
+
+    await evaluate(page, `document.querySelector('button.box-row[role=checkbox]').click()`);
+    await evaluate(page, clickButton('Write the key anyway'));
+
+    expect(await done).toEqual({
+      orgId: 'org-demos',
+      orgName: 'Demos',
+      // Null, not 2: nothing proved a version, and the result says so rather
+      // than reporting the fallback as a finding.
+      kdfVersion: null,
+      keyPath: '~/.capy/orgs/org-demos/users/u1/key.enc',
+      cancelled: false,
+    });
+    // Once, with no version — the caller falls back, this does not decide.
+    expect(written).toEqual([{ orgId: 'org-demos', kdfVersion: undefined }]);
+  }, 90_000);
+
+  test('declining the unverified fork writes nothing at all', async () => {
+    // Cancel is the safe answer on the one page in this flow whose primary
+    // button is a guess. It has to be reachable, and it has to end the run —
+    // an abandoned danger stop that waits out the wizard's timeout is not one
+    // of the two endings.
+    const { recoverInBrowser } = await import('../../src/ui/recoveryScreens');
+    const { generateSeedPhrase } = await import('../../src/crypto/keyManager');
+
+    const written: string[] = [];
+    let url = '';
+    const done = recoverInBrowser({
+      orgs: [ORGS[0]],
+      wordCount: 24,
+      open: false,
+      onListen: (u) => (url = u),
+      ops: {
+        scopeToOrg: async () => true,
+        verifyPhrase: async () => ({ code: 'NO_ORACLE', gap: 'other-branch' }),
+        writeKey: async (orgId) => {
+          written.push(orgId);
+          return { ok: true, keyPath: 'k' };
+        },
+      },
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('radio', 'Demos'));
+    await evaluate(page, clickButton('Use this organization'));
+    await until(page, `document.querySelector('input[aria-label="Word 24"]')`, 'the phrase stop');
+    await evaluate(page, typePhrase(generateSeedPhrase()));
+    await evaluate(page, clickButton('Recover key'));
+    await until(page, `document.body.textContent.includes('Found no secrets')`, 'the unverified fork');
+
+    await evaluate(page, clickButton('Cancel'));
+
+    expect(await done).toEqual({
+      orgId: '',
+      orgName: '',
+      kdfVersion: null,
+      keyPath: null,
+      cancelled: true,
+    });
+    expect(written).toEqual([]);
+  }, 90_000);
+
+  test('capy end-recover sweeps only what is still ticked', async () => {
+    // The terminal deletes every match with no preview and no confirmation.
+    // Unticking a row is the whole reason this screen exists, so it is the
+    // thing worth clicking.
+    const { endRecoverInBrowser } = await import('../../src/ui/recoveryScreens');
+    let url = '';
+    const done = endRecoverInBrowser({
+      session: { orgName: 'org-uuid-demos', startedAt: '2 hours ago' },
+      cwd: '/work/mikes-market',
+      files: [
+        { name: '.env.production.decrypted', age: '2 hours ago', size: '1 KB' },
+        { name: '.env.staging.decrypted', age: '3 days ago', size: '2 KB' },
+      ],
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // Filenames and the directory, and nothing about what is inside them.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('.env.production.decrypted')`),
+    ).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    // Both start ticked, matching what the terminal would have deleted.
+    expect(
+      await evaluate<number>(
+        page,
+        `[...document.querySelectorAll('[role=checkbox]')].filter(el => el.getAttribute('aria-checked') === 'true').length`,
+      ),
+    ).toBe(2);
+
+    await evaluate(page, clickOption('checkbox', '.env.staging.decrypted'));
+    await evaluate(page, clickButton('End session and delete'));
+
+    expect(await done).toEqual({
+      endSession: true,
+      remove: ['.env.production.decrypted'],
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('a sweep with no session is never served, so no browser can reach it', async () => {
+    // `capy end-recover` returns early with no session open and removes
+    // nothing. Under `--web` it used to serve the sweep anyway, with every row
+    // arriving TICKED — so pressing the page's own primary button unlinked
+    // plaintext the terminal form would never have touched, and `--web` was
+    // deciding what gets deleted rather than where a question is drawn.
+    //
+    // The refusal happens before `listen`, so the proof is that there is no
+    // address for a browser to go to. Then the same call with a session is
+    // driven with a real one, to show that closing the hole did not close the
+    // flow.
+    const { endRecoverInBrowser } = await import('../../src/ui/recoveryScreens');
+    const FILES = [
+      { name: '.env.production.decrypted', age: '2 hours ago', size: '1 KB' },
+      { name: '.env.staging.decrypted', age: '3 days ago', size: '2 KB' },
+    ];
+
+    let sessionless = '';
+    const refusal = endRecoverInBrowser({
+      // The shape a JavaScript caller can still hand in. TypeScript refuses it.
+      session: undefined as unknown as { orgName: string; startedAt: string },
+      cwd: '/work/mikes-market',
+      files: FILES,
+      open: false,
+      // Only reached if the refusal does not happen: the short window is what
+      // stops this test hanging on the defect instead of reporting it.
+      timeoutMs: 2_000,
+      onListen: (u) => (sessionless = u),
+    }).then(
+      () => 'served' as const,
+      () => 'refused' as const,
+    );
+    // No address was ever published, so there is nothing for the browser below
+    // to open. This is the assertion the old behaviour fails.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(sessionless).toBe('');
+    expect(await refusal).toBe('refused');
+
+    // One field different, and the page is there — with the session named on
+    // it, and its ticked rows exactly the list the terminal would have swept.
+    let url = '';
+    const done = endRecoverInBrowser({
+      session: { orgName: 'org-uuid-demos', startedAt: '2 hours ago' },
+      cwd: '/work/mikes-market',
+      files: FILES,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Session for')`)).toBe(
+      true,
+    );
+    expect(
+      await evaluate<number>(
+        page,
+        `[...document.querySelectorAll('[role=checkbox]')].filter(el => el.getAttribute('aria-checked') === 'true').length`,
+      ),
+    ).toBe(2);
+
+    await evaluate(page, clickButton('End session and delete'));
+    expect(await done).toEqual({
+      endSession: true,
+      remove: ['.env.production.decrypted', '.env.staging.decrypted'],
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('capy transport shows the code and answers with an action only', async () => {
+    // The code is a wrapped copy of the account's encryption key. It has to
+    // reach the page — that is the point — and it must not come back.
+    const { showTransportInBrowser } = await import('../../src/ui/recoveryScreens');
+    const CODE = 'capy redeem AgQtaGVhZGxlc3MtdHJhbnNwb3J0LWNvZGU';
+    let url = '';
+    const done = showTransportInBrowser({
+      orgName: 'Demos',
+      boundEmail: 'vince@capy.sc',
+      expiresAtIso: new Date(Date.now() + 7 * 24 * 3_600_000).toISOString(),
+      redeemCommand: CODE,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes(${JSON.stringify(CODE)})`)).toBe(true);
+    // It is blurred until the user asks for it — the page is a screen someone
+    // else can be looking at.
+    expect(await evaluate<boolean>(page, `!!document.querySelector('.value.blurred')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('vince@capy.sc')`)).toBe(true);
+
+    await evaluate(page, clickButton('Close this out'));
+
+    expect(await done).toEqual({ acknowledged: true });
+  }, 60_000);
+
+  test('cancelling the transport page is a refusal, and is not dressed as a finish', async () => {
+    // Two endings, and this is the one the screen used to render as the other:
+    // pressing Cancel produced the green tick, the "back to your terminal"
+    // heading and the reassurance a successful finish gets. The CLI's own
+    // answer has to differ too — `acknowledged: false` is what makes it print
+    // that the code was never taken.
+    const { showTransportInBrowser } = await import('../../src/ui/recoveryScreens');
+    let url = '';
+    const done = showTransportInBrowser({
+      orgName: 'Demos',
+      boundEmail: 'vince@capy.sc',
+      expiresAtIso: new Date(Date.now() + 7 * 24 * 3_600_000).toISOString(),
+      redeemCommand: 'capy redeem AgQtaGVhZGxlc3MtdHJhbnNwb3J0LWNvZGU',
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickButton('Cancel'));
+
+    expect(await done).toEqual({ acknowledged: false });
+
+    // And the page says the code exists anyway, because `capy transport`
+    // mints it before it opens the browser. Refusing it un-mints nothing.
+    await until(
+      page,
+      `document.body.textContent.includes('The code was already minted')`,
+      'the refusal ending',
+    );
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('You have the code')`)).toBe(
+      false,
+    );
+    // Off screen: the ending replaces the page the code was on.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('AgQtaGVhZGxlc3M')`),
+    ).toBe(false);
+  }, 60_000);
+
+  test('closing the transport page without answering resolves nothing', async () => {
+    // An unanswered page has not been acknowledged, and nothing about leaving
+    // may look like it was.
+    const { showTransportInBrowser } = await import('../../src/ui/recoveryScreens');
+    let url = '';
+    let settled = false;
+    const done = showTransportInBrowser({
+      orgName: 'Demos',
+      boundEmail: 'vince@capy.sc',
+      expiresAtIso: new Date(Date.now() + 3_600_000).toISOString(),
+      redeemCommand: 'capy redeem AgQ',
+      open: false,
+      timeoutMs: 1_500,
+      onListen: (u) => (url = u),
+    });
+    void done.then(() => (settled = true)).catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.navigate', { url: 'about:blank' });
+
+    await new Promise((r) => setTimeout(r, 400));
+    expect(settled).toBe(false);
+    await done.catch(() => undefined);
+  }, 60_000);
+});
