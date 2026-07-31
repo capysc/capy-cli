@@ -118,7 +118,7 @@ export class EndRecoverCommand {
       console.log('');
     } catch (error: any) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 

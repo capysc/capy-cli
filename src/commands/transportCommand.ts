@@ -108,7 +108,7 @@ export class TransportCommand {
       await promptCopyToClipboard(redeemCommand);
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 

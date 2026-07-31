@@ -62,7 +62,7 @@ export class OrgCommand {
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') throw error;
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 

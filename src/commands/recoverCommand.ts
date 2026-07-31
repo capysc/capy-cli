@@ -457,7 +457,7 @@ export class RecoverCommand {
       console.log('');
       console.log('  Nothing was written. No key on this device was created or replaced.');
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(err);
+      await displayErrorAndExit(err);
       // Unreachable: the line above exits. Present so this function has no
       // path that falls out of the catch returning nothing.
       throw err;

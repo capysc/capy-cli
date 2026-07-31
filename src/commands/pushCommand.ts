@@ -61,7 +61,7 @@ export class PushCommand {
     } catch (error: any) {
       this.debugError('push execute caught', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 

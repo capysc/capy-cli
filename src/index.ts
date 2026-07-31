@@ -4,6 +4,7 @@ import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
+import { setWebMode } from './ui/webMode';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -51,6 +52,15 @@ program
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
   .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  // Record `--web` once, before any handler runs, for the code that has no way
+  // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
+  // resolver, a service client, a crypto path — none of which is handed the
+  // flag, and threading a boolean through every signature between here and
+  // there would be forgotten on the nineteenth. Commands that decide their own
+  // flow still read `command.optsWithGlobals().web`.
+  .hook('preAction', (thisCommand) => {
+    setWebMode(thisCommand.opts().web === true);
+  })
   .action(async (options, cmd) => {
     if (cmd.args.length > 0) {
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
@@ -252,7 +262,7 @@ program
 
     } catch (error: any) {
       const { displayErrorAndExit } = await import('./ui/errorScreen');
-      displayErrorAndExit(error, {
+      await displayErrorAndExit(error, {
         projectName: projectState.projectName,
         projectId: projectState.projectId,
         branch: projectState.activeBranch ?? undefined,

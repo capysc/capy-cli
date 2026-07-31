@@ -135,7 +135,7 @@ export class CapyCommand {
     } catch (error: any) {
       this.debugError('execute caught error', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 
@@ -2082,9 +2082,23 @@ export class CapyCommand {
     }));
 
     const table = new ResolveTable(rows, showLocal, showRemote, defaults);
-    const { choices, cancelled } = await table.run();
+    const { choices, outcome } = await table.run();
 
-    if (cancelled) {
+    if (outcome === 'needs-input') {
+      // A conflict is the one thing in a sync that Capy cannot answer for you:
+      // both sides changed, and which one survives is a fact only the person
+      // who made the changes holds. Off a TTY this used to apply the defaults
+      // and carry on — a resolution written and reported as consent with
+      // nobody in the room. Exit 3 so a caller can tell "I need a human or a
+      // browser" apart from "this failed, retry".
+      const { refuseNonInteractive } = await import('../ui/interactive');
+      refuseNonInteractive(
+        `${diffs.length} ${diffs.length === 1 ? 'variable has' : 'variables have'} changed on both sides and need a decision`,
+        'Run `capy --web` to resolve them in a browser, or run `capy` in a terminal.',
+      );
+    }
+
+    if (outcome === 'cancelled') {
       return null;
     }
 

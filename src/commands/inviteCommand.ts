@@ -591,7 +591,7 @@ export class InviteCommand {
       }
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 

@@ -445,6 +445,73 @@ export interface ByocConnectData {
 }
 
 /**
+ * A command that could not continue, drawn instead of dying into a terminal.
+ *
+ * WHY THIS SCREEN EXISTS. `displayErrorAndExit` prints ANSI and exits at
+ * eighteen call sites. Under `--web` — which is agent-driven, so there is
+ * routinely no terminal anyone is watching — that output goes to a stream
+ * nobody reads, and if a browser window is already open it is left holding a
+ * page whose server has just been torn down. The run's last fact, the one that
+ * says what to do next, was the one fact that never made it to the surface the
+ * user was actually looking at.
+ *
+ * THE DIVISION OF LABOUR, and it is the whole shape of this payload: the CLI
+ * decides WHAT KIND of failure this is and hands over the pieces; the screen
+ * decides how they are drawn. Every layout in `errorScreen.ts` is the same
+ * five parts in different combinations — a title, a dim line of detail, some
+ * facts about where it happened, a list of ways it usually happens, and a
+ * numbered list of ways out. So they cross as five fields rather than as eight
+ * hand-built ANSI blocks, and the browser and the terminal cannot drift into
+ * telling different stories about the same failure.
+ *
+ * NOTHING HERE IS PARSED. `code` is the machine-readable fact and the only
+ * thing anything is allowed to branch on. `title`, `detail`, `causes` and
+ * `remedies` are prose for a person, shown verbatim.
+ */
+export interface CommandErrorData {
+  /**
+   * The typed error code — `PROJECT_NOT_FOUND`, `NETWORK_ERROR`, and so on.
+   *
+   * Carried so an agent reading the page (or a test asserting on it) has the
+   * same stable handle the CLI branched on, rather than having to recognise
+   * the sentence. The screen shows it in the corner for exactly that reason.
+   */
+  code: string;
+  /** One line: what happened. "Project not found", "Connection failed". */
+  title: string;
+  /** The specific reason, when there is one worth showing. Display only. */
+  detail?: string;
+  /**
+   * Where it happened: project, branch, variable, ID.
+   *
+   * Facts about one record, so they draw as a `FactList` — the same block the
+   * terminal prints as a dim label padded out beside its value.
+   */
+  context?: Array<{ label: string; value: string }>;
+  /**
+   * "This can happen when: …" — the ways this failure usually comes about.
+   *
+   * Separate from `remedies` because they are not instructions. Running the
+   * list together, as the terminal does with two adjacent indented blocks,
+   * makes the third cause read as the first step.
+   */
+  causes?: string[];
+  /**
+   * Ordered ways out. `command` is a thing to run, split from the sentence so
+   * the screen can set it in mono and offer to copy it.
+   */
+  remedies?: Array<{ text: string; command?: string }>;
+  /**
+   * How to see this failure in a terminal.
+   *
+   * An error page has no controls, so there is nothing here a flag could
+   * answer — the escape is for reproducing the failure somewhere a person can
+   * work on it, not for skipping a question.
+   */
+  nonTty?: NonTtyEscape;
+}
+
+/**
  * The typed confirmation in front of a live-mode key.
  *
  * `confirmLiveAction` serves two commands — `capy connect --live` and
@@ -4946,6 +5013,7 @@ export interface ScreenDataMap {
   "branch-create": BranchCreateData;
   "branch-list": BranchListData;
   "byoc-connect": ByocConnectData;
+  "command-error": CommandErrorData;
   "connect-live-gate": ConnectLiveGateData;
   "connect-overwrite": ConnectOverwriteData;
   "connect-provider": ConnectProviderData;
@@ -4992,6 +5060,7 @@ export const SCREEN_NAMES: readonly ScreenName[] = [
   "branch-create",
   "branch-list",
   "byoc-connect",
+  "command-error",
   "connect-live-gate",
   "connect-overwrite",
   "connect-provider",

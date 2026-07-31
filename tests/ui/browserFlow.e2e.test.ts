@@ -5499,3 +5499,119 @@ describeBrowser('capy deploy, driven by a real browser', () => {
     expect(again === null || again.status === 404).toBe(true);
   }, 60_000);
 });
+
+describeBrowser('a command that fails under --web ends on a page', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+  let child: CliChild | null = null;
+
+  afterEach(() => {
+    child?.dispose();
+    child = null;
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(520, 780);
+    await navigate(page, url);
+    return page;
+  }
+
+  /**
+   * A child that fails the way a real command fails: web mode on, a typed
+   * error, `displayErrorAndExit`. Run out of process because the two facts
+   * worth checking — that the page outlives the exit, and what the exit code
+   * is — cannot be observed from inside the process that has them.
+   */
+  const failing = (code: string, extra = '{}') =>
+    spawnCliChild(`
+      import { setWebMode } from ${imp('src/ui/webMode.ts')};
+      import { displayErrorAndExit } from ${imp('src/ui/errorScreen.ts')};
+      import { CapyError } from ${imp('src/types/index.ts')};
+
+      setWebMode(true);
+      await displayErrorAndExit(
+        new CapyError('the service said something', ${JSON.stringify(code)}, ${extra}),
+        { projectName: 'mikes-market', projectId: 'prj_7f3a', branch: 'development' },
+      );
+    `);
+
+  test('the page is still being served when the browser arrives', async () => {
+    // The defect class this guards is the one that made every ending page in
+    // the connectors parcel undeliverable: `start()` resolves when the socket
+    // is LISTENING, and a command that exits on the next line closes it
+    // microseconds before the browser connects. Proven by waiting first.
+    child = failing('PROJECT_NOT_FOUND', '{ status: 404 }');
+    const url = await child.url;
+    await new Promise((r) => setTimeout(r, 400));
+
+    const page = await open(url);
+    const text = await evaluate<string>(page, 'document.body.textContent');
+    expect(text).toContain('Project not found');
+  }, 60_000);
+
+  test('the code is on the page, because the reader is often not a person', async () => {
+    child = failing('NETWORK_ERROR');
+    const page = await open(await child.url);
+    const text = await evaluate<string>(page, 'document.body.textContent');
+    expect(text).toContain('NETWORK_ERROR');
+    expect(text).toContain('Connection failed');
+  }, 60_000);
+
+  test('the remedies name commands you can actually run', async () => {
+    child = failing('NO_KEEP_FILE');
+    const page = await open(await child.url);
+    const text = await evaluate<string>(page, 'document.body.textContent');
+    expect(text).toContain('No keep.lock file found');
+    expect(text).toContain('capy');
+  }, 60_000);
+
+  test('no ANSI escape reaches the document', async () => {
+    // A previous parcel shipped bold codes into a browser payload through a
+    // `B()` helper, and they render as a literal `[1m` in the middle of a
+    // sentence. The CLI bolds its own error messages on the way to a terminal.
+    child = failing('SERVICE_ERROR', '{ status: 503 }');
+    const page = await open(await child.url);
+    const html = await evaluate<string>(page, 'document.documentElement.outerHTML');
+    expect(html.includes(String.fromCharCode(27))).toBe(false);
+    expect(html.includes('[1m')).toBe(false);
+  }, 60_000);
+
+  test('the run still exits 1 — the page is a report, not a rescue', async () => {
+    // A failure that ends on a pretty page is still a failure, and an agent
+    // branches on the code rather than on whether a window appeared.
+    child = failing('PROJECT_NOT_FOUND', '{ status: 404 }');
+    const page = await open(await child.url);
+    await evaluate<string>(page, 'document.body.textContent');
+    expect(await child.exit).toBe(1);
+  }, 60_000);
+
+  test('with no --web there is no page and no wait', async () => {
+    // The other half of the contract: this must not turn every terminal
+    // failure into a browser window, and must not hold a plain run open
+    // waiting for a browser nobody asked for.
+    const plain = spawnCliChild(`
+      import { displayErrorAndExit } from ${imp('src/ui/errorScreen.ts')};
+      import { CapyError } from ${imp('src/types/index.ts')};
+      await displayErrorAndExit(new CapyError('nope', 'NO_KEEP_FILE'));
+    `);
+    // `spawnCliChild` arms its `url` promise eagerly and rejects it after ~20s
+    // if no URL is printed — which is the expected outcome here. Left alone it
+    // surfaces as an unhandled rejection long after this test has passed, and
+    // Bun attributes it to whichever test happens to be running then: this one
+    // failed a deploy test three blocks away. Claim it.
+    plain.url.catch(() => undefined);
+    try {
+      expect(await plain.exit).toBe(1);
+      expect(plain.output()).toContain('No keep.lock file found');
+      expect(PRINTED_URL.test(plain.output())).toBe(false);
+    } finally {
+      plain.dispose();
+    }
+  }, 60_000);
+});

@@ -113,7 +113,7 @@ export class CheckoutCommand {
         return;
       }
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 
@@ -406,7 +406,7 @@ export class CheckoutCommand {
     } catch (error: any) {
       branchSpinner.stop();
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
       return null;
     }
   }

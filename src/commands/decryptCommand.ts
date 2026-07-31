@@ -295,7 +295,7 @@ export class DecryptCommand {
         process.exit(0);
       }
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 }

@@ -133,7 +133,7 @@ export class EditCommand {
       }
     } catch (err: any) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(err, {
+      await displayErrorAndExit(err, {
         projectName: keep.project_name,
         projectId: keep.project_id,
         branch,

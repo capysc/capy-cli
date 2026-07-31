@@ -560,7 +560,7 @@ export class DeployCommand {
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') process.exit(0);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 }
@@ -711,7 +711,7 @@ export class DeployRevokeCommand {
       console.log(`  Deploy token ${deployIdPrefix.slice(0, 12)}... revoked.`);
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 }
@@ -795,7 +795,7 @@ export class DeployListCommand {
       console.log('');
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 }
