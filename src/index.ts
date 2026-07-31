@@ -110,10 +110,10 @@ program
   .command('status')
   .description('Show secret drift between local, pinned, and remote')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { StatusCommand } = await import('./commands/statusCommand');
     const cmd = new StatusCommand();
-    await cmd.execute({ json: options.json });
+    await cmd.execute({ json: options.json, web: command.optsWithGlobals().web === true });
   });
 
 program
@@ -264,7 +264,7 @@ program
   .option('--protected', 'Mark as a protected branch (invite-only)')
   .option('--no-protected', 'Create it open to the project')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (branch, options) => {
+  .action(async (branch, options, command) => {
     assertNotLocalOnly('checkout');
 
     // `--json` on a create describes the route rather than travelling it: the
@@ -284,7 +284,11 @@ program
 
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand();
-    await cmd.execute(branch, { create: options.create, protected: options.protected });
+    await cmd.execute(branch, {
+      create: options.create,
+      protected: options.protected,
+      web: command.optsWithGlobals().web === true,
+    });
   });
 
 program
@@ -522,11 +526,12 @@ program
   .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
-  .action(async (email, options) => {
+  .action(async (email, options, command) => {
     assertNotLocalOnly('invite');
     const { InviteCommand } = await import('./commands/inviteCommand');
     const cmd = new InviteCommand();
     await cmd.execute(email, {
+      web: command.optsWithGlobals().web === true,
       role: options.role,
       projects: options.project,
       ttl: options.ttl,
@@ -549,30 +554,32 @@ program
 program
   .command('transport')
   .description('Generate a redeem code to move your account to another machine')
-  .action(async () => {
+  .action(async (_options, command) => {
     assertNotLocalOnly('transport');
     const { TransportCommand } = await import('./commands/transportCommand');
     const cmd = new TransportCommand();
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
-  .action(async (email) => {
+  .action(async (email, _options, command) => {
     assertNotLocalOnly('kick');
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
-    await cmd.execute(email);
+    await cmd.execute(email, { web: command.optsWithGlobals().web === true });
   });
 
 program
   .command('org')
   .description('Switch organization')
-  .action(async () => {
+  .action(async (_options, command) => {
     assertNotLocalOnly('org');
     const { OrgCommand } = await import('./commands/orgCommand');
-    const cmd = new OrgCommand();
+    // OrgCommand takes it at construction — see its own note on why a
+    // subcommand must read the inherited global rather than its own options.
+    const cmd = new OrgCommand(undefined, false, { web: command.optsWithGlobals().web === true });
     await cmd.execute();
   });
 
@@ -641,20 +648,20 @@ program
 program
   .command('end-recover')
   .description('End recovery session and clean up decrypted files')
-  .action(async () => {
+  .action(async (_options, command) => {
     const { EndRecoverCommand } = await import('./commands/endRecoverCommand');
     const cmd = new EndRecoverCommand();
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
   .command('recover')
   .description('Reconstruct the wrapped master key from a 24-word recovery phrase')
-  .action(async () => {
+  .action(async (_options, command) => {
     assertNotLocalOnly('recover');
     const { RecoverCommand } = await import('./commands/recoverCommand');
     const cmd = new RecoverCommand();
-    await cmd.execute();
+    await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
 program
@@ -711,13 +718,14 @@ program
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand();
     if (!provider) {
-      await cmd.list();
+      await cmd.list({ web: command.optsWithGlobals().web === true });
       return;
     }
     // Merge globals: the top-level program also defines -f/--force, which
     // otherwise shadows this subcommand's --force (opts.force stays undefined).
     const merged = command.optsWithGlobals();
     await cmd.execute(provider, {
+      web: command.optsWithGlobals().web === true,
       live: options.live,
       var: options.var,
       account: options.account,
@@ -736,11 +744,12 @@ program
   .option('--skip-prompts', 'alias for --yes')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
-  .action(async (varName, options) => {
+  .action(async (varName, options, command) => {
     assertNotLocalOnly('rotate');
     const { RotateCommand } = await import('./commands/rotateCommand');
     const cmd = new RotateCommand();
     await cmd.execute(varName, {
+      web: command.optsWithGlobals().web === true,
       all: options.all,
       noPush: options.push === false,
       skipPrompts: !!(options.yes || options.skipPrompts),
