@@ -20,7 +20,7 @@
  *   bunx @puppeteer/browsers install chrome-headless-shell@stable
  */
 import { describe, test, expect, afterEach, afterAll, beforeAll } from 'bun:test';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -41,6 +41,22 @@ async function waitForUrl(getUrl: () => string): Promise<string> {
   for (let i = 0; i < 400 && !getUrl(); i++) await new Promise((r) => setTimeout(r, 10));
   return getUrl();
 }
+/**
+ * Wait for a condition in THIS process (a promise settling, a callback firing).
+ *
+ * `until` polls the page; this polls the CLI, which is what most of the
+ * endings below are about — a flow that ends by nobody clicking anything has
+ * nothing on screen left to assert against.
+ */
+async function untilHere(ok: () => boolean, what: string, budgetMs = 10_000): Promise<void> {
+  for (let i = 0; i < budgetMs / 25; i++) {
+    if (ok()) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+
 
 /** Evaluate an expression in the page and return its JSON value. */
 async function evaluate<T>(page: CdpSession, expression: string): Promise<T> {
@@ -107,6 +123,71 @@ async function clickWhenReady(page: CdpSession, finder: string, what: string): P
     await new Promise((r) => setTimeout(r, 25));
   }
   throw new Error(`timed out clicking ${what}${last ? ` (last: ${last})` : ''}`);
+}
+
+const CLI_ROOT = resolve(import.meta.dir, '../..');
+
+/** An absolute import specifier for a CLI module, for use inside a child snippet. */
+const imp = (rel: string): string => JSON.stringify(join(CLI_ROOT, rel));
+
+/**
+ * Either loopback address a `--web` run prints: an ending page served by
+ * `ScreenServer` (`/s/<token>`), or a wizard step (`/?n=<nonce>`).
+ */
+const PRINTED_URL = /http:\/\/127\.0\.0\.1:\d+\/(?:s\/[A-Za-z0-9_-]+|\?n=[a-f0-9]+)/;
+
+export interface CliChild {
+  /** The first loopback URL the child printed. */
+  url: Promise<string>;
+  exit: Promise<number>;
+  output: () => string;
+  dispose: () => void;
+}
+
+/**
+ * Run one snippet in a child `bun`, and hand back its URL and its EXIT CODE.
+ *
+ * Two facts about a `--web` run can only be observed from outside the process
+ * that has them: whether a page outlives the exit that follows it, and what
+ * that exit code is. Both matter — an ending served into a socket that closes
+ * microseconds later is a page nobody sees, and a refusal that exits 1 with a
+ * stack trace is a decision rendered as a crash.
+ *
+ * One helper for both, at module scope, because a second copy is a second set
+ * of assumptions about the URL shape, the environment and the teardown.
+ */
+function spawnCliChild(source: string): CliChild {
+  const scratch = mkdtempSync(join(tmpdir(), 'capy-child-'));
+  const file = join(scratch, 'run.ts');
+  writeFileSync(file, source);
+  // NEVER without CAPY_WEB_NO_OPEN: the child calls the same helpers the CLI
+  // calls, and those helpers open a browser.
+  const child = spawn('bun', [file], {
+    cwd: CLI_ROOT,
+    env: { ...process.env, CAPY_WEB_NO_OPEN: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout?.on('data', (c: Buffer) => (out += String(c)));
+  child.stderr?.on('data', (c: Buffer) => (out += String(c)));
+  const exit = new Promise<number>((res) => child.on('exit', (code) => res(code ?? -1)));
+  const url = (async () => {
+    for (let i = 0; i < 800; i++) {
+      const m = out.match(PRINTED_URL);
+      if (m) return m[0];
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`the child never printed a URL. Output:\n${out}`);
+  })();
+  return {
+    url,
+    exit,
+    output: () => out,
+    dispose: () => {
+      child.kill('SIGKILL');
+      rmSync(scratch, { recursive: true, force: true });
+    },
+  };
 }
 
 /** Navigate and wait until the page is actually running, not merely loaded. */
@@ -1406,66 +1487,29 @@ describeBrowser('capy rotate, driven by a real browser', () => {
  * real browser. They fail if the helper ever stops waiting for delivery.
  */
 describeBrowser('a --web ending outlives the exit code that follows it', () => {
-  const CLI_ROOT = resolve(import.meta.dir, '../..');
-  const SERVED_URL = /http:\/\/127\.0\.0\.1:\d+\/s\/[A-Za-z0-9_-]+/;
-
   let browser: Browser | null = null;
   let profile = '';
-  let scratch = '';
-  let child: ChildProcess | null = null;
+  let child: CliChild | null = null;
 
   afterEach(() => {
     browser?.close();
     browser = null;
-    child?.kill('SIGKILL');
+    child?.dispose();
     child = null;
-    for (const dir of [profile, scratch]) if (dir) rmSync(dir, { recursive: true, force: true });
+    if (profile) rmSync(profile, { recursive: true, force: true });
     profile = '';
-    scratch = '';
   });
 
   async function open(url: string): Promise<CdpSession> {
     profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
     browser = await Browser.launch(profile);
     const page = await browser.newPage(1280, 820);
-    const loaded = page.once('Page.loadEventFired', 20_000);
-    await page.send('Page.navigate', { url });
-    await loaded;
+    await navigate(page, url);
     return page;
   }
 
-  /** Run one snippet in a child `bun`, and hand back its URL and exit code. */
-  function spawnEnding(source: string): {
-    url: Promise<string>;
-    exit: Promise<number>;
-    output: () => string;
-  } {
-    scratch = mkdtempSync(join(tmpdir(), 'capy-ending-'));
-    const file = join(scratch, 'ending.ts');
-    writeFileSync(file, source);
-    // NEVER without CAPY_WEB_NO_OPEN: the child calls the same helper the CLI
-    // calls, and that helper opens a browser.
-    child = spawn('bun', [file], {
-      cwd: CLI_ROOT,
-      env: { ...process.env, CAPY_WEB_NO_OPEN: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let out = '';
-    child.stdout?.on('data', (c: Buffer) => (out += String(c)));
-    child.stderr?.on('data', (c: Buffer) => (out += String(c)));
-    const exit = new Promise<number>((res) => child!.on('exit', (code) => res(code ?? -1)));
-    const url = (async () => {
-      for (let i = 0; i < 800; i++) {
-        const m = out.match(SERVED_URL);
-        if (m) return m[0];
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      throw new Error(`the child never printed a URL. Output:\n${out}`);
-    })();
-    return { url, exit, output: () => out };
-  }
-
-  const imp = (rel: string): string => JSON.stringify(join(CLI_ROOT, rel));
+  /** The shared child runner, remembered so `afterEach` can bury it. */
+  const spawnEnding = (source: string): CliChild => (child = spawnCliChild(source));
 
   test('the rollout-failed page is still there after the command exits 1', async () => {
     // The marquee page of this parcel: the keys are live in Capy, every running
@@ -3694,4 +3738,950 @@ describeBrowser('the recovery flows, driven by a real browser', () => {
     expect(settled).toBe(false);
     await done.catch(() => undefined);
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------
+// The secrets parcel: `capy edit`, `capy add` and `capy decrypt`.
+//
+// These four screens are the only ones in the product that render real secret
+// values, so a fetch-driven test proves the least here: what has to be true is
+// that the page shows a mask, that the plaintext arrives ONLY on the round trip
+// the user asked for, and that the buffer the user typed reaches the CLI whole.
+// None of that can be checked without a browser.
+// ---------------------------------------------------------------------------
+
+const LIVE_KEY = 'example-value-123456-not-a-secret';
+const DB_LOCAL = 'postgres://localhost/dev';
+
+/** Two variables, as `capy edit` holds them: decrypted, in memory, in the CLI. */
+const EDIT_ROWS = [
+  {
+    key: 'STRIPE_SECRET_KEY',
+    localValue: LIVE_KEY,
+    remoteValue: LIVE_KEY,
+    status: 'in sync' as const,
+    updatedLabel: '3 days ago',
+    changedAt: '2026-07-27T10:00:00.000Z',
+  },
+  {
+    key: 'DATABASE_URL',
+    localValue: DB_LOCAL,
+    remoteValue: 'postgres://prod/app',
+    status: 'conflict' as const,
+    updatedLabel: 'just now',
+    changedAt: '2026-07-30T10:00:00.000Z',
+    // Queued in this session, so the table offers the review stop.
+    dirty: true,
+  },
+];
+
+/**
+ * The same two variables with nothing queued — the state every real run OPENS
+ * in, because `editCommand.ts` builds its rows from disk and no row on disk is
+ * dirty.
+ *
+ * It gets its own fixture because pre-marking a row `dirty` is what hid the
+ * worst defect in this parcel: with a change queued the table draws `Review 1
+ * change`, which is the only control that leads to a Cancel, so every test
+ * that used `EDIT_ROWS` was driving a screen that had a way out. On a clean
+ * table there is none — the buttons are the four column headers and `copy`,
+ * and `q`, `Escape`, `c` and `x` all post nothing.
+ */
+const CLEAN_ROWS = EDIT_ROWS.map(({ dirty: _dirty, ...row }) => row);
+
+describeBrowser('capy edit, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 900);
+    // The file's own navigate helper, not a fourth copy of it: it waits for the
+    // page to be RUNNING rather than merely loaded, which is what every
+    // assertion below actually depends on.
+    await navigate(page, url);
+    return page;
+  }
+
+  /** Type into a field the way a person does — `bind:value` listens for `input`. */
+  const type = (selector: string, value: string): string =>
+    `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  /** Click the button whose visible text contains `text`. */
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  const TABLE = {
+    projectName: 'mikes-market',
+    branch: 'staging',
+    mode: 'server' as const,
+    rows: EDIT_ROWS,
+    open: false,
+  };
+
+  test('a value is masked until it is asked for, and only that one is handed over', async () => {
+    // The rule the terminal cannot keep: `r` prints `row.localValue ??
+    // row.remoteValue` straight out of memory, and every value the table drew
+    // was already in the process that drew it. Here the served document holds
+    // no value at all, and one reveal fetches exactly one.
+    const { serveSecretTable } = await import('../../src/ui/secretTableScreen');
+    let url = '';
+    const done = serveSecretTable({ ...TABLE, timeoutMs: 20_000, onListen: (u) => (url = u) });
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+
+    // At rest: both keys on screen, neither value.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('postgres://')`)).toBe(false);
+    // The mask is a fixed run and does not vary with the value behind it.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022')`)).toBe(true);
+
+    // The rail is the CLI's plan, drawn whole before anything was answered —
+    // including the stops this run has not reached.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Encrypt and push to Keep')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('mikes-market/staging')`)).toBe(true);
+
+    // Open one row and ask for its value.
+    await evaluate(page, `document.querySelectorAll('tbody tr')[0].click()`);
+    await until(page, `[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'reveal')`, 'the value panel');
+    await evaluate(page, `[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'reveal').click()`);
+
+    await until(page, `document.body.textContent.includes(${JSON.stringify(LIVE_KEY)})`, 'the revealed value');
+    // One value, not the vault: the row nobody opened is still masked.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('postgres://')`)).toBe(false);
+
+    await evaluate(page, clickButton('Review'));
+    await evaluate(page, `document.querySelector('[data-test=commit]').click()`);
+    expect(await done).toEqual({ action: 'commit' });
+  }, 90_000);
+
+  test('asking to edit a variable is a handoff, and the CLI is told which one', async () => {
+    // `secret-table` answers the CLI's `ok` by saying "Opening <KEY> in the
+    // value editor…" and waiting — it never becomes the editor itself. So the
+    // CLI opens the editor, and this is the check that it learns the key.
+    const { serveSecretTable } = await import('../../src/ui/secretTableScreen');
+    let url = '';
+    const done = serveSecretTable({ ...TABLE, timeoutMs: 20_000, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, `document.querySelectorAll('tbody tr')[1].click()`);
+    await until(page, `document.querySelector('[data-test=edit-value]')`, 'the row panel');
+    await evaluate(page, `document.querySelector('[data-test=edit-value]').click()`);
+
+    expect(await done).toEqual({ action: 'edit', key: 'DATABASE_URL' });
+    await until(page, `document.body.textContent.includes('in the value editor')`, 'the handoff line');
+  }, 90_000);
+
+  test('the editor seeds its buffer from the CLI and saves what was typed', async () => {
+    // Two round trips a fetch test cannot stand in for: `/reveal` fills the box
+    // with the value that is on disk, and `/submit` carries the new one back.
+    // The terminal seeds this buffer with `row.localValue ?? ''`, so a row with
+    // no local copy silently overwrites the remote one with an empty string.
+    const { serveSecretValueEditor } = await import('../../src/ui/secretTableScreen');
+    let url = '';
+    const done = serveSecretValueEditor({
+      projectName: 'mikes-market',
+      branch: 'staging',
+      mode: 'server',
+      row: EDIT_ROWS[0],
+      remoteAvailable: true,
+      pendingCount: 0,
+      open: false,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // Inspect: the CLI's own mask, and no value.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('exa...ret')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes(${JSON.stringify(LIVE_KEY)})`)).toBe(false);
+
+    await evaluate(page, clickButton('Edit value'));
+    await until(page, `document.querySelector('input[type=password], textarea')`, 'the edit buffer');
+    // Seeded from the round trip, not from the payload.
+    expect(
+      await evaluate<string>(page, `document.querySelector('input[type=password], textarea').value`),
+    ).toBe(LIVE_KEY);
+
+    await evaluate(page, type('input[type=password], textarea', 'sk_live_rotated_0987654321'));
+    await until(page, `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Save value')).disabled`, 'the save button to go live');
+    await evaluate(page, clickButton('Save value'));
+
+    expect(await done).toEqual({
+      action: 'save',
+      key: 'STRIPE_SECRET_KEY',
+      value: 'sk_live_rotated_0987654321',
+    });
+  }, 90_000);
+
+  test('a secret short enough to have no mask is not previewed at all', async () => {
+    // `formatSnippet` returns anything six characters or shorter VERBATIM, so
+    // the terminal's column labelled as masked prints it whole. The payload
+    // carries no snippet for these, and the page says why there is none.
+    const { serveSecretValueEditor } = await import('../../src/ui/secretTableScreen');
+    let url = '';
+    const done = serveSecretValueEditor({
+      projectName: 'mikes-market',
+      branch: 'staging',
+      mode: 'server',
+      row: {
+        key: 'PIN',
+        localValue: 'hunter',
+        remoteValue: 'hunter',
+        status: 'in sync',
+        updatedLabel: 'just now',
+      },
+      remoteAvailable: true,
+      pendingCount: 0,
+      open: false,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('hunter')`)).toBe(false);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('No preview')`)).toBe(true);
+
+    // Reveal still works — seeing a value is meant to cost a deliberate act,
+    // which is exactly what it stopped costing when it was already on screen.
+    await evaluate(page, `[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'reveal').click()`);
+    await until(page, `document.body.textContent.includes('hunter')`, 'the revealed value');
+
+    await evaluate(page, clickButton('Cancel'));
+    // `declined`: a control on the page said no. The other two refusals — a
+    // closed window, a step nobody answered — are further down, and they are
+    // not the same fact even though all three write nothing.
+    expect(await done).toEqual({ action: 'cancel', reason: 'declined' });
+  }, 90_000);
+
+  test('a table with nothing queued has no control that ends the run', async () => {
+    // The state every real run opens in, and the reason the rest of this file
+    // did not catch what follows: `Review N changes` is the only control that
+    // reaches a Cancel, and it is not drawn until a row is dirty. This asserts
+    // the gap rather than papering over it — the fix is a `secret-table`
+    // change nobody in this parcel is allowed to make, so what the CLI owes
+    // the flow is an ending that does not need a control at all.
+    const { serveSecretTable } = await import('../../src/ui/secretTableScreen');
+    let url = '';
+    const done = serveSecretTable({
+      ...TABLE,
+      rows: CLEAN_ROWS,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(
+      await evaluate<string[]>(page, `[...document.querySelectorAll('button')].map(b => b.textContent.trim())`),
+    ).toEqual(['Key', 'Value', 'Status', 'Updated', 'copy']);
+
+    // And the keyboard is not a second way out either: `c` opens the review
+    // stop only when something is pending, and there is no `q` at all.
+    await evaluate(page, `window.__posts = []; const f = window.fetch;
+      window.fetch = (u, i) => { window.__posts.push(String(u)); return f(u, i); };`);
+    for (const key of ['q', 'Escape', 'c', 'x']) {
+      await evaluate(page, `window.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true }))`);
+    }
+    expect(await evaluate<string[]>(page, `window.__posts`)).toEqual([]);
+
+    await page.send('Page.close').catch(() => undefined);
+    await done.catch(() => undefined);
+  }, 90_000);
+
+  test('closing a table with nothing queued ends the run as a refusal', async () => {
+    // The blocking one. A person opens `capy edit --web`, reads the table,
+    // reveals a value and closes the tab — the most common path there is, and
+    // the one with no control on it. It used to end by holding the terminal
+    // for five minutes and then throwing `Timed out waiting for the browser`;
+    // it has to end the way every other refusal does, promptly and by name.
+    const { serveSecretTable } = await import('../../src/ui/secretTableScreen');
+    let url = '';
+    const done = serveSecretTable({
+      ...TABLE,
+      rows: CLEAN_ROWS,
+      // Comfortably longer than the close takes, so a pass cannot come from
+      // the deadline: this settles because the window closed.
+      timeoutMs: 30_000,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, `document.querySelectorAll('tbody tr')[0].click()`);
+    await until(page, `[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'reveal')`, 'the value panel');
+
+    const t0 = Date.now();
+    await page.send('Page.close').catch(() => undefined);
+
+    expect(await done).toEqual({ action: 'cancel', reason: 'closed' });
+    // Promptly: the whole defect was that this took five minutes.
+    expect(Date.now() - t0).toBeLessThan(10_000);
+  }, 90_000);
+
+  test('closing the value editor ends the run instead of looping back to a page nobody can see', async () => {
+    // Its Cancel means "back to the table". Closing the window does not: there
+    // is no tab left to draw a table into, so re-serving one waits out the
+    // deadline against a browser that has gone home.
+    const { serveSecretValueEditor } = await import('../../src/ui/secretTableScreen');
+    let url = '';
+    const done = serveSecretValueEditor({
+      projectName: 'mikes-market',
+      branch: 'staging',
+      mode: 'server',
+      row: CLEAN_ROWS[0],
+      remoteAvailable: true,
+      pendingCount: 0,
+      open: false,
+      timeoutMs: 30_000,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.close').catch(() => undefined);
+
+    expect(await done).toEqual({ action: 'cancel', reason: 'closed' });
+  }, 90_000);
+
+  test('the rail marks whichever stop the CLI says the run is standing on', async () => {
+    // The rail is the CLI's claim about the route, and the claim has to MOVE.
+    // Both payloads are built by the same `buildSecretTableData` the served
+    // flow uses, and the compiled screen draws the marker where the CLI put it.
+    //
+    // WHAT THIS DOES NOT COVER, deliberately, because it cannot be reached from
+    // here: `secret-table` swaps to its review view CLIENT-side
+    // (packages/ui/screens/secret-table/Screen.svelte, `openReview()` sets
+    // `view = 'confirm-commit'` and never posts), so the CLI is never asked for
+    // the second payload below and the rail on that view is the first one,
+    // stale. The same is true of the `done` and `cancelled` views. The fix is a
+    // line of packages/ui, which this parcel may not touch, and the pattern
+    // already exists there: `Wizard.svelte`'s `shownStops` advances the rail
+    // locally for exactly this reason. This test pins the CLI's half so that
+    // change is a one-liner and not an investigation.
+    const { buildSecretTableData } = await import('../../src/ui/secretTableScreen');
+    const { ScreenServer } = await import('../../src/ui/screens/serve');
+    const nonce = 'n'.repeat(64);
+    const params = { ...TABLE, rows: EDIT_ROWS };
+
+    const here = async (view: 'table' | 'confirm-commit'): Promise<string> => {
+      const server = new ScreenServer('secret-table', buildSecretTableData(params, nonce, view), {
+        timeoutMs: 20_000,
+      });
+      const url = await server.start();
+      const page = await open(url);
+      await until(page, `document.querySelector('li.current .label')`, 'the rail');
+      const label = await evaluate<string>(page, `document.querySelector('li.current .label').textContent`);
+      // One marker, never two: the rail is drawn from a single cursor.
+      expect(await evaluate<number>(page, `document.querySelectorAll('.here').length`)).toBe(1);
+      browser?.close();
+      browser = null;
+      // `open()` reassigns `profile`, so the second call would orphan the
+      // first one's directory past `afterEach`.
+      if (profile) rmSync(profile, { recursive: true, force: true });
+      profile = '';
+      server.close();
+      return label;
+    };
+
+    expect(await here('table')).toBe('Edit values');
+    expect(await here('confirm-commit')).toBe('Review changes');
+  }, 90_000);
+});
+
+describeBrowser('capy edit end to end, driven by a real browser', () => {
+  // `runSecretEditorInBrowser` is what `editCommand.ts` calls: the loop that
+  // stitches table → editor → table → commit across three separate loopback
+  // servers and three pages. Every test above drives one of those servers on
+  // its own, which is how a table with no way out shipped — the loop is where
+  // "no way out" becomes a hung command.
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function launch(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 900);
+    // The file's own navigate helper, not a fourth copy of it: it waits for the
+    // page to be RUNNING rather than merely loaded, which is what every
+    // assertion below actually depends on.
+    await navigate(page, url);
+    return page;
+  }
+
+  const type = (selector: string, value: string): string =>
+    `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  const LOOP = {
+    projectName: 'mikes-market',
+    branch: 'staging',
+    mode: 'server' as const,
+    remoteAvailable: true,
+    open: false,
+    timeoutMs: 30_000,
+  };
+
+  test('a run that edits nothing ends when the window closes, and writes nothing', async () => {
+    // The whole command, on its most common path. Without an ending here this
+    // is `capy edit --web` holding the terminal for five minutes and exiting
+    // non-zero, long after the person walked away.
+    const { runSecretEditorInBrowser } = await import('../../src/ui/secretTableScreen');
+    const urls: string[] = [];
+    let saved: Record<string, string> | null = null;
+
+    const done = runSecretEditorInBrowser(
+      { ...LOOP, rows: CLEAN_ROWS, onListen: (u) => urls.push(u) },
+      {
+        saveLocalEdits: async (edits) => {
+          saved = edits;
+          return {};
+        },
+      },
+    );
+
+    await untilHere(() => urls.length > 0, 'the table to be served');
+    const page = await launch(urls[0]);
+    await page.send('Page.close').catch(() => undefined);
+
+    await done;
+    expect(saved).toBeNull();
+    // One server, opened once: the loop did not go round again and serve a
+    // table into a browser that had gone.
+    expect(urls).toHaveLength(1);
+  }, 120_000);
+
+  test('the whole route is walked by clicking: table, editor, table, review, commit', async () => {
+    // Starting from a CLEAN table, which is where every real run starts. The
+    // review stop exists at the end only because the editor put a change
+    // behind it.
+    const { runSecretEditorInBrowser } = await import('../../src/ui/secretTableScreen');
+    const urls: string[] = [];
+    let saved: Record<string, string> | null = null;
+
+    const done = runSecretEditorInBrowser(
+      { ...LOOP, rows: CLEAN_ROWS, onListen: (u) => urls.push(u) },
+      {
+        saveLocalEdits: async (edits) => {
+          saved = edits;
+          return { STRIPE_SECRET_KEY: '2026-07-30T12:00:00.000Z' };
+        },
+      },
+    );
+
+    await untilHere(() => urls.length > 0, 'the table to be served');
+    const page = await launch(urls[0]);
+
+    // Stop one: ask to edit a variable. The table hands over rather than
+    // becoming the editor, so the CLI has to open the next page itself.
+    await evaluate(page, `document.querySelectorAll('tbody tr')[0].click()`);
+    await until(page, `document.querySelector('[data-test=edit-value]')`, 'the row panel');
+    await evaluate(page, `document.querySelector('[data-test=edit-value]').click()`);
+    await until(page, `document.body.textContent.includes('in the value editor')`, 'the handoff line');
+
+    // Stop two: the editor the loop opened, at its own address.
+    await untilHere(() => urls.length > 1, 'the value editor to be served');
+    await navigate(page, urls[1]);
+    await evaluate(page, clickButton('Edit value'));
+    await until(page, `document.querySelector('input[type=password], textarea')`, 'the edit buffer');
+    await evaluate(page, type('input[type=password], textarea', 'sk_live_rotated'));
+    await until(page, `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Save value')).disabled`, 'the save button');
+    await evaluate(page, clickButton('Save value'));
+
+    // Stop three: back to the table, now holding one queued change — which is
+    // what puts a Review control on the page at all.
+    await untilHere(() => urls.length > 2, 'the table to be served again');
+    await navigate(page, urls[2]);
+    await until(page, `[...document.querySelectorAll('button')].some(b => b.textContent.includes('Review'))`, 'the review control');
+    // The queued value is not in the document it redrew from.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live_rotated')`)).toBe(false);
+
+    await evaluate(page, clickButton('Review'));
+    await evaluate(page, `document.querySelector('[data-test=commit]').click()`);
+
+    await done;
+    expect(saved).toEqual({ STRIPE_SECRET_KEY: 'sk_live_rotated' });
+  }, 120_000);
+});
+
+describeBrowser('capy add, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+  let child: CliChild | null = null;
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    child?.dispose();
+    child = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  /** The shared child runner, remembered so `afterEach` can bury it. */
+  const spawnChild = (source: string): CliChild => (child = spawnCliChild(source));
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 900);
+    // The file's own navigate helper, not a fourth copy of it: it waits for the
+    // page to be RUNNING rather than merely loaded, which is what every
+    // assertion below actually depends on.
+    await navigate(page, url);
+    return page;
+  }
+
+  const type = (selector: string, value: string): string =>
+    `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  test('a value typed into the form reaches the CLI and was never in the document', async () => {
+    // The whole promise of this page: an agent asks for a credential it must
+    // not see, and the value goes from the keyboard to the CLI without passing
+    // through the model. It is also masked while it is typed, which the
+    // hand-written page it replaces did not do.
+    const { runWebIntake } = await import('../../src/ui/secretIntakeScreen');
+    let url = '';
+    let received: Array<{ name: string; value: string }> | null = null;
+    const done = runWebIntake(
+      {
+        vars: [{ name: 'STRIPE_SECRET_KEY', helpUrl: 'https://dashboard.stripe.com/apikeys' }],
+        reason: 'STRIPE_SECRET_KEY already exist(s). Overwrite?',
+        open: false,
+        timeoutMs: 20_000,
+        onListen: (u) => (url = u),
+      },
+      async (pairs) => {
+        received = pairs;
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The name is pre-seeded, the vendor mark resolved from the help link, and
+    // the CLI's own overwrite sentence is above the form — the confirm `--web`
+    // used to skip in silence.
+    expect(await evaluate<string>(page, `document.querySelector('input[type=text]').value`)).toBe('STRIPE_SECRET_KEY');
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('already exist(s). Overwrite?')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `!!document.querySelector('svg[role=img]')`)).toBe(true);
+
+    // The value box is masked while it is typed.
+    expect(await evaluate<boolean>(page, `!!document.querySelector('input[type=password], textarea')`)).toBe(true);
+
+    await evaluate(page, type('input[type=password], textarea', 'sk_live_typed_by_a_person'));
+    await evaluate(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Save')).click()`,
+    );
+
+    await done;
+    expect(received).toEqual([{ name: 'STRIPE_SECRET_KEY', value: 'sk_live_typed_by_a_person' }]);
+  }, 90_000);
+
+  test('an illegal variable name holds the button down before anything is sent', async () => {
+    // The page it replaces accepted `my key` as a variable name and encrypted
+    // it, because a hand-rolled input has nowhere to put an error.
+    const { runWebIntake } = await import('../../src/ui/secretIntakeScreen');
+    let url = '';
+    let saved = false;
+    const done = runWebIntake(
+      { vars: [{ name: 'OK_NAME' }], open: false, timeoutMs: 4_000, onListen: (u) => (url = u) },
+      async () => {
+        saved = true;
+      },
+    );
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, type('input[type=text]', 'my key'));
+    await evaluate(page, type('input[type=password], textarea', 'anything'));
+    await until(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Save')).disabled`,
+      'the save button to be held down',
+    );
+
+    expect(saved).toBe(false);
+    await done.catch(() => undefined);
+  }, 90_000);
+
+  test('closing the form is how you refuse the overwrite, and it saves nothing', async () => {
+    // `capy add --web` states the terminal's overwrite confirm above the form
+    // and the screen has no Cancel control, so leaving IS the answer to it.
+    // That answer has to arrive: it used to be a five-minute wait ending in a
+    // thrown timeout, and the caller — which reads "nothing was captured" as
+    // the refusal — never got to see it.
+    const { runWebIntake } = await import('../../src/ui/secretIntakeScreen');
+    let url = '';
+    let saved = false;
+    const done = runWebIntake(
+      {
+        vars: [{ name: 'STRIPE_SECRET_KEY' }],
+        reason: 'STRIPE_SECRET_KEY already exist(s). Overwrite?',
+        open: false,
+        timeoutMs: 30_000,
+        onListen: (u) => (url = u),
+      },
+      async () => {
+        saved = true;
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('already exist(s). Overwrite?')`),
+    ).toBe(true);
+    // Still true, and still the reason this ending has to work: there is no
+    // control on this page that says no.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `![...document.querySelectorAll('button')].some(b => /cancel|discard/i.test(b.textContent))`,
+      ),
+    ).toBe(true);
+
+    const t0 = Date.now();
+    await page.send('Page.close').catch(() => undefined);
+
+    await done;
+    expect(saved).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+  }, 90_000);
+
+  test('refusing the overwrite ends the command cleanly — no stack trace, exit 0', async () => {
+    // The refusal above only proves the INTAKE resolves. What the person sees
+    // is `capy add`, and that ran on past the resolve: the command printed its
+    // friendly line and then threw a `CapyError` that nothing catches — the
+    // `.action` handler has no try/catch and `program.parse` is not awaited —
+    // so it landed in the process-level unhandledRejection handler, which
+    // printed the same sentence again under eight lines of node internals and
+    // exited 1. Declining an overwrite is one of this flow's two endings; it is
+    // not a crash, and the terminal path for the identical refusal has always
+    // printed `Aborted.` and returned 0.
+    //
+    // A CHILD PROCESS, because an exit code is the thing under test and this
+    // one cannot be observed from inside the process that would be exiting.
+    const source = `
+      import { mock } from 'bun:test';
+      // The command's context, stubbed at the seam it is imported from: this
+      // test is about how the command ENDS, not about keep.lock or the service.
+      mock.module(${imp('src/commands/connectors/shared.ts')}, () => ({
+        resolveContext: async () => ({ branch: 'staging', localPlaintext: { STRIPE_SECRET_KEY: 'old' } }),
+        writeAndSync: async () => { throw new Error('nothing may be written on a refusal'); },
+      }));
+      const { AddCommand } = await import(${imp('src/commands/addCommand.ts')});
+      // Exactly as src/index.ts invokes it: awaited, with nothing catching.
+      await new AddCommand(false).execute(['STRIPE_SECRET_KEY'], { web: true, open: false, noPush: true });
+      console.log('COMMAND RETURNED');
+    `;
+    const run = spawnChild(source);
+    const page = await open(await run.url);
+    // The overwrite question really is on the page being closed.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('already exist(s). Overwrite?')`),
+    ).toBe(true);
+    await page.send('Page.close').catch(() => undefined);
+
+    expect(await run.exit).toBe(0);
+    const out = run.output();
+    expect(out).toContain('Nothing was added. The browser was closed without saving.');
+    expect(out).toContain('COMMAND RETURNED');
+    // Not the ✓ line either: a refusal is not a save of zero variables.
+    expect(out).not.toContain('✓ Saved');
+    // And no crash dressed over the top of it.
+    expect(out).not.toContain('CapyError');
+    expect(out).not.toContain('at <anonymous>');
+  }, 90_000);
+});
+
+describeBrowser('capy decrypt, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 900);
+    // The file's own navigate helper, not a fourth copy of it: it waits for the
+    // page to be RUNNING rather than merely loaded, which is what every
+    // assertion below actually depends on.
+    await navigate(page, url);
+    return page;
+  }
+
+  /** Fill the phrase grid one box at a time, the way a person retypes a card. */
+  const fillWords = (words: string[]): string =>
+    `(() => {
+       const boxes = [...document.querySelectorAll('input[type=password]')];
+       const words = ${JSON.stringify(words)};
+       boxes.forEach((el, i) => {
+         el.value = words[i] ?? '';
+         el.dispatchEvent(new Event('input', { bubbles: true }));
+       });
+       return boxes.length;
+     })()`;
+
+  const DECRYPT = {
+    projectName: 'mikes-market',
+    branch: 'main',
+    outputFile: '.env.main.decrypted',
+    open: false,
+  };
+
+  test('a real phrase is typed, posted once, and never comes back with the page', async () => {
+    const { generateSeedPhrase } = await import('../../src/crypto/keyManager');
+    const { decryptInBrowser } = await import('../../src/ui/decryptScreen');
+    const phrase = generateSeedPhrase();
+    const words = phrase.split(' ');
+
+    let url = '';
+    let seen = '';
+    const done = decryptInBrowser(
+      { ...DECRYPT, timeoutMs: 20_000, onListen: (u) => (url = u) },
+      async (input) => {
+        if ('phrase' in input) seen = input.phrase;
+        return { ok: true, count: 7, wrote: true };
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The rail says what happens next, including the file this will write.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('.env.main.decrypted')`)).toBe(true);
+    // Every box is masked, and none of them autocompletes.
+    expect(await evaluate<number>(page, `document.querySelectorAll('input[type=password]').length`)).toBe(24);
+
+    expect(await evaluate<number>(page, fillWords(words))).toBe(24);
+    await evaluate(page, `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Decrypt to a file')).click()`);
+
+    expect(await done).toEqual({ action: 'decrypted', count: 7, wrote: true });
+    // The CLI got the phrase the user typed…
+    expect(seen).toBe(phrase);
+    // …and the tab it was typed into does not hold it any more.
+    await until(page, `!document.body.textContent.includes(${JSON.stringify(words[0])})`, 'the words to be forgotten');
+    expect(await evaluate<string>(page, `location.search`)).not.toContain(words[0]);
+  }, 90_000);
+
+  test('a phrase the wordlist does not know never leaves the tab', async () => {
+    // The terminal answers all three failures with one sentence and only after
+    // the words have already been sent. The page runs the CLI's own three
+    // checks in the tab and holds the submit, so a typo is never posted.
+    const { decryptInBrowser } = await import('../../src/ui/decryptScreen');
+    let url = '';
+    let attempted = false;
+    const done = decryptInBrowser(
+      { ...DECRYPT, timeoutMs: 4_000, onListen: (u) => (url = u) },
+      async () => {
+        attempted = true;
+        return { ok: true, count: 1, wrote: true };
+      },
+    );
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, fillWords(Array.from({ length: 24 }, (_, i) => `notaword${i}`)));
+    await evaluate(page, `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Decrypt to a file')).click()`);
+
+    await until(page, `document.body.textContent.includes('BIP-39 wordlist')`, 'the refusal');
+    expect(attempted).toBe(false);
+    await done.catch(() => undefined);
+  }, 90_000);
+
+  test('an open recovery session asks before it reuses the key it already holds', async () => {
+    // The terminal reuses a cached master key with no prompt and no mention.
+    const { decryptInBrowser } = await import('../../src/ui/decryptScreen');
+    let url = '';
+    let answered: unknown = null;
+    const done = decryptInBrowser(
+      {
+        ...DECRYPT,
+        session: { orgName: 'org_2f9c', startedAt: '14 minutes ago' },
+        timeoutMs: 20_000,
+        onListen: (u) => (url = u),
+      },
+      async (input) => {
+        answered = input;
+        return { ok: true, count: 2, wrote: true };
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('org_2f9c')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('plaintext')`)).toBe(true);
+    // No phrase is asked for, so there is nothing to type.
+    expect(await evaluate<number>(page, `document.querySelectorAll('input[type=password]').length`)).toBe(0);
+
+    await evaluate(page, `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Decrypt to a file')).click()`);
+    expect(await done).toEqual({ action: 'decrypted', count: 2, wrote: true });
+    expect(answered).toEqual({ useSession: true });
+  }, 90_000);
+
+  test('closing the window decrypts nothing, and says which refusal it was', async () => {
+    // An unanswered step is a refusal. Nothing about leaving may look like
+    // consent to write every secret on this branch to a file in the clear —
+    // and nothing about it may look like a fault either: this used to end by
+    // throwing `Timed out waiting for the browser (5 minutes).` at a command
+    // that had done nothing wrong.
+    const { decryptInBrowser } = await import('../../src/ui/decryptScreen');
+    let url = '';
+    let attempted = false;
+    const done = decryptInBrowser({ ...DECRYPT, timeoutMs: 30_000, onListen: (u) => (url = u) }, async () => {
+      attempted = true;
+      return { ok: true, count: 1, wrote: true };
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    const t0 = Date.now();
+    await page.send('Page.close').catch(() => undefined);
+
+    expect(await done).toEqual({ action: 'cancelled', reason: 'closed' });
+    expect(attempted).toBe(false);
+    expect(Date.now() - t0).toBeLessThan(10_000);
+  }, 90_000);
+
+  test('a wrong phrase re-serves the step, and the run survives a human-length pause on it', async () => {
+    // The trap under "closing the window is a refusal": a standalone step
+    // ADVANCES by reloading, so every re-serve is a page going away and coming
+    // straight back. A refusal that fired on the way out would cancel the run
+    // exactly when it should be asking again — with the words already typed.
+    //
+    // THE PAUSE IS THE POINT. An earlier version of this test retyped 24 words
+    // and clicked in under half a second, which is faster than any grace window
+    // and faster than any person: it passed against a build where the re-serve
+    // armed a 1.2-second self-destruct. So this one STOPS and reads, the way
+    // somebody does when a page tells them "a single wrong word produces a
+    // completely different key", and only then retypes.
+    const { generateSeedPhrase } = await import('../../src/crypto/keyManager');
+    const { decryptInBrowser } = await import('../../src/ui/decryptScreen');
+    const phrase = generateSeedPhrase();
+    const words = phrase.split(' ');
+
+    let url = '';
+    let attempts = 0;
+    let settled: unknown = 'still going';
+    const done = decryptInBrowser(
+      { ...DECRYPT, timeoutMs: 30_000, onListen: (u) => (url = u) },
+      async () => {
+        attempts += 1;
+        // First answer: the phrase is real but opens nothing. The CLI re-serves
+        // the step rather than refusing inline, which is a full page reload.
+        return attempts === 1
+          ? { ok: false, reason: 'KEY_MISMATCH' as const }
+          : { ok: true, count: 4, wrote: true };
+      },
+    );
+    void done.then((r) => (settled = r)).catch((e) => (settled = e));
+
+    const page = await open(await waitForUrl(() => url));
+    expect(await evaluate<number>(page, fillWords(words))).toBe(24);
+    const reloaded = page.once('Page.loadEventFired', 20_000);
+    await evaluate(page, `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Decrypt to a file')).click()`);
+    await reloaded;
+
+    // The step comes back, wiped, with the CLI's own reason on it.
+    await until(
+      page,
+      `document.body.textContent.includes('a single wrong word produces a completely different key')`,
+      'the key-mismatch reason',
+    );
+    expect(await evaluate<string>(page, `document.querySelector('input[type=password]').value`)).toBe('');
+
+    // Read it. Twice the old grace window, and a fraction of what it takes to
+    // find the card the 24 words are written on.
+    await new Promise((r) => setTimeout(r, 2_500));
+
+    // The run has not ended behind the page. This is the assertion the defect
+    // broke: the promise resolved `{action:'cancelled',reason:'closed'}` about
+    // 1.2s after the re-serve, the CLI printed "Browser closed. Nothing was
+    // decrypted." and returned, and the socket the retype posts into was gone.
+    expect(settled).toBe('still going');
+    // The page is still being served by a live CLI, not by a corpse.
+    expect((await fetch(url)).status).toBe(200);
+
+    // …so the retype lands, and the run finishes the way it was going to.
+    expect(await evaluate<number>(page, fillWords(words))).toBe(24);
+    await evaluate(page, `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Decrypt to a file')).click()`);
+    expect(await done).toEqual({ action: 'decrypted', count: 4, wrote: true });
+    expect(attempts).toBe(2);
+  }, 90_000);
+
+  test('the result page is reachable when the browser comes for it, and stops being served once it has', async () => {
+    // Both halves of one rule. The page is served out of this process, so it
+    // has to outlive the command long enough to load — and not one moment
+    // longer: `showDecryptResult` used to return in 4ms and leave a listening
+    // socket holding the process for two minutes with the work already done
+    // and printed, on every run where nothing opened it.
+    const { showDecryptResult } = await import('../../src/ui/decryptScreen');
+    let url = '';
+    const done = showDecryptResult(
+      { ...DECRYPT, onListen: (u) => (url = u) },
+      { count: 3, wrote: true },
+      { timeoutMs: 30_000 },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('.env.main.decrypted')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('plaintext')`)).toBe(true);
+    // Counts and a filename. Never a variable name, never a value.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('3 secrets')`)).toBe(true);
+
+    const t0 = Date.now();
+    await done;
+    // It waited for the page and then stopped waiting — not for the timeout.
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    // And the socket goes with it. Not asserted on the first try: the server
+    // gives the response a beat to flush before tearing itself down, so the
+    // honest claim is that the port STOPS answering, not that it already has.
+    let refused = false;
+    for (let i = 0; i < 200 && !refused; i++) {
+      try {
+        // While it is still up it is single-use and spent, so it cannot serve
+        // a second copy of a page about a plaintext file either.
+        expect((await fetch(url)).status).not.toBe(200);
+      } catch {
+        refused = true;
+      }
+      if (!refused) await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(refused).toBe(true);
+  }, 90_000);
 });

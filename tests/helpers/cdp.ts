@@ -128,7 +128,30 @@ export class Browser {
     private endpoint: string,
   ) {}
 
+  /**
+   * Start a shell, retrying a startup that dies (up to three attempts).
+   *
+   * A shell that dies during startup is the one flaky failure this suite has:
+   * a full batch run launches a couple of dozen of them against the same
+   * machine, and an early exit surfaces as a test failing in ~150ms — before
+   * it has driven anything. Retrying the LAUNCH cannot mask a product defect,
+   * because at this point no page has been served and nothing has been
+   * clicked; every assertion still has to pass on the browser that comes up.
+   */
   static async launch(profileDir: string): Promise<Browser> {
+    let last: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await Browser.spawnOnce(profileDir);
+      } catch (err) {
+        last = err;
+        await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+      }
+    }
+    throw last instanceof Error ? last : new Error(String(last));
+  }
+
+  private static async spawnOnce(profileDir: string): Promise<Browser> {
     const bin = findHeadlessShell();
     if (!bin) {
       throw new Error(
@@ -170,6 +193,10 @@ export class Browser {
         clearTimeout(timer);
         rej(new Error(`browser exited early (${code}): ${buf.slice(-400)}`));
       });
+    }).catch((err) => {
+      // Never leave a half-started shell behind for the retry to compete with.
+      proc.kill('SIGKILL');
+      throw err;
     });
 
     return new Browser(proc, endpoint);
