@@ -667,12 +667,13 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
       console.log(`  ${url}`);
       console.log('');
       if (params.open) {
-        try {
-          const open = (await import('open')).default;
-          await open(url);
-        } catch {
-          /* best-effort; the printed URL is the fallback */
-        }
+        // A dialog, never a tab: this is the CLI's own page, served on
+        // loopback behind a single-use nonce, with nothing to sign into. The
+        // window is sized from the document about to be served — see
+        // `wantsWideWindow`.
+        const { openScreen } = await import('./openScreen');
+        const { wantsWideWindow } = await import('./screens/serve');
+        await openScreen(url, { kind: 'dialog', wide: wantsWideWindow(current.html) });
       }
     });
   });

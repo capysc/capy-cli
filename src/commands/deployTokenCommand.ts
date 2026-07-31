@@ -235,8 +235,11 @@ function writeConfig(projectRoot: string, config: CapyConfig): void {
 }
 
 async function openInBrowser(url: string): Promise<void> {
-  const open = (await import('open')).default;
-  open(url).catch(() => {});
+  const { openScreen } = await import('../ui/openScreen');
+  // Wide, and not because of `Page`: this one is not a compiled screen but the
+  // deploy instructions — fenced blocks of platform config someone is going to
+  // read and copy. A 520px dialog would wrap every one of them.
+  await openScreen(url, { kind: 'dialog', wide: true });
 }
 
 

@@ -833,8 +833,11 @@ program
     console.log(`Serving ${B(screen)} at ${url}`);
     console.log('One-time token URL — a second request will 404. Ctrl+C to stop.');
     if (options.open !== false) {
-      const { default: open } = await import('open');
-      await open(url);
+      // The same window a real run of this screen would get, so what is being
+      // previewed here is what ships.
+      const { openScreen } = await import('./ui/openScreen');
+      const { SCREEN_WIDE } = await import('./ui/screens/generated');
+      await openScreen(url, { kind: 'dialog', wide: SCREEN_WIDE[name] });
     }
   });
 
