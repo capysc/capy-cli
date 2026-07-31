@@ -17,6 +17,74 @@ import { debug } from '../ui/debug';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/**
+ * The codes this client is willing to mint from a response body's `code`.
+ *
+ * An allowlist rather than a passthrough: a server free to name any code it
+ * likes could steer the CLI down a branch the CLI never reasoned about, and
+ * `MEMBERSHIP_REVOKED` in particular gates a destructive local wipe. Anything
+ * unrecognised falls through to SERVICE_ERROR, which is the safe default.
+ */
+const SERVER_CODES = new Set<string>([
+  ERROR_CODES.PROJECT_NOT_FOUND,
+  ERROR_CODES.BRANCH_NOT_FOUND,
+  ERROR_CODES.SNAPSHOT_NOT_FOUND,
+  ERROR_CODES.NO_SECRETS,
+  ERROR_CODES.ORG_NOT_FOUND,
+  ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND,
+]);
+
+/**
+ * WHICH ERROR THIS IS — decided ONCE, here, where the status and the body are
+ * both in hand, and never again downstream.
+ *
+ * The alternative is what this replaces, and it was live in three files: the
+ * error screen picked its layout with `serverMsg.includes('Project not
+ * found')`, `getDecryptData` decided whether to swallow a 404 with
+ * `msg.includes('not found') && !msg.includes('No secrets')`, and
+ * `statusCommand` turned `err.message` into an `access_denied` badge with
+ * `reason.includes('do not have access')`. Three copies of one decision, each
+ * keyed on prose that no contract obliges the service to keep. Reword "Project
+ * not found" to "No such project" and the error screen silently drops to the
+ * generic layout — taking the recovery instructions with it — with nothing
+ * failing anywhere.
+ *
+ * PRECEDENCE.
+ *   1. The server's own `code` field, when it is one we recognise. This is the
+ *      contract, and it is what new code should rely on.
+ *   2. Otherwise, for 404s only, the historical message shapes — because a CLI
+ *      talks to whatever version of the service is deployed, and the older one
+ *      sends prose and nothing else. This is the ONLY place that match is
+ *      allowed to live, and it is here rather than downstream so it is one
+ *      bridge to delete rather than three to find. Delete it once every
+ *      supported service emits `code`.
+ *   3. SERVICE_ERROR.
+ *
+ * `MEMBERSHIP_REVOKED` is deliberately not minted here: it stays a
+ * `details.code` on a PERMISSION_DENIED, because `isMembershipRevokedError`
+ * is the single gate for a destructive wipe and its contract is pinned by
+ * tests. One vocabulary, two shapes, both machine-readable.
+ */
+export function classifyResponse(
+  status: number,
+  data: Record<string, any>,
+  message: string,
+): string {
+  if (typeof data.code === 'string' && SERVER_CODES.has(data.code)) return data.code;
+
+  if (status === 404) {
+    // Legacy bridge — prose, quarantined. Each predicate is the one that used
+    // to live at the call site named above, moved verbatim so behaviour is
+    // identical and only its LOCATION has changed.
+    if (message.includes('Snapshot not found')) return ERROR_CODES.SNAPSHOT_NOT_FOUND;
+    if (message.includes('No secrets')) return ERROR_CODES.NO_SECRETS;
+    if (message.includes('Project not found')) return ERROR_CODES.PROJECT_NOT_FOUND;
+    if (message.includes('Branch')) return ERROR_CODES.BRANCH_NOT_FOUND;
+  }
+
+  return ERROR_CODES.SERVICE_ERROR;
+}
+
 export interface MemberProjectBranch {
   id: string;
   name: string;
@@ -170,7 +238,7 @@ export class ServiceClient {
       const serverMessage = data.error || data.message || 'Service request failed';
       throw new CapyError(
         serverMessage,
-        ERROR_CODES.SERVICE_ERROR,
+        classifyResponse(res.status, data, serverMessage),
         { status: res.status, data }
       );
     }
@@ -238,16 +306,19 @@ export class ServiceClient {
         keep_file: data.keep_file,
       };
     } catch (error: any) {
-      // 404 with "No secrets" or "Snapshot not found" — return empty for secrets, propagate snapshot miss
-      // 404 with "Project not found" or "Branch not found" should propagate
+      // A 404 here is two different facts wearing one status. "This project /
+      // branch / pinned snapshot does not exist" is the caller's problem and
+      // has to propagate; "this branch has no secrets yet" is an ordinary
+      // empty state on a first run and must not be. `classifyResponse` already
+      // told them apart on the way in, so this reads the verdict rather than
+      // re-deriving it from the sentence.
       if (error instanceof CapyError && error.details?.status === 404) {
-        const msg = error.message || '';
-        if (msg.includes('Snapshot not found')) {
-          throw error; // Pinned version missing — caller must handle
-        }
-        if (msg.includes('not found') && !msg.includes('No secrets')) {
-          throw error; // Project or branch not found — let caller handle
-        }
+        const PROPAGATE: string[] = [
+          ERROR_CODES.SNAPSHOT_NOT_FOUND, // pinned version missing — caller must handle
+          ERROR_CODES.PROJECT_NOT_FOUND,
+          ERROR_CODES.BRANCH_NOT_FOUND,
+        ];
+        if (PROPAGATE.includes(error.code)) throw error;
         return {
           env_content: '',
           decrypt_key: '', // Key is managed client-side via keyResolver

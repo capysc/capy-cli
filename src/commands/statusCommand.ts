@@ -4,7 +4,7 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
-import { KeepFile } from '../types/index';
+import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
 import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
@@ -13,9 +13,24 @@ const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 type RemoteFailure = 'access_denied' | 'network_error' | 'no_data';
 
-function classifyRemoteFailure(reason: string): RemoteFailure {
-  if (reason.includes('do not have access')) return 'access_denied';
-  if (reason.includes('no data')) return 'no_data';
+/**
+ * Why the remote column is missing — from the ERROR, not from its sentence.
+ *
+ * This badge is not decoration. `access_denied` is what makes the report tell
+ * someone to run `capy redeem` instead of `capy`, because syncing will fail
+ * the same way again; getting it wrong sends them round a loop. It used to be
+ * decided with `reason.includes('do not have access')` against `err.message`,
+ * and that sentence is thrown in two places in `keyResolver` — both of which
+ * already carry `ERROR_CODES.PERMISSION_DENIED`, which is the actual fact.
+ *
+ * `no_data` was worse: the CLI matched `'no data'` against a string the CLI
+ * itself had just assigned four lines earlier. That case is now set where it
+ * is known and never re-read.
+ */
+function classifyRemoteFailure(err: unknown): RemoteFailure {
+  if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+    return 'access_denied';
+  }
   return 'network_error';
 }
 
@@ -181,7 +196,11 @@ export class StatusCommand {
     // Build local hashes from .env
     const localHashes: Record<string, string> = {};
     let encryptionKey: string | undefined;
+    // Two facts, deliberately separate: the sentence a person reads, and the
+    // verdict the report and the screen branch on. Deriving the second from
+    // the first is what this pair replaces.
     let remoteSkipReason: string | undefined;
+    let remoteFailureKind: RemoteFailure | undefined;
     const localMode = isLocalOnly();
     try {
       if (localMode) {
@@ -221,6 +240,7 @@ export class StatusCommand {
     } catch (err: any) {
       // Auth or key resolution failed — compare pinned vs local only
       remoteSkipReason = err?.message || 'auth or key resolution failed';
+      remoteFailureKind = classifyRemoteFailure(err);
     }
 
     // Build remote hashes (fetch from Keep)
@@ -250,17 +270,20 @@ export class StatusCommand {
             }
           } else {
             remoteSkipReason = 'no data at this keep_hash';
+            // Known here, so recorded here. Nothing downstream re-reads the
+            // sentence to work out what this line already knew.
+            remoteFailureKind = 'no_data';
           }
         }
       } catch (err: any) {
         remoteSkipReason = err?.message || 'network error';
+        remoteFailureKind = classifyRemoteFailure(err);
       }
     }
 
     const hasRemote = Object.keys(remoteHashes).length > 0;
-    const remoteFailure: RemoteFailure | undefined = !hasRemote && remoteSkipReason
-      ? classifyRemoteFailure(remoteSkipReason)
-      : undefined;
+    const remoteFailure: RemoteFailure | undefined =
+      !hasRemote && remoteSkipReason ? (remoteFailureKind ?? 'network_error') : undefined;
     const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
 
     // ONE report object, rendered three ways. `--json` prints it, `--web`

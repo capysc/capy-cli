@@ -1,4 +1,5 @@
 import { CapyError, ERROR_CODES } from '../types/index';
+import { isMembershipRevokedError } from '../errors/membershipRevoked';
 
 const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -25,11 +26,24 @@ export function renderError(error: any, context: ErrorContext = {}): string {
       case ERROR_CODES.AUTH_FAILED:
         return renderAuthFailed(error);
       case ERROR_CODES.PERMISSION_DENIED:
-        return renderPermissionDenied(error, context);
+        // Being kicked and being denied are different sentences to read, and
+        // the first was UNREACHABLE: its check lived in `renderServiceError`
+        // behind `status === 403`, but a 403 is thrown as PERMISSION_DENIED
+        // and never arrives there. Nobody has seen the "Access revoked" page.
+        return isMembershipRevokedError(error)
+          ? renderMembershipRevoked()
+          : renderPermissionDenied(error, context);
       case ERROR_CODES.NETWORK_ERROR:
         return renderNetworkError(error);
       case ERROR_CODES.SERVICE_ERROR:
         return renderServiceError(error, context);
+      // Each of these used to be a sentence this file matched against inside
+      // `renderServiceError`. `classifyResponse` decides them at the boundary
+      // now, so they are ordinary cases in the same switch as everything else.
+      case ERROR_CODES.PROJECT_NOT_FOUND:
+        return renderProjectNotFound(context);
+      case ERROR_CODES.BRANCH_NOT_FOUND:
+        return renderBranchNotFound(error);
       case ERROR_CODES.INVALID_FORMAT:
         return renderInvalidFormat(error);
       case ERROR_CODES.NO_KEEP_FILE:
@@ -135,58 +149,58 @@ function renderServiceError(error: CapyError, ctx: ErrorContext): string {
   const status = error.details?.status;
   const serverMsg = error.details?.data?.error || error.message;
 
-  // Membership revoked (kicked from org)
-  if (status === 403 && serverMsg?.includes('no longer a member')) {
-    const lines = [
-      '',
-      `  ${bold('Access revoked')}`,
-      `  ${grey('You are no longer a member of this organization.')}`,
-      '',
-      `  To regain access, ask an org admin to re-invite you.`,
-      '',
-    ];
-    return lines.join('\n') + '\n';
-  }
-
-  // Project not found — special layout
-  if (status === 404 && serverMsg?.includes('Project not found')) {
-    const lines = [
-      '',
-      `  ${bold('Project not found')}`,
-      ctx.projectName ? `  ${grey(`Project "${ctx.projectName}" does not exist on the server.`)}` : '',
-      ctx.projectId ? `  ${grey(`ID: ${ctx.projectId}`)}` : '',
-      '',
-      `  This can happen when:`,
-      `    - The database was reset`,
-      `    - The project was deleted`,
-      `    - The keep.lock file is from a different environment`,
-      '',
-      `  To fix:`,
-      `    1. Delete ${bold('keep.lock')} and ${bold('.capy/')} then run ${bold('capy')} to re-initialize`,
-      `    2. Or run ${bold('capy')} — it will offer to recreate the project`,
-      '',
-    ];
-    return lines.filter(l => l !== '').join('\n') + '\n';
-  }
-
-  // Branch not found
-  if (status === 404 && serverMsg?.includes('Branch')) {
-    const lines = [
-      '',
-      `  ${bold('Branch not found')}`,
-      `  ${grey(serverMsg)}`,
-      '',
-      `  Run ${bold('capy branch')} to see available branches.`,
-      '',
-    ];
-    return lines.join('\n');
-  }
-
-  // Generic service error
+  // Generic service error — everything specific is now its own code, handled
+  // in the switch above.
   const lines = [
     '',
     `  ${bold('Service error')}${status ? grey(` (${status})`) : ''}`,
     `  ${serverMsg}`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderMembershipRevoked(): string {
+  const lines = [
+    '',
+    `  ${bold('Access revoked')}`,
+    `  ${grey('You are no longer a member of this organization.')}`,
+    '',
+    `  To regain access, ask an org admin to re-invite you.`,
+    '',
+  ];
+  return lines.join('\n') + '\n';
+}
+
+function renderProjectNotFound(ctx: ErrorContext): string {
+  const lines = [
+    '',
+    `  ${bold('Project not found')}`,
+    ctx.projectName ? `  ${grey(`Project "${ctx.projectName}" does not exist on the server.`)}` : '',
+    ctx.projectId ? `  ${grey(`ID: ${ctx.projectId}`)}` : '',
+    '',
+    `  This can happen when:`,
+    `    - The database was reset`,
+    `    - The project was deleted`,
+    `    - The keep.lock file is from a different environment`,
+    '',
+    `  To fix:`,
+    `    1. Delete ${bold('keep.lock')} and ${bold('.capy/')} then run ${bold('capy')} to re-initialize`,
+    `    2. Or run ${bold('capy')} — it will offer to recreate the project`,
+    '',
+  ];
+  return lines.filter(l => l !== '').join('\n') + '\n';
+}
+
+function renderBranchNotFound(error: CapyError): string {
+  const lines = [
+    '',
+    `  ${bold('Branch not found')}`,
+    // Display only: the server's sentence names the branch, and showing it is
+    // the whole value. Nothing here reads it.
+    `  ${grey(error.details?.data?.error || error.message)}`,
+    '',
+    `  Run ${bold('capy branch')} to see available branches.`,
     '',
   ];
   return lines.join('\n');

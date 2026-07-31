@@ -4809,10 +4809,18 @@ export interface StatusDiff {
 /**
  * Why the remote could not be read.
  *
- * A machine code, minted where the failure is first known. The CLI derives
- * this by substring-matching the human message it happens to hold
- * (`reason.includes('do not have access')`), so any reword upstream silently
- * reclassifies the screen. Nothing here parses prose.
+ * A machine code, minted where the failure is first known — which it now
+ * genuinely is. This comment used to record the opposite as a known hazard:
+ * the CLI derived the value by substring-matching the human message it
+ * happened to be holding (`reason.includes('do not have access')`), so any
+ * reword upstream would silently reclassify the screen.
+ *
+ * It matters more than a badge. `access_denied` is what makes the report say
+ * `capy redeem` instead of `capy`, because syncing will fail the same way
+ * again — misclassify it and the reader is sent round a loop. `statusCommand`
+ * now reads `err.code === PERMISSION_DENIED`, and sets `no_data` at the line
+ * that knows it rather than matching a string it assigned itself four lines
+ * earlier. Nothing on either side parses prose.
  */
 export type RemoteFailure = 'access_denied' | 'network_error' | 'no_data';
 
