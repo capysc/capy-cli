@@ -21,7 +21,7 @@
  */
 import { describe, test, expect, afterEach, afterAll, beforeAll } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Browser, findHeadlessShell, type CdpSession } from '../helpers/cdp';
@@ -3693,5 +3693,819 @@ describeBrowser('the recovery flows, driven by a real browser', () => {
     await new Promise((r) => setTimeout(r, 400));
     expect(settled).toBe(false);
     await done.catch(() => undefined);
+  }, 60_000);
+});
+
+describeBrowser('capy deploy, driven by a real browser', () => {
+  let browser: Browser | null = null;
+  let profile = '';
+  let scratch = '';
+
+  afterEach(() => {
+    browser?.close();
+    browser = null;
+    for (const dir of [profile, scratch]) if (dir) rmSync(dir, { recursive: true, force: true });
+    profile = '';
+    scratch = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+    const page = await browser.newPage(1280, 820);
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /**
+   * What a run settled as, or the string `HUNG`.
+   *
+   * The defect this whole section exists to keep out does not throw and does
+   * not fail an assertion — it WAITS, for two minutes or for five, on a page
+   * the user has already answered. `await done` cannot see that: it either
+   * eventually agrees or blows the test's own budget with a message about a
+   * timeout that names nothing. So every ending is asserted through here, on a
+   * clock far shorter than the deadline it must not be reaching.
+   */
+  async function settledWithin<T>(p: Promise<T>, ms: number): Promise<T | 'HUNG'> {
+    let timer: NodeJS.Timeout | undefined;
+    const hung = new Promise<'HUNG'>((r) => {
+      timer = setTimeout(() => r('HUNG'), ms);
+    });
+    try {
+      return await Promise.race([p, hung]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A project directory with two saved deploy targets, and the loopback URL a
+   * `--web` command prints.
+   *
+   * The commands are driven for real — `deployRemove('legacy', root, {web:
+   * true})` — because the hang being tested is in the WIRING between the
+   * command and the screen, and a test that calls the screen directly cannot
+   * see the command still sitting there afterwards.
+   */
+  const SAVED_TARGETS = {
+    version: '1',
+    targets: {
+      'cf-worker-production': {
+        name: 'cf-worker-production',
+        kind: 'cf-worker',
+        branch: 'production',
+        vars: ['DATABASE_URL'],
+        options: { workerName: 'api', workerDir: '.' },
+        mode: 'direct',
+      },
+      legacy: {
+        name: 'legacy',
+        kind: 'cf-worker',
+        branch: 'development',
+        vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+        options: {},
+      },
+    },
+  };
+
+  function project(): string {
+    scratch = mkdtempSync(join(tmpdir(), 'capy-deploy-cmd-'));
+    mkdirSync(join(scratch, '.capy'), { recursive: true });
+    writeFileSync(
+      join(scratch, '.capy', 'deploy.json'),
+      JSON.stringify(SAVED_TARGETS, null, 2),
+    );
+    return scratch;
+  }
+
+  const savedNames = (root: string): string[] =>
+    Object.keys(JSON.parse(readFileSync(join(root, '.capy', 'deploy.json'), 'utf-8')).targets);
+
+  /** Run a `--web` command, capturing what it prints so the URL can be read. */
+  function runWebCommand(run: () => Promise<number>): {
+    code: Promise<number>;
+    url: Promise<string>;
+    lines: string[];
+  } {
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(' '));
+    };
+    // NEVER without this: the command calls `open()` on the URL it just
+    // printed, and that is the developer's own browser.
+    process.env.CAPY_WEB_NO_OPEN = '1';
+    const code = run().finally(() => {
+      console.log = realLog;
+    });
+    void code.catch(() => undefined);
+    const url = waitForUrl(
+      () => lines.join('\n').match(/http:\/\/127\.0\.0\.1:\d+\/\?n=[A-Za-z0-9_-]+/)?.[0] ?? '',
+    );
+    return { code, url, lines };
+  }
+
+  /**
+   * Type into a field the way a person does.
+   *
+   * Assigning `.value` alone is invisible to the screen: `bind:value` listens
+   * for `input`, so a test that only sets the property proves the CLI can read
+   * a field nobody could have filled in.
+   */
+  const typeInto = (label: string, value: string): string =>
+    `(() => {
+        const lab = [...document.querySelectorAll('.field label')]
+          .find(l => l.textContent.trim() === ${JSON.stringify(label)});
+        const el = document.getElementById(lab.getAttribute('for'));
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+     })()`;
+
+  /** Click the button whose visible text contains `text`. */
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  /**
+   * Click the option row whose label is exactly `label`.
+   *
+   * Exact, and on the label element rather than the row: which row is chosen
+   * here decides whose secrets ship and where they land, and half these labels
+   * are substrings of the copy around them.
+   */
+  const clickOption = (label: string): string =>
+    `[...document.querySelectorAll('[role=radio],[role=checkbox]')]
+       .find(el => el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)}).click()`;
+
+  const PLATFORMS = [
+    {
+      id: 'cloudflare-workers',
+      name: 'Cloudflare Workers',
+      hasConnector: true,
+      connectorId: 'cf-worker',
+      connectorLabel: 'Cloudflare Workers',
+      connectorDetail: ['Server-side, runtime secrets pushed via wrangler secret bulk'],
+    },
+    { id: 'heroku', name: 'Heroku', hasConnector: false },
+    { id: 'other', name: 'Other...', hasConnector: false },
+  ];
+
+  test('both stops of the destination route are walked by clicking', async () => {
+    // The standalone path end to end: answering stop one is a page RELOAD, not
+    // a markup swap, and the same URL then serves stop two.
+    const { chooseDeployDestinationInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = chooseDeployDestinationInBrowser({
+      platforms: PLATFORMS,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The route is drawn whole before the first answer — including the stops
+    // this page is not standing on. The terminal asks these as two lists with
+    // nothing between them, so nobody can tell whether the flow is two stops
+    // or nine.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('How to deploy')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Save as')`)).toBe(true);
+
+    // The button names the answer, so the fork is visible before it is taken.
+    await evaluate(page, clickOption('Cloudflare Workers'));
+    await evaluate(page, clickButton('Use Cloudflare Workers'));
+
+    // Stop two arrives by navigation, at the same address.
+    await until(page, `document.body.textContent.includes('How should Capy deploy it?')`, 'the mode stop');
+    // …with stop one now settled on the rail.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Cloudflare Workers')`)).toBe(true);
+
+    await evaluate(page, clickOption('Set up CI deploy token + docs (capy run in your CI)'));
+    await evaluate(page, clickButton('Mint a deploy token'));
+
+    expect(await done).toEqual({
+      platform: 'cloudflare-workers',
+      mode: 'token',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('a platform with no connector says the mode question is skipped', async () => {
+    // The terminal skips it in silence, so the flow just gets shorter and
+    // nobody is told why.
+    const { chooseDeployDestinationInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = chooseDeployDestinationInBrowser({
+      platforms: PLATFORMS,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, clickOption('Heroku'));
+    await until(
+      page,
+      `document.body.textContent.includes('No connector for Heroku yet')`,
+      'the no-connector callout',
+    );
+    await evaluate(page, clickButton('Use Heroku'));
+
+    // `null`, not a mode nobody chose: that question does not exist for Heroku.
+    expect(await done).toEqual({ platform: 'heroku', mode: null, cancelled: false });
+  }, 60_000);
+
+  const CF_WORKER = {
+    id: 'cf-worker',
+    label: 'Cloudflare Workers',
+    detail: ['Server-side, runtime secrets pushed via wrangler secret bulk'],
+    detected: 'wrangler.toml → api',
+    defaults: { workerName: 'api', workerDir: '.' },
+    vars: [
+      { name: 'DATABASE_URL', buildTime: false, checked: true },
+      { name: 'STRIPE_SECRET_KEY', buildTime: false, checked: true },
+      { name: 'VITE_API_URL', buildTime: true, checked: false },
+    ],
+    presetLabel: 'non-public-prefixed',
+    delivery: { mode: 'direct' as const, prBase: 'main' },
+    gitBranches: ['main', 'develop'],
+    regionDetected: false,
+    exampleVar: 'DATABASE_URL',
+  };
+
+  test('the whole picker is walked by clicking, and folds into one target', async () => {
+    const { setUpDeployTargetInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = setUpDeployTargetInBrowser({
+      intent: 'create',
+      steps: ['branch', 'settings', 'variables', 'delivery', 'name'],
+      adapterId: 'cf-worker',
+      capyBranches: ['development', 'production'],
+      branch: 'production',
+      existingNames: [],
+      resolveAdapter: async () => CF_WORKER,
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The rail is the CLI's plan, drawn whole before anything was answered,
+    // and the mode question is counted as a stop this run never asked rather
+    // than being dropped out of the route.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Delivery')`)).toBe(true);
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('nav.route .detail')]
+           .some(el => el.textContent.trim() === '1 not needed')`,
+      ),
+    ).toBe(true);
+
+    await evaluate(page, clickOption('development'));
+    await evaluate(page, clickButton('Ship this branch'));
+
+    await until(page, `document.body.textContent.includes('Cloudflare Workers settings')`, 'the settings stop');
+    // The terminal's `Detected: …` line, above the fields it prefilled.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('wrangler.toml')`)).toBe(true);
+    await evaluate(page, typeInto('Worker name', 'api'));
+    await evaluate(page, typeInto('Worker directory', 'worker'));
+    await evaluate(page, clickButton('Save settings'));
+
+    await until(page, `document.body.textContent.includes('Which variables ship')`, 'the variables stop');
+    // Variable NAMES only. Nothing has been decrypted at this point in the
+    // flow, and no value could reach this payload if it had.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    await evaluate(page, clickButton('Ship these variables'));
+
+    await until(page, `document.body.textContent.includes('How should this target deploy?')`, 'the delivery stop');
+    await evaluate(page, clickOption('Via CI/CD'));
+    await until(page, `!!document.querySelector('.field')`, 'the PR base field');
+    await evaluate(page, typeInto('PR base branch', 'release'));
+    await evaluate(page, clickButton('Open a pull request'));
+
+    await until(page, `document.body.textContent.includes('Save this target')`, 'the name stop');
+    await evaluate(page, typeInto('Target name', 'cf-worker-development'));
+    await evaluate(page, clickButton('Save target'));
+
+    expect(await done).toEqual({
+      adapterId: 'cf-worker',
+      branch: 'development',
+      options: { workerName: 'api', workerDir: 'worker' },
+      vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+      mode: 'ci',
+      gitBaseBranch: 'release',
+      name: 'cf-worker-development',
+      cancelled: false,
+    });
+  }, 90_000);
+
+  test('ticking a runtime secret on a Pages build is called out before it ships', async () => {
+    // The variable checkbox is the only boundary between a runtime secret and
+    // a public browser bundle: a Pages build inlines whatever it is given into
+    // JavaScript the browser downloads, and it can never be un-published.
+    // Nothing in the terminal says so.
+    const { setUpDeployTargetInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = setUpDeployTargetInBrowser({
+      intent: 'create',
+      steps: ['variables'],
+      adapterId: 'cf-pages',
+      capyBranches: ['production'],
+      branch: 'production',
+      existingNames: [],
+      resolveAdapter: async () => ({
+        ...CF_WORKER,
+        id: 'cf-pages',
+        label: 'Cloudflare Pages',
+        detected: undefined,
+        defaults: {
+          projectName: 'site',
+          buildCwd: '.',
+          buildCmd: 'bun run build',
+          distDir: 'dist',
+        },
+        vars: [
+          { name: 'VITE_API_URL', buildTime: true, checked: true },
+          { name: 'STRIPE_SECRET_KEY', buildTime: false, checked: false },
+        ],
+        presetLabel: 'VITE_/NEXT_PUBLIC_/PUBLIC_/REACT_APP_',
+      }),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('would be published')`)).toBe(false);
+
+    await evaluate(page, clickOption('STRIPE_SECRET_KEY'));
+    await until(page, `document.body.textContent.includes('would be published')`, 'the leak warning');
+
+    // Unticking it clears the warning, and the target ships only the public one.
+    await evaluate(page, clickOption('STRIPE_SECRET_KEY'));
+    await until(
+      page,
+      `!document.body.textContent.includes('would be published')`,
+      'the leak warning to clear',
+    );
+    await evaluate(page, clickButton('Ship these variables'));
+
+    expect((await done).vars).toEqual(['VITE_API_URL']);
+  }, 60_000);
+
+  const PLAN = {
+    target: {
+      name: 'cf-worker-production',
+      adapterId: 'cf-worker',
+      adapterLabel: 'Cloudflare Workers',
+      branch: 'production',
+      mode: 'direct' as const,
+      options: [
+        { key: 'workerName', value: 'api' },
+        { key: 'workerDir', value: '.' },
+      ],
+      vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+      saved: true,
+    },
+    action: 'direct' as const,
+    dryRun: false,
+    preflight: [
+      { id: 'preflight', label: 'Cloudflare Workers preflight', state: 'ok' as const },
+    ],
+    signedIn: true,
+    open: false,
+  };
+
+  test('the last gate before anything is decrypted is answered by clicking', async () => {
+    const { confirmDeployInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = confirmDeployInBrowser({ ...PLAN, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The plan, at the resolution the terminal prints it — and no value:
+    // preflight runs before anything is decrypted and this page sits in the
+    // same window.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    // The terminal prints only the first preflight failure; every check keeps
+    // a row here, and the ones that passed stay visible.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('preflight')`)).toBe(true);
+
+    await evaluate(page, clickButton('Deploy now'));
+    expect(await done).toEqual({ decision: 'deploy', force: false, cancelled: false });
+  }, 60_000);
+
+  test('deleting a target wants its name typed, not one keypress', async () => {
+    // The terminal deletes on `d` with no second question and no summary of
+    // what is going. The settings behind that name took seven prompts to
+    // produce and `.capy/deploy.json` keeps no history.
+    const { confirmDeployInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = confirmDeployInBrowser({ ...PLAN, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    await evaluate(page, `document.querySelector('[data-test=delete-target]').click()`);
+    await until(page, `document.body.textContent.includes('This cannot be undone')`, 'the delete view');
+
+    // Held down until the name matches, character for character.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Delete target')).disabled`,
+      ),
+    ).toBe(true);
+
+    await evaluate(page, typeInto('Type the target name to confirm', 'cf-worker-production'));
+    await until(
+      page,
+      `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Delete target')).disabled`,
+      'the delete button to go live',
+    );
+    await evaluate(page, clickButton('Delete target'));
+
+    expect(await done).toEqual({ decision: 'delete', force: false, cancelled: false });
+  }, 60_000);
+
+  test('the saved-target listing answers "which target?" by clicking a row', async () => {
+    // Three prompts in this command ask that with three different sentences.
+    // The listing also carries the two fields the printed one omits: mode, and
+    // what a CI target's pull request opens against.
+    const { chooseDeployTargetInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = chooseDeployTargetInBrowser({
+      projectName: 'mikes-market',
+      configPath: '/repo/.capy/deploy.json',
+      purpose: 'pick',
+      targets: [
+        {
+          name: 'cf-worker-production',
+          kind: 'cf-worker',
+          adapterLabel: 'Cloudflare Workers',
+          branch: 'production',
+          mode: 'direct',
+          options: [{ key: 'workerName', value: 'api' }],
+          vars: ['DATABASE_URL'],
+        },
+        {
+          name: 'legacy',
+          kind: 'cf-worker',
+          adapterLabel: 'Cloudflare Workers',
+          branch: 'development',
+          options: [],
+          vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+        },
+      ],
+      allow: ['use', 'new'],
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // A target saved before `mode` existed resolves to `direct` — the
+    // irreversible one — and the terminal listing says nothing at all.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Mode was never saved')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    await evaluate(page, clickOption('legacy'));
+    await evaluate(page, clickButton('Use this target'));
+
+    expect(await done).toEqual({ action: 'use', target: 'legacy', cancelled: false });
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // deploy-targets, driven through the COMMANDS that serve it
+  //
+  // `capy deploy targets-remove <name> --web` and `capy deploy targets --web`.
+  // Both hang on the same shape and neither shows it to a fetch: the decline is
+  // a button that posts NOTHING, so only a browser can produce it, and what it
+  // produces is silence. The first round fixed the twin screen and left these,
+  // and the report said otherwise — so the assertion here is on the CLOCK, not
+  // only on the value.
+  // -------------------------------------------------------------------------
+
+  test('declining a target removal ENDS the run AT ONCE, and keeps the target', async () => {
+    // Reproduced at the command level before the fix: click "Keep it" and the
+    // run sat for 300,021 ms before printing "Kept target legacy." and
+    // returning 0. The outcome was right and the flow was not: five silent
+    // minutes after a decision the user already made, on a page that walked
+    // back to a listing whose only buttons are Edit and Remove — nothing that
+    // posts anything, so nothing that could end the run.
+    const root = project();
+    const { deployRemove } = await import('../../src/commands/deployCommand');
+    const { code, url, lines } = runWebCommand(() => deployRemove('legacy', root, { web: true }));
+
+    const page = await open(await url);
+    await until(page, `document.querySelector('.callout.danger')`, 'the confirm-remove view');
+
+    const started = Date.now();
+    await evaluate(page, clickButton('Keep it'));
+
+    // The ending is the click. `HUNG` here is the defect, exactly as it was.
+    expect(await settledWithin(code, 15_000)).toBe(0);
+    expect(Date.now() - started).toBeLessThan(15_000);
+
+    // Nothing was removed, and the run said so in the terminal…
+    expect(savedNames(root)).toEqual(['cf-worker-production', 'legacy']);
+    expect(lines.join('\n')).toContain('Kept target');
+
+    // …and on the page, which is where the person who clicked is looking.
+    await until(page, `document.body.textContent.includes('nothing was removed')`, 'the decline ending');
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('legacy')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+  }, 60_000);
+
+  test('backing out of a remove on the LISTING leaves the run answerable', async () => {
+    // `capy deploy targets --web` opens on the listing, where Remove is one of
+    // several things a person came to do. Walking into the confirm and back out
+    // refuses nothing, so the run must not end — and the row the user actually
+    // wanted must still be pickable afterwards.
+    const root = project();
+    const { deployList } = await import('../../src/commands/deployCommand');
+    const { code, url } = runWebCommand(() => deployList(root, { web: true }));
+
+    let settled = false;
+    void code.then(() => (settled = true));
+
+    const page = await open(await url);
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('[role=radio]')].find(el => el.querySelector('.label').textContent.trim() === 'legacy')`,
+      'the legacy row',
+    );
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Remove target') && !b.disabled)`,
+      'the listing remove button',
+    );
+    await until(page, `document.querySelector('.callout.danger')`, 'the confirm-remove view');
+    await evaluate(page, clickButton('Keep it'));
+    await until(page, `!document.querySelector('.callout.danger')`, 'the listing to come back');
+
+    await new Promise((r) => setTimeout(r, 750));
+    expect(settled).toBe(false);
+
+    // Still live: the edit the user came for can still be asked for. `edit`
+    // needs a keep.lock this scratch project does not have, so the command
+    // reports that and exits 1 — which is an ENDING, and the point is that the
+    // page reached one at all.
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Edit target') && !b.disabled)`,
+      'the edit button',
+    );
+    expect(await settledWithin(code, 15_000)).not.toBe('HUNG');
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // deploy-tokens — `capy deploy list --web` and `capy deploy revoke <id> --web`
+  //
+  // The only destructive screen in this parcel, and the last one nobody had
+  // ever clicked. The first click on it found a five-minute hang on the
+  // DECLINE path, which is exactly the ending a fetch-driven test cannot see:
+  // a decline posts nothing, so only a browser can produce it.
+  // -------------------------------------------------------------------------
+
+  const TOKENS = {
+    projectName: 'mikes-market',
+    tokens: [
+      {
+        deployId: 'a1b2c3d4e5f6a7b8c9d0',
+        label: 'ci',
+        createdAge: '3 days ago',
+        createdOn: '2026-07-27',
+        createdBy: 'mike@example.com',
+        revokedAge: null,
+      },
+      {
+        deployId: 'ffeeddccbbaa99887766',
+        label: null,
+        createdAge: '2 months ago',
+        createdOn: '2026-05-20',
+        revokedAge: '1 month ago',
+      },
+    ],
+    open: false,
+  };
+
+  test('revoking from the listing sends the whole id, not the prefix it asked for', async () => {
+    // The field asks for twelve characters because twelve is all the terminal
+    // ever shows. What goes back is the full twenty, because two tokens can
+    // share a prefix and the CLI matches on `deployId === id`. Nothing but a
+    // click proves those two are wired to each other.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = showDeployTokensInBrowser({ ...TOKENS, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // A deploy id is an identifier. The credential it was minted with is
+    // returned once, at mint time, and never travels to this page.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('a1b2c3d4e5f6')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('SECRETS_BLOB')`)).toBe(false);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    await evaluate(page, clickButton('Revoke token'));
+    await until(page, `document.body.textContent.includes('This cannot be undone')`, 'the revoke confirm');
+
+    // Held down until the prefix is typed back, character for character. The
+    // terminal fires the DELETE on a bare argument with no question at all.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token')).disabled`,
+      ),
+    ).toBe(true);
+
+    await evaluate(page, typeInto('Type the deploy id prefix to confirm', 'a1b2c3d4e5f6'));
+    await until(
+      page,
+      `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token')).disabled`,
+      'the revoke button to go live',
+    );
+    await evaluate(page, clickButton('Revoke token'));
+
+    // Twenty characters, from a field that asked for twelve.
+    expect(await done).toEqual({ deployId: 'a1b2c3d4e5f6a7b8c9d0', cancelled: false });
+  }, 60_000);
+
+  test('declining a revoke ENDS the run AT ONCE, and the page says it did', async () => {
+    // `capy deploy revoke <id> --web`, and the user decides not to. "Leave it
+    // active" navigates back to the listing entirely inside the page and posts
+    // NOTHING — the screen has no control that reports a refusal, and the
+    // listing it lands on has no exit control at all.
+    //
+    // So the run had only silence to go on, and silence cost the whole
+    // deadline: measured end to end, the command took 120,017 ms to print
+    // "Nothing revoked". A decline that is acknowledged two minutes later, on a
+    // page that shows the user nothing, is not an ending anybody experiences as
+    // one. `withDeclineBridge` posts the `__action: 'cancel'` the screen should
+    // be posting itself, the moment the question leaves the document.
+    //
+    // The deadline here is the REAL two minutes, deliberately: if the ending
+    // came from the deadline rather than from the click, this test would sit
+    // there, and `HUNG` is what it would report.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = showDeployTokensInBrowser({
+      ...TOKENS,
+      view: 'confirm-revoke',
+      subjectToken: 'a1b2c3d4e5f6a7b8c9d0',
+      onListen: (u) => (url = u),
+    });
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('This cannot be undone')`)).toBe(true);
+
+    const started = Date.now();
+    await evaluate(page, clickButton('Leave it active'));
+
+    // The run ends on the CLICK, not on the clock.
+    expect(await settledWithin(done, 15_000)).toEqual({ deployId: null, cancelled: true });
+    expect(Date.now() - started).toBeLessThan(15_000);
+
+    // …and the page says so, rather than leaving the user on a listing with no
+    // idea whether their "no" was heard.
+    await until(page, `document.body.textContent.includes('nothing was revoked')`, 'the decline ending');
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('a1b2c3d4e5f6a7b8c9d0')`)).toBe(true);
+    // The id is an identifier; the credential it was minted with never travels.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+  }, 60_000);
+
+  test('backing out of a revoke on the LISTING leaves the run answerable', async () => {
+    // The other half of the bridge, and the reason it is fitted to the confirm
+    // view alone. `capy deploy list --web` opens on the listing; walking into a
+    // revoke and back out is not a refusal of anything — the user still has
+    // business with the page — so the run must NOT end there.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    let settled: unknown;
+    const done = showDeployTokensInBrowser({
+      ...TOKENS,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    void done.then((r) => (settled = r));
+
+    const page = await open(await waitForUrl(() => url));
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token'))`,
+      'the listing revoke button',
+    );
+    await until(page, `document.querySelector('.callout.danger')`, 'the revoke confirm');
+    await evaluate(page, clickButton('Leave it active'));
+    await until(page, `!document.querySelector('.callout.danger')`, 'the listing to come back');
+
+    await new Promise((r) => setTimeout(r, 750));
+    expect(settled).toBeUndefined();
+
+    // Still live: the revoke the user came for can still be made.
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token'))`,
+      'the listing revoke button, again',
+    );
+    await until(page, `document.querySelector('.callout.danger')`, 'the revoke confirm, again');
+    await evaluate(page, typeInto('Type the deploy id prefix to confirm', 'a1b2c3d4e5f6'));
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token') && !b.disabled)`,
+      'the revoke button once it goes live',
+    );
+    expect(await settledWithin(done, 15_000)).toEqual({
+      deployId: 'a1b2c3d4e5f6a7b8c9d0',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('closing the window on the token listing revokes nothing, and still ends', async () => {
+    // Closing the window is a refusal, never consent — and a refusal is an
+    // ENDING. Both halves matter: nothing may be revoked, and the run may not
+    // hang waiting for an answer that is never coming.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    let settled: unknown;
+    const done = showDeployTokensInBrowser({
+      ...TOKENS,
+      timeoutMs: 2_500,
+      onListen: (u) => (url = u),
+    });
+    void done.then((r) => (settled = r));
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.navigate', { url: 'about:blank' });
+
+    await new Promise((r) => setTimeout(r, 400));
+    // Leaving is not an answer.
+    expect(settled).toBeUndefined();
+
+    expect(await done).toEqual({ deployId: null, cancelled: true });
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // deploy-run-result — what the run actually did
+  //
+  // A display-only page with no nonce and `connect-src 'none'`. Its whole job
+  // is to still BE THERE when a browser asks for it: it is the last thing a
+  // deploy does, so a call site that serves it and returns has served nothing.
+  // -------------------------------------------------------------------------
+
+  test('the result page is still reachable when the run waits for it', async () => {
+    const { showDeployRunResultInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    let served = false;
+    const done = showDeployRunResultInBrowser(
+      {
+        outcome: 'opened-pr',
+        projectName: '\x1b[1mmikes-market\x1b[0m',
+        target: {
+          name: 'vercel-prod',
+          // Coloured on its way in — the terminal prints this same string.
+          adapterLabel: '\x1b[1mVercel\x1b[0m',
+          branch: 'production',
+          mode: 'ci',
+          prBase: 'main',
+        },
+        steps: [
+          { id: '0', label: 'set Vercel env', status: 'ok', detail: '\x1b[90m2 variables pushed\x1b[0m' },
+          { id: '1', label: 'vercel deploy', status: 'skip', detail: 'CI builds on merge' },
+        ],
+        pr: { branch: 'capy-deploy-1', base: 'main', url: 'https://example.test/pr/1' },
+      },
+      { open: false, timeoutMs: 20_000, onListen: (u) => (url = u) },
+    );
+    void done.then(() => (served = true));
+
+    const listening = await waitForUrl(() => url);
+    // The run has NOT finished yet: the page is only worth serving if the CLI
+    // is still there to serve it.
+    expect(served).toBe(false);
+
+    const page = await open(listening);
+
+    // The step log the terminal prints, rendered — and no escape codes reached
+    // the payload: a payload is not a terminal and `[90m` is what a browser
+    // shows of one.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('set Vercel env')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('2 variables pushed')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('[90m')`)).toBe(false);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('[1m')`)).toBe(false);
+    // Values never reach the result page either.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    // Only once it has been fetched does the run move on.
+    await done;
+
+    // Single-use: the address that served it does not serve it twice.
+    const again = await fetch(listening).catch(() => null);
+    expect(again === null || again.status === 404).toBe(true);
   }, 60_000);
 });
