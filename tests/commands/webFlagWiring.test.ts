@@ -31,24 +31,44 @@ function commandBlock(name: string): string {
 }
 
 /**
- * Commands whose flow has a compiled screen behind it.
+ * Which commands need the flag — DERIVED, never listed.
  *
- * `run` is absent on purpose — it wraps a child process and has no question to
- * ask, so it is the one command with no browser path by design.
+ * The first version of this file carried a hand-written array of eleven
+ * command names. It passed while `capy edit`, `capy decrypt` and `capy deploy`
+ * sat unwired, because they were not in the array — a test whose coverage is a
+ * list has exactly the blind spot it was written to close, and a reviewer
+ * found the gap rather than the test doing it.
+ *
+ * So the list comes from the source: a command needs the flag when the command
+ * class it constructs declares a `web` option. That cannot drift, and a newly
+ * converted command is covered the moment it accepts one.
  */
-const WEB_CAPABLE = [
-  'connect',
-  'rotate',
-  'org',
-  'byoc',
-  'invite',
-  'kick',
-  'recover',
-  'end-recover',
-  'transport',
-  'checkout',
-  'status',
-];
+function commandsNeedingWeb(): string[] {
+  const need: string[] = [];
+  for (const m of INDEX.matchAll(/\.command\('([a-z-]+)/g)) {
+    const name = m[1];
+    let block: string;
+    try {
+      block = commandBlock(name);
+    } catch {
+      continue;
+    }
+    // The implementation is always a dynamic import inside the handler.
+    const imp = block.match(/import\('\.\/commands\/([A-Za-z]+)'\)/);
+    if (!imp) continue;
+    const file = join(resolve(import.meta.dir, '../..'), `src/commands/${imp[1]}.ts`);
+    let src: string;
+    try {
+      src = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    if (/\bweb\??:\s*boolean/.test(src)) need.push(name);
+  }
+  return [...new Set(need)];
+}
+
+const WEB_CAPABLE = commandsNeedingWeb();
 
 describe('--web reaches the commands that can serve a screen', () => {
   test.each(WEB_CAPABLE)('capy %s threads the inherited flag', (name) => {

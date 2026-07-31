@@ -130,7 +130,7 @@ program
   .description('List secret branches')
   .option('-D <name>', 'Delete a branch')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     assertNotLocalOnly('branch');
     const { AuthService } = await import('./auth/authService');
     const { ServiceClient } = await import('./service/serviceClient');
@@ -243,7 +243,10 @@ program
       if (selected !== '__stay__') {
         const { CheckoutCommand } = await import('./commands/checkoutCommand');
         const cmd = new CheckoutCommand();
-        await cmd.execute(selected, {});
+        // `capy branch` hands its switch step to checkout, so the flag has to
+        // travel with it — otherwise picking a branch here drops out of the
+        // browser and into a TTY prompt halfway through the same run.
+        await cmd.execute(selected, { web: command.optsWithGlobals().web === true });
       }
     }
 
@@ -331,6 +334,9 @@ const deploy = program
         target: options.target,
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
+        // Same inherited-global rule as every other converted command: --web
+        // is declared once on the root program, so it arrives in merged opts.
+        web: merged.web === true,
         edit: options.edit,
         // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
         // a different thing, so it must NOT be merged in here.
@@ -356,39 +362,39 @@ const deploy = program
 deploy
   .command('revoke <deployId>')
   .description('Revoke a deploy token')
-  .action(async (deployId: string) => {
+  .action(async (deployId: string, _options, command) => {
     assertNotLocalOnly('deploy revoke');
     const { DeployRevokeCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployRevokeCommand();
+    const cmd = new DeployRevokeCommand(undefined, false, { web: command.optsWithGlobals().web === true });
     await cmd.execute(deployId);
   });
 
 deploy
   .command('list')
   .description('List deploy tokens for this project')
-  .action(async () => {
+  .action(async (_options, command) => {
     assertNotLocalOnly('deploy list');
     const { DeployListCommand } = await import('./commands/deployTokenCommand');
-    const cmd = new DeployListCommand();
+    const cmd = new DeployListCommand(undefined, false, { web: command.optsWithGlobals().web === true });
     await cmd.execute();
   });
 
 deploy
   .command('targets')
   .description('List configured connector targets (connector mode)')
-  .action(async () => {
+  .action(async (_options, command) => {
     assertNotLocalOnly('deploy targets');
     const { deployList } = await import('./commands/deployCommand');
-    process.exit(await deployList());
+    process.exit(await deployList(process.cwd(), { web: command.optsWithGlobals().web === true }));
   });
 
 deploy
   .command('targets-remove <name>')
   .description('Remove a configured connector target')
-  .action(async (name: string) => {
+  .action(async (name: string, _options, command) => {
     assertNotLocalOnly('deploy targets-remove');
     const { deployRemove } = await import('./commands/deployCommand');
-    process.exit(await deployRemove(name));
+    process.exit(await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true }));
   });
 
 program
