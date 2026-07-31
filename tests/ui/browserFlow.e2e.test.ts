@@ -21,7 +21,7 @@
  */
 import { describe, test, expect, afterEach, afterAll, beforeAll } from 'bun:test';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Browser, findHeadlessShell, type CdpSession } from '../helpers/cdp';
@@ -3699,12 +3699,14 @@ describeBrowser('the recovery flows, driven by a real browser', () => {
 describeBrowser('capy deploy, driven by a real browser', () => {
   let browser: Browser | null = null;
   let profile = '';
+  let scratch = '';
 
   afterEach(() => {
     browser?.close();
     browser = null;
-    if (profile) rmSync(profile, { recursive: true, force: true });
+    for (const dir of [profile, scratch]) if (dir) rmSync(dir, { recursive: true, force: true });
     profile = '';
+    scratch = '';
   });
 
   async function open(url: string): Promise<CdpSession> {
@@ -3715,6 +3717,95 @@ describeBrowser('capy deploy, driven by a real browser', () => {
     await page.send('Page.navigate', { url });
     await loaded;
     return page;
+  }
+
+  /**
+   * What a run settled as, or the string `HUNG`.
+   *
+   * The defect this whole section exists to keep out does not throw and does
+   * not fail an assertion — it WAITS, for two minutes or for five, on a page
+   * the user has already answered. `await done` cannot see that: it either
+   * eventually agrees or blows the test's own budget with a message about a
+   * timeout that names nothing. So every ending is asserted through here, on a
+   * clock far shorter than the deadline it must not be reaching.
+   */
+  async function settledWithin<T>(p: Promise<T>, ms: number): Promise<T | 'HUNG'> {
+    let timer: NodeJS.Timeout | undefined;
+    const hung = new Promise<'HUNG'>((r) => {
+      timer = setTimeout(() => r('HUNG'), ms);
+    });
+    try {
+      return await Promise.race([p, hung]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A project directory with two saved deploy targets, and the loopback URL a
+   * `--web` command prints.
+   *
+   * The commands are driven for real — `deployRemove('legacy', root, {web:
+   * true})` — because the hang being tested is in the WIRING between the
+   * command and the screen, and a test that calls the screen directly cannot
+   * see the command still sitting there afterwards.
+   */
+  const SAVED_TARGETS = {
+    version: '1',
+    targets: {
+      'cf-worker-production': {
+        name: 'cf-worker-production',
+        kind: 'cf-worker',
+        branch: 'production',
+        vars: ['DATABASE_URL'],
+        options: { workerName: 'api', workerDir: '.' },
+        mode: 'direct',
+      },
+      legacy: {
+        name: 'legacy',
+        kind: 'cf-worker',
+        branch: 'development',
+        vars: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+        options: {},
+      },
+    },
+  };
+
+  function project(): string {
+    scratch = mkdtempSync(join(tmpdir(), 'capy-deploy-cmd-'));
+    mkdirSync(join(scratch, '.capy'), { recursive: true });
+    writeFileSync(
+      join(scratch, '.capy', 'deploy.json'),
+      JSON.stringify(SAVED_TARGETS, null, 2),
+    );
+    return scratch;
+  }
+
+  const savedNames = (root: string): string[] =>
+    Object.keys(JSON.parse(readFileSync(join(root, '.capy', 'deploy.json'), 'utf-8')).targets);
+
+  /** Run a `--web` command, capturing what it prints so the URL can be read. */
+  function runWebCommand(run: () => Promise<number>): {
+    code: Promise<number>;
+    url: Promise<string>;
+    lines: string[];
+  } {
+    const lines: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map(String).join(' '));
+    };
+    // NEVER without this: the command calls `open()` on the URL it just
+    // printed, and that is the developer's own browser.
+    process.env.CAPY_WEB_NO_OPEN = '1';
+    const code = run().finally(() => {
+      console.log = realLog;
+    });
+    void code.catch(() => undefined);
+    const url = waitForUrl(
+      () => lines.join('\n').match(/http:\/\/127\.0\.0\.1:\d+\/\?n=[A-Za-z0-9_-]+/)?.[0] ?? '',
+    );
+    return { code, url, lines };
   }
 
   /**
@@ -4089,6 +4180,90 @@ describeBrowser('capy deploy, driven by a real browser', () => {
   }, 60_000);
 
   // -------------------------------------------------------------------------
+  // deploy-targets, driven through the COMMANDS that serve it
+  //
+  // `capy deploy targets-remove <name> --web` and `capy deploy targets --web`.
+  // Both hang on the same shape and neither shows it to a fetch: the decline is
+  // a button that posts NOTHING, so only a browser can produce it, and what it
+  // produces is silence. The first round fixed the twin screen and left these,
+  // and the report said otherwise — so the assertion here is on the CLOCK, not
+  // only on the value.
+  // -------------------------------------------------------------------------
+
+  test('declining a target removal ENDS the run AT ONCE, and keeps the target', async () => {
+    // Reproduced at the command level before the fix: click "Keep it" and the
+    // run sat for 300,021 ms before printing "Kept target legacy." and
+    // returning 0. The outcome was right and the flow was not: five silent
+    // minutes after a decision the user already made, on a page that walked
+    // back to a listing whose only buttons are Edit and Remove — nothing that
+    // posts anything, so nothing that could end the run.
+    const root = project();
+    const { deployRemove } = await import('../../src/commands/deployCommand');
+    const { code, url, lines } = runWebCommand(() => deployRemove('legacy', root, { web: true }));
+
+    const page = await open(await url);
+    await until(page, `document.querySelector('.callout.danger')`, 'the confirm-remove view');
+
+    const started = Date.now();
+    await evaluate(page, clickButton('Keep it'));
+
+    // The ending is the click. `HUNG` here is the defect, exactly as it was.
+    expect(await settledWithin(code, 15_000)).toBe(0);
+    expect(Date.now() - started).toBeLessThan(15_000);
+
+    // Nothing was removed, and the run said so in the terminal…
+    expect(savedNames(root)).toEqual(['cf-worker-production', 'legacy']);
+    expect(lines.join('\n')).toContain('Kept target');
+
+    // …and on the page, which is where the person who clicked is looking.
+    await until(page, `document.body.textContent.includes('nothing was removed')`, 'the decline ending');
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('legacy')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+  }, 60_000);
+
+  test('backing out of a remove on the LISTING leaves the run answerable', async () => {
+    // `capy deploy targets --web` opens on the listing, where Remove is one of
+    // several things a person came to do. Walking into the confirm and back out
+    // refuses nothing, so the run must not end — and the row the user actually
+    // wanted must still be pickable afterwards.
+    const root = project();
+    const { deployList } = await import('../../src/commands/deployCommand');
+    const { code, url } = runWebCommand(() => deployList(root, { web: true }));
+
+    let settled = false;
+    void code.then(() => (settled = true));
+
+    const page = await open(await url);
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('[role=radio]')].find(el => el.querySelector('.label').textContent.trim() === 'legacy')`,
+      'the legacy row',
+    );
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Remove target') && !b.disabled)`,
+      'the listing remove button',
+    );
+    await until(page, `document.querySelector('.callout.danger')`, 'the confirm-remove view');
+    await evaluate(page, clickButton('Keep it'));
+    await until(page, `!document.querySelector('.callout.danger')`, 'the listing to come back');
+
+    await new Promise((r) => setTimeout(r, 750));
+    expect(settled).toBe(false);
+
+    // Still live: the edit the user came for can still be asked for. `edit`
+    // needs a keep.lock this scratch project does not have, so the command
+    // reports that and exits 1 — which is an ENDING, and the point is that the
+    // page reached one at all.
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Edit target') && !b.disabled)`,
+      'the edit button',
+    );
+    expect(await settledWithin(code, 15_000)).not.toBe('HUNG');
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
   // deploy-tokens — `capy deploy list --web` and `capy deploy revoke <id> --web`
   //
   // The only destructive screen in this parcel, and the last one nobody had
@@ -4160,48 +4335,95 @@ describeBrowser('capy deploy, driven by a real browser', () => {
     expect(await done).toEqual({ deployId: 'a1b2c3d4e5f6a7b8c9d0', cancelled: false });
   }, 60_000);
 
-  test('declining a revoke ENDS the run, as a refusal rather than an error', async () => {
+  test('declining a revoke ENDS the run AT ONCE, and the page says it did', async () => {
     // `capy deploy revoke <id> --web`, and the user decides not to. "Leave it
     // active" navigates back to the listing entirely inside the page and posts
     // NOTHING — the screen has no control that reports a refusal, and the
-    // listing it lands on has no exit control at all. So the only signal the
-    // CLI ever gets is silence.
+    // listing it lands on has no exit control at all.
     //
-    // Silence used to REJECT: the run hung for the full wizard timeout and
-    // then exited non-zero through the error screen, for a user who had
-    // correctly chosen not to revoke a credential. It now RESOLVES as what it
-    // truthfully is — nothing was revoked — and the caller exits 0.
+    // So the run had only silence to go on, and silence cost the whole
+    // deadline: measured end to end, the command took 120,017 ms to print
+    // "Nothing revoked". A decline that is acknowledged two minutes later, on a
+    // page that shows the user nothing, is not an ending anybody experiences as
+    // one. `withDeclineBridge` posts the `__action: 'cancel'` the screen should
+    // be posting itself, the moment the question leaves the document.
     //
-    // Without that change this test does not time out, it THROWS: `await done`
-    // re-raises the rejection.
+    // The deadline here is the REAL two minutes, deliberately: if the ending
+    // came from the deadline rather than from the click, this test would sit
+    // there, and `HUNG` is what it would report.
     const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
     let url = '';
     const done = showDeployTokensInBrowser({
       ...TOKENS,
       view: 'confirm-revoke',
       subjectToken: 'a1b2c3d4e5f6a7b8c9d0',
-      // Stands in for the two-minute deadline the command ships with.
-      timeoutMs: 3_000,
       onListen: (u) => (url = u),
     });
+    void done.catch(() => undefined);
 
     const page = await open(await waitForUrl(() => url));
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('This cannot be undone')`)).toBe(true);
 
+    const started = Date.now();
     await evaluate(page, clickButton('Leave it active'));
 
-    // The decline is real on the page — it is back on the listing — and the
-    // page is STILL SERVED, so a user who changes their mind can still act.
-    await until(page, `document.body.textContent.includes('still active')`, 'the listing to come back');
-    expect(
-      await evaluate<boolean>(
-        page,
-        `[...document.querySelectorAll('button')].some(b => b.textContent.includes('Revoke token'))`,
-      ),
-    ).toBe(true);
+    // The run ends on the CLICK, not on the clock.
+    expect(await settledWithin(done, 15_000)).toEqual({ deployId: null, cancelled: true });
+    expect(Date.now() - started).toBeLessThan(15_000);
 
-    // …and the run reaches an ending on its own, as a refusal.
-    expect(await done).toEqual({ deployId: null, cancelled: true });
+    // …and the page says so, rather than leaving the user on a listing with no
+    // idea whether their "no" was heard.
+    await until(page, `document.body.textContent.includes('nothing was revoked')`, 'the decline ending');
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('a1b2c3d4e5f6a7b8c9d0')`)).toBe(true);
+    // The id is an identifier; the credential it was minted with never travels.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+  }, 60_000);
+
+  test('backing out of a revoke on the LISTING leaves the run answerable', async () => {
+    // The other half of the bridge, and the reason it is fitted to the confirm
+    // view alone. `capy deploy list --web` opens on the listing; walking into a
+    // revoke and back out is not a refusal of anything — the user still has
+    // business with the page — so the run must NOT end there.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    let settled: unknown;
+    const done = showDeployTokensInBrowser({
+      ...TOKENS,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    void done.then((r) => (settled = r));
+
+    const page = await open(await waitForUrl(() => url));
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token'))`,
+      'the listing revoke button',
+    );
+    await until(page, `document.querySelector('.callout.danger')`, 'the revoke confirm');
+    await evaluate(page, clickButton('Leave it active'));
+    await until(page, `!document.querySelector('.callout.danger')`, 'the listing to come back');
+
+    await new Promise((r) => setTimeout(r, 750));
+    expect(settled).toBeUndefined();
+
+    // Still live: the revoke the user came for can still be made.
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token'))`,
+      'the listing revoke button, again',
+    );
+    await until(page, `document.querySelector('.callout.danger')`, 'the revoke confirm, again');
+    await evaluate(page, typeInto('Type the deploy id prefix to confirm', 'a1b2c3d4e5f6'));
+    await clickWhenReady(
+      page,
+      `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token') && !b.disabled)`,
+      'the revoke button once it goes live',
+    );
+    expect(await settledWithin(done, 15_000)).toEqual({
+      deployId: 'a1b2c3d4e5f6a7b8c9d0',
+      cancelled: false,
+    });
   }, 60_000);
 
   test('closing the window on the token listing revokes nothing, and still ends', async () => {

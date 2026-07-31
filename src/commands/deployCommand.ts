@@ -43,7 +43,6 @@ import {
 } from '../deploy/git';
 import { buildDeployKeep, touchDeployKeep, reconcileVars } from '../deploy/keepGate';
 import { KeepFile } from '../types/index';
-import { CapyError } from '../types';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
@@ -1006,15 +1005,16 @@ export async function deployList(
         open: openBrowser(),
       });
     } catch (err) {
-      // Structural, not a message match: the wizard mints a CapyError when
-      // nobody answered — the deadline, or Ctrl-C — and a listing that ends
-      // having changed nothing is an ending, not a failure. A server that
-      // could not listen is a failure, and swallowing it made a listing that
-      // never opened exit 0 with nothing on screen.
-      if (!(err instanceof CapyError)) {
-        console.error(`${RED('✗')} could not open the targets page: ${err instanceof Error ? err.message : err}`);
-        return 1;
-      }
+      // The screen resolves every refusal — closed window, deadline, Ctrl-C —
+      // so anything that reaches here is the SERVER, not the user. A listing
+      // that never opened must not exit 0 with nothing on screen.
+      console.error(`${RED('✗')} could not open the targets page: ${err instanceof Error ? err.message : err}`);
+      return 1;
+    }
+
+    // Nobody chose a row. A listing that ends having changed nothing is an
+    // ending, and it says so rather than returning silently.
+    if (picked.action === null) {
       console.log('No changes.');
       return 0;
     }
@@ -1090,13 +1090,12 @@ export async function deployRemove(
         open: openBrowser(),
       });
     } catch (err) {
-      // An unanswered delete is a refusal — the target stays. A server that
-      // could not listen is a different fact and must not read as one.
-      if (!(err instanceof CapyError)) {
-        console.error(`${RED('✗')} could not open the confirm page: ${err instanceof Error ? err.message : err}`);
-        return 1;
-      }
-      picked = { action: null, target: '' };
+      // An unanswered delete is a refusal and the screen resolves it as one —
+      // clicking "Keep it" ends the run at once, and a window nobody came back
+      // to ends on the screen's deadline. So a throw here is the SERVER, which
+      // is a different fact and must not read as a decline.
+      console.error(`${RED('✗')} could not open the confirm page: ${err instanceof Error ? err.message : err}`);
+      return 1;
     }
     if (picked.action !== 'remove') {
       console.log(`Kept target ${B(name)}.`);
@@ -1186,6 +1185,14 @@ export async function ensureDeployTarget(
  * and they are one question about one list. `filterKind` carries the situation
  * (a run narrowed by `--target <id>`) and the screen supplies one wording for
  * all of them.
+ *
+ * `null` is the refusal, and it is the ONLY thing an unanswered page produces:
+ * the pick view has no Cancel — its two buttons are `Use this target` and `Set
+ * up a new target` — so closing the window is the whole vocabulary a user has
+ * for "not this". `chooseDeployTargetInBrowser` resolves that rather than
+ * rejecting, so it arrives here as an answer and every caller already treats it
+ * as one ("Cancelled.", exit 0). A throw from this call is a broken server, and
+ * still a throw.
  */
 async function pickTargetInBrowser(
   cwd: string,

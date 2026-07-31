@@ -32,6 +32,7 @@
 // is never a wizard answer, and under `--web` it is never printed, because an
 // agent shelling `capy` reads stdout.
 import { runBrowserWizard } from './browserWizard';
+import { withDeclineBridge, type DeclineBridge } from './declineBridge';
 import { renderScreen, ScreenServer } from './screens/serve';
 import {
   invitePlan,
@@ -568,103 +569,21 @@ export function buildKickData(p: WebKickParams, nonce: string): OrgMembersData {
  * The real fix is the screen's and is reported as such: `confirm-remove`'s
  * decline should POST `{__action:'cancel'}`, exactly the way the same package's
  * `Wizard` cancel already does — which is why `capy invite`'s Cancel needs
- * nothing here. Until it does, this is the CLI holding up its own end of the
- * contract: a browser flow has exactly two endings, and both must be reachable
- * from the page.
+ * nothing here.
  *
- * WHAT IT WATCHES is the question, not a button. The destructive control is the
- * only thing on this page that can answer, so a document with no such control
- * left in it is a document where this run can no longer be answered — which is
- * a refusal, whatever route the page took to get there. Deliberately not bound
- * to the decline button's label: copy is written for humans and is never what
- * code keys off.
- *
- * IT CANNOT TURN A REMOVAL INTO A CANCEL. The wizard marks itself done inside
- * the handler that resolved it, so a cancel that arrives after a confirmed
- * removal is answered 409 and this script leaves the page exactly as the screen
- * drew it.
+ * The bridge itself is `src/ui/declineBridge.ts`: the same defect turned up on
+ * `deploy-targets`' `confirm-remove` and `deploy-tokens`' `confirm-revoke`, and
+ * three copies of a script that answers for the user would be three ways for a
+ * page to say no. What it watches here is `button.danger` — the only control on
+ * this view that can answer the question, by its design-system variant and
+ * never by its label.
  */
-function declineBridge(nonce: string, stillAMember: string): string {
-  const js = (s: string): string => JSON.stringify(s).replace(/</g, '\\u003c');
-  return `<script>
-(function () {
-  // Out of the document before anything else. A script element's source counts
-  // as page text — document.body.textContent returns it — and this page's text
-  // is the screen's copy, not the CLI's plumbing. Removing the node does not
-  // stop the code already running from it.
-  var self = document.currentScript;
-  if (self && self.parentNode) self.parentNode.removeChild(self);
-
-  var NONCE = ${js(nonce)};
-  var STILL = ${js(stillAMember)};
-  // The control this view answers with, by its design-system variant — the
-  // structural attribute, never the label rendered inside it.
-  var ANSWERS_WITH = 'button.danger';
-  var sent = false;
-
-  function ending() {
-    document.title = 'Cancelled';
-    document.body.textContent = '';
-    var wrap = document.createElement('div');
-    wrap.setAttribute('style', 'max-width:34rem;margin:4rem auto;padding:0 1.5rem;font:16px/1.6 ui-sans-serif,system-ui,sans-serif');
-    var h = document.createElement('h1');
-    h.setAttribute('style', 'font-size:1.25rem;margin:0 0 .5rem;font-weight:600');
-    h.textContent = 'Cancelled \\u2014 nothing was changed.';
-    var p = document.createElement('p');
-    p.setAttribute('style', 'margin:0;opacity:.7');
-    p.textContent = STILL + ' You can close this tab.';
-    wrap.appendChild(h);
-    wrap.appendChild(p);
-    document.body.appendChild(wrap);
-  }
-
-  function decline() {
-    fetch('/submit', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ nonce: NONCE, payload: { __action: 'cancel' } })
-    }).then(function (r) {
-      // Not ok is the removal that already went through (409 already
-      // finished): the CLI has its answer and this page is not it.
-      if (!r.ok) return null;
-      return r.json().catch(function () { return null; });
-    }).then(function (b) {
-      if (b && b.done) ending();
-    }).catch(function () {
-      /* the CLI is gone: it already has its answer, or its timeout. */
-    });
-  }
-
-  // Watching from the first mutation, never from a poll that could start after
-  // the click it exists to catch. The screen mounts itself from its own inline
-  // script, so the control may arrive before or after this runs — either way
-  // the mount is a mutation, and it is the mutation that records having seen
-  // the question. A question that never rendered at all leaves this inert: a
-  // page that failed to draw is a page problem, and answering it with a cancel
-  // would hide that behind a tidy ending.
-  var seen = !!document.querySelector(ANSWERS_WITH);
-  var obs = new MutationObserver(function () {
-    if (sent) return;
-    if (document.querySelector(ANSWERS_WITH)) {
-      seen = true;
-      return;
-    }
-    if (!seen) return;
-    sent = true;
-    obs.disconnect();
-    decline();
-  });
-  obs.observe(document.body, { childList: true, subtree: true });
-})();
-</script>`;
-}
-
-/** Put the bridge inside the document the screen build produced. */
-function withDeclineBridge(html: string, nonce: string, stillAMember: string): string {
-  const script = declineBridge(nonce, stillAMember);
-  const close = html.lastIndexOf('</body>');
-  return close === -1 ? html + script : html.slice(0, close) + script + html.slice(close);
-}
+const kickDeclineBridge = (nonce: string, stillAMember: string): DeclineBridge => ({
+  nonce,
+  question: 'button.danger',
+  headline: 'Cancelled — nothing was changed.',
+  detail: stillAMember,
+});
 
 /**
  * Serve the removal confirm and wait for it.
@@ -687,8 +606,10 @@ export async function confirmKickInBrowser(p: WebKickParams): Promise<boolean> {
       renderFirst: (nonce) =>
         withDeclineBridge(
           renderScreen('org-members', buildKickData(p, nonce)),
-          nonce,
-          `${stripAnsi(p.member.email)} is still a member of ${stripAnsi(p.orgName)}.`,
+          kickDeclineBridge(
+            nonce,
+            `${stripAnsi(p.member.email)} is still a member of ${stripAnsi(p.orgName)}.`,
+          ),
         ),
     },
     async (_step, payload) => {

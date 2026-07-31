@@ -29,7 +29,6 @@ import {
   setUpDeployTargetInBrowser,
   showDeployTokensInBrowser,
   showScreenInBrowser,
-  TOKENS_TIMEOUT_MS,
   type WebDeployAdapterContext,
   type WebDeploySetupParams,
 } from '../../src/ui/deployScreens';
@@ -56,6 +55,25 @@ function parseScreenData(html: string): any {
   // `<` is escaped on the way in so a payload string cannot close the script
   // element; JSON.parse reads `<` back as `<` on its own.
   return JSON.parse(m[1]);
+}
+
+/**
+ * Serve one token screen and hand back the document a browser would get.
+ *
+ * The run is left as a refusal rather than answered: what is under test is the
+ * markup, and the deadline is short enough that the server is gone before the
+ * next test needs a port.
+ */
+async function fetchScreen(p: Record<string, unknown>): Promise<string> {
+  let url = '';
+  const done = showDeployTokensInBrowser({
+    ...(p as any),
+    timeoutMs: 1_500,
+    onListen: (u: string) => (url = u),
+  });
+  const html = await (await fetch(await waitForUrl(() => url))).text();
+  await done;
+  return html;
 }
 
 /** Submit a payload to a running wizard and hand back the parsed answer. */
@@ -764,6 +782,54 @@ describe('chooseDeployTargetInBrowser', () => {
     await submit(u, { __action: 'cancel' });
     await done;
   });
+
+  test('an unanswered listing ENDS as a refusal — it does not reject', async () => {
+    // The twin of the same test on `deploy-tokens`, and the half that was
+    // missed. This screen has no control that posts a decline either, so
+    // silence is the only signal a refusal ever produces — and silence used to
+    // come out of here as a throw, five minutes later, at all three call
+    // sites: `capy deploy targets --web`, `capy deploy targets-remove <name>
+    // --web`, and the "which target?" pick inside `capy deploy --web`.
+    const started = Date.now();
+    const out = await chooseDeployTargetInBrowser({
+      ...TARGETS,
+      timeoutMs: 400,
+      onListen: () => undefined,
+    });
+    expect(out).toEqual({ action: null, target: '', cancelled: true });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test('the confirm-remove view carries the bridge, and the listing does not', async () => {
+    // The bridge answers ONE question — "remove this target?" — so it is
+    // fitted only where that question is the whole run. On the listing, backing
+    // out of a remove leaves the user on a page they still have business with.
+    let url = '';
+    const confirm = chooseDeployTargetInBrowser({
+      ...TARGETS,
+      view: 'confirm-remove',
+      subjectTarget: 'legacy',
+      timeoutMs: 1_500,
+      onListen: (u) => (url = u),
+    });
+    const withBridge = await (await fetch(await waitForUrl(() => url))).text();
+    await confirm;
+    expect(withBridge).toContain('.callout.danger');
+    expect(withBridge).toContain('__action');
+    // It names what survives the decline, and never a value.
+    expect(withBridge).toContain('/repo/.capy/deploy.json');
+    expect(withBridge).not.toContain('sk_live');
+
+    url = '';
+    const listing = chooseDeployTargetInBrowser({
+      ...TARGETS,
+      timeoutMs: 1_500,
+      onListen: (u) => (url = u),
+    });
+    const plain = await (await fetch(await waitForUrl(() => url))).text();
+    await listing;
+    expect(plain).not.toContain('.callout.danger');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -859,11 +925,13 @@ describe('showDeployTokensInBrowser', () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
-  test('the `cancel` vocabulary is already answered, ready for the screen', async () => {
-    // The fix that removes the wait entirely is a screen change this parcel
-    // may not make (packages/ui): "Leave it active" and a "Done" control on the
-    // listing both need to post `__action: 'cancel'`. The reducer takes it
-    // today, so the moment those land the decline is immediate.
+  test('the `cancel` vocabulary is the one the page actually sends', async () => {
+    // Not a shape invented here. The confirm view's decline posts nothing of
+    // its own, so `withDeclineBridge` posts this on its behalf the moment the
+    // question leaves the document — and when the screen grows the control it
+    // should have (packages/ui: "Leave it active", plus a "Done" on the
+    // listing), it posts the same thing and the bridge becomes dead weight.
+    // `tests/ui/browserFlow.e2e.test.ts` clicks the real button.
     let url = '';
     const done = showDeployTokensInBrowser({ ...TOKENS, onListen: (u) => (url = u) });
     const u = new URL(await waitForUrl(() => url));
@@ -871,12 +939,21 @@ describe('showDeployTokensInBrowser', () => {
     expect(await done).toEqual({ deployId: null, cancelled: true });
   });
 
-  test('the listing does not hold a run for the wizard s five minutes', () => {
-    // `capy deploy list --web` is a read-only listing on a screen with no exit
-    // control, so the deadline IS its exit. Five minutes of block for a
-    // listing is not a listing.
-    expect(TOKENS_TIMEOUT_MS).toBeLessThan(5 * 60 * 1000);
-    expect(TOKENS_TIMEOUT_MS).toBe(120_000);
+  test('the confirm view carries the bridge, and the listing does not', async () => {
+    // The bridge answers ONE question — "revoke this token?" — so it is fitted
+    // only where that question is the whole run. On `capy deploy list --web`
+    // the same click walks back to a listing the user may still want, and
+    // ending the run there would be answering something nobody asked.
+    const confirm = await fetchScreen({
+      ...TOKENS,
+      view: 'confirm-revoke' as const,
+      subjectToken: 'a1b2c3d4e5f6a7b8c9d0',
+    });
+    expect(confirm).toContain('__action');
+    expect(confirm).toContain('.callout.danger');
+
+    const listing = await fetchScreen(TOKENS);
+    expect(listing).not.toContain('.callout.danger');
   });
 });
 

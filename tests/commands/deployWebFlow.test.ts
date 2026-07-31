@@ -171,6 +171,12 @@ describe('deployList --web', () => {
   test('a cancelled listing changes nothing and exits 0', async () => {
     // Closing the window is a refusal. A listing that ends without an answer
     // has removed nothing, and it is not a failure.
+    //
+    // `{__action:'cancel'}` is not a shape invented for this test: it is what
+    // `withDeclineBridge` posts, and what the screen itself should post once it
+    // grows the control. The BROWSER-driven proof is
+    // `tests/ui/browserFlow.e2e.test.ts`, which clicks the real button and
+    // times the run — this asserts what the command does with the answer.
     writeTargets();
     const cap = captureConsole();
     try {
@@ -215,6 +221,12 @@ describe('deployRemove --web', () => {
     // The terminal removes on a bare argument with no question at all. The
     // settings behind that name took seven prompts to produce and
     // `.capy/deploy.json` keeps no history — so a decline has to survive.
+    //
+    // The decline is POSTed here rather than clicked, and what a click actually
+    // costs is the other half of this: driven in a real browser this run sat
+    // for 300,021 ms before printing the very line asserted below. That half
+    // lives in `tests/ui/browserFlow.e2e.test.ts`, which clicks "Keep it" and
+    // fails the run if it has not ended fifteen seconds later.
     writeTargets();
     const cap = captureConsole();
     try {

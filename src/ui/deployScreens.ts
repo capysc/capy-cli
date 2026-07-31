@@ -27,8 +27,8 @@
 // plaintext exists yet when they are drawn — and the deploy PR body already
 // holds itself to the same rule.
 import { runBrowserWizard } from './browserWizard';
+import { refusalOn, withDeclineBridge } from './declineBridge';
 import { renderScreen } from './screens/serve';
-import { CapyError } from '../types';
 import { deployPlan, SIGNIN_COMMAND, type DeployStopId } from '../core/deployPlan';
 import type {
   DeployAdapterChoice,
@@ -99,6 +99,29 @@ interface WebServeOptions {
   onListen?: (url: string) => void;
   timeoutMs?: number;
 }
+
+/**
+ * How long a screen with no way to refuse stays open.
+ *
+ * `deploy-targets` and `deploy-tokens` are the two screens here that are not
+ * wizards: neither has a Cancel, and their `list` views offer nothing but the
+ * action itself — `Edit target` / `Remove target`, `Revoke token`. So a run
+ * that opens one and is never answered has only ONE signal available to it,
+ * silence, and this deadline is what turns that silence into an ending.
+ *
+ * Deliberately not the wizard's five minutes. Five minutes of a terminal that
+ * has printed nothing, after a user has already decided not to do the thing,
+ * is not an ending anybody experiences as one — and `capy deploy targets --web`
+ * is a LISTING, which should cost about as much as `ls`. Two minutes is the
+ * CLI's own display-screen default: long enough to read a listing and type a
+ * name back, short enough that a command that is over feels over.
+ *
+ * It is the backstop, not the mechanism. A CONFIRM view — one question, one
+ * destructive answer — ends the moment the user declines, through
+ * `withDeclineBridge`; this deadline is what is left for the listings, where
+ * there is no decline to detect because there is no question outstanding.
+ */
+export const NO_REFUSAL_TIMEOUT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // deploy-destination — where this project deploys, and how
@@ -944,24 +967,63 @@ export function buildDeployTargetsData(
  * The submitted name is resolved against the list the server sent, never
  * trusted: `use` is followed by a real deploy against whatever comes back, and
  * a target the screen could not have offered did not come from the screen.
+ *
+ * TWO ENDINGS, and this function is responsible for both of them REACHING the
+ * caller — every caller, which is why it is here and not repeated at the three
+ * call sites. Picked, edited, removed and "set up a new one" are submits.
+ * Everything else — the window closed, `Keep it` clicked, the deadline reached
+ * — is a refusal, and a refusal RESOLVES as `{ action: null, cancelled: true }`.
+ * It does not reject. `capy deploy targets-remove <name> --web` used to hang
+ * for the wizard's five minutes on a decline and `capy deploy --web` used to
+ * throw its timeout out of the picker, both for a user who had simply chosen
+ * not to go on.
+ *
+ * SCREEN CHANGE NEEDED (packages/ui/screens/deploy-targets/Screen.svelte — not
+ * made here, this parcel may not edit packages/ui):
+ *   1. `confirm-remove`'s "Keep it" (line ~248) sets `view = 'list'` and posts
+ *      nothing. It should `submitToCli('/submit', data.nonce, { __action:
+ *      'cancel' })` the way the same package's `Wizard` cancel does.
+ *   2. The `list` view has no exit control at all — Edit and Remove are the
+ *      only buttons. It needs a quiet "Done" posting the same thing.
+ * Until (1) lands, `withDeclineBridge` answers the confirm view from this side.
+ * Until (2) lands, `NO_REFUSAL_TIMEOUT_MS` is the listing's only ending.
  */
 export async function chooseDeployTargetInBrowser(
   p: WebDeployTargetsParams,
 ): Promise<WebDeployTargetsResult> {
+  const refused: WebDeployTargetsResult = { action: null, target: '', cancelled: true };
   const out = await runBrowserWizard(
     {
       title: p.purpose === 'pick' ? 'Which target?' : `Deploy targets — ${p.projectName}`,
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
-      timeoutMs: p.timeoutMs,
+      timeoutMs: p.timeoutMs ?? NO_REFUSAL_TIMEOUT_MS,
       doneMessage: 'Picked — back to your terminal.',
-      renderFirst: (nonce) => renderScreen('deploy-targets', buildDeployTargetsData(p, nonce)),
+      renderFirst: (nonce) => {
+        const html = renderScreen('deploy-targets', buildDeployTargetsData(p, nonce));
+        // Only when the CONFIRM is the whole question. On the listing, backing
+        // out of a remove leaves the user on a page they still have business
+        // with — ending the run there would be answering a question nobody
+        // asked.
+        return p.view === 'confirm-remove'
+          ? withDeclineBridge(html, {
+              nonce,
+              // The confirm view's danger callout: `deploy-targets` has exactly
+              // one, and it is the sentence that makes this a question. Not the
+              // danger BUTTON, which the sibling screen keeps in its listing —
+              // one selector for both, bound to a design-system variant.
+              question: '.callout.danger',
+              headline: 'Kept — nothing was removed.',
+              detail: `${stripAnsi(p.subjectTarget ?? 'The target')} is still in ${p.configPath}.`,
+            })
+          : html;
+      },
     },
     async (_step, payload) => {
       const action = payload.__action;
       if (action === 'cancel') {
-        return { done: true, result: { action: null, target: '', cancelled: true } };
+        return { done: true, result: refused };
       }
       if (
         action !== 'use' &&
@@ -983,7 +1045,7 @@ export async function chooseDeployTargetInBrowser(
       }
       return { done: true, result: { action, target: name, cancelled: false } };
     },
-  );
+  ).catch(refusalOn(refused));
   return out as WebDeployTargetsResult;
 }
 
@@ -1005,23 +1067,6 @@ export interface WebDeployTokensResult {
   /** True whenever the flow ended without a revoke. Never an error. */
   cancelled: boolean;
 }
-
-/**
- * How long the token flows stay open.
- *
- * Shorter than the wizard's five minutes on purpose, and the reason is a
- * screen defect this CLI cannot fix from here: `deploy-tokens` has no control
- * that posts a refusal. "Leave it active" walks back to the listing entirely
- * in the page, and the listing itself offers nothing but Revoke. So the only
- * signal a decline ever produces is SILENCE, and this deadline is what turns
- * that silence into an ending instead of a hang.
- *
- * Two minutes is the CLI's own display-screen default — long enough to read a
- * listing and type twelve characters back, short enough that `capy deploy
- * list --web` is a listing again rather than a five-minute block. See
- * `SCREEN CHANGE NEEDED` below for the fix that removes the wait entirely.
- */
-export const TOKENS_TIMEOUT_MS = 120_000;
 
 export function buildDeployTokensData(
   p: WebDeployTokensParams,
@@ -1067,11 +1112,14 @@ export function buildDeployTokensData(
  * made here, this parcel may not edit packages/ui):
  *   1. "Leave it active" (line ~195) sets `view = 'list'` and posts nothing.
  *      It should `submitToCli('/submit', data.nonce, { __action: 'cancel' })`
- *      so the decline is immediate rather than waiting out the deadline.
+ *      so the decline is the page's own act rather than something inferred.
  *   2. The `list` view has NO exit control at all — the only button is Revoke.
  *      It needs a quiet "Done" that posts the same `__action: 'cancel'`.
  * With those two, the reducer below already answers them: `__action: 'cancel'`
- * is handled, and the wait disappears entirely.
+ * is handled. Until (1) lands, `withDeclineBridge` posts it from this side the
+ * instant the question leaves the page, so `capy deploy revoke <id> --web`
+ * answers a decline at once and shows the user that it did. Until (2) lands,
+ * `NO_REFUSAL_TIMEOUT_MS` is the listing's only ending.
  */
 export async function showDeployTokensInBrowser(
   p: WebDeployTokensParams,
@@ -1083,9 +1131,27 @@ export async function showDeployTokensInBrowser(
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
-      timeoutMs: p.timeoutMs ?? TOKENS_TIMEOUT_MS,
+      timeoutMs: p.timeoutMs ?? NO_REFUSAL_TIMEOUT_MS,
       doneMessage: 'Done — back to your terminal.',
-      renderFirst: (nonce) => renderScreen('deploy-tokens', buildDeployTokensData(p, nonce)),
+      renderFirst: (nonce) => {
+        const html = renderScreen('deploy-tokens', buildDeployTokensData(p, nonce));
+        // Only when the CONFIRM is the whole question — `capy deploy revoke
+        // <id> --web`. On `capy deploy list --web` the same click walks back to
+        // a listing the user may still want, and ending the run there would be
+        // answering a question nobody asked.
+        return p.view === 'confirm-revoke'
+          ? withDeclineBridge(html, {
+              nonce,
+              // The confirm view's danger callout — "This cannot be undone".
+              // NOT `button.danger`: this screen keeps a danger button in its
+              // listing too, so the button survives the decline and the callout
+              // does not.
+              question: '.callout.danger',
+              headline: 'Left active — nothing was revoked.',
+              detail: `${stripAnsi(p.subjectToken ?? 'The token')} can still fetch this project's secrets.`,
+            })
+          : html;
+      },
     },
     async (_step, payload) => {
       // Already the vocabulary every other screen answers in, so the moment
@@ -1107,13 +1173,7 @@ export async function showDeployTokensInBrowser(
       }
       return { done: true, result: { deployId: id, cancelled: false } };
     },
-  ).catch((err: unknown) => {
-    // Nobody answered. Structural, not a message match: the wizard mints a
-    // CapyError for its deadline and for Ctrl-C, and both mean the same thing
-    // here. A server that failed to listen is not that, and still throws.
-    if (err instanceof CapyError) return refused;
-    throw err;
-  });
+  ).catch(refusalOn(refused));
   return out as WebDeployTokensResult;
 }
 
