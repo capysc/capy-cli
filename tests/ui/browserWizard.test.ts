@@ -262,4 +262,118 @@ describe('runBrowserWizard loopback server', () => {
     await fetch(`http://127.0.0.1:${u.port}/submit`, { method: 'POST', headers, body: JSON.stringify({ nonce, payload: {} }) });
     await done;
   });
+
+  test('the clock stops while the reducer works, and starts again with the next question', async () => {
+    // The budget is per QUESTION, not per run. A flow that holds one window
+    // across a whole first run spends most of its life in here — creating an
+    // organization, showing 24 words — with nothing outstanding that a person
+    // could answer, and killing the window for that is killing it for being
+    // used.
+    let url = '';
+    let rejected: unknown = null;
+    const done = runBrowserWizard(
+      {
+        title: 'Slow',
+        firstScreen: { html: '<form><button type="submit">go</button></form>' },
+        open: false,
+        timeoutMs: 400,
+        onListen: (u) => (url = u),
+      },
+      async (step) => {
+        // Longer than the whole per-question budget, twice over.
+        await new Promise((r) => setTimeout(r, 1_200));
+        return step === 0 ? { screen: { html: '<form id="s2"></form>' } } : { done: true, result: { finished: true } };
+      },
+    );
+    void done.catch((e) => (rejected = e));
+
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+    const post = () =>
+      fetch(`http://127.0.0.1:${u.port}/submit`, { method: 'POST', headers, body: JSON.stringify({ nonce, payload: {} }) });
+
+    expect((await (await post()).json()).screen).toContain('id="s2"');
+    expect(rejected).toBeNull();
+    expect(await post()).toBeDefined();
+    expect(await done).toEqual({ finished: true });
+  });
+
+  test('a flow can END on a screen, and the wizard resolves once it is collected', async () => {
+    // The third ending. `{ done: true }` says "this worked" in the only place
+    // that can say it — the page, which draws its ending from the control the
+    // user pressed — so a run that STOPPED has to hand over a document
+    // instead: the reason, and no question on it.
+    let url = '';
+    let settled = false;
+    const done = runBrowserWizard(
+      {
+        title: 'Stops',
+        firstScreen: { html: '<form><button type="submit">go</button></form>', standalone: true },
+        open: false,
+        timeoutMs: 20_000,
+        finalGraceMs: 20_000,
+        onListen: (u) => (url = u),
+      },
+      async () => ({
+        screen: { html: '<!DOCTYPE html><html><body>THE RUN STOPPED</body></html>', standalone: true, final: true },
+        result: { cancelled: true },
+      }),
+    );
+    void done.then(() => (settled = true));
+
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+    const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce, payload: {} }),
+    });
+    // Told to reload — NOT told it is done, which is what draws the check.
+    expect(await res.json()).toEqual({ next: true });
+    // Not over until the page has actually been handed over: a socket that
+    // closes the moment it is listening serves nobody.
+    expect(settled).toBe(false);
+
+    expect(await (await fetch(u.href)).text()).toContain('THE RUN STOPPED');
+    expect(await done).toEqual({ cancelled: true });
+
+    // And nothing more may be answered on it.
+    const after = await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce, payload: {} }),
+    }).catch(() => ({ status: 0 }));
+    expect([0, 409]).toContain(after.status);
+  });
+
+  test('a final screen nobody comes back for still ends the run', async () => {
+    // The window was already closed when the run died. The ending has nowhere
+    // to be delivered, and the CLI still has to exit.
+    let url = '';
+    const started = Date.now();
+    const done = runBrowserWizard(
+      {
+        title: 'Stops',
+        firstScreen: { html: '<form><button type="submit">go</button></form>', standalone: true },
+        open: false,
+        timeoutMs: 20_000,
+        finalGraceMs: 300,
+        onListen: (u) => (url = u),
+      },
+      async () => ({
+        screen: { html: '<!DOCTYPE html><html><body>THE RUN STOPPED</body></html>', standalone: true, final: true },
+        result: { cancelled: true },
+      }),
+    );
+
+    const u = new URL(await waitForUrl(() => url));
+    await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce: u.searchParams.get('n') ?? '', payload: {} }),
+    });
+
+    expect(await done).toEqual({ cancelled: true });
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
 });

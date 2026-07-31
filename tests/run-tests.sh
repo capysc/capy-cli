@@ -10,6 +10,13 @@ cd "$(dirname "$0")/.."
 # auto-commit (CAP-303) create real commits here.
 export CAPY_NO_AUTOCOMMIT=1
 
+# No test may launch the developer's browser. Every `--web` call site reads
+# this before calling `open()`, and the browser tests drive a downloaded
+# headless shell with a throwaway profile instead. Individual tests also pass
+# `open: false`; this is the backstop for the ones that go through a command,
+# where the flag is not theirs to pass.
+export CAPY_WEB_NO_OPEN=1
+
 FAIL=0
 
 # Files that use mock.module() — must run in isolation

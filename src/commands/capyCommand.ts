@@ -338,7 +338,11 @@ export class CapyCommand {
       await this.runInitialization(wizard);
       await wizard?.finish();
     } catch (err) {
-      await wizard?.abort();
+      // The browser is holding a submit at this point, and it must not be told
+      // that submit worked. `abort` replaces the question with what stopped
+      // the run — carrying the error's CODE, and the remedy any call site that
+      // knew one declared with `willBlock` just before it threw.
+      await wizard?.abort(err);
       throw err;
     }
   }
@@ -481,6 +485,25 @@ export class CapyCommand {
     const orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
     wizard?.record({ hasOrgKey: orgKeyPresent });
     if (!orgKeyPresent) {
+      // The most common way this run stops, and it stops one step after the
+      // browser answered a question — so the page would otherwise be told the
+      // organization it just picked went through. `redeem` is on the rail from
+      // the start for exactly this; the run stops standing on it.
+      //
+      // Stated in fields rather than left for the message below to be mined
+      // for: the remedy is a command, not a sentence that happens to contain
+      // one.
+      wizard?.willBlock(
+        'redeem',
+        {
+          code: ERROR_CODES.AUTH_FAILED,
+          title: 'This device does not hold this organization\'s key',
+          detail:
+            'You have access to the organization, but the shared encryption key has never been transferred to this device. An owner can send you an invite code; redeeming it moves the key here. Then run capy again in this directory.',
+          remedy: 'capy redeem <code>',
+        },
+        { facts: [{ label: 'Organization', value: selectedOrg.name }] },
+      );
       throw new CapyError(
         `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
         '  Ask your org owner for an invite code, then run:\n\n' +
@@ -709,6 +732,22 @@ export class CapyCommand {
               console.error(`  ${key}`);
             }
             console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
+            // The stop this run dies at is the consent gate, and the variables
+            // are the whole subject — so they go as NAMES, in the field that
+            // draws them as a list of things to go and find in a file, rather
+            // than as a count inside a red sentence. Names only: these values
+            // cannot be read by this key, which is the problem.
+            wizard?.willBlock(
+              'encrypt',
+              {
+                code: ERROR_CODES.PERMISSION_DENIED,
+                title: 'This .env holds values encrypted to a different project',
+                detail:
+                  'These variables cannot be read with this organization\'s key, so they cannot be pushed to it. Delete the .env file, or replace those values with plaintext, and run capy again.',
+                remedy: 'capy',
+              },
+              { names: foreignKeys },
+            );
             throw new CapyError(
               'Cannot push secrets encrypted with a different project\'s key to a new org',
               ERROR_CODES.PERMISSION_DENIED,
@@ -770,6 +809,16 @@ export class CapyCommand {
 
         const syncSpinner = ora('Syncing local variables...').start();
 
+        // What this actually got done, for the report a failure has to make.
+        // Read off the writes themselves rather than inferred afterwards: the
+        // three facts that matter are whether the values reached Keep, whether
+        // the plaintext copy was kept, and whether the .env in this directory
+        // is now ciphertext — and the third one is the reason this cannot be
+        // answered by looking at the error.
+        let pushedToKeep = false;
+        let backupWritten = false;
+        let envRewritten = false;
+
         try {
           const { createHash } = await import('crypto');
           const { deriveResourceId } = await import('../crypto/resourceId');
@@ -801,6 +850,7 @@ export class CapyCommand {
             envBlob,
             initBranch,
           );
+          pushedToKeep = true;
 
           // Prefer the server's copy — it carries server-assigned changed_at
           this.fileManager.writeKeepFile(
@@ -820,9 +870,11 @@ export class CapyCommand {
 
           // Backup plaintext .env before encrypting
           this.fileManager.backupPlaintextEnv(this.options.envPath);
+          backupWritten = true;
 
           // Encrypt the local .env file
           this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
+          envRewritten = true;
 
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
 
@@ -841,6 +893,20 @@ export class CapyCommand {
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
           console.log(`You can run ${B('capy')} again to retry syncing`);
+          // This is the one failure that happens after the last question, and
+          // the terminal path swallows it and carries on — which under --web
+          // used to mean the run ended with `finish()` and the page drew a
+          // green check over a push that did not happen. The browser gets the
+          // same three facts the terminal cannot state: whether the values
+          // reached Keep, whether the plaintext copy was kept, and whether the
+          // .env in this directory is ciphertext now.
+          await wizard?.reportEncryptFailure({
+            code: syncError instanceof CapyError ? syncError.code : ERROR_CODES.SERVICE_ERROR,
+            reason: syncError?.message ? String(syncError.message) : 'The push failed.',
+            envRewritten,
+            backupWritten,
+            pushed: pushedToKeep,
+          });
         }
       } else {
         console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
@@ -1488,15 +1554,17 @@ export class CapyCommand {
       const finalKeep = this.projectManager.readKeepFile();
       this.fileManager.writeEncryptedEnvFile(localPlaintext, encryptionKey, undefined, finalKeep, branch);
       this.installGitHooks();
-      // The .env was rewritten even though nothing differed — that write is
-      // unconditional, not a reaction to a diff, which is why the report
-      // carries it as its own fact rather than inferring it from a list.
-      await this.reportSyncResult(projectState, branch, {
-        outcome: 'nothing-to-do',
-        pulled: [],
-        pushed: [],
-        envRewritten: true,
-      });
+      // NO BROWSER PAGE HERE, deliberately. This is the path a synced
+      // directory takes on every single run: nothing was asked, nothing
+      // differed, and the one line above says so. Serving a report anyway
+      // opened a tab per run — and where `--web` actually lives, which is a
+      // headless or remote host, `open()` fails quietly and the listening
+      // socket holds the process for its whole 120-second timeout waiting for
+      // a browser that is never coming. A no-op that takes two minutes to
+      // exit is worse than a no-op nobody rendered.
+      //
+      // The three ENDS below still report: they follow a question somebody
+      // answered in a window that is demonstrably in use.
       return;
     }
 

@@ -15,9 +15,19 @@
 // rather than rebuilt, so what a person copies out of the page and what a
 // script parses cannot describe different states.
 //
-// Values never appear in either payload. Both screens carry variable names and
-// verdicts; the comparison itself is done on 16-hex sha256 prefixes and not
-// even those cross.
+// WHAT CROSSES. No value, in either payload. The structured rows carry a
+// variable NAME, a type and which side moved — `buildSyncStatusData` drops the
+// pinned/local/remote hashes `compareSecrets` compared on, and
+// `buildSyncResultData` never had them.
+//
+// The `json` field is the exception and is deliberate: it is `capy status
+// --json` VERBATIM, so what a person copies off the page and what a script
+// parses cannot describe different states. That object's `diffs` carry the
+// 16-hex sha256 prefixes — the same ones the command prints to stdout, on the
+// same machine, for the same person. So the page is not hash-free; it is
+// exactly as hash-free as `--json` is, which is the property this field is for.
+// A stricter page would mean two different reports called by one name, and the
+// browser test asserts the shape rather than assuming it.
 import { ScreenServer } from './screens/serve';
 import type {
   DiffType,
@@ -61,7 +71,15 @@ export interface WebSyncStatusParams {
   diffs: StatusDiffInput[];
   /** Connector credentials the CLI warns about after every run. */
   expiring: ExpiringCredential[];
-  /** The `capy status --json` payload, verbatim — the same object, stringified. */
+  /**
+   * The `capy status --json` payload, verbatim — the same object, stringified.
+   *
+   * Carries that object's `diffs`, and therefore its 16-hex sha256 prefixes.
+   * They are not values and they are not new to this surface: `--json` prints
+   * them to stdout on the same machine. Rebuilding a smaller object here would
+   * make the page and the flag two different reports under one name, which is
+   * the failure this field exists to prevent.
+   */
   json: string;
   open?: boolean;
   onListen?: (url: string) => void;

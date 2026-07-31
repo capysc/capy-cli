@@ -10,10 +10,12 @@
  */
 import { describe, test, expect } from 'bun:test';
 import {
+  blockedFromError,
   buildInitWizardData,
   projectNameProblem,
   InitWizardSession,
 } from '../../src/ui/initWizardScreen';
+import { CapyError, ERROR_CODES } from '../../src/types';
 
 const headers = { 'content-type': 'application/json' };
 
@@ -128,6 +130,48 @@ describe('buildInitWizardData', () => {
     );
     expect(d.value).toBe('mikes market');
     expect(d.rejected).toContain('letters, numbers, hyphens, and underscores');
+  });
+});
+
+describe('blockedFromError', () => {
+  test('carries the error\'s CODE and never mines its sentence for a remedy', () => {
+    const b = blockedFromError(
+      new CapyError(
+        'You have access to "hq" but no encryption key on this device.\n\n  run:\n\n    capy redeem <code>',
+        ERROR_CODES.AUTH_FAILED,
+      ),
+    );
+    expect(b.code).toBe(ERROR_CODES.AUTH_FAILED);
+    // The command inside that sentence is not lifted out of it: prose is not a
+    // contract, and a call site that knows the remedy states it in fields.
+    expect(b.remedy).toBe('capy');
+  });
+
+  test('an error with no code is not given one that means something else', () => {
+    expect(blockedFromError(new Error('socket hang up')).code).toBe('UNKNOWN');
+    expect(blockedFromError(undefined).detail).toContain('without saying why');
+  });
+
+  test('the bold the CLI prints does not reach the browser as [1m', () => {
+    const data = buildInitWizardData(
+      {
+        step: 'redeem',
+        input: {},
+        blocked: {
+          code: 'AUTH_FAILED',
+          title: '\x1b[1mNo key\x1b[0m',
+          detail: 'Ask for \x1b[1mcapy redeem\x1b[0m',
+          remedy: '\x1b[1mcapy redeem <code>\x1b[0m',
+        },
+        blockedNames: ['\x1b[1mSTRIPE_SECRET_KEY\x1b[0m'],
+        blockedFacts: [{ label: 'Organization', value: '\x1b[1mhq\x1b[0m' }],
+      },
+      'n',
+    );
+    expect(JSON.stringify(data)).not.toContain('\u001b');
+    expect(data.blocked!.title).toBe('No key');
+    expect(data.blockedNames).toEqual(['STRIPE_SECRET_KEY']);
+    expect(data.blockedFacts).toEqual([{ label: 'Organization', value: 'hq' }]);
   });
 });
 
@@ -307,6 +351,134 @@ describe('InitWizardSession', () => {
 
     await submit(u, nonce, { __action: 'cancel' });
     expect(await run).toBeNull();
+  });
+
+  test('a run that stops serves the reason, and never the success ending', async () => {
+    // The failure between two stops. The browser is holding a SUBMIT at this
+    // moment and the compiled screen draws its ending from the button that was
+    // pressed, so `{ done: true }` here is a green check over a dead run,
+    // whatever `result` says. It gets the blocked page instead — and the
+    // wizard resolves only once that page has been collected.
+    let url = '';
+    const session = new InitWizardSession({
+      open: false,
+      timeoutMs: 4_000,
+      finalGraceMs: 3_000,
+      onListen: (u) => (url = u),
+    });
+    const run = (async () => {
+      session.record({ orgCount: 2 });
+      await session.askOrganization(ORGS);
+      session.record({ hasOrgKey: false });
+      session.willBlock(
+        'redeem',
+        {
+          code: ERROR_CODES.AUTH_FAILED,
+          title: 'This device does not hold this organization\'s key',
+          detail: 'The shared key has never been transferred here.',
+          remedy: 'capy redeem <code>',
+        },
+        { facts: [{ label: 'Organization', value: 'mikes-market-hq' }] },
+      );
+      await session.abort(new CapyError('no key', ERROR_CODES.AUTH_FAILED));
+    })();
+
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+
+    // The answer is accepted and the page is told to reload — not that it is
+    // done. `{ done: true }` is what the success ending looks like on the wire.
+    expect(await submit(u, nonce, { __action: 'submit', organizationId: 'org-1' })).toEqual({ next: true });
+
+    const blocked = await served(u);
+    expect(blocked.step).toBe('redeem');
+    expect(blocked.blocked.code).toBe(ERROR_CODES.AUTH_FAILED);
+    // The way out is a command, in its own field. Nothing digs it out of prose.
+    expect(blocked.blocked.remedy).toBe('capy redeem <code>');
+    expect(blocked.blockedFacts).toEqual([{ label: 'Organization', value: 'mikes-market-hq' }]);
+    // The rail is still the rail: the run is standing on the stop that blocked
+    // it, and the organization it did answer is settled behind it.
+    expect(stop(blocked, 'redeem').state).toBe('current');
+    expect(stop(blocked, 'organization').state).toBe('done');
+
+    await run;
+    // Collected, so the server is gone rather than holding the process open.
+    expect(await fetch(u.href).then(() => 'up').catch(() => 'down')).toBe('down');
+  });
+
+  test('a push that fails after consent is not a stop the rail ticks off', async () => {
+    let url = '';
+    const session = new InitWizardSession({
+      open: false,
+      timeoutMs: 4_000,
+      finalGraceMs: 3_000,
+      onListen: (u) => (url = u),
+    });
+    const run = (async () => {
+      // A run that has answered everything before the last stop, which is the
+      // only way this failure is reachable.
+      session.record({
+        signedInAs: 'mike@market.example',
+        orgCount: 1,
+        organization: { kind: 'existing', name: 'mikes-market-hq' },
+        hasOrgKey: true,
+        projectCount: 0,
+        project: { kind: 'new', name: 'mikes-market' },
+        branchChoice: 'development',
+        localEnvCount: 2,
+      });
+      const yes = await session.askEncrypt(
+        { count: 2, names: ['STRIPE_SECRET_KEY', 'DATABASE_URL'] },
+        { projectName: 'mikes-market', orgName: 'mikes-market-hq', branch: 'development' },
+      );
+      await session.reportEncryptFailure({
+        code: ERROR_CODES.SERVICE_ERROR,
+        reason: 'Keep did not answer (503).',
+        envRewritten: false,
+        backupWritten: false,
+        pushed: false,
+      });
+      return yes;
+    })();
+
+    const u = new URL(await waitForUrl(() => url));
+    const nonce = u.searchParams.get('n') ?? '';
+    expect(await submit(u, nonce, { __action: 'submit', encrypt: true })).toEqual({ next: true });
+
+    const failed = await served(u);
+    expect(failed.step).toBe('encrypt');
+    expect(failed.encryptFailure).toEqual({
+      code: ERROR_CODES.SERVICE_ERROR,
+      reason: 'Keep did not answer (503).',
+      envRewritten: false,
+      backupWritten: false,
+      pushed: false,
+    });
+    // Answered, and not done: the stop describes a push that did not happen.
+    expect(stop(failed, 'encrypt').state).toBe('current');
+    expect(stop(failed, 'encrypt').answer).toBeUndefined();
+    // The page redraws what it asked about — the same NAMES and count, so the
+    // checklist can say how many reached Keep — and no value, exactly as
+    // before the push was attempted.
+    expect(failed.localEnv).toEqual({ count: 2, names: ['STRIPE_SECRET_KEY', 'DATABASE_URL'] });
+    expect(JSON.stringify(failed)).not.toContain('sk_live');
+
+    expect(await run).toBe(true);
+  });
+
+  test('a question after the window is over is refused with a code', async () => {
+    // It used to be a bare `Error`, which every caller had to read prose to
+    // tell apart from a service that refused them.
+    let url = '';
+    const session = new InitWizardSession({ open: false, timeoutMs: 4_000, onListen: (u) => (url = u) });
+    const first = session.askOrganization(ORGS);
+    const u = new URL(await waitForUrl(() => url));
+    await submit(u, u.searchParams.get('n') ?? '', { __action: 'cancel' });
+    expect(await first).toBeNull();
+
+    const err = await session.askProjectName('mikes-market').catch((e) => e);
+    expect(err).toBeInstanceOf(CapyError);
+    expect((err as CapyError).code).toBe(ERROR_CODES.SERVICE_ERROR);
   });
 
   test('the rail redraws with each answer folded in', async () => {

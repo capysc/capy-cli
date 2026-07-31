@@ -8,7 +8,7 @@
  * not settled yet (`blank`), and a stop that is genuinely next (`current`).
  */
 import { describe, test, expect } from 'bun:test';
-import { initWizardPlan, unansweredInitStops } from '../../src/core/initWizardPlan';
+import { initWizardPlan } from '../../src/core/initWizardPlan';
 
 const ids = (i: Parameters<typeof initWizardPlan>[0]) => initWizardPlan(i).map((s) => s.id);
 const byId = (i: Parameters<typeof initWizardPlan>[0], id: string) =>
@@ -140,7 +140,6 @@ describe('initWizardPlan', () => {
     for (const id of ['project-name', 'branch', 'branch-name', 'encrypt']) {
       expect(plan.find((s) => s.id === id)!.state).toBe('skipped');
     }
-    expect(unansweredInitStops(plan)).toEqual([]);
   });
 
   test('the default branch skips the naming stop; another branch does not', () => {
@@ -187,8 +186,13 @@ describe('initWizardPlan', () => {
     expect(plan.slice(plan.findIndex((s) => s.id === 'project') + 1).every((s) => s.state !== 'done')).toBe(true);
   });
 
-  test('what is left to ask is derived from the plan, never recomputed', () => {
-    expect(unansweredInitStops(initWizardPlan({}))).toEqual([
+  test('a run that has answered nothing has every stop still ahead of it', () => {
+    // The empty plan, which is what the first page is drawn from: one stop to
+    // stand on and eight in front of it, and nothing settled but the sign-in
+    // that already happened.
+    const plan = initWizardPlan({});
+    expect(plan.filter((s) => s.state === 'done').map((s) => s.id)).toEqual(['auth']);
+    expect(plan.filter((s) => s.state === 'current' || s.state === 'upcoming').map((s) => s.id)).toEqual([
       'organization',
       'organization-name',
       'recovery',

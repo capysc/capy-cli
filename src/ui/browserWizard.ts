@@ -5,7 +5,7 @@
 //
 // Security mirrors the single-step intake (src/commands/addCommand.ts runWebIntake):
 // a single-use 32-byte nonce, Host/Origin pinning to the exact loopback address
-// (defends DNS-rebinding), a body-size cap, an idle timeout, and full cleanup. The
+// (defends DNS-rebinding), a body-size cap, a per-question timeout, and full cleanup. The
 // only new capability is statefulness: each POST advances to the next screen, and
 // the caller's reducer decides the next screen / done / inline error.
 //
@@ -13,6 +13,28 @@
 // form fields, or built by the screen itself and handed to `window.capySubmit` — and
 // the reducer turns that into the NEXT screen or a final result. Values the user types
 // stay in the browser→CLI loopback; this transport never prints or logs them.
+//
+// THE CLOCK ONLY RUNS WHILE A QUESTION IS OUTSTANDING. It used to be a single
+// wall clock, set once at `listen()` and never touched again — which was fine
+// while every question stood up its own server for one question, and stopped
+// being fine the moment a flow held ONE window across a whole run. The init
+// wizard's budget then had to cover not just the answering but everything the
+// CLI does between two stops: creating an organization, which opens two more
+// browser windows of its own and asks somebody to write down 24 words. Five
+// minutes is a generous time to answer a question and a short time to be alive.
+// So the timer is armed while the browser owes us an answer and disarmed the
+// moment one arrives, for exactly as long as the reducer is working. A CLI that
+// hangs between two stops is a CLI bug and is not a thing this transport can
+// fix by killing a window the user is still looking at.
+//
+// ENDINGS. A flow ends submitted or cancelled — and either way the page has to
+// say which, so `{ done }` is not the only way out. A reducer can also end on a
+// final SCREEN (`final: true`): the browser is told to reload, receives a whole
+// document that asks nothing, and the wizard resolves once that document has
+// been served. That is what a failed run uses. `{ done: true }` renders as the
+// ending the page's own button implied — the compiled screens decide "submitted"
+// vs "cancelled" from which control was pressed — so answering a submit with
+// `done` on a run that just DIED would draw a green check over a failure.
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes } from 'crypto';
 import type { Socket } from 'net';
@@ -23,6 +45,14 @@ import { screenHeaders } from './screens/serve';
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_BODY = 5_000_000;
+/**
+ * How long a final screen waits to be collected before the flow gives up on it.
+ *
+ * The browser is holding the POST that releases it, so the reload lands in
+ * milliseconds; this cap is for the window that has already gone, so a CLI that
+ * ends on a failure page cannot be held open by a tab nobody will ever load.
+ */
+const DEFAULT_FINAL_GRACE_MS = 10 * 1000;
 
 export const CAPY_LOGO_SVG = `<svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M50 0L93.3013 25V75L50 100L6.69873 75V25L50 0Z" fill="url(#d0)"/><path d="M50 49.5V100L93.5 75V25L50 49.5Z" fill="black"/><path d="M74.5044 54V64.8832L81 67.8489L80.5617 68.8437L74.1859 65.9328L68.9222 75L68 74.4451L73.4332 65.0866V54.5453L74.5044 54Z" fill="white" stroke="white" stroke-width="2"/><path d="M29.375 53.5L10.875 33.4862L10.875 48.5L29.375 59L29.375 53.5Z" fill="black"/><defs><linearGradient id="d0" x1="50" y1="0" x2="50" y2="100" gradientUnits="userSpaceOnUse"><stop stop-opacity="0.15"/><stop offset="1" stop-opacity="0.5"/></linearGradient></defs></svg>`;
 
@@ -64,6 +94,21 @@ export interface WizardScreen {
    * Opening the next step…").
    */
   standalone?: boolean;
+  /**
+   * The last document of this flow: it asks nothing, and the wizard resolves
+   * once the browser has been served it.
+   *
+   * This is how a run ENDS on a page rather than on the shell's green check —
+   * a stop that was blocked, a push that failed after consent. `{ done: true }`
+   * cannot say those things: the compiled screens draw their ending from the
+   * control the user pressed, so answering a submit with `done` tells someone
+   * who pressed "Encrypt and push" that it worked, whatever happened next.
+   *
+   * Only meaningful together with `standalone` — a fragment cannot be the last
+   * thing a browser is handed, because the shell it swaps into is what would
+   * have to say the flow is over.
+   */
+  final?: boolean;
 }
 
 export interface WizardParams {
@@ -72,7 +117,16 @@ export interface WizardParams {
   open: boolean;
   /** Test-only: receives the loopback URL once listening. Unset in production. */
   onListen?: (url: string) => void;
+  /**
+   * How long to wait on an OUTSTANDING QUESTION before giving up.
+   *
+   * Not a budget for the whole run: it is disarmed for as long as the reducer
+   * is working on an answer, because during that time nothing is being waited
+   * on that a person could supply.
+   */
   timeoutMs?: number;
+  /** How long a `final` screen waits to be collected. See the constant. */
+  finalGraceMs?: number;
   doneMessage?: string;
   /**
    * Build the first screen's HTML once the nonce exists, replacing
@@ -87,9 +141,15 @@ export interface WizardParams {
   renderFirst?: (nonce: string) => string;
 }
 
-/** The reducer's verdict for a submitted screen. */
+/**
+ * The reducer's verdict for a submitted screen.
+ *
+ * `{ screen }` with `final` set on it is the third ending: the flow stops ON
+ * that document instead of on the shell's "Done", and `result` is what the
+ * wizard resolves with once the browser has collected it.
+ */
 export type WizardDecision =
-  | { screen: WizardScreen }
+  | { screen: WizardScreen; result?: unknown }
   | { done: true; result: unknown }
   | { error: string };
 
@@ -100,7 +160,8 @@ export type WizardSubmit = (step: number, payload: Record<string, unknown>) => P
 
 /**
  * Run a multi-step browser wizard. Resolves with the reducer's `result` once it
- * returns `{ done }`; rejects on timeout, server error, or Ctrl+C.
+ * returns `{ done }` or once a `final` screen has been served; rejects on
+ * timeout, server error, or Ctrl+C.
  */
 export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): Promise<unknown> {
   const nonce = randomBytes(32).toString('hex');
@@ -121,7 +182,9 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
     : params.firstScreen;
 
   return new Promise<unknown>((resolve, reject) => {
-    let timer: NodeJS.Timeout;
+    let timer: NodeJS.Timeout | null = null;
+    /** Set once a `final` screen is waiting to be collected. Its `result`. */
+    let ending: { result: unknown } | null = null;
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       const addr = server.address();
@@ -150,6 +213,19 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
             ? current.html
             : wizardPage(params.title, current.html, nonce, params.doneMessage),
         );
+        // The flow ended on this document. It has now been delivered, which is
+        // the whole reason the server was still up — so let the bytes flush and
+        // stop. A run that dies must not be kept alive by its own error page.
+        if (ending) {
+          const result = ending.result;
+          ending = null;
+          res.on('finish', () =>
+            setTimeout(() => {
+              cleanup();
+              resolve(result);
+            }, 250),
+          );
+        }
         return;
       }
 
@@ -196,10 +272,17 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
             return;
           }
           busy = true;
+          // The answer arrived; nothing is outstanding until the reducer says
+          // there is a next question. Whatever the CLI does in between is its
+          // own business and none of it is the browser keeping us waiting.
+          disarm();
           try {
             const decision = await onSubmit(step, payload);
             if ('error' in decision) {
               busy = false;
+              // Refused inline: the page keeps this step, so the same question
+              // is outstanding again and the clock goes back on.
+              arm();
               res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ error: decision.error }));
               return;
             }
@@ -217,6 +300,21 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
             step += 1;
             current = decision.screen;
             busy = false;
+            if (decision.screen.final) {
+              // The flow ends on this document. Nothing more may be submitted,
+              // and the wizard resolves when the browser has been served it —
+              // see the GET above. The grace timer is the window that has
+              // already been closed: without it a run that died would be held
+              // open by a page nobody is coming back for.
+              done = true;
+              ending = { result: decision.result };
+              armFinalGrace();
+              res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ next: true }));
+              return;
+            }
+            // A new question is outstanding from the moment this response goes
+            // out, so the clock the answer stopped starts again.
+            arm();
             if (decision.screen.standalone) {
               // The next step is a whole document, so it cannot be handed back
               // as a fragment for the current page to swap in. It is held in
@@ -235,6 +333,9 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
               .end(JSON.stringify({ screen: decision.screen.html, doneMessage: decision.screen.doneMessage }));
           } catch (err) {
             busy = false;
+            // The step failed and the page stays on it, so the question is
+            // outstanding again.
+            arm();
             const message = err instanceof Error ? err.message : 'Step failed.';
             res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: message }));
           }
@@ -245,8 +346,48 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
       res.writeHead(404).end('not found');
     });
 
+    /** Stop the clock. Nothing is being waited on that a person could supply. */
+    const disarm = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    };
+
+    /** Start it again: the browser owes this flow an answer from now. */
+    const arm = (): void => {
+      disarm();
+      const ms = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new CapyError(
+            `Timed out waiting for the browser (${Math.round(ms / 1000)}s with the question unanswered).`,
+            ERROR_CODES.SERVICE_ERROR,
+          ),
+        );
+      }, ms);
+      timer.unref();
+    };
+
+    /**
+     * The flow is over and one document is still to be delivered.
+     *
+     * Resolves rather than rejects when it elapses. The ending already
+     * happened; this timer only decides how long we hold a page open for a
+     * window that may already be gone.
+     */
+    const armFinalGrace = (): void => {
+      disarm();
+      timer = setTimeout(() => {
+        const result = ending?.result;
+        ending = null;
+        cleanup();
+        resolve(result);
+      }, params.finalGraceMs ?? DEFAULT_FINAL_GRACE_MS);
+      timer.unref();
+    };
+
     const cleanup = (): void => {
-      clearTimeout(timer);
+      disarm();
       try {
         server.close();
       } catch {
@@ -271,11 +412,8 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
       reject(err);
     });
 
-    timer = setTimeout(() => {
-      cleanup();
-      reject(new CapyError('Timed out waiting for the browser (5 minutes).', ERROR_CODES.SERVICE_ERROR));
-    }, params.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    timer.unref();
+    // The first question is outstanding from the moment there is a URL to open.
+    arm();
 
     process.once('SIGINT', () => {
       cleanup();

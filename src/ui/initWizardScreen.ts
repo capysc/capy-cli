@@ -23,11 +23,22 @@
 // belongs to the same flow and never appears here at all: `orgCreation.ts`
 // shows and confirms it on its own surface, and the `recovery` stop is drawn
 // `manual` to say that this page is not where that happens.
+//
+// TWO ENDINGS, AND A THIRD THAT IS NOT "DONE". A submit and a cancel are the
+// browser's own endings and the screen draws them from the button that was
+// pressed. A run that STOPS — no key on this device, a push that failed after
+// consent — is neither, and it may not be reported with `{ done }`: the page
+// would draw the ending the button implied, which is a green check over a
+// failure. Those land on a final page instead: `blocked` for a stop the run
+// cannot get past, `encryptFailure` for the one failure that happens after the
+// last question and changes what is on disk.
 import { runBrowserWizard, type WizardDecision } from './browserWizard';
 import { renderScreen } from './screens/serve';
-import { branchNameProblem } from './branchScreens';
 import { initWizardPlan, type InitWizardInput } from '../core/initWizardPlan';
+import { CapyError, ERROR_CODES } from '../types';
 import type {
+  Blocked,
+  InitEncryptFailure,
   InitLocalEnv,
   InitOrg,
   InitProject,
@@ -64,6 +75,14 @@ export interface InitWizardView {
   value?: string;
   /** Why the previous answer was refused, in the CLI's own words. */
   rejected?: string;
+  /** The run cannot go past this stop. Replaces the question with the reason. */
+  blocked?: Blocked;
+  /** Identifiers the block is about — the variables under a foreign key. */
+  blockedNames?: string[];
+  /** Labelled singletons the block is about — the organization, the branch. */
+  blockedFacts?: { label: string; value: string }[];
+  /** Consent was given and the push failed. What it had done by then. */
+  encryptFailure?: InitEncryptFailure;
 }
 
 /**
@@ -139,7 +158,50 @@ export function buildInitWizardData(v: InitWizardView, nonce: string): InitWizar
   }
   if (v.value !== undefined) data.value = stripAnsi(v.value);
   if (v.rejected !== undefined) data.rejected = v.rejected;
+  if (v.blocked) {
+    // `detail` is prose the CLI also prints, and printing is where the bold
+    // comes from. An escape that renders as `[1m` in a browser turns the one
+    // sentence explaining why a run stopped into gibberish.
+    data.blocked = {
+      ...v.blocked,
+      title: stripAnsi(v.blocked.title),
+      detail: stripAnsi(v.blocked.detail),
+      ...(v.blocked.remedy === undefined ? {} : { remedy: stripAnsi(v.blocked.remedy) }),
+    };
+  }
+  if (v.blockedNames?.length) data.blockedNames = v.blockedNames.map(stripAnsi);
+  if (v.blockedFacts?.length) {
+    data.blockedFacts = v.blockedFacts.map((f) => ({ label: f.label, value: stripAnsi(f.value) }));
+  }
+  if (v.encryptFailure) {
+    data.encryptFailure = { ...v.encryptFailure, reason: stripAnsi(v.encryptFailure.reason) };
+  }
   return data;
+}
+
+/**
+ * A stop the run could not get past, built from the error that stopped it.
+ *
+ * `code` is the CLI's own stable code and is the only thing anything may
+ * branch on. The message is carried as `detail` for a person to read and is
+ * never parsed — which is also why no remedy is invented here: several of
+ * these errors print a `capy redeem <code>` inside their prose, and digging it
+ * back out of a sentence is exactly the thing that breaks the next time the
+ * sentence is reworded. A call site that knows the remedy states it in fields
+ * with `willBlock` before it throws.
+ */
+export function blockedFromError(err: unknown): Blocked {
+  return {
+    code: err instanceof CapyError ? err.code : 'UNKNOWN',
+    title: 'This run stopped before it finished.',
+    detail:
+      err instanceof Error && err.message
+        ? err.message
+        : 'The CLI stopped without saying why. Its terminal output has the details.',
+    // Re-running the first run is the way out of every generic failure here:
+    // nothing this flow does before the last stop writes anything.
+    remedy: 'capy',
+  };
 }
 
 /**
@@ -167,7 +229,14 @@ export interface InitWizardOptions {
   open?: boolean;
   /** Test hook: receives the loopback URL once listening. */
   onListen?: (url: string) => void;
+  /**
+   * How long ONE outstanding question may go unanswered. Not a budget for the
+   * run: the clock stops while the CLI is working between two stops, which is
+   * where creating an organization and writing down 24 words happen.
+   */
   timeoutMs?: number;
+  /** How long a final page (blocked, or a failed push) waits to be collected. */
+  finalGraceMs?: number;
 }
 
 /**
@@ -199,12 +268,40 @@ export class InitWizardSession {
   private handoff: ((d: WizardDecision) => void) | null = null;
   private input: InitWizardInput = {};
   private ended = false;
+  /** True once the wizard promise has settled, however it settled. */
+  private settled = false;
+  /** The stop the browser is on. What a blocked page redraws itself as. */
+  private step: InitStep = 'organization';
+  /** Declared by the call site that is about to throw. See `willBlock`. */
+  private block: { step: InitStep; view: Omit<InitWizardView, 'input' | 'step'> } | null = null;
+  /** What the consent gate was asked ABOUT, for the page a failure redraws. */
+  private encryptView: { localEnv: InitLocalEnv; target: InitTarget } | null = null;
 
   constructor(private opts: InitWizardOptions = {}) {}
 
   /** Fold a fact or an answer into the run, so the rail redraws from one place. */
   record(patch: Partial<InitWizardInput>): void {
     this.input = { ...this.input, ...patch };
+  }
+
+  /**
+   * State, in fields, why the run is about to stop.
+   *
+   * Called immediately before the `throw`, by the one caller that knows what
+   * the condition IS: which stop it belongs to, the code behind it, and the
+   * command that clears it. Without this the browser gets `abort`'s generic
+   * page, which can carry the error's code and its sentence and cannot invent
+   * a remedy out of prose — see `blockedFromError`.
+   */
+  willBlock(
+    step: InitStep,
+    blocked: Blocked,
+    extra: { names?: string[]; facts?: { label: string; value: string }[] } = {},
+  ): void {
+    this.block = {
+      step,
+      view: { blocked, blockedNames: extra.names, blockedFacts: extra.facts },
+    };
   }
 
   private render(view: InitWizardView): string {
@@ -215,7 +312,13 @@ export class InitWizardSession {
     view: Omit<InitWizardView, 'input'>,
     decide: (payload: Record<string, unknown>) => Verdict<T>,
   ): Promise<T | null> {
-    if (this.ended) throw new Error('The setup window has already closed.');
+    if (this.ended) {
+      // A code, not a bare Error: this reaches the same handler every other
+      // failure does, and "the window closed" is a thing callers may want to
+      // tell apart from a service that refused them.
+      throw new CapyError('The setup window has already closed.', ERROR_CODES.SERVICE_ERROR);
+    }
+    this.step = view.step;
     const full: InitWizardView = { ...view, input: this.input };
 
     const answer = new Promise<T | null>((resolve, reject) => {
@@ -238,6 +341,7 @@ export class InitWizardSession {
           open: this.opts.open ?? true,
           onListen: this.opts.onListen,
           timeoutMs: this.opts.timeoutMs,
+          finalGraceMs: this.opts.finalGraceMs,
           doneMessage: 'Set up — back to your terminal.',
           renderFirst: (n) => {
             this.nonce = n;
@@ -254,6 +358,12 @@ export class InitWizardSession {
         this.pending = null;
         p?.reject(err);
       });
+      // Whether the window is still there decides whether an ending has
+      // anywhere to be delivered — see `end`.
+      void this.wizard.then(
+        () => (this.settled = true),
+        () => (this.settled = true),
+      );
     } else {
       // The reducer is holding the previous answer's POST open. Releasing it
       // with this step is what makes the browser reload into it.
@@ -360,12 +470,21 @@ export class InitWizardSession {
     });
   }
 
-  /** `Branch name:` — validated the way `capy checkout -b` validates one. */
+  /**
+   * `Branch name:` — the CLI's own validator, in the CLI's own words.
+   *
+   * `input.trim().length > 0`, which is all the terminal prompt this replaces
+   * checks. It used to borrow `capy checkout`'s stricter validator, which also
+   * refuses whitespace and a leading hyphen — and a channel that accepts a
+   * different set of names than the terminal is not a rendering change, it is
+   * a change of what the product does. (The screen holds its own button on a
+   * name with a space. That is a rendering difference and stays one: it is the
+   * page being more careful, not this flow being pickier.)
+   */
   async askBranchName(): Promise<string | null> {
     return this.ask<string>({ step: 'branch-name' }, (payload) => {
       const name = typeof payload.branchName === 'string' ? payload.branchName.trim() : '';
-      const problem = branchNameProblem(name, []);
-      if (problem) return { error: problem };
+      if (name.length === 0) return { error: 'Branch name cannot be empty' };
       this.record({ branchName: name });
       return { value: name };
     });
@@ -381,6 +500,10 @@ export class InitWizardSession {
    * may look like agreement to that.
    */
   async askEncrypt(localEnv: InitLocalEnv, target: InitTarget): Promise<boolean> {
+    // Kept for the failure page, which redraws this step: its checklist says
+    // how many secrets reached Keep, and a page rebuilt without the count
+    // would report a successful push of zero of them.
+    this.encryptView = { localEnv, target };
     const answer = await this.ask<boolean>({ step: 'encrypt', localEnv, target }, (payload) => {
       if (typeof payload.encrypt !== 'boolean') {
         return { error: 'That is not an answer the encrypt step can produce.' };
@@ -394,22 +517,83 @@ export class InitWizardSession {
   /** Nothing more will be asked: release the browser and let the CLI finish. */
   async finish(): Promise<void> {
     if (!this.wizard) return;
+    if (this.ended) {
+      // Already over — cancelled, blocked, or a window that closed. `finish`
+      // runs on the way out of every successful path, and a run that ended
+      // badly still comes back through here.
+      await this.wizard.catch(() => undefined);
+      return;
+    }
     this.ended = true;
     this.release({ done: true, result: { cancelled: false } });
     await this.wizard.catch(() => undefined);
   }
 
   /**
-   * The run failed between two questions.
+   * The run stopped between two questions.
    *
-   * Releases the POST the browser is waiting on so the page stops claiming to
-   * be working on something that has already stopped. The error itself is the
-   * terminal's to report — this only closes the window.
+   * The page is holding a submit at this moment, and the compiled screen draws
+   * its ending from the control that was pressed — so `{ done }` here would
+   * print "Done. You can close this tab." over a run that just died. It gets
+   * the reason instead: the same rail, with the question replaced by what
+   * stopped it, the code behind it, and (when a call site declared one with
+   * `willBlock`) the command that clears it.
+   *
+   * The error is still the terminal's to report. This decides only what the
+   * browser is left looking at.
    */
-  async abort(): Promise<void> {
+  async abort(err?: unknown): Promise<void> {
     if (!this.wizard) return;
+    const declared = this.block;
+    await this.end(
+      declared?.step ?? this.step,
+      declared?.view ?? { blocked: blockedFromError(err) },
+    );
+  }
+
+  /**
+   * Consent was given, and the push that followed failed.
+   *
+   * The one failure that happens AFTER the last question, which is why it is
+   * not an `abort`: by this point the answer was yes, some of it may have
+   * happened, and what is on disk right now is the only thing worth saying.
+   * The CLI states that in fields — `pushed`, `backupWritten`, `envRewritten`,
+   * and the code — and the screen draws them as the checklist it already has.
+   *
+   * The consent stop goes back to being the stop this run is STANDING at: it
+   * was answered and it did not complete, and a rail that ticks it off would
+   * be claiming the thing that failed is done.
+   */
+  async reportEncryptFailure(failure: InitEncryptFailure): Promise<void> {
+    if (!this.wizard) return;
+    this.record({ encrypt: undefined });
+    await this.end('encrypt', { ...(this.encryptView ?? {}), encryptFailure: failure });
+  }
+
+  /**
+   * Serve one last page and stop.
+   *
+   * A held POST is what an ending is delivered THROUGH: the page reloads out
+   * of it. With nothing held there is nowhere to put one, and there is nothing
+   * to say either — the flow settled on its own (cancelled, timed out, Ctrl+C)
+   * and the page drew that itself, or no question was ever asked. The CLI is
+   * on its way out with an error to print, so that case returns rather than
+   * waiting on a window that has already answered.
+   */
+  private async end(step: InitStep, view: Omit<InitWizardView, 'input' | 'step'>): Promise<void> {
+    const wizard = this.wizard;
+    if (!wizard) return;
+    const holding = this.handoff !== null;
     this.ended = true;
-    this.release({ done: true, result: { cancelled: true } });
-    await this.wizard.catch(() => undefined);
+    this.pending = null;
+    if (!holding) {
+      if (this.settled) await wizard.catch(() => undefined);
+      return;
+    }
+    this.release({
+      screen: { html: this.render({ ...view, step, input: this.input }), standalone: true, final: true },
+      result: { cancelled: true },
+    });
+    await wizard.catch(() => undefined);
   }
 }

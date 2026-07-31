@@ -210,15 +210,8 @@ export function initWizardPlan(i: InitWizardInput): InitWizardStop[] {
   });
 }
 
-/**
- * The stops this run still has to ask about.
- *
- * A headless caller uses this the way `unansweredStops` is used for branch
- * creation: anything left here is something no flag answered, and the root
- * `capy` command has no flags for any of them — so a run with nowhere to ask
- * must refuse rather than pick a default. Derived from the plan rather than
- * recomputed, so the two can never disagree about what is outstanding.
- */
-export function unansweredInitStops(stops: InitWizardStop[]): string[] {
-  return stops.filter((s) => s.state === 'current' || s.state === 'upcoming').map((s) => s.id);
-}
+// There was an `unansweredInitStops(stops)` here, the way `branchCreatePlan`
+// has one. It is gone: the root `capy` command has no `--json` and no flags
+// for any of these stops, so nothing headless ever consumed it and nothing
+// but its own test ever called it. The moment a caller needs it, it is four
+// lines — and it will then be written against a consumer that exists.

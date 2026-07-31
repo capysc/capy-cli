@@ -52,12 +52,27 @@ async function evaluate<T>(page: CdpSession, expression: string): Promise<T> {
   return res.result?.value as T;
 }
 
-/** Poll a predicate in the page until it holds, or fail loudly. */
+/**
+ * Poll a predicate in the page until it holds, or fail loudly.
+ *
+ * An evaluation that THROWS counts as "not yet". Half of what this helper
+ * waits for is a page that is being replaced — every standalone step advances
+ * by navigating — and there is a window during a navigation where the target
+ * has no execution context to evaluate in at all. Treating that as a verdict
+ * made this file fail about one run in eight on a page that was working
+ * perfectly. The last attempt is deliberately NOT caught, so a page that is
+ * genuinely broken still says so instead of timing out mutely.
+ */
 async function until(page: CdpSession, expression: string, what: string): Promise<void> {
   for (let i = 0; i < 200; i++) {
-    if (await evaluate<boolean>(page, `!!(${expression})`)) return;
+    try {
+      if (await evaluate<boolean>(page, `!!(${expression})`)) return;
+    } catch {
+      /* mid-navigation: no context to ask yet */
+    }
     await new Promise((r) => setTimeout(r, 25));
   }
+  if (await evaluate<boolean>(page, `!!(${expression})`)) return;
   throw new Error(`timed out waiting for ${what}`);
 }
 
@@ -222,8 +237,10 @@ describeBrowser('browser flow, driven by a real browser', () => {
     expect(await evaluate<string>(page, `document.getElementById('h').textContent`)).toBe('STEP ONE');
     expect(await evaluate<boolean>(page, `!document.getElementById('screen')`)).toBe(true);
 
-    // Answering reloads, and the same URL yields the NEXT step.
-    await evaluate(page, `window.answer()`);
+    // Answering reloads, and the same URL yields the NEXT step. The call is
+    // not awaited: the promise it returns settles around `location.reload()`,
+    // so awaiting it means asking a navigating target for a result.
+    await evaluate(page, `window.answer(); 'sent'`);
     await until(page, `document.getElementById('h') && document.getElementById('h').textContent === 'STEP TWO'`, 'step two');
 
     await evaluate(page, `window.answer()`);
@@ -705,6 +722,227 @@ describeBrowser('the first run, driven by a real browser', () => {
     });
   }, 90_000);
 
+  /**
+   * Answer the step and wait for the page that replaces it, whatever it is.
+   *
+   * Tolerant of the reload never coming, on purpose: a run that ends by
+   * rendering "Done" in place is exactly the defect these two tests are about,
+   * and swallowing the wait here lets them fail on what the page SAYS rather
+   * than on a protocol timeout that names nothing.
+   */
+  async function reloadAfter(page: CdpSession, click: string): Promise<void> {
+    const reloaded = page.once('Page.loadEventFired', 20_000).catch(() => undefined);
+    await evaluate(page, click);
+    await reloaded;
+  }
+
+  const body = `document.body.textContent`;
+
+  test('a run that stops between two stops says so, and never says Done', async () => {
+    // The teammate case, which is the most common way this run stops: the
+    // organization was answered, and the CLI then finds no key for it on this
+    // device and throws. The browser is holding that answer's POST at that
+    // moment, and the compiled screen draws its ending from the button that
+    // was pressed — so ending the flow with `{ done }` renders a green check
+    // and "Done. You can close this tab." over a run that just died.
+    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
+    const { CapyError, ERROR_CODES } = await import('../../src/types');
+    let url = '';
+    const session = new InitWizardSession({
+      open: false,
+      finalGraceMs: 8_000,
+      onListen: (u) => (url = u),
+    });
+
+    const done = (async () => {
+      session.record({ signedInAs: 'mike@market.example', orgCount: 2 });
+      await session.askOrganization(ORGS);
+      // The work that answer unlocked: scope the session to that org, and
+      // check whether this device holds its key. It does not.
+      session.record({ hasOrgKey: false });
+      session.willBlock(
+        'redeem',
+        {
+          code: ERROR_CODES.AUTH_FAILED,
+          title: 'This device does not hold this organization\'s key',
+          detail:
+            'You have access to the organization, but the shared encryption key has never been transferred to this device.',
+          remedy: 'capy redeem <code>',
+        },
+        { facts: [{ label: 'Organization', value: 'side-project-labs' }] },
+      );
+      await session.abort(new CapyError('no key on this device', ERROR_CODES.AUTH_FAILED));
+    })();
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('side-project-labs'));
+    await reloadAfter(page, clickButton('Use this organization'));
+
+    // Nothing anywhere on it says this worked.
+    expect(await evaluate<boolean>(page, `${body}.includes('Done. You can close this tab.')`)).toBe(false);
+    // The stop that blocked it, on the rail it was drawn on from the start.
+    await until(page, `${body}.includes('does not hold this organization')`, 'the blocked page');
+    // The way out, as something to copy — not mined out of the error's prose.
+    expect(await evaluate<boolean>(page, `${body}.includes('capy redeem <code>')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `${body}.includes('side-project-labs')`)).toBe(true);
+
+    await done;
+  }, 90_000);
+
+  test('the clock stops while the CLI works between two stops', async () => {
+    // One window for the whole run put every stop under ONE budget, and the
+    // budget has to cover what the CLI does BETWEEN stops — answering
+    // "Create new organization" hands off to a flow that opens two more
+    // windows and asks somebody to write down 24 words, which is not five
+    // minutes of anything but is easily five minutes of a person.
+    //
+    // Here that work takes longer than the whole per-question budget. Before
+    // the clock was made to stop for it, the wizard died mid-work and the next
+    // question threw "The setup window has already closed." — with the
+    // organization already created and its recovery phrase already shown once.
+    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
+    let url = '';
+    const session = new InitWizardSession({ open: false, timeoutMs: 6_000, onListen: (u) => (url = u) });
+
+    const done = (async () => {
+      session.record({ signedInAs: 'mike@market.example', orgCount: 2 });
+      const org = await session.askOrganization(ORGS);
+      // createNewOrganization: name it, mint the master key, show 24 words.
+      await new Promise((r) => setTimeout(r, 8_000));
+      session.record({ hasOrgKey: true, projectCount: 0, recoveryShown: true });
+      const project = await session.askProjectName('mikes-market');
+      await session.finish();
+      return { org, project };
+    })();
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('side-project-labs'));
+    await reloadAfter(page, clickButton('Use this organization'));
+
+    // The window survived the work and is serving the next stop.
+    await until(
+      page,
+      `[...document.querySelectorAll('button')].some(b => b.textContent.includes('Create project'))`,
+      'the project name stop',
+    );
+    await evaluate(page, type('mikes-market'));
+    await evaluate(page, clickButton('Create project'));
+
+    expect(await done).toEqual({ org: 'org-2', project: 'mikes-market' });
+  }, 90_000);
+
+  test('a push that fails after consent does not render as Done', async () => {
+    // The one failure that lands AFTER the last question. The terminal path
+    // swallows it, prints "You can run capy again", and carries on — so under
+    // --web the run reached `finish()` and the page drew a green check over a
+    // push that never happened, on a directory whose .env is still plaintext.
+    const { InitWizardSession } = await import('../../src/ui/initWizardScreen');
+    let url = '';
+    const session = new InitWizardSession({
+      open: false,
+      finalGraceMs: 8_000,
+      onListen: (u) => (url = u),
+    });
+
+    const done = (async () => {
+      session.record({
+        signedInAs: 'mike@market.example',
+        orgCount: 1,
+        organization: { kind: 'existing', name: 'mikes-market-hq' },
+        hasOrgKey: true,
+        projectCount: 0,
+        project: { kind: 'new', name: 'mikes-market' },
+        branchChoice: 'development',
+        localEnvCount: 2,
+      });
+      const yes = await session.askEncrypt(LOCAL_ENV, TARGET);
+      // pushSecrets threw. Nothing was stored, nothing was backed up, and the
+      // .env in this directory was never rewritten.
+      await session.reportEncryptFailure({
+        code: 'SERVICE_ERROR',
+        reason: 'Keep did not answer (503).',
+        envRewritten: false,
+        backupWritten: false,
+        pushed: false,
+      });
+      return yes;
+    })();
+
+    const page = await open(await waitForUrl(() => url));
+    await until(page, `${body}.includes('STRIPE_SECRET_KEY')`, 'the consent gate');
+    await reloadAfter(page, clickButton('Encrypt and push'));
+
+    expect(await evaluate<boolean>(page, `${body}.includes('Done. You can close this tab.')`)).toBe(false);
+    await until(page, `${body}.includes('The push failed')`, 'the failure page');
+    // The fact that decides what to do next, and the only one the message
+    // cannot be trusted for: what is on disk right now.
+    expect(await evaluate<boolean>(page, `${body}.includes('still plaintext')`)).toBe(true);
+    // The consent stop is where this run is STANDING, not a stop it ticked
+    // off: the rail must not draw a station done because the question on it
+    // was answered, when the thing the station describes then failed.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('nav.route li')]
+           .some(li => li.textContent.includes('Encrypt and push') && li.textContent.includes('you are here'))`,
+      ),
+    ).toBe(true);
+
+    expect(await done).toBe(true);
+  }, 90_000);
+
+  test('a refusal the CLI makes lands on the compiled screen, and the step stays live', async () => {
+    // Five of the wizard's verdicts are inline refusals, and until now no test
+    // drove one against a STANDALONE compiled screen — the shell's `#status`
+    // line, which the other refusal test reads, does not exist on one of these
+    // pages. This is the org list refusing an id it cannot reach, which is
+    // what a page whose list has moved under it submits.
+    const { buildInitWizardData } = await import('../../src/ui/initWizardScreen');
+    const { renderScreen } = await import('../../src/ui/screens/serve');
+    let url = '';
+    let attempts = 0;
+    const render = (nonce: string): string =>
+      renderScreen(
+        'init-wizard',
+        buildInitWizardData({ step: 'organization', input: { signedInAs: 'mike@market.example', orgCount: 2 }, orgs: ORGS }, nonce),
+      );
+
+    const done = runBrowserWizard(
+      {
+        title: 'Set up this directory',
+        firstScreen: { html: '', standalone: true },
+        open: false,
+        timeoutMs: 30_000,
+        onListen: (u) => (url = u),
+        renderFirst: render,
+      },
+      async (_step, payload) => {
+        attempts += 1;
+        if (attempts === 1) return { error: 'That organization is not one this session can reach.' };
+        return { done: true, result: payload };
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('side-project-labs'));
+    await evaluate(page, clickButton('Use this organization'));
+
+    // The CLI's sentence, on the page, in the screen's own status line.
+    await until(page, `${body}.includes('not one this session can reach')`, 'the refusal');
+    // Still this step: the rows are there and the button is live again.
+    expect(await evaluate<boolean>(page, `!!document.querySelector('[role=radio]')`)).toBe(true);
+    await until(
+      page,
+      `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Use this organization')).disabled`,
+      'the button to go live again',
+    );
+
+    // Answering again finishes it — a refusal is not an ending.
+    await evaluate(page, clickButton('Use this organization'));
+    expect(await done).toEqual({ __action: 'submit', organizationId: 'org-2' });
+    expect(attempts).toBe(2);
+  }, 90_000);
+
   test('cancelling the consent gate is a NO, and nothing is encrypted', async () => {
     // `confirmEncrypt = chosen === 'yes'` already meant this. After this step
     // the .env in the directory is ciphertext, so the refusal has to come back
@@ -773,7 +1011,25 @@ describeBrowser('the sync reports, driven by a real browser', () => {
   }
 
   test('capy status renders its report, and no value is on it', async () => {
+    // The `json` field is `capy status --json` VERBATIM, and this test used to
+    // hand it a two-key stub — which made its own "no hash on the page"
+    // assertion vacuous, because the hashes live in that object's `diffs`.
+    // This is the real thing statusCommand builds.
     const { showSyncStatusInBrowser } = await import('../../src/ui/syncScreens');
+    const diffs = [
+      { variable: 'STRIPE_SECRET_KEY', type: 'changed' as const, pinned: 'a1b2c3d4e5f60718', local: '0718f6e5d4c3b2a1', remote: 'a1b2c3d4e5f60718' },
+      { variable: 'DATABASE_URL', type: 'new' as const, local: 'ffeeddccbbaa9988' },
+    ];
+    const report = {
+      projectName: 'mikes-market',
+      branch: 'development',
+      totalSecrets: 14,
+      inSync: false,
+      localMatchesPinned: false,
+      remoteMatchesPinned: false,
+      remoteFailure: null,
+      diffs,
+    };
     const url = await showSyncStatusInBrowser({
       projectName: 'mikes-market',
       branch: 'development',
@@ -781,12 +1037,9 @@ describeBrowser('the sync reports, driven by a real browser', () => {
       localMatchesPinned: false,
       remoteMatchesPinned: false,
       hasRemote: true,
-      diffs: [
-        { variable: 'STRIPE_SECRET_KEY', type: 'changed', pinned: 'a1b2c3d4e5f60718', local: '0718f6e5d4c3b2a1', remote: 'a1b2c3d4e5f60718' },
-        { variable: 'DATABASE_URL', type: 'new', local: 'ffeeddccbbaa9988' },
-      ],
+      diffs,
       expiring: [{ variable: 'STRIPE_SECRET_KEY', expiresInDays: 2 }],
-      json: JSON.stringify({ projectName: 'mikes-market', inSync: false }, null, 2),
+      json: JSON.stringify(report, null, 2),
       open: false,
       timeoutMs: 20_000,
     });
@@ -796,9 +1049,28 @@ describeBrowser('the sync reports, driven by a real browser', () => {
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('mikes-market')`)).toBe(true);
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('DATABASE_URL')`)).toBe(true);
-    // Values never reach this page — and neither do the hashes it compared.
+    // No value, ever.
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
-    expect(await evaluate<boolean>(page, `document.body.textContent.includes('a1b2c3d4e5f60718')`)).toBe(false);
+
+    // The rows the screen renders carry a name, a type and which side moved.
+    // The hashes `compareSecrets` compared on are dropped on the way in.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `window.__CAPY_DATA__.diffs.every(d =>
+           Object.keys(d).sort().join(',') === 'side,type,variable')`,
+      ),
+    ).toBe(true);
+
+    // The hashes DO appear once each on this page, and only inside the copy of
+    // `capy status --json` — the same object the same command prints to stdout
+    // on the same machine. Every occurrence in the document is accounted for
+    // by that string: nothing else on the page renders one.
+    const hashHits = `(document.body.textContent.match(/a1b2c3d4e5f60718/g) || []).length`;
+    const jsonHits = (JSON.stringify(report, null, 2).match(/a1b2c3d4e5f60718/g) || []).length;
+    expect(jsonHits).toBe(2);
+    expect(await evaluate<number>(page, hashHits)).toBe(jsonHits);
+
     // The command that moves this forward, which the terminal also offers.
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('capy')`)).toBe(true);
   }, 90_000);
