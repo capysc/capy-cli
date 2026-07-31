@@ -9,11 +9,12 @@
 import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { DEPLOY_PAGE_CSS } from '../../src/ui/deployPage/generatedAssets';
-import { chooseSourceScreen, phraseDisplayScreen, passphraseScreen } from '../../src/ui/onboardingWeb';
+import { buildLocalOnboardingData } from '../../src/ui/onboardingWeb';
 import { buildConflictData } from '../../src/ui/syncConflictScreen';
 import { renderScreen } from '../../src/ui/screens/serve';
 import { CAPY_LOGO_SVG } from '../../src/ui/browserWizard';
 import { generateSeedPhrase } from '../../src/crypto/keyManager';
+import { LOCAL_PHRASE_NOTES } from '../../src/commands/byocCommand';
 
 const outDir = process.argv[2] || '/tmp/capy-preview';
 mkdirSync(outDir, { recursive: true });
@@ -40,11 +41,27 @@ function page(title: string, screenHtml: string, theme: 'light' | 'dark' = 'ligh
 }
 
 const previewPhrase = generateSeedPhrase();
+const previewWords = previewPhrase.split(/\s+/).filter(Boolean);
+
+/** One step of local onboarding, as the compiled `local-onboarding` screen. */
+const onboarding = (state: Parameters<typeof buildLocalOnboardingData>[0]): string =>
+  renderScreen(
+    'local-onboarding',
+    buildLocalOnboardingData({ ...state, bodyLines: LOCAL_PHRASE_NOTES }, 'preview-nonce'),
+  );
 
 const screens: Array<[string, string, string]> = [
-  ['1-onboard-choose.html', 'Set up Capy — local mode', chooseSourceScreen().html],
-  ['2-onboard-phrase.html', 'Set up Capy — local mode', phraseDisplayScreen(previewPhrase).html],
-  ['3-onboard-passphrase.html', 'Set up Capy — local mode', passphraseScreen().html],
+  ['1-onboard-choose.html', 'Set up Capy — local mode', onboarding({})],
+  [
+    '2-onboard-phrase.html',
+    'Set up Capy — local mode',
+    onboarding({ source: 'generate', phraseWords: previewWords }),
+  ],
+  [
+    '3-onboard-passphrase.html',
+    'Set up Capy — local mode',
+    onboarding({ source: 'generate', phraseWords: previewWords, phraseSettled: true }),
+  ],
   [
     '4-conflict-resolver.html',
     'Resolve 2 conflicts — demo/development',

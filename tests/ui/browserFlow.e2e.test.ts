@@ -2097,3 +2097,541 @@ describeBrowser('the sync reports, driven by a real browser', () => {
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
   }, 90_000);
 });
+
+describeBrowser('org and onboarding, driven by a real browser', () => {
+  /**
+   * ONE headless shell for the whole block, with a fresh tab per test.
+   *
+   * The blocks above launch and kill a browser per test, which is fine at four
+   * tests and starts costing seconds and the occasional early-exit at sixteen —
+   * the profile directory is removed the instant SIGTERM is sent, so a shell
+   * that has not finished shutting down is racing a deletion. Nothing here
+   * needs a clean profile: these pages are loopback documents with no storage,
+   * no cookies and no service worker, and each test navigates a tab it opened
+   * itself.
+   */
+  let browser: Browser | null = null;
+  let session: CdpSession | null = null;
+  let profile = '';
+
+  beforeAll(async () => {
+    profile = mkdtempSync(join(tmpdir(), 'capy-e2e-'));
+    browser = await Browser.launch(profile);
+  });
+
+  afterEach(() => {
+    session?.close();
+    session = null;
+  });
+
+  afterAll(() => {
+    browser?.close();
+    browser = null;
+    if (profile) rmSync(profile, { recursive: true, force: true });
+    profile = '';
+  });
+
+  async function open(url: string): Promise<CdpSession> {
+    const page = await browser!.newPage(1280, 820);
+    session = page;
+    const loaded = page.once('Page.loadEventFired', 20_000);
+    await page.send('Page.navigate', { url });
+    await loaded;
+    return page;
+  }
+
+  /**
+   * Type into a field the way a person does.
+   *
+   * Assigning `.value` alone is invisible to the screen: `bind:value` listens
+   * for `input`, so a test that only sets the property proves the CLI can read
+   * a field nobody could have filled in.
+   */
+  const type = (selector: string, value: string): string =>
+    `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        el.value = ${JSON.stringify(value)};
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`;
+
+  /** Click the button whose visible text contains `text`. */
+  const clickButton = (text: string): string =>
+    `[...document.querySelectorAll('button')]
+       .find(b => b.textContent.includes(${JSON.stringify(text)})).click()`;
+
+  /** Click the option row whose label is exactly `label`. */
+  const clickOption = (label: string): string =>
+    `[...document.querySelectorAll('[role=radio]')]
+       .find(el => el.querySelector('.label').textContent.trim() === ${JSON.stringify(label)}).click()`;
+
+  /** Uncover the phrase grid and tick the write-it-down consent. */
+  const REVEAL = `document.querySelector('.reveal').click()`;
+  const CONSENT = `document.querySelector('[role=checkbox]').click()`;
+
+  /**
+   * One row of the rail, by the label the CLI put on it.
+   *
+   * The rail is a `<nav class="route">` of `<li class="{state}">` (Trainstops),
+   * so the row's class IS the claim the payload made about that stop and its
+   * text is what the reader is told: `← you are here` on the current stop,
+   * `not needed` on a skipped one, the answer on a done one.
+   */
+  const railRow = (label: string): string =>
+    `[...document.querySelectorAll('nav.route li')]
+       .find(li => li.querySelector('.label').textContent.trim() === ${JSON.stringify(label)})`;
+  const railClass = (label: string): string => `${railRow(label)}.className`;
+  const railText = (label: string): string => `${railRow(label)}.textContent`;
+
+  test('local setup: the phrase is covered, gated, and never sent back', async () => {
+    // The flow the whole browser path exists for. Three things are checked
+    // here that no fetch-driven test can see: the grid really is covered on
+    // load, the consent really is held closed until it has been uncovered, and
+    // the words the page renders are the words the CLI derives the key from.
+    const { runLocalOnboardingWeb } = await import('../../src/ui/onboardingWeb');
+    let url = '';
+    let finalized: { phrase: string; passphrase: string } | null = null;
+    const done = runLocalOnboardingWeb(
+      (phrase, passphrase) => (finalized = { phrase, passphrase }),
+      {
+        open: false,
+        bodyLines: ['IF YOU LOSE THIS PHRASE WE CANNOT HELP YOU!'],
+        onListen: (u) => (url = u),
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The route is drawn whole before anything is answered — including the
+    // write-it-down step, which is the one you want to know about while there
+    // is still time to find a pen.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Recovery phrase')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Passphrase')`)).toBe(true);
+
+    await evaluate(page, clickButton('Show recovery phrase'));
+    await until(page, `document.querySelector('.reveal')`, 'the covered phrase grid');
+
+    // Covered: the words are in the document but not on offer, and the consent
+    // cannot be ticked until they have been read.
+    expect(await evaluate<string>(page, `document.querySelector('.words').getAttribute('aria-hidden')`)).toBe('true');
+    expect(await evaluate<boolean>(page, `document.querySelector('[role=checkbox]').disabled`)).toBe(true);
+
+    const words = await evaluate<string[]>(page, `window.__CAPY_DATA__.phraseWords`);
+    expect(words).toHaveLength(24);
+
+    await evaluate(page, REVEAL);
+    await evaluate(page, CONSENT);
+    await evaluate(page, clickButton('Set a passphrase'));
+
+    await until(page, `document.getElementById('pp2')`, 'the passphrase step');
+    // Stop one is settled on the rail and the words are gone from the page.
+    expect(await evaluate<unknown>(page, `window.__CAPY_DATA__.phraseWords`)).toBeUndefined();
+
+    await evaluate(page, type('#pp', 'correct-horse-battery'));
+    await evaluate(page, type('#pp2', 'correct-horse-battery'));
+    await evaluate(page, clickButton('Finish setup'));
+
+    expect(await done).toBe(true);
+    expect(finalized!.phrase).toBe(words.join(' '));
+    expect(finalized!.passphrase).toBe('correct-horse-battery');
+  }, 60_000);
+
+  test('creating an organization: both stops walked, phrase confirmed by a boolean', async () => {
+    const { createOrganizationInBrowser } = await import('../../src/ui/onboardingWeb');
+    let url = '';
+    const phrase = Array.from({ length: 24 }, (_, i) => `word${i + 1}`).join(' ');
+    const done = createOrganizationInBrowser({
+      phrase,
+      bodyLines: ['Capy is a ZERO TRUST secrets platform.'],
+      learnMoreUrl: 'https://capy.sc/zero-trust',
+      maxNameLength: 100,
+      checkName: async (n) => (n === 'Acme' ? 'taken' : 'available'),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // A name the server refuses comes back as this same step, carrying the
+    // name so it can be edited rather than retyped — and the phrase is still
+    // nowhere on the page.
+    await evaluate(page, type('.field input', 'Acme'));
+    await evaluate(page, clickButton('Show recovery phrase'));
+    await until(page, `document.body.textContent.includes('already taken')`, 'the collision');
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('word1')`)).toBe(false);
+
+    await evaluate(page, type('.field input', 'Acme Labs'));
+    await evaluate(page, clickButton('Show recovery phrase'));
+    await until(page, `document.querySelector('.reveal')`, 'the phrase step');
+
+    await evaluate(page, REVEAL);
+    await until(page, `document.body.textContent.includes('word24')`, 'all 24 words');
+    await evaluate(page, CONSENT);
+    await evaluate(page, clickButton('Create organization'));
+
+    expect(await done).toEqual({ name: 'Acme Labs', cancelled: false });
+  }, 60_000);
+
+  test('capy org: a row with no key on this machine cannot be picked', async () => {
+    // The terminal picker offers it, re-scopes the session, prints
+    // `Organization: acme`, and only then discovers there is no key. Here the
+    // row says so and refuses to be chosen.
+    const { switchOrganizationInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = switchOrganizationInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: 'o1',
+      orgs: [
+        { id: 'o1', name: 'mikes-market', hasLocalKey: true },
+        { id: 'o2', name: 'northwind', hasLocalKey: true },
+        { id: 'o3', name: 'acme', hasLocalKey: false },
+      ],
+      hasKeepLock: false,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      onOrgChosen: async () => ({ ok: true, projects: [{ id: 'p1', name: 'storefront' }] }),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // Opens on the org this directory is already pinned to, so the button
+    // starts held down: "switch to where you already are" is not a switch.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Switch organization')).disabled`,
+      ),
+    ).toBe(true);
+    expect(
+      await evaluate<string>(
+        page,
+        `[...document.querySelectorAll('[role=radio]')]
+           .find(el => el.querySelector('.label').textContent.trim() === 'acme')
+           .getAttribute('aria-disabled')`,
+      ),
+    ).toBe('true');
+    // And it says why, rather than leaving a dead row.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('No encryption key for this organization')`),
+    ).toBe(true);
+
+    await evaluate(page, clickOption('northwind'));
+    await evaluate(page, clickButton('Switch organization'));
+
+    await until(page, `document.body.textContent.includes('storefront')`, 'the project stop');
+    await evaluate(page, clickOption('storefront'));
+    await evaluate(page, clickButton('Switch project'));
+
+    expect(await done).toEqual({
+      action: 'select-project',
+      orgId: 'o2',
+      projectId: 'p1',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('capy byoc: a failed probe says which failure it was, then the run recovers', async () => {
+    // The terminal prints `connection failed (ENOTFOUND)` and asks for a URL
+    // again. ENOTFOUND, ECONNREFUSED and a timeout are three problems with
+    // three fixes, and the prompt treats them as one.
+    const { connectByocInBrowser } = await import('../../src/ui/byocScreens');
+    let url = '';
+    const done = connectByocInBrowser({
+      defaultUrl: 'https://capy.internal',
+      urlSource: 'builtin',
+      suggestName: () => 'acme',
+      existingProfiles: [],
+      probe: async (u) =>
+        u.includes('acme')
+          ? { url: u, code: 'ok', reason: 'found (capy service detected)' }
+          : {
+              url: u,
+              code: 'connection_failed',
+              reason: 'connection failed (ENOTFOUND)',
+              transportCode: 'ENOTFOUND',
+            },
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The built-in guess is named as a guess. The terminal probes it without
+    // ever saying that is what it is doing.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('built-in guess')`)).toBe(true);
+
+    await evaluate(page, clickButton('Verify'));
+    await until(page, `document.body.textContent.includes('did not resolve')`, 'the named failure');
+    // The CLI's own sentence is quoted rather than paraphrased away.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('connection failed (ENOTFOUND)')`),
+    ).toBe(true);
+
+    await evaluate(page, type('.field input', 'capy.acme.com'));
+    await evaluate(page, clickButton('Try again'));
+
+    await until(page, `document.body.textContent.includes('Name this profile')`, 'the name step');
+    await evaluate(page, clickButton('Save profile'));
+
+    expect(await done).toMatchObject({
+      url: 'https://capy.acme.com',
+      profileName: 'acme',
+      replaced: false,
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('capy byoc: a failed probe takes the rail back to the address with the page', async () => {
+    // THE RAIL DEFECT, in the browser that showed it. `capy byoc <host> --web`
+    // with the host mistyped — the commonest path this flow has — used to serve
+    // the address question with a rail beside it reading `● Server URL
+    // https://nope.invalid`, `● Verify ← you are here`, `● Certificate not
+    // needed`: three false statements at once, the last of them struck through
+    // on the strength of a probe that never completed a handshake.
+    const { connectByocInBrowser } = await import('../../src/ui/byocScreens');
+    let url = '';
+    const done = connectByocInBrowser({
+      defaultUrl: 'https://nope.invalid',
+      urlSource: 'argv',
+      suggestName: () => 'acme',
+      existingProfiles: [],
+      probe: async (u) =>
+        u.includes('acme')
+          ? { url: u, code: 'ok', reason: 'found (capy service detected)' }
+          : {
+              url: u,
+              code: 'connection_failed',
+              reason: 'connection failed (ENOTFOUND)',
+              transportCode: 'ENOTFOUND',
+            },
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickButton('Verify'));
+    await until(page, `document.body.textContent.includes('did not resolve')`, 'the named failure');
+
+    // Back on the address question — and so is the rail.
+    expect(await evaluate<string>(page, railClass('Server URL'))).toContain('current');
+    expect(await evaluate<string>(page, railText('Server URL'))).not.toContain('nope.invalid');
+    expect(await evaluate<string>(page, railText('Verify'))).not.toContain('you are here');
+    expect(await evaluate<string>(page, railText('Certificate'))).not.toContain('not needed');
+    // A route has one traveller: exactly one station may say where they are.
+    expect(
+      await evaluate<number>(
+        page,
+        `document.querySelectorAll('nav.route li .here').length`,
+      ),
+    ).toBe(1);
+
+    // And an address that IS accepted still settles: the fix is a rail that
+    // follows the run, not a rail that never commits.
+    await evaluate(page, type('.field input', 'capy.acme.com'));
+    await evaluate(page, clickButton('Try again'));
+    await until(page, `document.body.textContent.includes('Name this profile')`, 'the name step');
+    expect(await evaluate<string>(page, railText('Server URL'))).toContain('https://capy.acme.com');
+    expect(await evaluate<string>(page, railClass('Verify'))).toContain('done');
+    // The certificate never came up, and only now is that a settled fact.
+    expect(await evaluate<string>(page, railText('Certificate'))).toContain('not needed');
+
+    await evaluate(page, clickButton('Save profile'));
+    expect(await done).toMatchObject({ url: 'https://capy.acme.com', cancelled: false });
+  }, 60_000);
+
+  test('capy org: a refusal the terminal bolded reaches the page as words, not escapes', async () => {
+    // `firstProjectRefusal` writes its sentence with `\x1b[1m…\x1b[0m` because
+    // the TTY path raises the same string as a CapyError in a scrollback. Handed
+    // to a browser unchanged, the page rendered `a project in [1mnorthwind[0m
+    // would make those values unreadable.` — reachable whenever the chosen org
+    // has no projects and this directory's .env holds an encrypted value.
+    const { switchOrganizationInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = switchOrganizationInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: 'o1',
+      orgs: [
+        { id: 'o1', name: 'mikes-market', hasLocalKey: true },
+        { id: 'o2', name: 'northwind', hasLocalKey: true },
+      ],
+      hasKeepLock: false,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      onOrgChosen: async () => ({
+        ok: false,
+        reason:
+          'This directory is bound to another project and its .env contains 2 encrypted value(s).\n\n' +
+          '  Binding it to a project in \x1b[1mnorthwind\x1b[0m would make those values unreadable.',
+      }),
+      open: false,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    void done.catch(() => undefined);
+
+    const page = await open(await waitForUrl(() => url));
+    await evaluate(page, clickOption('northwind'));
+    await evaluate(page, clickButton('Switch organization'));
+    await until(
+      page,
+      `document.body.textContent.includes('would make those values unreadable')`,
+      'the refusal to reach the page',
+    );
+
+    const text = await evaluate<string>(page, `document.body.textContent`);
+    expect(text).not.toContain('\x1b');
+    expect(text).not.toContain('[1m');
+    expect(text).not.toContain('[0m');
+    // The sentence survives whole; only the formatting is gone.
+    expect(text).toContain('a project in northwind would make those values unreadable');
+
+    // Still the organization step, so another row is one click away.
+    expect(
+      await evaluate<boolean>(page, `!!document.querySelector('[role=radio]')`),
+    ).toBe(true);
+    await evaluate(page, clickButton('Cancel'));
+    await done.catch(() => undefined);
+  }, 60_000);
+
+  test('capy org in a directory that already has a keep.lock draws no rail', async () => {
+    // THE PRODUCTION DEFAULT, pinned because it is the case the other org test
+    // does not cover. `hasKeepLock: true` is what `capy org` ships from any
+    // directory that has been initialised, and the screen's `showStops`
+    // (packages/ui switch-organization/Screen.svelte) is `mode === 'init' ||
+    // onCreateRoute || (mode === 'switch' && hasKeepLock === false)`, so the
+    // five stops the CLI computed are discarded before they are drawn.
+    //
+    // CAP-316's reasoning is that a switch onto an existing org is one decision
+    // — but this CLI still asks for a project afterwards either way, so the
+    // route is two stops and the traveller is shown none of it. The CLI half is
+    // right (the payload below carries all five) and the fix belongs in the
+    // screen, which this parcel may not edit. WHEN THAT SCREEN CHANGES, this
+    // assertion is the one to update: it is here so the gap cannot ship quietly
+    // a second time.
+    const { switchOrganizationInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = switchOrganizationInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: 'o1',
+      orgs: [
+        { id: 'o1', name: 'mikes-market', hasLocalKey: true },
+        { id: 'o2', name: 'northwind', hasLocalKey: true },
+      ],
+      hasKeepLock: true,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      onOrgChosen: async () => ({ ok: true, projects: [{ id: 'p1', name: 'storefront' }] }),
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // The command computed the whole route…
+    expect(
+      await evaluate<number>(page, `window.__CAPY_DATA__.stops.length`),
+    ).toBe(5);
+    expect(await evaluate<boolean>(page, `window.__CAPY_DATA__.hasKeepLock`)).toBe(true);
+    // …and the screen drew none of it.
+    expect(
+      await evaluate<number>(page, `document.querySelectorAll('nav.route li').length`),
+    ).toBe(0);
+
+    // Both questions are still asked and still answerable, rail or no rail.
+    await evaluate(page, clickOption('northwind'));
+    await evaluate(page, clickButton('Switch organization'));
+    await until(page, `document.body.textContent.includes('storefront')`, 'the project stop');
+    await evaluate(page, clickOption('storefront'));
+    await evaluate(page, clickButton('Switch project'));
+
+    expect(await done).toEqual({
+      action: 'select-project',
+      orgId: 'o2',
+      projectId: 'p1',
+      cancelled: false,
+    });
+  }, 60_000);
+
+  test('naming the first project: the create route just walked is behind you', async () => {
+    // This window opens straight after Name → Recovery phrase → Create. The
+    // route was built from the org name alone, so all three stops arrived
+    // `skipped` — the rail telling somebody who had written down 24 words a
+    // minute earlier that the step was "not needed".
+    //
+    // It also cost the rail entirely. The screen's `onCreateRoute` reads the
+    // payload back on any view past the picker — "a create-only stop that is
+    // not `skipped` means this run went that way" — so three skipped stops plus
+    // this directory's keep.lock left `showStops` false and no rail at all.
+    const { nameFirstProjectInBrowser } = await import('../../src/ui/selectWeb');
+    let url = '';
+    const done = nameFirstProjectInBrowser({
+      signedInAs: 'mike@example.com',
+      currentOrgId: undefined,
+      orgs: [{ id: 'new', name: 'northwind', hasLocalKey: true }],
+      hasKeepLock: true,
+      defaultProjectName: 'storefront',
+      firstBranchName: 'development',
+      orgId: 'new',
+      open: false,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+
+    expect(
+      await evaluate<number>(page, `document.querySelectorAll('nav.route li').length`),
+    ).toBeGreaterThan(0);
+    for (const label of ['Name', 'Recovery phrase', 'Create']) {
+      expect(await evaluate<string>(page, railClass(label))).toContain('done');
+      expect(await evaluate<string>(page, railText(label))).not.toContain('not needed');
+    }
+    // The one stop left is the question on screen.
+    expect(await evaluate<string>(page, railClass('Project'))).toContain('current');
+    // The phrase stop still carries the consent and nothing else — never words.
+    expect(await evaluate<string>(page, railText('Recovery phrase'))).toContain('written down');
+
+    await evaluate(page, type('.field input', 'storefront'));
+    await evaluate(page, clickButton('Create project'));
+    expect(await done).toBe('storefront');
+  }, 60_000);
+
+  test('the local passphrase: a wrong one offers the field again', async () => {
+    // The terminal turns a wrong passphrase into a typed error and the command
+    // dies; at three of its five call sites the words "Incorrect passphrase."
+    // never reach the user at all.
+    const { unlockPassphraseInBrowser } = await import('../../src/ui/onboardingWeb');
+    let url = '';
+    const done = unlockPassphraseInBrowser(
+      (pass) => (pass === 'right-one' ? { ok: true, masterKeyHex: 'deadbeef' } : { ok: false }),
+      {
+        triggeredBy: 'run',
+        triggerCommand: 'capy run -- npm start',
+        projectName: 'mikes-market',
+        lockedBy: 'idle',
+        idleTimeoutMs: 3_600_000,
+        open: false,
+        onListen: (u) => (url = u),
+      },
+    );
+
+    const page = await open(await waitForUrl(() => url));
+
+    // It says who is asking and why it is asking again — neither of which the
+    // bare `Enter your local passphrase:` prompt can.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes('put your secrets in the environment')`),
+    ).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('idle timer')`)).toBe(true);
+
+    await evaluate(page, type('.passphrase-field input', 'wrong-one'));
+    await evaluate(page, clickButton('Unlock'));
+    await until(page, `document.body.textContent.includes('Incorrect passphrase')`, 'the refusal');
+
+    // Still the same step, with the field live again.
+    expect(await evaluate<boolean>(page, `!!document.querySelector('.passphrase-field input')`)).toBe(true);
+
+    await evaluate(page, type('.passphrase-field input', 'right-one'));
+    await evaluate(page, clickButton('Unlock'));
+
+    expect(await done).toBe('deadbeef');
+  }, 60_000);
+});
