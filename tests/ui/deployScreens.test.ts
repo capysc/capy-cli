@@ -15,6 +15,7 @@
  * throughout as a canary — if one ever reaches a payload these tests fail.
  */
 import { describe, test, expect } from 'bun:test';
+import { deployPlan } from '../../src/core/deployPlan';
 import {
   buildDeployDestinationData,
   buildDeployPlanConfirmData,
@@ -27,6 +28,8 @@ import {
   confirmDeployInBrowser,
   setUpDeployTargetInBrowser,
   showDeployTokensInBrowser,
+  showScreenInBrowser,
+  TOKENS_TIMEOUT_MS,
   type WebDeployAdapterContext,
   type WebDeploySetupParams,
 } from '../../src/ui/deployScreens';
@@ -37,6 +40,22 @@ const headers = { 'content-type': 'application/json' };
 async function waitForUrl(getUrl: () => string): Promise<string> {
   for (let i = 0; i < 300 && !getUrl(); i++) await new Promise((r) => setTimeout(r, 10));
   return getUrl();
+}
+
+/**
+ * Read a screen's payload back OUT of the document it was inlined into.
+ *
+ * Asserting that the HTML merely *contains* `window.__CAPY_DATA__` proves the
+ * placeholder was replaced and nothing about what replaced it. This parses the
+ * JSON the browser will actually parse, so a claim about what the page carries
+ * is a claim about the page.
+ */
+function parseScreenData(html: string): any {
+  const m = html.match(/window\.__CAPY_DATA__\s*=\s*(\{[\s\S]*?\});/);
+  if (!m) throw new Error('no window.__CAPY_DATA__ assignment in the served document');
+  // `<` is escaped on the way in so a payload string cannot close the script
+  // element; JSON.parse reads `<` back as `<` on its own.
+  return JSON.parse(m[1]);
 }
 
 /** Submit a payload to a running wizard and hand back the parsed answer. */
@@ -145,6 +164,25 @@ describe('chooseDeployDestinationInBrowser', () => {
     const page = await (await fetch(u.href)).text();
     expect(page).toContain('window.__CAPY_DATA__');
     expect(page).not.toContain('id="screen"');
+
+    // …and the rail inside it is `deployPlan`'s, read back OUT of the served
+    // document rather than out of the builder that made it. That is the only
+    // form of this claim worth making: the array the browser gets and the
+    // array `--json` emits are the same array.
+    const served = parseScreenData(page);
+    expect(served.stops).toEqual(deployPlan({ at: 'platform' }));
+    expect((served.stops as Array<{ id: string }>).map((s) => s.id)).toEqual([
+      'platform',
+      'mode',
+      'signin',
+      'branch',
+      'settings',
+      'variables',
+      'delivery',
+      'name',
+      'review',
+      'deploy',
+    ]);
 
     const first = await submit(u, { __action: 'submit', platform: 'cloudflare-workers' });
     // A continuing run answers `next`, and the browser reloads to receive it.
@@ -805,6 +843,41 @@ describe('showDeployTokensInBrowser', () => {
     // The listing has no exit of its own: leaving it revokes nothing.
     await done.catch(() => undefined);
   });
+
+  test('an unanswered listing ENDS as a refusal — it does not reject', async () => {
+    // The screen has no control that posts a decline, so silence is the only
+    // signal a refusal ever produces. Silence used to reject, which
+    // `capy deploy revoke --web` turned into an error screen and a non-zero
+    // exit for a user who had chosen not to revoke.
+    const started = Date.now();
+    const out = await showDeployTokensInBrowser({
+      ...TOKENS,
+      timeoutMs: 400,
+      onListen: () => undefined,
+    });
+    expect(out).toEqual({ deployId: null, cancelled: true });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test('the `cancel` vocabulary is already answered, ready for the screen', async () => {
+    // The fix that removes the wait entirely is a screen change this parcel
+    // may not make (packages/ui): "Leave it active" and a "Done" control on the
+    // listing both need to post `__action: 'cancel'`. The reducer takes it
+    // today, so the moment those land the decline is immediate.
+    let url = '';
+    const done = showDeployTokensInBrowser({ ...TOKENS, onListen: (u) => (url = u) });
+    const u = new URL(await waitForUrl(() => url));
+    await submit(u, { __action: 'cancel' });
+    expect(await done).toEqual({ deployId: null, cancelled: true });
+  });
+
+  test('the listing does not hold a run for the wizard s five minutes', () => {
+    // `capy deploy list --web` is a read-only listing on a screen with no exit
+    // control, so the deadline IS its exit. Five minutes of block for a
+    // listing is not a listing.
+    expect(TOKENS_TIMEOUT_MS).toBeLessThan(5 * 60 * 1000);
+    expect(TOKENS_TIMEOUT_MS).toBe(120_000);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -847,5 +920,138 @@ describe('buildDeployRunResultData', () => {
     const json = JSON.stringify(d);
     expect(json).not.toContain('sk_live');
     expect(json).toContain('6 pushed');
+  });
+
+  test('the colours come off every field, not just the ones with a strip call', () => {
+    // Each of these is a string the CLI also PRINTS, so each arrives coloured
+    // and each renders as a literal `[1m` in the browser. The target NAME is
+    // deliberately not rewritten — it is an identifier — so nothing here
+    // colours it.
+    const d = buildDeployRunResultData({
+      outcome: 'failed',
+      projectName: 'mikes-market',
+      target: {
+        name: 'vercel-prod',
+        adapterLabel: '\x1b[1mVercel\x1b[0m',
+        branch: 'production',
+        mode: 'ci',
+      },
+      steps: [
+        {
+          id: '0',
+          label: '\x1b[31mvercel env add\x1b[0m',
+          status: 'fail',
+          detail: '\x1b[90mexit 1\x1b[0m',
+          output: '\x1b[31mError: not linked\x1b[0m',
+        },
+      ],
+      epilogue: {
+        title: '\x1b[1mNext steps\x1b[0m',
+        snippet: '\x1b[90mvercel link\x1b[0m',
+        note: '\x1b[90mrun it in this directory\x1b[0m',
+      },
+    });
+    expect(d.target.adapterLabel).toBe('Vercel');
+    expect(d.steps[0].output).toBe('Error: not linked');
+    expect(d.epilogue).toEqual({
+      title: 'Next steps',
+      snippet: 'vercel link',
+      note: 'run it in this directory',
+    });
+    expect(JSON.stringify(d)).not.toContain('\x1b');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// showScreenInBrowser — the display-only serve
+// ---------------------------------------------------------------------------
+
+const RUN_RESULT = {
+  outcome: 'deployed' as const,
+  projectName: 'mikes-market',
+  target: {
+    name: 'api',
+    adapterLabel: 'Cloudflare Workers',
+    branch: 'production',
+    mode: 'direct' as const,
+  },
+  steps: [{ id: '0', label: 'wrangler secret bulk', status: 'ok' as const, detail: '6 pushed' }],
+};
+
+describe('showScreenInBrowser', () => {
+  test('the run WAITS for the page: it is not served and abandoned', async () => {
+    // The failure this exists to catch: a call site that starts a server and
+    // returns has proved a socket was listening and nothing else. The process
+    // goes on to exit and the page dies before a browser can fetch it — and
+    // this is the LAST thing a deploy does, so that is exactly the window.
+    let url = '';
+    let finished = false;
+    const done = showScreenInBrowser('deploy-run-result', RUN_RESULT, {
+      open: false,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    void done.then(() => (finished = true));
+
+    const u = await waitForUrl(() => url);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(finished).toBe(false);
+
+    const res = await fetch(u);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('window.__CAPY_DATA__');
+
+    await done;
+    expect(finished).toBe(true);
+  });
+
+  test('a page with nothing to say back is given no way to speak', async () => {
+    // `connect-src 'none'`: a page that cannot open a socket cannot exfiltrate
+    // what it renders, whatever ends up in its markup.
+    let url = '';
+    const done = showScreenInBrowser('deploy-run-result', RUN_RESULT, {
+      open: false,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    const res = await fetch(await waitForUrl(() => url));
+    const csp = res.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("connect-src 'none'");
+    expect(csp).toContain("default-src 'none'");
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    await done;
+  });
+
+  test('the address is single-use, and a guessed one is a 404', async () => {
+    let url = '';
+    const done = showScreenInBrowser('deploy-run-result', RUN_RESULT, {
+      open: false,
+      timeoutMs: 20_000,
+      onListen: (u) => (url = u),
+    });
+    const u = new URL(await waitForUrl(() => url));
+
+    // A token nobody was given.
+    const wrong = await fetch(`http://127.0.0.1:${u.port}/s/aaaaaaaaaaaa`);
+    expect(wrong.status).toBe(404);
+    // The real one, once.
+    expect((await fetch(u.href)).status).toBe(200);
+    await done;
+
+    // …and not twice. The server is gone by now, so either answer is a refusal.
+    const again = await fetch(u.href).catch(() => null);
+    expect(again === null || again.status === 404).toBe(true);
+  });
+
+  test('nobody coming is an ending, not a hang', async () => {
+    // The deadline is what closes the socket AND settles the promise. A deploy
+    // that already happened must not be held open by a page nobody opened.
+    const started = Date.now();
+    await showScreenInBrowser('deploy-run-result', RUN_RESULT, {
+      open: false,
+      timeoutMs: 300,
+      onListen: () => undefined,
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });

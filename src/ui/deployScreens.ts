@@ -26,10 +26,9 @@
 // a single value is decrypted and these screens sit in the same window, so no
 // plaintext exists yet when they are drawn — and the deploy PR body already
 // holds itself to the same rule.
-import { createServer } from 'http';
-import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { runBrowserWizard } from './browserWizard';
-import { renderScreen, screenHeaders } from './screens/serve';
+import { renderScreen } from './screens/serve';
+import { CapyError } from '../types';
 import { deployPlan, SIGNIN_COMMAND, type DeployStopId } from '../core/deployPlan';
 import type {
   DeployAdapterChoice,
@@ -74,6 +73,20 @@ import type { DeployMode } from '../deploy/adapter';
  * server sent instead, which no rewriting can defeat.
  */
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+/** `stripAnsi` for an optional field, keeping `undefined` as `undefined`. */
+const stripOpt = (s: string | undefined): string | undefined =>
+  s === undefined ? undefined : stripAnsi(s);
+
+/**
+ * `stripAnsi` across a `Gloss` — the segmented one-liners a screen marks up.
+ *
+ * A gloss is built from an adapter's own description, which is written for a
+ * terminal. Only the prose segments are rewritten; a `{ code }` segment is a
+ * command the user retypes and is left exactly as it is.
+ */
+const stripGloss = (g: Gloss): Gloss =>
+  g.map((seg) => (typeof seg === 'string' ? stripAnsi(seg) : seg));
 
 const plural = (n: number, one: string, many: string): string =>
   `${n} ${n === 1 ? one : many}`;
@@ -475,7 +488,9 @@ export function buildDeployTargetSetupData(
     intent: p.intent,
     stops: deployPlan({ at: STEP_STOP[step], answers, skipped }),
     adapters: step === 'adapter' ? p.adapters : undefined,
-    adapter: ctx ? { id: ctx.id, label: stripAnsi(ctx.label), detail: ctx.detail } : undefined,
+    adapter: ctx
+      ? { id: ctx.id, label: stripAnsi(ctx.label), detail: stripGloss(ctx.detail) }
+      : undefined,
     detected: ctx?.detected ? stripAnsi(ctx.detected) : undefined,
     capyBranches: p.capyBranches,
     branch: answered.branch ?? p.branch,
@@ -785,10 +800,19 @@ export function buildDeployPlanConfirmData(
   return {
     nonce,
     stops: deployPlan({ at: 'review', answers, skipped, dryRun: p.dryRun }),
-    target: t,
+    // The label and the preflight rows are strings the CLI also PRINTS, so
+    // they arrive coloured and would render as a literal `[90m` on the page.
+    // `name` is deliberately NOT rewritten: it is the string the delete gate
+    // makes the user type back, and it has to match what is on disk.
+    target: { ...t, adapterLabel: stripAnsi(t.adapterLabel) },
     action: p.action,
     dryRun: p.dryRun,
-    preflight: p.preflight,
+    preflight: p.preflight.map((c) => ({
+      ...c,
+      label: stripAnsi(c.label),
+      detail: stripOpt(c.detail),
+      fix: stripOpt(c.fix),
+    })),
     drift: p.drift,
     changeGate: p.changeGate,
     otherGitChanges: p.otherGitChanges,
@@ -896,8 +920,10 @@ export function buildDeployTargetsData(
     configPath: p.configPath,
     purpose: p.purpose,
     filterKind: p.filterKind,
-    filterKindLabel: p.filterKindLabel,
-    targets: p.targets,
+    filterKindLabel: stripOpt(p.filterKindLabel),
+    // `name` round-trips as the answer, so it is left alone; the label is
+    // printed prose and an escape in it renders as `[90m` on the page.
+    targets: p.targets.map((t) => ({ ...t, adapterLabel: stripOpt(t.adapterLabel) })),
     activeBranch: p.activeBranch,
     view: p.view,
     subjectTarget: p.subjectTarget,
@@ -976,8 +1002,26 @@ export interface WebDeployTokensParams extends WebServeOptions {
 export interface WebDeployTokensResult {
   /** The full deploy id to revoke, or null when nothing was revoked. */
   deployId: string | null;
+  /** True whenever the flow ended without a revoke. Never an error. */
   cancelled: boolean;
 }
+
+/**
+ * How long the token flows stay open.
+ *
+ * Shorter than the wizard's five minutes on purpose, and the reason is a
+ * screen defect this CLI cannot fix from here: `deploy-tokens` has no control
+ * that posts a refusal. "Leave it active" walks back to the listing entirely
+ * in the page, and the listing itself offers nothing but Revoke. So the only
+ * signal a decline ever produces is SILENCE, and this deadline is what turns
+ * that silence into an ending instead of a hang.
+ *
+ * Two minutes is the CLI's own display-screen default — long enough to read a
+ * listing and type twelve characters back, short enough that `capy deploy
+ * list --web` is a listing again rather than a five-minute block. See
+ * `SCREEN CHANGE NEEDED` below for the fix that removes the wait entirely.
+ */
+export const TOKENS_TIMEOUT_MS = 120_000;
 
 export function buildDeployTokensData(
   p: WebDeployTokensParams,
@@ -1003,24 +1047,52 @@ export function buildDeployTokensData(
 /**
  * Serve the token listing.
  *
- * The screen has no exit control of its own — closing the window is the exit —
- * so a run that is never answered ends by TIMING OUT rather than by resolving.
- * That is the contract: an unanswered revoke has not been approved.
+ * TWO ENDINGS, and this function is responsible for both of them REACHING the
+ * caller. Revoked is a submit. Everything else — the window closed, "Leave it
+ * active" clicked, the deadline reached — is a refusal, and a refusal RESOLVES
+ * here as `{ deployId: null, cancelled: true }`. It does not reject.
+ *
+ * That last part is the fix for a real defect: declining a revoke used to
+ * reject with a timeout, which `capy deploy revoke <id> --web` turned into an
+ * error screen and a non-zero exit — for a user who had correctly chosen NOT to
+ * revoke. A decline is not a failure, and the only thing the CLI truthfully
+ * knows in every one of these cases is the same: nothing was revoked.
+ *
+ * A refusal is distinguished from a broken server structurally, never by
+ * reading a message: `runBrowserWizard` rejects with `CapyError` when nobody
+ * answered (deadline, Ctrl-C) and with the raw socket error when the server
+ * itself failed. Only the first is an ending; the second is still a throw.
+ *
+ * SCREEN CHANGE NEEDED (packages/ui/screens/deploy-tokens/Screen.svelte — not
+ * made here, this parcel may not edit packages/ui):
+ *   1. "Leave it active" (line ~195) sets `view = 'list'` and posts nothing.
+ *      It should `submitToCli('/submit', data.nonce, { __action: 'cancel' })`
+ *      so the decline is immediate rather than waiting out the deadline.
+ *   2. The `list` view has NO exit control at all — the only button is Revoke.
+ *      It needs a quiet "Done" that posts the same `__action: 'cancel'`.
+ * With those two, the reducer below already answers them: `__action: 'cancel'`
+ * is handled, and the wait disappears entirely.
  */
 export async function showDeployTokensInBrowser(
   p: WebDeployTokensParams,
 ): Promise<WebDeployTokensResult> {
+  const refused: WebDeployTokensResult = { deployId: null, cancelled: true };
   const out = await runBrowserWizard(
     {
       title: `Deploy tokens — ${p.projectName ?? 'this project'}`,
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
-      timeoutMs: p.timeoutMs,
+      timeoutMs: p.timeoutMs ?? TOKENS_TIMEOUT_MS,
       doneMessage: 'Done — back to your terminal.',
       renderFirst: (nonce) => renderScreen('deploy-tokens', buildDeployTokensData(p, nonce)),
     },
     async (_step, payload) => {
+      // Already the vocabulary every other screen answers in, so the moment
+      // the screen grows the two controls named above this path is live.
+      if (payload.__action === 'cancel') {
+        return { done: true, result: refused };
+      }
       // This screen posts a bare `action`, not the wizard's `__action`: it
       // drives its own submit rather than going through the shared form.
       if (payload.action !== 'revoke') {
@@ -1035,7 +1107,13 @@ export async function showDeployTokensInBrowser(
       }
       return { done: true, result: { deployId: id, cancelled: false } };
     },
-  );
+  ).catch((err: unknown) => {
+    // Nobody answered. Structural, not a message match: the wizard mints a
+    // CapyError for its deadline and for Ctrl-C, and both mean the same thing
+    // here. A server that failed to listen is not that, and still throws.
+    if (err instanceof CapyError) return refused;
+    throw err;
+  });
   return out as WebDeployTokensResult;
 }
 
@@ -1047,88 +1125,60 @@ export function buildDeployRunResultData(d: DeployRunResultData): DeployRunResul
   return {
     ...d,
     projectName: stripAnsi(d.projectName),
+    // The adapter label is printed beside every step in the terminal, and the
+    // epilogue is lifted straight out of the adapter's own stdout block — the
+    // two places colour is most likely to have been baked in already.
+    target: { ...d.target, adapterLabel: stripAnsi(d.target.adapterLabel) },
     steps: d.steps.map((s) => ({
       ...s,
       label: stripAnsi(s.label),
-      detail: s.detail === undefined ? undefined : stripAnsi(s.detail),
-      output: s.output === undefined ? undefined : stripAnsi(s.output),
+      detail: stripOpt(s.detail),
+      output: stripOpt(s.output),
     })),
+    epilogue:
+      d.epilogue === undefined
+        ? undefined
+        : {
+            ...d.epilogue,
+            title: stripAnsi(d.epilogue.title),
+            snippet: stripAnsi(d.epilogue.snippet),
+            note: stripOpt(d.epilogue.note),
+          },
   };
 }
 
 /**
  * Serve a screen that only displays, and wait for the browser to fetch it.
  *
- * `deploy-run-result` carries no nonce because it has nothing to say back, so
- * it gets the strict policy — `connect-src 'none'` — and a page that cannot
- * open a socket cannot exfiltrate what it renders. The URL is single-use and
- * loopback-only, on the same scheme as every other screen this CLI serves; the
- * wait ends when the page has been served, or when the timeout says nobody is
- * coming.
+ * This is `serveEndingPage` — the shared ending-page wait — with the one thing
+ * a deploy adds on top: a serve that FAILS must not look like a deploy that
+ * failed. Everything else it needs is already there, and deliberately is not
+ * reimplemented here: `ScreenServer.delivered` is the fact that the page
+ * reached a browser, and awaiting it is what stops the run exiting out from
+ * under the socket it just opened. `deploy-run-result` is the last thing a
+ * deploy does, so that window is exactly where the page would have died.
+ *
+ * The wait ends when the page has been served, or when the deadline says
+ * nobody is coming.
  */
 export async function showScreenInBrowser<K extends ScreenName>(
   screen: K,
   data: ScreenDataMap[K],
   opts: WebServeOptions & { note?: string } = {},
 ): Promise<void> {
-  const token = randomBytes(32).toString('base64url');
-  const sha256 = (s: string): Buffer => createHash('sha256').update(s).digest();
-  let served = false;
-
-  await new Promise<void>((resolve) => {
-    const server = createServer((req, res) => {
-      const path = (req.url ?? '').split('?')[0];
-      const match = path.match(/^\/s\/([A-Za-z0-9_-]+)$/);
-      const presented = match ? match[1] : '';
-      const valid =
-        !served &&
-        req.method === 'GET' &&
-        presented.length > 0 &&
-        timingSafeEqual(sha256(presented), sha256(token));
-      if (!valid) {
-        res.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found');
-        return;
-      }
-      served = true;
-      res.writeHead(200, screenHeaders());
-      res.end(renderScreen(screen, data));
-      // Let the response flush before tearing the server down.
-      res.on('finish', () => setTimeout(finish, 250));
+  const { serveEndingPage } = await import('./endingPage');
+  try {
+    await serveEndingPage(screen, data, {
+      open: opts.open ?? true,
+      onListen: opts.onListen,
+      timeoutMs: opts.timeoutMs ?? 120_000,
+      lead: opts.note ?? 'Open this in your browser:',
     });
-
-    const timer = setTimeout(finish, opts.timeoutMs ?? 120_000);
-    timer.unref();
-
-    function finish(): void {
-      clearTimeout(timer);
-      try {
-        server.close();
-      } catch {
-        /* ignore */
-      }
-      resolve();
-    }
-
-    server.on('error', () => finish());
-    server.listen(0, '127.0.0.1', async () => {
-      const addr = server.address();
-      const port = addr && typeof addr === 'object' ? addr.port : 0;
-      const url = `http://127.0.0.1:${port}/s/${token}`;
-      opts.onListen?.(url);
-      console.log('');
-      console.log(`  ${opts.note ?? 'Open this in your browser:'}`);
-      console.log(`  ${url}`);
-      console.log('');
-      if (opts.open ?? true) {
-        try {
-          const open = (await import('open')).default;
-          await open(url);
-        } catch {
-          /* best-effort; the printed URL is the fallback */
-        }
-      }
-    });
-  });
+  } catch (err) {
+    // A page that cannot be served must not undo a deploy that already
+    // happened — but it is said out loud rather than swallowed.
+    console.log(`  Could not open the result page: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 /** Serve the step log the terminal prints as `renderResult`. */

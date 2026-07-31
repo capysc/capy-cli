@@ -43,13 +43,16 @@ import {
 } from '../deploy/git';
 import { buildDeployKeep, touchDeployKeep, reconcileVars } from '../deploy/keepGate';
 import { KeepFile } from '../types/index';
+import { CapyError } from '../types';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
 import { classify, isBuildTime } from '../deploy/classify';
 import type { WebDeployAdapterContext } from '../ui/deployScreens';
+import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
 import type {
   DeployAdapterChoice,
+  DeployPlanConfirmStop,
   DeployPlanTarget,
   DeployPreflightCheck,
   DeployRunResultData,
@@ -102,6 +105,18 @@ export interface DeployCliOptions {
    * moves.
    */
   web?: boolean;
+  /**
+   * Describe the route instead of travelling it.
+   *
+   * The SAME stop array the browser screens are served, so a headless caller
+   * can see which stops argv already settled and which it would be asked
+   * about. Printed before any network call and before anything is decrypted,
+   * because a plan you had to deploy to obtain is not a plan.
+   *
+   * (argv wiring for this — and for `--web` — lives in src/index.ts, which the
+   * coordinator owns; both are threaded here and settable by any caller.)
+   */
+  json?: boolean;
   /**
    * The platform answer from earlier in the run, when `capy deploy` reached
    * here through the destination picker. It is a stop this run really
@@ -497,7 +512,13 @@ async function runPicker(
   // union across EVERY branch, so it would offer vars that only exist on
   // prod/development and then fail/skip at deploy. The materialized .env is the
   // active branch's var set — that's what actually gets deployed.
-  const branchVarSet = new Set(Object.keys(new FileManager().readEnvFile()));
+  //
+  // `cwd`, not process.cwd(): every other read in this command is scoped to the
+  // directory it was handed, and this one deciding which variables are offered
+  // off a different directory is how the picker ends up ticking a variable the
+  // target does not have. Identical whenever the two agree, which is every
+  // production call.
+  const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
   const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
 
   if (web?.web) {
@@ -974,14 +995,29 @@ export async function deployList(
     // `capy deploy targets-remove <name>` — both named on the page.
     const keep = readKeep(cwd);
     const { chooseDeployTargetInBrowser } = await import('../ui/deployScreens');
-    const picked = await chooseDeployTargetInBrowser({
-      projectName: basename(cwd),
-      configPath: deployConfigPath(cwd),
-      purpose: 'browse',
-      targets: targetRows(cwd, targets),
-      allow: ['edit', 'remove', 'new'],
-      open: openBrowser(),
-    }).catch(() => ({ action: null, target: '', cancelled: true }));
+    let picked: { action: string | null; target: string };
+    try {
+      picked = await chooseDeployTargetInBrowser({
+        projectName: basename(cwd),
+        configPath: deployConfigPath(cwd),
+        purpose: 'browse',
+        targets: targetRows(cwd, targets),
+        allow: ['edit', 'remove', 'new'],
+        open: openBrowser(),
+      });
+    } catch (err) {
+      // Structural, not a message match: the wizard mints a CapyError when
+      // nobody answered — the deadline, or Ctrl-C — and a listing that ends
+      // having changed nothing is an ending, not a failure. A server that
+      // could not listen is a failure, and swallowing it made a listing that
+      // never opened exit 0 with nothing on screen.
+      if (!(err instanceof CapyError)) {
+        console.error(`${RED('✗')} could not open the targets page: ${err instanceof Error ? err.message : err}`);
+        return 1;
+      }
+      console.log('No changes.');
+      return 0;
+    }
 
     if (picked.action === 'remove') return deployRemove(picked.target, cwd);
     if (picked.action === 'edit' || picked.action === 'new') {
@@ -1041,16 +1077,27 @@ export async function deployRemove(
       return 1;
     }
     const { chooseDeployTargetInBrowser } = await import('../ui/deployScreens');
-    const picked = await chooseDeployTargetInBrowser({
-      projectName: basename(cwd),
-      configPath: deployConfigPath(cwd),
-      purpose: 'browse',
-      targets: targetRows(cwd, targets),
-      view: 'confirm-remove',
-      subjectTarget: name,
-      allow: ['remove'],
-      open: openBrowser(),
-    }).catch(() => ({ action: null, target: '', cancelled: true }));
+    let picked: { action: string | null; target: string };
+    try {
+      picked = await chooseDeployTargetInBrowser({
+        projectName: basename(cwd),
+        configPath: deployConfigPath(cwd),
+        purpose: 'browse',
+        targets: targetRows(cwd, targets),
+        view: 'confirm-remove',
+        subjectTarget: name,
+        allow: ['remove'],
+        open: openBrowser(),
+      });
+    } catch (err) {
+      // An unanswered delete is a refusal — the target stays. A server that
+      // could not listen is a different fact and must not read as one.
+      if (!(err instanceof CapyError)) {
+        console.error(`${RED('✗')} could not open the confirm page: ${err instanceof Error ? err.message : err}`);
+        return 1;
+      }
+      picked = { action: null, target: '' };
+    }
     if (picked.action !== 'remove') {
       console.log(`Kept target ${B(name)}.`);
       return 0;
@@ -1377,6 +1424,60 @@ async function showRunResult(
 /** The terminal's own colours, off anything on its way into a payload. */
 const stripAnsiText = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 
+/**
+ * The route this invocation would travel, and what is still unanswered on it.
+ *
+ * One builder, one array: `deployPlan` is what the three browser screens draw
+ * and this is what `--json` emits, so the rail a person reads and the array an
+ * agent parses cannot describe different routes. `unanswered` is DERIVED from
+ * the same array rather than recomputed, for the same reason.
+ *
+ * Only argv and `.capy/deploy.json` settle a stop here. Nothing is guessed: a
+ * stop no flag answered comes back in `unanswered`, which is precisely the
+ * list a headless caller needs to know it must refuse rather than pick.
+ */
+export function describeDeployRoute(
+  nameArg: string | undefined,
+  options: DeployCliOptions,
+  cwd: string,
+): { stops: DeployPlanConfirmStop[]; unanswered: string[] } {
+  const answers: Partial<Record<DeployStopId, string>> = {};
+  const skipped: DeployStopId[] = [];
+
+  if (options.platformAnswer) answers.platform = stripAnsiText(options.platformAnswer);
+  if (options.modeAnswer) answers.mode = stripAnsiText(options.modeAnswer);
+  else skipped.push('mode');
+
+  const saved = nameArg ? getTarget(cwd, nameArg) : null;
+  if (saved) {
+    const adapter = getAdapter(saved.kind);
+    answers.platform = stripAnsiText(adapter?.label ?? saved.kind);
+    answers.branch = saved.branch;
+    answers.variables = `${saved.vars.length} ${saved.vars.length === 1 ? 'variable' : 'variables'}`;
+    answers.delivery = (adapter?.ciOnly ? 'ci' : saved.mode ?? 'direct') === 'ci' ? 'CI' : 'Direct';
+    answers.name = saved.name;
+    if (Object.keys(saved.options).length > 0) answers.settings = 'saved';
+  } else if (options.target) {
+    const adapter = getAdapter(options.target);
+    if (adapter) answers.platform = stripAnsiText(adapter.label);
+    // `--target <id>` builds an ad-hoc target that is never written to disk,
+    // so the naming question does not happen rather than going unanswered.
+    skipped.push('name');
+  }
+
+  // Where the traveller stands is the FIRST outstanding stop, taken off the
+  // plan itself so the two can never disagree about what is left.
+  const dryRun = !!options.dryRun;
+  const [at] = unansweredDeployStops(deployPlan({ answers, skipped, dryRun }));
+  const stops = deployPlan({
+    at: (at as DeployStopId | undefined) ?? null,
+    answers,
+    skipped,
+    dryRun,
+  });
+  return { stops, unanswered: unansweredDeployStops(stops) };
+}
+
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
 
 export async function deployCommand(
@@ -1384,6 +1485,14 @@ export async function deployCommand(
   options: DeployCliOptions = {},
   cwd: string = process.cwd(),
 ): Promise<number> {
+  // `--json` describes the route rather than travelling it. Before keep.lock,
+  // before auth, before a single value is decrypted — the plan is knowable
+  // without any of that, and that is what makes it a plan.
+  if (options.json) {
+    console.log(JSON.stringify(describeDeployRoute(nameArg, options, cwd), null, 2));
+    return 0;
+  }
+
   const keep = readKeep(cwd);
   if (!keep) {
     console.error(

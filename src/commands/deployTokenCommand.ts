@@ -562,6 +562,16 @@ export class DeployCommand {
   }
 }
 
+/** One minted deploy token, as the listing and the confirm both read it. */
+export interface DeployTokenListRow {
+  deployId: string;
+  label: string | null;
+  createdAge: string;
+  createdOn: string;
+  createdBy?: string;
+  revokedAge: string | null;
+}
+
 /**
  * Turn the service's token records into the rows the browser draws.
  *
@@ -577,14 +587,7 @@ function tokenRows(
     created_at: string;
     revoked_at: string | null;
   }>,
-): Array<{
-  deployId: string;
-  label: string | null;
-  createdAge: string;
-  createdOn: string;
-  createdBy?: string;
-  revokedAge: string | null;
-}> {
+): DeployTokenListRow[] {
   return tokens.map(t => ({
     deployId: t.deploy_id,
     label: t.label,
@@ -593,6 +596,34 @@ function tokenRows(
     createdBy: t.created_by || undefined,
     revokedAge: t.revoked_at ? formatRelativeTime(t.revoked_at) : null,
   }));
+}
+
+/** What a typed prefix resolved to. A CODE, never a sentence to be parsed. */
+export type TokenPrefixMatch =
+  | { code: 'ok'; token: DeployTokenListRow }
+  | { code: 'none' }
+  | { code: 'ambiguous'; matches: DeployTokenListRow[] };
+
+/**
+ * Resolve the prefix a user typed to the ONE token it names.
+ *
+ * The terminal hands the prefix to the service and lets it pick; under `--web`
+ * the whole list is already in hand, so an ambiguous prefix is a question that
+ * can be answered honestly instead of resolved to whichever row happens to sort
+ * first. Revoking is irreversible and cuts a live pipeline off, so "probably
+ * this one" is not an answer.
+ */
+export function resolveTokenPrefix(
+  rows: DeployTokenListRow[],
+  prefix: string,
+): TokenPrefixMatch {
+  // An exact id is never ambiguous, whatever else it happens to prefix.
+  const exact = rows.find(t => t.deployId === prefix);
+  if (exact) return { code: 'ok', token: exact };
+  const matches = rows.filter(t => t.deployId.startsWith(prefix));
+  if (matches.length === 0) return { code: 'none' };
+  if (matches.length > 1) return { code: 'ambiguous', matches };
+  return { code: 'ok', token: matches[0] };
 }
 
 export class DeployRevokeCommand {
@@ -636,11 +667,22 @@ export class DeployRevokeCommand {
         // the token being cut off and wants its id typed back first.
         const { tokens } = await serviceClient.listDeployTokens(orgId, projectState.projectId);
         const rows = tokenRows(tokens);
-        const subject = rows.find(t => t.deployId.startsWith(deployIdPrefix));
-        if (!subject) {
+        // Branch on the code, not on anything printed. Resolving an ambiguous
+        // prefix to whichever row sorts first is how the wrong pipeline loses
+        // access, and revoking cannot be undone.
+        const match = resolveTokenPrefix(rows, deployIdPrefix);
+        if (match.code === 'none') {
           console.error(`  No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`);
           process.exit(1);
         }
+        if (match.code === 'ambiguous') {
+          console.error(
+            `  ${match.matches.length} deploy tokens start with ${deployIdPrefix} — ` +
+              `pass more of the id. Run ${B('capy deploy list')} to see them in full.`,
+          );
+          process.exit(1);
+        }
+        const subject = match.token;
         const { showDeployTokensInBrowser } = await import('../ui/deployScreens');
         const picked = await showDeployTokensInBrowser({
           projectName: projectState.projectName ?? null,
@@ -649,8 +691,11 @@ export class DeployRevokeCommand {
           subjectToken: subject.deployId,
           open: !process.env.CAPY_WEB_NO_OPEN,
         });
+        // A decline, a closed window and an unanswered page are one outcome and
+        // it is not a failure: the token is still active, which is what the
+        // user asked for. Said out loud, and exit 0.
         if (!picked.deployId) {
-          console.log('  Nothing revoked.');
+          console.log(`  Nothing revoked — ${subject.deployId.slice(0, 12)} is still active.`);
           return;
         }
         await serviceClient.revokeDeployToken(picked.deployId);
@@ -709,15 +754,23 @@ export class DeployListCommand {
         // The one command you reach for in a hurry is also the one with no
         // confirmation, so the browser listing carries the revoke rather than
         // making you copy an id into a second command that fires immediately.
+        //
+        // No `.catch()` swallowing the outcome here: a refusal — closed window,
+        // nothing clicked — RESOLVES as `cancelled`, and a server that could
+        // not listen is a real failure that belongs on the error screen.
         const { showDeployTokensInBrowser } = await import('../ui/deployScreens');
         const picked = await showDeployTokensInBrowser({
           projectName: projectState.projectName ?? null,
           tokens: tokenRows(tokens),
           open: !process.env.CAPY_WEB_NO_OPEN,
-        }).catch(() => ({ deployId: null, cancelled: true }));
+        });
         if (picked.deployId) {
           await serviceClient.revokeDeployToken(picked.deployId);
           console.log(`  Deploy token ${picked.deployId.slice(0, 12)}... revoked.`);
+        } else {
+          // A listing that ends is a listing. Saying so is the difference
+          // between "you read it and moved on" and "something went wrong".
+          console.log('  Nothing revoked.');
         }
         return;
       }

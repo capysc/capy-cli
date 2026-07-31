@@ -132,6 +132,12 @@ export function deployPlan(input: DeployPlanInput = {}): DeployPlanConfirmStop[]
  *
  * Derived from the plan rather than recomputed, so the two can never disagree
  * about what is outstanding.
+ *
+ * Called by `describeDeployRoute` in deployCommand.ts, which is what
+ * `capy deploy --json` emits — the same array the three browser screens draw.
+ * That is the whole claim: the rail a person reads and the array an agent
+ * parses come out of one builder. (argv wiring for the flag lives in
+ * src/index.ts, which the coordinator owns, exactly as `--web` does.)
  */
 export function unansweredDeployStops(stops: DeployPlanConfirmStop[]): string[] {
   return stops

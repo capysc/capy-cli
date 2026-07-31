@@ -4087,4 +4087,203 @@ describeBrowser('capy deploy, driven by a real browser', () => {
 
     expect(await done).toEqual({ action: 'use', target: 'legacy', cancelled: false });
   }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // deploy-tokens — `capy deploy list --web` and `capy deploy revoke <id> --web`
+  //
+  // The only destructive screen in this parcel, and the last one nobody had
+  // ever clicked. The first click on it found a five-minute hang on the
+  // DECLINE path, which is exactly the ending a fetch-driven test cannot see:
+  // a decline posts nothing, so only a browser can produce it.
+  // -------------------------------------------------------------------------
+
+  const TOKENS = {
+    projectName: 'mikes-market',
+    tokens: [
+      {
+        deployId: 'a1b2c3d4e5f6a7b8c9d0',
+        label: 'ci',
+        createdAge: '3 days ago',
+        createdOn: '2026-07-27',
+        createdBy: 'mike@example.com',
+        revokedAge: null,
+      },
+      {
+        deployId: 'ffeeddccbbaa99887766',
+        label: null,
+        createdAge: '2 months ago',
+        createdOn: '2026-05-20',
+        revokedAge: '1 month ago',
+      },
+    ],
+    open: false,
+  };
+
+  test('revoking from the listing sends the whole id, not the prefix it asked for', async () => {
+    // The field asks for twelve characters because twelve is all the terminal
+    // ever shows. What goes back is the full twenty, because two tokens can
+    // share a prefix and the CLI matches on `deployId === id`. Nothing but a
+    // click proves those two are wired to each other.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = showDeployTokensInBrowser({ ...TOKENS, onListen: (u) => (url = u) });
+
+    const page = await open(await waitForUrl(() => url));
+
+    // A deploy id is an identifier. The credential it was minted with is
+    // returned once, at mint time, and never travels to this page.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('a1b2c3d4e5f6')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('SECRETS_BLOB')`)).toBe(false);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    await evaluate(page, clickButton('Revoke token'));
+    await until(page, `document.body.textContent.includes('This cannot be undone')`, 'the revoke confirm');
+
+    // Held down until the prefix is typed back, character for character. The
+    // terminal fires the DELETE on a bare argument with no question at all.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token')).disabled`,
+      ),
+    ).toBe(true);
+
+    await evaluate(page, typeInto('Type the deploy id prefix to confirm', 'a1b2c3d4e5f6'));
+    await until(
+      page,
+      `![...document.querySelectorAll('button')].find(b => b.textContent.includes('Revoke token')).disabled`,
+      'the revoke button to go live',
+    );
+    await evaluate(page, clickButton('Revoke token'));
+
+    // Twenty characters, from a field that asked for twelve.
+    expect(await done).toEqual({ deployId: 'a1b2c3d4e5f6a7b8c9d0', cancelled: false });
+  }, 60_000);
+
+  test('declining a revoke ENDS the run, as a refusal rather than an error', async () => {
+    // `capy deploy revoke <id> --web`, and the user decides not to. "Leave it
+    // active" navigates back to the listing entirely inside the page and posts
+    // NOTHING — the screen has no control that reports a refusal, and the
+    // listing it lands on has no exit control at all. So the only signal the
+    // CLI ever gets is silence.
+    //
+    // Silence used to REJECT: the run hung for the full wizard timeout and
+    // then exited non-zero through the error screen, for a user who had
+    // correctly chosen not to revoke a credential. It now RESOLVES as what it
+    // truthfully is — nothing was revoked — and the caller exits 0.
+    //
+    // Without that change this test does not time out, it THROWS: `await done`
+    // re-raises the rejection.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    const done = showDeployTokensInBrowser({
+      ...TOKENS,
+      view: 'confirm-revoke',
+      subjectToken: 'a1b2c3d4e5f6a7b8c9d0',
+      // Stands in for the two-minute deadline the command ships with.
+      timeoutMs: 3_000,
+      onListen: (u) => (url = u),
+    });
+
+    const page = await open(await waitForUrl(() => url));
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('This cannot be undone')`)).toBe(true);
+
+    await evaluate(page, clickButton('Leave it active'));
+
+    // The decline is real on the page — it is back on the listing — and the
+    // page is STILL SERVED, so a user who changes their mind can still act.
+    await until(page, `document.body.textContent.includes('still active')`, 'the listing to come back');
+    expect(
+      await evaluate<boolean>(
+        page,
+        `[...document.querySelectorAll('button')].some(b => b.textContent.includes('Revoke token'))`,
+      ),
+    ).toBe(true);
+
+    // …and the run reaches an ending on its own, as a refusal.
+    expect(await done).toEqual({ deployId: null, cancelled: true });
+  }, 60_000);
+
+  test('closing the window on the token listing revokes nothing, and still ends', async () => {
+    // Closing the window is a refusal, never consent — and a refusal is an
+    // ENDING. Both halves matter: nothing may be revoked, and the run may not
+    // hang waiting for an answer that is never coming.
+    const { showDeployTokensInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    let settled: unknown;
+    const done = showDeployTokensInBrowser({
+      ...TOKENS,
+      timeoutMs: 2_500,
+      onListen: (u) => (url = u),
+    });
+    void done.then((r) => (settled = r));
+
+    const page = await open(await waitForUrl(() => url));
+    await page.send('Page.navigate', { url: 'about:blank' });
+
+    await new Promise((r) => setTimeout(r, 400));
+    // Leaving is not an answer.
+    expect(settled).toBeUndefined();
+
+    expect(await done).toEqual({ deployId: null, cancelled: true });
+  }, 60_000);
+
+  // -------------------------------------------------------------------------
+  // deploy-run-result — what the run actually did
+  //
+  // A display-only page with no nonce and `connect-src 'none'`. Its whole job
+  // is to still BE THERE when a browser asks for it: it is the last thing a
+  // deploy does, so a call site that serves it and returns has served nothing.
+  // -------------------------------------------------------------------------
+
+  test('the result page is still reachable when the run waits for it', async () => {
+    const { showDeployRunResultInBrowser } = await import('../../src/ui/deployScreens');
+    let url = '';
+    let served = false;
+    const done = showDeployRunResultInBrowser(
+      {
+        outcome: 'opened-pr',
+        projectName: '\x1b[1mmikes-market\x1b[0m',
+        target: {
+          name: 'vercel-prod',
+          // Coloured on its way in — the terminal prints this same string.
+          adapterLabel: '\x1b[1mVercel\x1b[0m',
+          branch: 'production',
+          mode: 'ci',
+          prBase: 'main',
+        },
+        steps: [
+          { id: '0', label: 'set Vercel env', status: 'ok', detail: '\x1b[90m2 variables pushed\x1b[0m' },
+          { id: '1', label: 'vercel deploy', status: 'skip', detail: 'CI builds on merge' },
+        ],
+        pr: { branch: 'capy-deploy-1', base: 'main', url: 'https://example.test/pr/1' },
+      },
+      { open: false, timeoutMs: 20_000, onListen: (u) => (url = u) },
+    );
+    void done.then(() => (served = true));
+
+    const listening = await waitForUrl(() => url);
+    // The run has NOT finished yet: the page is only worth serving if the CLI
+    // is still there to serve it.
+    expect(served).toBe(false);
+
+    const page = await open(listening);
+
+    // The step log the terminal prints, rendered — and no escape codes reached
+    // the payload: a payload is not a terminal and `[90m` is what a browser
+    // shows of one.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('set Vercel env')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('2 variables pushed')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('[90m')`)).toBe(false);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('[1m')`)).toBe(false);
+    // Values never reach the result page either.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+
+    // Only once it has been fetched does the run move on.
+    await done;
+
+    // Single-use: the address that served it does not serve it twice.
+    const again = await fetch(listening).catch(() => null);
+    expect(again === null || again.status === 404).toBe(true);
+  }, 60_000);
 });
