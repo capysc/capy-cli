@@ -90,6 +90,17 @@ describe('runWebIntake loopback server (multi-variable contract)', () => {
     expect(html).toContain('"B"');
     expect(html).toContain('https://dashboard.stripe.com/apikeys');
 
+    // ...under the interactive screen policy. This page collects credentials, so
+    // the browser — not just the page's construction — has to be the thing that
+    // stops it reaching a remote origin, being framed, or posting natively.
+    const csp = form.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("connect-src 'self'"); // its own loopback origin, nothing else
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("form-action 'none'");
+    expect(form.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(form.headers.get('cache-control')).toBe('no-store');
+
     // wrong nonce → 403, nothing delivered
     const bad = await fetch(`${base}/submit`, {
       method: 'POST',

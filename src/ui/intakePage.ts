@@ -239,6 +239,7 @@ export function generateIntakeForm(o: IntakeFormOptions): string {
       nameInput.placeholder = 'VARIABLE_NAME';
       nameInput.spellcheck = false;
       nameInput.autocapitalize = 'off';
+      nameInput.autocomplete = 'off';
       nameInput.value = name;
       nameLine.append(nameInput);
       const valueInput = document.createElement('textarea');
@@ -246,6 +247,16 @@ export function generateIntakeForm(o: IntakeFormOptions): string {
       valueInput.rows = 2;
       valueInput.placeholder = 'value (multiline OK)';
       valueInput.spellcheck = false;
+      // A browser treats this like any other text field: remember it, offer it
+      // back as autofill, let a password manager capture it. Every one of those
+      // is wrong for a credential — it copies the value somewhere the CLI's
+      // encryption does not reach. Same opt-outs the ui SecretField uses.
+      valueInput.autocomplete = 'off';
+      valueInput.autocapitalize = 'off';
+      valueInput.setAttribute('autocorrect', 'off');
+      valueInput.setAttribute('data-1p-ignore', 'true');
+      valueInput.setAttribute('data-lpignore', 'true');
+      valueInput.setAttribute('data-form-type', 'other');
       row.append(nameLine, valueInput);
       // Footer: per-variable "where to find this" link (left) + remove (right), justified between.
       // The link is http(s)-only, sanitized server-side; href is set as a property (no innerHTML).

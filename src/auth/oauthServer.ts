@@ -51,6 +51,17 @@ export class OAuthServer {
   /**
    * Bind to the first available port from the candidate list.
    * Must be called before startAuthFlow.
+   *
+   * Loopback ONLY — the host argument is load-bearing, not decoration. Omitting
+   * it binds every interface, and the callback handler is meant to be reachable
+   * from this machine and nowhere else. `state` gates what the handler accepts,
+   * but the surface itself should never be exposed beyond loopback. Every local
+   * server in this CLI pins 127.0.0.1 for the same reason.
+   *
+   * The redirect URI keeps saying `localhost` because the service validates
+   * the string it was handed at /auth/initiate. Browsers resolve localhost to
+   * both ::1 and 127.0.0.1 and fall through to the second on connection
+   * refused, so an IPv4-only bind still receives the callback.
    */
   async bind(): Promise<void> {
     this.server = createServer(this.handleRequest.bind(this));
@@ -65,7 +76,7 @@ export class OAuthServer {
       try {
         await new Promise<void>((resolve, reject) => {
           this.server.once('error', reject);
-          this.server.listen(candidate, () => {
+          this.server.listen(candidate, '127.0.0.1', () => {
             this.server.removeListener('error', reject);
             resolve();
           });

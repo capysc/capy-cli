@@ -38,7 +38,7 @@ describe('OAuthServer', () => {
 
     // Mock HTTP server
     mockServer = {
-      listen: mock((port: number, callback: () => void) => callback()),
+      listen: mock((_port: number, _host: string, callback: () => void) => callback()),
       close: mock(() => undefined),
       on: mock(() => undefined),
       once: mock(() => undefined),
@@ -60,9 +60,9 @@ describe('OAuthServer', () => {
   });
 
   describe('bind', () => {
-    test('should bind to first available port', async () => {
+    test('should bind to first available port, on loopback only', async () => {
       // Mock the listen to call the callback (success)
-      mockServer.listen.mockImplementation((port: number, callback: () => void) => {
+      mockServer.listen.mockImplementation((_port: number, _host: string, callback: () => void) => {
         mockServer.removeListener('error', expect.any(Function));
         callback();
       });
@@ -70,7 +70,10 @@ describe('OAuthServer', () => {
       await oauthServer.bind();
 
       expect(mockCreateServer).toHaveBeenCalled();
-      expect(mockServer.listen).toHaveBeenCalledWith(19420, expect.any(Function));
+      // The host argument is the assertion that matters: omitting it binds every
+      // interface, which puts the OAuth callback on the LAN for the length of an
+      // auth round trip.
+      expect(mockServer.listen).toHaveBeenCalledWith(19420, '127.0.0.1', expect.any(Function));
     });
   });
 

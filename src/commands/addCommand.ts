@@ -4,6 +4,7 @@ import type { Socket } from 'net';
 import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync } from './connectors/shared';
 import { generateIntakeForm, type IntakeVar } from '../ui/intakePage';
+import { screenHeaders } from '../ui/screens/serve';
 import { nonceEqual, isLoopbackHost, isAllowedOrigin } from './intakeSecurity';
 
 export interface AddOpts {
@@ -89,7 +90,13 @@ export function runWebIntake(params: IntakeParams, onSubmit: (pairs: SecretPair[
           res.writeHead(403).end('forbidden');
           return;
         }
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        // This page collects credentials, so it carries the same interactive
+        // screen policy as the wizard. `intakePage` makes no external request by
+        // construction — the policy is the browser enforcing that rather than
+        // trusting it: no remote origins, no eval, no framing, no native form
+        // post, and `connect-src` limited to the loopback origin the page came
+        // from, which is the only place the typed values are supposed to go.
+        res.writeHead(200, screenHeaders({ interactive: true }));
         res.end(generateIntakeForm({ vars: params.vars, nonce, reason: params.reason }));
         return;
       }
