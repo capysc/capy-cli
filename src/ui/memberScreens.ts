@@ -468,12 +468,9 @@ export async function serveInviteCode(
   );
   const url = await server.start();
   if (opts.open) {
-    try {
-      const open = (await import('open')).default;
-      await open(url);
-    } catch {
-      /* best-effort; the printed URL is the fallback */
-    }
+    const { openScreen } = await import('./openScreen');
+    const { SCREEN_WIDE } = await import('./screens/generated');
+    await openScreen(url, { kind: 'dialog', wide: SCREEN_WIDE['invite-teammate'] });
   }
   return { url, close: () => server.close() };
 }

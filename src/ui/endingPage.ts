@@ -64,12 +64,11 @@ export async function serveEndingPage<K extends ScreenName>(
   console.log('');
 
   if (p.open ?? true) {
-    try {
-      const open = (await import('open')).default;
-      await open(url);
-    } catch {
-      /* best-effort; the printed URL is the fallback */
-    }
+    // An ending is a loopback screen like any other, so it gets the same
+    // chromeless window — and it knows its own name, so it can be sized right.
+    const { openScreen } = await import('./openScreen');
+    const { SCREEN_WIDE } = await import('./screens/generated');
+    await openScreen(url, { kind: 'dialog', wide: SCREEN_WIDE[screen] });
   }
 
   const delivered = await server.delivered;

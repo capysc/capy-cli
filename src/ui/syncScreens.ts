@@ -34,6 +34,7 @@ import type {
   ExpiringCredential,
   RemoteFailure,
   RemoteState,
+  ScreenName,
   StatusDiff,
   SyncResultChange,
   SyncResultData,
@@ -158,7 +159,7 @@ export async function showSyncStatusInBrowser(p: WebSyncStatusParams): Promise<s
   console.log(`  ${url}`);
   console.log('');
   p.onListen?.(url);
-  if (p.open ?? true) await openUrl(url);
+  if (p.open ?? true) await openUrl(url, 'sync-status');
   return url;
 }
 
@@ -207,16 +208,19 @@ export async function showSyncResultInBrowser(p: WebSyncResultParams): Promise<s
   console.log(`  ${url}`);
   console.log('');
   p.onListen?.(url);
-  if (p.open ?? true) await openUrl(url);
+  if (p.open ?? true) await openUrl(url, 'sync-result');
   return url;
 }
 
-/** Best-effort browser open; the printed URL is the fallback. */
-async function openUrl(url: string): Promise<void> {
-  try {
-    const open = (await import('open')).default;
-    await open(url);
-  } catch {
-    /* the URL is printed above */
-  }
+/**
+ * Best-effort browser open; the printed URL is the fallback.
+ *
+ * Takes the screen name rather than a boolean because both sync reports are
+ * listings — a window sized for a question would wrap the drift table that is
+ * the entire content of the page.
+ */
+async function openUrl(url: string, screen: ScreenName): Promise<void> {
+  const { openScreen } = await import('./openScreen');
+  const { SCREEN_WIDE } = await import('./screens/generated');
+  await openScreen(url, { kind: 'dialog', wide: SCREEN_WIDE[screen] });
 }
