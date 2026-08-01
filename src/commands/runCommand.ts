@@ -175,14 +175,14 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
       const { resolveLocalProjectKey } = await import('../core/localUnlock');
       projectKeyHex = await resolveLocalProjectKey(projectId);
     } else {
-      const { AuthService } = await import('../auth/authService');
+      const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
       const { ServiceClient } = await import('../service/serviceClient');
       const { resolveProjectKey } = await import('../crypto/keyResolver');
 
       const auth = new AuthService(undefined, devMode);
       const result = await auth.authenticateSilent(orgId);
       if (!result.success || !result.user_id) {
-        console.error('capy run: not authenticated. Run `capy` to sign in.');
+        console.error(`capy run: ${silentAuthFailureMessage(result)}`);
         return 1;
       }
 

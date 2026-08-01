@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
@@ -211,7 +211,10 @@ export class StatusCommand {
         }
         const { resolveProjectKey } = await import('../crypto/keyResolver');
         const authResult = await this.authService.authenticateSilent(projectState.organizationId);
-        if (!authResult.success) throw new Error('auth failed');
+        // The message becomes `remoteSkipReason`, which the report and the
+        // screen both show. "auth failed" told the reader nothing about
+        // whether to sign in again or check the network.
+        if (!authResult.success) throw new Error(silentAuthFailureMessage(authResult));
 
         const keyOps = {
           coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),

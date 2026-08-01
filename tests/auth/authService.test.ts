@@ -706,6 +706,7 @@ describe('AuthService', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Session expired — sign-in required');
+      expect(result.error_code).toBe('session_ended');
       const failure = service.getLastRefreshFailure();
       expect(failure?.reason).toBe('session_ended');
       expect(failure?.status).toBe(401);
@@ -721,6 +722,7 @@ describe('AuthService', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Could not reach the Capy service to refresh your session');
+      expect(result.error_code).toBe('network');
       expect(service.getLastRefreshFailure()?.reason).toBe('network');
     });
 
@@ -737,6 +739,7 @@ describe('AuthService', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('Organization not found while refreshing your session');
+      expect(result.error_code).toBe('org_not_found');
       expect(service.getLastRefreshFailure()?.reason).toBe('org_not_found');
     });
 
@@ -746,6 +749,7 @@ describe('AuthService', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('No valid session available');
+      expect(result.error_code).toBe('no_session');
       expect(service.getLastRefreshFailure()).toBeNull();
     });
 

@@ -445,7 +445,9 @@ program
       const serviceClient = new ServiceClient(undefined, true);
       serviceClient.setTokenProvider(() => authService.getValidToken());
       const authResult = await authService.authenticateSilent(keep.org_id);
-      if (!authResult.success) throw new Error('auth failed — run capy-dev first');
+      if (!authResult.success) {
+        throw new Error(`${authResult.error || 'Not authenticated'} — run ${B('capy-dev')} first`);
+      }
 
       const keyOps = {
         coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),

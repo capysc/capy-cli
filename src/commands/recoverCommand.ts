@@ -205,7 +205,15 @@ export class RecoverCommand {
     //    on this org's endpoint succeeds with the right token.
     let scoped = await authService.authenticateSilent(orgId);
     if (!scoped.success) {
-      console.error(`\n  Failed to scope session to ${B(selectedOrg.name)}. Run ${B('capy')} and select this org, then retry.\n`);
+      // "select this org and retry" is the right advice for an ended session
+      // and the wrong advice for an unreachable service, so the cause leads
+      // and the org-specific step follows only when it would help.
+      console.error(`\n  Failed to scope session to ${B(selectedOrg.name)}: ${scoped.error}.`);
+      console.error(
+        scoped.error_code === 'network' || scoped.error_code === 'server_error'
+          ? `  Check your connection and re-run ${B('capy recover')}.\n`
+          : `  Run ${B('capy')}, select this org, then re-run ${B('capy recover')}.\n`,
+      );
       process.exit(1);
     }
     authResult = scoped;

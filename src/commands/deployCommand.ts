@@ -194,14 +194,14 @@ async function decryptCurrentBranch(
     throw new Error('no keep.lock — run `capy` to sync first.');
   }
 
-  const { AuthService } = await import('../auth/authService');
+  const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
   const { ServiceClient } = await import('../service/serviceClient');
   const { resolveProjectKey } = await import('../crypto/keyResolver');
 
   const auth = new AuthService(undefined, devMode);
   const result = await auth.authenticateSilent(keep.orgId);
   if (!result.success || !result.user_id) {
-    throw new Error('not authenticated. Run `capy` to sign in.');
+    throw new Error(silentAuthFailureMessage(result));
   }
   const svc = new ServiceClient(undefined, devMode);
   svc.setTokenProvider(() => auth.getValidToken());
@@ -235,14 +235,14 @@ async function mintForDeploy(
   const keep = readKeep(cwd);
   if (!keep) throw new Error('no keep.lock — run `capy` to sync first.');
 
-  const { AuthService } = await import('../auth/authService');
+  const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
   const { ServiceClient } = await import('../service/serviceClient');
   const { mintDeployToken } = await import('./deployTokenCommand');
 
   const auth = new AuthService(undefined, devMode);
   const result = await auth.authenticateSilent(keep.orgId);
   if (!result.success || !result.user_id) {
-    throw new Error('not authenticated. Run `capy` to sign in.');
+    throw new Error(silentAuthFailureMessage(result));
   }
   const svc = new ServiceClient(undefined, devMode);
   svc.setTokenProvider(() => auth.getValidToken());

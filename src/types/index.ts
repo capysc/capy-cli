@@ -1,3 +1,5 @@
+import type { AuthFailureReason as ScreenAuthFailureReason } from '../ui/screens/contract';
+
 /**
  * Marker for an env var that was provisioned by a `capy connect <provider>`
  * flow. Lives on the per-branch variable entry so different branches can
@@ -147,6 +149,34 @@ export interface Organization {
   name: string;
 }
 
+/**
+ * Why a silent authentication attempt failed, as a code rather than a
+ * sentence. `error` on `AuthResult` is for display; this is what callers
+ * branch on when they need to pick a recovery — notably, only some of these
+ * are fixed by signing in again. `no_session` means nothing was cached to
+ * refresh in the first place; the rest come from `RefreshFailureReason`.
+ */
+export type SilentAuthFailureCode =
+  | 'session_ended'
+  | 'org_not_found'
+  | 'server_error'
+  | 'network'
+  | 'no_session';
+
+/**
+ * The same vocabulary crosses the wire to the browser screens as
+ * `AuthFailureReason`, where it decides whether the page draws a sign-in
+ * button — so a member added on one side and not the other would render the
+ * wrong recovery rather than fail. The two declarations sit either side of a
+ * package boundary and cannot share a definition; this pair of assignments is
+ * what stops them drifting, and it fails at `tsc`, not at runtime.
+ */
+type AssertNever<T extends never> = T;
+export type SilentAuthCodeMatchesScreenContract = [
+  AssertNever<Exclude<SilentAuthFailureCode, ScreenAuthFailureReason>>,
+  AssertNever<Exclude<ScreenAuthFailureReason, SilentAuthFailureCode>>,
+];
+
 export interface AuthResult {
   success: boolean;
   organization_id?: string;
@@ -157,6 +187,8 @@ export interface AuthResult {
   user_last_name?: string | null;
   organizations?: Organization[];
   error?: string;
+  /** Machine-readable companion to `error`. Branch on this, never on `error`. */
+  error_code?: SilentAuthFailureCode;
   /** WorkOS refresh token for use with createOrganization when org selection is pending */
   _refresh_token?: string;
   /** How the token was obtained: 'cached', 'refreshed', or 'oauth' */
