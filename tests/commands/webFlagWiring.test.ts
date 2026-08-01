@@ -95,6 +95,28 @@ function commandsNeedingWeb(entry: string): string[] {
   return [...new Set(need)];
 }
 
+/**
+ * Does this handler take `web` FROM the merged globals?
+ *
+ * Not "does it mention `optsWithGlobals`" — that is what this file used to ask,
+ * and it is how `capy-dev connect stripe --web` shipped broken while this test
+ * was green. That handler calls `optsWithGlobals()` for a different reason
+ * entirely: the root program also declares `-f/--force`, so `--force` has to be
+ * read from the merge. `web` was simply never taken off the result, and a
+ * substring check for the call cannot tell the two apart.
+ *
+ * Both spellings in use are accepted: read straight through
+ * (`command.optsWithGlobals().web`), or via the local alias the handlers that
+ * also need `force` keep (`const merged = …; merged.web`).
+ */
+function readsWebFromGlobals(block: string): boolean {
+  if (/optsWithGlobals\(\)\s*\.\s*web\b/.test(block)) return true;
+  for (const m of block.matchAll(/const\s+(\w+)\s*=\s*[^;\n]*optsWithGlobals[^;]*;/g)) {
+    if (new RegExp(`\\b${m[1]}\\s*\\.\\s*web\\b`).test(block)) return true;
+  }
+  return false;
+}
+
 /** One row per (entrypoint, command) so a failure names both. */
 const CASES: Array<[string, string]> = ENTRYPOINTS.flatMap((entry) =>
   commandsNeedingWeb(entry).map((name) => [entry, name] as [string, string]),
@@ -104,10 +126,10 @@ describe('--web reaches the commands that can serve a screen', () => {
   test.each(CASES)('%s: %s threads the inherited flag', (entry, name) => {
     const block = commandBlock(entry, name);
     expect(
-      block.includes('optsWithGlobals'),
-      `\`${name} --web\` parses in ${entry} but the handler never reads the ` +
-        `inherited global, so the flag is silently dropped and the command prompts ` +
-        `a TTY nobody is watching. Read \`command.optsWithGlobals().web\`.`,
+      readsWebFromGlobals(block),
+      `\`${name} --web\` parses in ${entry} but the handler never reads \`web\` off ` +
+        `the inherited globals, so the flag is silently dropped and the command ` +
+        `prompts a TTY nobody is watching. Read \`command.optsWithGlobals().web\`.`,
     ).toBe(true);
   });
 

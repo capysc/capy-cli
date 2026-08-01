@@ -326,6 +326,9 @@ const deploy = program
         target: options.target,
         yes: options.yes ?? merged.yes,
         dryRun: options.dryRun ?? merged.dryRun,
+        // Same inherited-global rule as every other converted command: --web
+        // is declared once on the root program, so it arrives in merged opts.
+        web: merged.web === true,
         edit: options.edit,
         devMode: true,
       });
@@ -800,14 +803,23 @@ program
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
-    if (!provider) {
-      await cmd.list();
-      return;
-    }
     // Merge globals: the top-level program also defines -f/--force, which
     // otherwise shadows this subcommand's --force (opts.force stays undefined).
+    // `--web` arrives the same way and for the same reason — it is declared
+    // once on the root program. Dropping it here is not a no-op: `ConnectCommand`
+    // reads `opts.web` to decide between the browser route and the TTY prompts,
+    // so an unpassed flag makes `capy-dev connect stripe --web` silently answer
+    // in the terminal — or fail as "ambiguous without a prompt" when there
+    // isn't one. That is the dev binary, which is the only one the Stripe
+    // sandbox flow ever runs.
     const merged = command.optsWithGlobals();
+    const web = merged.web === true;
+    if (!provider) {
+      await cmd.list({ web });
+      return;
+    }
     await cmd.execute(provider, {
+      web,
       live: options.live,
       var: options.var,
       account: options.account,
