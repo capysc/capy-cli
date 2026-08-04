@@ -626,11 +626,32 @@ export class RotateCommand {
       // is still drawn for that run — the destructive half is unchanged — with
       // the stops it will not travel struck through.
       deployTarget = null;
-    } else if (isTTY) {
-      // Interactive: ensure a target exists, setting one up inline if needed.
+    } else if (web || isTTY) {
+      // Ensure a target exists, setting one up inline if needed.
+      //
+      // `--web` HAS TO REACH THIS CALL, and for two reasons that are easy to
+      // miss because everything downstream is already built and already
+      // tested. `ensureDeployTarget` takes a `WebContext` and branches on it
+      // twice — `pickTargetInBrowser` when several targets are saved, and
+      // `runPicker(…, web)` when none is, which serves the adapter/branch/
+      // settings/variables/delivery/name route through
+      // `setUpDeployTargetInBrowser`. Called with no second argument the
+      // context defaults to `{}`, every one of those branches is skipped, and
+      // a run whose whole point is that nobody is watching the terminal stops
+      // on `Where are you deploying?` at an inquirer prompt. The screens are
+      // not missing; this call site was not asking for them.
+      //
+      // And the gate cannot stay `isTTY` alone. `--web` exists because the
+      // caller is an agent, which is precisely the case with no TTY — so the
+      // old condition sent exactly the intended caller down the branch that
+      // silently resolves nothing.
       const { ensureDeployTarget } = await import('./deployCommand');
-      deployTarget = await ensureDeployTarget(process.cwd());
+      deployTarget = await ensureDeployTarget(process.cwd(), web ? { web: true } : {});
       if (!deployTarget) {
+        // A declined picker wrote nothing and that was the point, so this is a
+        // 0 either way. Under `--web` the wizard has already closed on the
+        // user's own cancel, so the line below is a terminal echo of a
+        // decision they watched themselves make — not the only report of it.
         console.log('\n  Cancelled.\n');
         return;
       }
