@@ -26,6 +26,15 @@ async function waitForUrl(getUrl: () => string): Promise<string> {
   return getUrl();
 }
 
+// Not shaped like anyone's credential, on purpose. These tests are about what
+// the reveal and the mask DO to a long value — neither cares what it looks
+// like — and the fixture used to be `sk_live_` followed by the alphabet and the
+// digits at the length Stripe uses. That is obviously synthetic to a person and
+// indistinguishable from real to a scanner, which is how it blocked a push to
+// this public repo. Nothing here should ever have to be allowlisted.
+//
+// It has to stay longer than seven characters: `fingerprint()` returns anything
+// shorter verbatim, and a value that is not masked cannot test masking.
 const LIVE = 'example-value-123456-not-a-secret';
 
 const ROWS: WebSecretRow[] = [
@@ -65,7 +74,10 @@ const BASE: WebSecretTableParams = {
 describe('buildSecretTableData', () => {
   test('carries no value — only what a value IS, never what it says', () => {
     const json = JSON.stringify(buildSecretTableData(BASE, 'n'));
-    expect(json).not.toContain('sk_live');
+    // Against the fixture itself, not the `sk_live` prefix it used to start
+    // with. A leak check whose subject no longer appears in the value passes
+    // whatever happens, which is worse than no check at all.
+    expect(json).not.toContain(LIVE);
     expect(json).not.toContain('postgres://');
     expect(json).not.toContain('remote-only-value');
     // …and nothing pre-seeds the reveal cache, which is the other half of the
@@ -212,8 +224,13 @@ describe('buildSecretValueEditorData', () => {
   test('a long value crosses as the CLI\'s own mask and nothing else', () => {
     const d = buildSecretValueEditorData({ ...editorBase, row: ROWS[0] }, 'n');
     expect(d.snippetIsWholeValue).toBe(false);
-    expect(d.snippet).toBe('exa...ret');
-    expect(JSON.stringify(d)).not.toContain('sk_live');
+    // Both ends derived from LIVE itself rather than hardcoded to the
+    // fixture's old head and tail, so changing the value cannot break this.
+    expect(d.snippet).toBe(`${LIVE.slice(0, 3)}...${LIVE.slice(-3)}`);
+    // The whole value, not a prefix. Asserting the payload lacks `sk_live`
+    // stopped meaning anything the moment the fixture stopped containing it —
+    // a check that passes because its subject is gone is worse than no check.
+    expect(JSON.stringify(d)).not.toContain(LIVE);
     expect(d.valueLength).toBe(LIVE.length);
   });
 
@@ -301,7 +318,10 @@ describe('serveSecretTable', () => {
     const page = await (await fetch(u.href)).text();
     expect(page).toContain('window.__CAPY_DATA__');
     expect(page).toContain('STRIPE_SECRET_KEY');
-    expect(page).not.toContain('sk_live');
+    // Against the fixture itself, not the `sk_live` prefix it used to start
+    // with. A leak check whose subject no longer appears in the value passes
+    // whatever happens, which is worse than no check at all.
+    expect(page).not.toContain(LIVE);
 
     const res = await fetch(`http://127.0.0.1:${u.port}/submit`, {
       method: 'POST',

@@ -3755,6 +3755,15 @@ describeBrowser('the recovery flows, driven by a real browser', () => {
 // None of that can be checked without a browser.
 // ---------------------------------------------------------------------------
 
+// Not shaped like anyone's credential, on purpose. These tests are about what
+// the reveal and the mask DO to a long value — neither cares what it looks
+// like — and the fixture used to be `sk_live_` followed by the alphabet and the
+// digits at the length Stripe uses. That is obviously synthetic to a person and
+// indistinguishable from real to a scanner, which is how it blocked a push to
+// this public repo. Nothing here should ever have to be allowlisted.
+//
+// It has to stay longer than seven characters: `fingerprint()` returns anything
+// shorter verbatim, and a value that is not masked cannot test masking.
 const LIVE_KEY = 'example-value-123456-not-a-secret';
 const DB_LOCAL = 'postgres://localhost/dev';
 
@@ -3849,7 +3858,12 @@ describeBrowser('capy edit, driven by a real browser', () => {
 
     // At rest: both keys on screen, neither value.
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('STRIPE_SECRET_KEY')`)).toBe(true);
-    expect(await evaluate<boolean>(page, `document.body.textContent.includes('sk_live')`)).toBe(false);
+    // Against the fixture itself, not the `sk_live` prefix it used to start
+    // with — a leak check whose subject is absent from the value passes
+    // whatever happens.
+    expect(
+      await evaluate<boolean>(page, `document.body.textContent.includes(${JSON.stringify(LIVE_KEY)})`),
+    ).toBe(false);
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('postgres://')`)).toBe(false);
     // The mask is a fixed run and does not vary with the value behind it.
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022')`)).toBe(true);
@@ -3913,7 +3927,14 @@ describeBrowser('capy edit, driven by a real browser', () => {
     const page = await open(await waitForUrl(() => url));
 
     // Inspect: the CLI's own mask, and no value.
-    expect(await evaluate<boolean>(page, `document.body.textContent.includes('exa...ret')`)).toBe(true);
+    // Built from LIVE_KEY's own tail rather than hardcoded, so the fixture can
+    // change without this asserting against a value that no longer exists.
+    expect(
+      await evaluate<boolean>(
+        page,
+        `document.body.textContent.includes(${JSON.stringify(`${LIVE_KEY.slice(0, 3)}...${LIVE_KEY.slice(-3)}`)})`,
+      ),
+    ).toBe(true);
     expect(await evaluate<boolean>(page, `document.body.textContent.includes(${JSON.stringify(LIVE_KEY)})`)).toBe(false);
 
     await evaluate(page, clickButton('Edit value'));
