@@ -140,7 +140,20 @@ describe('runWebIntake', () => {
     const nonce = u.searchParams.get('n') ?? '';
 
     // The page is the compiled screen itself, served whole and pre-seeded.
-    const html = await (await fetch(u.href)).text();
+    const form = await fetch(u.href);
+    const html = await form.text();
+    // ...and served under the interactive screen policy. This page collects
+    // credentials, so the browser — not just the page's construction — has to
+    // be the thing that stops it reaching a remote origin, being framed, or
+    // posting natively. `browserWizard` sets these; asserting them here is what
+    // catches the intake losing them.
+    const csp = form.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("connect-src 'self'"); // its own loopback origin, nothing else
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("form-action 'none'");
+    expect(form.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(form.headers.get('cache-control')).toBe('no-store');
     expect(html).toContain('window.__CAPY_DATA__');
     expect(html).toContain('"A"');
     expect(html).toContain('"B"');
