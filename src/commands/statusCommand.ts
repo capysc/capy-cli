@@ -1,10 +1,10 @@
 import { createHash } from 'crypto';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
-import { KeepFile } from '../types/index';
+import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
 import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
@@ -13,9 +13,24 @@ const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 type RemoteFailure = 'access_denied' | 'network_error' | 'no_data';
 
-function classifyRemoteFailure(reason: string): RemoteFailure {
-  if (reason.includes('do not have access')) return 'access_denied';
-  if (reason.includes('no data')) return 'no_data';
+/**
+ * Why the remote column is missing — from the ERROR, not from its sentence.
+ *
+ * This badge is not decoration. `access_denied` is what makes the report tell
+ * someone to run `capy redeem` instead of `capy`, because syncing will fail
+ * the same way again; getting it wrong sends them round a loop. It used to be
+ * decided with `reason.includes('do not have access')` against `err.message`,
+ * and that sentence is thrown in two places in `keyResolver` — both of which
+ * already carry `ERROR_CODES.PERMISSION_DENIED`, which is the actual fact.
+ *
+ * `no_data` was worse: the CLI matched `'no data'` against a string the CLI
+ * itself had just assigned four lines earlier. That case is now set where it
+ * is known and never re-read.
+ */
+function classifyRemoteFailure(err: unknown): RemoteFailure {
+  if (err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED) {
+    return 'access_denied';
+  }
   return 'network_error';
 }
 
@@ -140,7 +155,7 @@ export class StatusCommand {
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
-  async execute(opts: { json?: boolean } = {}): Promise<void> {
+  async execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
     try {
       await this._execute(opts);
     } catch {
@@ -150,7 +165,7 @@ export class StatusCommand {
     }
   }
 
-  private async _execute(opts: { json?: boolean } = {}): Promise<void> {
+  private async _execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       if (this.terse) return;
@@ -181,7 +196,11 @@ export class StatusCommand {
     // Build local hashes from .env
     const localHashes: Record<string, string> = {};
     let encryptionKey: string | undefined;
+    // Two facts, deliberately separate: the sentence a person reads, and the
+    // verdict the report and the screen branch on. Deriving the second from
+    // the first is what this pair replaces.
     let remoteSkipReason: string | undefined;
+    let remoteFailureKind: RemoteFailure | undefined;
     const localMode = isLocalOnly();
     try {
       if (localMode) {
@@ -192,7 +211,10 @@ export class StatusCommand {
         }
         const { resolveProjectKey } = await import('../crypto/keyResolver');
         const authResult = await this.authService.authenticateSilent(projectState.organizationId);
-        if (!authResult.success) throw new Error('auth failed');
+        // The message becomes `remoteSkipReason`, which the report and the
+        // screen both show. "auth failed" told the reader nothing about
+        // whether to sign in again or check the network.
+        if (!authResult.success) throw new Error(silentAuthFailureMessage(authResult));
 
         const keyOps = {
           coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
@@ -221,6 +243,7 @@ export class StatusCommand {
     } catch (err: any) {
       // Auth or key resolution failed — compare pinned vs local only
       remoteSkipReason = err?.message || 'auth or key resolution failed';
+      remoteFailureKind = classifyRemoteFailure(err);
     }
 
     // Build remote hashes (fetch from Keep)
@@ -250,38 +273,68 @@ export class StatusCommand {
             }
           } else {
             remoteSkipReason = 'no data at this keep_hash';
+            // Known here, so recorded here. Nothing downstream re-reads the
+            // sentence to work out what this line already knew.
+            remoteFailureKind = 'no_data';
           }
         }
       } catch (err: any) {
         remoteSkipReason = err?.message || 'network error';
+        remoteFailureKind = classifyRemoteFailure(err);
       }
     }
 
     const hasRemote = Object.keys(remoteHashes).length > 0;
-    const remoteFailure: RemoteFailure | undefined = !hasRemote && remoteSkipReason
-      ? classifyRemoteFailure(remoteSkipReason)
-      : undefined;
+    const remoteFailure: RemoteFailure | undefined =
+      !hasRemote && remoteSkipReason ? (remoteFailureKind ?? 'network_error') : undefined;
     const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
 
+    // ONE report object, rendered three ways. `--json` prints it, `--web`
+    // carries it into the page verbatim, and the TTY draws the same numbers
+    // below — so what a person reads and what a script parses cannot describe
+    // different states. diffs carry value HASHES only (sha256 prefix), never
+    // plaintext.
+    const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
+    const report = {
+      projectName: keep.project_name,
+      branch,
+      totalSecrets,
+      inSync: diffs.length === 0,
+      localMatchesPinned: !showLocal,
+      remoteMatchesPinned: !showRemote,
+      remoteFailure: remoteFailure ?? null,
+      diffs,
+    };
+
     if (opts.json) {
-      // diffs carry value HASHES only (sha256 prefix), never plaintext.
-      const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
-      console.log(
-        JSON.stringify(
-          {
-            projectName: keep.project_name,
-            branch,
-            totalSecrets,
-            inSync: diffs.length === 0,
-            localMatchesPinned: !showLocal,
-            remoteMatchesPinned: !showRemote,
-            remoteFailure: remoteFailure ?? null,
-            diffs,
-          },
-          null,
-          2,
-        ),
-      );
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    if (opts.web) {
+      // No TTY under --web (this is the agent-driven path), so the report goes
+      // to the browser instead of to a stream nobody is reading. The page is
+      // display-only: it posts nothing, carries no nonce, and is served under
+      // the strict policy that cannot open a socket at all.
+      const { showSyncStatusInBrowser } = await import('../ui/syncScreens');
+      const { checkExpiringKeys } = await import('./connectors/shared');
+      await showSyncStatusInBrowser({
+        projectName: keep.project_name ?? '',
+        branch,
+        totalSecrets,
+        localMatchesPinned: !showLocal,
+        remoteMatchesPinned: !showRemote,
+        hasRemote,
+        remoteFailure,
+        diffs,
+        // The warnings `printExpiryWarnings` puts on stderr after every run,
+        // where they can still be acted on.
+        expiring: checkExpiringKeys().map(k => ({ variable: k.varName, expiresInDays: k.expiresIn })),
+        json: JSON.stringify(report, null, 2),
+        // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
+        // headless verification drive the loopback without hijacking one.
+        open: !process.env.CAPY_WEB_NO_OPEN,
+      });
       return;
     }
 
@@ -297,8 +350,6 @@ export class StatusCommand {
     // Full output
     console.log(`${B('capy')}: ${keep.project_name} (${branchLabel})`);
     console.log('');
-
-    const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
 
     if (diffs.length === 0) {
       console.log(`> ${totalSecrets} secret${totalSecrets !== 1 ? 's' : ''} match pinned branch.`);

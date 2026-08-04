@@ -48,14 +48,14 @@ async function resolveEnv(devMode: boolean): Promise<ResolvedEnv> {
     throw new Error('keep.lock missing org_id/project_id. Run `capy` to re-sync.');
   }
 
-  const { AuthService } = await import('../auth/authService');
+  const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
   const { ServiceClient } = await import('../service/serviceClient');
   const { resolveProjectKey } = await import('../crypto/keyResolver');
 
   const auth = new AuthService(undefined, devMode);
   const result = await auth.authenticateSilent(orgId);
   if (!result.success || !result.user_id) {
-    throw new Error('not authenticated. Run `capy` to sign in.');
+    throw new Error(silentAuthFailureMessage(result));
   }
 
   const svc = new ServiceClient(undefined, devMode);

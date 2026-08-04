@@ -445,6 +445,73 @@ export interface ByocConnectData {
 }
 
 /**
+ * A command that could not continue, drawn instead of dying into a terminal.
+ *
+ * WHY THIS SCREEN EXISTS. `displayErrorAndExit` prints ANSI and exits at
+ * eighteen call sites. Under `--web` — which is agent-driven, so there is
+ * routinely no terminal anyone is watching — that output goes to a stream
+ * nobody reads, and if a browser window is already open it is left holding a
+ * page whose server has just been torn down. The run's last fact, the one that
+ * says what to do next, was the one fact that never made it to the surface the
+ * user was actually looking at.
+ *
+ * THE DIVISION OF LABOUR, and it is the whole shape of this payload: the CLI
+ * decides WHAT KIND of failure this is and hands over the pieces; the screen
+ * decides how they are drawn. Every layout in `errorScreen.ts` is the same
+ * five parts in different combinations — a title, a dim line of detail, some
+ * facts about where it happened, a list of ways it usually happens, and a
+ * numbered list of ways out. So they cross as five fields rather than as eight
+ * hand-built ANSI blocks, and the browser and the terminal cannot drift into
+ * telling different stories about the same failure.
+ *
+ * NOTHING HERE IS PARSED. `code` is the machine-readable fact and the only
+ * thing anything is allowed to branch on. `title`, `detail`, `causes` and
+ * `remedies` are prose for a person, shown verbatim.
+ */
+export interface CommandErrorData {
+  /**
+   * The typed error code — `PROJECT_NOT_FOUND`, `NETWORK_ERROR`, and so on.
+   *
+   * Carried so an agent reading the page (or a test asserting on it) has the
+   * same stable handle the CLI branched on, rather than having to recognise
+   * the sentence. The screen shows it in the corner for exactly that reason.
+   */
+  code: string;
+  /** One line: what happened. "Project not found", "Connection failed". */
+  title: string;
+  /** The specific reason, when there is one worth showing. Display only. */
+  detail?: string;
+  /**
+   * Where it happened: project, branch, variable, ID.
+   *
+   * Facts about one record, so they draw as a `FactList` — the same block the
+   * terminal prints as a dim label padded out beside its value.
+   */
+  context?: Array<{ label: string; value: string }>;
+  /**
+   * "This can happen when: …" — the ways this failure usually comes about.
+   *
+   * Separate from `remedies` because they are not instructions. Running the
+   * list together, as the terminal does with two adjacent indented blocks,
+   * makes the third cause read as the first step.
+   */
+  causes?: string[];
+  /**
+   * Ordered ways out. `command` is a thing to run, split from the sentence so
+   * the screen can set it in mono and offer to copy it.
+   */
+  remedies?: Array<{ text: string; command?: string }>;
+  /**
+   * How to see this failure in a terminal.
+   *
+   * An error page has no controls, so there is nothing here a flag could
+   * answer — the escape is for reproducing the failure somewhere a person can
+   * work on it, not for skipping a question.
+   */
+  nonTty?: NonTtyEscape;
+}
+
+/**
  * The typed confirmation in front of a live-mode key.
  *
  * `confirmLiveAction` serves two commands — `capy connect --live` and
@@ -3193,10 +3260,10 @@ export interface RedeemInviteData {
  *      the entire chain, and `!opts.skipPrompts && isTTY` drops it silently on
  *      a piped run. The gate exists on this screen for every caller.
  *   2. **Promoting an unmanaged variable overwrites its value.** `capy rotate
- *      DATABASE_URL` on a var with no connector hands off to `capy connect`
- *      with `force: true`, so whatever is in `DATABASE_URL` today is replaced
- *      by a key from the integration you pick. The CLI's two intro lines never
- *      say so.
+ *      DATABASE_URL` on a var with no connector links it to the integration
+ *      you pick and then rotates it, so whatever is in `DATABASE_URL` today is
+ *      replaced by a key that integration issues. The CLI's two intro lines
+ *      never say so.
  *   3. **A single registered provider is auto-picked with no output** off a
  *      TTY, which today always means Stripe. The integration step here is
  *      never pre-selected, however few there are.
@@ -4809,10 +4876,18 @@ export interface StatusDiff {
 /**
  * Why the remote could not be read.
  *
- * A machine code, minted where the failure is first known. The CLI derives
- * this by substring-matching the human message it happens to hold
- * (`reason.includes('do not have access')`), so any reword upstream silently
- * reclassifies the screen. Nothing here parses prose.
+ * A machine code, minted where the failure is first known — which it now
+ * genuinely is. This comment used to record the opposite as a known hazard:
+ * the CLI derived the value by substring-matching the human message it
+ * happened to be holding (`reason.includes('do not have access')`), so any
+ * reword upstream would silently reclassify the screen.
+ *
+ * It matters more than a badge. `access_denied` is what makes the report say
+ * `capy redeem` instead of `capy`, because syncing will fail the same way
+ * again — misclassify it and the reader is sent round a loop. `statusCommand`
+ * now reads `err.code === PERMISSION_DENIED`, and sets `no_data` at the line
+ * that knows it rather than matching a string it assigned itself four lines
+ * earlier. Nothing on either side parses prose.
  */
 export type RemoteFailure = 'access_denied' | 'network_error' | 'no_data';
 
@@ -4938,6 +5013,7 @@ export interface ScreenDataMap {
   "branch-create": BranchCreateData;
   "branch-list": BranchListData;
   "byoc-connect": ByocConnectData;
+  "command-error": CommandErrorData;
   "connect-live-gate": ConnectLiveGateData;
   "connect-overwrite": ConnectOverwriteData;
   "connect-provider": ConnectProviderData;
@@ -4984,6 +5060,7 @@ export const SCREEN_NAMES: readonly ScreenName[] = [
   "branch-create",
   "branch-list",
   "byoc-connect",
+  "command-error",
   "connect-live-gate",
   "connect-overwrite",
   "connect-provider",

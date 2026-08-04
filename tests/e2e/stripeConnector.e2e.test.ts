@@ -117,6 +117,12 @@ describe('live-mode firewall (capy-dev)', () => {
       exitCode = code as number;
       throw new Error(`__exit_${code}__`);
     });
+    // Both streams. The firewall refusal is a typed `DEV_LIVE_FIREWALL` now,
+    // so it goes out through `displayErrorAndExit` — which prints on stdout
+    // like every other typed failure in the CLI, and which is also what serves
+    // the page under `--web`. What matters here is the sentence a person sees,
+    // not which descriptor it arrived on.
+    const logSpy = spyOn(console, 'log').mockImplementation(() => {});
     const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
 
     try {
@@ -127,11 +133,16 @@ describe('live-mode firewall (capy-dev)', () => {
     }
 
     expect(exitCode).toBe(1);
-    const errorOutput = errorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
-    expect(errorOutput).toContain('configured for live mode');
-    expect(errorOutput).toContain('production `capy` binary');
+    const output = [...logSpy.mock.calls, ...errorSpy.mock.calls]
+      .map((c) => c.join(' '))
+      .join('\n')
+      .replace(/\x1b\[[0-9;]*m/g, '');
+    expect(output).toContain('Live mode is not allowed in capy-dev');
+    expect(output).toContain('STRIPE_LIVE_KEY is configured for live mode.');
+    expect(output).toContain('Use the production capy binary');
 
     exitSpy.mockRestore();
+    logSpy.mockRestore();
     errorSpy.mockRestore();
   });
 
@@ -155,10 +166,14 @@ describe('live-mode firewall (capy-dev)', () => {
 
     // Should warn about skipping the live entry, then exit because nothing left.
     const logOutput = logSpy.mock.calls.map((c) => c.join(' ')).join('\n');
-    const errorOutput = errorSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+    const output = [...logSpy.mock.calls, ...errorSpy.mock.calls]
+      .map((c) => c.join(' '))
+      .join('\n')
+      .replace(/\x1b\[[0-9;]*m/g, '');
     expect(logOutput).toContain('skipping STRIPE_LIVE_KEY');
     expect(logOutput).toContain('live mode');
-    expect(errorOutput).toContain('All managed keys are live-mode');
+    expect(output).toContain('Nothing to rotate');
+    expect(output).toContain('All managed keys on this branch are live-mode.');
     expect(exitCode).toBe(1);
 
     exitSpy.mockRestore();

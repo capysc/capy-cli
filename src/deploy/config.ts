@@ -19,6 +19,24 @@ export function deployConfigPath(cwd: string): string {
   return join(cwd, '.capy', 'deploy.json');
 }
 
+/**
+ * "This file is from a newer CLI" — a typed class, so the catch below can
+ * recognise it without reading its sentence.
+ *
+ * The version check and the catch that has to let it through are eight lines
+ * apart in the same function, and they used to be joined by
+ * `err.message?.startsWith('Unsupported deploy.json')`. Rewording that
+ * sentence — including just moving the version number to the front — would
+ * have turned "update the CLI" into "deploy.json is malformed", which sends
+ * someone to edit a file that is perfectly well-formed.
+ */
+export class UnsupportedDeployConfigVersion extends Error {
+  constructor(public readonly version: unknown) {
+    super(`Unsupported deploy.json version: ${version}. Update the CLI.`);
+    this.name = 'UnsupportedDeployConfigVersion';
+  }
+}
+
 export function readDeployConfig(cwd: string): DeployConfigFile | null {
   const p = deployConfigPath(cwd);
   if (!existsSync(p)) return null;
@@ -26,16 +44,14 @@ export function readDeployConfig(cwd: string): DeployConfigFile | null {
     const raw = JSON.parse(readFileSync(p, 'utf-8'));
     if (!raw || typeof raw !== 'object') return null;
     if (raw.version !== FILE_VERSION) {
-      throw new Error(
-        `Unsupported deploy.json version: ${raw.version}. Update the CLI.`,
-      );
+      throw new UnsupportedDeployConfigVersion(raw.version);
     }
     if (!raw.targets || typeof raw.targets !== 'object') {
       return { version: FILE_VERSION, targets: {} };
     }
     return raw as DeployConfigFile;
   } catch (err: any) {
-    if (err.message?.startsWith('Unsupported deploy.json')) throw err;
+    if (err instanceof UnsupportedDeployConfigVersion) throw err;
     throw new Error(`deploy.json is malformed: ${err.message}`);
   }
 }

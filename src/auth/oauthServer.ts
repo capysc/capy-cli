@@ -1,8 +1,8 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { createHash, randomBytes } from 'crypto';
 import { URL } from 'url';
-import open from 'open';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { openScreen } from '../ui/openScreen';
 import { renderScreen, screenHeaders } from '../ui/screens/serve';
 
 const CALLBACK_PORTS = [19420, 19421, 19422, 19423, 19424];
@@ -106,10 +106,15 @@ export class OAuthServer {
       console.log(`  ${authUrl}`);
       console.log('');
 
-      open(authUrl).then(() => {
-        console.log(`✓ Opened browser for authentication`);
-      }).catch(() => {
-        console.error(`❌ Failed to open browser automatically — use the URL above.`);
+      // `handoff`, and it is the ONLY handoff in the CLI: sign-in is the one
+      // page we do not serve. The person needs the address bar to check where
+      // they are being asked for a password, and needs to be able to move the
+      // window to whichever profile their session lives in — a chromeless
+      // popup takes both away. Going through the helper also puts this call
+      // behind CAPY_WEB_NO_OPEN for the first time; before, a suite or CI run
+      // that reached authentication opened the developer's own browser.
+      void openScreen(authUrl, { kind: 'handoff' }).then((plan) => {
+        if (plan.via !== 'suppressed') console.log(`✓ Opened browser for authentication`);
       });
 
       const timeout = setTimeout(() => {

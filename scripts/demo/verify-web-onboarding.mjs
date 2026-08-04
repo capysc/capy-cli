@@ -38,10 +38,23 @@ const headers = { 'content-type': 'application/json' };
 const post = (base, nonce, payload) =>
   fetch(`${base}/submit`, { method: 'POST', headers: { ...headers, origin: base }, body: JSON.stringify({ nonce, payload }) });
 
-// Pull the 24 words out of the phrase-display screen HTML (monospace word spans).
-function extractPhrase(screenHtml) {
-  const words = [...screenHtml.matchAll(/font-family:ui-monospace[^>]*>([a-z]+)</g)].map((m) => m[1]);
-  return words.join(' ');
+// Every step of this flow is a compiled screen, which is a whole document: the
+// answer comes back as `{ next: true }` and the browser RELOADS to receive the
+// next step. So the page is fetched rather than read out of the submit's reply.
+const page = (base, nonce) => fetch(`${base}/?n=${nonce}`).then((r) => r.text());
+
+/**
+ * Pull the 24 words out of the phrase step's payload.
+ *
+ * The screen renders from `window.__CAPY_DATA__`, inlined into the document at
+ * serve time, so `phraseWords` is exactly what the person in front of the page
+ * is being shown — and reading it here is the only way this script can hold the
+ * leak check, which compares those words against the CLI's own output.
+ */
+function extractPhrase(html) {
+  const m = html.match(/"phraseWords":\s*(\[[^\]]*\])/);
+  if (!m) return '';
+  return JSON.parse(m[1]).join(' ');
 }
 
 async function main() {
@@ -58,16 +71,24 @@ async function main() {
       const base = `http://127.0.0.1:${m[1]}`;
       const nonce = m[2];
       console.log(`• byoc --web loopback on ${base} — playing the browser`);
-      // Step 0: generate a new phrase.
-      const s1 = await (await post(base, nonce, { mode: 'generate' })).json();
-      phrase = extractPhrase(s1.screen || '');
+      // Step 0: where the phrase comes from. Two rows, one of them this.
+      const s1 = await (await post(base, nonce, { source: 'generate' })).json();
+      if (s1.error) throw new Error(`phrase-source step refused: ${s1.error}`);
+      if (!s1.next) throw new Error(`expected the phrase step to be next, got ${JSON.stringify(s1)}`);
+      phrase = extractPhrase(await page(base, nonce));
       if (phrase.split(' ').length !== 24) throw new Error(`expected 24 words in page, got ${phrase.split(' ').length}`);
       console.log(`• captured the 24-word phrase from the page (kept only for the leak check)`);
-      // Step 1: confirm saved.
-      await post(base, nonce, { saved: 'on' });
+      // Step 1: consent, and consent only. The words travel one way, so this
+      // step answers with a boolean — a payload carrying them is refused.
+      const guard = await (await post(base, nonce, { confirmed: true, phrase })).json();
+      if (!guard.error) throw new Error('the phrase step accepted the words back — it must not');
+      console.log(`• the page refused to send the phrase back ✓ (${guard.error})`);
+      const s2 = await (await post(base, nonce, { confirmed: true })).json();
+      if (!s2.next) throw new Error(`expected the passphrase step to be next, got ${JSON.stringify(s2)}`);
       // Step 2: set passphrase.
       const s3 = await (await post(base, nonce, { passphrase: 'demo-passphrase', confirm: 'demo-passphrase' })).json();
       console.log(`• POST passphrase → ${JSON.stringify(s3)}`);
+      if (!s3.done) throw new Error(`setup did not finish: ${JSON.stringify(s3)}`);
     },
   });
   if (byoc.code !== 0) throw new Error(`byoc --web exited ${byoc.code}:\n${byoc.err}\n${byoc.out}`);
@@ -94,7 +115,13 @@ async function main() {
   const projectDir = join(HOME, 'fresh-project');
   rmSync(projectDir, { recursive: true, force: true });
   mkdirSync(projectDir, { recursive: true });
-  const boot = await run('node', [CAPY], { cwd: projectDir, stdio: ['ignore', 'pipe', 'pipe'] });
+  // CAPY_WEB_NO_OPEN on this one too: a demo script must never be able to take
+  // over the browser of whoever is running it.
+  const boot = await run('node', [CAPY], {
+    cwd: projectDir,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { CAPY_WEB_NO_OPEN: '1' },
+  });
   if (!existsSync(join(projectDir, 'keep.lock'))) {
     throw new Error(`fresh project did not bootstrap a keep.lock:\n${boot.out}\n${boot.err}`);
   }

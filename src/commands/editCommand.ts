@@ -4,7 +4,7 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
-import { fetchSecretsWithCache, writeKeepCache, readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
+import { fetchSecretsWithCache, readKeepCache, writeKeepCache, readSecretsLocal, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { hashValue } from './statusCommand';
@@ -34,6 +34,20 @@ function classifyStatus(
   return 'in sync';
 }
 
+export interface EditOpts {
+  /**
+   * Render the variable table and the value editor as compiled screens in a
+   * local browser instead of the alternate-screen TUI.
+   *
+   * Agent-only, and the reason it exists: the TUI has no TTY guard. Run it
+   * headlessly and it writes an entire ANSI screen into the agent's captured
+   * stdout and then blocks forever on a stdin that never delivers a key.
+   */
+  web?: boolean;
+  /** false when --no-open was passed: print the URL, do not open a browser. */
+  open?: boolean;
+}
+
 export class EditCommand {
   private apiUrl?: string;
   private devMode: boolean;
@@ -43,7 +57,7 @@ export class EditCommand {
     this.devMode = devMode;
   }
 
-  async execute(): Promise<void> {
+  async execute(opts: EditOpts = {}): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
 
@@ -119,7 +133,7 @@ export class EditCommand {
       }
     } catch (err: any) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(err, {
+      await displayErrorAndExit(err, {
         projectName: keep.project_name,
         projectId: keep.project_id,
         branch,
@@ -129,6 +143,10 @@ export class EditCommand {
 
     // Decrypt local .env values
     const localPlaintext: Record<string, string> = {};
+    // Local ciphertext this profile does not hold the key for. The TUI drops
+    // these on the floor and says nothing, and the next commit then deletes
+    // their pins — so the browser table names them.
+    const undecryptableKeys: string[] = [];
     const rawLocal = fileManager.readEnvFile();
     for (const [key, value] of Object.entries(rawLocal)) {
       if (value.startsWith('capy:')) {
@@ -136,6 +154,7 @@ export class EditCommand {
           localPlaintext[key] = fileManager.decryptValue(value, projectKey);
         } catch {
           // Skip values we can't decrypt
+          undecryptableKeys.push(key);
         }
       } else {
         localPlaintext[key] = value;
@@ -149,9 +168,19 @@ export class EditCommand {
     // compare working-vs-baseline.
     const remotePlaintext: Record<string, string> = {};
     let remoteAvailable = false;
+    // Why there is no other copy to compare against, when there is none. The
+    // terminal renders all three the same way — `{n} ? / remote unavailable` —
+    // so an offline run, a project nobody has pushed and a cold local cache are
+    // indistinguishable. Minted here, where the condition is actually known.
+    let remoteGap: 'never_pushed' | 'fetch_failed' | 'local_mode' | undefined;
+    // Whether the comparison ran against the on-disk cache rather than the
+    // service. A warm cache computes the whole status column while offline with
+    // nothing on screen to say so.
+    let remoteFromCache = false;
     {
       const keepHash = SyncEngine.computeKeepHash(keep, branch);
       try {
+        if (!localMode) remoteFromCache = readKeepCache(orgId, projectId, keepHash) !== null;
         const blob = localMode
           ? readSecretsLocal(orgId, projectId, keepHash)
           : await fetchSecretsWithCache(serviceClient!, orgId, projectId, keepHash);
@@ -167,9 +196,12 @@ export class EditCommand {
           // Remote column only applies to server mode; local mode uses the
           // committed baseline with local-mode wording instead.
           if (!localMode) remoteAvailable = true;
+        } else {
+          remoteGap = localMode ? 'local_mode' : 'never_pushed';
         }
       } catch {
         // Remote fetch failed (server mode) — fall back to pinned-only.
+        remoteGap = localMode ? 'local_mode' : 'fetch_failed';
       }
     }
 
@@ -230,7 +262,7 @@ export class EditCommand {
     // Set when a save rewrote keep.lock. The auto-commit runs after the TUI
     // exits — committing (and printing) mid-screen would corrupt the display.
     let keepDirty = false;
-    await screen.run(state, {
+    const editContext = {
       saveLocalEdits: async (edits: Record<string, string>) => {
         // Same flow as the conflict-resolution "commit local" action and
         // PushCommand: encrypt the merged local state, mergeWithKeep, push
@@ -307,7 +339,33 @@ export class EditCommand {
         }
         return changedAtByKey;
       },
-    });
+    };
+
+    // `--web` changes only where the questions are ASKED. The commit callback
+    // above is the same object either way, so the crypto, the push, the keep
+    // rewrite and the auto-commit are one code path with one browser-shaped
+    // front end and one terminal-shaped one.
+    if (opts.web) {
+      const { runSecretEditorInBrowser } = await import('../ui/secretTableScreen');
+      await runSecretEditorInBrowser(
+        {
+          projectName: keep.project_name,
+          branch,
+          mode: localMode ? 'local' : 'server',
+          rows,
+          remoteAvailable,
+          remoteGap,
+          remoteFromCache,
+          undecryptableKeys,
+          // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
+          // headless runs drive the loopback without hijacking a real browser.
+          open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN,
+        },
+        editContext,
+      );
+    } else {
+      await screen.run(state, editContext);
+    }
     if (keepDirty) {
       const { autoCommitKeep } = await import('../git/autoCommitKeep');
       autoCommitKeep(branch);

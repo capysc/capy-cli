@@ -1,0 +1,67 @@
+{
+  "parcel": "org-onboarding",
+  "branch": "web/org-onboarding",
+  "verdict": "fail",
+  "browser_test_exists": true,
+  "browser_test_passes": true,
+  "suite_green": true,
+  "secrets_leak": false,
+  "problems": [
+    {
+      "file": "src/core/onboardingPlan.ts",
+      "problem": "CONFIRMED IN A REAL BROWSER. byocConnectPlan marks the URL stop `done` and `verify` `current` as soon as any probe has run, and byocScreens' runProbe sets `state.url = outcome.url` even when the probe FAILED. So on the most common path in this flow \u2014 you mistyped the host \u2014 the page is showing the URL field again while the rail beside it reads: `\u25cf Server URL https://capy.internal` (done), `\u25cf Verify ask /health whether it is Capy \u2190 you are here`, `\u25cf Certificate not needed`. Three false statements at once: the URL is not settled, the traveller is not at Verify, and the certificate stop is struck through on the strength of a probe that never completed a handshake (certUntrusted resolves to `false` for connection_failed/http_status/not_capy, which the plan's own doc comment says it exists to avoid). Reproduced by driving chrome-headless-shell against connectByocInBrowser with a probe returning connection_failed, and again end-to-end through `node bin/capy byoc https://nope.invalid --web`. This is precisely the defect class the trainstop requirement exists to remove \u2014 the rail describing a different run than the command is on.",
+      "severity": "blocking"
+    },
+    {
+      "file": "src/commands/orgCommand.ts",
+      "problem": "CONFIRMED. ANSI escapes reach a browser payload. `firstProjectRefusal()` builds its sentence with `B()` (`\\x1b[1m\u2026\\x1b[0m`), and `_executeWeb`'s `onOrgChosen` hands that string straight back as `{ ok: false, reason: refusal }`, which switchOrganizationInBrowser passes verbatim to `return { error: outcome.reason }`. Driving the real loopback, the browser receives: \"Binding it to a project in \\u001b[1mnorthwind\\u001b[0m would make those values unreadable.\" The page renders that as literal `[1mnorthwind[0m`. onboardingWeb.ts and syncConflictScreen.ts both define and apply `stripAnsi`; selectWeb.ts defines none and applies none. Direct violation of the brief's \"strip ANSI escapes from anything the terminal formatted before it enters a payload\". Reachable whenever the chosen org has no projects and the cwd's .env holds at least one `capy:` value.",
+      "severity": "blocking"
+    },
+    {
+      "file": "src/index.ts",
+      "problem": "`capy org --web` cannot happen. `program.command('org').action(async () => {...})` takes no `command` argument and never calls `optsWithGlobals()`, so `new OrgCommand()` is always constructed without `{ web: true }`. The entire `_executeWeb` path, `switchOrganizationInBrowser` and `nameFirstProjectInBrowser` are unreachable from argv \u2014 one of the parcel's five screens (`switch-organization`) is never served by a real invocation. The agent disclosed this in both the report and the commit message and attributed it to whoever owns index.ts, but index.ts is in no parcel in docs-internal/web-parity-partition.md, and the fix is the two lines `byoc` already has three hundred lines above. `capy byoc <url> --web` and `capy --web`'s create-org path were verified reachable; `capy org --web` was not.",
+      "severity": "major"
+    },
+    {
+      "file": "scripts/demo/verify-web-onboarding.mjs",
+      "problem": "CONFIRMED BROKEN, and not reported. This is the repo's own headless E2E verifier for exactly the invariant this parcel is built around (the 24-word phrase never reaching stdout), and `scripts/demo/run-all.sh` runs it. The rewrite changed the local-onboarding wire contract \u2014 `{mode:'generate'}` became `{source:'generate'}`, `{saved:'on'}` became `{confirmed:true}`, and a standalone screen answers `{next:true}` and reloads instead of returning `{screen}` \u2014 but only `scripts/demo/preview.ts` was updated (it broke at compile time; this one breaks at runtime, so tsc stayed silent). Spawning the real CLI and replaying the script's Step 0 returns `{\"error\":\"That is not a phrase source this step offers.\"}` and `extractPhrase()` yields 0 words, so the script dies at its own 24-word assertion before it can check anything. The agent's report claims preview.ts was the only script that \"would not have run\".",
+      "severity": "major"
+    },
+    {
+      "file": "src/ui/selectWeb.ts",
+      "problem": "CONFIRMED IN A REAL BROWSER. In the DEFAULT `capy org` case \u2014 a directory that already has a keep.lock, i.e. `hasProject === true` \u2014 no rail is drawn at all. buildSwitchOrganizationData ships five stops and sets `hasKeepLock: true`, but the screen's `showStops` (packages/ui/screens/switch-organization/Screen.svelte:113) is `mode === 'init' || onCreateRoute || (mode === 'switch' && hasKeepLock === false)`, so the payload's stops are discarded (`document.querySelectorAll('nav.route li').length === 0`, stops in payload === 5). The report identifies this correctly as a CLI/CAP-316 mismatch outside a rendering parcel \u2014 but the new browser test only exercises `hasKeepLock: false`, the one case where the rail survives, so the production default ships railless with no test saying so.",
+      "severity": "major"
+    },
+    {
+      "file": "src/ui/onboardingWeb.ts",
+      "problem": "`unlockPassphraseInBrowser` and `buildPassphraseUnlockData` (~130 lines plus 5 unit tests and a browser test) have zero production callers \u2014 grep across src/ finds only the definition. The parcel's fifth screen, `local-passphrase-unlock`, is never served. The report discloses this and correctly points at src/core/localUnlock.ts:40 as the prompt site outside the file list, but the result is that a claimed deliverable ships as dead code with tests that pass against nothing a user can reach.",
+      "severity": "major"
+    },
+    {
+      "file": "src/ui/byocScreens.ts",
+      "problem": "Comment and behaviour disagree, untested. In `runProbe`, when a READABLE CA bundle still fails to chain (code stays `tls_untrusted`), the code sets `bundleRequested = false; declinedBundle = false` under a comment saying \"Back to the URL question, which is where the terminal lands too\" \u2014 but `byocView` with `tls_untrusted`, neither flag set, falls through to `return 'ca-trust'`. The user is asked \"trust it via a CA bundle?\" all over again rather than being returned to the address. Only the `ca_unreadable` and \"bundle works\" branches have tests; this one has none.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/core/onboardingPlan.ts",
+      "problem": "`orgSwitchPlan`'s `creating` input has no production caller \u2014 only tests pass it. The consequence is visible in `nameFirstProjectInBrowser`, which is served immediately AFTER the user has walked Name \u2192 Recovery phrase \u2192 Create: buildSwitchOrganizationData calls `orgSwitchPlan({ orgName })` with no `creating`, so those three stops render `skipped` (\"not needed\") on the very screen that follows them. Same class as the byoc rail defect: the route lies about where the run has been.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/commands/byocCommand.ts",
+      "problem": "`--web` changes logic here, not only rendering. The TTY path asks `confirm` \"Use in local mode?\" before anything else; the new `--web` path deletes that question and settles it from whether an argv positional is present (`initialUrl ? connectSetupWeb : localSetupWeb`). Defensible \u2014 before this the URL was accepted and silently dropped \u2014 and disclosed in the report, but it means `capy byoc https://host --web` can no longer reach local mode at all, while `capy byoc https://host` still offers it. The brief's rule is that `--web` changes the RENDERING of a question, never the logic.",
+      "severity": "minor"
+    },
+    {
+      "file": "tests/ui/browserFlow.e2e.test.ts",
+      "problem": "The shared `until()` helper was changed to swallow ALL exceptions from `Runtime.evaluate` as \"not yet\", for every one of the 16 tests in the file including the four that predate this parcel. It was added to survive the navigation a standalone step performs, which is legitimate \u2014 but it also makes a genuine page-side error (a selector returning null, a component that failed to mount, a thrown getter) indistinguishable from a slow page: the only signal left is a 5-second timeout with a generic message. Narrowing the catch to the navigation case would keep the fix without blinding the harness. Everything still passes \u2014 16/16 across three consecutive runs \u2014 this is about what the harness can still detect.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/core/onboardingPlan.ts",
+      "problem": "Three of the four routes (orgSwitchPlan, createOrgPlan, localOnboardingPlan) carry no `detail` on any stop, so those rails draw bare labels. The brief says stops carry `detail`. Verified the stated cause is real: the generated contract's base `Stop` (src/ui/screens/contract.ts:58) is id/label/state/answer only, while the kit's `Stop` (packages/ui/src/lib/types.ts:26) renders detail/detailMono/manual/blank/flag, and only `ByocStop` re-declares them CLI-side. Correctly reported rather than worked around, and correctly not fixed in packages/ui. Noted so it is not lost.",
+      "severity": "minor"
+    }
+  ],
+  "notes": "Independently verified on a detached worktree at 805f564 (packages/.wt-review-org-onboarding), never on the agent's own worktree.\n\nWHAT HOLDS UP. The browser tests are real and they pass: five new tests that load the compiled page in chrome-headless-shell and click actual controls (`.reveal`, `[role=checkbox]`, `[role=radio] .label`, `.field input`, `.passphrase-field input`), asserting on what the CLI's reducer resolved. 16/16 in that file, three consecutive runs, no flakes. They are not fetch-driven. Full suite: 1117 pass / 0 fail via `bash tests/run-tests.sh`. `bunx tsc -p tsconfig.json --noEmit` clean. `node scripts/check-screens.mjs` \u2192 deps 6/6, 41 screens. Dependencies still exactly 6. No test omits browser suppression \u2014 the new tests pass `open: false` directly and every command call site is `open: !process.env.CAPY_WEB_NO_OPEN`; nothing launched a developer browser, and the CDP driver only ever spawns a downloaded shell with a throwaway --user-data-dir.\n\nCAVEAT ON \"suite green\": `tests/run-tests.sh` does NOT build, and 24 tests (runCommand + deployCommand) spawn `dist/index.js`. In a fresh worktree they fail until you `bun run build`. Pre-existing and unrelated to this parcel \u2014 those files are untouched by the commit \u2014 but worth knowing if you reproduce.\n\nSECRETS: clean. Grepped every buildXData. A generated recovery phrase reaches exactly one place \u2014 `phraseWords` on the one view that displays it, in buildLocalOnboardingData and buildCreateOrganizationData, gated on `view === 'phrase'` \u2014 and never a return value, never stdout, never a submit. Both display steps refuse a payload containing `phrase`/`phraseWords` inline. The one phrase that does travel inbound is a phrase the user already holds and types (the restore path), which matches the TTY password prompt. `tests/commands/webPhraseLeak.test.ts` was rewritten to read the words out of `window.__CAPY_DATA__` instead of server-rendered spans and now asserts both directions against a real spawned process; I re-read it and it is honest. buildSwitchOrganizationData carries names/ids only, buildByocConnectData a URL/hostname-derived name/cert metadata/bundle path, buildPassphraseUnlockData nothing derivable.\n\nTRAINSTOPS: built by the command, in `src/core/onboardingPlan.ts` \u2014 four pure functions, no I/O, branchCreatePlan-shaped, pinned by tests/core/onboardingPlan.test.ts. Structurally right. The problem is not where the rail is built but what it says (findings 1, 5, 8).\n\nOUT-OF-PARCEL EDITS: scripts/demo/preview.ts and tests/commands/webPhraseLeak.test.ts, plus the shared tests/ui/browserFlow.e2e.test.ts. I diffed all six sibling branches against the merge base \u2014 none of them touches preview.ts or webPhraseLeak.test.ts, so there is no cross-agent conflict; browserFlow.e2e.test.ts is shared by design. packages/ui is untouched (`git status` in packages/ui shows only the pre-existing submodule pointer drift). The three screen changes the report asks for were each checked against the actual Svelte source and all three claims are accurate.\n\nVERDICT REASONING. Two confirmed defects put this at fail rather than pass, and both are one-file fixes: the ANSI escapes reaching the browser (an explicitly stated rule, and syncConflictScreen.ts shows exactly how to obey it), and the byoc rail telling the user \"Server URL done / Verify \u2190 you are here / Certificate not needed\" while the page in front of them is asking for the URL again. The third, the broken demo verifier, matters because it is the script that proves the phrase never leaks and it will now die on its first assertion in front of whoever runs run-all.sh. Everything else is disclosed, defensible, or genuinely someone else's file. The work is close and the browser tests are the real thing \u2014 it is the rail, which is the point of the exercise, that is wrong."
+}

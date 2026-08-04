@@ -1,11 +1,12 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'http';
-import { randomBytes } from 'crypto';
-import type { Socket } from 'net';
 import { CapyError, ERROR_CODES } from '../types';
 import { resolveContext, writeAndSync } from './connectors/shared';
-import { generateIntakeForm, type IntakeVar } from '../ui/intakePage';
-import { screenHeaders } from '../ui/screens/serve';
-import { nonceEqual, isLoopbackHost, isAllowedOrigin } from './intakeSecurity';
+import { runWebIntake, parseVars, type SecretPair } from '../ui/secretIntakeScreen';
+import type { IntakeVar } from '../ui/screens/contract';
+
+// The intake moved to `ui/secretIntakeScreen.ts` with the compiled screen it
+// now serves. Re-exported here because this is where the flow is entered from
+// and where its tests have always looked for it.
+export { runWebIntake, parseVars, type SecretPair };
 
 export interface AddOpts {
   web?: boolean;
@@ -19,22 +20,7 @@ export interface AddOpts {
   nonTty?: boolean;
 }
 
-export interface SecretPair {
-  name: string;
-  value: string;
-}
-
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const INTAKE_TIMEOUT_MS = 5 * 60 * 1000;
-
-export interface IntakeParams {
-  /** Suggested variables (name + optional per-variable help link) to pre-seed the form. */
-  vars: IntakeVar[];
-  reason?: string;
-  open: boolean;
-  /** Test-only hook: receives the loopback URL once the server is listening. Unset in production. */
-  onListen?: (url: string) => void;
-}
 
 /** Parse repeatable `--help-url NAME=URL` flags into a name→url map (http(s) only). */
 export function parseHelpUrls(pairs: string[] | undefined): Record<string, string> {
@@ -49,185 +35,19 @@ export function parseHelpUrls(pairs: string[] | undefined): Record<string, strin
   return map;
 }
 
-/** Validate + normalize the submitted {name,value}[] payload. Names only — values pass through. */
-export function parseVars(input: unknown): SecretPair[] | null {
-  if (!Array.isArray(input)) return null;
-  const out: SecretPair[] = [];
-  for (const item of input) {
-    if (!item || typeof item !== 'object') return null;
-    const rec = item as Record<string, unknown>;
-    const name = typeof rec.name === 'string' ? rec.name.trim() : '';
-    const value = rec.value;
-    if (!VAR_RE.test(name) || typeof value !== 'string') return null;
-    out.push({ name, value });
-  }
-  return out.length > 0 ? out : null;
-}
-
 /**
- * Open a local browser key/value form (pre-seeded with the suggested names) and
- * run `onSubmit` with the {name,value} pairs the user enters. The save runs INSIDE
- * the request, so the browser learns whether it succeeded (200) or not (500 + the
- * message, retryable). Values are handled in-process — never printed, logged, or returned.
+ * The terminal's overwrite confirm, in a form the intake page can carry.
+ *
+ * The CLI's own sentence, verbatim, because two wordings for one thing is a
+ * bug. `--web` used to skip this question entirely — the confirm is gated on
+ * `!opts.web` — so a browser intake silently overwrote existing values with no
+ * mention anywhere. It cannot be a second screen (the intake form is the whole
+ * flow and has no confirm step), so it is stated above the form and the Save
+ * button is the answer: closing the window changes nothing, which is what
+ * refusing meant in the terminal too.
  */
-export function runWebIntake(params: IntakeParams, onSubmit: (pairs: SecretPair[]) => Promise<void>): Promise<void> {
-  const nonce = randomBytes(32).toString('hex');
-  const connections = new Set<Socket>();
-  let busy = false;
-  let done = false;
-
-  return new Promise<void>((resolve, reject) => {
-    let timer: NodeJS.Timeout;
-
-    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-      const addr = server.address();
-      const port = addr && typeof addr === 'object' ? addr.port : 0;
-      const expectedHost = `127.0.0.1:${port}`;
-      const url = new URL(req.url ?? '/', `http://${expectedHost}`);
-
-      if (req.method === 'GET' && url.pathname === '/') {
-        if (url.searchParams.get('n') !== nonce) {
-          res.writeHead(403).end('forbidden');
-          return;
-        }
-        // This page collects credentials, so it carries the same interactive
-        // screen policy as the wizard. `intakePage` makes no external request by
-        // construction — the policy is the browser enforcing that rather than
-        // trusting it: no remote origins, no eval, no framing, no native form
-        // post, and `connect-src` limited to the loopback origin the page came
-        // from, which is the only place the typed values are supposed to go.
-        res.writeHead(200, screenHeaders({ interactive: true }));
-        res.end(generateIntakeForm({ vars: params.vars, nonce, reason: params.reason }));
-        return;
-      }
-
-      if (req.method === 'POST' && url.pathname === '/submit') {
-        if (!isLoopbackHost(req.headers.host, port)) {
-          res.writeHead(403).end('bad host');
-          return;
-        }
-        if (!isAllowedOrigin(req.headers.origin, port)) {
-          res.writeHead(403).end('bad origin');
-          return;
-        }
-
-        let body = '';
-        let aborted = false;
-        req.on('data', (c: Buffer) => {
-          body += c.toString();
-          if (body.length > 5_000_000) {
-            aborted = true;
-            res.writeHead(413).end('too large');
-            req.destroy();
-          }
-        });
-        req.on('end', async () => {
-          if (aborted) return;
-          let parsed: { nonce?: unknown; vars?: unknown };
-          try {
-            parsed = JSON.parse(body);
-          } catch {
-            res.writeHead(400).end('bad json');
-            return;
-          }
-          if (!nonceEqual(parsed.nonce, nonce)) {
-            res.writeHead(403).end('bad nonce');
-            return;
-          }
-          const pairs = parseVars(parsed.vars);
-          if (!pairs) {
-            res
-              .writeHead(400, { 'content-type': 'application/json' })
-              .end(JSON.stringify({ error: 'each variable needs a valid NAME and a value' }));
-            return;
-          }
-          if (done) {
-            res.writeHead(409).end('already submitted');
-            return;
-          }
-          if (busy) {
-            res.writeHead(409).end('a submission is already in progress');
-            return;
-          }
-          // Save BEFORE responding, so the browser reflects real success/failure.
-          busy = true;
-          try {
-            await onSubmit(pairs);
-            done = true;
-            res.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
-            setTimeout(() => {
-              cleanup();
-              resolve();
-            }, 250);
-          } catch (err) {
-            busy = false;
-            const message = err instanceof Error ? err.message : 'Failed to save the secrets.';
-            res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ error: message }));
-          }
-        });
-        return;
-      }
-
-      res.writeHead(404).end('not found');
-    });
-
-    const cleanup = (): void => {
-      clearTimeout(timer);
-      try {
-        server.close();
-      } catch {
-        /* ignore */
-      }
-      for (const c of connections) {
-        try {
-          c.destroy();
-        } catch {
-          /* ignore */
-        }
-      }
-      connections.clear();
-    };
-
-    server.on('connection', (c: Socket) => {
-      connections.add(c);
-      c.on('close', () => connections.delete(c));
-    });
-    server.on('error', (err) => {
-      cleanup();
-      reject(err);
-    });
-
-    timer = setTimeout(() => {
-      cleanup();
-      reject(new CapyError('Timed out waiting for the values (5 minutes).', ERROR_CODES.SERVICE_ERROR));
-    }, INTAKE_TIMEOUT_MS);
-    timer.unref();
-
-    process.once('SIGINT', () => {
-      cleanup();
-      reject(new CapyError('Cancelled.', ERROR_CODES.SERVICE_ERROR));
-    });
-
-    server.listen(0, '127.0.0.1', async () => {
-      const addr = server.address();
-      const port = addr && typeof addr === 'object' ? addr.port : 0;
-      const url = `http://127.0.0.1:${port}/?n=${nonce}`;
-      params.onListen?.(url);
-      const label = params.vars.length === 1 ? params.vars[0].name : `${params.vars.length} secret(s)`;
-      console.log('');
-      console.log(`  Enter ${label} in your browser (values never touch this terminal or the AI):`);
-      console.log(`  ${url}`);
-      console.log('');
-      if (params.open) {
-        try {
-          const open = (await import('open')).default;
-          await open(url);
-        } catch {
-          /* best-effort; the printed URL is the fallback */
-        }
-      }
-    });
-  });
+export function overwriteNotice(existing: string[]): string | undefined {
+  return existing.length > 0 ? `${existing.join(', ')} already exist(s). Overwrite?` : undefined;
 }
 
 export class AddCommand {
@@ -273,14 +93,40 @@ export class AddCommand {
     if (opts.web) {
       const helpUrls = parseHelpUrls(opts.helpUrls);
       const vars: IntakeVar[] = names.map((name) => ({ name, helpUrl: helpUrls[name] }));
+      // The overwrite warning goes above whatever the caller asked for: the
+      // consequence of pressing Save outranks the note explaining why the form
+      // was opened.
+      const warning = opts.force ? undefined : overwriteNotice(existing);
+      const reason = [warning, opts.reason].filter(Boolean).join(' ') || undefined;
       let captured: string[] = [];
       await runWebIntake(
-        { vars, reason: opts.reason, open: opts.open !== false },
+        // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
+        // headless runs drive the loopback without hijacking a real browser.
+        { vars, reason, open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN },
         async (pairs) => {
           await writeMany(pairs);
           captured = pairs.map((p) => p.name);
         },
       );
+      // The intake resolves whether or not it was filled in — a closed window
+      // and a step nobody answered both land here — and this is the only
+      // signal that separates them from a save. Without it the command ran on
+      // to `✓ Saved 0 variable(s): ` and reported a refusal as a success,
+      // which for an overwrite is the difference between "I left it alone" and
+      // "I replaced it".
+      //
+      // A PRINTED LINE AND A NORMAL RETURN, not a throw. Closing the window is
+      // a refusal, and a refusal is one of the two endings this flow HAS — it
+      // is not a fault. Throwing here reached the process-level
+      // `unhandledRejection` handler (nothing between here and `program.parse`
+      // catches it), which printed the sentence a second time under a node
+      // stack trace and exited 1: a person who declined an overwrite was shown
+      // a crash. The terminal path for the identical refusal, twenty lines up,
+      // prints `Aborted.` and returns 0.
+      if (captured.length === 0) {
+        console.log('\n  Nothing was added. The browser was closed without saving.\n');
+        return;
+      }
       savedNames = captured;
     } else {
       if (opts.nonTty) {

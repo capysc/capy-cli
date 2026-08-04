@@ -58,6 +58,17 @@ mock.module('inquirer', () => ({
     Separator: class Separator { constructor() {} },
   },
 }));
+// The two browser REPORTS. Mocked so a `--web` run in here can be asked what
+// it decided to serve without any test binding a socket — and, more to the
+// point, without a no-op sync leaving a listening server behind it.
+const shownSyncResults: unknown[] = [];
+mock.module('../../src/ui/syncScreens', () => ({
+  showSyncResultInBrowser: mock(async (p: unknown) => {
+    shownSyncResults.push(p);
+    return 'http://127.0.0.1:1/s/not-served';
+  }),
+  showSyncStatusInBrowser: mock(async () => 'http://127.0.0.1:1/s/not-served'),
+}));
 mock.module('../../src/ui/spinner', () => ({
   default: (text: string) => ({
     start: () => ({
@@ -801,6 +812,25 @@ describe('CapyCommand', () => {
       // syncProject tries authenticateSilent first
       expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('org-123');
       expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
+
+      consoleSpy.mockRestore();
+    });
+
+    test('a run with nothing to do serves no browser report and holds no socket', async () => {
+      // `capy --web` in a synced directory is the common case, and it asks
+      // nothing: the report page it used to serve had to be opened by `open()`,
+      // which fails quietly on the headless and remote hosts where `--web`
+      // actually runs — leaving the listening socket to hold the process for
+      // its whole 120-second timeout, on every single run, to render a page
+      // that says nothing happened.
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      shownSyncResults.length = 0;
+
+      const webCommand = new CapyCommand({ web: true });
+      await (webCommand as any).syncProject(mockProjectState);
+
+      expect(consoleSpy).toHaveBeenCalledWith('Everything is up to date!');
+      expect(shownSyncResults).toEqual([]);
 
       consoleSpy.mockRestore();
     });

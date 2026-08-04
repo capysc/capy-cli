@@ -28,9 +28,19 @@ const ENTRY = join(CLI_ROOT, 'src/index.ts');
 const URL_RE = /http:\/\/127\.0\.0\.1:(\d+)\/\?n=([a-f0-9]+)/;
 const headers = { 'content-type': 'application/json' };
 
-/** The 24 words as the page renders them — one mono span each. */
+/**
+ * The 24 words as the page receives them.
+ *
+ * Read out of the payload the CLI inlines rather than off the rendered markup:
+ * the screen is a compiled document that builds its grid at runtime, so there
+ * is no server-rendered span to match. This is the same thing from the other
+ * side — whatever reaches `window.__CAPY_DATA__` is what the browser can show.
+ */
 function extractPhrase(html: string): string[] {
-  return [...html.matchAll(/font-family:ui-monospace[^>]*>([a-z]+)</g)].map((m) => m[1]);
+  const match = html.match(/window\.__CAPY_DATA__ = (\{.*?\});/s);
+  if (!match) return [];
+  const data = JSON.parse(match[1].replace(/\\u003c/g, '<')) as { phraseWords?: string[] };
+  return data.phraseWords ?? [];
 }
 
 describe('capy byoc --web keeps the recovery phrase off the wire', () => {
@@ -75,17 +85,21 @@ describe('capy byoc --web keeps the recovery phrase off the wire', () => {
     const base = `http://127.0.0.1:${match![1]}`;
     const nonce = match![2];
 
-    // Ask for a freshly generated phrase, and read it off the page the way the
-    // person writing it down would.
-    const generated = (await (
+    // Ask for a freshly generated phrase, then fetch the page the way the
+    // person writing it down would: a compiled screen advances by RELOADING,
+    // so the CLI answers `{ next: true }` and serves the phrase step on the
+    // next GET of the same address.
+    const advanced = (await (
       await fetch(`${base}/submit`, {
         method: 'POST',
         headers: { ...headers, origin: base },
-        body: JSON.stringify({ nonce, payload: { mode: 'generate' } }),
+        body: JSON.stringify({ nonce, payload: { __action: 'submit', source: 'generate' } }),
       })
-    ).json()) as { screen?: string };
+    ).json()) as { next?: boolean };
+    expect(advanced.next).toBe(true);
 
-    const words = extractPhrase(generated.screen ?? '');
+    const phrasePage = await (await fetch(match![0])).text();
+    const words = extractPhrase(phrasePage);
     expect(words).toHaveLength(24);
 
     // THE ASSERTION: no run of the phrase reaches either stream.
@@ -120,6 +134,24 @@ describe('capy byoc --web keeps the recovery phrase off the wire', () => {
 
     // And the page really did carry it — otherwise this test would pass just
     // as well against a screen that renders nothing at all.
-    expect(generated.screen).toContain(words[0]);
+    expect(phrasePage).toContain(words[0]);
+
+    /*
+     * The other direction, which the compiled screen made checkable: the words
+     * must not be accepted BACK. The display step answers with consent and the
+     * CLI refuses a payload carrying a phrase, so a page that has been tampered
+     * with cannot hand this machine a key off the wire.
+     */
+    const returned = (await (
+      await fetch(`${base}/submit`, {
+        method: 'POST',
+        headers: { ...headers, origin: base },
+        body: JSON.stringify({
+          nonce,
+          payload: { __action: 'submit', confirmed: true, phrase: words.join(' ') },
+        }),
+      })
+    ).json()) as { error?: string };
+    expect(returned.error).toBeDefined();
   }, 60_000);
 });

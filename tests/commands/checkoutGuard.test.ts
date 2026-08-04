@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { findUncommittedEnvChange } from '../../src/commands/checkoutCommand';
+import { countVariablesPerBranch, findUncommittedEnvChange } from '../../src/commands/checkoutCommand';
 import { hashValue } from '../../src/commands/statusCommand';
 import { KeepFile } from '../../src/types/index';
 
@@ -54,5 +54,39 @@ describe('findUncommittedEnvChange (checkout dirty guard)', () => {
       PROD_ONLY: [{ resource_id: 'rid-p', branch: 'prod', value_hash: hashValue('prod-value') }],
     };
     expect(findUncommittedEnvChange({}, variables, BRANCH)).toBeNull();
+  });
+});
+
+describe('countVariablesPerBranch (branch list counts)', () => {
+  test('counts each branch\'s pinned variables, and no other branch\'s', () => {
+    const variables: KeepFile['variables'] = {
+      API_KEY: [
+        { resource_id: 'r1', branch: 'development', value_hash: 'h' },
+        { resource_id: 'r2', branch: 'production', value_hash: 'h' },
+      ],
+      DB_URL: [{ resource_id: 'r3', branch: 'development', value_hash: 'h' }],
+    };
+    expect(countVariablesPerBranch({ variables } as KeepFile)).toEqual({
+      development: 2,
+      production: 1,
+    });
+  });
+
+  test('one variable pinned twice on a branch is still one variable', () => {
+    // The screen prints "14 variables", not "14 pins", so the count is per
+    // variable — otherwise a duplicate entry inflates what the branch holds.
+    const variables: KeepFile['variables'] = {
+      API_KEY: [
+        { resource_id: 'r1', branch: 'development', value_hash: 'h' },
+        { resource_id: 'r2', branch: 'development', value_hash: 'h' },
+      ],
+    };
+    expect(countVariablesPerBranch({ variables } as KeepFile)).toEqual({ development: 1 });
+  });
+
+  test('no keep.lock is no counts, never zeroes', () => {
+    // A branch absent from the map renders without a count; a zero would claim
+    // this directory knows the branch is empty.
+    expect(countVariablesPerBranch(null)).toEqual({});
   });
 });

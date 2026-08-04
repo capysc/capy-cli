@@ -82,6 +82,32 @@ describe('ScreenServer', () => {
     expect(second.status).toBe(404);
   });
 
+  test('delivered stays pending until a browser has actually read the page', async () => {
+    // `start()` resolves on LISTENING, which is what every ending call site
+    // had — and an ending is followed by the command exiting, so the page went
+    // into a socket that closed microseconds later. This is the fact those
+    // callers actually need.
+    server = new ScreenServer('auth-success', { autoCloseSeconds: 0 }, { closeAfterServe: false });
+    const url = await server.start();
+
+    let settled: boolean | undefined;
+    void server.delivered.then((v) => (settled = v));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(settled).toBeUndefined();
+
+    expect((await request(url)).status).toBe(200);
+    expect(await server.delivered).toBe(true);
+  });
+
+  test('a server that closes unread releases its waiter with false', async () => {
+    // The ceiling for a browser that never comes: the work being reported is
+    // already over, so the command must not be held open by a page nobody is
+    // reading.
+    server = new ScreenServer('auth-success', { autoCloseSeconds: 0 }, { timeoutMs: 40 });
+    await server.start();
+    expect(await server.delivered).toBe(false);
+  });
+
   test('rejects requests with a missing or wrong token', async () => {
     server = new ScreenServer('auth-success', { autoCloseSeconds: 0 }, { closeAfterServe: false });
     const url = new URL(await server.start());

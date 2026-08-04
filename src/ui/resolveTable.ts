@@ -23,10 +23,34 @@ export interface ResolveRow {
   remote: string | null;
 }
 
+/**
+ * How the table ended. Three outcomes, not two, and the third is the point.
+ *
+ * `cancelled: boolean` could not express "nobody was asked", so off a TTY this
+ * returned the DEFAULTS with `cancelled: false` — a conflict on every variable
+ * silently resolved and reported as a person's answer. The defaults are the
+ * safe picks, so nothing was destroyed; what was wrong is that a run with
+ * nobody watching wrote a resolution and called it consent. The screens state
+ * the rule the terminal was breaking: an unanswered step is a refusal.
+ */
+export type ResolveOutcome =
+  /** Every row carries a choice somebody made. */
+  | 'resolved'
+  /** They quit. Change nothing. */
+  | 'cancelled'
+  /** No TTY, so nobody was asked. Not an answer, and not a cancel either. */
+  | 'needs-input';
+
 export interface ResolveResult {
-  /** Map of variable name -> chosen source ('pinned' | 'local' | 'remote' | 'delete') */
+  /**
+   * Variable name -> chosen source. EMPTY unless `outcome` is `resolved`.
+   *
+   * Deliberately empty on the other two: a caller that reads `choices` without
+   * checking the outcome gets nothing to apply rather than a plausible set of
+   * answers nobody gave.
+   */
   choices: Record<string, 'pinned' | 'local' | 'remote' | 'delete'>;
-  cancelled: boolean;
+  outcome: ResolveOutcome;
 }
 
 export type ColumnKey = 'pinned' | 'local' | 'remote' | 'delete';
@@ -88,11 +112,11 @@ export class ResolveTable {
   run(): Promise<ResolveResult> {
     return new Promise<ResolveResult>((resolve) => {
       if (!process.stdin.isTTY) {
-        const choices: Record<string, ColumnKey> = {};
-        for (let i = 0; i < this.rows.length; i++) {
-          choices[this.rows[i].variable] = this.selections[i];
-        }
-        resolve({ choices, cancelled: false });
+        // There is no arrow-key table without a terminal, so there is nobody
+        // to answer — which is a different fact from "they answered with the
+        // defaults", and this used to report the second one. The caller
+        // refuses; see `resolveIndividually`.
+        resolve({ choices: {}, outcome: 'needs-input' });
         return;
       }
 
@@ -107,7 +131,7 @@ export class ResolveTable {
 
         if (key === '\x03' || key === 'q') {
           this.cleanup(onData);
-          resolve({ choices: {}, cancelled: true });
+          resolve({ choices: {}, outcome: 'cancelled' });
           return;
         }
 
@@ -161,7 +185,7 @@ export class ResolveTable {
             for (let i = 0; i < this.rows.length; i++) {
               choices[this.rows[i].variable] = this.selections[i];
             }
-            resolve({ choices, cancelled: false });
+            resolve({ choices, outcome: 'resolved' });
             return;
           }
 

@@ -40,6 +40,15 @@ mock.module('inquirer', () => ({
   prompt: mockPromptFn,
 }));
 
+// The browser confirm. Stubbed rather than driven here — the real page is
+// clicked in tests/ui/browserFlow.e2e.test.ts — because what this file is for
+// is the wiring either side of it: which confirm gets asked, and whether a
+// DELETE follows the answer.
+const mockConfirmInBrowser = jest.fn();
+mock.module('../../src/ui/memberScreens', () => ({
+  confirmKickInBrowser: mockConfirmInBrowser,
+}));
+
 afterAll(() => { mock.restore(); });
 
 import { KickCommand } from '../../src/commands/kickCommand';
@@ -135,5 +144,82 @@ describe('KickCommand', () => {
     await expect(cmd.execute('nobody@acme.com')).rejects.toThrow('process.exit');
     expect(mockExit).toHaveBeenCalledWith(1);
     expect(mockKickMember).not.toHaveBeenCalled();
+  });
+
+  describe('--web', () => {
+    beforeEach(() => {
+      mockListMemberDetails.mockResolvedValue({
+        members: [
+          {
+            membershipId: 'mem-alice-2',
+            userId: 'user-uuid-alice',
+            email: 'alice@acme.com',
+            role: 'member',
+            status: 'active',
+            createdAt: '2025-02-01T00:00:00Z',
+            projects: [{ id: 'p1', name: 'storefront', role: 'member', branches: [] }],
+          },
+        ],
+      });
+    });
+
+    it('asks the browser instead of the terminal, and removes on yes', async () => {
+      mockConfirmInBrowser.mockResolvedValue(true);
+
+      await new KickCommand().execute('alice@acme.com', { web: true });
+
+      expect(mockPromptFn).not.toHaveBeenCalled();
+      expect(mockKickMember).toHaveBeenCalledWith('org-123', 'mem-alice-2');
+      // The screen is told which membership this run is about, so a submit
+      // aimed at any other one can be refused rather than performed.
+      expect(mockConfirmInBrowser.mock.calls[0][0].member).toMatchObject({
+        membershipId: 'mem-alice-2',
+        email: 'alice@acme.com',
+      });
+    });
+
+    it('removes nobody when the browser says no', async () => {
+      mockConfirmInBrowser.mockResolvedValue(false);
+
+      await new KickCommand().execute('alice@acme.com', { web: true });
+
+      expect(mockKickMember).not.toHaveBeenCalled();
+    });
+
+    it('a browser that never answered is a no, not an error', async () => {
+      // Closed, timed out, interrupted: `runBrowserWizard` rejects for all
+      // three, and none of them is agreement to cut somebody off from every
+      // secret in the organization.
+      mockConfirmInBrowser.mockRejectedValue(new Error('Timed out waiting for the browser'));
+
+      await new KickCommand().execute('alice@acme.com', { web: true });
+
+      expect(mockKickMember).not.toHaveBeenCalled();
+    });
+
+    it('never opens the developer\'s real browser when CAPY_WEB_NO_OPEN is set', async () => {
+      // The flag every test in this repo sets. The command has to honour it, or
+      // a suite run hijacks a window on somebody's machine.
+      const prev = process.env.CAPY_WEB_NO_OPEN;
+      process.env.CAPY_WEB_NO_OPEN = '1';
+      mockConfirmInBrowser.mockResolvedValue(false);
+      try {
+        await new KickCommand().execute('alice@acme.com', { web: true });
+        expect(mockConfirmInBrowser.mock.calls[0][0].open).toBe(false);
+      } finally {
+        if (prev === undefined) delete process.env.CAPY_WEB_NO_OPEN;
+        else process.env.CAPY_WEB_NO_OPEN = prev;
+      }
+    });
+
+    it('leaves the terminal confirm alone without the flag', async () => {
+      mockPromptFn.mockResolvedValue({ confirm: true });
+
+      await new KickCommand().execute('alice@acme.com');
+
+      expect(mockConfirmInBrowser).not.toHaveBeenCalled();
+      expect(mockPromptFn).toHaveBeenCalled();
+      expect(mockKickMember).toHaveBeenCalledWith('org-123', 'mem-alice-2');
+    });
   });
 });
