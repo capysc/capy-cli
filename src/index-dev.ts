@@ -370,6 +370,28 @@ deploy
     await cmd.execute();
   });
 
+// `targets` / `targets-remove` exist on the production binary and were missing
+// here, so `capy-dev deploy targets` resolved `targets` as a TARGET NAME and
+// failed with `No target named "targets"`. Dev is meant to be the same CLI
+// against the dev backend; a subcommand present on one and not the other is
+// drift, and it surfaced as an MCP tool that works in production and breaks in
+// the only configuration anyone tests in.
+deploy
+  .command('targets')
+  .description('List configured connector targets (connector mode)')
+  .action(async (_options, command) => {
+    const { deployList } = await import('./commands/deployCommand');
+    process.exit(await deployList(process.cwd(), { web: command.optsWithGlobals().web === true }));
+  });
+
+deploy
+  .command('targets-remove <name>')
+  .description('Remove a configured connector target')
+  .action(async (name: string, _options, command) => {
+    const { deployRemove } = await import('./commands/deployCommand');
+    process.exit(await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true }));
+  });
+
 program
   .command('invite <email>')
   .description('Invite a teammate to your organization')
