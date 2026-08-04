@@ -49,6 +49,7 @@ ISOLATED_FILES=(
   tests/commands/profileCommand.test.ts
   tests/commands/localOnlyFlow.test.ts
   tests/ui/deployDeadline.test.ts
+  tests/commands/rotatePromotesThenRotates.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

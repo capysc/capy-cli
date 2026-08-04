@@ -7,7 +7,21 @@ export interface ConnectOpts {
   var?: string;
   account?: string;
   noPush?: boolean;
-  force?: boolean;
+  /**
+   * This connect is a STEP inside another command rather than the whole run.
+   *
+   * `capy rotate <var>` on a variable with no connector links it first and then
+   * rotates it — one journey, drawn as one rail. Without this the link half
+   * serves its own ENDING page and signs off with "run `capy rotate <var>` to
+   * replace it", which is the command the user is already inside. An ending is
+   * a claim that the run is over, so a nested one has to be suppressed rather
+   * than merely tolerated.
+   *
+   * Only the SUCCESS ending is suppressed. A decline or a failed push still
+   * gets its page, because the outer command stops there and something has to
+   * say why.
+   */
+  subStep?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
   /**

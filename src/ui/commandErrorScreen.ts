@@ -169,6 +169,91 @@ export function buildCommandErrorData(error: any, ctx: ErrorContext = {}): Comma
         remedies: [{ text: 'Initialize this directory', command: 'capy' }],
       };
 
+    // The local-state refusals, in the same order and the same words as
+    // `errorScreen.ts` tells them. These are the ones an agent is most likely
+    // to hit first — a wrong variable name, a directory that was never
+    // initialised — so `context` carries the branch and the names that WOULD
+    // have worked, which is the difference between a page that ends the run
+    // and one that lets the caller correct itself and try again.
+    case ERROR_CODES.NO_ACTIVE_BRANCH:
+      return {
+        ...base,
+        title: 'No active branch',
+        detail: 'Nothing here records which branch this directory is on.',
+        remedies: [{ text: 'Select a branch', command: 'capy' }],
+      };
+
+    case ERROR_CODES.NO_MANAGED_KEYS:
+      return {
+        ...base,
+        title: 'No managed keys to rotate on this branch',
+        detail:
+          'Rotation goes through the provider, so a variable has to be linked to one first.',
+        context: fact('Branch', error.details?.branch ?? ctx.branch),
+        remedies: [
+          { text: 'Link a variable to a provider', command: 'capy connect <provider>' },
+          { text: 'Or set up an existing variable', command: 'capy rotate' },
+        ],
+      };
+
+    case ERROR_CODES.NO_VARIABLES:
+      return {
+        ...base,
+        title: 'No variables on this branch yet',
+        context: fact('Branch', error.details?.branch ?? ctx.branch),
+        remedies: [
+          { text: 'Add one to .env, then sync', command: 'capy' },
+          { text: 'Or pull one from a provider', command: 'capy connect <provider>' },
+        ],
+      };
+
+    case ERROR_CODES.VARIABLE_NOT_FOUND: {
+      const variable = error.details?.variable;
+      const branch = error.details?.branch ?? ctx.branch;
+      const available: string[] = error.details?.available ?? [];
+      return {
+        ...base,
+        title: 'Variable not found',
+        detail: `${plain(String(variable))} is not in your environment on branch ${plain(
+          String(branch),
+        )}.`,
+        context: [
+          ...fact('Variable', variable),
+          ...fact('Branch', branch),
+          // The names that would have worked. A page that says "not found"
+          // and stops makes the caller guess; this one is the answer.
+          ...fact('Available', available.join(', ')),
+        ],
+        remedies: [
+          { text: 'Add it to .env, then sync', command: 'capy' },
+          ...(available.length > 0 ? [{ text: 'Or use one of the names above' }] : []),
+        ],
+      };
+    }
+
+    case ERROR_CODES.NO_CONNECTORS:
+      return {
+        ...base,
+        title: 'No connectors are registered',
+        detail: 'This build has no third-party integration to promote a variable to.',
+      };
+
+    case ERROR_CODES.DEV_LIVE_FIREWALL: {
+      // Told apart on the structured flag, never on the sentence.
+      const nothingLeft = error.details?.nothingLeft === true;
+      const variables: string[] = error.details?.variables ?? [];
+      return {
+        ...base,
+        title: nothingLeft ? 'Nothing to rotate' : 'Live mode is not allowed in capy-dev',
+        detail: nothingLeft
+          ? 'All managed keys on this branch are live-mode.'
+          : `${plain(String(variables[0]))} is configured for live mode.`,
+        context: variables.length > 0 ? [{ label: 'Live keys', value: plain(variables.join(', ')) }] : [],
+        causes: ['capy-dev never touches a live credential'],
+        remedies: [{ text: 'Rotate with the production binary', command: 'capy rotate' }],
+      };
+    }
+
     case ERROR_CODES.QUOTA_EXCEEDED:
       return quotaExceeded(error, detail);
 

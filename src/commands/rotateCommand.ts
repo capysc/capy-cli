@@ -9,7 +9,7 @@ import { ConnectCommand, confirmLiveAction, rotateLiveGateStops } from './connec
 import { loadProvider, listProviders, RotateOpts } from './connectors/registry';
 import { cap, rotationPlan, type RotationPlanInput } from './connectors/plans';
 import { ProjectManager } from '../core/projectManager';
-import { ConnectorMetadata, KeepFile } from '../types/index';
+import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/index';
 import { TargetConfig } from '../deploy/adapter';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
@@ -84,6 +84,38 @@ function renderRotationPlan(stops: RotatePlanStop[]): void {
   writeSync(1, rotationPlanLines(stops).join('\n') + '\n');
 }
 
+/**
+ * End the run on a refusal, wherever the caller is looking.
+ *
+ * Every early exit in this file used to be `console.error(…)` +
+ * `process.exit(1)`. That is right in a terminal and empty under `--web`: the
+ * flag exists because the caller is an agent, so the one fact that says what
+ * to do next — the variable does not exist, the branch has nothing managed —
+ * went to a stream with nobody on the other end. The exit code was correct and
+ * the sentence was correct, and neither of them reached a surface.
+ *
+ * `displayErrorAndExit` is the CLI's single answer to that, and it already
+ * does the three things this needs: the ANSI still goes to the terminal, a
+ * `command-error` page is served under `--web` and HELD until the browser has
+ * fetched it, and the process exits 1 either way. So these sites do not get a
+ * second implementation of an ending — they get a typed code, which is also
+ * the handle an agent branches on (cardinal Rule 4) instead of recognising a
+ * sentence.
+ *
+ * `await refuse(…); return;` at every call site, and the `return` is not
+ * decoration: `displayErrorAndExit` is `Promise<never>` but TypeScript does
+ * not narrow across an awaited never, so the `return` is what tells the
+ * compiler `keep` is non-null below — and what keeps the flow honest under a
+ * test that stubs `process.exit` without throwing.
+ */
+async function refuse(
+  error: CapyError,
+  context: { projectName?: string; projectId?: string; branch?: string } = {},
+): Promise<void> {
+  const { displayErrorAndExit } = await import('../ui/errorScreen');
+  await displayErrorAndExit(error, context);
+}
+
 /** One-line description of how a configured target ships, for the Deploy stop. */
 function describeDeploy(t: TargetConfig): string {
   const mode = t.mode ?? 'direct';
@@ -119,12 +151,15 @@ export class RotateCommand {
     const branch = pm.deriveActiveBranch();
 
     if (!keep) {
-      console.error('\n  No keep.lock found. Run `capy` first to initialize.\n');
-      process.exit(1);
+      await refuse(new CapyError('No keep.lock found in this directory.', ERROR_CODES.NO_KEEP_FILE));
+      return;
     }
     if (!branch) {
-      console.error(`\n  No active branch. Run ${B('capy')} to select a branch.\n`);
-      process.exit(1);
+      await refuse(
+        new CapyError('No active branch.', ERROR_CODES.NO_ACTIVE_BRANCH),
+        { projectName: keep.project_name, projectId: keep.project_id },
+      );
+      return;
     }
 
     const managed = listManagedKeys(keep, branch);
@@ -134,9 +169,13 @@ export class RotateCommand {
     // unmanaged vars in bulk — that needs per-var intent.
     if (opts.all) {
       if (managed.length === 0) {
-        console.error('\n  No managed keys to rotate on this branch.');
-        console.error(`  Connect one with ${B('capy connect <provider>')}, or run ${B('capy rotate')} to set up an existing var.\n`);
-        process.exit(1);
+        await refuse(
+          new CapyError('No managed keys to rotate on this branch.', ERROR_CODES.NO_MANAGED_KEYS, {
+            branch,
+          }),
+          { projectName: keep.project_name, projectId: keep.project_id, branch },
+        );
+        return;
       }
       // `--all` ignores a positional variable and says nothing about it. The
       // plan screen carries that as an advisory rather than letting the user
@@ -155,18 +194,26 @@ export class RotateCommand {
       } else if (allVars.includes(varName)) {
         target = { varName, unmanaged: true };
       } else {
-        console.error(`\n  ${B(varName)} is not in your environment on branch ${branch}.`);
-        if (allVars.length > 0) {
-          console.error(`  Available: ${allVars.join(', ')}`);
-        }
-        console.error('');
-        process.exit(1);
+        await refuse(
+          new CapyError(
+            `${varName} is not in your environment on branch ${branch}.`,
+            ERROR_CODES.VARIABLE_NOT_FOUND,
+            // The names that WOULD have worked travel with the refusal. An
+            // agent that gets "not found" and nothing else has to guess or
+            // shell out to read keep.lock; this is the answer it needed.
+            { variable: varName, branch, available: allVars },
+          ),
+          { projectName: keep.project_name, projectId: keep.project_id, branch },
+        );
+        return;
       }
     } else {
       if (allVars.length === 0) {
-        console.error('\n  No variables on this branch yet.');
-        console.error(`  Add one to .env and run ${B('capy')}, or run ${B('capy connect <provider>')}.\n`);
-        process.exit(1);
+        await refuse(
+          new CapyError('No variables on this branch yet.', ERROR_CODES.NO_VARIABLES, { branch }),
+          { projectName: keep.project_name, projectId: keep.project_id, branch },
+        );
+        return;
       }
       let picked: string;
       if (opts.web) {
@@ -213,7 +260,7 @@ export class RotateCommand {
     }
 
     if ('unmanaged' in target) {
-      await this.promoteAndConnect(target.varName, opts);
+      await this.promoteAndConnect(target.varName, branch, opts);
       return;
     }
 
@@ -221,31 +268,44 @@ export class RotateCommand {
   }
 
   /**
-   * Unmanaged var picked for rotation → prompt for an integration and
-   * delegate to ConnectCommand. That flow fetches a fresh key from the
-   * provider, overwrites the existing value, and tags the keep.lock entry
-   * as connector-managed for future rotations.
+   * Unmanaged var picked for rotation → ask which integration issues it, link
+   * it through `ConnectCommand`, then rotate it.
+   *
+   * THE ROTATION IS THE POINT, and it used to happen by accident. `connect`
+   * fetched a key from the provider and wrote it over the variable, so
+   * promoting looked like a rotation without ever being one — and when
+   * `connect` correctly stopped writing values, promoting silently stopped
+   * changing anything at all. `capy rotate DATABASE_URL` recorded a link,
+   * printed connect's own sign-off ("run `capy rotate DATABASE_URL` to replace
+   * it" — the command already running), and returned with the credential
+   * untouched.
+   *
+   * Nothing failed and nothing said so, which is why it survived: the rail
+   * `rotationPlan` draws for this route has always shown Rotate, Push and
+   * Deploy as stops still ahead. They were drawn and never travelled. So the
+   * link is a step here, not an ending, and the run carries on to the stops it
+   * promised.
    */
   private async promoteAndConnect(
     varName: string,
+    branch: string,
     opts: RotateOpts & { provider?: string },
   ): Promise<void> {
     const providers = listProviders();
     if (providers.length === 0) {
-      console.error('\n  No connectors are registered. Cannot promote.\n');
-      process.exit(1);
+      await refuse(new CapyError('No connectors are registered.', ERROR_CODES.NO_CONNECTORS));
+      return;
     }
 
     let provider: string;
     if (opts.web) {
       // Never pre-selected, however few are registered. Off a TTY the CLI
       // auto-picks the single provider with no output at all — for a variable
-      // the user never associated with it — and what follows runs with
-      // `force: true`, so the value in that variable is replaced rather than
-      // rotated. The screen says that before the list, not after the write.
+      // the user never associated with it — and the run that follows replaces
+      // whatever is in that variable with a key the provider issues. The
+      // screen says that before the list, not after the write.
       const pm = new ProjectManager();
       const keep = pm.readKeepFile();
-      const branch = pm.deriveActiveBranch() ?? '';
       const { askRotateIntegrationInBrowser } = await import('../ui/rotateScreens');
       const answer = await askRotateIntegrationInBrowser({
         step: 'integration',
@@ -317,16 +377,48 @@ export class RotateCommand {
     }
 
     const connect = new ConnectCommand(this.devMode);
-    await connect.execute(provider, {
+    const { linked } = await connect.execute(provider, {
       var: varName,
-      force: true,
       noPush: opts.noPush,
       nonTty: opts.nonTty,
       // The connect flow takes over from here, and it has to keep serving
       // screens: dropping `--web` at the hand-off is how a browser flow ends
       // up at a TTY prompt nobody is watching.
       web: opts.web,
+      // A step, not the run. Suppresses connect's success ENDING so the
+      // rotation that follows is not preceded by a page announcing the run is
+      // over — and stops it signing off with the command we are inside.
+      subStep: true,
     });
+    // A decline or a failed push already served its own ending and said why.
+    if (!linked) return;
+
+    // The connector `connect` just recorded, read back rather than assumed:
+    // it carries the provider's fingerprint and key type, and `rotateMany`
+    // needs both to tell a real rotation from the provider handing back the
+    // same key.
+    const keep = new ProjectManager().readKeepFile();
+    const connector = keep ? findManagedConnector(keep, varName, branch) : undefined;
+    if (!connector) {
+      // Nothing to rotate through. `connect` reported success, so this is a
+      // state we do not expect rather than a refusal — say so plainly instead
+      // of returning as though the run had finished its journey.
+      await refuse(
+        new CapyError(
+          `${varName} was linked to ${provider}, but no connector was recorded on branch ${branch}.`,
+          ERROR_CODES.NO_MANAGED_KEYS,
+          { branch },
+        ),
+        { branch },
+      );
+      return;
+    }
+
+    // `promotedVia` so the rail can mark the Integration stop ANSWERED. The
+    // plain plan declares it skipped, which is right for a variable that was
+    // already managed and a contradiction here: the stop would name `stripe`
+    // and carry the never-visited marker beside it.
+    await this.planAndRotate([{ varName, connector }], branch, { ...opts, promotedVia: provider });
   }
 
   /**
@@ -382,11 +474,17 @@ export class RotateCommand {
     if (this.devMode) {
       const liveOnes = toRotate.filter((m) => m.connector.mode === 'live');
       if (!opts.all && liveOnes.length > 0) {
-        console.error(
-          `\n  ${B(liveOnes[0].varName)} is configured for live mode.`,
+        // Reached AFTER the plan was approved in the browser under `--web`, so
+        // this is the one refusal the user has already said yes to something
+        // about. A terminal-only exit here reads as the run simply stopping.
+        await refuse(
+          new CapyError(
+            `${liveOnes[0].varName} is configured for live mode.`,
+            ERROR_CODES.DEV_LIVE_FIREWALL,
+            { variables: liveOnes.map((m) => m.varName), nothingLeft: false },
+          ),
         );
-        console.error('  Rotate cannot run via capy-dev. Use the production `capy` binary.\n');
-        process.exit(1);
+        return { succeeded: [], keys, stopped: true };
       }
       if (opts.all && liveOnes.length > 0) {
         console.log('');
@@ -404,8 +502,14 @@ export class RotateCommand {
         }
         toRotate = toRotate.filter((m) => m.connector.mode !== 'live');
         if (toRotate.length === 0) {
-          console.error('\n  Nothing to rotate. All managed keys are live-mode.');
-          process.exit(1);
+          await refuse(
+            new CapyError(
+              'Nothing to rotate. All managed keys are live-mode.',
+              ERROR_CODES.DEV_LIVE_FIREWALL,
+              { variables: liveOnes.map((m) => m.varName), nothingLeft: true },
+            ),
+          );
+          return { succeeded: [], keys, stopped: true };
         }
       }
     }
@@ -598,6 +702,12 @@ export class RotateCommand {
       provider?: string;
       /** A positional variable `--all` dropped, so the plan can say so. */
       varIgnored?: string;
+      /**
+       * This run reached here by PROMOTING an unmanaged variable through the
+       * named integration, which is an answer the rail has to show rather than
+       * a stop it can strike through.
+       */
+      promotedVia?: string;
     },
   ): Promise<void> {
     const web = opts.web === true;
@@ -679,7 +789,13 @@ export class RotateCommand {
       standing: 'plan',
       providers,
       targetCount: targets.length,
-      needsIntegration: false,
+      ...(opts.promotedVia
+        ? {
+            needsIntegration: true,
+            integration: opts.promotedVia,
+            integrationFromFlag: Boolean(opts.provider),
+          }
+        : { needsIntegration: false }),
       ...(opts.all ? {} : { varName: targets[0]?.varName }),
       ...(deployTarget ? { deployDetail: describeDeploy(deployTarget) } : {}),
     });

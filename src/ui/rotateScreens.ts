@@ -195,9 +195,9 @@ export interface WebRotateIntegrationResult {
  *
  * Never pre-selected, however few are registered: off a TTY the CLI
  * auto-picks the single provider with no output at all, for a variable the
- * user never associated with it — and the connect flow it hands off to runs
- * with `force: true`, so the value in that variable is replaced rather than
- * rotated.
+ * user never associated with it — and the run that follows replaces the value
+ * in that variable with a key the integration issues. Picking the integration
+ * is therefore a decision about a credential, not a filing choice.
  */
 export async function askRotateIntegrationInBrowser(
   p: WebRotatePlanParams,

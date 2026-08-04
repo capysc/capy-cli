@@ -737,9 +737,10 @@ program
       await cmd.list({ web: command.optsWithGlobals().web === true });
       return;
     }
-    // Merge globals: the top-level program also defines -f/--force, which
-    // otherwise shadows this subcommand's --force (opts.force stays undefined).
-    const merged = command.optsWithGlobals();
+    // Globals, because `--web` is declared once on the root program. Dropping
+    // it here is not a no-op: `ConnectCommand` reads `opts.web` to choose
+    // between the browser route and the TTY prompts, so an unpassed flag makes
+    // `capy connect stripe --web` answer in a terminal nobody is watching.
     await cmd.execute(provider, {
       web: command.optsWithGlobals().web === true,
       live: options.live,

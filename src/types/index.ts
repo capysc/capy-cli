@@ -328,6 +328,21 @@ export const ERROR_CODES = {
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
   ORG_NOT_FOUND: 'ORG_NOT_FOUND',
   LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
+  // Local-state refusals: the command cannot start because this directory,
+  // this branch or this build does not hold what it needs. Nothing has been
+  // asked of the service yet, so none of these is a SERVICE_ERROR — and each
+  // one used to be a bare `console.error` + `process.exit(1)`, which under
+  // `--web` is a decision reported to a stream nobody is reading.
+  /** The branch has no connector-managed credentials, so there is nothing to rotate. */
+  NO_MANAGED_KEYS: 'NO_MANAGED_KEYS',
+  /** The branch has no variables at all yet. */
+  NO_VARIABLES: 'NO_VARIABLES',
+  /** The named variable is not in the environment on this branch. */
+  VARIABLE_NOT_FOUND: 'VARIABLE_NOT_FOUND',
+  /** No connector integrations are registered in this build. */
+  NO_CONNECTORS: 'NO_CONNECTORS',
+  /** `capy-dev` reached a live-mode credential. Dev never touches live. */
+  DEV_LIVE_FIREWALL: 'DEV_LIVE_FIREWALL',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

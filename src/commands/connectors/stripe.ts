@@ -471,9 +471,11 @@ export function stripeVarSlots(ctx: ResolvedContext): ConnectVarSlot[] {
   return [...matches, ...others].map((name) => ({
     name,
     looksRelated: looksStripey(name),
-    // Every row here is a name .env already holds, so every one of them routes
-    // through the overwrite guard. `hasValue` is that fact, not a test for
-    // emptiness — the guard fires on presence.
+    // Every row here is a name .env already holds. `hasValue` records that
+    // fact rather than testing for emptiness. It no longer routes anything
+    // through an overwrite guard — `connect` stopped writing values, so there
+    // is no overwrite left to guard — and the screen uses it to say which
+    // slots are occupied.
     hasValue: true,
     ...(findManagedConnector(ctx.keep, name, ctx.branch)?.provider
       ? { managedBy: findManagedConnector(ctx.keep, name, ctx.branch)!.provider }

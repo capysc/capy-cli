@@ -87,11 +87,29 @@ describe('the payload is fit to render', () => {
     ERROR_CODES.QUOTA_EXCEEDED,
     ERROR_CODES.SERVICE_ERROR,
     ERROR_CODES.DECRYPT_KEY_MISMATCH,
+    // The local-state refusals. These never reach the service, so they used to
+    // be bare `console.error` + `process.exit(1)` at the top of a command —
+    // right in a terminal, and nothing at all under `--web`.
+    ERROR_CODES.NO_ACTIVE_BRANCH,
+    ERROR_CODES.NO_MANAGED_KEYS,
+    ERROR_CODES.NO_VARIABLES,
+    ERROR_CODES.VARIABLE_NOT_FOUND,
+    ERROR_CODES.NO_CONNECTORS,
+    ERROR_CODES.DEV_LIVE_FIREWALL,
   ];
 
   test.each(CODES)('%s has a title and no empty prose fields', (code) => {
     const data = buildCommandErrorData(
-      new CapyError('something happened', code, { status: 500, kind: 'project', limit: 3 }),
+      new CapyError('something happened', code, {
+        status: 500,
+        kind: 'project',
+        limit: 3,
+        variable: 'STRIPE_SECRET_KEY',
+        branch: 'main',
+        available: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+        variables: ['STRIPE_LIVE_KEY'],
+        nothingLeft: false,
+      }),
       { projectName: 'acme', projectId: 'prj_1', branch: 'main' },
     );
     expect(data.title.length).toBeGreaterThan(0);
@@ -126,10 +144,89 @@ describe('the payload is fit to render', () => {
       [ERROR_CODES.NO_KEEP_FILE, 'No keep.lock file found'],
       [ERROR_CODES.PROJECT_NOT_FOUND, 'Project not found'],
       [ERROR_CODES.INVALID_FORMAT, 'Invalid file format'],
+      [ERROR_CODES.NO_ACTIVE_BRANCH, 'No active branch'],
+      [ERROR_CODES.NO_MANAGED_KEYS, 'No managed keys to rotate on this branch'],
+      [ERROR_CODES.NO_VARIABLES, 'No variables on this branch yet'],
+      [ERROR_CODES.VARIABLE_NOT_FOUND, 'Variable not found'],
+      [ERROR_CODES.NO_CONNECTORS, 'No connectors are registered'],
+      [ERROR_CODES.DEV_LIVE_FIREWALL, 'Live mode is not allowed in capy-dev'],
     ] as const) {
       const err = new CapyError('detail', code, { status: 404 });
       expect(buildCommandErrorData(err).title).toBe(headline);
       expect(strip(renderError(err))).toContain(headline);
+    }
+  });
+});
+
+describe('the local-state refusals carry what the caller needs to correct itself', () => {
+  test('a wrong variable name comes back with the names that would have worked', () => {
+    // The whole difference between a page that ends the run and one an agent
+    // can act on. `capy rotate NOPE --web` used to write "not in your
+    // environment" to a stream nobody reads and exit 1, so the caller had no
+    // surface at all — not the reason, and not the alternatives.
+    const err = new CapyError('nope', ERROR_CODES.VARIABLE_NOT_FOUND, {
+      variable: 'STRIPE_SECRET',
+      branch: 'development',
+      available: ['DATABASE_URL', 'STRIPE_SECRET_KEY'],
+    });
+    const data = buildCommandErrorData(err);
+    expect(data.code).toBe('VARIABLE_NOT_FOUND');
+    expect(data.detail).toBe('STRIPE_SECRET is not in your environment on branch development.');
+    expect(data.context).toContainEqual({ label: 'Variable', value: 'STRIPE_SECRET' });
+    expect(data.context).toContainEqual({ label: 'Branch', value: 'development' });
+    expect(data.context).toContainEqual({
+      label: 'Available',
+      value: 'DATABASE_URL, STRIPE_SECRET_KEY',
+    });
+    // And the terminal says the same thing, including the list.
+    const text = strip(renderError(err));
+    expect(text).toContain('STRIPE_SECRET is not in your environment on branch development.');
+    expect(text).toContain('Available: DATABASE_URL, STRIPE_SECRET_KEY');
+  });
+
+  test('a branch with nothing to offer omits the list rather than printing an empty one', () => {
+    const err = new CapyError('nope', ERROR_CODES.VARIABLE_NOT_FOUND, {
+      variable: 'X',
+      branch: 'development',
+      available: [],
+    });
+    expect(buildCommandErrorData(err).context).not.toContainEqual(
+      expect.objectContaining({ label: 'Available' }),
+    );
+    expect(strip(renderError(err))).not.toContain('Available:');
+  });
+
+  test('the two live-mode refusals are told apart on the flag, not on the sentence', () => {
+    // Same code, two facts: one key stopped a single rotation, or every
+    // managed key was live and there is nothing left to do. Both arrive with
+    // the same message text on purpose — if either surface read the sentence
+    // to pick a shape, this is where it would show.
+    const one = new CapyError('anything at all', ERROR_CODES.DEV_LIVE_FIREWALL, {
+      variables: ['STRIPE_LIVE_KEY'],
+      nothingLeft: false,
+    });
+    const all = new CapyError('anything at all', ERROR_CODES.DEV_LIVE_FIREWALL, {
+      variables: ['STRIPE_LIVE_KEY', 'OTHER_LIVE_KEY'],
+      nothingLeft: true,
+    });
+
+    expect(buildCommandErrorData(one).title).toBe('Live mode is not allowed in capy-dev');
+    expect(buildCommandErrorData(all).title).toBe('Nothing to rotate');
+    expect(strip(renderError(one))).toContain('STRIPE_LIVE_KEY is configured for live mode.');
+    expect(strip(renderError(all))).toContain('All managed keys on this branch are live-mode.');
+
+    // The live keys are named, so a `--all` run says WHICH ones it refused
+    // rather than only how many survived.
+    expect(buildCommandErrorData(all).context).toContainEqual({
+      label: 'Live keys',
+      value: 'STRIPE_LIVE_KEY, OTHER_LIVE_KEY',
+    });
+  });
+
+  test('a branch-scoped refusal names the branch it is about', () => {
+    for (const code of [ERROR_CODES.NO_MANAGED_KEYS, ERROR_CODES.NO_VARIABLES] as const) {
+      const data = buildCommandErrorData(new CapyError('nope', code, { branch: 'development' }));
+      expect(data.context).toContainEqual({ label: 'Branch', value: 'development' });
     }
   });
 });

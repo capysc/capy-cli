@@ -50,6 +50,23 @@ export function renderError(error: any, context: ErrorContext = {}): string {
         return renderNoKeepFile();
       case ERROR_CODES.QUOTA_EXCEEDED:
         return renderQuotaExceeded(error);
+      // The local-state refusals. Each of these was a bare `console.error` at
+      // the top of a command, which is fine in a terminal and invisible under
+      // `--web` — the flag exists because the caller is an agent. Routing them
+      // through here costs the terminal nothing and gives the browser half a
+      // payload to draw, from one switch on one code.
+      case ERROR_CODES.NO_ACTIVE_BRANCH:
+        return renderNoActiveBranch();
+      case ERROR_CODES.NO_MANAGED_KEYS:
+        return renderNoManagedKeys();
+      case ERROR_CODES.NO_VARIABLES:
+        return renderNoVariables();
+      case ERROR_CODES.VARIABLE_NOT_FOUND:
+        return renderVariableNotFound(error);
+      case ERROR_CODES.NO_CONNECTORS:
+        return renderNoConnectors();
+      case ERROR_CODES.DEV_LIVE_FIREWALL:
+        return renderDevLiveFirewall(error);
       default:
         return renderGeneric(error);
     }
@@ -261,6 +278,96 @@ function renderNoKeepFile(): string {
     `  Run ${bold('capy')} to initialize.`,
     '',
   ];
+  return lines.join('\n');
+}
+
+function renderNoActiveBranch(): string {
+  const lines = [
+    '',
+    `  ${bold('No active branch')}`,
+    `  ${grey('Nothing here records which branch this directory is on.')}`,
+    '',
+    `  Run ${bold('capy')} to select a branch.`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderNoManagedKeys(): string {
+  const lines = [
+    '',
+    `  ${bold('No managed keys to rotate on this branch')}`,
+    `  ${grey('Rotation goes through the provider, so a variable has to be linked to one first.')}`,
+    '',
+    `  Connect one with ${bold('capy connect <provider>')}, or run ${bold('capy rotate')} to set up an existing var.`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderNoVariables(): string {
+  const lines = [
+    '',
+    `  ${bold('No variables on this branch yet')}`,
+    '',
+    `  Add one to ${bold('.env')} and run ${bold('capy')}, or run ${bold('capy connect <provider>')}.`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderVariableNotFound(error: CapyError): string {
+  const variable = error.details?.variable;
+  const branch = error.details?.branch;
+  // Display only — the caller already decided this case on the code.
+  const available: string[] = error.details?.available ?? [];
+  const lines = [
+    '',
+    `  ${bold('Variable not found')}`,
+    `  ${bold(String(variable))} is not in your environment on branch ${String(branch)}.`,
+    ...(available.length > 0 ? [`  ${grey(`Available: ${available.join(', ')}`)}`] : []),
+    '',
+    available.length > 0
+      ? `  Add it to ${bold('.env')} and run ${bold('capy')}, or pick one of the names above.`
+      : `  Add it to ${bold('.env')} and run ${bold('capy')}.`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderNoConnectors(): string {
+  const lines = [
+    '',
+    `  ${bold('No connectors are registered')}`,
+    `  ${grey('This build has no third-party integration to promote a variable to.')}`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+function renderDevLiveFirewall(error: CapyError): string {
+  // Two facts, told apart on a structured flag rather than on the sentence:
+  // one live key stopped a single rotation, or every managed key was live and
+  // the run has nothing left to do.
+  const nothingLeft = error.details?.nothingLeft === true;
+  const variables: string[] = error.details?.variables ?? [];
+  const lines = nothingLeft
+    ? [
+        '',
+        `  ${bold('Nothing to rotate')}`,
+        `  ${grey('All managed keys on this branch are live-mode.')}`,
+        '',
+        `  ${bold('capy-dev')} never touches a live credential. Use the production ${bold('capy')} binary.`,
+        '',
+      ]
+    : [
+        '',
+        `  ${bold('Live mode is not allowed in capy-dev')}`,
+        `  ${grey(`${String(variables[0])} is configured for live mode.`)}`,
+        '',
+        `  Rotate cannot run via ${bold('capy-dev')}. Use the production ${bold('capy')} binary.`,
+        '',
+      ];
   return lines.join('\n');
 }
 

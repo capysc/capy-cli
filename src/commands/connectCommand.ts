@@ -128,7 +128,16 @@ export class ConnectCommand {
     return picked.cancelled ? null : picked.provider;
   }
 
-  async execute(provider: string, opts: ConnectOpts): Promise<void> {
+  /**
+   * Returns whether the link was actually recorded.
+   *
+   * A caller that has more journey after this one — `capy rotate` promoting an
+   * unmanaged variable — has to know whether to carry on, and the honest
+   * signal is a return value rather than re-reading keep.lock and inferring it.
+   * A decline and a failed push both leave `linked: false`; every path that
+   * ends in `process.exit` never returns at all.
+   */
+  async execute(provider: string, opts: ConnectOpts): Promise<{ linked: boolean }> {
     // Live-mode firewall: capy-dev never touches a live key.
     if (this.devMode && opts.live) {
       console.error('\n  Live mode is not allowed in dev mode.');
@@ -156,8 +165,7 @@ export class ConnectCommand {
           // exiting here would close the socket underneath it. Returning lets
           // the process end on its own once that page has been read, carrying
           // whatever exit code the inner run set.
-          await this.execute(picked, opts);
-          return;
+          return await this.execute(picked, opts);
         }
       }
       console.error(`\n  ${(err as Error).message}`);
@@ -243,7 +251,7 @@ export class ConnectCommand {
           mode: entry.mode as 'test' | 'live' | undefined,
           requiresAuth: mod.requiresAuth === true,
         });
-        return;
+        return { linked: false };
       }
     }
 
@@ -274,15 +282,32 @@ export class ConnectCommand {
       // that overstates its own reach is how a user learns the wrong model of
       // the command.
       console.log(`  ✓ ${B(varName)} is now managed by ${B(provider)} (not pushed).`);
-      console.log(`  Its value is unchanged. Run ${B('capy push')} to share the link with teammates.`);
+      console.log(
+        opts.subStep
+          ? '  Its value is unchanged — rotating it now.'
+          : `  Its value is unchanged. Run ${B('capy push')} to share the link with teammates.`,
+      );
       console.log('');
     } else {
       console.log(`  ✓ ${B(varName)} is now managed by ${B(provider)} (branch: ${ctx.branch}).`);
-      console.log(`  Its value is unchanged — run ${B(`capy rotate ${varName}`)} to replace it.`);
+      // Inside `capy rotate` the usual next step IS what is already running,
+      // and telling someone to run the command they are inside is how a flow
+      // reads as a loop.
+      console.log(
+        opts.subStep
+          ? '  Its value is unchanged — rotating it now.'
+          : `  Its value is unchanged — run ${B(`capy rotate ${varName}`)} to replace it.`,
+      );
       console.log('');
     }
 
-    if (opts.web) {
+    // No ending page for a step that is not the end. `showResult` serves a
+    // page that says the run is over and holds the process until a browser has
+    // read it; between the link and the rotation it would be a false ending
+    // and a second window. The failure endings below this branch are a
+    // different case — the outer command stops there, so the page is the only
+    // report there is.
+    if (opts.web && (failed || !opts.subStep)) {
       await this.showResult(ctx.keep.project_name, ctx.branch, provider, mod.requiresTool, opts, {
         outcome,
         varName,
@@ -302,6 +327,7 @@ export class ConnectCommand {
     // made "the push did not land" a page nobody could open. The code is
     // delivered when the loop drains, which is after the browser has the page.
     if (failed) process.exitCode = 1;
+    return { linked: !failed };
   }
 
   /** The tail of the command, as a page. Reports only — nothing here decides. */

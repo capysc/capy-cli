@@ -3260,10 +3260,10 @@ export interface RedeemInviteData {
  *      the entire chain, and `!opts.skipPrompts && isTTY` drops it silently on
  *      a piped run. The gate exists on this screen for every caller.
  *   2. **Promoting an unmanaged variable overwrites its value.** `capy rotate
- *      DATABASE_URL` on a var with no connector hands off to `capy connect`
- *      with `force: true`, so whatever is in `DATABASE_URL` today is replaced
- *      by a key from the integration you pick. The CLI's two intro lines never
- *      say so.
+ *      DATABASE_URL` on a var with no connector links it to the integration
+ *      you pick and then rotates it, so whatever is in `DATABASE_URL` today is
+ *      replaced by a key that integration issues. The CLI's two intro lines
+ *      never say so.
  *   3. **A single registered provider is auto-picked with no output** off a
  *      TTY, which today always means Stripe. The integration step here is
  *      never pre-selected, however few there are.
