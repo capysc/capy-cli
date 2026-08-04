@@ -11,6 +11,15 @@ export interface ConnectOpts {
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;
   /**
+   * Pair with the provider again even when a usable session already exists.
+   *
+   * Off by default on purpose. `stripe login` rewrites the machine's shared
+   * provider config and can make the provider issue a new key, so re-running
+   * `connect` must not do it as a side effect of recording a link. This is the
+   * way to ask for it deliberately.
+   */
+  reauth?: boolean;
+  /**
    * Render this command's questions as compiled screens in a local browser.
    *
    * Not the same axis as `nonTty`, and the pairing is the whole point: the
@@ -37,7 +46,21 @@ export interface RotateOpts {
 /** Result of provider.connect(): the provider hands us a value + the connector metadata to record on the keep.lock entry. */
 export interface ConnectResult {
   varName: string;
-  value: string;
+  /**
+   * A value to write, for a connector whose setup genuinely produces one.
+   *
+   * OMITTED IS THE NORMAL CASE, and the default is the point. `connect` sets up
+   * the link between a variable and a provider — it is not a credential
+   * operation. Returning a value here makes the command overwrite whatever the
+   * variable already held, which is `rotate`'s job and nobody else's.
+   *
+   * Stripe returned one for exactly this reason and it was wrong: `connect
+   * stripe` copied the key sitting in the Stripe CLI's own `config.toml` over
+   * the top of the user's `.env`, silently, on a command whose name promises
+   * an association. `undefined` leaves the value alone; only the keep.lock
+   * connector entry is written.
+   */
+  value?: string;
   entry: ConnectorMetadata;
 }
 

@@ -395,7 +395,10 @@ describe('buildLiveGateData', () => {
 
   test('draws the route the run declared, not one of its own', () => {
     const d = buildLiveGateData(GATE, 'n');
-    expect(d.stops.map((s) => s.id)).toEqual(['cli', 'var', 'mode', 'auth', 'account', 'refresh', 'push']);
+    expect(d.stops.map((s) => s.id)).toEqual(['cli', 'var', 'mode', 'auth', 'account', 'push']);
+    // `refresh` left the route with the behaviour behind it: it re-ran
+    // `stripe login`, and `connect` no longer performs credential work.
+    expect(d.stops.some((s) => s.id === 'refresh')).toBe(false);
   });
 });
 

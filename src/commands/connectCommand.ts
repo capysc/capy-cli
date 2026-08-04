@@ -1,4 +1,4 @@
-import { resolveContext, writeAndSync, listManagedKeys, keyTypePrefix } from './connectors/shared';
+import { resolveContext, writeAndSync, listManagedKeys } from './connectors/shared';
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { connectPlan } from './connectors/plans';
 import { isInteractive } from '../ui/interactive';
@@ -192,10 +192,12 @@ export class ConnectCommand {
             branch: ctx.branch,
             varName,
             accountId: entry.account_id ?? null,
-            // Guarded, unlike the terminal's own `value.slice(0, 8)` below: a
-            // value with nothing more than eight characters in it would
-            // otherwise travel whole.
-            ...(keyTypePrefix(value) ? { keyPrefix: keyTypePrefix(value) as string } : {}),
+            // Read off the recorded metadata, not off a value: `connect` no
+            // longer carries one. `key_prefix` exists for exactly this — the
+            // fingerprint keeps three characters, which cannot tell `sk_test_`
+            // from `sk_live_` at the confirmation that exists to tell them
+            // apart.
+            ...(entry.key_prefix ? { keyPrefix: entry.key_prefix } : {}),
             push: !opts.noPush,
             pushFromFlag: opts.noPush === true,
             accountFromFlag: Boolean(opts.account),
@@ -213,7 +215,6 @@ export class ConnectCommand {
               account: entry.account_id,
               accountFromFlag: Boolean(opts.account),
               alreadySignedIn: true,
-              refreshOffered: false,
               push: !opts.noPush,
               pushFromFlag: opts.noPush === true,
             }),
@@ -223,7 +224,7 @@ export class ConnectCommand {
             action: 'connect',
             varName,
             accountId: entry.account_id ?? '(unknown)',
-            keyPrefix: value.slice(0, 8),
+            keyPrefix: entry.key_prefix ?? '(unknown)',
           });
       if (!ok) {
         console.log('  Cancelled.');
@@ -268,11 +269,16 @@ export class ConnectCommand {
       console.error(`  ✗ ${B(varName)}: ${detail}`);
       console.log('');
     } else if (opts.noPush) {
-      console.log(`  ✓ wrote ${B(varName)} to .env (encrypted, not pushed).`);
-      console.log(`  Run ${B('capy push')} to share with teammates.`);
+      // Say what moved AND what did not. The old wording — "wrote VAR to .env"
+      // — described a value write that no longer happens, and a success line
+      // that overstates its own reach is how a user learns the wrong model of
+      // the command.
+      console.log(`  ✓ ${B(varName)} is now managed by ${B(provider)} (not pushed).`);
+      console.log(`  Its value is unchanged. Run ${B('capy push')} to share the link with teammates.`);
       console.log('');
     } else {
-      console.log(`  ✓ ${B(varName)} written, encrypted, and pushed (branch: ${ctx.branch}).`);
+      console.log(`  ✓ ${B(varName)} is now managed by ${B(provider)} (branch: ${ctx.branch}).`);
+      console.log(`  Its value is unchanged — run ${B(`capy rotate ${varName}`)} to replace it.`);
       console.log('');
     }
 
@@ -282,7 +288,7 @@ export class ConnectCommand {
         varName,
         mode: entry.mode as 'test' | 'live' | undefined,
         accountId: entry.account_id,
-        ...(keyTypePrefix(value) ? { keyPrefix: keyTypePrefix(value) as string } : {}),
+        ...(entry.key_prefix ? { keyPrefix: entry.key_prefix } : {}),
         fingerprint: entry.fingerprint,
         expiresAt: entry.expires_at,
         detail,
@@ -390,7 +396,6 @@ export function rotateLiveGateStops(args: {
     mode: 'live',
     ...(args.accountId ? { account: args.accountId } : {}),
     alreadySignedIn: true,
-    refreshOffered: false,
     push: args.push,
     ...(args.pushFromFlag ? { pushFromFlag: true } : {}),
   });

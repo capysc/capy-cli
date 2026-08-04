@@ -793,13 +793,13 @@ program
 
 program
   .command('connect [provider]')
-  .description('Connect a third-party provider and pull a credential into .env')
+  .description('Link an existing .env variable to a third-party provider')
   .option('--live', 'use live mode (default: test)')
-  .option('--var <name>', 'env var name to write')
+  .option('--var <name>', 'which existing env var the connection describes')
   .option('--account <id>', 'pick a specific provider account when multiple are configured')
-  .option('--no-push', 'write to .env only; do not push to Capy')
-  .option('-f, --force', 'overwrite an existing value without prompting')
+  .option('--no-push', 'record the link locally; do not push it to Capy')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
+  .option('--reauth', 'pair with the provider again even if a usable session exists')
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
@@ -824,8 +824,8 @@ program
       var: options.var,
       account: options.account,
       noPush: options.push === false,
-      force: merged.force,
       nonTty: options.nonTty,
+      reauth: options.reauth === true,
     });
   });
 

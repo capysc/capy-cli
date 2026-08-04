@@ -82,14 +82,6 @@ export interface ConnectPlanInput {
   alreadySignedIn?: boolean;
   /** The hand-off ran and came back, so the stop is behind the traveller. */
   signedIn?: boolean;
-  /**
-   * Whether the key this run is taking is near expiry, and so whether the
-   * refresh offer happens at all. Undefined until the key has been read —
-   * which is why the stop is `upcoming` rather than `skipped` before then.
-   */
-  refreshOffered?: boolean;
-  /** The answer to the refresh offer, once it has been made. */
-  refreshAccepted?: boolean;
   /** False under `--no-push`: the key lands in .env and goes no further. */
   push: boolean;
   /** `--no-push` was explicit rather than the default. */
@@ -115,8 +107,8 @@ export interface ConnectPlanInput {
 /**
  * The stops `capy connect <provider>` travels, in the order it travels them.
  *
- * The order is `connect()`'s own — variable, mode, sign-in, account, refresh,
- * push — not the dependency order the screen's documentation describes. A rail
+ * The order is `connect()`'s own — variable, mode, sign-in, account, push —
+ * not the dependency order the screen's documentation describes. A rail
  * is a claim about the run in front of you, and a rail whose stops are ordered
  * one way while the questions arrive another would be describing a different
  * command.
@@ -192,23 +184,6 @@ export function connectPlan(input: ConnectPlanInput): ConnectStop[] {
   });
 
   stops.push({
-    id: 'refresh',
-    label: 'Refresh key',
-    manual: true,
-    // A run whose key is not near expiry never visits this stop, and saying so
-    // up front is the point of drawing the whole route: it says Capy is
-    // watching the expiry, which is the reason `capy rotate` exists.
-    state:
-      input.refreshOffered === false
-        ? 'skipped'
-        : stateFor('refresh', input.refreshAccepted !== undefined, input.standing),
-    detail: 'the key is nearly out — pair again for a fresh one',
-    ...(input.refreshAccepted !== undefined
-      ? { answer: input.refreshAccepted ? 'paired again' : 'kept the current key' }
-      : {}),
-  });
-
-  stops.push({
     id: 'push',
     label: 'Push',
     // Never a question: `--no-push` settles it and nothing else asks. It is
@@ -230,12 +205,17 @@ export function connectPlan(input: ConnectPlanInput): ConnectStop[] {
         : input.pushOutcome === 'failed'
           ? 'current'
           : 'upcoming',
+    // What travels here is the keep.lock connector record, not a credential.
+    // `connect` does not write a value, so "encrypt and push" — which this
+    // said while the command was overwriting `.env` — now describes a thing
+    // that does not happen. The env blob is re-encrypted on the way past, but
+    // its contents are the same ones that went in.
     detail:
       input.pushOutcome === 'failed'
         ? `did not reach Capy (branch: ${input.branch})`
         : input.push
-          ? `encrypt and push to Capy (branch: ${input.branch})`
-          : 'write to .env on this machine only',
+          ? `record the link with Capy (branch: ${input.branch})`
+          : 'record the link on this machine only',
     ...(input.pushOutcome === 'failed' ? { blank: true } : {}),
     ...(input.pushOutcome === 'landed'
       ? { answer: `pushed to ${input.branch}` }

@@ -821,7 +821,12 @@ describeBrowser('capy connect, driven by a real browser', () => {
     // The rail is the CLI's plan, drawn whole before anything was answered —
     // including the stops this page is not standing on.
     expect(await evaluate<boolean>(page, `document.body.textContent.includes('Sign in')`)).toBe(true);
-    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Refresh key')`)).toBe(true);
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Account')`)).toBe(true);
+    // And NOT `Refresh key`. That stop re-paired with Stripe to freshen a
+    // nearly-expired key, which only made sense while connect wrote the key
+    // into `.env`. A rail that still drew it would be promising a step the
+    // command no longer travels.
+    expect(await evaluate<boolean>(page, `document.body.textContent.includes('Refresh key')`)).toBe(false);
 
     await evaluate(page, clickOption('STRIPE_SECRET_KEY'));
     await evaluate(page, clickButton('Use this variable'));

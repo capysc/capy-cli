@@ -17,7 +17,12 @@ describe('connectPlan', () => {
 
   test('declares the whole route in the order connect() travels it', () => {
     const stops = connectPlan({ ...BASE, standing: 'var' });
-    expect(stops.map((s) => s.id)).toEqual(['cli', 'var', 'mode', 'auth', 'account', 'refresh', 'push']);
+    expect(stops.map((s) => s.id)).toEqual(['cli', 'var', 'mode', 'auth', 'account', 'push']);
+    // No `refresh`. It re-ran `stripe login`, which rewrites the user's
+    // pairing — a credential operation, and `connect` does not do those. It
+    // earned its place when connect wrote the key into `.env`; nothing is
+    // written now, so `capy rotate` owns the near-expiry decision.
+    expect(stops.some((s) => s.id === 'refresh')).toBe(false);
   });
 
   test('the precheck stop is on the rail even though it is never a question', () => {
@@ -77,21 +82,23 @@ describe('connectPlan', () => {
       ...BASE,
       standing: 'account',
       alreadySignedIn: true,
-      refreshOffered: false,
     });
     const byId = Object.fromEntries(stops.map((s) => [s.id, s]));
     expect(byId.auth.state).toBe('skipped');
     expect(byId.auth.answer).toBe('already paired');
-    expect(byId.refresh.state).toBe('skipped');
-    // Still seven stops: a skipped station is a fact about the route.
-    expect(stops).toHaveLength(7);
+    // Still six stops: a skipped station is a fact about the route, and an
+    // already-paired run really did travel past the sign-in.
+    expect(stops).toHaveLength(6);
   });
 
-  test('the two hand-offs are marked manual, so their track draws dotted', () => {
+  test('the one hand-off is marked manual, so its track draws dotted', () => {
+    // Sign-in is the only stop left that Capy cannot travel for you: the
+    // provider's own browser pairing. `refresh` was the other, and removing it
+    // means the route now has exactly one thing it hands back to the user.
     const stops = connectPlan({ ...BASE, standing: 'var' });
     expect(stops.find((s) => s.id === 'auth')!.manual).toBe(true);
-    expect(stops.find((s) => s.id === 'refresh')!.manual).toBe(true);
     expect(stops.find((s) => s.id === 'account')!.manual).toBeUndefined();
+    expect(stops.filter((s) => s.manual)).toHaveLength(1);
   });
 
   test('push is the terminus and never a question', () => {

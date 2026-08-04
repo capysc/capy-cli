@@ -124,15 +124,26 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
  * `capy push` / `capy` will pick it up. Local-only mode skips the merge so
  * the connector field doesn't get attached until a real push.
  */
+/**
+ * Write a variable (when there is one to write), attach its connector, sync.
+ *
+ * `value === undefined` is the METADATA-ONLY mode, and it is what `connect`
+ * uses: the env map goes to the service unchanged and only keep.lock's
+ * connector entry moves. Everything downstream — the keep merge, the push, the
+ * cache, the sync state, the auto-commit — is identical either way, which is
+ * why this is one function and not two. `rotate` is the caller that passes a
+ * value, because replacing a credential is what rotate is for.
+ */
 export async function writeAndSync(
   ctx: ResolvedContext,
   varName: string,
-  value: string,
+  value: string | undefined,
   opts: { push: boolean; connector?: ConnectorMetadata },
 ): Promise<void> {
   const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
 
-  const finalEnv: Record<string, string> = { ...localPlaintext, [varName]: value };
+  const finalEnv: Record<string, string> =
+    value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
 
   if (!opts.push) {
     // Local-only path. Even though we're not hitting the service, we still

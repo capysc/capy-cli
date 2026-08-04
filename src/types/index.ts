@@ -27,6 +27,17 @@ export interface ConnectorMetadata {
   rotated_at?: number;
   /** `abc…xyz`-style snippet of the credential value; never the plaintext. */
   fingerprint: string;
+  /**
+   * The credential's type prefix — `sk_test_`, `rk_live_` — recorded so the
+   * screens can name it without the value in hand.
+   *
+   * `fingerprint` cannot stand in: it keeps three characters, so `sk_` and
+   * `sk_test_` collapse to the same thing and a live key stops being
+   * distinguishable from a test one at exactly the confirmation that exists to
+   * distinguish them. Recorded at connect and refreshed at rotate; absent on
+   * entries written before this field existed, which is why it is optional.
+   */
+  key_prefix?: string;
 }
 
 /** v3 keep.lock variable entry — per-branch value hashes */
