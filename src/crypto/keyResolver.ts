@@ -25,17 +25,9 @@ import {
   saveLocalRoot,
   saveLocalRootExclusive,
   getLocalRootMode,
-  setLocalRootMode,
   LOCAL_ORG_ID,
 } from '../config/globalConfig';
 import { generateLocalRoot, deriveLocalInnerKey } from './localKeyRoot';
-import {
-  isKeychainAvailable,
-  readKeychainRoot,
-  saveKeychainRootExclusive,
-  saveKeychainRoot,
-  wantsKeychainBackend,
-} from './keychainBackend';
 import { CapyError, ERROR_CODES } from '../types/index';
 
 /** True for a LOCAL_KEY_BACKEND_ERROR — must propagate, never be swallowed as a generic error. */
@@ -44,21 +36,19 @@ function isLocalKeyBackendError(err: unknown): boolean {
 }
 
 /**
- * Mode-aware K_local read. If this (org, user) previously minted via the
- * keychain backend (mode marker says 'keychain') but the entry is now
- * missing or unreadable, this throws rather than treating it as "never
- * minted" — silently falling through would mint a second root under the
- * file backend and orphan the existing key.enc with no signal that
- * anything went wrong.
+ * Mode-aware K_local read. The OS-keychain backend is gone (see
+ * globalConfig's mode-marker note), but an install that opted into it while
+ * it existed still has its K_local sitting in the OS keychain and a marker
+ * on disk saying so. Fail closed for those: falling through to the file
+ * backend would read "never minted", mint a second root, and orphan the
+ * existing key.enc with no signal that anything went wrong.
  */
 function readAnyLocalRoot(orgId: string, userId?: string): Buffer | null {
   if (getLocalRootMode(orgId, userId) === 'keychain') {
-    const root = readKeychainRoot(orgId, userId);
-    if (root) return root;
     throw new CapyError(
-      'This machine\'s K_local is stored in the OS keychain, but the entry is missing or unreadable.\n\n' +
+      'This machine\'s K_local was stored in the OS keychain, which this version of capy no longer supports.\n\n' +
       'Not falling back to a plaintext key — that would silently orphan your existing access.\n' +
-      'Restore access with capy redeem or seed-phrase recovery, or investigate the OS keychain entry (service "capy").',
+      'Restore access with capy redeem or seed-phrase recovery.',
       ERROR_CODES.LOCAL_KEY_BACKEND_ERROR,
       { orgId, userId },
     );
@@ -160,8 +150,8 @@ export async function unwrapMasterKey(
     // doesn't get misclassified as PERMISSION_DENIED and nuke local keys.
     if (isNetworkError(err)) throw err;
 
-    // Keychain mode committed but broken — re-throw. Falling through here
-    // would mint a fresh file-backed root and silently mask the real problem.
+    // K_local stranded in the removed keychain backend — re-throw. Falling
+    // through here would mint a fresh file-backed root and silently mask it.
     if (isLocalKeyBackendError(err)) throw err;
 
     // Other errors (e.g. blob isn't KMS-wrapped) → fall through to legacy
@@ -240,32 +230,6 @@ export async function resolveProjectKey(
 function loadOrMintLocalRoot(orgId: string, userId: string): Buffer {
   const existing = readAnyLocalRoot(orgId, userId);
   if (existing) return existing;
-
-  // First mint for this (org, user) on this machine — nothing committed
-  // yet, so a soft fallback to the file backend here is fine (matches
-  // "clean downgrade when unavailable", not the fail-closed case above,
-  // which only applies once a backend has actually been chosen).
-  if (wantsKeychainBackend() && isKeychainAvailable()) {
-    const fresh = generateLocalRoot();
-    if (saveKeychainRootExclusive(orgId, fresh, userId)) {
-      setLocalRootMode(orgId, 'keychain', userId);
-      return fresh;
-    }
-
-    // Lost the mint race — adopt the winner's root.
-    const winner = readKeychainRoot(orgId, userId);
-    if (winner) {
-      setLocalRootMode(orgId, 'keychain', userId);
-      return winner;
-    }
-
-    // An entry exists but doesn't parse as a 32-byte root (corrupt/foreign
-    // value). Same "unrecoverable, replace it" logic as the file backend's
-    // corrupt-write recovery below.
-    saveKeychainRoot(orgId, fresh, userId);
-    setLocalRootMode(orgId, 'keychain', userId);
-    return fresh;
-  }
 
   const fresh = generateLocalRoot();
   if (saveLocalRootExclusive(orgId, fresh, userId)) return fresh;
