@@ -1,6 +1,6 @@
 {
   "name": "@capysc/cli",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Capy CLI - SecretOps for the AI age",
   "main": "dist/index.js",
   "bin": {
