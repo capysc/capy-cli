@@ -19,6 +19,7 @@ import {
   buildLiveGateData,
   chooseConnectorInBrowser,
   confirmLiveActionInBrowser,
+  signInInBrowser,
   type ConnectQuestion,
   type WebConnectSetupParams,
 } from '../../src/ui/connectScreens';
@@ -285,6 +286,137 @@ describe('askConnectInBrowser', () => {
     const out = await askConnectInBrowser({ ...params([]), onListen: () => (opened = true) });
     expect(out).toEqual({ answers: {}, cancelled: false });
     expect(opened).toBe(false);
+  });
+});
+
+/**
+ * The stop this flow used to skip.
+ *
+ * Every other question `capy connect stripe` asks has had a `--web` answer
+ * since the screens landed; sign-in did not, and fell through to `stripe login`
+ * with an inherited stdout — which on the MCP transport is the tool-result
+ * channel, so the pairing URL and code went to the AI agent and the user was
+ * never asked anything (CAP-365).
+ */
+describe('signInInBrowser', () => {
+  const AUTH_Q: ConnectQuestion = {
+    kind: 'auth',
+    command: 'stripe login',
+    state: 'ready',
+    pairingCode: 'grin-faster-mature-bright',
+  };
+
+  test('the page carries the pairing code and stands on the sign-in stop', async () => {
+    let url = '';
+    const done = signInInBrowser({ ...params([AUTH_Q]), onListen: (u) => (url = u) }, async () => true);
+    const u = new URL(await waitForUrl(() => url));
+    const page = await (await fetch(u.href)).text();
+
+    expect(page).toContain('"step":"auth"');
+    // The whole point of the screen: the code is on it, so the user can compare
+    // it with the one Stripe shows rather than just clicking approve.
+    expect(page).toContain('grin-faster-mature-bright');
+
+    await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce: u.searchParams.get('n'), payload: { __action: 'submit', step: 'auth' } }),
+    });
+    expect(await done).toBe('paired');
+  });
+
+  test('the hand-off runs inside the reducer, and the answer is its verdict', async () => {
+    // `approve` opens Stripe and then BLOCKS polling for the approval. A
+    // reducer is the one place in this transport that may block — the wizard's
+    // clock is disarmed for as long as one is working — and a pairing that
+    // never landed must come back false rather than as a sign-in.
+    let ran = false;
+    let url = '';
+    const done = signInInBrowser({ ...params([AUTH_Q]), onListen: (u) => (url = u) }, async () => {
+      ran = true;
+      await new Promise((r) => setTimeout(r, 30));
+      return false;
+    });
+    const u = new URL(await waitForUrl(() => url));
+    await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce: u.searchParams.get('n'), payload: { __action: 'submit', step: 'auth' } }),
+    });
+    // Not `declined`: nobody said no, the approval simply never came. One is a
+    // decision that ends the run at 0 and the other is a wall that ends it at 1.
+    expect(await done).toBe('not-approved');
+    expect(ran).toBe(true);
+  });
+
+  test('cancelling never starts the hand-off', async () => {
+    let ran = false;
+    let url = '';
+    const done = signInInBrowser({ ...params([AUTH_Q]), onListen: (u) => (url = u) }, async () => {
+      ran = true;
+      return true;
+    });
+    const u = new URL(await waitForUrl(() => url));
+    await fetch(`http://127.0.0.1:${u.port}/submit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ nonce: u.searchParams.get('n'), payload: { __action: 'cancel' } }),
+    });
+    expect(await done).toBe('declined');
+    expect(ran).toBe(false);
+  });
+
+  test('a submit this screen has no control to produce is refused inline', async () => {
+    let url = '';
+    const done = signInInBrowser(
+      { ...params([AUTH_Q]), timeoutMs: 4_000, onListen: (u) => (url = u) },
+      async () => true,
+    );
+    const u = new URL(await waitForUrl(() => url));
+    const post = (payload: Record<string, unknown>) =>
+      fetch(`http://127.0.0.1:${u.port}/submit`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ nonce: u.searchParams.get('n'), payload }),
+      });
+    expect((await (await post({ __action: 'submit', mode: 'live' })).json()).error).toContain(
+      'sign-in step',
+    );
+    await post({ __action: 'cancel' });
+    expect(await done).toBe('declined');
+  });
+
+  test('a pairing with no code still asks — the code is a comparison, not the pairing', () => {
+    const q: ConnectQuestion = { kind: 'auth', command: 'stripe login', state: 'ready' };
+    const d = buildConnectSetupData(params([q]), q, {}, 'n');
+    expect(d.auth).toEqual({ command: 'stripe login', state: 'ready' });
+    // Omitted rather than empty: the screen picks between two readings of its
+    // own instruction on whether there is a code, and an empty string would put
+    // "compare the code below" above a blank row.
+    expect('pairingCode' in (d.auth ?? {})).toBe(false);
+  });
+
+  test('the sign-in stop has a headless escape, and it is not a flag', () => {
+    const d = buildConnectSetupData(params([AUTH_Q]), AUTH_Q, {}, 'n');
+    expect(d.step).toBe('auth');
+    expect(d.stops.filter((s) => s.state === 'current').map((s) => s.id)).toEqual(['auth']);
+    // No flag completes a pairing a person has to approve, so the escape is to
+    // already be signed in before the run starts.
+    expect(d.nonTty?.command).toContain('stripe login');
+  });
+
+  test('the rail cannot claim the sign-in already happened while it is asking', () => {
+    // `connectPlan` resolves an ANSWERED stop to `done` before it looks at
+    // where the traveller is standing, so a caller that folds its `signedIn`
+    // forward onto this screen draws "Sign in ✓ paired" over the page asking
+    // someone to go and do it. The call site drops it for exactly this reason;
+    // this is the assertion that says so.
+    const p = { ...params([AUTH_Q]), plan: { ...PLAN, signedIn: true } };
+    const stops = buildConnectSetupData(p, AUTH_Q, {}, 'n').stops;
+    expect(stops.find((s) => s.id === 'auth')?.state).toBe('done');
+    expect(buildConnectSetupData(params([AUTH_Q]), AUTH_Q, {}, 'n').stops.find((s) => s.id === 'auth')?.state).toBe(
+      'current',
+    );
   });
 });
 
