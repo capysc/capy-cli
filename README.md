@@ -27,11 +27,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/capysc/capy-cli/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/capysc/capy-cli/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/capysc/capy-cli/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/capysc/capy-badges/main/capy-cli-tests.json"></a>
-  <a href="https://www.npmjs.com/package/@capysc/cli"><img alt="npm" src="https://img.shields.io/npm/v/@capysc/cli"></a>
-  <a href="https://nodejs.org"><img alt="Node" src="https://img.shields.io/badge/node-%3E%3D18-brightgreen"></a>
-  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
+  <a href="https://github.com/capysc/capy-cli/actions/workflows/ci.yml"><img alt="Continuous integration status" src="https://github.com/capysc/capy-cli/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/capysc/capy-cli/actions/workflows/ci.yml"><img alt="Test suite status" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcapysc%2Fcapy-badges%2Fmain%2Fcapy-cli-tests.json"></a>
+  <a href="https://www.npmjs.com/package/@capysc/cli"><img alt="Latest npm package version" src="https://img.shields.io/npm/v/@capysc/cli"></a>
+  <a href="https://nodejs.org"><img alt="Minimum Node.js version: 18" src="https://img.shields.io/badge/node-%3E%3D18-brightgreen"></a>
+  <a href="./LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
 Capy is a secrets toolchain with git-style primitives — branch, sync, deploy, revoke — end-to-end encrypted on your machine and fully revocable for humans and agents. Your `.env` becomes versioned state your team can commit, roll back, and offboard without rotating a single key.

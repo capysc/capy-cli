@@ -84,13 +84,15 @@ export function hasLocalRoot(orgId: string, userId?: string): boolean {
   return existsSync(getLocalRootPath(orgId, userId));
 }
 
-// --- K_local backend mode marker ---
+// --- K_local backend mode marker (read-only legacy detection) ---
 //
-// Absence of this file means 'file' — today's plaintext-local.key behavior,
-// unchanged for every install that never opts into the keychain backend.
-// Only ever written when the keychain backend is actually chosen at mint
-// time, so existing installs and every test that doesn't explicitly opt in
-// are byte-identical to before this file existed.
+// The OS-keychain backend was removed, so nothing writes this file anymore
+// and 'file' is the only mode capy mints. The read stays because installs
+// that opted in via CAPY_LOCAL_KEY_BACKEND=keychain while it existed still
+// have the marker on disk and their K_local in the OS keychain; keyResolver
+// uses this to fail closed for them instead of silently minting a second
+// root. Absence of the file means 'file', so every other install is
+// unaffected.
 
 export function getLocalRootModePath(orgId: string, userId?: string): string {
   return getLocalRootPath(orgId, userId) + '.mode';
@@ -101,10 +103,6 @@ export type LocalRootMode = 'file' | 'keychain';
 export function getLocalRootMode(orgId: string, userId?: string): LocalRootMode {
   const content = readFileOrNull(getLocalRootModePath(orgId, userId));
   return content?.trim() === 'keychain' ? 'keychain' : 'file';
-}
-
-export function setLocalRootMode(orgId: string, mode: LocalRootMode, userId?: string): void {
-  writeSecureFile(getLocalRootModePath(orgId, userId), mode);
 }
 
 export function getGlobalConfigPath(): string {
