@@ -1,8 +1,8 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { createHash, randomBytes } from 'crypto';
 import { URL } from 'url';
-import open from 'open';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { openScreen } from '../ui/openScreen';
 import { renderScreen, screenHeaders } from '../ui/screens/serve';
 
 const CALLBACK_PORTS = [19420, 19421, 19422, 19423, 19424];
@@ -51,6 +51,17 @@ export class OAuthServer {
   /**
    * Bind to the first available port from the candidate list.
    * Must be called before startAuthFlow.
+   *
+   * Loopback ONLY — the host argument is load-bearing, not decoration. Omitting
+   * it binds every interface, and the callback handler is meant to be reachable
+   * from this machine and nowhere else. `state` gates what the handler accepts,
+   * but the surface itself should never be exposed beyond loopback. Every local
+   * server in this CLI pins 127.0.0.1 for the same reason.
+   *
+   * The redirect URI keeps saying `localhost` because the service validates
+   * the string it was handed at /auth/initiate. Browsers resolve localhost to
+   * both ::1 and 127.0.0.1 and fall through to the second on connection
+   * refused, so an IPv4-only bind still receives the callback.
    */
   async bind(): Promise<void> {
     this.server = createServer(this.handleRequest.bind(this));
@@ -65,7 +76,7 @@ export class OAuthServer {
       try {
         await new Promise<void>((resolve, reject) => {
           this.server.once('error', reject);
-          this.server.listen(candidate, () => {
+          this.server.listen(candidate, '127.0.0.1', () => {
             this.server.removeListener('error', reject);
             resolve();
           });
@@ -87,11 +98,23 @@ export class OAuthServer {
     return new Promise((resolve, reject) => {
       console.log(`🔐 Starting OAuth authentication...`);
 
-      open(authUrl).then(() => {
-        console.log(`✓ Opened browser for authentication`);
-        console.log(`  If the browser didn't open, visit: ${authUrl}`);
-      }).catch(() => {
-        console.error(`❌ Failed to open browser. Please visit: ${authUrl}`);
+      // Always print the URL up front so it's available even if the browser
+      // never opens (no TTY, headless, --web driven through the MCP, or `open`
+      // silently failing). The auto-open below is a best-effort convenience.
+      console.log('');
+      console.log(`  If the browser doesn't open, visit:`);
+      console.log(`  ${authUrl}`);
+      console.log('');
+
+      // `handoff`, and it is the ONLY handoff in the CLI: sign-in is the one
+      // page we do not serve. The person needs the address bar to check where
+      // they are being asked for a password, and needs to be able to move the
+      // window to whichever profile their session lives in — a chromeless
+      // popup takes both away. Going through the helper also puts this call
+      // behind CAPY_WEB_NO_OPEN for the first time; before, a suite or CI run
+      // that reached authentication opened the developer's own browser.
+      void openScreen(authUrl, { kind: 'handoff' }).then((plan) => {
+        if (plan.via !== 'suppressed') console.log(`✓ Opened browser for authentication`);
       });
 
       const timeout = setTimeout(() => {

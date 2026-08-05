@@ -94,7 +94,7 @@ export class UsersCommand {
     return { projectId: project.id, branchId: (branch as any).id, userId: member.userId };
   }
 
-  async execute(): Promise<void> {
+  async execute(opts: { json?: boolean } = {}): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
 
@@ -120,9 +120,11 @@ export class UsersCommand {
       process.exit(1);
     }
 
-    // Fetch member details
-    const spinner = new Spinner('Loading members...');
-    spinner.start();
+    // Fetch member details. In --json mode emit NO progress at all so stdout stays
+    // pure JSON even on a TTY (the Spinner already routes to stderr when piped; this
+    // also covers an interactive run). CAP-273.
+    const spinner = opts.json ? null : new Spinner('Loading members...');
+    spinner?.start();
     let members;
     let callerRole = '';
     let currentUserId = '';
@@ -134,11 +136,42 @@ export class UsersCommand {
       members = result.members;
       callerRole = me.role;
       currentUserId = me.user_id;
-      spinner.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
+      spinner?.succeed(`${members.length} member${members.length !== 1 ? 's' : ''}`);
     } catch (err: any) {
-      spinner.fail('Failed to load members');
+      spinner?.fail('Failed to load members');
       console.error(`  ${err.message}`);
       process.exit(1);
+    }
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            members: members.map((m: any) => ({
+              membershipId: m.membershipId,
+              userId: m.userId,
+              email: m.email,
+              role: m.role,
+              status: m.status,
+              joinedAt: m.createdAt,
+              projects: (m.projects || []).map((p: any) => ({
+                id: p.id,
+                name: p.name,
+                role: p.role ?? null,
+                branches: (p.branches || []).map((b: any) => ({
+                  id: b.id,
+                  name: b.name,
+                  isProtected: b.isProtected,
+                  hasAccess: b.hasAccess,
+                })),
+              })),
+            })),
+          },
+          null,
+          2,
+        ),
+      );
+      return;
     }
 
     if (members.length === 0) {

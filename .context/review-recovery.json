@@ -1,0 +1,47 @@
+{
+  "parcel": "recovery",
+  "branch": "web/recovery",
+  "verdict": "pass",
+  "browser_test_exists": true,
+  "browser_test_passes": true,
+  "suite_green": true,
+  "secrets_leak": false,
+  "problems": [
+    {
+      "file": "src/index.ts",
+      "problem": "`--web` is accepted but silently ignored for all three commands. I verified with commander (v11, same config as this repo) that `capy transport --web` parses and reaches the action; the action never reads `optsWithGlobals().web`, so the TERMINAL path runs and the redeem code \u2014 a bearer credential for the whole account \u2014 is still printed to stdout. That is precisely the leak this parcel exists to close, and `capy recover --web` likewise falls through to a dead TTY prompt (the exact bug index.ts:663-667 documents for `capy add --web`). The parcel rules forbid touching index.ts and the report discloses this, so it is not the agent's defect \u2014 but the flag is live-and-ignored today, which is worse than absent, and the coordinator must wire lines 550/642/651.",
+      "severity": "major"
+    },
+    {
+      "file": "src/commands/endRecoverCommand.ts",
+      "problem": "`--web` changes what gets DELETED, not only how a question is rendered. With plaintext present and NO recovery session open, the terminal path returns early ('No recovery session active.') and removes nothing; `executeInBrowser` (line 132) offers the sweep anyway, and I confirmed by clicking that every row arrives PRE-TICKED, so the default submit unlinks files the terminal would never have touched. Disclosed in the report and defensible as a product decision, but it violates the brief's '--web changes the RENDERING of a question, never the logic ... or what gets written' and deserves an explicit owner sign-off rather than landing inside a rendering parcel.",
+      "severity": "major"
+    },
+    {
+      "file": "tests/ui/browserFlow.e2e.test.ts",
+      "problem": "The `unverified` fork \u2014 the one genuinely NEW control this parcel invents (a danger submit that writes a master key under a guessed KDF version when the trial decryption could not run) \u2014 has no browser test. It is exercised only by fetch against the loopback (tests/ui/recoveryScreens.test.ts:359-458), which is exactly the gap the brief says killed three inventions this session. I wrote and ran a throwaway CDP test against the real page: `answer:()=>({writeUnverified:!0})` exists in the compiled screen, the danger submit is gated on a consent box, and clicking it writes once with `kdfVersion` null \u2014 so it does work, but the branch shipped unclicked. Same for the no-session end-recover sweep and the transport `Cancel` button (both of which I also clicked and both of which pass).",
+      "severity": "minor"
+    },
+    {
+      "file": "src/commands/transportCommand.ts",
+      "problem": "`capy transport` reaches `resolveOrgContext`, which itself asks an inquirer `list` ('Select organization:', src/core/orgContext.ts:50) when there is no keep.lock and more than one org. That prompt has no `--web` path, so once index.ts is wired, `capy transport --web` can still block on a TTY question before the browser ever opens. The file is shared (invite/kick/users) and outside the parcel, so leaving it is correct \u2014 but it is an unclosed hole in 'every prompt in this flow has a --web path' and belongs on the coordinator's list.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/core/recoverPlan.ts",
+      "problem": "The `manual: true` branch (line 84) is unreachable from the product: `buildRecoverData` hardcodes `signedIn: true` (src/ui/recoveryScreens.ts:211) because `recover` authenticates before it serves anything, so the only dotted-track stop the rail can draw is never drawn. It is exercised solely by tests/core/recoverPlan.test.ts. Harmless, and arguably correct for a future `--json`, but the contract's `manual` modifier currently has no live producer here.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/commands/endRecoverCommand.ts",
+      "problem": "`readSessionSummary()` puts the organization's UUID into `session.orgName`, so the page reads 'Session for  b3f1\u2026'. Disclosed, and fixing it means writing the name at `saveRecoverySession` time in src/config/globalConfig.ts (out of parcel), but the payload field is named `orgName` and does not carry one.",
+      "severity": "minor"
+    },
+    {
+      "file": "tests/ui/browserFlow.e2e.test.ts",
+      "problem": "The new browser tests select by `[role=radio]`/`[role=checkbox]` + `.label` text and by button copy ('Use this organization', 'Overwrite key', 'Recover key', 'End session and delete', 'Close this out') because these three screens carry no `data-test` hooks the way `sync-conflict` does. Any copy edit in packages/ui breaks them with a `.find(...)` TypeError rather than a readable failure. Worth a `data-test` request to the packages/ui owner.",
+      "severity": "minor"
+    }
+  ],
+  "notes": "VERIFIED INDEPENDENTLY in a fresh detached worktree at 0c116ac (never reused the agent's .wt-recovery), with dist built from source. (1) BROWSER TESTS: real, and they really click. tests/ui/browserFlow.e2e.test.ts:579 adds 5 tests driving a cached chrome-headless-shell over CDP with a throwaway profile; `bun test tests/ui/browserFlow.e2e.test.ts` = 16 pass / 0 fail / 52 expects in 17s. Not skipped \u2014 a shell is cached at ~/.cache/puppeteer and no 'no cached chrome-headless-shell' warning appears in the suite log. They click a real radio, a real destructive checkbox, dispatch `input` on 24 `input[aria-label=\"Word N\"]` boxes, and assert each answer is a page RELOAD serving the next stop. I then wrote my own adversarial CDP probe for the paths they missed (unverified fork, no-session sweep, inline server refusal, transport Cancel) \u2014 4/4 pass, so the untested branches are also genuinely wired. Probe deleted afterwards. (2) SUITE: `bash tests/run-tests.sh` = 684 pass / 0 fail across 58 files, exit 0 \u2014 exactly the claimed number (630 baseline + 11 recoverPlan + 38 recoveryScreens + 5 browser). My first run showed 24 failures; those were my own environment (no dist/ for the spawn-based `capy run`/`capy deploy` tests, and a /tmp worktree that could not resolve the monorepo's hoisted node_modules) and vanished after `tsc` built dist. Nothing regressed. (3) NO SECRET VALUE IN ANY PAYLOAD. `buildRecoverData` has no field that can hold a phrase, a master key, or a fingerprint of either; the pending phrase on the unverified fork is a local in `recoverInBrowser`'s frame and I confirmed in a real browser that it is absent from `document.documentElement.outerHTML` on the page handed back. `buildEndRecoverData` carries filenames/ages/sizes only. `buildTransportData` renders `redeemCommand` INTO the page \u2014 that is contract-mandated (contract.ts:4880 marks it SECRET, blurred, never returned) and structurally cannot come back: the reducer refuses any payload whose keys are not exactly `['__action']`. Nothing prints or logs a phrase or the code. (4) TRAINSTOPS ARE THE CLI'S: built by the pure exported `src/core/recoverPlan.ts`, branchCreatePlan-shaped, called from `buildRecoverData`; the screen only receives the array. Same posture as the syncConflictScreen reference. `capy recover` has no `--json` today so nothing consumes it yet. (5) PARCEL BOUNDARIES CLEAN: diff touches only recoverCommand.ts, endRecoverCommand.ts, transportCommand.ts, two new files (src/core/recoverPlan.ts, src/ui/recoveryScreens.ts) and three test files. No packages/ui, no generated.ts, no contract.ts, no browserWizard.ts, no index.ts, no run-tests.sh. (6) `bunx tsc -p tsconfig.json --noEmit` clean; runtime deps still exactly 6; `scripts/check-screens.mjs` = 6/6 used, 41 screens intact. (7) NO TEST CAN OPEN A REAL BROWSER: all three commands use `open: !process.env.CAPY_WEB_NO_OPEN` (recoverCommand.ts:368, endRecoverCommand.ts:152, transportCommand.ts:158), no new test invokes a command's execute(), and every screen-module call in the new tests passes `open: false` explicitly \u2014 stronger than relying on the env var. TERMINAL PATH: the `findOrgCiphertextOracle` refactor from `null` to a four-way `gap` code is behaviour-preserving for the TTY \u2014 every gap still falls into the same else-branch printing the same 'This org has no stored secrets yet' warning and writing under CURRENT_KDF_VERSION; tests/commands/recoverCommand.test.ts and recoverKdf.test.ts pass unchanged. Commit message is in the codebase's voice and states what was wrong before, not just what changed. Branch is committed, not pushed, not rebased; base feat/cli-mcp has moved to 8405d39 (docs-only) so it still merges cleanly."
+}

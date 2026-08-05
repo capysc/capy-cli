@@ -1,3 +1,5 @@
+import type { AuthFailureReason as ScreenAuthFailureReason } from '../ui/screens/contract';
+
 /**
  * Marker for an env var that was provisioned by a `capy connect <provider>`
  * flow. Lives on the per-branch variable entry so different branches can
@@ -25,6 +27,17 @@ export interface ConnectorMetadata {
   rotated_at?: number;
   /** `abc…xyz`-style snippet of the credential value; never the plaintext. */
   fingerprint: string;
+  /**
+   * The credential's type prefix — `sk_test_`, `rk_live_` — recorded so the
+   * screens can name it without the value in hand.
+   *
+   * `fingerprint` cannot stand in: it keeps three characters, so `sk_` and
+   * `sk_test_` collapse to the same thing and a live key stops being
+   * distinguishable from a test one at exactly the confirmation that exists to
+   * distinguish them. Recorded at connect and refreshed at rotate; absent on
+   * entries written before this field existed, which is why it is optional.
+   */
+  key_prefix?: string;
 }
 
 /** v3 keep.lock variable entry — per-branch value hashes */
@@ -147,6 +160,34 @@ export interface Organization {
   name: string;
 }
 
+/**
+ * Why a silent authentication attempt failed, as a code rather than a
+ * sentence. `error` on `AuthResult` is for display; this is what callers
+ * branch on when they need to pick a recovery — notably, only some of these
+ * are fixed by signing in again. `no_session` means nothing was cached to
+ * refresh in the first place; the rest come from `RefreshFailureReason`.
+ */
+export type SilentAuthFailureCode =
+  | 'session_ended'
+  | 'org_not_found'
+  | 'server_error'
+  | 'network'
+  | 'no_session';
+
+/**
+ * The same vocabulary crosses the wire to the browser screens as
+ * `AuthFailureReason`, where it decides whether the page draws a sign-in
+ * button — so a member added on one side and not the other would render the
+ * wrong recovery rather than fail. The two declarations sit either side of a
+ * package boundary and cannot share a definition; this pair of assignments is
+ * what stops them drifting, and it fails at `tsc`, not at runtime.
+ */
+type AssertNever<T extends never> = T;
+export type SilentAuthCodeMatchesScreenContract = [
+  AssertNever<Exclude<SilentAuthFailureCode, ScreenAuthFailureReason>>,
+  AssertNever<Exclude<ScreenAuthFailureReason, SilentAuthFailureCode>>,
+];
+
 export interface AuthResult {
   success: boolean;
   organization_id?: string;
@@ -157,6 +198,8 @@ export interface AuthResult {
   user_last_name?: string | null;
   organizations?: Organization[];
   error?: string;
+  /** Machine-readable companion to `error`. Branch on this, never on `error`. */
+  error_code?: SilentAuthFailureCode;
   /** WorkOS refresh token for use with createOrganization when org selection is pending */
   _refresh_token?: string;
   /** How the token was obtained: 'cached', 'refreshed', or 'oauth' */
@@ -218,6 +261,10 @@ export interface CliOptions {
   verbose?: boolean;
   force?: boolean;
   dryRun?: boolean;
+  /** Render bare `capy`'s interactive steps (init trainstops / sync conflict resolver)
+   *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
+   *  interactive decision is actually reached (a clean sync stays terminal-only). */
+  web?: boolean;
 }
 
 export interface ProjectInitResult {
@@ -281,6 +328,21 @@ export const ERROR_CODES = {
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
   ORG_NOT_FOUND: 'ORG_NOT_FOUND',
   LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
+  // Local-state refusals: the command cannot start because this directory,
+  // this branch or this build does not hold what it needs. Nothing has been
+  // asked of the service yet, so none of these is a SERVICE_ERROR — and each
+  // one used to be a bare `console.error` + `process.exit(1)`, which under
+  // `--web` is a decision reported to a stream nobody is reading.
+  /** The branch has no connector-managed credentials, so there is nothing to rotate. */
+  NO_MANAGED_KEYS: 'NO_MANAGED_KEYS',
+  /** The branch has no variables at all yet. */
+  NO_VARIABLES: 'NO_VARIABLES',
+  /** The named variable is not in the environment on this branch. */
+  VARIABLE_NOT_FOUND: 'VARIABLE_NOT_FOUND',
+  /** No connector integrations are registered in this build. */
+  NO_CONNECTORS: 'NO_CONNECTORS',
+  /** `capy-dev` reached a live-mode credential. Dev never touches live. */
+  DEV_LIVE_FIREWALL: 'DEV_LIVE_FIREWALL',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

@@ -4,24 +4,54 @@ import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { Organization, KeepFile, CapyError, ERROR_CODES } from '../types/index';
+import { AuthResult, Organization, KeepFile, CapyError, ERROR_CODES } from '../types/index';
 import { hasOrgKey, resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { createNewOrganization } from './orgCreation';
 import { execSync } from 'child_process';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/**
+ * The branch a first project is bootstrapped with.
+ *
+ * Named rather than inline so the browser can state it before the project is
+ * created. The terminal only mentions it as a spinner line that has already
+ * scrolled past by the time anyone looks.
+ */
+const FIRST_BRANCH = 'development';
+
+export interface OrgCommandOptions {
+  /**
+   * Serve the three questions as browser screens instead of inquirer prompts.
+   *
+   * Agent-only, and NOT REACHABLE FROM ARGV YET. `src/index.ts` declares
+   * `--web` once, on the root program; a subcommand has to read the inherited
+   * global for itself, which `byoc` does in two lines:
+   *
+   *     const web = command.optsWithGlobals().web === true;
+   *
+   * `org`'s own action takes no `command` argument and never calls
+   * `optsWithGlobals`, so `new OrgCommand()` is always built without this. The
+   * flow below is live and browser-tested; the missing hop is argv wiring,
+   * which the coordinator owns centrally along with the rest of the command
+   * registry — this parcel may not edit index.ts.
+   */
+  web?: boolean;
+}
+
 export class OrgCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
   private authService: AuthService;
   private serviceClient: ServiceClient;
+  private web: boolean;
 
-  constructor(apiUrl?: string, devMode: boolean = false) {
+  constructor(apiUrl?: string, devMode: boolean = false, options: OrgCommandOptions = {}) {
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
     this.authService = new AuthService(apiUrl, devMode);
     this.serviceClient = new ServiceClient(apiUrl, devMode);
+    this.web = options.web === true;
 
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
@@ -32,7 +62,7 @@ export class OrgCommand {
     } catch (error: any) {
       if (error?.name === 'ExitPromptError') throw error;
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      displayErrorAndExit(error);
+      await displayErrorAndExit(error);
     }
   }
 
@@ -57,6 +87,14 @@ export class OrgCommand {
     const orgs = authResult.organizations || [];
     const currentOrg = currentOrgId ? orgs.find(o => o.id === currentOrgId) : undefined;
     const CREATE_NEW_ORG = '__create_new__';
+
+    if (this.web) {
+      // No TTY under --web (this is driven through the MCP): an inquirer list
+      // here would hang forever with nothing on screen and no URL to hand
+      // anybody. Same three questions, same order, served as screens.
+      await this._executeWeb(authResult, orgs, currentOrgId, hasProject);
+      return;
+    }
 
     console.log('');
     const { orgId } = await inquirer.prompt([{
@@ -156,7 +194,16 @@ export class OrgCommand {
     }]);
 
     const selectedProject = orgProjects.find(p => p.id === projectId)!;
+    this.bindToProject(selectedOrg, selectedProject, authResult.user_id, hasProject);
+  }
 
+  /** Point this directory at the chosen org+project and say so. */
+  private bindToProject(
+    selectedOrg: Organization,
+    selectedProject: { id: string; name: string },
+    userId: string | undefined,
+    hasProject: boolean,
+  ): void {
     if (hasProject) {
       // Update keep.lock with new org + project
       const keep: KeepFile = {
@@ -172,7 +219,7 @@ export class OrgCommand {
       this.fileManager.writeSyncState({
         last_sync: '',
         synced_variables: [],
-        user_id: authResult.user_id,
+        user_id: userId,
         org_id: selectedOrg.id,
       });
 
@@ -182,6 +229,139 @@ export class OrgCommand {
       console.log(`\n  Switched to ${B(selectedOrg.name)} / ${B(selectedProject.name)}`);
       console.log(`  Run ${B('capy')} in a project directory to sync secrets.\n`);
     }
+  }
+
+  /**
+   * The same three questions, served as screens.
+   *
+   * The order is the terminal's — organization, then project — and so is
+   * everything between them: the session is re-scoped, the device's key for the
+   * org is checked, the project list is fetched. Two things the terminal cannot
+   * do come for free from doing that work where the picker can hear the answer:
+   * an org this device holds no key for is refused in its own row rather than
+   * after a switch the CLI has already announced, and a failed re-scope leaves
+   * the list on screen with the reason attached instead of ending the run.
+   */
+  private async _executeWeb(
+    authResult: AuthResult,
+    orgs: Organization[],
+    currentOrgId: string | undefined,
+    hasProject: boolean,
+  ): Promise<void> {
+    const userId = authResult.user_id!;
+    const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
+    if (!refreshToken) {
+      console.error('No refresh token available. Run `capy` to re-authenticate.');
+      process.exit(1);
+    }
+
+    const { switchOrganizationInBrowser, nameFirstProjectInBrowser } = await import('../ui/selectWeb');
+
+    const facts = {
+      signedInAs: authResult.user_email,
+      currentOrgId,
+      // The one fact the terminal picker does not carry. `hasOrgKey` is what
+      // the CLI checks AFTER announcing the switch; shipping it with the list
+      // is what lets the screen refuse the row instead.
+      orgs: orgs.map(o => ({ id: o.id, name: o.name, hasLocalKey: hasOrgKey(o.id, userId) })),
+      hasKeepLock: hasProject,
+      defaultProjectName: this.projectManager.getDefaultProjectName(),
+      firstBranchName: FIRST_BRANCH,
+    };
+
+    let switchedTo: Organization | undefined;
+    const picked = await switchOrganizationInBrowser({
+      ...facts,
+      onOrgChosen: async (orgId: string) => {
+        const org = orgs.find(o => o.id === orgId)!;
+        const scopedAuth = await this.authService.refreshWithCredentials(
+          refreshToken,
+          org.id,
+          userId,
+        );
+        if (!scopedAuth.success) {
+          return { ok: false as const, reason: scopedAuth.error || 'Organization switch failed' };
+        }
+        switchedTo = org;
+        const projects = await this.serviceClient.listProjects();
+        const orgProjects = projects.filter(p => p.organization_id === org.id);
+        if (orgProjects.length === 0) {
+          const refusal = this.firstProjectRefusal(org, hasProject);
+          if (refusal) return { ok: false as const, reason: refusal };
+        }
+        return {
+          ok: true as const,
+          projects: orgProjects.map(p => ({ id: p.id, name: p.name })),
+        };
+      },
+      open: !process.env.CAPY_WEB_NO_OPEN,
+    });
+
+    if (picked.action === 'cancel') {
+      console.log('\n  Switch cancelled.\n');
+      return;
+    }
+
+    if (picked.action === 'create') {
+      const created = await createNewOrganization(
+        this.authService,
+        this.serviceClient,
+        refreshToken,
+        userId,
+        true,
+      );
+      const scopedAuth = await this.authService.refreshWithCredentials(
+        refreshToken,
+        created.id,
+        userId,
+      );
+      if (!scopedAuth.success) {
+        throw new CapyError(
+          scopedAuth.error || 'Organization switch failed',
+          ERROR_CODES.AUTH_FAILED,
+        );
+      }
+      // A brand-new org has no projects, so the only route on is the first one.
+      console.log(`\n  ${B(created.name)} has no projects yet.`);
+      const refusal = this.firstProjectRefusal(created, hasProject);
+      if (refusal) throw new CapyError(refusal, ERROR_CODES.INVALID_FORMAT);
+      const name = await nameFirstProjectInBrowser({
+        ...facts,
+        orgs: [{ id: created.id, name: created.name, hasLocalKey: true }],
+        currentOrgId: undefined,
+        orgId: created.id,
+        open: !process.env.CAPY_WEB_NO_OPEN,
+      });
+      if (name === null) {
+        console.log(`\n  Switch cancelled. Run ${B('capy')} in a fresh directory to create a project in ${B(created.name)}.\n`);
+        return;
+      }
+      await this.bootstrapFirstProject(created, userId, name);
+      return;
+    }
+
+    const selectedOrg = switchedTo!;
+    if (!hasOrgKey(selectedOrg.id, userId)) {
+      // Unreachable through the screen, which disables a row with no key —
+      // and still checked, because the throw is what stops a switch this
+      // device cannot decrypt anything in.
+      throw new CapyError(
+        `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
+        '  Ask your org owner for an invite code, then run:\n\n' +
+        '    capy redeem <code>\n\n' +
+        '  This will securely transfer the shared encryption key to your device.',
+        ERROR_CODES.AUTH_FAILED,
+      );
+    }
+
+    if (picked.action === 'create-project') {
+      await this.bootstrapFirstProject(selectedOrg, userId, picked.projectName);
+      return;
+    }
+
+    const projects = await this.serviceClient.listProjects();
+    const selectedProject = projects.find(p => p.id === picked.projectId)!;
+    this.bindToProject(selectedOrg, selectedProject, userId, hasProject);
   }
 
   private keyServiceOps(): KeyServiceOps {
@@ -206,23 +386,8 @@ export class OrgCommand {
   ): Promise<void> {
     console.log(`\n  ${B(selectedOrg.name)} has no projects yet.`);
 
-    // If the current directory is already bound to another project, its .env
-    // holds values encrypted for that project's key. Overwriting keep.lock
-    // here would orphan those secrets — refuse and point the user at a clean
-    // directory.
-    if (hasProject) {
-      const localEnv = this.fileManager.readEnvFile();
-      const encryptedEntries = Object.entries(localEnv)
-        .filter(([_, v]) => v.startsWith('capy:'));
-      if (encryptedEntries.length > 0) {
-        throw new CapyError(
-          `This directory is bound to another project and its .env contains ${encryptedEntries.length} encrypted value(s).\n\n` +
-          `  Binding it to a project in ${B(selectedOrg.name)} would make those values unreadable.\n\n` +
-          `  To create the first project in ${B(selectedOrg.name)}, run ${B('capy')} in a fresh directory.`,
-          ERROR_CODES.INVALID_FORMAT,
-        );
-      }
-    }
+    const refusal = this.firstProjectRefusal(selectedOrg, hasProject);
+    if (refusal) throw new CapyError(refusal, ERROR_CODES.INVALID_FORMAT);
 
     const { confirmed } = await inquirer.prompt([{
       type: 'confirm',
@@ -244,6 +409,38 @@ export class OrgCommand {
       validate: (input: string) => input.trim().length > 0 || 'Project name cannot be empty',
     }]);
 
+    await this.bootstrapFirstProject(selectedOrg, userId, projectName);
+  }
+
+  /**
+   * Why this directory cannot take the first project of another org, or null.
+   *
+   * A sentence rather than a throw so both surfaces can use it: the terminal
+   * raises it as a CapyError and ends the run, and the browser hands it back as
+   * a refusal on the organization list, where the user still has other rows to
+   * pick. The condition is the same one either way — a .env holding values
+   * encrypted for the project this directory is currently bound to, which
+   * rebinding keep.lock would orphan.
+   */
+  private firstProjectRefusal(selectedOrg: Organization, hasProject: boolean): string | null {
+    if (!hasProject) return null;
+    const localEnv = this.fileManager.readEnvFile();
+    const encryptedEntries = Object.entries(localEnv)
+      .filter(([_, v]) => v.startsWith('capy:'));
+    if (encryptedEntries.length === 0) return null;
+    return (
+      `This directory is bound to another project and its .env contains ${encryptedEntries.length} encrypted value(s).\n\n` +
+      `  Binding it to a project in ${B(selectedOrg.name)} would make those values unreadable.\n\n` +
+      `  To create the first project in ${B(selectedOrg.name)}, run ${B('capy')} in a fresh directory.`
+    );
+  }
+
+  /** Everything the first-project questions lead to, once they are answered. */
+  private async bootstrapFirstProject(
+    selectedOrg: Organization,
+    userId: string,
+    projectName: string,
+  ): Promise<void> {
     const initSpinner = ora('Creating project...').start();
     const projectResult = await this.serviceClient.initializeProject(
       projectName.trim(),
@@ -260,7 +457,7 @@ export class OrgCommand {
     );
     keySpinner.succeed('Project key ready');
 
-    const branchName = 'development';
+    const branchName = FIRST_BRANCH;
     const branchSpinner = ora(`Creating branch ${branchName}...`).start();
     try {
       await this.serviceClient.createBranch(projectResult.project_id, branchName, false);

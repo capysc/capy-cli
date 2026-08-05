@@ -1,7 +1,7 @@
 import { unlinkSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { lockSync, unlockSync } from 'proper-lockfile';
-import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES } from '../types/index';
+import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES, SilentAuthFailureCode } from '../types/index';
 import { OAuthServer } from './oauthServer';
 import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
@@ -24,7 +24,10 @@ export class HttpStatusError extends Error {
  * later (a browser round-trip can't fix an offline machine, so don't fall
  * through to OAuth), `org_not_found` / `server_error` → surface the detail.
  */
-export type RefreshFailureReason = 'session_ended' | 'org_not_found' | 'server_error' | 'network';
+// Derived from SilentAuthFailureCode rather than restated, so the two can
+// never drift: every refresh failure is reportable to a caller, and the only
+// silent-auth failure that is NOT a refresh failure is `no_session`.
+export type RefreshFailureReason = Exclude<SilentAuthFailureCode, 'no_session'>;
 
 export interface RefreshFailure {
   reason: RefreshFailureReason;
@@ -46,6 +49,26 @@ function classifyRefreshFailure(error: any): RefreshFailure {
     return { reason: 'server_error', status: error.status, detail: error.message };
   }
   return { reason: 'network', detail: error?.message };
+}
+
+/**
+ * The sentence to show a user whose silent auth failed, remedy included.
+ *
+ * Every caller used to print a bare "not authenticated. Run `capy` to sign
+ * in." for all five causes. That is wrong advice for two of them: a browser
+ * round-trip cannot fix an offline machine or a 5xx from the service, and
+ * following it just replaces a clear failure with a hung sign-in. The remedy
+ * is chosen from `error_code`, never from the message text.
+ */
+export function silentAuthFailureMessage(result: AuthResult): string {
+  const cause = result.error || 'Not authenticated';
+  switch (result.error_code) {
+    case 'network':
+    case 'server_error':
+      return `${cause}. Check your connection and try again.`;
+    default:
+      return `${cause}. Run \`capy\` to sign in.`;
+  }
 }
 
 /**
@@ -197,26 +220,34 @@ export class AuthService {
       }
     }
 
-    return { success: false, error: this.describeSilentAuthFailure() };
+    const { code, message } = this.describeSilentAuthFailure();
+    return { success: false, error: message, error_code: code };
   }
 
   /**
-   * Distinct, actionable failure message for a failed silent auth. Before
-   * this, an ended session, a network outage, and a genuinely missing
-   * session were all reported as "No valid session available".
+   * Distinct, actionable failure for a silent auth. Before this, an ended
+   * session, a network outage, and a genuinely missing session were all
+   * reported as "No valid session available".
+   *
+   * Returns the code as well as the sentence: a caller that only gets the
+   * sentence has to either print one generic remedy for every cause or parse
+   * prose to tell them apart, and both of those have bitten us.
    */
-  private describeSilentAuthFailure(): string {
+  private describeSilentAuthFailure(): { code: SilentAuthFailureCode; message: string } {
     switch (this.lastRefreshFailure?.reason) {
       case 'session_ended':
-        return 'Session expired — sign-in required';
+        return { code: 'session_ended', message: 'Session expired — sign-in required' };
       case 'network':
-        return 'Could not reach the Capy service to refresh your session';
+        return { code: 'network', message: 'Could not reach the Capy service to refresh your session' };
       case 'org_not_found':
-        return 'Organization not found while refreshing your session';
+        return { code: 'org_not_found', message: 'Organization not found while refreshing your session' };
       case 'server_error':
-        return `Token refresh failed (HTTP ${this.lastRefreshFailure.status})`;
+        return {
+          code: 'server_error',
+          message: `Token refresh failed (HTTP ${this.lastRefreshFailure.status})`,
+        };
       default:
-        return 'No valid session available';
+        return { code: 'no_session', message: 'No valid session available' };
     }
   }
 

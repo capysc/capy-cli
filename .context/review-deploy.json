@@ -1,0 +1,67 @@
+{
+  "parcel": "deploy",
+  "branch": "web/deploy",
+  "verdict": "fail",
+  "browser_test_exists": true,
+  "browser_test_passes": true,
+  "suite_green": true,
+  "secrets_leak": false,
+  "problems": [
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/tests/ui/browserFlow.e2e.test.ts",
+      "problem": "Only 4 of the parcel's 6 screens are ever clicked. deploy-tokens (`capy deploy list` / `capy deploy revoke`) and deploy-run-result have NO browser test \u2014 their only tests drive the loopback with fetch, which is exactly the gap the brief says is not optional. I wrote a throwaway click test against both: they do render and work (the tokens confirm screen submits the full 20-char deployId even though the field asks for the 12-char prefix, so the reducer's `deployId === id` check passes), but nothing in the branch proves that and nothing would catch it regressing.",
+      "severity": "blocking"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/src/commands/deployTokenCommand.ts",
+      "problem": "Line 632: declining a revoke never ends the run. I clicked 'Leave it active' on the deploy-tokens confirm view \u2014 it navigates back to the listing entirely client-side, posts nothing, and `showDeployTokensInBrowser` keeps waiting. `capy deploy revoke <id> --web` then hangs the full 5-minute wizard timeout and exits through `displayErrorAndExit` with 'Timed out waiting for the browser (5 minutes).' \u2014 a non-zero exit and an error screen for a user who correctly chose NOT to revoke. This is precisely the class of defect a browser test exists to catch, and it survived because deploy-tokens has none.",
+      "severity": "blocking"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/src/index.ts",
+      "problem": "Line 325/340/357/367/377/386: the root program's global `--web` is never read for `deploy`, `deploy list`, `deploy revoke`, `deploy targets` or `deploy targets-remove`. `DeployCliOptions.web` and the new `{ web }` constructor options exist and are threaded internally, but no call site sets them, so every line of this parcel is unreachable from argv. Self-reported and index.ts is unowned (checkout left the same gap), but as shipped `capy deploy --web` silently runs the TTY path.",
+      "severity": "major"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/tests/ui/browserFlow.e2e.test.ts",
+      "problem": "Line 208: adding 7 more browsers to this file made the PRE-EXISTING test 'a standalone step is served whole and the page advances by reloading' ~20% flaky. Measured: 2 failures in 10 standalone runs of the file ('Inspected target navigated or closed' from cdp.ts:72), versus 4/4 green when only the pre-existing describes are selected with `-t`. The claimed fix does not cover it \u2014 the failing call is a bare `evaluate(page, 'window.answer()')` at lines 241/244 racing the `location.reload()` its own promise triggers, not an `until()`. `bash tests/run-tests.sh` was green 4/4 for me, so CI may mask this, but `bun test tests/ui/browserFlow.e2e.test.ts` is not reliable on this branch.",
+      "severity": "major"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/tests/ui/browserFlow.e2e.test.ts",
+      "problem": "Line 68: the shared `until()` helper now swallows EVERY page exception, not just navigation teardown. A typo'd selector or a genuine ReferenceError in any other parcel's appended test now reports 'timed out waiting for <what>' after 5 seconds instead of failing immediately with the real error. The brief warns that other parcels append to this file; narrowing the catch to the navigation case (or retrying only on that CDP error) would keep the fix without blunting everyone else's diagnostics.",
+      "severity": "major"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/src/commands/deployTokenCommand.ts",
+      "problem": "Line 708: `capy deploy list --web` is a read-only listing that blocks for the full 5-minute wizard timeout. The deploy-tokens screen has no cancel control and only submits on revoke, so an agent that reads the page and moves on gets nothing back for five minutes before the `.catch()` turns the rejection into a silent return. A short timeoutMs for the pure-listing case would make this a listing again.",
+      "severity": "major"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/src/commands/deployCommand.ts",
+      "problem": "826 lines of new `--web` wiring in deployCommand.ts plus 218 in deployTokenCommand.ts have ZERO command-level tests \u2014 `grep -rn 'web' tests/commands/deployCommand.test.ts tests/deploy/deployFlow.test.ts` is empty. Everything tested lives in src/ui/deployScreens.ts. So `runPicker`'s web branch, `pickTargetInBrowser`, `promptVercelGitBranchInBrowser`, `showRunResult`, the DeployList/DeployRevoke web branches and the modeAnswer hand-off between the two commands are untested at the layer that actually assembles the params.",
+      "severity": "major"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/src/ui/deployScreens.ts",
+      "problem": "Line 1069: `showScreenInBrowser` is a second, hand-rolled way to serve a screen \u2014 its own `createServer`, its own single-use path token, its own timeout \u2014 where the brief says explicitly not to invent a second way to do any of this. It has no automated test of any kind (I verified by hand that it serves and resolves). A new listening socket in a secrets CLI with no test is the wrong thing to have zero coverage on.",
+      "severity": "major"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/src/core/deployPlan.ts",
+      "problem": "Line 136: `unansweredDeployStops()` is dead code \u2014 nothing in src/ calls it, and `capy deploy` declares no `--json` flag. The partition's done-criterion 2 ('the same array is what --json emits') is therefore unmet for this parcel, and the report's claim that it 'mirrors branchCreatePlan's for --json' describes an integration that does not exist.",
+      "severity": "minor"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/src/commands/deployTokenCommand.ts",
+      "problem": "Line 639: the web revoke path resolves the id prefix locally with `rows.find(t => t.deployId.startsWith(prefix))` \u2014 first match silently wins \u2014 whereas the terminal path hands the prefix to the service. deployScreens.ts's own comment argues that two tokens can share twelve characters; the CLI-side resolution has exactly that ambiguity, just moved. An ambiguous prefix should be refused rather than resolved to whichever row sorts first.",
+      "severity": "minor"
+    },
+    {
+      "file": "/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy/tests/ui/deployScreens.test.ts",
+      "problem": "Line 145: the report claims '\u00a78 parity is pinned by reading the array back out of the served HTML'. The test only asserts the page contains `window.__CAPY_DATA__` and no `id=\"screen\"`; it never parses the stops array out of the document. The claim overstates what is pinned.",
+      "severity": "minor"
+    }
+  ],
+  "notes": "Verified independently in the branch's own worktree (/Users/vince/conductor/workspaces/capy/rabat/packages/.wt-deploy, HEAD 5a6fb41, merge-base 25e8f61, not pushed \u2014 `git branch -r --contains 5a6fb41` empty). WHAT HOLDS UP: `bash tests/run-tests.sh` 696 pass / 0 fail, run 4x, all green (baseline claim of 630 is consistent). `bunx tsc -p tsconfig.json --noEmit` exit 0. Runtime deps exactly 6. The 7 new browser tests are real click tests against real pages and pass \u2014 I ran tests/ui/browserFlow.e2e.test.ts and got 18/18 with chrome-headless-shell actually present (no skip warning), and confirmed the standalone reload path really serves stop two at the same address. NO SECRET LEAK: every payload carries variable NAMES only; DeployPlanTarget.vars, DeployVar and DeployTargetRow have no value field; DeployRunStep.output exists in the contract but showRunResult never populates it; the aws-ssm epilogue is ARNs and names; five unit tests assert `sk_live` is absent from the serialized payload and two browser tests assert it is absent from the rendered DOM. No recovery-phrase surface in this parcel. TRAINSTOPS ARE THE CLI'S: src/core/deployPlan.ts is a pure builder holding the only station table, all three rail-drawing screens are fed `deployPlan(...)` from src/ui/deployScreens.ts, and no screen-local route survives. PARCEL BOUNDARIES CLEAN: the commit touches only deployCommand.ts, deployTokenCommand.ts, two new files, two new test files and the shared browserFlow.e2e.test.ts (append + the one `until()` edit). packages/ui is untouched (monorepo `git status` shows no ui changes), as are generated.ts and contract.ts. NO BROWSER RISK: every serve call in every test passes `open: false` explicitly; the CLI's own default is `openBrowser() = !process.env.CAPY_WEB_NO_OPEN`; running the suite opened nothing. TERMINAL PATH: unchanged in substance \u2014 runPicker's web branch returns early before the inquirer block, the empty-branchVars refusal uses the same message the terminal throws, and the only behavioural drift I found is that `--platform ''` now errors instead of falling through to the picker. I reproduced the flake and the revoke-decline hang by hand with a throwaway probe test, which I deleted; the worktree is clean. Verdict is fail on the brief's own standard \u2014 deploy-tokens is a flow nobody ran, and the first click on it found a five-minute hang on the decline path of a destructive command."
+}

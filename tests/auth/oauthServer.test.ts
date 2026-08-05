@@ -38,7 +38,7 @@ describe('OAuthServer', () => {
 
     // Mock HTTP server
     mockServer = {
-      listen: mock((port: number, callback: () => void) => callback()),
+      listen: mock((_port: number, _host: string, callback: () => void) => callback()),
       close: mock(() => undefined),
       on: mock(() => undefined),
       once: mock(() => undefined),
@@ -60,9 +60,9 @@ describe('OAuthServer', () => {
   });
 
   describe('bind', () => {
-    test('should bind to first available port', async () => {
+    test('should bind to first available port, on loopback only', async () => {
       // Mock the listen to call the callback (success)
-      mockServer.listen.mockImplementation((port: number, callback: () => void) => {
+      mockServer.listen.mockImplementation((_port: number, _host: string, callback: () => void) => {
         mockServer.removeListener('error', expect.any(Function));
         callback();
       });
@@ -70,23 +70,42 @@ describe('OAuthServer', () => {
       await oauthServer.bind();
 
       expect(mockCreateServer).toHaveBeenCalled();
-      expect(mockServer.listen).toHaveBeenCalledWith(19420, expect.any(Function));
+      // The host argument is the assertion that matters: omitting it binds every
+      // interface, which puts the OAuth callback on the LAN for the length of an
+      // auth round trip.
+      expect(mockServer.listen).toHaveBeenCalledWith(19420, '127.0.0.1', expect.any(Function));
     });
   });
 
   describe('startAuthFlow', () => {
-    test('should open browser and resolve with auth code on success', async () => {
-      const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
+    /**
+     * Sign-in now goes through `openScreen`, which honours CAPY_WEB_NO_OPEN —
+     * and `run-tests.sh` exports it for the whole suite, precisely so that no
+     * test opens the developer's browser. Cases that assert a browser WAS
+     * opened have to lift it for their own duration and put it back, or they
+     * would be asserting against the suite's own safety net.
+     */
+    const withBrowserAllowed = async (body: () => Promise<void>): Promise<void> => {
+      const saved = process.env.CAPY_WEB_NO_OPEN;
+      delete process.env.CAPY_WEB_NO_OPEN;
+      try {
+        await body();
+      } finally {
+        if (saved !== undefined) process.env.CAPY_WEB_NO_OPEN = saved;
+      }
+    };
 
-      // Manually set the server (as bind() would)
+    test('CAPY_WEB_NO_OPEN reaches sign-in too, and the flow still completes', async () => {
+      // Before `openScreen`, this one call site ignored the flag: a CI run or a
+      // suite that reached authentication launched a real browser. The flag has
+      // to suppress the window WITHOUT suppressing the flow — the URL is
+      // printed, and a person can still finish in a browser of their choosing.
+      const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
       (oauthServer as any).server = mockServer;
 
-      // Mock successful flow
       setTimeout(() => {
-        // Simulate server close event with successful auth code
         const closeHandler = mockServer.on.mock.calls.find((call: any) => call[0] === 'close')?.[1];
         if (closeHandler) {
-          // Set auth code before calling close handler
           (oauthServer as any).authorizationCode = 'test-auth-code';
           closeHandler();
         }
@@ -94,8 +113,38 @@ describe('OAuthServer', () => {
 
       const result = await oauthServer.startAuthFlow(authUrl);
 
-      expect(mockOpen).toHaveBeenCalledWith(authUrl);
+      expect(mockOpen).not.toHaveBeenCalled();
       expect(result).toBe('test-auth-code');
+    });
+
+    test('should open browser and resolve with auth code on success', async () => {
+      const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
+
+      // Manually set the server (as bind() would)
+      (oauthServer as any).server = mockServer;
+
+      // Mock successful flow
+      await withBrowserAllowed(async () => {
+        setTimeout(() => {
+          // Simulate server close event with successful auth code
+          const closeHandler = mockServer.on.mock.calls.find(
+            (call: any) => call[0] === 'close',
+          )?.[1];
+          if (closeHandler) {
+            // Set auth code before calling close handler
+            (oauthServer as any).authorizationCode = 'test-auth-code';
+            closeHandler();
+          }
+        }, 10);
+
+        const result = await oauthServer.startAuthFlow(authUrl);
+
+        // The ordinary window, with its address bar — never the chromeless
+        // one the loopback screens get. Someone being asked for a password
+        // has to be able to see where they are.
+        expect(mockOpen).toHaveBeenCalledWith(authUrl);
+        expect(result).toBe('test-auth-code');
+      });
     });
 
     test('should handle browser open failure gracefully', async () => {
@@ -105,17 +154,21 @@ describe('OAuthServer', () => {
       // Manually set the server (as bind() would)
       (oauthServer as any).server = mockServer;
 
-      // Mock successful auth after browser failure
-      setTimeout(() => {
-        const closeHandler = mockServer.on.mock.calls.find((call: any) => call[0] === 'close')?.[1];
-        if (closeHandler) {
-          (oauthServer as any).authorizationCode = 'test-auth-code';
-          closeHandler();
-        }
-      }, 10);
+      await withBrowserAllowed(async () => {
+        // Mock successful auth after browser failure
+        setTimeout(() => {
+          const closeHandler = mockServer.on.mock.calls.find(
+            (call: any) => call[0] === 'close',
+          )?.[1];
+          if (closeHandler) {
+            (oauthServer as any).authorizationCode = 'test-auth-code';
+            closeHandler();
+          }
+        }, 10);
 
-      const result = await oauthServer.startAuthFlow(authUrl);
-      expect(result).toBe('test-auth-code');
+        const result = await oauthServer.startAuthFlow(authUrl);
+        expect(result).toBe('test-auth-code');
+      });
     });
 
     test('should timeout after 5 minutes', async () => {

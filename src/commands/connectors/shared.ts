@@ -75,7 +75,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
     });
   } catch (err: any) {
     const { displayErrorAndExit } = await import('../../ui/errorScreen');
-    displayErrorAndExit(err, {
+    await displayErrorAndExit(err, {
       projectName: keep.project_name,
       projectId: keep.project_id,
       branch,
@@ -124,15 +124,26 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
  * `capy push` / `capy` will pick it up. Local-only mode skips the merge so
  * the connector field doesn't get attached until a real push.
  */
+/**
+ * Write a variable (when there is one to write), attach its connector, sync.
+ *
+ * `value === undefined` is the METADATA-ONLY mode, and it is what `connect`
+ * uses: the env map goes to the service unchanged and only keep.lock's
+ * connector entry moves. Everything downstream — the keep merge, the push, the
+ * cache, the sync state, the auto-commit — is identical either way, which is
+ * why this is one function and not two. `rotate` is the caller that passes a
+ * value, because replacing a credential is what rotate is for.
+ */
 export async function writeAndSync(
   ctx: ResolvedContext,
   varName: string,
-  value: string,
+  value: string | undefined,
   opts: { push: boolean; connector?: ConnectorMetadata },
 ): Promise<void> {
   const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
 
-  const finalEnv: Record<string, string> = { ...localPlaintext, [varName]: value };
+  const finalEnv: Record<string, string> =
+    value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
 
   if (!opts.push) {
     // Local-only path. Even though we're not hitting the service, we still
@@ -262,6 +273,27 @@ export function listAllVarsOnBranch(keep: KeepFile, branch: string): string[] {
 export function fingerprint(value: string): string {
   if (value.length <= 7) return value;
   return `${value.slice(0, 3)}…${value.slice(-3)}`;
+}
+
+/**
+ * `rk_live_` — the first eight characters of a key, for a browser payload, and
+ * ONLY when there is more of the value than that.
+ *
+ * The terminal prints `value.slice(0, 8)` as "Key type" and can go on doing
+ * so: it is showing eight characters to the person whose key it is, on a
+ * screen they are already looking at. A payload is a different thing. Eight
+ * characters of a forty-character key is a redaction; eight characters of an
+ * eight-character value is the value, and the difference is a length check
+ * nobody performs by eye.
+ *
+ * The same rule `fingerprint()` above needs and does not have — it returns
+ * anything seven characters or shorter VERBATIM — which is why the browser
+ * paths wrap it rather than calling it directly. Undefined means "say
+ * nothing": every screen renders the absence, and none of them renders a
+ * short secret.
+ */
+export function keyTypePrefix(value: string): string | undefined {
+  return value.length > 8 ? value.slice(0, 8) : undefined;
 }
 
 export interface ExpiringKey {

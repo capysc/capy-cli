@@ -1,0 +1,57 @@
+{
+  "parcel": "connectors",
+  "branch": "web/connectors",
+  "verdict": "fail",
+  "browser_test_exists": true,
+  "browser_test_passes": true,
+  "suite_green": true,
+  "secrets_leak": false,
+  "problems": [
+    {
+      "file": "src/commands/rotateCommand.ts",
+      "problem": "BLOCKING \u2014 every --web failure/cancel report page is served and then destroyed before a browser can load it. showRotateProgressInBrowser()/showConnectResultInBrowser() return as soon as the socket is listening (ScreenServer.start() resolves on listen; open() resolves on spawn, not on load). Every call site then immediately process.exit()s, which tears down the loopback server. Sites: rotateCommand.ts:700-701 (nothing rotated), :714-715 (deploy failed), :725-726 (report.stopped); connectCommand.ts:204-210 (live gate declined -> outcome 'cancelled'), :228-244 (push-failed / write-failed). PROVEN: I spawned a child that calls showRotateProgressInBrowser({outcome:'deploy-failed', open:false}) and then process.exit(1), captured the printed URL, and fetched it 150ms later -> 'fetch failed' (ECONNREFUSED). Control run with the exit removed -> HTTP 200. So the 'deploy-failed' page whose browser test is the marquee assertion of this parcel ('Rollout failed', 'Do not run', teammate warning) cannot be delivered in a real run; likewise connect's push-failed page, which the commit message names as the reason connect-result exists. The author identified this exact hazard inside rotateMany (comment at rotateCommand.ts:935: 'exiting there would kill the loopback server before the browser could fetch it') and then reintroduced it at every reportRun/showResult call site. The browser tests miss it because they call the show* helpers directly, never through reportRun+exit. Fix is local: defer with process.exitCode, or expose a served/closed promise on ScreenServer and await it.",
+      "severity": "blocking"
+    },
+    {
+      "file": "src/index.ts",
+      "problem": "--web is never passed to connect or rotate, so the entire parcel is unreachable from argv. The connect action handler (index.ts:711-727) and the rotate action handler (:740-750) build ConnectOpts/RotateOpts without `web`. Separately, `if (!provider) { await cmd.list(); }` calls list() with NO argument at all, so ConnectCommand.list(opts) can never take the web branch even once execute() is wired. Disclosed by the author, and index.ts is outside the parcel's declared file ownership \u2014 but until the coordinator lands it, none of the 14 conversions is reachable by a user or an agent.",
+      "severity": "major"
+    },
+    {
+      "file": "tests/ui/browserFlow.e2e.test.ts",
+      "problem": "Partial click coverage: 4 of the converted surfaces have no browser test. connect-setup step 'account' (prompt #7), connect-setup step 'refresh' (#8), rotate-plan-confirm step 'integration' (#12), and the connect-result page (#10) are only exercised over fetch or not at all. I wrote and ran click probes for all four against the real compiled pages: all four work (account returns {account:'prod'} after clicking a [role=radio] and button[type=submit]; refresh returns {refresh:true}; integration returns {provider:'acme'}; connect-result renders with no key material). So this is a coverage gap, not a broken flow \u2014 but it is exactly the gap the brief calls not-optional, and it is why the process.exit defect above went unseen.",
+      "severity": "major"
+    },
+    {
+      "file": "src/commands/rotateCommand.ts",
+      "problem": "The report's claim 'terminal paths are byte-identical' is false for renderRotationPlan. rotationPlan() now feeds the terminal diagram too, so a plain `capy rotate` (no --web) prints two stations it never printed before (Variable, Integration), new node glyphs (\u2713 for answered, \u00b7 for never-visited), and a ' \u00b7 <answer> (<flag>)' suffix. It is deliberate, justified by partition rule 2 (one array for terminal/browser/--json), and pinned by new tests in tests/commands/rotatePicker.test.ts \u2014 but it is a visible change to a non-web path and should not be described as byte-identical.",
+      "severity": "minor"
+    },
+    {
+      "file": "tests/ui/browserFlow.e2e.test.ts",
+      "problem": "until() now wraps evaluate() in a bare `catch {}` that swallows EVERY exception, not only the 'Inspected target navigated or closed' navigation race it was written for. This is the shared harness every parcel appends to: a typo'd or broken predicate in any parcel's test now silently spins for 5 seconds and fails with 'timed out waiting for X' instead of surfacing the page exception. Narrow it to the navigation case (or at least remember the last error and include it in the timeout message).",
+      "severity": "minor"
+    },
+    {
+      "file": "src/commands/connectCommand.ts",
+      "problem": "The connect-result rail contradicts the page it sits on for non-success outcomes. connectPlan() hardcodes push.state = 'upcoming' (plans.ts:195-207) and showResult() passes standing: null, so on a 'push-failed' result the rendered page shows '\u25cb Push \u2014 encrypt and push to Capy' and a 'Step 5 of 7' header while the body correctly says 'The push did not land'. Observed directly in the rendered document. A rail that says the run is mid-flight on a page reporting a finished run is the drift this whole effort exists to remove.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/commands/rotateCommand.ts",
+      "problem": "Rotate's live gate passes keyPrefix: connector.fingerprint.slice(0, 8) (rotateCommand.ts:456, and the terminal call at :474). fingerprint() returns the 7-character redacted form 'rk_\u2026tst', so slice(0,8) is the whole fingerprint, not an 8-char key prefix \u2014 the screen renders it under its 'Key type' label as 'rk_\u2026tst\u2026'. Carried verbatim from the pre-existing terminal call, so not a regression, but the browser test hand-feeds keyPrefix:'rk_live_' and so never sees what the command actually sends.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/commands/connectors/stripe.ts",
+      "problem": "stripeModeOptions can mark BOTH modes unavailable, leaving the mode question unanswerable. With one resolved config.toml section holding only a live key, under capy-dev: live -> blockedBy 'DEV_MODE', test -> blockedBy 'NO_KEY'. The screen disables both and the reducer refuses either (connectScreens.ts:384-389), so the run sits on a dead page until runBrowserWizard's 5-minute timeout. A no-runnable-mode state should serve a Blocked reason rather than an unanswerable question.",
+      "severity": "minor"
+    },
+    {
+      "file": "src/commands/connectors/stripe.ts",
+      "problem": "describeIncomingKey (stripe.ts:461) and stripeModeOptions (:400) put key.value.slice(0, 8) in the payload with no length guard, unlike their sibling safeSnippet() which deliberately withholds a fingerprint for values of 7 chars or fewer. A provider value of 8 characters or fewer would travel whole. Not reachable with real Stripe keys, and the terminal already prints value.slice(0,8), so it is a consistency nit rather than a live leak.",
+      "severity": "minor"
+    }
+  ],
+  "notes": "Verified independently in a detached worktree at 52634f8 (since removed). VERIFIED GREEN: `bash tests/run-tests.sh` -> 723 pass / 0 fail across 60 files (the 24 failures on my first run were my worktree missing dist/; after `bunx tsc -p tsconfig.json` the suite is clean). `bunx tsc -p tsconfig.json --noEmit` exits 0. `node scripts/check-screens.mjs` -> deps within allowlist (6/6), 41 embedded screens intact. Branch is 1 commit on origin/feat/cli-mcp (25e8f61), not pushed, not rebased. BROWSER TESTS: real, and they pass. `bun test tests/ui/browserFlow.e2e.test.ts` -> 20 pass / 0 fail / 75 expects in 25.8s with a cached chrome-headless-shell, so nothing was skipped; 9 of the 20 are new and each drives a real compiled document over CDP (clicking [role=radio] rows and buttons, and typing into the live gate with a real `input` event rather than `.value =`). The two-document walk (connect-setup var -> connect-setup mode -> connect-overwrite at one address) genuinely exercises the standalone reload. NO SECRET LEAK: every payload carries snippets only \u2014 fingerprint()'s abc\u2026xyz form or an 8-char prefix. safeSnippet() correctly withholds a fingerprint for values too short to redact. ctx.localPlaintext never crosses. No recovery phrase is involved in this parcel. TRAINSTOPS: built by the command, not the screen \u2014 src/commands/connectors/plans.ts holds two pure functions (connectPlan, rotationPlan) modelled on branchCreatePlan; screens receive `stops` as data and renderRotationPlan renders the same array. This is done correctly. PARCEL BOUNDARIES: clean. Diff touches only connectCommand.ts, rotateCommand.ts, connectors/{registry,stripe,plans}.ts, two new src/ui/*Screens.ts files, and tests. No packages/ui file touched; the two screen-contract problems it hit (ConnectIncomingKey.keyPrefix/.fingerprint should be optional; connect-setup's documented route order disagrees with connect()'s actual order) are reported, not patched \u2014 correct call. CAPY_WEB_NO_OPEN: honoured everywhere via shouldOpen() in both commands and directly in stripe.ts:503; every test additionally passes open:false explicitly, so running the suite cannot open a real browser. No `open: true` anywhere in tests. VERDICT RATIONALE: fail rests on the first problem alone. Everything the parcel builds works when you click it, but the pages it adds for the worst outcomes \u2014 a live key rotated and pushed with the rollout failed, a connect whose push did not land, a declined live gate \u2014 are served into a socket the CLI closes microseconds later. That is a small, localized fix (process.exitCode instead of process.exit, or await a served/closed promise on ScreenServer), and it needs a browser test that goes through reportRun rather than calling the show* helper directly."
+}
