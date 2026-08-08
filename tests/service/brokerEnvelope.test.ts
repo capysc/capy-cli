@@ -6,6 +6,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  ENVELOPE_HKDF_INFO_PREFIX,
   mintConnectionKeypair,
   openEnvelope,
   parseCompletionPayload,
@@ -13,6 +14,18 @@ import {
 import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
 
 const CONNECTION_ID = '4f9c02e2-92cf-4a6b-8f3e-27cf6f6f2f10';
+
+// CAP-376/CAP-381 Gate-2 MINOR-4: keep-app's page-side seal hardcodes this
+// same literal (`envelope.ts`) instead of importing it, because the two
+// repos share no code. The tests above only prove self-consistency — they
+// derive both halves of the HKDF info string from this repo's own constant,
+// so a drift in that constant would keep this suite green while breaking
+// real browser -> CLI interop. Pinning the literal here means a change to
+// `ENVELOPE_HKDF_INFO_PREFIX` fails loudly on THIS side too, not just
+// silently on keep-app's.
+test('the HKDF info prefix is pinned to the literal keep-app hardcodes independently (interop tripwire)', () => {
+  expect(ENVELOPE_HKDF_INFO_PREFIX).toBe('capy-broker-envelope-v1');
+});
 
 describe('mintConnectionKeypair', () => {
   test('registers a 65-byte uncompressed P-256 point in base64', () => {

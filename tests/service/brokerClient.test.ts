@@ -138,6 +138,18 @@ describe('createConnection', () => {
     expect(thrown).toBeInstanceOf(CapyError);
     expect((thrown as CapyError).code).toBe(ERROR_CODES.NETWORK_ERROR);
   });
+
+  // CAP-376 Gate-2 MINOR-5: a payload-bearing ceremony overrides the
+  // no-submit auth screens' 600s default (ceremony guidance: 900). The knob
+  // was always plumbed (`opts.ttlSeconds`); this pins that it actually rides
+  // the wire rather than silently falling back to the default.
+  test('a caller-supplied ttlSeconds rides the wire, overriding the auth-screen default', async () => {
+    await client().createConnection({ purpose: 'device-key', ttlSeconds: 900 });
+
+    const create = state.requests[0];
+    const body = create.body as Record<string, unknown>;
+    expect(body.ttl_seconds).toBe(900);
+  });
 });
 
 describe('awaitAnswer', () => {

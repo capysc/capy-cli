@@ -53,6 +53,20 @@ export type AwaitAnswerResult =
   /** Delivered bytes that could not be opened as a v1 envelope. */
   | { kind: 'bad_envelope'; code: string };
 
+// Defaults are tuned for the built no-submit auth screens (auth-success /
+// auth-error): the page answers within a couple of seconds of the redirect
+// landing, no human deliberation in between. A payload-bearing ceremony
+// (device-key enroll/unlock, CAP-382 and beyond) is a different shape of
+// wait — a passkey prompt on a *second* device, or a user re-reading a
+// warning screen, routinely runs past a minute — so callers driving a
+// ceremony MUST override both knobs via `createConnection({ ttlSeconds })`
+// and `awaitAnswer(conn, { deadlineMs })` rather than accept these. Ceremony
+// guidance (see CAP-382 brief): `ttlSeconds` >= 900 (the broker's own max),
+// `deadlineMs` >= `ttlSeconds * 1000` (the client deadline must not expire
+// before the broker's own TTL does, or the poll gives up on a connection
+// the broker would still honor) plus auto-recreate on `CONNECTION_EXPIRED`
+// and a page refresh path on expiry — auto-recreate/refresh are the
+// ceremony impl's job, not this client's.
 const DEFAULT_TTL_SECONDS = 600;
 const DEFAULT_WAIT_SECONDS = 25; // openapi max for wait_seconds
 const DEFAULT_DEADLINE_MS = 60_000;
@@ -102,6 +116,12 @@ export class BrokerClient {
    * half, and returns the handle the caller needs to build the keep URL and
    * later open the answer. Throws `CapyError` (coded) on any failure — the
    * caller's contract is "fall back to the loopback transport if this throws".
+   *
+   * @param opts.ttlSeconds how long the broker honors this connection.
+   *   Defaults to {@link DEFAULT_TTL_SECONDS} (600s), which is fine for the
+   *   no-submit auth screens. A ceremony that waits on human deliberation
+   *   (a passkey touch, a phone approval) should pass 900 — see the
+   *   defaults comment above `DEFAULT_TTL_SECONDS` for the full guidance.
    */
   async createConnection(opts: {
     purpose: string;
@@ -152,6 +172,14 @@ export class BrokerClient {
    * Long-poll `GET /connections/:id/result` until the sealed answer arrives,
    * the broker reports a terminal state, or our own deadline passes. Never
    * throws — every ending is a typed variant.
+   *
+   * @param opts.deadlineMs how long to keep polling before giving up and
+   *   best-effort cancelling. Defaults to {@link DEFAULT_DEADLINE_MS} (60s),
+   *   which is fine for the no-submit auth screens. A ceremony caller should
+   *   pass a deadline >= the `ttlSeconds * 1000` it created the connection
+   *   with — see the defaults comment above `DEFAULT_TTL_SECONDS` for the
+   *   full guidance — otherwise this client gives up on (and cancels) a
+   *   connection the broker would still be honoring.
    */
   async awaitAnswer(
     connection: BrokerConnection,
