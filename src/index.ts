@@ -680,6 +680,42 @@ program
     await cmd.execute({ web: command.optsWithGlobals().web === true });
   });
 
+const deviceKeyCmd = program
+  .command('device-key')
+  .description('Manage device keys (CAPY_DEVICE_KEYS=1) — passwordless onboarding for new machines');
+
+deviceKeyCmd
+  .command('enroll')
+  .description('Enroll a device key for this account on this machine')
+  .action(async () => {
+    assertNotLocalOnly('device-key enroll');
+    const { DeviceKeyEnrollCommand } = await import('./commands/deviceKeyCommand');
+    const cmd = new DeviceKeyEnrollCommand();
+    await cmd.execute();
+  });
+
+deviceKeyCmd
+  .command('list')
+  .description('List this account\'s enrolled device keys')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--include-deleted', 'include removed wrappers')
+  .action(async (options) => {
+    assertNotLocalOnly('device-key list');
+    const { DeviceKeyListCommand } = await import('./commands/deviceKeyCommand');
+    const cmd = new DeviceKeyListCommand();
+    await cmd.execute({ json: options.json, includeDeleted: options.includeDeleted });
+  });
+
+deviceKeyCmd
+  .command('remove <id>')
+  .description('Remove (soft-delete) a device key wrapper by id')
+  .action(async (id: string) => {
+    assertNotLocalOnly('device-key remove');
+    const { DeviceKeyRemoveCommand } = await import('./commands/deviceKeyCommand');
+    const cmd = new DeviceKeyRemoveCommand();
+    await cmd.execute(id);
+  });
+
 program
   .command('add <vars...>')
   .description('Add one or more secret values to the project (encrypts + syncs)')

@@ -41,6 +41,9 @@ import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
+import { deviceKeysEnabled } from '../auth/deviceKey/flag';
+import { attemptCaseCUnlock, runPendingSyncBestEffort, DeviceKeyWiringContext } from '../auth/deviceKey/wiring';
+import type { DeviceKeyEnrollmentOptions } from './orgCreation';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -406,7 +409,16 @@ export class CapyCommand {
 
     if (orgs.length === 0) {
       console.log('\nNo organization found. Let\'s create one.');
-      selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+      // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
+      // Wave-B org-less token — flag-gated, and a no-op (org creation is
+      // byte-identical) when the flag is off or no such token was captured.
+      const deviceKeyEnrollment = deviceKeysEnabled()
+        ? {
+            ctx: this.deviceKeyWiringContext(authResult, undefined),
+            orglessToken: authResult._orgless_access_token,
+          }
+        : undefined;
+      selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!, deviceKeyEnrollment);
       wizard?.record({
         organization: { kind: 'new', name: selectedOrg.name },
         recoveryShown: true,
@@ -482,7 +494,20 @@ export class CapyCommand {
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
-    const orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+    let orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+
+    // CAP-382 Case C: exactly the purpose program's marquee failure signal
+    // — a new machine, already enrolled elsewhere, that today dead-ends
+    // into "run capy redeem". Try the device-key unlock ceremony before
+    // falling through to that message. Flag-gated; no enrolled device key,
+    // a decline, or any ceremony failure leaves this branch unchanged.
+    if (!orgKeyPresent && deviceKeysEnabled()) {
+      const unlock = await attemptCaseCUnlock(this.deviceKeyWiringContext(authResult, selectedOrg.id));
+      if (unlock.ok) {
+        orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+      }
+    }
+
     wizard?.record({ hasOrgKey: orgKeyPresent });
     if (!orgKeyPresent) {
       // The most common way this run stops, and it stops one step after the
@@ -511,6 +536,13 @@ export class CapyCommand {
         '  This will securely transfer the shared encryption key to your device.',
         ERROR_CODES.AUTH_FAILED
       );
+    }
+
+    // CAP-382: this machine is enrollment-aware (orgKeyPresent is true, one
+    // way or another) — retry any owed key.enc upload left by a previous
+    // interrupted sync. Best-effort, flag-gated, never blocks this run.
+    if (deviceKeysEnabled()) {
+      await runPendingSyncBestEffort(this.deviceKeyWiringContext(authResult, selectedOrg.id));
     }
 
     // Discover existing projects in the org. If any exist, give the user the
@@ -2242,8 +2274,32 @@ export class CapyCommand {
     };
   }
 
-  private async createNewOrganization(refreshToken: string, userId: string): Promise<Organization> {
+  private async createNewOrganization(
+    refreshToken: string,
+    userId: string,
+    deviceKeyEnrollment?: DeviceKeyEnrollmentOptions,
+  ): Promise<Organization> {
     const { createNewOrganization } = await import('./orgCreation');
-    return createNewOrganization(this.authService, this.serviceClient, refreshToken, userId, this.options.web);
+    return createNewOrganization(
+      this.authService,
+      this.serviceClient,
+      refreshToken,
+      userId,
+      this.options.web,
+      deviceKeyEnrollment,
+    );
+  }
+
+  /** Shared context the device-key wiring (CAP-382) builds ceremony deps from. */
+  private deviceKeyWiringContext(authResult: AuthResult, activeOrgId?: string | null): DeviceKeyWiringContext {
+    return {
+      authService: this.authService,
+      serviceClient: this.serviceClient,
+      devMode: this.devMode,
+      userId: authResult.user_id!,
+      userEmail: authResult.user_email,
+      organizations: authResult.organizations || [],
+      activeOrgId,
+    };
   }
 }

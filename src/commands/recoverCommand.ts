@@ -1,5 +1,6 @@
+import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
-import { ServiceClient } from '../service/serviceClient';
+import { ServiceClient, KeyWrapperMetadata } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import {
@@ -12,6 +13,14 @@ import {
   seedPhraseToMasterKey,
   CURRENT_KDF_VERSION,
 } from '../crypto/keyManager';
+import { readLocalRoot } from '../config/globalConfig';
+import { isInteractive } from '../ui/interactive';
+import { deviceKeysEnabled } from '../auth/deviceKey/flag';
+import {
+  runDeviceKeyEnrollment,
+  reportEnrollmentOutcome,
+  DeviceKeyWiringContext,
+} from '../auth/deviceKey/wiring';
 
 /** A piece of this org's ciphertext, and a way to test a key against it. */
 interface CiphertextOracle {
@@ -303,6 +312,13 @@ export class RecoverCommand {
         serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
     };
 
+    // CAP-382: whether this recovery is about to MINT a brand new K_local
+    // root (no local.key on this machine yet) decides whether any already-
+    // enrolled device-key doors are about to go stale — checked before the
+    // write, since wrapAndSaveMasterKey's loadOrMintLocalRoot would answer
+    // "yes, one exists" immediately after minting one itself.
+    const hadLocalRootBefore = readLocalRoot(orgId, userId) !== null;
+
     try {
       await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
     } catch (err: any) {
@@ -318,6 +334,71 @@ export class RecoverCommand {
     console.log(`  Verify by running ${B('capy')} in a project for this org — a wrong recovery`);
     console.log(`  phrase will surface as a decryption failure on the first encrypted variable.`);
     console.log('');
+
+    if (deviceKeysEnabled()) {
+      await this.maybeReenrollAfterRecovery(
+        { authService, serviceClient, devMode: this.devMode, userId, userEmail: authResult.user_email, organizations: orgs, activeOrgId: orgId },
+        serviceClient,
+        selectedOrg.name,
+        hadLocalRootBefore,
+      );
+    }
+  }
+
+  /**
+   * CAP-382: when recovery minted a BRAND NEW K_local root (no local.key
+   * existed on this machine before wrapAndSaveMasterKey ran), any device-key
+   * doors already enrolled for this account wrap the OLD, now-orphaned
+   * root — silently stale. Offers re-enrollment onto the new root, and only
+   * once a NEW live door actually exists does it soft-delete the stale
+   * ones, so the ≥1-anchored-door invariant is never at risk of blocking
+   * the cleanup (enroll-then-delete, never the other order). When
+   * local.key already existed (the overwrite branch above), the root is
+   * UNCHANGED and existing doors remain valid — nothing here touches them.
+   * Declining, a non-interactive run, or any ceremony failure leave every
+   * existing wrapper exactly as recovery already left it.
+   */
+  private async maybeReenrollAfterRecovery(
+    ctx: DeviceKeyWiringContext,
+    serviceClient: ServiceClient,
+    orgName: string,
+    hadLocalRootBefore: boolean,
+  ): Promise<void> {
+    if (!isInteractive()) return;
+
+    let staleDoors: KeyWrapperMetadata[] = [];
+    if (!hadLocalRootBefore) {
+      try {
+        staleDoors = (await serviceClient.listWrappers()).filter(w => w.type === 'wrapped_k_local' && !w.deleted_at);
+      } catch {
+        staleDoors = [];
+      }
+    }
+
+    const { confirmed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmed',
+      message:
+        staleDoors.length > 0
+          ? 'This recovery reset your local device key material. Set up a new device key for this machine (and retire the old one)?'
+          : 'Set up a device key so your other machines onboard with Face ID/Touch ID instead of a recovery phrase?',
+      default: false,
+    }]);
+    if (!confirmed) return;
+
+    const outcome = await runDeviceKeyEnrollment(ctx);
+    if (outcome.kind !== 'enrolled') return;
+    reportEnrollmentOutcome(outcome.result, orgName);
+
+    for (const door of staleDoors) {
+      try {
+        await serviceClient.deleteWrapper(door.id);
+      } catch {
+        // Best-effort: a surviving stale door is a cleanliness issue, not a
+        // security one (it wraps an orphaned root nothing needs anymore).
+        // `capy device-key list` shows the true state either way.
+      }
+    }
   }
 
   /**
