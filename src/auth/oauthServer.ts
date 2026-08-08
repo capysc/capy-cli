@@ -18,6 +18,18 @@ function generatePKCE(): { codeVerifier: string; codeChallenge: string } {
   return { codeVerifier, codeChallenge };
 }
 
+/**
+ * How a deferred callback response is finally answered (CAPY_KEEP_SCREENS).
+ * A discriminated union so the ending is always one of exactly three shapes.
+ */
+export type DeferredCompletion =
+  /** Send the browser to a hosted keep-app screen. */
+  | { kind: 'redirect'; url: string }
+  /** Fall back to today's loopback auth-success screen. */
+  | { kind: 'success-screen' }
+  /** Fall back to today's loopback auth-error screen. Display-only message. */
+  | { kind: 'error-screen'; message: string };
+
 export class OAuthServer {
   private port: number = 0;
   private state: string;
@@ -26,10 +38,24 @@ export class OAuthServer {
   private authorizationCode: string | null = null;
   private error: string | null = null;
   private pkce: { codeVerifier: string; codeChallenge: string };
+  /**
+   * Deferred-completion mode (CAP-376 keep-screens fork): the successful
+   * callback's HTTP response is HELD OPEN instead of being answered with the
+   * loopback auth-success screen, and `startAuthFlow` resolves as soon as the
+   * code arrives. The caller finishes the token exchange, decides where the
+   * browser should land, and settles the held response via
+   * `completeDeferred`. Error callbacks (state mismatch, provider error,
+   * missing code) are NOT deferred — no session can exist at that point, so
+   * they render the loopback error screen exactly as always.
+   */
+  private deferCompletion: boolean;
+  private pendingRes: ServerResponse | null = null;
+  private flowResolve: ((code: string) => void) | null = null;
 
-  constructor() {
+  constructor(opts: { deferCompletion?: boolean } = {}) {
     this.state = randomBytes(32).toString('hex');
     this.pkce = generatePKCE();
+    this.deferCompletion = opts.deferCompletion === true;
   }
 
   getState(): string {
@@ -117,6 +143,11 @@ export class OAuthServer {
         if (plan.via !== 'suppressed') console.log(`✓ Opened browser for authentication`);
       });
 
+      // Deferred mode resolves the flow as soon as the code arrives (the
+      // callback response is still held open); the close-time settlement
+      // below is then a no-op — a promise settles once.
+      this.flowResolve = resolve;
+
       const timeout = setTimeout(() => {
         this.cleanup();
         reject(new CapyError(
@@ -185,7 +216,47 @@ export class OAuthServer {
     }
 
     this.authorizationCode = code;
+    if (this.deferCompletion) {
+      // Hold the browser's request open; the caller finishes the exchange and
+      // settles it via completeDeferred. The 5-minute flow timeout still
+      // bounds this — cleanup() answers any still-held response.
+      this.pendingRes = res;
+      this.flowResolve?.(code);
+      return;
+    }
     this.sendSuccessResponse(res);
+    this.cleanup();
+  }
+
+  /**
+   * Settle the held callback response (deferred mode only). Safe to call
+   * exactly once; a response that already died (browser gone, timeout fired)
+   * degrades to plain cleanup.
+   */
+  completeDeferred(completion: DeferredCompletion): void {
+    const res = this.pendingRes;
+    this.pendingRes = null;
+    if (res && !res.writableEnded) {
+      try {
+        if (completion.kind === 'redirect') {
+          // 303: the callback GET is done here; the outcome lives at the
+          // hosted screen. No screen HTML ever renders on the loopback.
+          res.writeHead(303, { Location: completion.url, 'Cache-Control': 'no-store' });
+          res.end();
+        } else if (completion.kind === 'success-screen') {
+          this.sendSuccessResponse(res);
+        } else {
+          this.sendErrorResponse(res, completion.message);
+        }
+        // Let the response flush before tearing the sockets down — the same
+        // grace ScreenServer gives after serving; a synchronous destroy can
+        // cut the redirect off mid-flight.
+        setTimeout(() => this.cleanup(), 250);
+        return;
+      } catch {
+        // The socket died under us — nothing left to answer.
+      }
+    }
     this.cleanup();
   }
 
@@ -200,6 +271,17 @@ export class OAuthServer {
   }
 
   private cleanup(): void {
+    // Never leave a deferred browser request hanging: if the flow ends by any
+    // path (timeout, error) while a callback response is still held, answer
+    // it with the loopback error screen before tearing the server down.
+    if (this.pendingRes && !this.pendingRes.writableEnded) {
+      try {
+        this.sendErrorResponse(this.pendingRes, 'Sign-in could not be completed');
+      } catch {
+        // Socket already gone.
+      }
+    }
+    this.pendingRes = null;
     if (this.server) {
       this.server.close();
       // Destroy all open connections immediately (don't wait for keep-alive timeout)

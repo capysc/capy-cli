@@ -1,5 +1,9 @@
+import { hostname } from 'os';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES } from '../types/index';
 import { OAuthServer } from './oauthServer';
+import { BrokerClient } from '../service/brokerClient';
+import { parseCompletionPayload } from '../service/brokerEnvelope';
+import { keepFlowUrl, keepScreensEnabled, type KeepAuthFlow } from '../ui/screens/keepScreens';
 import { consumeForceLoginMarker } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
@@ -129,7 +133,12 @@ export class AuthService {
   }
 
   private async startOAuthFlow(organizationId?: string): Promise<AuthResult> {
-    const oauthServer = new OAuthServer();
+    // CAP-376 serving fork: with CAPY_KEEP_SCREENS=1 the successful callback
+    // response is deferred so the browser can be sent to a hosted keep-app
+    // screen bound to a broker connection. Flag unset = today's loopback
+    // behavior, unchanged.
+    const keepScreens = keepScreensEnabled();
+    const oauthServer = new OAuthServer({ deferCompletion: keepScreens });
     await oauthServer.bind();
     const redirectUri = oauthServer.getRedirectUri();
     const state = oauthServer.getState();
@@ -154,16 +163,124 @@ export class AuthService {
 
     const code = await oauthServer.startAuthFlow(auth_url);
 
-    const response = await postJson<{
-      token: { access_token: string | null; refresh_token: string; expires_in: number };
-      user: { id: string; email: string; first_name: string | null; last_name: string | null };
-      organizations: Organization[];
-    }>(`${this.serviceApiUrl}/auth/exchange`, {
-      code,
-      code_verifier: oauthServer.getCodeVerifier(),
-    });
+    if (!keepScreens) {
+      const response = await postJson<{
+        token: { access_token: string | null; refresh_token: string; expires_in: number };
+        user: { id: string; email: string; first_name: string | null; last_name: string | null };
+        organizations: Organization[];
+      }>(`${this.serviceApiUrl}/auth/exchange`, {
+        code,
+        code_verifier: oauthServer.getCodeVerifier(),
+      });
 
-    return this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+      return this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+    }
+
+    // Keep-screens path: the callback response is still held open. Finish the
+    // exchange, then decide where the browser lands. Any throw on the way must
+    // settle the held response first — a browser left spinning is a bug.
+    try {
+      const response = await postJson<{
+        token: { access_token: string | null; refresh_token: string; expires_in: number };
+        user: { id: string; email: string; first_name: string | null; last_name: string | null };
+        organizations: Organization[];
+      }>(`${this.serviceApiUrl}/auth/exchange`, {
+        code,
+        code_verifier: oauthServer.getCodeVerifier(),
+      });
+
+      const result = await this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+      await this.relayAuthScreenViaKeep(oauthServer, result);
+      return result;
+    } catch (error: any) {
+      // Exchange (or session processing) failed with no usable session, so a
+      // broker connection cannot be created (create is org-scoped): the held
+      // browser response gets today's loopback error screen, and the caller's
+      // error handling proceeds unchanged.
+      oauthServer.completeDeferred({
+        kind: 'error-screen',
+        message: error?.message || 'Authentication failed',
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * CAP-376: relay the auth ending as a hosted keep-app screen riding the
+   * connection broker. Fully best-effort — authentication has already
+   * succeeded or failed by the time this runs, and every failure here
+   * degrades to the loopback screen the flow always had.
+   *
+   * The keep transport requires an org-scoped access token (broker create is
+   * a CLI-side verb). A multi-org first sign-in gets no org token from the
+   * exchange, so it keeps the loopback ending — recorded limitation, not an
+   * error path.
+   */
+  private async relayAuthScreenViaKeep(oauthServer: OAuthServer, result: AuthResult): Promise<void> {
+    const flow: KeepAuthFlow = result.success ? 'auth-success' : 'auth-error';
+    const fallback = () =>
+      oauthServer.completeDeferred(
+        result.success
+          ? { kind: 'success-screen' }
+          : { kind: 'error-screen', message: result.error || 'Authentication failed' },
+      );
+
+    const token = this.getKeepRelayToken(result);
+    if (!token) {
+      fallback();
+      return;
+    }
+
+    const broker = new BrokerClient(this.serviceApiUrl, () => token);
+    let connection;
+    try {
+      connection = await broker.createConnection({
+        purpose: flow,
+        machineName: hostname(),
+      });
+    } catch {
+      // Coded CapyError from the client; the remedy is always the same —
+      // serve the loopback ending instead. Nothing branches on which failure.
+      fallback();
+      return;
+    }
+
+    const url = keepFlowUrl(flow, connection.connectionId, result.success ? undefined : result.error_code || 'AUTH_FAILED');
+
+    // Print before redirecting, mirroring the auth-URL print above: the MCP
+    // relays what interactive runs print, and a browser that never follows
+    // the redirect still leaves the user a working address.
+    console.log('');
+    console.log('  Finish in your browser:');
+    console.log(`  ${url}`);
+    console.log('');
+
+    oauthServer.completeDeferred({ kind: 'redirect', url });
+
+    // Wait (bounded) for the page's sealed acknowledgement — the same
+    // envelope round-trip a payload-bearing screen will rely on. The ack is
+    // confirmation, not authority: its absence never un-succeeds a login.
+    const ack = await broker.awaitAnswer(connection);
+    if (ack.kind === 'answered') {
+      const completion = parseCompletionPayload(ack.plaintext, flow);
+      debug(`[keep-screens] ${flow} ${completion ? 'acknowledged' : 'bad completion payload'}`);
+    } else {
+      debug(`[keep-screens] ${flow} not acknowledged (${ack.kind})`);
+    }
+  }
+
+  /**
+   * The org-scoped token the broker's CLI-side verbs require, if this auth
+   * ending produced one. Empty-handed on multi-org sign-ins (exchange
+   * returns no org token) and on failures — the callers fall back.
+   */
+  private getKeepRelayToken(result: AuthResult): string | null {
+    if (!this.session) return null;
+    const orgId = result.organization_id || this.currentOrgId;
+    if (!orgId) return null;
+    const orgSession = this.session.sessions[orgId];
+    if (!orgSession || orgSession.expires_at <= Date.now()) return null;
+    return orgSession.access_token;
   }
 
   /**

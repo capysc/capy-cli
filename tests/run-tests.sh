@@ -22,6 +22,7 @@ FAIL=0
 # Files that use mock.module() — must run in isolation
 ISOLATED_FILES=(
   tests/auth/authService.test.ts
+  tests/auth/authServiceKeepScreens.test.ts
   tests/auth/oauthServer.test.ts
   tests/auth/sessionFileBackend.test.ts
   tests/auth/sessionLifecycle.test.ts
