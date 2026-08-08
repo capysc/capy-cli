@@ -33,6 +33,12 @@ let saveLocalRoot: typeof import('../../src/config/globalConfig').saveLocalRoot;
 let saveLocalRootExclusive: typeof import('../../src/config/globalConfig').saveLocalRootExclusive;
 let readLocalRoot: typeof import('../../src/config/globalConfig').readLocalRoot;
 let hasLocalRoot: typeof import('../../src/config/globalConfig').hasLocalRoot;
+let markKeyEncSyncPending: typeof import('../../src/config/globalConfig').markKeyEncSyncPending;
+let clearKeyEncSyncPending: typeof import('../../src/config/globalConfig').clearKeyEncSyncPending;
+let isKeyEncSyncPending: typeof import('../../src/config/globalConfig').isKeyEncSyncPending;
+let readKeyEncSyncPendingMarker: typeof import('../../src/config/globalConfig').readKeyEncSyncPendingMarker;
+let getKeyEncSyncPendingPath: typeof import('../../src/config/globalConfig').getKeyEncSyncPendingPath;
+let rootFingerprint: typeof import('../../src/config/globalConfig').rootFingerprint;
 
 beforeAll(async () => {
   const mod = await import('../../src/config/globalConfig');
@@ -57,6 +63,12 @@ beforeAll(async () => {
   saveLocalRootExclusive = mod.saveLocalRootExclusive;
   readLocalRoot = mod.readLocalRoot;
   hasLocalRoot = mod.hasLocalRoot;
+  markKeyEncSyncPending = mod.markKeyEncSyncPending;
+  clearKeyEncSyncPending = mod.clearKeyEncSyncPending;
+  isKeyEncSyncPending = mod.isKeyEncSyncPending;
+  readKeyEncSyncPendingMarker = mod.readKeyEncSyncPendingMarker;
+  getKeyEncSyncPendingPath = mod.getKeyEncSyncPendingPath;
+  rootFingerprint = mod.rootFingerprint;
 });
 
 afterAll(() => {
@@ -300,6 +312,51 @@ describe('GlobalConfig', () => {
       expect(saveLocalRootExclusive(ORG, b, 'user_excl')).toBe(false);
       // The winner's root is what's on disk
       expect(readLocalRoot(ORG, 'user_excl')!.equals(a)).toBe(true);
+    });
+  });
+
+  describe('key.enc sync-pending marker (gate-2 MAJOR-1: canonical identity)', () => {
+    const ORG = 'org_sync';
+
+    it('records the canonical org id + root fingerprint, and round-trips them', () => {
+      const root = require('crypto').randomBytes(32);
+      markKeyEncSyncPending(ORG, 'user_marker', 'canonical_org', root);
+      expect(isKeyEncSyncPending(ORG, 'user_marker')).toBe(true);
+      expect(readKeyEncSyncPendingMarker(ORG, 'user_marker')).toEqual({
+        canonicalOrgId: 'canonical_org',
+        canonicalRootSha256: rootFingerprint(root),
+      });
+      clearKeyEncSyncPending(ORG, 'user_marker');
+      expect(isKeyEncSyncPending(ORG, 'user_marker')).toBe(false);
+      expect(readKeyEncSyncPendingMarker(ORG, 'user_marker')).toBeNull();
+    });
+
+    it('treats a missing marker, an empty (pre-fix) marker, and unparseable content all as "no canonical recorded" — never as canonical', () => {
+      const { writeFileSync, mkdirSync } = require('fs');
+      const { dirname } = require('path');
+
+      expect(readKeyEncSyncPendingMarker(ORG, 'user_missing')).toBeNull();
+
+      // Pre-fix format: an empty marker file. Still "pending" — just no
+      // recorded identity — so callers must fall back, not skip it.
+      const emptyPath = getKeyEncSyncPendingPath(ORG, 'user_legacy');
+      mkdirSync(dirname(emptyPath), { recursive: true, mode: 0o700 });
+      writeFileSync(emptyPath, '', { mode: 0o600 });
+      expect(isKeyEncSyncPending(ORG, 'user_legacy')).toBe(true);
+      expect(readKeyEncSyncPendingMarker(ORG, 'user_legacy')).toBeNull();
+
+      // Corrupt/foreign JSON shape: also null, never thrown, never trusted.
+      const corruptPath = getKeyEncSyncPendingPath(ORG, 'user_corrupt_marker');
+      mkdirSync(dirname(corruptPath), { recursive: true, mode: 0o700 });
+      writeFileSync(corruptPath, '{"not":"a marker"}', { mode: 0o600 });
+      expect(readKeyEncSyncPendingMarker(ORG, 'user_corrupt_marker')).toBeNull();
+    });
+
+    it('two different canonical roots fingerprint differently (the sweep\'s drift check depends on this)', () => {
+      const a = require('crypto').randomBytes(32);
+      const b = require('crypto').randomBytes(32);
+      expect(rootFingerprint(a)).not.toBe(rootFingerprint(b));
+      expect(rootFingerprint(a)).toBe(rootFingerprint(Buffer.from(a)));
     });
   });
 });

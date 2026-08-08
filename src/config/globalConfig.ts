@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'fs';
+import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -112,14 +113,55 @@ export function listOrgsWithLocalRoot(userId: string): string[] {
 // a pending retry. In steady state the file does not exist, so a
 // passkey-provisioned tree stays structurally identical to a
 // transport-provisioned one (CAP-372 equivalence requirement).
+//
+// The marker's CONTENT records the canonical identity it was set against
+// (gate-2 MAJOR-1 fix): the org whose local.key is the root this org's
+// key.enc is owed against, plus a SHA-256 fingerprint of that root's bytes
+// at mark-time. A crash-recovery sweep that instead GUESSED the canonical
+// root from "any org that happens to be marker-free right now" could pick a
+// divergent, never-canonicalized org — durably re-keying a good copy onto a
+// root no enrolled door wraps. Recording the identity in the marker itself
+// means the sweep never has to guess, and a fingerprint mismatch (the
+// recorded canonical org's root moved, or vanished, since the marker was
+// set) fails closed instead of silently trusting stale state. A marker with
+// empty or unparseable content predates this format — callers MUST treat
+// that as "no canonical recorded", never assume it means "not pending"
+// (use isKeyEncSyncPending / listOrgsWithKeyEncSyncPending for that).
+
+export interface KeyEncSyncPendingMarker {
+  /** Org id whose local.key is the canonical root this org's key.enc owes an upload against. */
+  canonicalOrgId: string;
+  /** SHA-256 hex digest of the canonical root's raw bytes at mark-time. */
+  canonicalRootSha256: string;
+}
+
+/** SHA-256 hex digest of a root's raw bytes — the sync-marker fingerprint. */
+export function rootFingerprint(root: Buffer): string {
+  return createHash('sha256').update(root).digest('hex');
+}
 
 export function getKeyEncSyncPendingPath(orgId: string, userId?: string): string {
   return getOrgKeyPath(orgId, userId) + '.sync-pending';
 }
 
-export function markKeyEncSyncPending(orgId: string, userId?: string): void {
+/**
+ * Marks `orgId`'s key.enc as owing a server upload against `canonicalRoot`
+ * (the root of `canonicalOrgId` — the same org when there is nothing to
+ * unify onto, a different org when enrollment is re-keying onto a shared
+ * canonical root).
+ */
+export function markKeyEncSyncPending(
+  orgId: string,
+  userId: string | undefined,
+  canonicalOrgId: string,
+  canonicalRoot: Buffer,
+): void {
+  const marker: KeyEncSyncPendingMarker = {
+    canonicalOrgId,
+    canonicalRootSha256: rootFingerprint(canonicalRoot),
+  };
   try {
-    writeSecureFile(getKeyEncSyncPendingPath(orgId, userId), '');
+    writeSecureFile(getKeyEncSyncPendingPath(orgId, userId), JSON.stringify(marker));
   } catch {
     // Best-effort: a failed marker write only costs a missed retry.
   }
@@ -135,6 +177,26 @@ export function clearKeyEncSyncPending(orgId: string, userId?: string): void {
 
 export function isKeyEncSyncPending(orgId: string, userId?: string): boolean {
   return existsSync(getKeyEncSyncPendingPath(orgId, userId));
+}
+
+/**
+ * Reads a marker's recorded canonical identity. Returns null for a missing
+ * marker, empty content (the pre-gate-2-fix format), or content that fails
+ * to parse as a `KeyEncSyncPendingMarker` — callers must fall back rather
+ * than trust it, and must not read null as "not pending".
+ */
+export function readKeyEncSyncPendingMarker(orgId: string, userId?: string): KeyEncSyncPendingMarker | null {
+  const content = readFileOrNull(getKeyEncSyncPendingPath(orgId, userId));
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed?.canonicalOrgId === 'string' && typeof parsed?.canonicalRootSha256 === 'string') {
+      return { canonicalOrgId: parsed.canonicalOrgId, canonicalRootSha256: parsed.canonicalRootSha256 };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Org ids with a pending key.enc upload marker for this user. */

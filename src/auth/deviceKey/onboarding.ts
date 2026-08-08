@@ -55,6 +55,8 @@ import {
   markKeyEncSyncPending,
   clearKeyEncSyncPending,
   listOrgsWithKeyEncSyncPending,
+  readKeyEncSyncPendingMarker,
+  rootFingerprint,
 } from '../../config/globalConfig';
 import type { CeremonyTransport, CeremonyFailureCode } from './ceremonyTransport';
 import {
@@ -164,6 +166,19 @@ export interface UnlockSummary {
   ok: true;
   credentialId: string;
   orgs: OrgOutcome[];
+}
+
+/**
+ * Detection said Case B (some org dir has a local.key), but no candidate's
+ * file actually parses as a usable 32-byte root (corrupt/truncated write) —
+ * there is nothing left on this machine to enroll onto. Degrades to the B′
+ * routing verdict rather than dead-ending in a throw, matching the fork's
+ * own graceful-degradation philosophy (gate-2 MAJOR-4).
+ */
+export interface RoutingVerdict {
+  ok: false;
+  kind: 'recovery_or_transport';
+  code: typeof ERROR_CODES.INVALID_FORMAT;
 }
 
 export interface DetectionResult {
@@ -283,12 +298,16 @@ async function uploadKeyEncRotating(
  * this machine's blob. The pending marker brackets the whole operation:
  * it is set before the first side effect and cleared only after the server
  * holds the current blob AND local files are settled, so any crash leaves a
- * persisted instruction to retry (the legacy-migration retry pattern).
+ * persisted instruction to retry (the legacy-migration retry pattern). The
+ * marker records `canonicalOrgId` + a fingerprint of `canonicalRoot` (gate-2
+ * MAJOR-1) so a later `runPendingSync` retry never has to guess which root
+ * this org's crash-interrupted sync was targeting.
  */
 async function syncOrgKeyEnc(
   deps: OnboardingDeps,
   orgId: string,
   canonicalRoot: Buffer,
+  canonicalOrgId: string,
 ): Promise<OrgOutcome> {
   const blob = readMasterKey(orgId, deps.userId);
   if (!blob) {
@@ -298,7 +317,7 @@ async function syncOrgKeyEnc(
     return { orgId, status: 'skipped_no_key_enc' };
   }
 
-  markKeyEncSyncPending(orgId, deps.userId);
+  markKeyEncSyncPending(orgId, deps.userId, canonicalOrgId, canonicalRoot);
 
   const orgOps = await deps.opsForOrg(orgId);
   if (!orgOps) {
@@ -371,7 +390,12 @@ function candidateOrgIds(deps: OnboardingDeps): string[] {
  * every org-creation regardless of passkey outcome, and wrapping the settled
  * root closes the race where an uploaded door wraps a root that lost the
  * O_EXCL mint — a divergence nothing could later detect. A ceremony refusal
- * therefore leaves the machine byte-identical to today's non-passkey flow.
+ * therefore leaves the machine byte-identical to today's non-passkey flow:
+ * the pre-ceremony wrapAndSaveMasterKey hook marks the org's key.enc
+ * sync-pending (an upload is owed the moment a door exists to wrap the
+ * root), and a refusal means no door ever will, so the refusal path clears
+ * that marker explicitly rather than leaving a permanent, unpayable retry
+ * debt for a user who never opted in (gate-2 MAJOR-3).
  */
 export async function runNewUserEnrollment(
   deps: OnboardingDeps,
@@ -393,9 +417,16 @@ export async function runNewUserEnrollment(
   const root = loadOrMintLocalRoot(args.orgId, deps.userId);
 
   const door = await enrollDoor(deps, root);
-  if (!door.ok) return door;
+  if (!door.ok) {
+    // Refusal costs nothing: clear the marker the pre-ceremony
+    // wrapAndSaveMasterKey hook set, so the tree is byte-identical to
+    // today's non-passkey org creation (gate-2 MAJOR-3) — nothing to retry
+    // for an org that was never enrolled.
+    clearKeyEncSyncPending(args.orgId, deps.userId);
+    return door;
+  }
 
-  const orgs: OrgOutcome[] = [await syncOrgKeyEnc(deps, args.orgId, root)];
+  const orgs: OrgOutcome[] = [await syncOrgKeyEnc(deps, args.orgId, root, args.orgId)];
 
   return {
     ok: true,
@@ -412,18 +443,31 @@ export async function runNewUserEnrollment(
 
 export async function runFirstEnrollment(
   deps: OnboardingDeps,
-): Promise<EnrollmentSummary | CeremonyAborted> {
+): Promise<EnrollmentSummary | CeremonyAborted | RoutingVerdict> {
   const rootOrgs = listOrgsWithLocalRoot(deps.userId);
-  const canonicalOrgId =
-    deps.activeOrgId && rootOrgs.includes(deps.activeOrgId) ? deps.activeOrgId : rootOrgs[0];
-  const canonicalRoot = canonicalOrgId ? readLocalRoot(canonicalOrgId, deps.userId) : null;
-  if (!canonicalRoot) {
-    // Detection said Case B, but no org dir yields a parseable 32-byte root.
-    throw new CapyError(
-      'No usable machine key found on this machine.',
-      ERROR_CODES.INVALID_FORMAT,
-      { reason: 'no_parseable_local_root', rootOrgs },
-    );
+  const ordered =
+    deps.activeOrgId && rootOrgs.includes(deps.activeOrgId)
+      ? [deps.activeOrgId, ...rootOrgs.filter(id => id !== deps.activeOrgId)]
+      : rootOrgs;
+
+  // Iterate every candidate for the first PARSEABLE root (active org
+  // preferred): one corrupt/truncated local.key must not dead-end
+  // enrollment when another org holds a working root (gate-2 MAJOR-4).
+  let canonicalOrgId: string | null = null;
+  let canonicalRoot: Buffer | null = null;
+  for (const candidate of ordered) {
+    const root = readLocalRoot(candidate, deps.userId);
+    if (root) {
+      canonicalOrgId = candidate;
+      canonicalRoot = root;
+      break;
+    }
+  }
+  if (!canonicalOrgId || !canonicalRoot) {
+    // Detection said Case B, but nothing on this machine parses as a usable
+    // 32-byte root — degrade to the B′ routing verdict instead of
+    // dead-ending in a throw (gate-2 MAJOR-4).
+    return { ok: false, kind: 'recovery_or_transport', code: ERROR_CODES.INVALID_FORMAT };
   }
 
   const door = await enrollDoor(deps, canonicalRoot);
@@ -437,7 +481,7 @@ export async function runFirstEnrollment(
 
   const orgs: OrgOutcome[] = [];
   for (const orgId of orgIds) {
-    orgs.push(await syncOrgKeyEnc(deps, orgId, canonicalRoot));
+    orgs.push(await syncOrgKeyEnc(deps, orgId, canonicalRoot, canonicalOrgId));
   }
 
   return {
@@ -581,6 +625,68 @@ async function installOrgFromServer(
 // --- Sync sweep — the "retry on next run" half of the invariant --------------
 
 /**
+ * LEGACY FALLBACK ONLY (gate-2 MAJOR-1): a sync-pending marker written before
+ * the canonical-identity format (empty/unparseable content) carries no
+ * recorded canonical org of its own. For those markers only, guess a
+ * canonical root the same way the original sweep did, but fixed: a
+ * "settled" org must have BOTH a parseable local.key AND a key.enc blob —
+ * excluding an org a crash left with a root but no blob, or one
+ * syncOrgKeyEnc's skipped_no_key_enc branch cleared without ever comparing
+ * roots — and the pick is deterministic (active org preferred, else
+ * lexicographic), never filesystem readdir order.
+ */
+function legacyCanonicalIdentity(
+  deps: OnboardingDeps,
+  pending: string[],
+): { orgId: string; root: Buffer } | null {
+  const pendingSet = new Set(pending);
+  const settled = listOrgsWithLocalRoot(deps.userId)
+    .filter(id => !pendingSet.has(id))
+    .filter(id => readLocalRoot(id, deps.userId) !== null && readMasterKey(id, deps.userId) !== null)
+    .sort((a, b) => {
+      if (a === deps.activeOrgId) return -1;
+      if (b === deps.activeOrgId) return 1;
+      return a.localeCompare(b);
+    });
+  if (settled.length === 0) return null;
+  const root = readLocalRoot(settled[0], deps.userId);
+  return root ? { orgId: settled[0], root } : null;
+}
+
+/**
+ * Resolve the canonical (orgId, root) a pending org's retry should target.
+ * Trusts ONLY the identity the org's OWN marker recorded at mark-time — a
+ * marker-free divergent org (e.g. one joined via `capy redeem` after
+ * enrollment) can therefore never be mistaken for canonical, which is the
+ * exact MAJOR-1 orphaning path this replaces. A marker whose recorded
+ * canonical org's root has since moved or vanished fails closed (coded)
+ * rather than silently substituting something else. Only a marker that
+ * predates the format falls back to the deterministic legacy guess, and
+ * finally to the org's own root (nothing to unify onto, so it re-uploads
+ * itself unchanged — the historical single-org-pending behavior).
+ */
+function resolveCanonicalForPendingOrg(
+  deps: OnboardingDeps,
+  orgId: string,
+  legacyFallback: { orgId: string; root: Buffer } | null,
+): { canonicalOrgId: string; canonicalRoot: Buffer } | { code: string } {
+  const marker = readKeyEncSyncPendingMarker(orgId, deps.userId);
+  if (marker) {
+    const canonicalRoot = readLocalRoot(marker.canonicalOrgId, deps.userId);
+    if (!canonicalRoot || rootFingerprint(canonicalRoot) !== marker.canonicalRootSha256) {
+      return { code: ERROR_CODES.INVALID_FORMAT };
+    }
+    return { canonicalOrgId: marker.canonicalOrgId, canonicalRoot };
+  }
+  if (legacyFallback) {
+    return { canonicalOrgId: legacyFallback.orgId, canonicalRoot: legacyFallback.root };
+  }
+  const ownRoot = readLocalRoot(orgId, deps.userId);
+  if (!ownRoot) return { code: ERROR_CODES.INVALID_FORMAT };
+  return { canonicalOrgId: orgId, canonicalRoot: ownRoot };
+}
+
+/**
  * Retry every owed key.enc upload (key.enc.sync-pending markers). Runs from
  * enrollment-aware contexts only; does nothing without markers. When the
  * account has no live door (never enrolled / fully un-enrolled) the markers
@@ -599,20 +705,16 @@ export async function runPendingSync(deps: OnboardingDeps): Promise<OrgOutcome[]
     }));
   }
 
-  // Canonical root = the root of any org NOT owing a sync (its key.enc and
-  // root are settled — enrollment left it consistent). A machine where every
-  // org is pending (the single-org case) syncs each org onto its own root.
-  const settled = listOrgsWithLocalRoot(deps.userId).filter(id => !pending.includes(id));
-  const canonicalFromSettled = settled.length > 0 ? readLocalRoot(settled[0], deps.userId) : null;
+  const legacyFallback = legacyCanonicalIdentity(deps, pending);
 
   const outcomes: OrgOutcome[] = [];
   for (const orgId of pending) {
-    const canonical = canonicalFromSettled ?? readLocalRoot(orgId, deps.userId);
-    if (!canonical) {
-      outcomes.push({ orgId, status: 'failed', code: ERROR_CODES.INVALID_FORMAT });
+    const resolved = resolveCanonicalForPendingOrg(deps, orgId, legacyFallback);
+    if ('code' in resolved) {
+      outcomes.push({ orgId, status: 'failed', code: resolved.code });
       continue;
     }
-    outcomes.push(await syncOrgKeyEnc(deps, orgId, canonical));
+    outcomes.push(await syncOrgKeyEnc(deps, orgId, resolved.canonicalRoot, resolved.canonicalOrgId));
   }
   return outcomes;
 }

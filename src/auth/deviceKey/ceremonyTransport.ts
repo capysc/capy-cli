@@ -23,6 +23,19 @@
  * (machine-readable, stable) — e.g. `prf_unsupported` routes to the
  * transport/redeem fallback, `cancelled` aborts politely. Transport-level
  * breakage (broker unreachable, connection expired) is `transport_error`.
+ *
+ * PAGE-SIDE CAPS (gate-2 MINOR-2, for the CAP-382 transport implementation):
+ * the keep-app ceremony page enforces hard limits on what fits in the
+ * broker fragment it is reached through (`keep-app/src/lib/flow/deviceKeyWire.ts`,
+ * `MAX_UNLOCK_CANDIDATES`/fragment size/credential-id length) — currently 32
+ * unlock candidates, a 16 KiB fragment, and 1400-char credential ids. A
+ * `requestUnlock` call built from more live doors (or with abnormally large
+ * credential ids) than that produces a fragment the page rejects outright as
+ * INVALID_REQUEST: the page never attaches, and the CLI just waits out its
+ * long-poll into an undiagnosable `transport_error`. The CAP-382
+ * implementation of this interface MUST mirror these caps CLI-side and fail
+ * fast with a coded error before ever building the oversized request — do
+ * not rely on the page's rejection to surface the problem.
  */
 
 /** Stable, machine-readable reasons a ceremony did not produce a PRF result. */

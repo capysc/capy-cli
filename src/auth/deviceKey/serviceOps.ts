@@ -98,8 +98,10 @@ export function createDeviceKeyServiceOps(
       },
       // The sync-invariant hook (see KeyServiceOps): any key.enc rewrite
       // through this ops object leaves a persisted marker until the server
-      // copy catches up.
-      onKeyEncRewrapped: (oid, userId) => markKeyEncSyncPending(oid, userId),
+      // copy catches up. Self-referential canonical (oid, root) — this
+      // generic hook fires outside any cross-org enrollment unification, so
+      // the org is always canonical against its own just-written root.
+      onKeyEncRewrapped: (oid, userId, root) => markKeyEncSyncPending(oid, userId, oid, root),
       uploadKeyEnc: async keyEnc => {
         await ensureOrg();
         return serviceClient.uploadKeyEncWrapper(keyEnc);

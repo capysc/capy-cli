@@ -1,5 +1,5 @@
 import { mock, describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
 import { CapyError, ERROR_CODES, Organization } from '../../src/types/index';
@@ -234,7 +234,11 @@ function makeDeps(
       return {
         coDecrypt: async (_oid: string, ct: string) => kmsStrip(ct),
         wrapOuterLayer: async (_oid: string, pt: string) => kmsWrap(pt),
-        onKeyEncRewrapped: (oid: string, uid: string) => gc.markKeyEncSyncPending(oid, uid),
+        // Self-referential canonical (oid, root) — mirrors serviceOps.ts's
+        // production wiring: this generic hook fires outside any cross-org
+        // enrollment unification, so the org is canonical against its own
+        // just-written root.
+        onKeyEncRewrapped: (oid: string, uid: string, root: Buffer) => gc.markKeyEncSyncPending(oid, uid, oid, root),
         uploadKeyEnc: async (keyEnc: string) => server.uploadKeyEnc(orgId, keyEnc),
         fetchKeyEnc: async (wrapperId: string) => {
           const w = server.fetch(wrapperId);
@@ -316,12 +320,15 @@ describe('device-key onboarding engine', () => {
       expect(result.code).toBe(ERROR_CODES.DEVICE_KEY_CEREMONY_FAILED);
       expect(result.ceremonyCode).toBe('cancelled');
 
-      // Files written (today's org-creation behavior), nothing uploaded,
-      // and the sync marker records the still-owed upload.
+      // Files written (today's org-creation behavior), nothing uploaded —
+      // and NO sync marker: a refusal means no door will ever exist to wrap
+      // this root, so the pre-ceremony hook's marker is cleared rather than
+      // left as a permanent, unpayable retry debt (gate-2 MAJOR-3 fix; this
+      // assertion used to contradict the test's own title).
       expect(gc.readLocalRoot('orgA', USER)).not.toBeNull();
       expect(gc.readMasterKey('orgA', USER)).not.toBeNull();
       expect(server.rows.length).toBe(0);
-      expect(gc.isKeyEncSyncPending('orgA', USER)).toBe(true);
+      expect(gc.isKeyEncSyncPending('orgA', USER)).toBe(false);
     });
   });
 
@@ -444,6 +451,55 @@ describe('device-key onboarding engine', () => {
       expect(byOrg['org2']).toBe('skipped_no_org_token');
       expect(gc.isKeyEncSyncPending('org2', USER)).toBe(true);
     });
+
+    it('a corrupt local.key on the sorted-first org does not dead-end enrollment when another org has a working root (gate-2 MAJOR-4)', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-case-b-corrupt';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      const kms = { coDecrypt: async (_o: string, ct: string) => kmsStrip(ct), wrapOuterLayer: async (_o: string, pt: string) => kmsWrap(pt) };
+
+      await keyResolver.wrapAndSaveMasterKey(randomBytes(32), 'org1', USER, kms);
+      await keyResolver.wrapAndSaveMasterKey(randomBytes(32), 'org2', USER, kms);
+      const root2 = gc.readLocalRoot('org2', USER)!;
+
+      // org1's local.key is truncated by a crashed write — it still EXISTS
+      // (detection's existsSync-only hasLocalRoot still says Case B), but it
+      // no longer parses as a 32-byte root. org1 is active, so it sorts
+      // first among candidates.
+      writeFileSync(gc.getLocalRootPath('org1', USER), Buffer.from('short').toString('base64'));
+      expect(gc.readLocalRoot('org1', USER)).toBeNull();
+
+      const deps = makeDeps(server, ceremony, [org('org1'), org('org2')], { activeOrgId: 'org1' });
+      const result = await onboarding.runFirstEnrollment(deps);
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error('unreachable');
+
+      // org2's PARSEABLE root won — org1's corrupt file never dead-ended it.
+      expect(rootFromDoor(server, ceremony).equals(root2)).toBe(true);
+      const byOrg = Object.fromEntries(result.orgs.map(o => [o.orgId, o.status]));
+      expect(byOrg['org2']).toBe('uploaded');
+    });
+
+    it('zero parseable roots anywhere routes to the B′ verdict instead of throwing (gate-2 MAJOR-4)', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-case-b-all-corrupt';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+
+      // A local.key exists (so detection still says Case B) but is corrupt,
+      // and nothing else on the machine has a parseable root.
+      gc.saveLocalRoot('org1', randomBytes(32), USER);
+      writeFileSync(gc.getLocalRootPath('org1', USER), Buffer.from('short').toString('base64'));
+      expect(gc.readLocalRoot('org1', USER)).toBeNull();
+
+      const deps = makeDeps(server, ceremony, [org('org1')]);
+      const result = await onboarding.runFirstEnrollment(deps);
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result).toMatchObject({ kind: 'recovery_or_transport', code: ERROR_CODES.INVALID_FORMAT });
+
+      // A routing verdict, not a throw — and nothing was uploaded.
+      expect(server.rows.length).toBe(0);
+    });
   });
 
   describe('Case C / C′ — enrolled user, fresh machine', () => {
@@ -553,6 +609,117 @@ describe('device-key onboarding engine', () => {
       expect(result.ceremonyCode).toBe('webauthn_unavailable');
       expect(existsSync(gc.getLocalRootPath('org1', USER))).toBe(false);
       expect(existsSync(gc.getOrgKeyPath('org1', USER))).toBe(false);
+    });
+  });
+
+  describe('runPendingSync — canonical root resolution (gate-2 MAJOR-1)', () => {
+    it('a marker-free divergent org (e.g. joined via capy redeem after enrollment) is never picked as canonical', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-sweep-marker-free';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      const kms = { coDecrypt: async (_o: string, ct: string) => kmsStrip(ct), wrapOuterLayer: async (_o: string, pt: string) => kmsWrap(pt) };
+
+      // Enrollment unifies org1 (canonical, active) + org2 onto root1.
+      const m1 = randomBytes(32);
+      const m2 = randomBytes(32);
+      await keyResolver.wrapAndSaveMasterKey(m1, 'org1', USER, kms);
+      await keyResolver.wrapAndSaveMasterKey(m2, 'org2', USER, kms);
+      const enrolled = await onboarding.runFirstEnrollment(
+        makeDeps(server, ceremony, [org('org1'), org('org2')], { activeOrgId: 'org1' }),
+      );
+      expect(enrolled.ok).toBe(true);
+      const root1 = gc.readLocalRoot('org1', USER)!;
+      expect(gc.readLocalRoot('org2', USER)!.equals(root1)).toBe(true);
+
+      // A THIRD org joins the account AFTER enrollment, exactly the report's
+      // "known gap" — its own untouched capy-redeem-style root, a
+      // self-consistent blob, and NO marker at all.
+      const m3 = randomBytes(32);
+      await keyResolver.wrapAndSaveMasterKey(m3, 'org3', USER, kms);
+      const root3 = gc.readLocalRoot('org3', USER)!;
+      expect(root3.equals(root1)).toBe(false);
+      expect(gc.isKeyEncSyncPending('org3', USER)).toBe(false);
+
+      // org2's key.enc needs a retried upload (a hook-bearing run marked it
+      // pending against the TRUE canonical, org1, then went offline).
+      gc.markKeyEncSyncPending('org2', USER, 'org1', root1);
+      expect(gc.isKeyEncSyncPending('org2', USER)).toBe(true);
+
+      const deps = makeDeps(server, ceremony, [org('org1'), org('org2'), org('org3')], { activeOrgId: 'org1' });
+      const outcomes = await onboarding.runPendingSync(deps);
+      expect(outcomes).toEqual([{ orgId: 'org2', status: 'uploaded' }]);
+      expect(gc.isKeyEncSyncPending('org2', USER)).toBe(false);
+
+      // org3 — marker-free and divergent — was never touched: the old
+      // "any marker-free org" guess could have picked it as canonical
+      // (gate-2 MAJOR-1); the marker-driven resolution never considers it.
+      expect(gc.readLocalRoot('org3', USER)!.equals(root3)).toBe(true);
+      expect(gc.isKeyEncSyncPending('org3', USER)).toBe(false);
+      expect(server.liveKeyEnc('org3')).toBeUndefined();
+    });
+
+    it('self-heals a crash that landed after the server upload but before the local root+blob rewrite', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-sweep-crash-root-blob';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      const kms = { coDecrypt: async (_o: string, ct: string) => kmsStrip(ct), wrapOuterLayer: async (_o: string, pt: string) => kmsWrap(pt) };
+
+      // orgA alone, enrolled first (establishes the account's one door,
+      // wrapping rootA) — orgB/orgC don't exist on disk yet, so this run
+      // cannot touch them.
+      const mA = randomBytes(32);
+      await keyResolver.wrapAndSaveMasterKey(mA, 'orgA', USER, kms);
+      const enrolled = await onboarding.runFirstEnrollment(
+        makeDeps(server, ceremony, [org('orgA')], { activeOrgId: 'orgA' }),
+      );
+      expect(enrolled.ok).toBe(true);
+      const rootA = gc.readLocalRoot('orgA', USER)!;
+
+      // orgB and orgC provisioned the pre-passkey way, after the fact.
+      const mB = randomBytes(32);
+      const mC = randomBytes(32);
+      await keyResolver.wrapAndSaveMasterKey(mB, 'orgB', USER, kms);
+      await keyResolver.wrapAndSaveMasterKey(mC, 'orgC', USER, kms);
+      const rootB = gc.readLocalRoot('orgB', USER)!;
+      const rootC = gc.readLocalRoot('orgC', USER)!;
+      expect(rootA.equals(rootB)).toBe(false);
+      expect(rootA.equals(rootC)).toBe(false);
+
+      // Simulate the exact crash point from the gate-2 security report: a
+      // hook-bearing run re-keyed orgB onto the canonical root and the
+      // server upload landed, but the crash hit before local.key/key.enc
+      // were rewritten — orgB's marker (recording canonical=orgA) persists,
+      // and orgC (never touched this run) stays marker-free on its own
+      // divergent root.
+      const orgBOuterUnderA = kmsWrap(
+        keyManager.encryptMasterKey(mB, localKeyRoot.deriveLocalInnerKey(rootA), keyManager.masterKeyAAD(USER, 'orgB')),
+      );
+      server.uploadKeyEnc('orgB', orgBOuterUnderA);
+      gc.markKeyEncSyncPending('orgB', USER, 'orgA', rootA);
+      expect(gc.readLocalRoot('orgB', USER)!.equals(rootB)).toBe(true); // local NOT yet advanced
+
+      const deps = makeDeps(server, ceremony, [org('orgA'), org('orgB'), org('orgC')], { activeOrgId: 'orgA' });
+      const outcomes = await onboarding.runPendingSync(deps);
+      expect(outcomes).toEqual([{ orgId: 'orgB', status: 'rekeyed_and_uploaded' }]);
+      expect(gc.isKeyEncSyncPending('orgB', USER)).toBe(false);
+
+      // orgB fully self-healed onto the TRUE canonical root — local files
+      // and the live server row agree, and it decrypts to the original mB
+      // (not garbage from a torn/foreign wrap).
+      expect(gc.readLocalRoot('orgB', USER)!.equals(rootA)).toBe(true);
+      const liveRow = server.liveKeyEnc('orgB')!;
+      const recovered = keyManager.decryptMasterKey(
+        kmsStrip(liveRow.key_enc!),
+        localKeyRoot.deriveLocalInnerKey(rootA),
+        keyManager.masterKeyAAD(USER, 'orgB'),
+      );
+      expect(recovered.equals(mB)).toBe(true);
+
+      // orgC — marker-free and divergent — was never touched: not picked as
+      // canonical, not uploaded, not corrupted.
+      expect(gc.readLocalRoot('orgC', USER)!.equals(rootC)).toBe(true);
+      expect(gc.isKeyEncSyncPending('orgC', USER)).toBe(false);
+      expect(server.liveKeyEnc('orgC')).toBeUndefined();
     });
   });
 

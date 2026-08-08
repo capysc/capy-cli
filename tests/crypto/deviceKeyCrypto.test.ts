@@ -79,6 +79,21 @@ describe('device-key crypto (PRF → HKDF KEK → AES-256-GCM wrap of K_local)',
     }
   });
 
+  it('a prototype-key-shaped kdf_version fails CLOSED, not via Object.prototype (gate-2 MINOR-2)', () => {
+    // A hostile server sending kdf_version as a plain-object prototype key
+    // name must never reach an Object.prototype member — the version table
+    // is a Map, so any key not literally inserted into it is `undefined`.
+    for (const version of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      try {
+        deriveDeviceKeyKek(prfOutput, prfSalt, version as unknown as number);
+        throw new Error('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect((err as CapyError).code).toBe(ERROR_CODES.DEVICE_KEY_KDF_UNSUPPORTED);
+      }
+    }
+  });
+
   it('a malformed PRF output is refused before any derivation', () => {
     try {
       deriveDeviceKeyKek(randomBytes(16), prfSalt);

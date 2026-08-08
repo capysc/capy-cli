@@ -19,10 +19,16 @@ import { CapyError, ERROR_CODES } from '../../types/index';
 
 export const DEVICE_KEY_KDF_VERSION = 1;
 
-/** HKDF info strings, one per kdf_version. Append-only — never rewrite an entry. */
-const KEK_INFO_BY_VERSION: Record<number, string> = {
-  1: 'capy:device-key:kek:v1',
-};
+/**
+ * HKDF info strings, one per kdf_version. Append-only — never rewrite an
+ * entry. A Map (not a plain object) so a server-supplied kdf_version cannot
+ * reach Object.prototype via a key like "constructor"/"toString" — the
+ * lookup below is `undefined` for anything that isn't a key literally
+ * inserted here, never a prototype member (gate-2 MINOR-2, hardening).
+ */
+const KEK_INFO_BY_VERSION: ReadonlyMap<number, string> = new Map([
+  [1, 'capy:device-key:kek:v1'],
+]);
 
 export const PRF_SALT_LENGTH = 32;
 export const PRF_OUTPUT_LENGTH = 32;
@@ -46,7 +52,7 @@ export function deriveDeviceKeyKek(
   prfSalt: Buffer,
   kdfVersion: number = DEVICE_KEY_KDF_VERSION,
 ): Buffer {
-  const info = KEK_INFO_BY_VERSION[kdfVersion];
+  const info = KEK_INFO_BY_VERSION.get(kdfVersion);
   if (!info) {
     throw new CapyError(
       `This device key was enrolled by a newer capy (kdf_version ${kdfVersion}). Update capy and try again.`,
