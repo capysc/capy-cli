@@ -77,6 +77,30 @@ export interface KeyServiceOps {
   coDecrypt(orgId: string, ciphertext: string): Promise<string>;
   /** Add the KMS outer layer via POST /orgs/:orgId/wrap */
   wrapOuterLayer(orgId: string, plaintext: string): Promise<string>;
+  /**
+   * OPTIONAL device-key sync hook (CAP-380). Called after key.enc is
+   * (re)written on disk — legacy migrations included — so an
+   * enrollment-aware caller can mark the server's copy stale and re-upload
+   * it best-effort (retry on the next enrollment-aware run, mirroring the
+   * legacy→K_local migration's own retry pattern: the persisted state, here
+   * a `key.enc.sync-pending` marker, encodes that a retry is owed).
+   * `root` is the K_local this org's key.enc was just (re)wrapped under —
+   * callers record it as the marker's own canonical identity (self-
+   * referential: this generic hook fires outside any cross-org enrollment
+   * unification, so the org is always canonical against its own root).
+   * Steady-state call sites that don't provide it are byte-for-byte
+   * unchanged. Must never throw into the wrap path; failures are swallowed.
+   */
+  onKeyEncRewrapped?(orgId: string, userId: string, root: Buffer): void;
+}
+
+/** Fire the optional sync hook without letting it disturb the wrap path. */
+function notifyKeyEncRewrapped(service: KeyServiceOps, orgId: string, userId: string, root: Buffer): void {
+  try {
+    service.onKeyEncRewrapped?.(orgId, userId, root);
+  } catch {
+    // Best-effort by contract.
+  }
 }
 
 /**
@@ -227,7 +251,7 @@ export async function resolveProjectKey(
  * loser adopts the winner's root, so every subsequent key.enc write is keyed
  * by the root that is actually on disk.
  */
-function loadOrMintLocalRoot(orgId: string, userId: string): Buffer {
+export function loadOrMintLocalRoot(orgId: string, userId: string): Buffer {
   const existing = readAnyLocalRoot(orgId, userId);
   if (existing) return existing;
 
@@ -279,10 +303,12 @@ export async function wrapAndSaveMasterKey(
     innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(userId, orgId));
     const reOuter = await service.wrapOuterLayer(orgId, innerWrapped);
     saveMasterKey(orgId, reOuter, userId);
+    notifyKeyEncRewrapped(service, orgId, userId, kLocal);
     return;
   }
 
   saveMasterKey(orgId, outerWrapped, userId);
+  notifyKeyEncRewrapped(service, orgId, userId, kLocal);
 }
 
 /**

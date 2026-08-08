@@ -343,6 +343,26 @@ export const ERROR_CODES = {
   NO_CONNECTORS: 'NO_CONNECTORS',
   /** `capy-dev` reached a live-mode credential. Dev never touches live. */
   DEV_LIVE_FIREWALL: 'DEV_LIVE_FIREWALL',
+  // Wrapper-endpoint server codes (CAP-379/CAP-380). Mirrored from
+  // service/src/errorCodes.ts, same convention as the codes above. The first
+  // three are minted as top-level CapyError codes via SERVER_CODES; the last
+  // two ride on 403s as `details.code` (the MEMBERSHIP_REVOKED convention).
+  WRAPPER_NOT_FOUND: 'WRAPPER_NOT_FOUND',
+  WRAPPER_CONFLICT: 'WRAPPER_CONFLICT',
+  WRAPPER_INVARIANT_VIOLATION: 'WRAPPER_INVARIANT_VIOLATION',
+  /** 403 details.code: token too old for a sensitive wrapper endpoint — force a refresh and retry ONCE (remediation=refresh_and_retry). */
+  FRESH_AUTH_REQUIRED: 'FRESH_AUTH_REQUIRED',
+  /** 403 details.code: wrapper enrollment requires a verified email. */
+  EMAIL_NOT_VERIFIED: 'EMAIL_NOT_VERIFIED',
+  // Device-key onboarding codes (CAP-380, client-side).
+  /** The WebAuthn ceremony did not produce a usable PRF result; details carry the ceremony's own code. */
+  DEVICE_KEY_CEREMONY_FAILED: 'DEVICE_KEY_CEREMONY_FAILED',
+  /** AES-GCM auth failure unwrapping wrapped_k_local — wrong PRF output / credential / blob. */
+  DEVICE_KEY_UNWRAP_FAILED: 'DEVICE_KEY_UNWRAP_FAILED',
+  /** A wrapper row's kdf_version is newer than this binary understands. */
+  DEVICE_KEY_KDF_UNSUPPORTED: 'DEVICE_KEY_KDF_UNSUPPORTED',
+  /** Onboarding lost the local.key create race to a DIFFERENT root — refused to overwrite. */
+  LOCAL_ROOT_CONFLICT: 'LOCAL_ROOT_CONFLICT',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
