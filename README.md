@@ -69,15 +69,14 @@ capy run -- npm run dev           # run with decrypted secrets
 capy deploy                       # ship to prod
 ```
 
-That's the whole loop. Edit a secret, run `capy`, see this guy, redeploy.
+That's the whole loop. Edit a secret, run `capy` and it all just works.
 
-<p>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/images/welcome-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="./docs/images/welcome-light.png">
-    <img alt="Capy CLI welcome banner showing project, organization, branch, and a capybara" src="./docs/images/welcome-light.png" width="380">
-  </picture>
-</p>
+## Demo
+
+
+
+https://github.com/user-attachments/assets/60800e68-6101-4f1a-9176-6b2d58a6fd61
+
 
 
 ## Why Use Capy
