@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -82,6 +82,71 @@ export function readLocalRoot(orgId: string, userId?: string): Buffer | null {
 
 export function hasLocalRoot(orgId: string, userId?: string): boolean {
   return existsSync(getLocalRootPath(orgId, userId));
+}
+
+/**
+ * Org ids under ~/.capy/orgs/ that hold a user-scoped local.key for this
+ * user. Read-only scan used by device-key onboarding detection (CAP-380):
+ * "local.key on disk" means ANY org has one, not just the active org.
+ * Only the user-scoped layout (orgs/<orgId>/users/<userId>/local.key) is
+ * scanned — every current write path is user-scoped.
+ */
+export function listOrgsWithLocalRoot(userId: string): string[] {
+  const orgsDir = join(getGlobalCapyDir(), 'orgs');
+  let entries: string[];
+  try {
+    entries = readdirSync(orgsDir);
+  } catch {
+    return [];
+  }
+  return entries.filter(orgId => existsSync(getLocalRootPath(orgId, userId)));
+}
+
+// --- key.enc device-key sync marker (CAP-380) ---
+//
+// TRANSIENT flag meaning "the server's copy of this org's key.enc is owed an
+// upload". Written when device-key onboarding starts touching an org and
+// whenever an enrollment-aware run re-wraps key.enc; deleted the moment the
+// upload succeeds. It lives beside key.enc (same precedent as the `.mode`
+// marker) so `capy logout` — which preserves the orgs/ subtree — cannot lose
+// a pending retry. In steady state the file does not exist, so a
+// passkey-provisioned tree stays structurally identical to a
+// transport-provisioned one (CAP-372 equivalence requirement).
+
+export function getKeyEncSyncPendingPath(orgId: string, userId?: string): string {
+  return getOrgKeyPath(orgId, userId) + '.sync-pending';
+}
+
+export function markKeyEncSyncPending(orgId: string, userId?: string): void {
+  try {
+    writeSecureFile(getKeyEncSyncPendingPath(orgId, userId), '');
+  } catch {
+    // Best-effort: a failed marker write only costs a missed retry.
+  }
+}
+
+export function clearKeyEncSyncPending(orgId: string, userId?: string): void {
+  try {
+    rmSync(getKeyEncSyncPendingPath(orgId, userId), { force: true });
+  } catch {
+    // best effort
+  }
+}
+
+export function isKeyEncSyncPending(orgId: string, userId?: string): boolean {
+  return existsSync(getKeyEncSyncPendingPath(orgId, userId));
+}
+
+/** Org ids with a pending key.enc upload marker for this user. */
+export function listOrgsWithKeyEncSyncPending(userId: string): string[] {
+  const orgsDir = join(getGlobalCapyDir(), 'orgs');
+  let entries: string[];
+  try {
+    entries = readdirSync(orgsDir);
+  } catch {
+    return [];
+  }
+  return entries.filter(orgId => isKeyEncSyncPending(orgId, userId));
 }
 
 // --- K_local backend mode marker (read-only legacy detection) ---

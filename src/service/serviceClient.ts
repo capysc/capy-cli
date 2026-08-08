@@ -32,6 +32,13 @@ const SERVER_CODES = new Set<string>([
   ERROR_CODES.NO_SECRETS,
   ERROR_CODES.ORG_NOT_FOUND,
   ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND,
+  // Wrapper endpoints (CAP-379 contract): 404/409 answers the onboarding
+  // fork must branch on. FRESH_AUTH_REQUIRED and EMAIL_NOT_VERIFIED are NOT
+  // here — they arrive on 403s and stay `details.code` on PERMISSION_DENIED,
+  // the MEMBERSHIP_REVOKED convention.
+  ERROR_CODES.WRAPPER_NOT_FOUND,
+  ERROR_CODES.WRAPPER_CONFLICT,
+  ERROR_CODES.WRAPPER_INVARIANT_VIOLATION,
 ]);
 
 /**
@@ -223,7 +230,10 @@ export class ServiceClient {
         throw new CapyError(
           detail,
           ERROR_CODES.PERMISSION_DENIED,
-          { status: 403, detail, code: serverCode }
+          // `data` carried through so structured 403 contracts stay readable
+          // downstream — e.g. FreshAuthRequiredError's `remediation` +
+          // `max_token_age_seconds` fields (CAP-379). Additive only.
+          { status: 403, detail, code: serverCode, data }
         );
       }
 
@@ -642,4 +652,95 @@ export class ServiceClient {
   async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: Array<{ deploy_id: string; label: string | null; created_by: string; created_at: string; revoked_at: string | null }> }> {
     return this.request('GET', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/deploy-tokens`);
   }
+
+  // --- Key wrappers (CAP-379 contract, consumed by CAP-380 onboarding) ---
+  //
+  // Shapes mirror service openapi.yaml. Doors (wrapped_k_local) are org-less
+  // and per credential; key_enc rows are per user×org with the org taken
+  // from the JWT — so key_enc upload/fetch MUST run under a token scoped to
+  // that org. Fetching a key_enc row is additionally fresh-auth gated: the
+  // 403 FRESH_AUTH_REQUIRED retry dance lives in
+  // src/auth/deviceKey/serviceOps.ts, not here — this client stays one
+  // call per method.
+
+  /** Upload a door (wrapped_k_local) blob. 409 WRAPPER_CONFLICT if the credential already has a live row. */
+  async uploadDoorWrapper(body: {
+    wrapped_k_local: string;
+    iv: string;
+    prf_salt: string;
+    credential_id: string;
+    kdf_version: number;
+  }): Promise<KeyWrapperMetadata> {
+    const data = await this.request<{ wrapper: KeyWrapperMetadata }>(
+      'POST', '/wrappers',
+      { type: 'wrapped_k_local', ...body },
+    );
+    return data.wrapper;
+  }
+
+  /** Upload this org's key.enc blob unchanged (already KMS+AES self-armored). Org comes from the JWT. */
+  async uploadKeyEncWrapper(keyEnc: string, kdfVersion?: number): Promise<KeyWrapperMetadata> {
+    const data = await this.request<{ wrapper: KeyWrapperMetadata }>(
+      'POST', '/wrappers',
+      { type: 'key_enc', key_enc: keyEnc, ...(kdfVersion !== undefined ? { kdf_version: kdfVersion } : {}) },
+    );
+    return data.wrapper;
+  }
+
+  /** The caller's wrapper inventory — metadata only, never ciphertext. */
+  async listWrappers(includeDeleted = false): Promise<KeyWrapperMetadata[]> {
+    const data = await this.request<{ wrappers: KeyWrapperMetadata[] }>(
+      'GET', `/wrappers${includeDeleted ? '?include_deleted=true' : ''}`,
+    );
+    return data.wrappers;
+  }
+
+  /** One wrapper with its ciphertext payload. key_enc rows are fresh-auth gated server-side. */
+  async fetchWrapper(wrapperId: string): Promise<KeyWrapperPayload> {
+    const data = await this.request<{ wrapper: KeyWrapperPayload }>(
+      'GET', `/wrappers/${encodeURIComponent(wrapperId)}`,
+    );
+    return data.wrapper;
+  }
+
+  /** Record enrollment-ceremony completion for a door. Idempotent; fresh-auth gated. */
+  async verifyWrapper(wrapperId: string): Promise<KeyWrapperMetadata> {
+    const data = await this.request<{ wrapper: KeyWrapperMetadata }>(
+      'POST', `/wrappers/${encodeURIComponent(wrapperId)}/verify`,
+    );
+    return data.wrapper;
+  }
+
+  /** Soft-delete a wrapper. 409 WRAPPER_INVARIANT_VIOLATION when it would strand the account. */
+  async deleteWrapper(wrapperId: string): Promise<KeyWrapperMetadata> {
+    const data = await this.request<{ wrapper: KeyWrapperMetadata }>(
+      'DELETE', `/wrappers/${encodeURIComponent(wrapperId)}`,
+    );
+    return data.wrapper;
+  }
+}
+
+/** Wrapper row metadata (service KeyWrapperMetadata schema) — never carries ciphertext. */
+export interface KeyWrapperMetadata {
+  id: string;
+  type: 'wrapped_k_local' | 'key_enc';
+  /** WebAuthn credential id (doors only). */
+  credential_id?: string | null;
+  kdf_version: number;
+  /** Server-assigned: the user's first live door anchors the ≥1-wrapper invariant until a door is verified. */
+  is_seed: boolean;
+  verified_at?: string | null;
+  /** Set for key_enc rows (per user×org); null for doors. */
+  organization_id?: string | null;
+  created_at: string;
+  deleted_at?: string | null;
+  mirror_state: 'pending' | 'mirrored' | 'diverged';
+}
+
+/** Full wrapper fetch: metadata plus the type's ciphertext fields. */
+export interface KeyWrapperPayload extends KeyWrapperMetadata {
+  wrapped_k_local?: string;
+  iv?: string;
+  prf_salt?: string;
+  key_enc?: string;
 }
