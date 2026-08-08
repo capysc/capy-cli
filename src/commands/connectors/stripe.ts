@@ -179,36 +179,262 @@ function ensureStripeCliInstalled(): void {
 }
 
 /**
- * Run `stripe login`, optionally for a named project. Inherits stdout/stderr so
- * the user sees the pairing code + URL and the browser flow.
+ * WHY SIGNING IN IS TWO CALLS AND NOT ONE.
  *
- * In non-interactive (assisted-agent) mode there's no TTY attached to our
- * stdin, so `stripe login`'s "Press Enter to open the browser" gate would hang.
- * We feed it a single newline via `input` to clear that gate; stripe then
- * prints the pairing code + URL (visible on the inherited stdout) and polls for
- * the browser callback, which the user completes out-of-band. stdin hits EOF
- * after the newline, which is fine — the pairing step needs no further input.
+ * `stripe login` behaves differently depending on whether ITS stdin is a
+ * terminal, and the difference is not cosmetic. With a TTY it prints a pairing
+ * code, opens the browser and BLOCKS until the pairing is approved. Without one
+ * it switches to `--non-interactive`: it prints a JSON object — `browser_url`,
+ * `verification_code`, `next_step` — and EXITS 0 IMMEDIATELY, having signed
+ * nobody in. Completing the pairing is the caller's job, via the `next_step`
+ * command, which is what actually polls and writes the credential.
+ *
+ * Every run capy makes on behalf of an agent has a piped stdin, so every one of
+ * them took the second path while the code was written for the first (CAP-365).
+ * Two things went wrong at once. The JSON went to whatever was reading our
+ * stdout — on the MCP transport that is the tool-result channel, so the pairing
+ * URL and code were delivered to the AI agent instead of to the person who has
+ * to approve them — and the pairing was then never completed, because nothing
+ * ran `next_step`. The run died on a config that was never written.
+ *
+ * So: `startStripePairing` does step one with stdout PIPED (the JSON is ours to
+ * render, never to leak), a surface of the caller's choosing shows the code to
+ * the user, and `completeStripePairing` does step two and blocks.
  */
-function runStripeLogin(projectName?: string, nonTty?: boolean): void {
-  const args = ['login'];
-  if (projectName && projectName !== 'default') args.push(`--project-name=${projectName}`);
-  if (nonTty) {
-    // writeSync (not console.log) so this flushes before the blocking
-    // `stripe login` spawnSync — otherwise a backgrounded run buffers it and
-    // it appears only after auth completes, out of order with the pairing code.
-    writeSync(
-      1,
-      `\n  ${B('Opening Stripe in your browser.')} Compare the pairing code shown below\n` +
-        '  with the one in the browser, then approve. Waiting for you to authenticate…\n\n',
-    );
+export interface StripePairing {
+  /** The page the user approves on. Opened for them; never fetched by capy. */
+  browserUrl: string;
+  /**
+   * The four words the user compares against the ones Stripe shows them.
+   *
+   * Not a credential and not sufficient to be one — it proves that the tab
+   * being approved is the pairing this process started, which is the whole
+   * reason to show it rather than just say "approve it".
+   */
+  verificationCode: string;
+  /** What `--complete` polls until the approval lands. */
+  pollUrl: string;
+}
+
+/**
+ * How a sign-in ended, as a code rather than a sentence.
+ *
+ * Four outcomes and the caller has to tell them apart, because three of them
+ * send the reader somewhere different: an unapproved pairing is a person who
+ * walked away, an unsupported CLI is a `brew upgrade`, and a config that came
+ * back unusable after a pairing that DID complete is the only one of the three
+ * worth looking at config parsing for. The old code printed the third message
+ * for all of them.
+ */
+export type StripeLoginOutcome =
+  | { ok: true }
+  /** The hand-off ran and nobody approved it. A wall: the run could not go on. */
+  | { ok: false; reason: 'pairing-not-completed' }
+  /**
+   * Somebody said no — Cancel, or the window closed on the pairing screen.
+   *
+   * Apart from the others because it is not a failure. Nothing was written and
+   * that was the intention, so it ends the run at 0; reporting a decision as a
+   * fault is how a caller learns the wrong thing from a run that did nothing.
+   */
+  | { ok: false; reason: 'declined' }
+  /** This `stripe` binary has no two-step non-interactive flow. */
+  | { ok: false; reason: 'pairing-unsupported' }
+  /** `stripe login` itself exited non-zero. Only reachable on the TTY path. */
+  | { ok: false; reason: 'login-failed' };
+
+/**
+ * How long `--complete` may block before we stop waiting.
+ *
+ * The TTY path has never had a bound and keeps not having one — someone is
+ * sitting there and can Ctrl+C. The non-TTY path is a tool call inside an agent
+ * turn, and a tool call that never returns is worse than one that fails, so it
+ * gets the same five minutes every other browser step in this CLI gets.
+ */
+const PAIRING_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Pull the poll URL out of `next_step` and prove it is one.
+ *
+ * `next_step` is the only place the poll URL appears — the JSON has no
+ * `poll_url` field — so there is no way to avoid reading it out of a string.
+ * What we can avoid is TRUSTING it. Nothing here runs the string as a command,
+ * which is what `next_step` literally is and which would make a shell out of a
+ * value; the URL is lifted out and then accepted only if it parses, is https,
+ * and sits on the same origin as `browser_url`. Both fields came out of one
+ * object, and a `next_step` pointing somewhere `browser_url` does not is not
+ * the next step of this pairing.
+ */
+function pollUrlFrom(nextStep: string, browserOrigin: string): string | null {
+  const candidate = nextStep.match(/https:\/\/[^\s'"]+/)?.[0];
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol !== 'https:' || url.origin !== browserOrigin) return null;
+    return url.toString();
+  } catch {
+    return null;
   }
-  const result = nonTty
-    ? spawnSync('stripe', args, { input: '\n', stdio: ['pipe', 'inherit', 'inherit'] })
-    : spawnSync('stripe', args, { stdio: 'inherit' });
-  if (result.status !== 0) {
-    console.error('\nstripe login failed or was cancelled.');
-    process.exit(1);
+}
+
+/**
+ * `stripe login --non-interactive`'s stdout, as the three things we act on.
+ *
+ * Exported for the unit tests: this is a wire format owned by another binary,
+ * so the thing worth pinning is that a change in its shape fails CLOSED — null,
+ * which the caller reports as "this CLI cannot do the hand-off" — rather than
+ * half-parsing into a pairing that sends the user to nowhere.
+ */
+export function parseStripePairing(stdout: string): StripePairing | null {
+  // Sliced to the outermost braces rather than parsed whole, so a future
+  // version that prefixes a banner line does not turn into a hard refusal.
+  const start = stdout.indexOf('{');
+  const end = stdout.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdout.slice(start, end + 1));
+  } catch {
+    return null;
   }
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const browserUrl = typeof o.browser_url === 'string' ? o.browser_url : '';
+  const nextStep = typeof o.next_step === 'string' ? o.next_step : '';
+  const verificationCode = typeof o.verification_code === 'string' ? o.verification_code : '';
+  if (!browserUrl || !nextStep) return null;
+  let browserOrigin: string;
+  try {
+    const parsed = new URL(browserUrl);
+    if (parsed.protocol !== 'https:') return null;
+    browserOrigin = parsed.origin;
+  } catch {
+    return null;
+  }
+  const pollUrl = pollUrlFrom(nextStep, browserOrigin);
+  if (!pollUrl) return null;
+  return { browserUrl, verificationCode, pollUrl };
+}
+
+/** `-p` for every call in a pairing, so both halves land in the same section. */
+function projectArgs(projectName?: string): string[] {
+  return projectName && projectName !== 'default' ? [`--project-name=${projectName}`] : [];
+}
+
+/**
+ * Step one: ask Stripe for a pairing, and hand it back rather than print it.
+ *
+ * `stdio[1]` is a PIPE and that is the fix. It was `inherit`, which on the MCP
+ * transport meant the pairing URL and code went straight to the AI agent — the
+ * one party in the room who must not be the one approving a credential pairing.
+ * stderr stays inherited: it carries stripe's own diagnostics, which are for
+ * whoever is reading the terminal.
+ */
+function startStripePairing(projectName?: string): StripePairing | null {
+  const result = spawnSync(
+    'stripe',
+    ['login', '--non-interactive', ...projectArgs(projectName)],
+    // `input: ''` closes stdin immediately. Belt and braces with the explicit
+    // flag: the CLI picks this mode off a non-TTY stdin anyway, and a binary
+    // old enough not to know the flag exits non-zero rather than blocking.
+    { input: '', stdio: ['pipe', 'pipe', 'inherit'], encoding: 'utf-8' },
+  );
+  if (result.status !== 0) return null;
+  return parseStripePairing(result.stdout ?? '');
+}
+
+/**
+ * Step two: block until the person approves, then let stripe write its config.
+ *
+ * stdout is piped for the same reason as step one — the success banner is
+ * stripe talking to a terminal, and under MCP there isn't one — and the verdict
+ * is the exit code, never the banner.
+ */
+function completeStripePairing(pairing: StripePairing, projectName?: string): boolean {
+  const result = spawnSync(
+    'stripe',
+    ['login', '--complete', pairing.pollUrl, ...projectArgs(projectName)],
+    { stdio: ['ignore', 'pipe', 'inherit'], timeout: PAIRING_TIMEOUT_MS },
+  );
+  return result.status === 0;
+}
+
+/**
+ * Sign in to Stripe, on whichever of the three surfaces this run actually has.
+ *
+ * `handoff` is the browser one and it owns the whole middle of the flow: it is
+ * given the pairing to render and the thunk that blocks, because the only place
+ * a loopback wizard may block is inside its own reducer. Without one — a script,
+ * a CI job, a piped run with no `--web` — the pairing is announced on the
+ * terminal and completed inline.
+ *
+ * A REAL TTY IS UNTOUCHED. `stripe login` with an inherited terminal does all of
+ * this itself, better, and has always worked; the two-step exists precisely
+ * because that is the path a non-TTY caller never gets.
+ */
+async function runStripeLogin(args: {
+  projectName?: string;
+  nonTty?: boolean;
+  /**
+   * This run's stdout is a relay to an AI agent rather than a terminal someone
+   * is reading — which is what `--web` means, and the whole reason it exists.
+   *
+   * It gates ONE line: the pairing URL, which carries the session token in its
+   * query string. The verification code goes out either way, because it is a
+   * string to compare against the one Stripe shows and is worth nothing without
+   * the URL. A caller that sets this and supplies no `handoff` is trading a
+   * fallback for a leak, and that is the right trade — see `rotate`.
+   */
+  web?: boolean;
+  handoff?: (
+    pairing: StripePairing,
+    complete: () => boolean,
+  ) => Promise<'paired' | 'declined' | 'not-approved'>;
+}): Promise<StripeLoginOutcome> {
+  const { projectName, nonTty, web, handoff } = args;
+
+  if (!handoff && isInteractive(nonTty)) {
+    const result = spawnSync('stripe', ['login', ...projectArgs(projectName)], { stdio: 'inherit' });
+    return result.status === 0 ? { ok: true } : { ok: false, reason: 'login-failed' };
+  }
+
+  const pairing = startStripePairing(projectName);
+  if (!pairing) return { ok: false, reason: 'pairing-unsupported' };
+
+  const complete = (): boolean => completeStripePairing(pairing, projectName);
+
+  if (handoff) {
+    // NOTHING ABOUT THE PAIRING IS PRINTED HERE. The browser surface shows the
+    // code on a page only the user can see, and `browser_url` carries the
+    // pairing token in its query string — putting it on stdout would hand the
+    // agent the very thing this branch exists to keep from it.
+    const ending = await handoff(pairing, complete);
+    if (ending === 'paired') return { ok: true };
+    return { ok: false, reason: ending === 'declined' ? 'declined' : 'pairing-not-completed' };
+  }
+
+  // writeSync (not console.log) so this flushes before the blocking
+  // `--complete` spawnSync — otherwise a backgrounded run buffers it and it
+  // appears only after auth completes, out of order with the pairing code.
+  writeSync(
+    1,
+    `\n  ${B('Approve this pairing in your browser.')} Check that Stripe shows you the\n` +
+      '  same code, then approve. Waiting for you to authenticate…\n\n' +
+      `    Code: ${B(pairing.verificationCode)}\n` +
+      // THE URL IS WITHHELD ON A RELAYED STDOUT. It carries the pairing token,
+      // and the reader there is the agent. Losing the fallback costs a browser
+      // that failed to open; printing it costs the thing being paired.
+      (web
+        ? '    A Stripe tab should have opened. If it did not, run `stripe login`\n' +
+          '    in a terminal and then re-run this command.\n\n'
+        : `    Open: ${pairing.browserUrl}\n\n`),
+  );
+  // Best effort. A hand-off wants the whole browser — an address bar, a profile
+  // picker — so it is never the chromeless dialog a loopback screen gets.
+  const { openScreen } = await import('../../ui/openScreen');
+  await openScreen(pairing.browserUrl, { kind: 'handoff' });
+
+  return complete() ? { ok: true } : { ok: false, reason: 'pairing-not-completed' };
 }
 
 /**
@@ -801,6 +1027,49 @@ async function askConnectPhaseA(
   return { varName, mode: settledMode, cancelled: false };
 }
 
+/**
+ * What a sign-in that did not sign anyone in says, per reason.
+ *
+ * A switch and not a ternary chain, so the compiler is what proves every reason
+ * has a wall — including `declined`, which must never reach here: it is a
+ * refusal, ends the run at 0, and draws nothing. A chain would have quietly
+ * handed it the last branch's message and called a decision a failure.
+ *
+ * ONE OBJECT PER REASON, read by both surfaces. The browser renders it as the
+ * wall and the terminal prints the same three lines, which is the only way the
+ * two can be claimed to be describing the same run.
+ */
+function stripeLoginWall(
+  reason: Exclude<Extract<StripeLoginOutcome, { ok: false }>['reason'], 'declined'>,
+  varName: string,
+): Blocked {
+  switch (reason) {
+    case 'pairing-unsupported':
+      return {
+        code: 'PROVIDER_PAIRING_UNSUPPORTED',
+        title: 'This Stripe CLI cannot hand off a pairing.',
+        detail:
+          'Capy asked the Stripe CLI for a pairing URL and it did not produce one, so there was nothing to send you to. Signing in from a terminal still works.',
+        remedy: 'brew upgrade stripe/stripe-cli/stripe && stripe login',
+      };
+    case 'pairing-not-completed':
+      return {
+        code: 'PROVIDER_PAIRING_NOT_COMPLETED',
+        title: 'The Stripe pairing was not approved.',
+        detail:
+          'Nothing was written and nothing changed. Capy waited for Stripe to report the approval and it never came — the tab was closed, the code did not match, or nobody got to it.',
+        remedy: `capy connect stripe --var ${varName}`,
+      };
+    case 'login-failed':
+      return {
+        code: 'PROVIDER_LOGIN_FAILED',
+        title: 'stripe login failed or was cancelled.',
+        detail: 'The Stripe CLI exited without signing in. Nothing was written and nothing changed.',
+        remedy: `capy connect stripe --var ${varName}`,
+      };
+  }
+}
+
 /** The account picker, in a browser. Rows are config.toml's sections, verbatim. */
 async function pickAccountInBrowser(
   ctx: ResolvedContext,
@@ -888,10 +1157,10 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
   const auth: Partial<ConnectPlanInput> =
     reason === null ? { alreadySignedIn: true } : { signedIn: true };
   if (reason !== null) {
-    // `stripe login` is a browser flow; in non-interactive (assisted-agent)
-    // mode we still run it — the human completes the pairing in the browser
-    // out-of-band while the CLI polls. runStripeLogin handles the "Press
-    // Enter" gate for us in that mode.
+    // `stripe login` is a browser pairing the user completes by hand. Under
+    // `--web` it is a screen like every other stop on this route; without one
+    // it is announced on the terminal. Either way the CLI does the polling —
+    // see `runStripeLogin` for why that is two calls and not one.
     const why =
       reason === 'reauth'
         ? '--reauth: pairing with Stripe again'
@@ -903,12 +1172,110 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
         ? `${why}. Running ${B('stripe login')}...`
         : `  ${why} — starting browser pairing.`,
     );
-    runStripeLogin(opts.account, opts.nonTty);
+    const outcome = await runStripeLogin({
+      projectName: opts.account,
+      nonTty: opts.nonTty,
+      web,
+      ...(web
+        ? {
+            handoff: async (pairing, complete) => {
+              const { signInInBrowser } = await import('../../ui/connectScreens');
+              return signInInBrowser(
+                webParams(
+                  ctx,
+                  opts,
+                  [
+                    {
+                      kind: 'auth',
+                      // What the screen names as the command being handed off
+                      // to. `stripe login` and not the two-step it expands
+                      // into: the expansion is our implementation detail, and
+                      // this line exists so the hand-off is never a mystery,
+                      // not so it can be copied.
+                      command: 'stripe login',
+                      state: 'ready',
+                      ...(pairing.verificationCode
+                        ? { pairingCode: pairing.verificationCode }
+                        : {}),
+                    },
+                  ],
+                  // `auth` is deliberately NOT folded in here, and it is the
+                  // one screen on this route where it must not be. It carries
+                  // `signedIn: true` — the fact the run is about to establish —
+                  // and `connectPlan` resolves an answered stop to `done`
+                  // before it looks at where the traveller is standing. Folding
+                  // it forward would draw "Sign in ✓ paired" on the very page
+                  // asking someone to go and do it.
+                  { varName, mode },
+                ),
+                async () => {
+                  // The hand-off proper: the whole browser, because the person
+                  // has to be able to see the address bar and pick the profile
+                  // their Stripe session lives in.
+                  const { openScreen } = await import('../../ui/openScreen');
+                  await openScreen(pairing.browserUrl, { kind: 'handoff' });
+                  return complete();
+                },
+              );
+            },
+          }
+        : {}),
+    });
+    // A DECLINE IS NOT A FAILURE, so it gets no wall and no non-zero exit. The
+    // page that asked has already closed itself — `signInInBrowser` does not
+    // resolve until it has — so there is nothing left to serve and nothing to
+    // outrun by exiting here. Same shape as the decline in `askConnectPhaseA`.
+    if (!outcome.ok && outcome.reason === 'declined') {
+      console.log('  Cancelled.');
+      process.exit(0);
+    }
+
     sections = readStripeConfig();
-    if (usableFor(sections, mode).length === 0) {
-      console.error(
-        `\n  stripe login completed but the config still holds no usable ${mode}-mode key.`,
-      );
+
+    // FOUR WALLS, NOT ONE. This used to print "stripe login completed but the
+    // config still holds no usable key" whatever happened, including for the
+    // common case where login did not complete at all — which sends the reader
+    // to look at config parsing when the cause is a pairing nobody approved.
+    const usable = usableFor(sections, mode).length > 0;
+    if (!outcome.ok || !usable) {
+      const wall: Blocked = outcome.ok
+        ? {
+            // The one case the old message was ever right about: the pairing
+            // DID complete, and the config that came back still cannot serve
+            // the mode this run needs.
+            code: 'PROVIDER_MODE_UNAVAILABLE',
+            title: `Signed in, but there is no usable ${mode}-mode key.`,
+            detail: `The pairing completed and Stripe wrote its config, and that config holds no ${mode}-mode key Capy can read — so there is nothing to record a link against.`,
+            remedy: 'stripe config --list',
+          }
+        : stripeLoginWall(outcome.reason, varName);
+
+      if (web) {
+        // SERVED BEFORE THE EXIT, not after it. `showConnectBlockedInBrowser`
+        // does not return until the browser is holding the page, and the page
+        // comes off a loopback server inside THIS process — so exiting first,
+        // which is what this site used to do, closed the server microseconds
+        // before it could answer and turned the failure into a window that
+        // simply stopped. Same hazard, and same order, as the live-gate
+        // decline in connectCommand.ts.
+        const { showConnectBlockedInBrowser } = await import('../../ui/connectScreens');
+        await showConnectBlockedInBrowser({
+          provider: 'stripe',
+          projectName: ctx.keep.project_name,
+          branch: ctx.branch,
+          step: 'auth',
+          // Same reason the sign-in screen drops `auth`: the run stopped ON
+          // this stop, so a rail claiming it was travelled is a rail
+          // contradicting the page it is drawn on.
+          stops: connectPlan({ ...planFor(ctx, opts, { varName, mode }), standing: 'auth' }),
+          blocked: wall,
+          open: !process.env.CAPY_WEB_NO_OPEN,
+        });
+      }
+      console.error(`\n  ${wall.title}`);
+      console.error(`  ${wall.detail}`);
+      if (wall.remedy) console.error(`  ${B(wall.remedy)}`);
+      console.error('');
       process.exit(1);
     }
   }
@@ -994,26 +1361,24 @@ async function rotate(
   // user is logged into are untouched.
   const loggedOut = runStripeLogout(sectionName);
 
-  if (nonTty) {
-    // writeSync (not console.log) so this flushes before the blocking
-    // `stripe login` spawnSync — otherwise a backgrounded run buffers it and
-    // it appears only after auth completes, out of order with the pairing code.
-    writeSync(
-      1,
-      `\n  ${B('Opening Stripe in your browser.')} Compare the pairing code shown below\n` +
-        '  with the one in the browser, then approve. Waiting for you to authenticate…\n\n',
-    );
-  }
-  const loginArgs = ['login'];
-  if (sectionName !== 'default') loginArgs.push(`--project-name=${sectionName}`);
-  // In assisted non-interactive mode, feed the "Press Enter" gate a newline and
-  // keep stdout/stderr inherited so the pairing code + URL surface to the user.
-  const loginResult = nonTty
-    ? spawnSync('stripe', loginArgs, { input: '\n', stdio: ['pipe', 'inherit', 'inherit'] })
-    : spawnSync('stripe', loginArgs, { stdio: 'inherit' });
-  if (loginResult.status !== 0) {
+  // The same two-step hand-off `connect` uses, and for the same reason: with a
+  // piped stdin `stripe login` prints its pairing JSON and exits without
+  // signing anyone in, so this used to spray the pairing URL and code onto the
+  // channel the AI agent reads and then fail on a config nothing had written.
+  //
+  // NO BROWSER SCREEN HERE YET. `rotate --web` gets the hand-off — the Stripe
+  // tab opens and the poll runs — but not a Capy page around it, because the
+  // rail this screen draws is `connect`'s and drawing a connect route through a
+  // rotation would be a worse lie than drawing nothing. `rotate-progress`
+  // already carries a `pairing` field for it; wiring that is its own change.
+  const loginOutcome = await runStripeLogin({ projectName: sectionName, nonTty, web: opts.web === true });
+  if (!loginOutcome.ok) {
     console.error('');
-    console.error(`  ${B('stripe login')} failed or was cancelled after logout.`);
+    console.error(
+      loginOutcome.reason === 'pairing-unsupported'
+        ? `  This ${B('stripe')} CLI cannot hand off a pairing, so the re-login could not start.`
+        : `  ${B('stripe login')} failed or was cancelled after logout.`,
+    );
     if (loggedOut) {
       console.error(`  Heads up: ${B(varName)} in your local .env still holds the previous key,`);
       console.error(`  but your Stripe CLI is now logged out of "${sectionName}". The previous`);

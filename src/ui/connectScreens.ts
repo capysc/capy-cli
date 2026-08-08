@@ -33,6 +33,7 @@ import { serveEndingPage } from './endingPage';
 import { connectPlan, type ConnectPlanInput } from '../commands/connectors/plans';
 import type {
   Blocked,
+  ConnectAuthState,
   ConnectIncomingKey,
   ConnectLiveAction,
   ConnectLiveGateData,
@@ -173,6 +174,12 @@ export async function chooseConnectorInBrowser(
 export type ConnectQuestion =
   | { kind: 'var'; vars: ConnectVarSlot[]; defaultVarName: string }
   | { kind: 'mode'; modes: ConnectModeOption[] }
+  /**
+   * The sign-in hand-off. Not a question the user answers so much as one they
+   * ACT on: the only control is "Open Stripe", and pressing it is consent to be
+   * sent there, not an answer that comes back with a value.
+   */
+  | { kind: 'auth'; command: string; state: ConnectAuthState; pairingCode?: string }
   | {
       kind: 'overwrite';
       varName: string;
@@ -210,6 +217,7 @@ export interface WebConnectSetupResult {
 const STEP_FOR: Record<ConnectQuestion['kind'], ConnectStep | null> = {
   var: 'var',
   mode: 'mode',
+  auth: 'auth',
   // The overwrite guard is not a station on the route — it is the route being
   // interrupted by something already in the way — so the rail keeps standing
   // where it was and the guard draws no rail of its own.
@@ -228,6 +236,11 @@ const STEP_FOR: Record<ConnectQuestion['kind'], ConnectStep | null> = {
  */
 function nonTtyEscape(kind: ConnectQuestion['kind']): ConnectSetupData['nonTty'] {
   switch (kind) {
+    case 'auth':
+      return {
+        command: 'stripe login   # in a terminal, then re-run capy connect stripe',
+        why: 'A pairing is approved by a person in a browser. No flag completes one, so the only headless answer is to already be signed in before the run starts.',
+      };
     case 'var':
       return {
         command: 'capy connect stripe --var STRIPE_SECRET_KEY',
@@ -289,7 +302,19 @@ export function buildConnectSetupData(
           ? { accounts: q.accounts }
           : q.kind === 'refresh'
             ? { refresh: { mode: q.mode, expiresInDays: q.expiresInDays, command: q.command } }
-            : {}),
+            : q.kind === 'auth'
+              ? {
+                  auth: {
+                    command: q.command,
+                    state: q.state,
+                    // Omitted rather than empty: the screen has two readings of
+                    // its own instruction and picks between them on whether
+                    // there is a code to compare, so an empty string would put
+                    // "compare the code below" above a blank row.
+                    ...(q.pairingCode ? { pairingCode: q.pairingCode } : {}),
+                  },
+                }
+              : {}),
     nonTty: nonTtyEscape(q.kind),
   };
 }
@@ -420,6 +445,78 @@ export async function askConnectInBrowser(
     },
   );
   return out as WebConnectSetupResult;
+}
+
+// ---------------------------------------------------------------------------
+// connect-setup, as the sign-in hand-off
+// ---------------------------------------------------------------------------
+
+/**
+ * The Stripe pairing, in a browser.
+ *
+ * THE STOP THIS FLOW USED TO SKIP. Every other question `capy connect stripe`
+ * asks has had a `--web` answer since the screens landed; sign-in did not, and
+ * fell through to `stripe login` with an inherited stdout. On the MCP transport
+ * that stdout is the tool-result channel, so the pairing URL and the
+ * verification code were handed to the AI agent while the user — the only party
+ * who can approve a pairing — was never asked anything (CAP-365).
+ *
+ * WHY THE HAND-OFF RUNS INSIDE THE REDUCER. `approve` blocks: it opens Stripe
+ * and then polls until the pairing lands or five minutes pass. A reducer is the
+ * one place in this transport where that is allowed — the wizard's clock is
+ * disarmed for exactly as long as one is working, because during that time
+ * nothing is outstanding that a person could supply. The page holds its POST
+ * open and shows its own "Working…" until this returns.
+ *
+ * THREE ENDINGS, NOT TWO, and the third is why this does not return a boolean.
+ * A pairing nobody approved is a wall — the run could not proceed — and someone
+ * pressing Cancel is a refusal, which changed nothing and was the point. The
+ * exit code is the only thing an agent reads, so collapsing them would report
+ * "capy failed" for a user who decided not to. Closing the window is a refusal
+ * too: it has agreed to nothing.
+ *
+ * The caller draws whatever each ending says, so one place decides it rather
+ * than one per surface.
+ */
+export type WebSignInResult = 'paired' | 'declined' | 'not-approved';
+
+export async function signInInBrowser(
+  p: WebConnectSetupParams,
+  approve: () => Promise<boolean>,
+): Promise<WebSignInResult> {
+  const q = p.questions[0];
+  if (p.questions.length !== 1 || !q || q.kind !== 'auth') {
+    throw new Error('signInInBrowser serves exactly one auth step.');
+  }
+
+  const out = await runBrowserWizard(
+    {
+      title: `Sign in to ${p.provider} — ${p.projectName}`,
+      firstScreen: { html: '', standalone: true },
+      open: p.open ?? true,
+      onListen: p.onListen,
+      timeoutMs: p.timeoutMs,
+      doneMessage: 'Paired — back to your terminal.',
+      renderFirst: (nonce) =>
+        renderScreen('connect-setup', buildConnectSetupData(p, q, {}, nonce)),
+      // A window closed on the pairing screen has approved nothing, and the
+      // command must not sit on the socket for five minutes finding that out.
+      closeIsRefusal: { result: 'declined' satisfies WebSignInResult },
+    },
+    async (_step, payload) => {
+      if (payload.__action === 'cancel') return { done: true, result: 'declined' };
+      // One control, and it means "send me to Stripe". Anything else did not
+      // come from this screen — there is no field on it to send.
+      if (payload.step !== 'auth') {
+        return { error: 'That is not an answer the sign-in step can produce.' };
+      }
+      return { done: true, result: (await approve()) ? 'paired' : 'not-approved' };
+    },
+  );
+  // Anything the wizard can resolve with that is not one of the three is a
+  // transport that went somewhere this flow did not write, and the safe reading
+  // of "I do not know what happened" is that nobody got signed in.
+  return out === 'paired' || out === 'declined' ? out : 'not-approved';
 }
 
 // ---------------------------------------------------------------------------
@@ -605,12 +702,18 @@ export interface WebConnectBlockedParams extends ServeOptions {
   /**
    * The step the run died on, so the rail keeps standing where it stopped.
    *
-   * Only the four steps that are questions: a wall replaces a question, and
-   * `auth` and `push` are not ones — which is also why the type is narrowed
-   * here rather than mapped, since each of these has a `nonTtyEscape` and
-   * neither of those does.
+   * Every step that can be STOOD ON, which is each one with a `nonTtyEscape`.
+   * `push` is the exception and stays out: it is not a question, so a wall
+   * there would have no question to replace and nothing to tell a headless
+   * caller to run instead.
+   *
+   * `auth` earns its place the hard way. A pairing that is never approved is a
+   * dead end like any other, and before CAP-365 it was the one dead end that
+   * exited the process instead of drawing itself — which under `--web` killed
+   * the loopback server mid-run and left the browser on a page that just
+   * stopped.
    */
-  step: Extract<ConnectStep, 'var' | 'mode' | 'account' | 'refresh'>;
+  step: Extract<ConnectStep, 'auth' | 'var' | 'mode' | 'account' | 'refresh'>;
   stops: ConnectStop[];
   blocked: Blocked;
 }
