@@ -42,6 +42,34 @@ mock.module('../../src/config/globalConfig', () => ({
   writeKeepCache: mock(() => undefined),
   fetchSecretsWithCache: mock(async () => null),
 }));
+// The device-key wiring layer (CAP-382/final-gate MAJOR-5 + item 4) — kept
+// as a thin spy here rather than the real module: the real wiring.ts pulls
+// in the broker/ceremony/onboarding stack (tests/auth/deviceKey/wiring.test.ts
+// already covers its actual decision logic against a fake wrapper server).
+// Every test in this file leaves CAPY_DEVICE_KEYS unset, so none of these
+// are ever called except by the tests that explicitly opt in below.
+const deviceKeyWiringCalls: { attemptCaseCUnlock: unknown[]; runPendingSyncBestEffort: unknown[]; syncOrgOntoDeviceKeyIfEnrolled: unknown[]; maybeNudgeDeviceKeyEnrollment: unknown[] } = {
+  attemptCaseCUnlock: [],
+  runPendingSyncBestEffort: [],
+  syncOrgOntoDeviceKeyIfEnrolled: [],
+  maybeNudgeDeviceKeyEnrollment: [],
+};
+mock.module('../../src/auth/deviceKey/wiring', () => ({
+  attemptCaseCUnlock: mock(async (ctx: unknown) => {
+    deviceKeyWiringCalls.attemptCaseCUnlock.push(ctx);
+    return { ok: false, installedCurrentOrg: false };
+  }),
+  runPendingSyncBestEffort: mock(async (ctx: unknown) => {
+    deviceKeyWiringCalls.runPendingSyncBestEffort.push(ctx);
+  }),
+  syncOrgOntoDeviceKeyIfEnrolled: mock(async (ctx: unknown, orgId: string) => {
+    deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled.push({ ctx, orgId });
+    return { alreadyEnrolled: false, synced: false };
+  }),
+  maybeNudgeDeviceKeyEnrollment: mock(async (ctx: unknown, orgName: string) => {
+    deviceKeyWiringCalls.maybeNudgeDeviceKeyEnrollment.push({ ctx, orgName });
+  }),
+}));
 mock.module('inquirer', () => ({
   default: {
     prompt: mock((questions: any) => {
@@ -1442,6 +1470,133 @@ describe('CapyCommand', () => {
         (inquirer as any).prompt = origPrompt;
         consoleSpy.mockRestore();
       }
+    });
+  });
+
+  describe('initializeProject — creating an ADDITIONAL org while device keys are on (final-gate item 4 + MAJOR-5)', () => {
+    // Distinct from "new org creation is atomic" above: THIS user already
+    // has one org, and picks "Create new organization +" from the picker —
+    // exactly the "second org while already enrolled" gap the final-gate
+    // review flagged (syncOrgOntoDeviceKeyIfEnrolled previously ran only
+    // from `capy redeem`).
+    const ORIGINAL_FLAG = process.env.CAPY_DEVICE_KEYS;
+
+    beforeEach(() => {
+      deviceKeyWiringCalls.attemptCaseCUnlock.length = 0;
+      deviceKeyWiringCalls.runPendingSyncBestEffort.length = 0;
+      deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled.length = 0;
+      deviceKeyWiringCalls.maybeNudgeDeviceKeyEnrollment.length = 0;
+      process.env.CAPY_DEVICE_KEYS = '1';
+
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-existing',
+        organization_name: 'Existing Org',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-existing', workos_org_id: 'workos-existing', name: 'Existing Org' }],
+        _refresh_token: 'refresh-token',
+      });
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-token',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-existing',
+        user_id: 'user-456',
+      });
+      mockAuthService.createOrganization.mockResolvedValue({
+        id: 'org-second',
+        workos_org_id: 'workos-second',
+        name: 'Second Org',
+      });
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-second',
+        project_id: 'proj-second',
+        project_name: 'test',
+        created: true,
+      });
+      mockServiceClient.listProjects.mockResolvedValue([]);
+      mockPromptEngine.promptForProjectName.mockResolvedValue('test-project');
+    });
+
+    afterEach(() => {
+      if (ORIGINAL_FLAG === undefined) delete process.env.CAPY_DEVICE_KEYS;
+      else process.env.CAPY_DEVICE_KEYS = ORIGINAL_FLAG;
+    });
+
+    test('picking "Create new organization +" syncs the NEW org onto any already-enrolled device key, not the old one', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q.name === 'orgId') return { orgId: '__create_new__' };
+        if (q.name === 'orgName') return { orgName: 'Second Org' };
+        if (q.name === 'confirmed') return { confirmed: true };
+        if (q.name === 'initChoice') return { initChoice: 'development' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProject();
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      expect(mockAuthService.createOrganization).toHaveBeenCalledWith('Second Org', 'refresh-token', 'user-456');
+      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled).toHaveLength(1);
+      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled[0].orgId).toBe('org-second');
+      // The pre-existing org must never be the sync target here — this call
+      // is specifically about the org that was JUST created.
+      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled[0].orgId).not.toBe('org-existing');
+    });
+
+    test('flag off: neither the sync nor the enrollment nudge fire', async () => {
+      delete process.env.CAPY_DEVICE_KEYS;
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q.name === 'orgId') return { orgId: '__create_new__' };
+        if (q.name === 'orgName') return { orgName: 'Second Org' };
+        if (q.name === 'confirmed') return { confirmed: true };
+        if (q.name === 'initChoice') return { initChoice: 'development' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProject();
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled).toHaveLength(0);
+      expect(deviceKeyWiringCalls.maybeNudgeDeviceKeyEnrollment).toHaveLength(0);
+    });
+
+    test('the ordinary-flow enrollment nudge also fires once a project exists (MAJOR-5 wiring)', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q.name === 'orgId') return { orgId: 'org-existing' };
+        if (q.name === 'initChoice') return { initChoice: 'development' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProject();
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      expect(deviceKeyWiringCalls.maybeNudgeDeviceKeyEnrollment).toHaveLength(1);
+      expect(deviceKeyWiringCalls.maybeNudgeDeviceKeyEnrollment[0].orgName).toBe('Existing Org');
     });
   });
 

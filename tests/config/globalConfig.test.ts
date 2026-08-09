@@ -28,6 +28,9 @@ let fetchSecretsWithCache: typeof import('../../src/config/globalConfig').fetchS
 let getForceLoginMarkerPath: typeof import('../../src/config/globalConfig').getForceLoginMarkerPath;
 let setForceLoginMarker: typeof import('../../src/config/globalConfig').setForceLoginMarker;
 let consumeForceLoginMarker: typeof import('../../src/config/globalConfig').consumeForceLoginMarker;
+let getDeviceKeyNudgeDeclinedMarkerPath: typeof import('../../src/config/globalConfig').getDeviceKeyNudgeDeclinedMarkerPath;
+let hasDeclinedDeviceKeyNudge: typeof import('../../src/config/globalConfig').hasDeclinedDeviceKeyNudge;
+let setDeviceKeyNudgeDeclined: typeof import('../../src/config/globalConfig').setDeviceKeyNudgeDeclined;
 let getLocalRootPath: typeof import('../../src/config/globalConfig').getLocalRootPath;
 let saveLocalRoot: typeof import('../../src/config/globalConfig').saveLocalRoot;
 let saveLocalRootExclusive: typeof import('../../src/config/globalConfig').saveLocalRootExclusive;
@@ -58,6 +61,9 @@ beforeAll(async () => {
   getForceLoginMarkerPath = mod.getForceLoginMarkerPath;
   setForceLoginMarker = mod.setForceLoginMarker;
   consumeForceLoginMarker = mod.consumeForceLoginMarker;
+  getDeviceKeyNudgeDeclinedMarkerPath = mod.getDeviceKeyNudgeDeclinedMarkerPath;
+  hasDeclinedDeviceKeyNudge = mod.hasDeclinedDeviceKeyNudge;
+  setDeviceKeyNudgeDeclined = mod.setDeviceKeyNudgeDeclined;
   getLocalRootPath = mod.getLocalRootPath;
   saveLocalRoot = mod.saveLocalRoot;
   saveLocalRootExclusive = mod.saveLocalRootExclusive;
@@ -251,6 +257,39 @@ describe('GlobalConfig', () => {
       const stat = statSync(getForceLoginMarkerPath());
       expect(stat.mode & 0o777).toBe(0o600);
       consumeForceLoginMarker();
+    });
+  });
+
+  describe('device-key enrollment nudge marker (final-gate MAJOR-5)', () => {
+    it('returns false when no marker exists', () => {
+      const { existsSync: realExists, rmSync } = require('fs');
+      if (realExists(getDeviceKeyNudgeDeclinedMarkerPath())) {
+        rmSync(getDeviceKeyNudgeDeclinedMarkerPath(), { force: true });
+      }
+      expect(hasDeclinedDeviceKeyNudge()).toBe(false);
+    });
+
+    it('setDeviceKeyNudgeDeclined persists — hasDeclinedDeviceKeyNudge stays true (unlike the one-shot force-login marker, this is NOT consumed)', () => {
+      setDeviceKeyNudgeDeclined();
+      expect(existsSync(getDeviceKeyNudgeDeclinedMarkerPath())).toBe(true);
+      expect(hasDeclinedDeviceKeyNudge()).toBe(true);
+      // Checking again does not clear it — the whole point is "never ask twice".
+      expect(hasDeclinedDeviceKeyNudge()).toBe(true);
+
+      require('fs').rmSync(getDeviceKeyNudgeDeclinedMarkerPath(), { force: true });
+    });
+
+    it("lives under auth/, never under orgs/<orgId>/users/<userId>/ — CAP-383's equivalence test pins that directory to exactly key.enc + local.key", () => {
+      expect(getDeviceKeyNudgeDeclinedMarkerPath()).toContain(`${require('path').sep}auth${require('path').sep}`);
+      expect(getDeviceKeyNudgeDeclinedMarkerPath()).not.toContain(`${require('path').sep}orgs${require('path').sep}`);
+    });
+
+    it('writes marker with 0o600 permissions', () => {
+      setDeviceKeyNudgeDeclined();
+      const { statSync } = require('fs');
+      const stat = statSync(getDeviceKeyNudgeDeclinedMarkerPath());
+      expect(stat.mode & 0o777).toBe(0o600);
+      require('fs').rmSync(getDeviceKeyNudgeDeclinedMarkerPath(), { force: true });
     });
   });
 

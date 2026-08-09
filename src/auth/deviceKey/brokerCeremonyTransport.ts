@@ -42,6 +42,8 @@ import { hostname } from 'os';
 import { CapyError, ERROR_CODES } from '../../types/index';
 import { BrokerClient, type BrokerConnection } from '../../service/brokerClient';
 import { keepOrigin } from '../../ui/screens/keepScreens';
+import { openScreen } from '../../ui/openScreen';
+import { isInteractive } from '../../ui/interactive';
 import type {
   CeremonyFailure,
   CeremonyFailureCode,
@@ -113,12 +115,36 @@ function buildDeviceKeyUrl(connectionId: string, fragment: string, origin: strin
   return `${url.toString()}${fragment}`;
 }
 
-/** Print before waiting — the MCP relays what interactive runs print, mirroring authService.ts's relayAuthScreenViaKeep / oauthServer's auth-URL print. */
-function relayUrl(label: string, url: string): void {
+/**
+ * Print before waiting — the MCP relays what interactive runs print,
+ * mirroring authService.ts's relayAuthScreenViaKeep / oauthServer's auth-URL
+ * print.
+ *
+ * Final-gate MAJOR-2: also OPENS the URL, same as every other browser-
+ * opening flow in the CLI (`browserWizard.ts` prints and calls
+ * `openScreen`; `oauthServer.ts` does the same for the WorkOS sign-in URL).
+ * This page is exactly that kind of URL — a real hosted page at
+ * keep.capy.sc with its own session, not a CLI-served loopback dialog — so
+ * it uses `kind: 'handoff'`, the same choice oauthServer.ts makes and for
+ * the same reason (see openScreen.ts's module doc).
+ *
+ * Gated on `isInteractive()` (`../../ui/interactive.ts`, this repo's
+ * standing TTY/agent-detection primitive) rather than opening
+ * unconditionally: a real terminal gets a window like every other flow, but
+ * the MCP's `capy_sync` spawns this path with piped/non-TTY stdin — exactly
+ * the case `isInteractive()` exists to catch — so that caller still only
+ * ever gets the printed URL to relay, never a browser this process has no
+ * business opening on someone else's machine. `openScreen`'s own
+ * `CAPY_WEB_NO_OPEN` check remains underneath as the CI/test backstop.
+ */
+export function relayUrl(label: string, url: string): void {
   console.log('');
   console.log(`  ${label}`);
   console.log(`  ${url}`);
   console.log('');
+  if (isInteractive()) {
+    void openScreen(url, { kind: 'handoff' });
+  }
 }
 
 export interface BrokerCeremonyTransportOptions {

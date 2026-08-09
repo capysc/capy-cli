@@ -19,7 +19,7 @@
 import { AuthService } from '../auth/authService';
 import { ServiceClient, Door, DoorsInventory, DoorType } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
-import { AuthResult } from '../types/index';
+import { AuthResult, CapyError, ERROR_CODES } from '../types/index';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { keepOrigin } from '../ui/screens/keepScreens';
 
@@ -145,6 +145,18 @@ export class DoorsCommand {
     try {
       inventory = await serviceClient.listDoors();
     } catch (err) {
+      if (err instanceof CapyError && err.code === ERROR_CODES.DOORS_NOT_SUPPORTED) {
+        // Capability gap, not a request failure — the server this CLI is
+        // pointed at predates the doors route. Coded (ServiceClient decided
+        // this from the 404 status, never from response text) so this stays
+        // distinguishable from every other listDoors failure below.
+        console.error('');
+        console.error('  capy doors is not available yet: this Capy service does not support');
+        console.error('  device-key doors (no /doors route).');
+        console.error('  If you administer this service, upgrade it; otherwise check back later.');
+        console.error('');
+        process.exit(1);
+      }
       console.error(`\n  Failed to load doors: ${err instanceof Error ? err.message : String(err)}\n`);
       process.exit(1);
     }

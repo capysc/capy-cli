@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { FileManager } from '../files/fileManager';
 import { debug } from '../ui/debug';
+import { CapyError, ERROR_CODES } from '../types/index';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -28,6 +29,44 @@ function emitNextEnvModule(keys: string[]): void {
     `module.exports = {\n${body}\n};\n`;
 
   writeFileSync(join(capyDir, 'next-env.js'), content, 'utf-8');
+}
+
+/**
+ * Final-gate BLOCKER-1(c): `keyResolver.unwrapMasterKey` throws
+ * PERMISSION_DENIED — with no `details.status` (a client-local decision, not
+ * a server 403) — whenever there is no usable key.enc on this machine. Its
+ * message only ever names one remedy, "ask the project owner to invite
+ * you". That's correct for a teammate who was never granted access, but it
+ * is the wrong (or at least incomplete) remedy for a machine that could
+ * instead unlock via an already-enrolled device key — the whole point of
+ * the device-key feature is to make that remedy unnecessary. Named "device
+ * key" per invariant 9 either way, whether or not the retry above got a
+ * chance to run.
+ */
+function missingKeyRemediation(deviceKeysEnabled: boolean): CapyError {
+  const lines = [
+    "You do not have access to this project's secrets on this device.",
+    '',
+    '  Ask the project owner to invite you, then run:',
+    '',
+    '    capy redeem <code>',
+  ];
+  if (deviceKeysEnabled) {
+    lines.push(
+      '',
+      '  Or, if this account already has a device key enrolled on another',
+      '  machine, approve this device there (a device-key unlock was just',
+      '  attempted and did not complete) and re-run this command.',
+    );
+  } else {
+    lines.push(
+      '',
+      '  Or, if this account already has a device key enrolled on another',
+      '  machine, set CAPY_DEVICE_KEYS=1 and re-run — this device will try to',
+      '  unlock automatically instead of waiting on an invite.',
+    );
+  }
+  return new CapyError(lines.join('\n'), ERROR_CODES.PERMISSION_DENIED);
 }
 
 /**
@@ -163,7 +202,10 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     return 1;
   }
 
-  let projectKeyHex: string;
+  // Definite-assignment: every non-throwing path through the try block below
+  // assigns this before use — TS's control-flow analysis can't see through
+  // the nested try/catch/if the device-key retry (BLOCKER-1(c)) requires.
+  let projectKeyHex!: string;
   try {
     const { isLocalOnly } = await import('../config/profileConfig');
 
@@ -193,7 +235,49 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
         wrapOuterLayer: (o: string, p: string) => svc.wrapOuterLayer(o, p).then(r => r.ciphertext),
       };
 
-      projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
+      try {
+        projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
+      } catch (keyErr) {
+        // Final-gate BLOCKER-1(c): a missing/invalid key.enc used to dead-end
+        // straight into "ask for an invite" with no device-key path at all —
+        // even with CAPY_DEVICE_KEYS=1 and a live door this account could
+        // unlock from. keyResolver.ts is untouched (invariant 4 depends on
+        // it staying that way); the branch lives entirely here, keyed off
+        // the coded PERMISSION_DENIED keyResolver already throws, never off
+        // its message text.
+        const isMissingKey = keyErr instanceof CapyError && keyErr.code === ERROR_CODES.PERMISSION_DENIED;
+        if (!isMissingKey) throw keyErr;
+
+        const { deviceKeysEnabled } = await import('../auth/deviceKey/flag');
+        const enabled = deviceKeysEnabled();
+        let unlocked = false;
+        if (enabled) {
+          // attemptCaseCUnlock does its own "does this account have live
+          // doors" detection internally (via detectOnboardingCase) — it is a
+          // safe no-op, never a throw, when there is nothing to unlock with.
+          const { attemptCaseCUnlock } = await import('../auth/deviceKey/wiring');
+          const unlock = await attemptCaseCUnlock({
+            authService: auth,
+            serviceClient: svc,
+            devMode,
+            userId: result.user_id,
+            userEmail: result.user_email,
+            organizations: result.organizations || [],
+            activeOrgId: orgId,
+          });
+          if (unlock.ok) {
+            try {
+              // Retry once now that the unlock ceremony may have installed
+              // key.enc for this org.
+              projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
+              unlocked = true;
+            } catch {
+              unlocked = false;
+            }
+          }
+        }
+        if (!unlocked) throw missingKeyRemediation(enabled);
+      }
     }
   } catch (err: any) {
     console.error(`capy run: failed to resolve project key: ${err.message}`);

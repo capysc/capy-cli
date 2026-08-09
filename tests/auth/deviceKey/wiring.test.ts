@@ -147,6 +147,27 @@ mock.module('../../../src/auth/deviceKey/serviceOps', () => ({
   })),
 }));
 
+// maybeNudgeDeviceKeyEnrollment (final-gate MAJOR-5) — declinable confirm.
+let interactive = true;
+mock.module('../../../src/ui/interactive', () => ({
+  isInteractive: mock(() => interactive),
+}));
+
+let confirmAnswer = true;
+let promptShouldThrow = false;
+const promptCalls: unknown[] = [];
+mock.module('inquirer', () => ({
+  default: {
+    prompt: mock(async (questions: any) => {
+      promptCalls.push(questions);
+      if (promptShouldThrow) throw new Error('terminal went away mid-prompt');
+      const q = Array.isArray(questions) ? questions[0] : questions;
+      if (q.name === 'confirmed') return { confirmed: confirmAnswer };
+      throw new Error(`unexpected prompt: ${q.name}`);
+    }),
+  },
+}));
+
 afterAll(() => {
   mock.restore();
   rmSync(tempHome, { recursive: true, force: true });
@@ -169,6 +190,10 @@ beforeEach(() => {
     unlock: { ok: true, credentialId: 'cred-1', prfOutput: Buffer.alloc(32, 9).toString('base64') },
   };
   rmSync(join(tempHome, '.capy'), { recursive: true, force: true });
+  interactive = true;
+  confirmAnswer = true;
+  promptShouldThrow = false;
+  promptCalls.length = 0;
 });
 
 function ctx(overrides: Partial<import('../../../src/auth/deviceKey/wiring').DeviceKeyWiringContext> = {}) {
@@ -323,5 +348,76 @@ describe('syncOrgOntoDeviceKeyIfEnrolled (the CAP-380 "org joined after enrollme
     const keyEncRow = server.rows.find((r) => r.type === 'key_enc' && r.organization_id === ORG_A);
     expect(keyEncRow).toBeDefined();
     expect(keyEncRow!.key_enc).toBe('kms:already-wrapped');
+  });
+});
+
+describe('maybeNudgeDeviceKeyEnrollment (final-gate MAJOR-5 — the ordinary-flow on-ramp)', () => {
+  test('non-interactive (CI/agent/--web) — no prompt, no ceremony, nothing persisted', async () => {
+    interactive = false;
+    globalConfig.saveLocalRoot(ORG_A, Buffer.alloc(32, 3), USER);
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A');
+    expect(promptCalls).toHaveLength(0);
+    expect(ceremonyCalls.enroll).toBe(0);
+    expect(globalConfig.hasDeclinedDeviceKeyNudge()).toBe(false);
+  });
+
+  test('already declined once — no prompt, never asks twice', async () => {
+    globalConfig.saveLocalRoot(ORG_A, Buffer.alloc(32, 3), USER);
+    globalConfig.setDeviceKeyNudgeDeclined();
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A');
+    expect(promptCalls).toHaveLength(0);
+    expect(ceremonyCalls.enroll).toBe(0);
+  });
+
+  test('not eligible — a live door already exists (Case C territory, not B) — no prompt', async () => {
+    server.uploadDoor({ wrapped_k_local: 'w', iv: 'i', prf_salt: 's', credential_id: 'cred-1', kdf_version: 1 });
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A');
+    expect(promptCalls).toHaveLength(0);
+    expect(ceremonyCalls.enroll).toBe(0);
+  });
+
+  test('not eligible — no local root and orgs exist (recovery_or_transport) — no prompt', async () => {
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A');
+    expect(promptCalls).toHaveLength(0);
+  });
+
+  test('not eligible — brand new (no orgs, no local root) — no prompt', async () => {
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx({ organizations: [], activeOrgId: null }), 'Org A');
+    expect(promptCalls).toHaveLength(0);
+  });
+
+  test('eligible (local root, zero live doors) + declines the offer — persists the marker, never enrolls', async () => {
+    globalConfig.saveLocalRoot(ORG_A, Buffer.alloc(32, 3), USER);
+    confirmAnswer = false;
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A');
+    expect(promptCalls).toHaveLength(1);
+    expect(ceremonyCalls.enroll).toBe(0);
+    expect(globalConfig.hasDeclinedDeviceKeyNudge()).toBe(true);
+  });
+
+  test('eligible + accepts + ceremony succeeds — enrolls, marker is NOT set (nothing was declined)', async () => {
+    globalConfig.saveLocalRoot(ORG_A, Buffer.alloc(32, 3), USER);
+    confirmAnswer = true;
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A');
+    expect(ceremonyCalls.enroll).toBe(1);
+    expect(globalConfig.hasDeclinedDeviceKeyNudge()).toBe(false);
+    const door = server.rows.find((r) => r.type === 'wrapped_k_local');
+    expect(door).toBeDefined();
+  });
+
+  test('eligible + accepts + the ceremony itself is declined (e.g. cancelled) — persists the marker', async () => {
+    globalConfig.saveLocalRoot(ORG_A, Buffer.alloc(32, 3), USER);
+    confirmAnswer = true;
+    script.enroll = { ok: false, code: 'cancelled' };
+    await wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A');
+    expect(globalConfig.hasDeclinedDeviceKeyNudge()).toBe(true);
+  });
+
+  test('never throws — a prompt-layer blowup (e.g. terminal went away) degrades to a no-op', async () => {
+    globalConfig.saveLocalRoot(ORG_A, Buffer.alloc(32, 3), USER);
+    promptShouldThrow = true;
+    await expect(wiring.maybeNudgeDeviceKeyEnrollment(ctx(), 'Org A')).resolves.toBeUndefined();
+    expect(ceremonyCalls.enroll).toBe(0);
+    expect(globalConfig.hasDeclinedDeviceKeyNudge()).toBe(false);
   });
 });

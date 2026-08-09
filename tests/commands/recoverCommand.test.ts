@@ -87,6 +87,33 @@ mock.module('../../src/ui/interactive', () => ({
   isInteractive: mock(() => interactive),
 }));
 
+// `capy recover --web` (final-gate failure-signal #5). A faithful-enough
+// fake of the real reducer in ui/recoveryScreens.ts: it actually calls the
+// `ops` the command wires up (scopeToOrg, writeKey) rather than short-
+// circuiting past them, because recoverCommand's own hadLocalRootBeforeWrite
+// capture lives INSIDE that writeKey closure — a mock that never called it
+// would prove nothing about whether the capture still runs under --web.
+let webOrgId = ORG_DEMOS;
+let webPhraseFn: () => string = () => '';
+let webCancelled = false;
+mock.module('../../src/ui/recoveryScreens', () => ({
+  recoverInBrowser: mock(async (p: any) => {
+    if (webCancelled) {
+      return { orgId: '', orgName: '', kdfVersion: null, keyPath: null, cancelled: true };
+    }
+    const orgId = webOrgId;
+    await p.ops.scopeToOrg(orgId);
+    const outcome = await p.ops.writeKey(orgId, webPhraseFn());
+    return {
+      orgId,
+      orgName: p.orgs.find((o: any) => o.id === orgId)?.name ?? '',
+      kdfVersion: null,
+      keyPath: outcome.ok ? outcome.keyPath : null,
+      cancelled: false,
+    };
+  }),
+}));
+
 let enrollmentOutcome: unknown = { kind: 'enrolled', result: { ok: true, credentialId: 'c1', wrapperId: 'w1', verified: true, backupEligible: true, backupState: true, orgs: [] } };
 const runDeviceKeyEnrollmentCalls: unknown[] = [];
 const reportedOutcomes: unknown[] = [];
@@ -178,6 +205,9 @@ beforeEach(() => {
   interactive = true;
   enrollmentOutcome = { kind: 'enrolled', result: { ok: true, credentialId: 'c1', wrapperId: 'w1', verified: true, backupEligible: true, backupState: true, orgs: [] } };
   delete process.env.CAPY_DEVICE_KEYS;
+  webOrgId = ORG_DEMOS;
+  webPhraseFn = () => '';
+  webCancelled = false;
   rmSync(join(tempHome, '.capy'), { recursive: true, force: true });
 });
 
@@ -401,6 +431,96 @@ describe('RecoverCommand', () => {
       expect(runDeviceKeyEnrollmentCalls).toHaveLength(1);
       // No stale doors were ever computed for a machine that already had a
       // root — the existing door survives untouched.
+      expect(deleteWrapperCalls).toHaveLength(0);
+    });
+  });
+
+  describe('final-gate failure-signal #5 — `capy recover --web` reaches the same post-recovery nudge', () => {
+    test('flag off: --web completes normally, no nudge attempted (unchanged from before this fix)', async () => {
+      webOrgId = ORG_DEMOS;
+      webPhraseFn = () => generateSeedPhrase();
+
+      const cmd = new RecoverCommand();
+      await cmd.execute({ web: true });
+
+      expect(wrapCalls).toHaveLength(1);
+      expect(wrapCalls[0].orgId).toBe(ORG_DEMOS);
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
+    });
+
+    test('flag on, non-interactive: --web reaches the nudge code path, but isInteractive() still no-ops it (no hang)', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      interactive = false;
+      webOrgId = ORG_CAPY;
+      webPhraseFn = () => generateSeedPhrase();
+
+      const cmd = new RecoverCommand();
+      await cmd.execute({ web: true });
+
+      expect(wrapCalls).toHaveLength(1);
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
+    });
+
+    test('flag on, interactive, accepts: --web now runs the SAME re-enrollment ceremony the terminal path runs, for the org actually recovered', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      interactive = true;
+      answers = { confirmed: true }; // the nudge's own confirm prompt
+      webOrgId = ORG_VINCENT;
+      webPhraseFn = () => generateSeedPhrase();
+
+      const cmd = new RecoverCommand();
+      await cmd.execute({ web: true });
+
+      expect(wrapCalls).toHaveLength(1);
+      expect(wrapCalls[0].orgId).toBe(ORG_VINCENT);
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(1);
+      expect(reportedOutcomes).toHaveLength(1);
+      // The ctx handed to the enrollment engine must be scoped to the org
+      // that was ACTUALLY recovered in the browser, not some other org.
+      expect((runDeviceKeyEnrollmentCalls[0] as any).activeOrgId).toBe(ORG_VINCENT);
+    });
+
+    test('flag on, interactive, declines the nudge: no ceremony, key is still written', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      interactive = true;
+      answers = { confirmed: false };
+      webOrgId = ORG_DEMOS;
+      webPhraseFn = () => generateSeedPhrase();
+
+      const cmd = new RecoverCommand();
+      await cmd.execute({ web: true });
+
+      expect(wrapCalls).toHaveLength(1);
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
+    });
+
+    test('a cancelled --web flow (no key written) never reaches the nudge', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      interactive = true;
+      webCancelled = true;
+
+      const cmd = new RecoverCommand();
+      await cmd.execute({ web: true });
+
+      expect(wrapCalls).toHaveLength(0);
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
+    });
+
+    test('local.key already existed before this --web recovery (overwrite branch) — hadLocalRootBeforeWrite is still captured correctly under --web', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      interactive = true;
+      answers = { confirmed: true };
+      saveLocalRoot(ORG_DEMOS, Buffer.alloc(32, 4), FAKE_USER_ID);
+      listWrappersResult = [{ id: 'still-valid-door-web', type: 'wrapped_k_local', deleted_at: null }];
+      webOrgId = ORG_DEMOS;
+      webPhraseFn = () => generateSeedPhrase();
+
+      const cmd = new RecoverCommand();
+      await cmd.execute({ web: true });
+
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(1);
+      // Root pre-existed (unchanged by this recovery) — no stale-door
+      // cleanup, exactly like the terminal path's own "already existed" test.
       expect(deleteWrapperCalls).toHaveLength(0);
     });
   });

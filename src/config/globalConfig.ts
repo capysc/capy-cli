@@ -515,6 +515,35 @@ export function consumeForceLoginMarker(): boolean {
   return true;
 }
 
+// --- Device-key enrollment nudge marker (~/.capy/auth/.device-key-nudge-declined) ---
+//
+// Final-gate MAJOR-5: the ordinary `capy` run offers a ONE-TIME, declinable
+// nudge to set up a device key when this machine already holds a local root
+// but the account has zero live doors (Case B — `enroll_existing`, the
+// existing-user-never-enrolled gap the final-gate review named as the
+// program's biggest adoption risk). A "no" persists this marker so the
+// prompt never repeats.
+//
+// Lives beside the force-login marker under `auth/` — deliberately NOT
+// under `orgs/<orgId>/users/<userId>/`: CAP-383's equivalence test
+// (`capyRunEquivalence.e2e.test.ts`) pins that directory's file set to
+// exactly `key.enc`/`local.key` byte-for-byte across both provisioning
+// paths, so a marker written there would be a regression the moment device
+// keys are flag-on. An "enrolled" outcome needs no marker at all — the
+// detection condition itself stops being true the moment a door exists.
+
+export function getDeviceKeyNudgeDeclinedMarkerPath(): string {
+  return join(getGlobalCapyDir(), 'auth', '.device-key-nudge-declined');
+}
+
+export function hasDeclinedDeviceKeyNudge(): boolean {
+  return existsSync(getDeviceKeyNudgeDeclinedMarkerPath());
+}
+
+export function setDeviceKeyNudgeDeclined(): void {
+  writeSecureFile(getDeviceKeyNudgeDeclinedMarkerPath(), '');
+}
+
 /**
  * Local-only counterpart to fetchSecretsWithCache: reads the encrypted blob
  * from the local keep cache ONLY, returning null on a miss. Never touches the

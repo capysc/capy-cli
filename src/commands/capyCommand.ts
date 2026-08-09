@@ -42,7 +42,13 @@ import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
-import { attemptCaseCUnlock, runPendingSyncBestEffort, DeviceKeyWiringContext } from '../auth/deviceKey/wiring';
+import {
+  attemptCaseCUnlock,
+  runPendingSyncBestEffort,
+  syncOrgOntoDeviceKeyIfEnrolled,
+  maybeNudgeDeviceKeyEnrollment,
+  DeviceKeyWiringContext,
+} from '../auth/deviceKey/wiring';
 import type { DeviceKeyEnrollmentOptions } from './orgCreation';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -464,6 +470,20 @@ export class CapyCommand {
           recoveryShown: true,
         });
 
+        // Final-gate failure-signal #4: this branch runs when the account
+        // already has ≥1 org (the zero-org path above is Case A, handled by
+        // createNewOrganization's own deviceKeyEnrollment option). A SECOND
+        // org created while already enrolled mints its own fresh per-org
+        // root and is unportable via the device key until something unifies
+        // it onto the canonical one — exactly the gap
+        // syncOrgOntoDeviceKeyIfEnrolled exists to close, today only called
+        // from `capy redeem`'s post-success hook. Silent maintenance (no
+        // prompt: nothing new is being decided), best-effort, and a no-op
+        // when nothing is enrolled anywhere yet.
+        if (deviceKeysEnabled()) {
+          await syncOrgOntoDeviceKeyIfEnrolled(this.deviceKeyWiringContext(authResult, selectedOrg.id), selectedOrg.id);
+        }
+
       } else if (currentOrg && orgId === currentOrg.id) {
         selectedOrg = currentOrg;
 
@@ -543,6 +563,14 @@ export class CapyCommand {
     // interrupted sync. Best-effort, flag-gated, never blocks this run.
     if (deviceKeysEnabled()) {
       await runPendingSyncBestEffort(this.deviceKeyWiringContext(authResult, selectedOrg.id));
+
+      // Final-gate MAJOR-5: the ordinary-run on-ramp into enrollment. Only
+      // fires when this machine has a local root but the account holds zero
+      // live doors (Case B); declinable, isInteractive()-gated (a no-op
+      // under --web/MCP/CI), and shown at most once per machine — see
+      // maybeNudgeDeviceKeyEnrollment's own doc for the eligibility check
+      // and the decline-persistence marker.
+      await maybeNudgeDeviceKeyEnrollment(this.deviceKeyWiringContext(authResult, selectedOrg.id), selectedOrg.name);
     }
 
     // Discover existing projects in the org. If any exist, give the user the

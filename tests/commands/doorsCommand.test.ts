@@ -262,3 +262,47 @@ describe('capy doors — service failure', () => {
     expect(errs.join('\n')).toContain('Failed to load doors');
   });
 });
+
+describe('capy doors — final-gate BLOCKER-2 (route missing on this service build)', () => {
+  test('a DOORS_NOT_SUPPORTED coded error prints a capability-gap message, not the generic failure text, and exits 1', async () => {
+    listDoorsImpl = async () => {
+      // Mirrors what ServiceClient.listDoors() synthesizes from a bare 404 —
+      // this test exercises the COMMAND's handling of the code, independent
+      // of the client's own 404→code mapping (covered by
+      // tests/service/serviceClient.test.ts).
+      const { CapyError, ERROR_CODES } = await import('../../src/types/index');
+      throw new CapyError(
+        'This Capy service does not support device-key doors yet (no /doors route).',
+        ERROR_CODES.DOORS_NOT_SUPPORTED,
+        { status: 404 },
+      );
+    };
+    const errs: string[] = [];
+    const originalErr = console.error;
+    console.error = (...args: unknown[]) => errs.push(args.map(String).join(' '));
+    try {
+      await expect(new DoorsCommand().execute()).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      console.error = originalErr;
+    }
+    const out = errs.join('\n');
+    expect(out).toContain('not available yet');
+    expect(out).toContain('does not support');
+    expect(out).not.toContain('Failed to load doors');
+  });
+
+  test('a generic (non-coded) failure still falls through to the ordinary message', async () => {
+    listDoorsImpl = async () => {
+      throw new Error('some other failure');
+    };
+    const errs: string[] = [];
+    const originalErr = console.error;
+    console.error = (...args: unknown[]) => errs.push(args.map(String).join(' '));
+    try {
+      await expect(new DoorsCommand().execute()).rejects.toBeInstanceOf(ExitError);
+    } finally {
+      console.error = originalErr;
+    }
+    expect(errs.join('\n')).toContain('Failed to load doors');
+  });
+});

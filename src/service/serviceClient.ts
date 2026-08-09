@@ -726,9 +726,29 @@ export class ServiceClient {
    * unavailable if the WorkOS lookup itself failed). Never includes
    * ciphertext or key material. Mounted behind the same org-scoped auth
    * middleware as /wrappers.
+   *
+   * Final-gate BLOCKER-2: `/doors` shipped on a service branch that isn't
+   * guaranteed to be in every deployed service's merge train yet. A 404 here
+   * means "this route doesn't exist" (the inventory itself answers "zero
+   * doors" with a 200 + empty array, never a 404) — a capability gap the CLI
+   * can degrade out of, not a generic request failure. Reclassified to a
+   * dedicated code so `capy doors` can say so plainly instead of surfacing
+   * an unhandled/generic error. Branches on `details.status`, never on
+   * response text (cardinal Rule 4).
    */
   async listDoors(): Promise<DoorsInventory> {
-    return this.request<DoorsInventory>('GET', '/doors');
+    try {
+      return await this.request<DoorsInventory>('GET', '/doors');
+    } catch (err) {
+      if (err instanceof CapyError && err.details?.status === 404) {
+        throw new CapyError(
+          'This Capy service does not support device-key doors yet (no /doors route).',
+          ERROR_CODES.DOORS_NOT_SUPPORTED,
+          { status: 404 },
+        );
+      }
+      throw err;
+    }
   }
 }
 

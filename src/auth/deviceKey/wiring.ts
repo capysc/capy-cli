@@ -14,14 +14,22 @@
  * non-passkey flow") extended to the wiring layer.
  */
 import { hostname } from 'os';
+import inquirer from 'inquirer';
 import type { AuthService } from '../authService';
 import type { ServiceClient } from '../../service/serviceClient';
 import { Organization } from '../../types/index';
 import { debug } from '../../ui/debug';
+import { isInteractive } from '../../ui/interactive';
 import { resolveActiveUrl } from '../../config/profileConfig';
 import { createDeviceKeyServiceOps } from './serviceOps';
 import { BrokerCeremonyTransport } from './brokerCeremonyTransport';
-import { listOrgsWithLocalRoot, readLocalRoot, markKeyEncSyncPending } from '../../config/globalConfig';
+import {
+  listOrgsWithLocalRoot,
+  readLocalRoot,
+  markKeyEncSyncPending,
+  hasDeclinedDeviceKeyNudge,
+  setDeviceKeyNudgeDeclined,
+} from '../../config/globalConfig';
 import {
   OnboardingDeps,
   detectOnboardingCase,
@@ -197,6 +205,74 @@ export async function runDeviceKeyEnrollment(ctx: DeviceKeyWiringContext): Promi
     return { kind: 'declined', ceremonyCode: result.ceremonyCode };
   }
   return { kind: 'enrolled', result };
+}
+
+/**
+ * Final-gate MAJOR-5 — the ordinary `capy` run's own on-ramp into device-key
+ * enrollment.
+ *
+ * The final-gate review's biggest adoption risk: enrollment previously only
+ * happened via `capy device-key enroll`, the post-redeem nudge, or the
+ * post-recovery nudge — never during the everyday flow, so a user who never
+ * hits any of those three never finds out the feature exists, and
+ * every new machine keeps using transport codes. This closes
+ * that gap the same way `capy redeem`'s own nudge (`redeemCommand.ts`) does:
+ * a declinable inquirer confirm, `isInteractive()`-gated so CI, agents and
+ * `--web` runs (no TTY) never see a prompt they cannot answer.
+ *
+ * Detects Case B (`enroll_existing` — a local root already exists, but the
+ * account holds zero live doors) itself, rather than firing the prompt and
+ * letting `runDeviceKeyEnrollment` sort it out afterward: that function goes
+ * straight to the WebAuthn ceremony with no confirmation of its own, so the
+ * eligibility check has to happen BEFORE the question is asked, not after.
+ *
+ * Declining persists `globalConfig`'s device-key-nudge-declined marker so
+ * this asks AT MOST ONCE per machine; an `enrolled` outcome needs no marker
+ * (detection itself stops being `enroll_existing` the moment a door exists).
+ * Never throws outward — matches every other helper in this file.
+ */
+export async function maybeNudgeDeviceKeyEnrollment(ctx: DeviceKeyWiringContext, orgName: string): Promise<void> {
+  if (!isInteractive()) return;
+  if (hasDeclinedDeviceKeyNudge()) return;
+
+  try {
+    const deps = buildOnboardingDeps(ctx, currentOrgToken(ctx));
+    const detection = await detectOnboardingCase(deps);
+    if (detection.kind !== 'enroll_existing') return;
+
+    const { confirmed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmed',
+      message: 'Set up a device key so your other machines can unlock with Face ID/Touch ID instead of transport codes?',
+      default: false,
+    }]);
+    if (!confirmed) {
+      setDeviceKeyNudgeDeclined();
+      console.log('  No problem — enroll a device key any time with `capy device-key enroll`.');
+      console.log('');
+      return;
+    }
+
+    const outcome = await runDeviceKeyEnrollment(ctx);
+    switch (outcome.kind) {
+      case 'enrolled':
+        reportEnrollmentOutcome(outcome.result, orgName);
+        break;
+      case 'declined':
+        setDeviceKeyNudgeDeclined();
+        console.log('  No problem — enroll a device key any time with `capy device-key enroll`.');
+        console.log('');
+        break;
+      case 'already_enrolled':
+      case 'not_ready':
+        // Detection said 'enroll_existing' a moment ago; either changed
+        // underneath us (another process just enrolled) or nothing to do.
+        // Leave the marker unset either way — this was not a decline.
+        break;
+    }
+  } catch (err) {
+    debug(`[device-key] enrollment nudge skipped: ${describeError(err)}`);
+  }
 }
 
 /**

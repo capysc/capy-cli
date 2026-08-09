@@ -1,6 +1,7 @@
 import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
 import { ServiceClient, KeyWrapperMetadata } from '../service/serviceClient';
+import { Organization } from '../types/index';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import {
@@ -423,12 +424,20 @@ export class RecoverCommand {
   private async executeInBrowser(
     authService: AuthService,
     userId: string,
-    orgs: Array<{ id: string; name: string }>,
+    orgs: Organization[],
     userEmail?: string,
   ): Promise<void> {
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
     const fm = new FileManager();
+
+    // Final-gate failure-signal #5: captured INSIDE writeKey, before
+    // wrapAndSaveMasterKey runs — same reason the terminal path captures it
+    // at the same point (see the comment above hadLocalRootBefore there):
+    // wrapAndSaveMasterKey's loadOrMintLocalRoot would answer "yes, one
+    // exists" immediately after minting one itself, so checking afterward
+    // would always read true and silently suppress the stale-door check.
+    let hadLocalRootBeforeWrite = false;
 
     const keyOps = {
       coDecrypt: (oid: string, ct: string) =>
@@ -480,6 +489,7 @@ export class RecoverCommand {
         },
         writeKey: async (orgId: string, phrase: string, kdfVersion?: 1 | 2) => {
           const masterKey = seedPhraseToMasterKey(phrase, kdfVersion ?? CURRENT_KDF_VERSION);
+          hadLocalRootBeforeWrite = readLocalRoot(orgId, userId) !== null;
           try {
             await wrapAndSaveMasterKey(masterKey, orgId, userId, keyOps);
           } catch (err: any) {
@@ -521,6 +531,25 @@ export class RecoverCommand {
     console.log(`  Verify by running ${B('capy')} in a project for this org — a wrong recovery`);
     console.log(`  phrase will surface as a decryption failure on the first encrypted variable.`);
     console.log('');
+
+    // Final-gate failure-signal #5: `--web` used to early-return before this
+    // point ever existed (the whole method wasn't reached), so the re-
+    // enroll-after-recovery nudge — and, when this recovery minted a brand
+    // new K_local root, the stale-door cleanup — never ran under --web at
+    // all. Reachable now, gated by the same isInteractive() check
+    // maybeReenrollAfterRecovery already applies: a real TTY driving
+    // `--web` gets the prompt like the terminal path does, and a non-TTY
+    // caller (the ordinary way --web is actually driven) still no-ops,
+    // exactly as it did before this fix, rather than hanging on a question
+    // nothing can answer.
+    if (deviceKeysEnabled()) {
+      await this.maybeReenrollAfterRecovery(
+        { authService, serviceClient, devMode: this.devMode, userId, userEmail, organizations: orgs, activeOrgId: result.orgId },
+        serviceClient,
+        result.orgName,
+        hadLocalRootBeforeWrite,
+      );
+    }
   }
 
   /**

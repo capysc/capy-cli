@@ -290,4 +290,40 @@ describe('ServiceClient', () => {
     });
   });
 
+  describe('listDoors (final-gate BLOCKER-2 — /doors capability gap)', () => {
+    test('a 404 (route missing on this service build) is reclassified to DOORS_NOT_SUPPORTED', async () => {
+      // No `code` field — a bare route-not-found 404, not a data-shaped one.
+      mockFetch.mockResolvedValue(mockFetchResponse({}, false, 404));
+
+      try {
+        await serviceClient.listDoors();
+        throw new Error('expected request to throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).toBe(ERROR_CODES.DOORS_NOT_SUPPORTED);
+        expect(err.details?.status).toBe(404);
+      }
+    });
+
+    test('a non-404 failure (e.g. 500) is left as the ordinary classified error, not DOORS_NOT_SUPPORTED', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'boom' }, false, 500));
+
+      try {
+        await serviceClient.listDoors();
+        throw new Error('expected request to throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).not.toBe(ERROR_CODES.DOORS_NOT_SUPPORTED);
+      }
+    });
+
+    test('success (empty inventory) is returned untouched — a 200 with zero doors is not a capability gap', async () => {
+      const inventory = { doors: [], has_seed_wrapper: false, sessions_unavailable_reason: null, unavailable_door_types: [] };
+      mockFetch.mockResolvedValue(mockFetchResponse(inventory, true, 200));
+
+      const result = await serviceClient.listDoors();
+      expect(result).toEqual(inventory);
+    });
+  });
+
 });

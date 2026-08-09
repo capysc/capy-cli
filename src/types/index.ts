@@ -384,6 +384,15 @@ export const ERROR_CODES = {
   DEVICE_KEY_FRAGMENT_TOO_LARGE: 'DEVICE_KEY_FRAGMENT_TOO_LARGE',
   /** A candidate's credential id exceeds the ceremony page's 1400-char cap. */
   DEVICE_KEY_CREDENTIAL_ID_TOO_LONG: 'DEVICE_KEY_CREDENTIAL_ID_TOO_LONG',
+  /**
+   * Final-gate BLOCKER-2: `GET /doors` 404'd — synthesized CLIENT-SIDE by
+   * ServiceClient.listDoors() (never sent by the server), for the case where
+   * the CLI is talking to a service build that doesn't have the doors route
+   * yet. A capability gap, not a "no doors" answer (that's a 200 with an
+   * empty array) — kept distinct from generic SERVICE_ERROR so `capy doors`
+   * can name the real cause instead of a bare request failure.
+   */
+  DOORS_NOT_SUPPORTED: 'DOORS_NOT_SUPPORTED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
