@@ -718,6 +718,18 @@ export class ServiceClient {
     );
     return data.wrapper;
   }
+
+  /**
+   * The caller's doors inventory (CAP-378): "everything that can act as
+   * this user" — device keys, org key copies, and WorkOS sessions, plus the
+   * honest gaps (transport codes are never persisted; sessions may be
+   * unavailable if the WorkOS lookup itself failed). Never includes
+   * ciphertext or key material. Mounted behind the same org-scoped auth
+   * middleware as /wrappers.
+   */
+  async listDoors(): Promise<DoorsInventory> {
+    return this.request<DoorsInventory>('GET', '/doors');
+  }
 }
 
 /** Wrapper row metadata (service KeyWrapperMetadata schema) — never carries ciphertext. */
@@ -743,4 +755,69 @@ export interface KeyWrapperPayload extends KeyWrapperMetadata {
   iv?: string;
   prf_salt?: string;
   key_enc?: string;
+}
+
+/**
+ * One row in a user's doors inventory (service `Door` schema, CAP-378).
+ * Fields present depend on `door_type` — device_key and org_key are
+ * key_wrappers rows (same underlying data as KeyWrapperMetadata, reshaped);
+ * session is a WorkOS AuthKit session, the only server-observable "signed in
+ * as me" signal this service has (no local sessions table exists).
+ */
+export type DoorType = 'device_key' | 'org_key' | 'session' | 'transport_code';
+
+export interface Door {
+  door_type: DoorType;
+  /** Opaque within its door_type's id space (UUID for wrapper-backed doors, a WorkOS session id for sessions). */
+  id: string;
+  /** device_key only. No label column exists in the schema yet — always null today. */
+  label?: string | null;
+  /** device_key only — the WebAuthn credential id. */
+  credential_id?: string | null;
+  /** org_key and session — null for device_key (user-global). */
+  organization_id?: string | null;
+  /** device_key and org_key only. */
+  kdf_version?: number;
+  /** device_key only. True on the account's first-ever enrolled door. */
+  is_seed?: boolean;
+  /** device_key and org_key only. */
+  verified_at?: string | null;
+  /** session only. */
+  ip_address?: string | null;
+  /** session only. */
+  user_agent?: string | null;
+  /** session only — WorkOS AuthMethod (oauth, password, sso, ...). */
+  auth_method?: string;
+  /** session only. */
+  status?: 'active' | 'expired' | 'revoked';
+  created_at: string;
+  /** session only. */
+  updated_at?: string;
+  /** session only. */
+  expires_at?: string;
+  /** session only. */
+  ended_at?: string | null;
+  revocable: boolean;
+}
+
+/**
+ * Why the sessions section of a DoorsInventory may be empty even though the
+ * user genuinely has sessions: null means the WorkOS lookup ran (even if it
+ * returned zero rows); non-null means it could not run or failed, which is a
+ * different fact from "this user has zero sessions."
+ */
+export type SessionsUnavailableReason = 'WORKOS_NOT_CONFIGURED' | 'WORKOS_LOOKUP_FAILED';
+
+export interface UnavailableDoorType {
+  door_type: 'transport_code';
+  reason: 'NOT_PERSISTED';
+}
+
+export interface DoorsInventory {
+  doors: Door[];
+  /** True while a live device_key door with is_seed=true exists. */
+  has_seed_wrapper: boolean;
+  sessions_unavailable_reason: SessionsUnavailableReason | null;
+  /** Door types this endpoint can never populate — always contains exactly transport_code today. */
+  unavailable_door_types: UnavailableDoorType[];
 }

@@ -802,6 +802,16 @@ deviceKeyCmd
   });
 
 program
+  .command('doors')
+  .description('List everything that can act as you: device keys, org key copies, sessions')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { DoorsCommand } = await import('./commands/doorsCommand');
+    const cmd = new DoorsCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute({ json: options.json });
+  });
+
+program
   .command('run')
   .description('Run a command with decrypted secrets')
   .allowUnknownOption()

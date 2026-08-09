@@ -717,6 +717,17 @@ deviceKeyCmd
   });
 
 program
+  .command('doors')
+  .description('List everything that can act as you: device keys, org key copies, sessions')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    assertNotLocalOnly('doors');
+    const { DoorsCommand } = await import('./commands/doorsCommand');
+    const cmd = new DoorsCommand();
+    await cmd.execute({ json: options.json });
+  });
+
+program
   .command('add <vars...>')
   .description('Add one or more secret values to the project (encrypts + syncs)')
   // NOTE: `--web` is intentionally NOT declared here. The root program already
