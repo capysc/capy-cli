@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
+import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { parseRedeemCode } from '../crypto/inviteCrypto';
@@ -7,6 +8,14 @@ import { wrapAndSaveMasterKey, hasOrgKey } from '../crypto/keyResolver';
 import { FileManager } from '../files/fileManager';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
+import { isInteractive } from '../ui/interactive';
+import { deviceKeysEnabled } from '../auth/deviceKey/flag';
+import {
+  runDeviceKeyEnrollment,
+  reportEnrollmentOutcome,
+  syncOrgOntoDeviceKeyIfEnrolled,
+  DeviceKeyWiringContext,
+} from '../auth/deviceKey/wiring';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -158,6 +167,70 @@ export class RedeemCommand {
     console.log(`  You now have access to ${B(orgName)}.`);
     console.log(`  Run ${B('capy')} to sync secrets.`);
     console.log('');
+
+    // CAP-382: two distinct device-key follow-ups, only on THIS branch — the
+    // early "you're all set" return above (step 6) never wrote anything this
+    // run, so there is nothing new to sync or nudge about there.
+    if (deviceKeysEnabled()) {
+      const ctx: DeviceKeyWiringContext = {
+        authService,
+        serviceClient,
+        devMode: this.devMode,
+        userId,
+        userEmail,
+        organizations: authResult.organizations || [],
+        activeOrgId: orgId,
+      };
+
+      // (a) The CAP-380 known gap: this org may have joined AFTER the
+      // account already enrolled a device key elsewhere — silently unify
+      // its fresh root onto the canonical one (maintenance, no prompt;
+      // nothing new is being decided). `alreadyEnrolled` also gates the
+      // nudge below — a user who already has a device key should never be
+      // asked to "set one up".
+      const sync = await syncOrgOntoDeviceKeyIfEnrolled(ctx, orgId);
+      if (!sync.alreadyEnrolled) {
+        // (b) Nothing enrolled yet anywhere — offer to set one up.
+        await this.maybeOfferDeviceKeyEnrollment(ctx, orgName);
+      }
+    }
+  }
+
+  /**
+   * Declinable, flag-gated. Declining, a non-interactive run, or any
+   * ceremony failure all leave the tree exactly as redeem already left it —
+   * nothing here writes anything except through the enrollment engine
+   * itself, which has its own byte-identical-on-refusal contract.
+   */
+  private async maybeOfferDeviceKeyEnrollment(ctx: DeviceKeyWiringContext, orgName: string): Promise<void> {
+    if (!isInteractive()) return;
+
+    const { confirmed } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmed',
+      message: 'Set up a device key so your other machines onboard with Face ID/Touch ID instead of codes?',
+      default: false,
+    }]);
+    if (!confirmed) return;
+
+    const outcome = await runDeviceKeyEnrollment(ctx);
+    switch (outcome.kind) {
+      case 'enrolled':
+        reportEnrollmentOutcome(outcome.result, orgName);
+        break;
+      case 'declined':
+        console.log('  No problem — enroll a device key any time with `capy device-key enroll`.');
+        console.log('');
+        break;
+      case 'already_enrolled':
+        console.log('  This account already has a device key enrolled.');
+        console.log('');
+        break;
+      case 'not_ready':
+        // Detection disagreeing with "redeem just wrote local.key" should
+        // not happen; nothing to do but leave redeem's own result standing.
+        break;
+    }
   }
 
   /**

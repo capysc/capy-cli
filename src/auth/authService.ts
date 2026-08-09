@@ -368,6 +368,18 @@ export class AuthService {
 
       this.lifecycle.save();
 
+      // CAP-375 Wave-B: a genuinely zero-org identity's exchange now
+      // returns a real (org-less, scope:"user") access token instead of
+      // null — previously this branch could only be reached by a 1-org or
+      // org_id-claim-matched exchange, both of which always resolve an org
+      // id. `organizations.length === 0` is the only way `token.access_token`
+      // is truthy with `resolvedOrgId` still empty, so this can't
+      // misclassify a multi-org sign-in (which still returns a null token,
+      // untouched by the amendment) as org-less. Never persisted to
+      // SessionStore — see AuthResult._orgless_access_token's doc comment.
+      const orglessToken =
+        !resolvedOrgId && (!organizations || organizations.length === 0) ? token.access_token : undefined;
+
       const resolvedOrg = organizations?.find(o => o.id === resolvedOrgId);
       return {
         success: true,
@@ -380,6 +392,7 @@ export class AuthService {
         organizations: organizations || [],
         // Include refresh_token for org creation when user has no orgs yet
         ...(!resolvedOrgId ? { _refresh_token: token.refresh_token } : {}),
+        ...(orglessToken ? { _orgless_access_token: orglessToken } : {}),
       };
     }
 

@@ -56,6 +56,9 @@ ISOLATED_FILES=(
   tests/auth/deviceKeyOnboarding.test.ts
   tests/crypto/keyResolverSyncHook.test.ts
   tests/service/wrapperEndpoints.test.ts
+  tests/auth/deviceKey/wiring.test.ts
+  tests/commands/deviceKeyCommand.test.ts
+  tests/commands/redeemCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

@@ -1,4 +1,4 @@
-import { mock, describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
+import { mock, describe, test, expect, beforeAll, beforeEach, afterEach, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -64,13 +64,40 @@ mock.module('../../src/auth/authService', () => ({
   },
 }));
 
+// CAP-382: staleDoors + deleteWrapper bookkeeping for the re-enroll-after-
+// recovery cleanup. Empty by default — most tests never touch device keys.
+let listWrappersResult: Array<{ id: string; type: string; deleted_at: string | null }> = [];
+const deleteWrapperCalls: string[] = [];
 mock.module('../../src/service/serviceClient', () => ({
   ServiceClient: class FakeServiceClient {
     constructor(_apiUrl?: string) {}
     setTokenProvider(_fn: any) {}
     coDecrypt(_oid: string, _ct: string) { return Promise.resolve({ plaintext: 'unused' }); }
     wrapOuterLayer(_oid: string, pt: string) { return Promise.resolve({ ciphertext: 'kms-wrapped:' + pt }); }
+    listWrappers(_includeDeleted?: boolean) { return Promise.resolve(listWrappersResult); }
+    deleteWrapper(id: string) {
+      deleteWrapperCalls.push(id);
+      return Promise.resolve({ id });
+    }
   },
+}));
+
+let interactive = true;
+mock.module('../../src/ui/interactive', () => ({
+  isInteractive: mock(() => interactive),
+}));
+
+let enrollmentOutcome: unknown = { kind: 'enrolled', result: { ok: true, credentialId: 'c1', wrapperId: 'w1', verified: true, backupEligible: true, backupState: true, orgs: [] } };
+const runDeviceKeyEnrollmentCalls: unknown[] = [];
+const reportedOutcomes: unknown[] = [];
+mock.module('../../src/auth/deviceKey/wiring', () => ({
+  runDeviceKeyEnrollment: mock(async (ctx: unknown) => {
+    runDeviceKeyEnrollmentCalls.push(ctx);
+    return enrollmentOutcome;
+  }),
+  reportEnrollmentOutcome: mock((result: unknown, orgName: string) => {
+    reportedOutcomes.push({ result, orgName });
+  }),
 }));
 
 // ProjectManager — return a state with a keep.lock pointing at ORG_VINCENT
@@ -127,19 +154,36 @@ afterAll(() => {
 let RecoverCommand: any;
 let generateSeedPhrase: any;
 let seedPhraseToMasterKey: any;
+let saveLocalRoot: any;
+
+const ORIGINAL_DEVICE_KEYS_FLAG = process.env.CAPY_DEVICE_KEYS;
 
 beforeAll(async () => {
   ({ RecoverCommand } = await import('../../src/commands/recoverCommand'));
   const km = await import('../../src/crypto/keyManager');
   generateSeedPhrase = km.generateSeedPhrase;
   seedPhraseToMasterKey = km.seedPhraseToMasterKey;
+  const gc = await import('../../src/config/globalConfig');
+  saveLocalRoot = gc.saveLocalRoot;
 });
 
 beforeEach(() => {
   wrapCalls.length = 0;
   authCalls.length = 0;
   answers = {};
+  listWrappersResult = [];
+  deleteWrapperCalls.length = 0;
+  runDeviceKeyEnrollmentCalls.length = 0;
+  reportedOutcomes.length = 0;
+  interactive = true;
+  enrollmentOutcome = { kind: 'enrolled', result: { ok: true, credentialId: 'c1', wrapperId: 'w1', verified: true, backupEligible: true, backupState: true, orgs: [] } };
+  delete process.env.CAPY_DEVICE_KEYS;
   rmSync(join(tempHome, '.capy'), { recursive: true, force: true });
+});
+
+afterEach(() => {
+  if (ORIGINAL_DEVICE_KEYS_FLAG === undefined) delete process.env.CAPY_DEVICE_KEYS;
+  else process.env.CAPY_DEVICE_KEYS = ORIGINAL_DEVICE_KEYS_FLAG;
 });
 
 describe('RecoverCommand', () => {
@@ -271,5 +315,93 @@ describe('RecoverCommand', () => {
     let b = generateSeedPhrase();
     while (b === a) b = generateSeedPhrase();
     expect(seedPhraseToMasterKey(a).equals(seedPhraseToMasterKey(b))).toBe(false);
+  });
+
+  describe('CAP-382 re-enroll-after-recovery nudge', () => {
+    test('flag off — no nudge prompt, no wrapper cleanup', async () => {
+      const phrase = generateSeedPhrase();
+      answers = { orgId: ORG_DEMOS, seedPhrase: phrase };
+
+      const cmd = new RecoverCommand();
+      await cmd.execute();
+
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
+      expect(deleteWrapperCalls).toHaveLength(0);
+    });
+
+    test('flag on, non-interactive — no prompt (no hang in CI/agents)', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      interactive = false;
+      const phrase = generateSeedPhrase();
+      answers = { orgId: ORG_DEMOS, seedPhrase: phrase };
+
+      const cmd = new RecoverCommand();
+      await cmd.execute();
+
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
+    });
+
+    test('flag on, interactive, declines — no enrollment attempted, no wrapper touched', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      const phrase = generateSeedPhrase();
+      answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: false };
+
+      const cmd = new RecoverCommand();
+      await cmd.execute();
+
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
+      expect(deleteWrapperCalls).toHaveLength(0);
+    });
+
+    test('no local.key existed before recovery (fresh mint) + a live stale door + accept + enrollment succeeds → the stale door is soft-deleted AFTER the new one enrolls', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      listWrappersResult = [{ id: 'stale-door-1', type: 'wrapped_k_local', deleted_at: null }];
+      enrollmentOutcome = { kind: 'enrolled', result: { ok: true, credentialId: 'new-cred', wrapperId: 'new-wrapper', verified: true, backupEligible: true, backupState: true, orgs: [] } };
+      const phrase = generateSeedPhrase();
+      answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: true };
+
+      const cmd = new RecoverCommand();
+      await cmd.execute();
+
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(1);
+      expect(reportedOutcomes).toHaveLength(1);
+      expect(deleteWrapperCalls).toEqual(['stale-door-1']);
+    });
+
+    test('a declined re-enrollment ceremony leaves stale doors untouched', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      listWrappersResult = [{ id: 'stale-door-2', type: 'wrapped_k_local', deleted_at: null }];
+      enrollmentOutcome = { kind: 'declined', ceremonyCode: 'cancelled' };
+      const phrase = generateSeedPhrase();
+      answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: true };
+
+      const cmd = new RecoverCommand();
+      await cmd.execute();
+
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(1);
+      expect(deleteWrapperCalls).toHaveLength(0);
+    });
+
+    test('local.key ALREADY existed before recovery (overwrite branch) — existing doors are never touched, even on accept', async () => {
+      process.env.CAPY_DEVICE_KEYS = '1';
+      // Pre-seed a root for ORG_DEMOS so hadLocalRootBefore is true — the
+      // root is UNCHANGED by this recovery, so any existing door remains
+      // valid and must not be caught up in the stale-door cleanup.
+      saveLocalRoot(ORG_DEMOS, Buffer.alloc(32, 4), FAKE_USER_ID);
+      listWrappersResult = [{ id: 'still-valid-door', type: 'wrapped_k_local', deleted_at: null }];
+      const phrase = generateSeedPhrase();
+      // Overwrite gate fires because key.enc doesn't exist for the mocked
+      // hasOrgKey (keyed on key.enc, not local.key) — no `proceed` needed
+      // since no key.enc was pre-created here.
+      answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: true };
+
+      const cmd = new RecoverCommand();
+      await cmd.execute();
+
+      expect(runDeviceKeyEnrollmentCalls).toHaveLength(1);
+      // No stale doors were ever computed for a machine that already had a
+      // root — the existing door survives untouched.
+      expect(deleteWrapperCalls).toHaveLength(0);
+    });
   });
 });

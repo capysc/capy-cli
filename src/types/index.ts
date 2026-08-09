@@ -204,6 +204,16 @@ export interface AuthResult {
   _refresh_token?: string;
   /** How the token was obtained: 'cached', 'refreshed', or 'oauth' */
   _auth_method?: 'cached' | 'refreshed' | 'oauth';
+  /**
+   * CAP-375 Wave-B org-less access token (`scope:"user"`) — present only
+   * when the exchange resolved to a genuinely zero-org identity (no org_id
+   * claim, no known-org match, `organizations.length === 0`). Used to
+   * create an org-less connection broker channel for the Case-A device-key
+   * ceremony (CAP-382); never written to SessionStore (transient, this
+   * process's lifetime only — the org-scoped session created moments later
+   * supersedes it for everything else).
+   */
+  _orgless_access_token?: string;
 }
 
 export interface DecryptResponse {
@@ -363,6 +373,17 @@ export const ERROR_CODES = {
   DEVICE_KEY_KDF_UNSUPPORTED: 'DEVICE_KEY_KDF_UNSUPPORTED',
   /** Onboarding lost the local.key create race to a DIFFERENT root — refused to overwrite. */
   LOCAL_ROOT_CONFLICT: 'LOCAL_ROOT_CONFLICT',
+  // Broker-backed ceremony transport codes (CAP-382, client-side only — the
+  // page-side caps these mirror never reach the service, so no server-side
+  // twin is needed). Thrown, not folded into CeremonyFailureCode, because
+  // they are structural bugs in the request the CLI built, not a ceremony
+  // outcome a human chose.
+  /** requestUnlock's candidate list exceeds the ceremony page's MAX_UNLOCK_CANDIDATES cap. */
+  DEVICE_KEY_TOO_MANY_CANDIDATES: 'DEVICE_KEY_TOO_MANY_CANDIDATES',
+  /** The encoded ceremony request exceeds the ceremony page's 16 KiB fragment cap. */
+  DEVICE_KEY_FRAGMENT_TOO_LARGE: 'DEVICE_KEY_FRAGMENT_TOO_LARGE',
+  /** A candidate's credential id exceeds the ceremony page's 1400-char cap. */
+  DEVICE_KEY_CREDENTIAL_ID_TOO_LONG: 'DEVICE_KEY_CREDENTIAL_ID_TOO_LONG',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

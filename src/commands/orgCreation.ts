@@ -10,6 +10,7 @@ import {
 } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey, KeyServiceOps } from '../crypto/keyResolver';
 import { displayAndConfirmRecoveryPhrase } from '../ui/recoveryPhrase';
+import { attemptCaseAEnrollment, DeviceKeyWiringContext } from '../auth/deviceKey/wiring';
 // Type-only: erased at compile time, so the TTY path does not pull the browser
 // wizard into its module graph just to name an organization.
 import type { OrgNameVerdict } from '../ui/onboardingWeb';
@@ -101,12 +102,26 @@ export const ORG_PHRASE_NOTES = [
 
 const ORG_PHRASE_BOX = [...ORG_PHRASE_NOTES, '', 'To learn more about zero-trust:', ZERO_TRUST_URL];
 
+/**
+ * CAP-382: when supplied (i.e. CAPY_DEVICE_KEYS=1 and the exchange captured
+ * a Wave-B org-less token), the just-created org's master key is also
+ * offered to the device-key enrollment ceremony — Case A, run exactly where
+ * CAP-380 designed it to be called (right after the existing
+ * wrapAndSaveMasterKey write, below). Absent, this function's behavior is
+ * byte-identical to before CAP-382 existed.
+ */
+export interface DeviceKeyEnrollmentOptions {
+  ctx: DeviceKeyWiringContext;
+  orglessToken: string | null | undefined;
+}
+
 export async function createNewOrganization(
   authService: AuthService,
   serviceClient: ServiceClient,
   refreshToken: string,
   userId: string,
   web = false,
+  deviceKeyEnrollment?: DeviceKeyEnrollmentOptions,
 ): Promise<Organization> {
   // ONE phrase for the whole run, generated before the first question. A 409
   // sends the name step round again and the same words have to key whatever
@@ -137,6 +152,16 @@ export async function createNewOrganization(
       // are detected by trial decryption at the phrase→M boundaries.
       const masterKey = seedPhraseToMasterKey(seedPhrase, CURRENT_KDF_VERSION);
       await wrapAndSaveMasterKey(masterKey, org.id, userId, keyServiceOpsFromClient(serviceClient));
+
+      if (deviceKeyEnrollment) {
+        await attemptCaseAEnrollment({
+          ctx: deviceKeyEnrollment.ctx,
+          orgId: org.id,
+          orgName: org.name,
+          masterKey,
+          orglessToken: deviceKeyEnrollment.orglessToken,
+        });
+      }
 
       return org;
     } catch (err: any) {
