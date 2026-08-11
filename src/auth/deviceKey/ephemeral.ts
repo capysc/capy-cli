@@ -38,3 +38,15 @@ export function configuredGrantSocketPath(): string | null {
   const value = process.env[GRANT_SOCKET_ENV_VAR];
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
+
+/**
+ * The yes/no reading of the signal above, for callers that only need to
+ * branch on "ephemeral or not" (CAP-402's atomic-mint gate in
+ * onboarding.ts is the first of these) rather than the socket path itself.
+ * Deliberately NOT liveness-checked (`isGrantActive`) — this is asked
+ * before any grant exists to check the liveness OF, at the point Case A
+ * decides whether it may leave newly-minted key material on disk at all.
+ */
+export function isEphemeralEnvironment(): boolean {
+  return configuredGrantSocketPath() !== null;
+}

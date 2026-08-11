@@ -67,6 +67,7 @@ ISOLATED_FILES=(
   tests/auth/deviceKey/onboardingCaseMatrix.e2e.test.ts
   tests/auth/deviceKey/security.e2e.test.ts
   tests/auth/deviceKey/grantE2E.e2e.test.ts
+  tests/ui/recoveryPhrase.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

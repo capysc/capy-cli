@@ -282,6 +282,34 @@ export function hasOrgKey(orgId: string, userId?: string): boolean {
   return existsSync(getOrgKeyPath(orgId, userId));
 }
 
+/**
+ * Removes every local key-material file this machine holds for (orgId,
+ * userId): local.key, key.enc, the key.enc sync-pending marker, and the
+ * K_local backend-mode marker. CAP-402's ephemeral-environment rollback is
+ * the only caller — see `runNewUserEnrollment`'s docblock. On a disk that
+ * will not outlive this process, a half-finished mint (a ceremony declined,
+ * or the key.enc upload never landed) is worse left on disk than deleted:
+ * it invites a false "this org is safely provisioned here" reading, when
+ * the ONLY durable copy is the seed phrase the caller was (or was not) able
+ * to show. Never called for a durable machine — CAP-383's byte-identical-
+ * refusal test pins the opposite behavior there (files stay).
+ */
+export function deleteLocalKeyMaterial(orgId: string, userId?: string): void {
+  for (const path of [
+    getLocalRootPath(orgId, userId),
+    getOrgKeyPath(orgId, userId),
+    getKeyEncSyncPendingPath(orgId, userId),
+    getLocalRootModePath(orgId, userId),
+  ]) {
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      // Best-effort: a delete that fails on a disk about to vanish anyway
+      // is not a new problem this function can solve.
+    }
+  }
+}
+
 export function saveProjectKeyCache(
   orgId: string,
   projectId: string,

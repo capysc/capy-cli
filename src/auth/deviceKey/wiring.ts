@@ -17,7 +17,7 @@ import { hostname } from 'os';
 import inquirer from 'inquirer';
 import type { AuthService } from '../authService';
 import type { ServiceClient } from '../../service/serviceClient';
-import { Organization } from '../../types/index';
+import { Organization, ERROR_CODES } from '../../types/index';
 import { debug } from '../../ui/debug';
 import { isInteractive } from '../../ui/interactive';
 import { resolveActiveUrl } from '../../config/profileConfig';
@@ -39,6 +39,7 @@ import {
   runPendingSync,
   EnrollmentSummary,
   CeremonyAborted,
+  EphemeralEnrollmentIncomplete,
 } from './onboarding';
 import type { CeremonyFailureCode, CeremonyTransport } from './ceremonyTransport';
 
@@ -93,7 +94,10 @@ export function buildOnboardingDeps(
   };
 }
 
-function reportEnrollmentOutcome(result: EnrollmentSummary | CeremonyAborted, orgName: string): void {
+function reportEnrollmentOutcome(
+  result: EnrollmentSummary | CeremonyAborted | EphemeralEnrollmentIncomplete,
+  orgName: string,
+): void {
   if (result.ok) {
     console.log('');
     console.log(
@@ -105,9 +109,26 @@ function reportEnrollmentOutcome(result: EnrollmentSummary | CeremonyAborted, or
       console.log('  Keep your recovery phrase somewhere safe — it is still the only backup for this key.');
     }
     console.log('');
-  } else {
-    debug(`[device-key] enrollment ceremony not completed (${result.ceremonyCode})`);
+    return;
   }
+
+  if (result.code === ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE) {
+    // CAP-402: this is not a quiet "ceremony declined, try later" — the
+    // rollback already deleted the K_local/key.enc this call minted, and on
+    // an ephemeral box the seed phrase shown earlier (if it was safe to
+    // show at all) is now the only way back into this org. Worth a visible
+    // line, not just a debug log.
+    console.log('');
+    console.log(`  Could not finish setting up a device key for ${orgName} on this machine.`);
+    console.log('  This looks like an ephemeral environment, so nothing was left half set up here —');
+    console.log('  your recovery phrase is the only way back into this organization from elsewhere.');
+    console.log('  Finish device-key setup later from a machine with a human at the keyboard:');
+    console.log('  `capy device-key enroll`.');
+    console.log('');
+    return;
+  }
+
+  debug(`[device-key] enrollment ceremony not completed (${result.ceremonyCode})`);
 }
 
 /**

@@ -18,7 +18,14 @@
  *   3. A CANCELLED BROWSER MINTS NOTHING. Everything past the browser hands
  *      somebody a copy of the org key.
  *   4. The rail `--json` prints describes the run that happened.
+ *   5. CAP-402: WITHOUT `--web` OR `--json`, THE CODE IS REFUSED WHEN THERE IS
+ *      NO REAL TERMINAL — `capy invite` shelled directly by an agent, with
+ *      every flag supplied so nothing else in the command asks a question.
+ *      `--json` stays the sanctioned machine-readable path (item 4); this only
+ *      closes the accidental one, where the human-terminal rendering runs with
+ *      no human terminal to read it.
  *
+
  * The browser itself is driven in tests/ui/browserFlow.e2e.test.ts. Here the
  * question wizard is stubbed and the CODE PAGE IS REAL, because the code page
  * is where the invariant above lives.
@@ -221,22 +228,29 @@ describe('InviteCommand', () => {
       expect(parsed.redeemCode.length).toBeGreaterThan(40);
     });
 
-    test('without --web the code is printed, which is what --web exists to stop', async () => {
-      // The control for the test above: same command, no flag, and the code is
-      // right there on stdout. Without this the leak test could pass because
-      // nothing was minted at all.
+    test('CAP-402: without --web or --json and no real terminal, the code is refused rather than printed', async () => {
+      // The control for the test above, updated for the fix this file used to
+      // pin as a passing "control": the mint still happens — same crypto, same
+      // server calls as every other path, proving this is a refusal of a real
+      // credential and not a vacuous pass because nothing was ever created —
+      // but with no real TTY to read a one-time bearer credential off, the
+      // command now refuses instead of handing it to whatever captured stdout
+      // (an agent's own transcript is exactly that surface).
       const cap = captureOutput();
       try {
-        await new InviteCommand().execute('bob@example.com', {
-          role: 'admin',
-          ttl: '24h',
-          nonTty: true,
-        });
+        await expect(
+          new InviteCommand().execute('bob@example.com', {
+            role: 'admin',
+            ttl: '24h',
+            nonTty: true,
+          }),
+        ).rejects.toThrow('process.exit');
       } finally {
         cap.restore();
       }
-      // `capy` is bold on this path, so the two words are not adjacent bytes.
-      expect(cap.out()).toMatch(/redeem [A-Za-z0-9_\-+/=]{20,}/);
+      expect(mockWrapOuterLayer).toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(3); // EXIT_NEEDS_INPUT — coded, not string-matched
+      expect(cap.out()).not.toMatch(/redeem [A-Za-z0-9_\-+/=]{20,}/);
     });
   });
 

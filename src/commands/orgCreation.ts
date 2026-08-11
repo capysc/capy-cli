@@ -138,6 +138,11 @@ export async function createNewOrganization(
     orgName = await nameAndConfirmInBrowser(authService, seedPhrase);
   } else {
     orgName = await promptForAvailableOrgName(authService);
+    // SECURITY (CAP-402): displayAndConfirmRecoveryPhrase itself refuses
+    // (coded RECOVERY_PHRASE_UNSAFE_SURFACE) when there is no real TTY to
+    // read the phrase from — see its docblock. Not re-checked here: the gate
+    // lives in the one function every recovery-phrase caller shares, so it
+    // cannot be bypassed by a future call site that forgets to ask.
     await displayAndConfirmRecoveryPhrase(seedPhrase, ORG_PHRASE_BOX);
   }
 

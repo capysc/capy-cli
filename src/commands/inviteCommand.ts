@@ -564,6 +564,21 @@ export class InviteCommand {
         console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
         console.log('');
       } else {
+        // CAP-402: same bearer-credential-to-stdout risk `--web` already
+        // guards above, just not yet enforced for a run that passes neither
+        // `--web` nor `--json` and has no real TTY (an agent invoking
+        // `capy invite` directly with every flag supplied, so none of this
+        // function's earlier refuseNonInteractive calls ever fire). `--json`
+        // stays the sanctioned agent path — this is not a REGRESSION there,
+        // it exists precisely to hand the code to automation deliberately —
+        // this refusal only closes the accidental route: reaching the
+        // human-terminal rendering with no human terminal to read it.
+        if (!interactive) {
+          refuseNonInteractive(
+            'this would print a redeem code — a bearer credential for the organization key — with no terminal to read it from',
+            'Pass `--json` for structured output, or run `capy invite` at an interactive terminal.',
+          );
+        }
         console.log('  Send them this command:');
         console.log('');
         console.log(`    ${B('capy')} redeem ${redeemCode}`);

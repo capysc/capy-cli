@@ -8,6 +8,8 @@ import {
   buildRedeemCode,
   resolveInviteTtlMs,
 } from '../crypto/inviteCrypto';
+import { isInteractive } from '../ui/interactive';
+import { CapyError, ERROR_CODES } from '../types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -22,6 +24,12 @@ export interface TransportOptions {
    * agent-driven run is the AI. Under `--web` the code goes into the loopback
    * page and nowhere else: it is not printed, not logged, and cannot travel
    * back over the loopback either.
+   *
+   * CAP-402: the terminal form additionally refuses (coded
+   * TRANSPORT_CODE_UNSAFE_SURFACE) when there is no real TTY to read it
+   * from — the exact same non-TTY leak this docblock already described for
+   * `--web`'s absence, just not yet enforced. See recoveryPhrase.ts for the
+   * sibling fix on the seed-phrase side of this same bug class.
    */
   web?: boolean;
 }
@@ -90,6 +98,19 @@ export class TransportCommand {
           redeemCommand,
         });
         return;
+      }
+
+      // CAP-402: the code above this line is cheap and stateless to mint
+      // (a self-contained wrapped blob, nothing server-side to roll back —
+      // unlike Case A's org+device-key mint, there is no "half-created"
+      // state here), so the safety check belongs right where the leak would
+      // actually happen: immediately before the code would hit stdout.
+      if (!isInteractive()) {
+        throw new CapyError(
+          'This would print a transport code — a bearer credential for this account\'s org master key — and only a human at a real terminal can safely record it.\n\n' +
+          'Run `capy transport` at an interactive terminal, or ask someone with terminal access to run it and share the redeem code with you directly.',
+          ERROR_CODES.TRANSPORT_CODE_UNSAFE_SURFACE,
+        );
       }
 
       console.log('');
