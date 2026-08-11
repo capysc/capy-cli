@@ -11,8 +11,14 @@ import {
   mintConnectionKeypair,
   openEnvelope,
   parseCompletionPayload,
+  requestHkdfInfo,
+  sealRequestEnvelope,
 } from '../../src/service/brokerEnvelope';
-import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
+import {
+  mintPageKeypairPageSide,
+  openRequestEnvelopePageSide,
+  sealEnvelopePageSide,
+} from '../helpers/sealEnvelope';
 
 const CONNECTION_ID = '4f9c02e2-92cf-4a6b-8f3e-27cf6f6f2f10';
 
@@ -38,6 +44,16 @@ test('the HKDF info prefix is pinned to the literal keep-app hardcodes independe
 test('the answer info string carries the `ans` direction tag (interop tripwire)', () => {
   expect(envelopeHkdfInfo('conn-1', 'CLIENTPUB', 'EPK')).toBe(
     'capy-broker-envelope-v1|ans|conn-1|CLIENTPUB|EPK',
+  );
+});
+
+// The `req` producer's own tripwire — keep-app's request-opening half (W2-A)
+// independently hardcodes this same literal, exactly as CAP-376's `ans`
+// pairing already does. A drift here would keep this suite green while
+// breaking real CLI -> page interop.
+test('the request info string carries the `req` direction tag (interop tripwire)', () => {
+  expect(requestHkdfInfo('conn-1', 'CLIENTPUB', 'EPK')).toBe(
+    'capy-broker-envelope-v1|req|conn-1|CLIENTPUB|EPK',
   );
 });
 
@@ -138,6 +154,73 @@ describe('openEnvelope', () => {
       keypair,
     });
     expect(opened).toEqual({ ok: false, code: 'UNSUPPORTED_VERSION' });
+  });
+});
+
+describe('sealRequestEnvelope', () => {
+  test('seals a CLI->page request that opens under a real WebCrypto page (interop)', async () => {
+    const clientKeypair = mintConnectionKeypair();
+    const page = await mintPageKeypairPageSide();
+    const plaintext = JSON.stringify({ v: 1, vars: [{ name: 'STRIPE_SECRET_KEY' }] });
+
+    const sealed = sealRequestEnvelope({
+      connectionId: CONNECTION_ID,
+      clientPubkeyB64: clientKeypair.publicKeyB64,
+      pagePubkeyB64: page.pagePubkeyB64,
+      payload: plaintext,
+    });
+    expect(sealed.ok).toBe(true);
+    if (!sealed.ok) return;
+
+    const opened = await openRequestEnvelopePageSide({
+      ciphertextB64: sealed.ciphertextB64,
+      connectionId: CONNECTION_ID,
+      clientPubkeyB64: clientKeypair.publicKeyB64,
+      pagePrivateKey: page.privateKey,
+    });
+    expect(opened).toBe(plaintext);
+  });
+
+  test('rejects a malformed page_pubkey as a coded failure, never a throw', () => {
+    const clientKeypair = mintConnectionKeypair();
+    for (const bad of ['not base64!!!', Buffer.from('too short').toString('base64'), '']) {
+      const sealed = sealRequestEnvelope({
+        connectionId: CONNECTION_ID,
+        clientPubkeyB64: clientKeypair.publicKeyB64,
+        pagePubkeyB64: bad,
+        payload: 'x',
+      });
+      expect(sealed).toEqual({ ok: false, code: 'MALFORMED_PAGE_PUBKEY' });
+    }
+  });
+
+  test('a request sealed under `req` does not open as an `ans` (cross-direction replay fails)', async () => {
+    // The page's reverse-channel keypair is P-256-shaped identically to the
+    // CLI's connection keypair, so a `req` envelope can be fed into
+    // `openEnvelope` (the `ans`-only opener) as a structural sanity check
+    // that AEAD authentication — not just the info-string label — actually
+    // rejects it, the same binding openEnvelope's own tests already pin.
+    const clientKeypair = mintConnectionKeypair();
+    const page = await mintPageKeypairPageSide();
+    const sealed = sealRequestEnvelope({
+      connectionId: CONNECTION_ID,
+      clientPubkeyB64: clientKeypair.publicKeyB64,
+      pagePubkeyB64: page.pagePubkeyB64,
+      payload: 'req-tagged',
+    });
+    expect(sealed.ok).toBe(true);
+    if (!sealed.ok) return;
+
+    // openEnvelope derives its key against the CLI's OWN keypair (the `ans`
+    // direction's recipient); a `req` envelope was sealed to the PAGE's
+    // keypair instead, so this must fail closed regardless of which keypair
+    // is handed to the (wrong-direction) opener.
+    const opened = openEnvelope({
+      ciphertextB64: sealed.ciphertextB64,
+      connectionId: CONNECTION_ID,
+      keypair: clientKeypair,
+    });
+    expect(opened).toEqual({ ok: false, code: 'DECRYPT_FAILED' });
   });
 });
 

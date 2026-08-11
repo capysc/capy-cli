@@ -36,12 +36,14 @@
  * payload-bearing screen (device-key ceremony, CAP-381) will reuse.
  */
 import {
+  createCipheriv,
   createDecipheriv,
   createPublicKey,
   diffieHellman,
   generateKeyPairSync,
   hkdfSync,
   KeyObject,
+  randomBytes,
 } from 'crypto';
 
 export const ENVELOPE_VERSION = 1;
@@ -97,6 +99,31 @@ export function envelopeHkdfInfo(
   epkB64: string,
 ): string {
   return `${ENVELOPE_HKDF_INFO_PREFIX}|ans|${connectionId}|${clientPubkeyB64}|${epkB64}`;
+}
+
+/**
+ * The `req` sibling of {@link envelopeHkdfInfo} — CLI->page (broker reverse
+ * channel, CAP-403/W2-A). A separate function rather than a `direction`
+ * parameter on the existing one: `envelopeHkdfInfo` is pinned byte-for-byte
+ * by an existing interop tripwire test, and this keeps that test (and every
+ * other `ans` caller) untouched rather than threading a new argument through
+ * call sites that will never seal anything but an answer.
+ *
+ * Both producers are keyed by the SAME three things — connection id, the
+ * connection's static `client_pubkey`, and the fresh ephemeral key of
+ * whichever side is sealing THIS envelope — deliberately, not by
+ * `page_pubkey`: `client_pubkey` is the one identity anchor both directions
+ * and both parties already hold (the CLI as its own key; the page from its
+ * own `GET /:id` observe response), so one shared binding scheme covers
+ * both directions without a second piece of plumbing. Only the `req`/`ans`
+ * tag makes the two derivations disjoint.
+ */
+export function requestHkdfInfo(
+  connectionId: string,
+  clientPubkeyB64: string,
+  epkB64: string,
+): string {
+  return `${ENVELOPE_HKDF_INFO_PREFIX}|req|${connectionId}|${clientPubkeyB64}|${epkB64}`;
 }
 
 /** Why an envelope could not be opened. Codes, never sentences. */
@@ -209,6 +236,80 @@ export function openEnvelope(opts: {
   } catch {
     return { ok: false, code: 'DECRYPT_FAILED' };
   }
+}
+
+/** Why a request could not be sealed. Codes, never sentences. */
+export type SealRequestFailureCode =
+  /** `pagePubkeyB64` was not a well-formed uncompressed P-256 point. */
+  | 'MALFORMED_PAGE_PUBKEY';
+
+export type SealRequestResult =
+  | { ok: true; ciphertextB64: string }
+  | { ok: false; code: SealRequestFailureCode };
+
+/**
+ * Seal a CLI->page request (broker reverse channel). The mirror of
+ * {@link openEnvelope}, in the other direction: mints a fresh ephemeral
+ * P-256 keypair for exactly this one envelope, ECDH's it against the page's
+ * static `page_pubkey` (learned from `GET /connections/:id/result`, the
+ * only place the CLI can read it — see `brokerClient.ts`'s
+ * `awaitPagePubkey`), and encrypts under the `req`-tagged HKDF info string
+ * so the page can derive the identical key from its own private half.
+ *
+ * Never throws on a malformed `pagePubkeyB64` (a coded failure instead) —
+ * everything else (AES-GCM, HKDF, ECDH) only fails on a genuine crypto
+ * library defect, which is allowed to throw same as `openEnvelope`'s inner
+ * `try` does.
+ */
+export function sealRequestEnvelope(opts: {
+  connectionId: string;
+  clientPubkeyB64: string;
+  pagePubkeyB64: string;
+  /** UTF-8 plaintext to seal — the caller's JSON.stringify'd payload. */
+  payload: string;
+}): SealRequestResult {
+  const pageRaw = Buffer.from(opts.pagePubkeyB64, 'base64');
+  if (
+    pageRaw.length !== UNCOMPRESSED_POINT_BYTES ||
+    pageRaw[0] !== 0x04 ||
+    !BASE64_RE.test(opts.pagePubkeyB64)
+  ) {
+    return { ok: false, code: 'MALFORMED_PAGE_PUBKEY' };
+  }
+
+  const pagePublicKey = createPublicKey({
+    key: {
+      kty: 'EC',
+      crv: 'P-256',
+      x: pageRaw.subarray(1, 33).toString('base64url'),
+      y: pageRaw.subarray(33).toString('base64url'),
+    },
+    format: 'jwk',
+  });
+
+  const ephemeral = mintConnectionKeypair();
+  const shared = diffieHellman({
+    privateKey: ephemeral.privateKey,
+    publicKey: pagePublicKey,
+  });
+  const info = requestHkdfInfo(opts.connectionId, opts.clientPubkeyB64, ephemeral.publicKeyB64);
+  const key = Buffer.from(hkdfSync('sha256', shared, Buffer.alloc(0), Buffer.from(info), 32));
+
+  const iv = randomBytes(GCM_IV_BYTES);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([
+    cipher.update(Buffer.from(opts.payload, 'utf8')),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
+
+  const envelope: EnvelopeShape = {
+    v: ENVELOPE_VERSION,
+    epk: ephemeral.publicKeyB64,
+    iv: iv.toString('base64'),
+    ct: ct.toString('base64'),
+  };
+  return { ok: true, ciphertextB64: Buffer.from(JSON.stringify(envelope)).toString('base64') };
 }
 
 /**

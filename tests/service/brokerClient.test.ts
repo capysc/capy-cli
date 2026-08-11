@@ -8,7 +8,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 
 import { BrokerClient } from '../../src/service/brokerClient';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
-import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
+import { mintPageKeypairPageSide, openRequestEnvelopePageSide, sealEnvelopePageSide } from '../helpers/sealEnvelope';
 
 const CONNECTION_ID = '0b4e2c62-6f6e-4a11-9d3a-1c2f4b5a6d7e';
 const TOKEN = 'org-scoped-test-token';
@@ -26,6 +26,7 @@ const state = {
   requests: [] as Recorded[],
   createStatus: 201,
   resultQueue: [] as Array<{ status: number; body: unknown }>,
+  requestQueue: [] as Array<{ status: number; body: unknown }>,
 };
 
 const server = Bun.serve({
@@ -67,6 +68,10 @@ const server = Bun.serve({
     if (req.method === 'DELETE' && url.pathname === `/connections/${CONNECTION_ID}`) {
       return Response.json({ status: 'cancelled' });
     }
+    if (req.method === 'POST' && url.pathname === `/connections/${CONNECTION_ID}/request`) {
+      const next = state.requestQueue.shift() ?? { status: 200, body: { status: 'sent' } };
+      return Response.json(next.body as any, { status: next.status });
+    }
     return Response.json({ error: 'no', code: 'NOT_FOUND' }, { status: 404 });
   },
 });
@@ -80,6 +85,7 @@ beforeEach(() => {
   state.requests.length = 0;
   state.createStatus = 201;
   state.resultQueue.length = 0;
+  state.requestQueue.length = 0;
 });
 
 function client(token: string | null = TOKEN): BrokerClient {
@@ -228,6 +234,147 @@ describe('awaitAnswer', () => {
     const connection = await client().createConnection({ purpose: 'auth-success' });
     const dead = new BrokerClient('http://127.0.0.1:1', () => TOKEN);
     const result = await dead.awaitAnswer(connection, { deadlineMs: 2_000 });
+    expect(result.kind).toBe('network');
+  });
+});
+
+describe('awaitPagePubkey', () => {
+  test('polls through pending/attached-without-key and reports ready once page_pubkey lands', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    const page = await mintPageKeypairPageSide();
+    state.resultQueue.push(
+      { status: 200, body: { status: 'pending' } },
+      { status: 200, body: { status: 'attached' } },
+      { status: 200, body: { status: 'attached', page_pubkey: page.pagePubkeyB64 } },
+    );
+
+    const result = await client().awaitPagePubkey(connection, { deadlineMs: 5_000, pollGapMs: 5 });
+    expect(result).toEqual({ kind: 'ready', pagePubkeyB64: page.pagePubkeyB64 });
+
+    const polls = state.requests.filter((r) => r.path.endsWith('/result'));
+    expect(polls.length).toBe(3);
+  });
+
+  test('maps 410 to expired and 409 to consumed', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+
+    state.resultQueue.push({ status: 410, body: { error: 'gone', code: 'CONNECTION_EXPIRED' } });
+    expect(await client().awaitPagePubkey(connection, { deadlineMs: 2_000 })).toEqual({
+      kind: 'expired',
+    });
+
+    state.resultQueue.push({ status: 409, body: { error: 'used', code: 'CONNECTION_CONSUMED' } });
+    expect(await client().awaitPagePubkey(connection, { deadlineMs: 2_000 })).toEqual({
+      kind: 'consumed',
+    });
+  });
+
+  test('cancels best-effort when the deadline passes with no page_pubkey', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    // Queue stays empty: every poll reports pending, forever.
+    const result = await client().awaitPagePubkey(connection, {
+      deadlineMs: 150,
+      pollGapMs: 10,
+      waitSeconds: 0,
+    });
+    expect(result).toEqual({ kind: 'timeout' });
+
+    const cancel = state.requests.find((r) => r.method === 'DELETE');
+    expect(cancel?.path).toBe(`/connections/${CONNECTION_ID}`);
+  });
+
+  test('network failure mid-poll is a coded variant', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    const dead = new BrokerClient('http://127.0.0.1:1', () => TOKEN);
+    const result = await dead.awaitPagePubkey(connection, { deadlineMs: 2_000 });
+    expect(result.kind).toBe('network');
+  });
+});
+
+describe('sendRequest', () => {
+  test('seals the payload to page_pubkey and posts the documented wire shape', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    const page = await mintPageKeypairPageSide();
+    const payload = JSON.stringify({ vars: [{ name: 'STRIPE_SECRET_KEY' }] });
+
+    const result = await client().sendRequest(connection, page.pagePubkeyB64, payload);
+    expect(result).toEqual({ kind: 'sent' });
+
+    const sent = state.requests.find((r) => r.path.endsWith('/request'));
+    expect(sent?.method).toBe('POST');
+    expect(sent?.auth).toBe(`Bearer ${TOKEN}`);
+    const ciphertextB64 = (sent?.body as Record<string, unknown>).ciphertext as string;
+    expect(typeof ciphertextB64).toBe('string');
+
+    // The broker only ever sees ciphertext — prove it actually opens, and to
+    // the right plaintext, as the page would.
+    const opened = await openRequestEnvelopePageSide({
+      ciphertextB64,
+      connectionId: connection.connectionId,
+      clientPubkeyB64: connection.keypair.publicKeyB64,
+      pagePrivateKey: page.privateKey,
+    });
+    expect(opened).toBe(payload);
+  });
+
+  test('maps every documented 409 to its own coded variant, never by parsing prose', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    const page = await mintPageKeypairPageSide();
+
+    state.requestQueue.push({
+      status: 409,
+      body: { error: 'not attached yet', code: 'CONNECTION_NOT_ATTACHED' },
+    });
+    expect(await client().sendRequest(connection, page.pagePubkeyB64, 'x')).toEqual({
+      kind: 'not_attached',
+    });
+
+    state.requestQueue.push({
+      status: 409,
+      body: { error: 'no page key', code: 'CONNECTION_PAGE_KEY_MISSING' },
+    });
+    expect(await client().sendRequest(connection, page.pagePubkeyB64, 'x')).toEqual({
+      kind: 'no_page_key',
+    });
+
+    state.requestQueue.push({
+      status: 409,
+      body: { error: 'already sent', code: 'CONNECTION_REQUEST_ALREADY_SENT' },
+    });
+    expect(await client().sendRequest(connection, page.pagePubkeyB64, 'x')).toEqual({
+      kind: 'already_sent',
+    });
+
+    state.requestQueue.push({
+      status: 409,
+      body: { error: 'consumed', code: 'CONNECTION_CONSUMED' },
+    });
+    expect(await client().sendRequest(connection, page.pagePubkeyB64, 'x')).toEqual({
+      kind: 'consumed',
+    });
+  });
+
+  test('maps 410 to expired', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    const page = await mintPageKeypairPageSide();
+    state.requestQueue.push({ status: 410, body: { error: 'gone', code: 'CONNECTION_EXPIRED' } });
+    expect(await client().sendRequest(connection, page.pagePubkeyB64, 'x')).toEqual({
+      kind: 'expired',
+    });
+  });
+
+  test('a malformed page_pubkey never reaches the wire — coded failure instead', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    const result = await client().sendRequest(connection, 'not-a-real-key', 'x');
+    expect(result).toEqual({ kind: 'bad_page_pubkey', code: 'MALFORMED_PAGE_PUBKEY' });
+    expect(state.requests.some((r) => r.path.endsWith('/request'))).toBe(false);
+  });
+
+  test('network failure is a coded variant', async () => {
+    const connection = await client().createConnection({ purpose: 'secret-intake' });
+    const page = await mintPageKeypairPageSide();
+    const dead = new BrokerClient('http://127.0.0.1:1', () => TOKEN);
+    const result = await dead.sendRequest(connection, page.pagePubkeyB64, 'x');
     expect(result.kind).toBe('network');
   });
 });
