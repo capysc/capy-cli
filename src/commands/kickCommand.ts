@@ -102,6 +102,9 @@ export class KickCommand {
           // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
           // headless verification drive the loopback without hijacking one.
           open: !process.env.CAPY_WEB_NO_OPEN,
+          // Opts this call into the keep-hosted transport when
+          // CAPY_KEEP_SCREENS=1 (W2-D) — omitted, unreachable, loopback-only.
+          authService,
         });
       } catch {
         // Closed, timed out, or interrupted. None of those is a yes, and the

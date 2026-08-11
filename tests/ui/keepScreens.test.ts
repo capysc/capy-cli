@@ -22,6 +22,8 @@ describe('KEEP_SCREENS registry', () => {
       { name: 'auth-success', kind: 'no-submit' },
       { name: 'auth-error', kind: 'no-submit' },
       { name: 'secret-intake', kind: 'payload-both' },
+      { name: 'connect-live-gate', kind: 'payload-both' },
+      { name: 'org-members', kind: 'payload-both' },
     ]);
   });
 

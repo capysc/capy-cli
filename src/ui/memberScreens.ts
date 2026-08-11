@@ -34,6 +34,9 @@
 import { runBrowserWizard } from './browserWizard';
 import { withDeclineBridge, type DeclineBridge } from './declineBridge';
 import { renderScreen, ScreenServer } from './screens/serve';
+import type { AuthService } from '../auth/authService';
+import { keepScreensEnabled } from './screens/keepScreens';
+import { runKeepPayloadScreen } from '../service/keepPayloadRelay';
 import {
   invitePlan,
   unansweredInviteStops,
@@ -498,6 +501,13 @@ export interface WebKickParams {
   open?: boolean;
   onListen?: (url: string) => void;
   timeoutMs?: number;
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte — see `secretIntakeScreen.ts`'s `WebIntakeParams`
+   * for the precedent this mirrors (W2-D).
+   */
+  authService?: AuthService;
 }
 
 /** Roles that hold every branch of every project. */
@@ -591,8 +601,73 @@ const kickDeclineBridge = (nonce: string, stillAMember: string): DeclineBridge =
  * coding — a step nobody answered has not been approved, and the one thing this
  * flow must never do is read a closed window as agreement to cut somebody off
  * from every secret in the organization.
+ *
+ * Dispatches to the keep-hosted transport (W2-D) when `CAPY_KEEP_SCREENS=1`
+ * AND an `authService` was supplied; any keep-path outcome short of a
+ * validated answer falls back to today's loopback flow, byte for byte —
+ * mirrors `runWebIntake`'s dispatcher in `secretIntakeScreen.ts`. The
+ * loopback-only `withDeclineBridge`/`kickDeclineBridge` machinery below has
+ * no keep-path equivalent: it patches a real gap in the compiled screen (the
+ * "Keep them" control is client-side-only and sends nothing), and over the
+ * broker a decline is simply indistinguishable from "the page was never
+ * answered" — the same known limitation `secretIntakeScreen.ts` documents
+ * for its own close-without-saving case, not a new one this screen adds.
  */
 export async function confirmKickInBrowser(p: WebKickParams): Promise<boolean> {
+  if (p.authService && keepScreensEnabled()) {
+    const handled = await confirmKickViaKeep(p, p.authService);
+    if (handled.kind === 'handled') return handled.result;
+  }
+  return confirmKickLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-D). Seals this same `OrgMembersData` the
+ * loopback path would have served (minus the loopback-only `nonce`) to the
+ * page's key over the broker reverse channel, then waits for the page's
+ * sealed removal decision. Only `remove()`'s payload shape
+ * (`{action:'remove', membershipId}`) is validated here — `capy kick`'s call
+ * site always serves `confirm-remove`, so `apply()`'s queued-edits payload
+ * (`{__action:'apply', edits}`) is never reachable and any such payload
+ * fails validation like any other malformed answer.
+ */
+async function confirmKickViaKeep(
+  p: WebKickParams,
+  authService: AuthService,
+): Promise<{ kind: 'handled'; result: boolean } | { kind: 'fall-through' }> {
+  const requestPayload = buildKickData(p, '');
+
+  const outcome = await runKeepPayloadScreen<boolean>({
+    screen: 'org-members',
+    handoffFlow: 'kick',
+    label: `Confirm removing ${p.member.email} in your browser:`,
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const rec = parsed as Record<string, unknown>;
+      if (rec.v !== 1) return null;
+      if (rec.action !== 'remove') return null;
+      // Resolved against the membership the CLI already found, never
+      // trusted — mirrors the loopback reducer's own check.
+      return rec.membershipId === p.member.membershipId ? true : null;
+    },
+  });
+
+  if (outcome.kind !== 'answered') return { kind: 'fall-through' };
+  return { kind: 'handled', result: outcome.answer };
+}
+
+async function confirmKickLoopback(p: WebKickParams): Promise<boolean> {
   const out = await runBrowserWizard(
     {
       title: `Remove ${p.member.email} — ${p.orgName}`,
