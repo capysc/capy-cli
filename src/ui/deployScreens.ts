@@ -58,6 +58,9 @@ import type {
   ScreenName,
 } from './screens/contract';
 import type { DeployMode } from '../deploy/adapter';
+import type { AuthService } from '../auth/authService';
+import { keepScreensEnabled } from './screens/keepScreens';
+import { runKeepInfoScreen } from '../service/keepPayloadRelay';
 
 /**
  * Strip terminal colour codes on the way into a payload.
@@ -1247,13 +1250,47 @@ export async function showScreenInBrowser<K extends ScreenName>(
   }
 }
 
-/** Serve the step log the terminal prints as `renderResult`. */
-export function showDeployRunResultInBrowser(
+/**
+ * Serve the step log the terminal prints as `renderResult`.
+ *
+ * Dispatches to the keep-hosted transport (W2-B) when `CAPY_KEEP_SCREENS=1`
+ * AND an `authService` was supplied on `opts`; any keep-path outcome short of
+ * `sent` degrades to the unchanged loopback body below. `authService` is
+ * intersected onto `opts` locally rather than added to the shared
+ * `WebServeOptions` base — that interface is extended by every other screen
+ * in this file, most of them outside this batch.
+ */
+export async function showDeployRunResultInBrowser(
   data: DeployRunResultData,
-  opts: WebServeOptions = {},
+  opts: WebServeOptions & { authService?: AuthService } = {},
 ): Promise<void> {
+  if (opts.authService && keepScreensEnabled()) {
+    const sent = await runDeployRunResultViaKeep(data, opts.authService, opts.timeoutMs);
+    if (sent) return;
+  }
   return showScreenInBrowser('deploy-run-result', buildDeployRunResultData(data), {
     ...opts,
     note: 'What this deploy did (your secrets never reach this page):',
   });
+}
+
+/** The keep-hosted transport (W2-B) — `payload-in`: see `syncScreens.ts`'s
+ *  `runSyncStatusViaKeep` for the shared shape. No URL to return: this
+ *  function's own public contract is `Promise<void>`, unlike its siblings. */
+async function runDeployRunResultViaKeep(
+  data: DeployRunResultData,
+  authService: AuthService,
+  timeoutMs?: number,
+): Promise<boolean> {
+  const outcome = await runKeepInfoScreen({
+    screen: 'deploy-run-result',
+    handoffFlow: 'deploy',
+    label: 'What this deploy did (your secrets never reach this page):',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload: buildDeployRunResultData(data),
+    ttlSeconds: 60,
+    deadlineMs: timeoutMs ?? 60_000,
+  });
+  return outcome.kind === 'sent';
 }

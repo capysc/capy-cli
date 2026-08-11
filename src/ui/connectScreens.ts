@@ -33,7 +33,7 @@ import { serveEndingPage } from './endingPage';
 import { connectPlan, type ConnectPlanInput } from '../commands/connectors/plans';
 import type { AuthService } from '../auth/authService';
 import { keepScreensEnabled } from './screens/keepScreens';
-import { runKeepPayloadScreen } from '../service/keepPayloadRelay';
+import { runKeepInfoScreen, runKeepPayloadScreen } from '../service/keepPayloadRelay';
 import type {
   Blocked,
   ConnectAuthState,
@@ -719,6 +719,10 @@ export interface WebConnectResultParams extends ServeOptions {
   detail?: string;
   /** The route the run travelled, as the CLI declared it. */
   stops: ConnectResultData['stops'];
+  /** Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1, W2-B). Optional
+   *  and additive: omitted (or the flag unset) is exactly today's loopback
+   *  behavior, byte for byte. */
+  authService?: AuthService;
 }
 
 /**
@@ -768,8 +772,40 @@ export function buildConnectResultData(p: WebConnectResultParams): ConnectResult
  * .env holds a key nobody else has — and a command that exits on the next line
  * closes the loopback server that is serving this. The wait is bounded by
  * `timeoutMs`.
+ *
+ * Dispatches to the keep-hosted transport (W2-B) when `CAPY_KEEP_SCREENS=1`
+ * AND an `authService` was supplied; any keep-path outcome short of `sent`
+ * degrades to the loopback body below unchanged.
  */
 export async function showConnectResultInBrowser(p: WebConnectResultParams): Promise<string> {
+  if (p.authService && keepScreensEnabled()) {
+    const url = await runConnectResultViaKeep(p, p.authService);
+    if (url) return url;
+  }
+  return showConnectResultInBrowserLoopback(p);
+}
+
+/** The keep-hosted transport (W2-B) — `payload-in`: a real report, no submit
+ *  control on the page at all. See `syncScreens.ts`'s `runSyncStatusViaKeep`
+ *  for the shared shape this mirrors. */
+async function runConnectResultViaKeep(
+  p: WebConnectResultParams,
+  authService: AuthService,
+): Promise<string | undefined> {
+  const outcome = await runKeepInfoScreen({
+    screen: 'connect-result',
+    handoffFlow: 'connect',
+    label: 'What this run did, in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload: buildConnectResultData(p),
+    ttlSeconds: 60,
+    deadlineMs: p.timeoutMs ?? 60_000,
+  });
+  return outcome.kind === 'sent' ? outcome.url : undefined;
+}
+
+async function showConnectResultInBrowserLoopback(p: WebConnectResultParams): Promise<string> {
   const { url } = await serveEndingPage('connect-result', buildConnectResultData(p), {
     ...(p.open === undefined ? {} : { open: p.open }),
     ...(p.onListen ? { onListen: p.onListen } : {}),

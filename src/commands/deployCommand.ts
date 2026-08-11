@@ -48,6 +48,7 @@ import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
 import { classify, isBuildTime } from '../deploy/classify';
 import type { WebDeployAdapterContext } from '../ui/deployScreens';
+import type { AuthService } from '../auth/authService';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
 import type {
   DeployAdapterChoice,
@@ -1361,6 +1362,10 @@ async function showRunResult(
     keepLockChanged: boolean;
     baseBranch: string;
     pr?: { branch: string; base: string; url?: string; title?: string; manualUrl?: string };
+    /** `keep.orgId` — both call sites already hold `keep` from `readKeep(cwd)`.
+     *  Used only for the keep-hosted transport's own silent auth below (W2-B),
+     *  never for anything the loopback path needs. */
+    orgId: string;
   },
 ): Promise<void> {
   const steps: DeployRunStep[] = result.steps.map((s, i) => ({
@@ -1391,6 +1396,23 @@ async function showRunResult(
       title: (lines[first] ?? '').trim(),
       snippet: lines.slice(first + 1).join('\n').replace(/^\n+/, ''),
     };
+  }
+
+  // W2-B: the keep-hosted transport needs an org-scoped access token, which
+  // nothing upstream of this display-only report has left lying around —
+  // `mintForDeploy`/`decryptCurrentBranch` above each construct and discard
+  // their own `AuthService` for the same reason. Best-effort: any failure
+  // here (offline, silent-auth expired) just leaves `authService` undefined,
+  // which is the same "fall back to loopback" signal every other keep path
+  // uses, never a thrown error out of an ending page.
+  let deployAuthService: AuthService | undefined;
+  try {
+    const { AuthService } = await import('../auth/authService');
+    const auth = new AuthService(undefined, options.devMode);
+    const silent = await auth.authenticateSilent(extra.orgId);
+    if (silent.success) deployAuthService = auth;
+  } catch {
+    /* best-effort; loopback fallback below */
   }
 
   const { showDeployRunResultInBrowser } = await import('../ui/deployScreens');
@@ -1424,7 +1446,7 @@ async function showRunResult(
         why: '--yes is not optional off a TTY: without it the confirm resolves to cancel and the run exits 0 having deployed nothing.',
       },
     },
-    { open: openBrowser() },
+    { open: openBrowser(), authService: deployAuthService },
   );
 }
 
@@ -1997,6 +2019,7 @@ export async function deployCommand(
         stashed: directStashed,
         keepLockChanged,
         baseBranch,
+        orgId: keep.orgId,
       });
     }
     return 1;
@@ -2082,6 +2105,7 @@ export async function deployCommand(
       keepLockChanged,
       baseBranch,
       pr: openedPr,
+      orgId: keep.orgId,
     });
   }
 

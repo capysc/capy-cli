@@ -10,6 +10,7 @@ import type {
   ConnectOutcome,
   ConnectResultData,
 } from '../ui/screens/contract';
+import type { AuthService } from '../auth/authService';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -253,7 +254,7 @@ export class ConnectCommand {
           varName,
           mode: entry.mode as 'test' | 'live' | undefined,
           requiresAuth: mod.requiresAuth === true,
-        });
+        }, ctx.authService);
         return { linked: false };
       }
     }
@@ -321,7 +322,7 @@ export class ConnectCommand {
         expiresAt: entry.expires_at,
         detail,
         requiresAuth: mod.requiresAuth === true,
-      });
+      }, ctx.authService);
     }
 
     // `process.exitCode`, never `process.exit`. The failure endings above are
@@ -352,6 +353,11 @@ export class ConnectCommand {
       /** The provider's own flag, not an assumption about every connector. */
       requiresAuth: boolean;
     },
+    /** `authService` opts this call into the keep-hosted transport when
+     *  CAPY_KEEP_SCREENS=1 (W2-B) — omitted, this is unreachable and the flow
+     *  is the loopback-only path unchanged. Both call sites already hold
+     *  `ctx` from `resolveContext()`. */
+    authService?: AuthService,
   ): Promise<void> {
     const { showConnectResultInBrowser } = await import('../ui/connectScreens');
     const expiresInDays =
@@ -393,6 +399,7 @@ export class ConnectCommand {
       ...(run.detail ? { detail: run.detail } : {}),
       stops,
       open: shouldOpen(),
+      authService,
     });
   }
 }

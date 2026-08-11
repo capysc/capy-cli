@@ -31,20 +31,33 @@ export type KeepAuthFlow = 'auth-success' | 'auth-error';
  *   no-submit     the page answers with nothing but
  *                 `{v, flow, signal: 'acknowledged'}` — auth-success,
  *                 auth-error. Relayed by `authService.ts`'s
- *                 `relayAuthScreenViaKeep`.
+ *                 `relayAuthScreenViaKeep`. Carries no request payload
+ *                 either: what little the page needs (auth-error's message)
+ *                 rides the `/flow/<name>?c=<id>&code=<CODE>` URL itself,
+ *                 which only works because that payload is one short code.
  *   payload-both  the CLI sends a request payload over the broker reverse
  *                 channel AND the page answers with a payload of its own —
  *                 secret-intake, and (going forward) any screen that
  *                 carries a browser/phone-entered value back to the CLI.
  *                 Relayed by the shared `runKeepPayloadScreen` helper in
  *                 `src/service/keepPayloadRelay.ts`.
- *
- * A screen needing only ONE non-trivial direction (e.g. a request payload
- * with a bare ack back, or no request but a real answer payload) has no
- * kind here yet — add one, and the relay case it needs, when the first such
- * screen actually migrates, rather than guessing its shape in advance.
+ *   payload-in    W2-B: CLI→page carries a real, structured payload (too
+ *                 large for a URL param — an error's causes/remedies, a
+ *                 deploy's step log, a status report's diff table) but the
+ *                 page has NOTHING to submit back: no button, no form, no
+ *                 signal, only "read it and close the tab". The CLI does not
+ *                 wait for any acknowledgement — same fire-and-forget
+ *                 posture the loopback `serveEndingPage`/`showScreenInBrowser`
+ *                 helpers already have ("returns once the browser has the
+ *                 page, not once it has been read"). Relayed by
+ *                 `runKeepInfoScreen` in `src/service/keepPayloadRelay.ts`.
+ *                 The seven no-submit "ending" screens (CommandError,
+ *                 ConnectResult, DeployRunResult, RotateProgress,
+ *                 SessionInfo, SyncResult, SyncStatus) are this kind — this
+ *                 is the "one non-trivial direction" case this doc comment
+ *                 used to say had no kind yet.
  */
-export type KeepScreenKind = 'no-submit' | 'payload-both';
+export type KeepScreenKind = 'no-submit' | 'payload-both' | 'payload-in';
 
 export interface KeepScreenDefinition {
   /** Doubles as the broker `purpose` and the keep-app `/flow/<name>` route
@@ -72,6 +85,13 @@ export const KEEP_SCREENS: readonly KeepScreenDefinition[] = [
   { name: 'connect-live-gate', kind: 'payload-both' },
   { name: 'org-members', kind: 'payload-both' },
   // <<< keep-migrated screens: append below >>>
+  { name: 'command-error', kind: 'payload-in' },
+  { name: 'connect-result', kind: 'payload-in' },
+  { name: 'deploy-run-result', kind: 'payload-in' },
+  { name: 'rotate-progress', kind: 'payload-in' },
+  { name: 'session-info', kind: 'payload-in' },
+  { name: 'sync-result', kind: 'payload-in' },
+  { name: 'sync-status', kind: 'payload-in' },
 ];
 
 export function isKeepScreen(name: string): boolean {

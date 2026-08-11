@@ -2009,6 +2009,11 @@ export class CapyCommand {
       branch,
       ...result,
       open: !process.env.CAPY_WEB_NO_OPEN,
+      // `authService` opts this call into the keep-hosted transport when
+      // CAPY_KEEP_SCREENS=1 (W2-B) — this class already threads
+      // `this.authService` into other browser-ending calls (see
+      // `createNewOrganization` / `deviceKeyWiringContext` below).
+      authService: this.authService,
     });
   }
 
