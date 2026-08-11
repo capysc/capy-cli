@@ -74,6 +74,12 @@ import { decideOnboardingCase, OnboardingCaseKind } from './detect';
 /** Wrapper endpoints that are user-scoped (any org token of the user works). */
 export interface UserWrapperOps {
   listWrappers(): Promise<KeyWrapperMetadata[]>;
+  /**
+   * MUST implement the FRESH_AUTH_REQUIRED refresh-and-retry dance
+   * (serviceOps.withFreshAuthRetry). GET /wrappers/:id fresh-auth gates
+   * BOTH wrapper types (door reads, not just key_enc) as of the service
+   * fix in audit-browser-direct-api.md.
+   */
   fetchWrapper(wrapperId: string): Promise<KeyWrapperPayload>;
   uploadDoorWrapper(body: {
     wrapped_k_local: string;
@@ -512,7 +518,9 @@ export async function runUnlock(
   }
 
   // The list is metadata-only; each door's prf_salt/iv/ciphertext requires a
-  // full fetch (doors are not fresh-auth gated — only key_enc rows are).
+  // full fetch, which is fresh-auth gated the same as key_enc rows are (see
+  // ops.fetchWrapper's docblock) — deps.ops.fetchWrapper handles the
+  // refresh-and-retry dance transparently.
   const doorPayloads = new Map<string, KeyWrapperPayload>();
   for (const door of doors) {
     const payload = await deps.ops.fetchWrapper(door.id);

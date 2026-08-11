@@ -66,7 +66,11 @@ export function createDeviceKeyServiceOps(
 
   const ops: UserWrapperOps = {
     listWrappers: () => serviceClient.listWrappers(),
-    fetchWrapper: id => serviceClient.fetchWrapper(id),
+    // GET /wrappers/:id now fresh-auth gates BOTH wrapper types (service
+    // fix: door reads used to be ungated — see audit-browser-direct-api.md
+    // "Audit fixes ... Finding 2"). Without this retry, any unlock on a
+    // session older than CAPY_FRESH_AUTH_MAX_AGE_SECONDS hard-fails.
+    fetchWrapper: id => withFreshAuthRetry(forceRefresh, () => serviceClient.fetchWrapper(id)),
     uploadDoorWrapper: body => serviceClient.uploadDoorWrapper(body),
     verifyWrapper: id => withFreshAuthRetry(forceRefresh, () => serviceClient.verifyWrapper(id)),
     deleteWrapper: id => serviceClient.deleteWrapper(id),

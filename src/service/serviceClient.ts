@@ -658,8 +658,10 @@ export class ServiceClient {
   // Shapes mirror service openapi.yaml. Doors (wrapped_k_local) are org-less
   // and per credential; key_enc rows are per user×org with the org taken
   // from the JWT — so key_enc upload/fetch MUST run under a token scoped to
-  // that org. Fetching a key_enc row is additionally fresh-auth gated: the
-  // 403 FRESH_AUTH_REQUIRED retry dance lives in
+  // that org. Fetching EITHER wrapper type's full payload (GET
+  // /wrappers/:id) is fresh-auth gated — door reads were folded into the
+  // same gate as key_enc (audit-browser-direct-api.md, "Audit fixes ...
+  // Finding 2"). The 403 FRESH_AUTH_REQUIRED retry dance lives in
   // src/auth/deviceKey/serviceOps.ts, not here — this client stays one
   // call per method.
 
@@ -695,7 +697,7 @@ export class ServiceClient {
     return data.wrappers;
   }
 
-  /** One wrapper with its ciphertext payload. key_enc rows are fresh-auth gated server-side. */
+  /** One wrapper with its ciphertext payload. Both wrapper types are fresh-auth gated server-side. */
   async fetchWrapper(wrapperId: string): Promise<KeyWrapperPayload> {
     const data = await this.request<{ wrapper: KeyWrapperPayload }>(
       'GET', `/wrappers/${encodeURIComponent(wrapperId)}`,
