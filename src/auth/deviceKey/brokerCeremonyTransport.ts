@@ -50,6 +50,8 @@ import type {
   CeremonyTransport,
   EnrollmentRequest,
   EnrollmentSuccess,
+  GrantRequest,
+  GrantSuccess,
   UnlockCandidate,
   UnlockRequest,
   UnlockSuccess,
@@ -79,7 +81,8 @@ const FRAGMENT_KEY = 'r';
 
 type WireRequest =
   | { v: 1; ceremony: 'enroll'; prfSalt: string }
-  | { v: 1; ceremony: 'unlock'; candidates: { credentialId: string; prfSalt: string }[] };
+  | { v: 1; ceremony: 'unlock'; candidates: { credentialId: string; prfSalt: string }[] }
+  | { v: 1; ceremony: 'grant'; candidates: { credentialId: string; prfSalt: string }[] };
 
 const CEREMONY_FAILURE_CODES: readonly CeremonyFailureCode[] = [
   'cancelled',
@@ -198,6 +201,26 @@ export class BrokerCeremonyTransport implements CeremonyTransport {
     return this.run('unlock', fragment, (payload) => this.toUnlockResult(payload));
   }
 
+  /**
+   * CAP-384: same WebAuthn mechanics as requestUnlock (get() across every
+   * live door), but framed `ceremony:'grant'` on the wire so the page shows
+   * "granting a temporary key to <machineName>" copy instead of "unlock this
+   * machine". Callers building this transport for a grant SHOULD construct
+   * it with `machineName` set to the sandbox's own display label (see
+   * grant.ts) — the connection's existing machine-name field is reused
+   * verbatim, no new wire plumbing needed.
+   */
+  async requestGrant(req: GrantRequest): Promise<GrantSuccess | CeremonyFailure> {
+    this.assertCandidateCaps(req.candidates);
+    const request: WireRequest = {
+      v: 1,
+      ceremony: 'grant',
+      candidates: req.candidates.map((c) => ({ credentialId: c.credentialId, prfSalt: c.prfSalt })),
+    };
+    const fragment = this.buildFragmentOrThrow(request);
+    return this.run('grant', fragment, (payload) => this.toUnlockResult(payload));
+  }
+
   // ---- page-side caps, mirrored CLI-side and checked before any network call ----
 
   private assertCandidateCaps(candidates: UnlockCandidate[]): void {
@@ -238,7 +261,7 @@ export class BrokerCeremonyTransport implements CeremonyTransport {
   // ---- shared connection / long-poll / framing-validation plumbing ----
 
   private async run<T extends { ok: true }>(
-    ceremony: 'enroll' | 'unlock',
+    ceremony: 'enroll' | 'unlock' | 'grant',
     fragment: string,
     mapSuccess: (payload: Record<string, unknown>) => T | null,
   ): Promise<T | CeremonyFailure> {
@@ -258,7 +281,13 @@ export class BrokerCeremonyTransport implements CeremonyTransport {
 
     const origin = this.options.originOverride ?? keepOrigin();
     const url = buildDeviceKeyUrl(connection.connectionId, fragment, origin);
-    relayUrl(ceremony === 'enroll' ? 'Set up your device key:' : 'Unlock with your device key:', url);
+    const relayLabel =
+      ceremony === 'enroll'
+        ? 'Set up your device key:'
+        : ceremony === 'unlock'
+          ? 'Unlock with your device key:'
+          : 'Grant a temporary device key:';
+    relayUrl(relayLabel, url);
 
     const ack = await this.broker.awaitAnswer(connection, {
       deadlineMs: this.options.deadlineMs ?? DEVICE_KEY_DEADLINE_MS,

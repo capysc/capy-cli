@@ -302,6 +302,74 @@ describe('BrokerCeremonyTransport.requestUnlock', () => {
   });
 });
 
+describe('BrokerCeremonyTransport.requestGrant (CAP-384)', () => {
+  test('sends every candidate framed ceremony:"grant" (never "unlock") and maps a real sealed grant success', async () => {
+    const candidates = [{ credentialId: 'cred-a', prfSalt: Buffer.alloc(32, 21).toString('base64') }];
+    const { result, getUrl } = captureRelayedUrl(() =>
+      transport({ machineName: 'sandbox:agentic-chat-7' }).requestGrant({ userId: 'user-1', candidates }),
+    );
+    await Bun.sleep(20);
+    const created = state.requests.find((r) => r.method === 'POST' && r.path === '/connections');
+    // The sandbox label rides the connection's existing machine_name field —
+    // no new wire plumbing needed for the page to show "who is asking".
+    expect((created!.body as any).machine_name).toBe('sandbox:agentic-chat-7');
+
+    const clientPubkey = (state.requests[0].body as any).client_pubkey as string;
+    const sealed = await sealAnswer(
+      { v: 1, flow: 'device-key', ceremony: 'grant', ok: true, credentialId: 'cred-a', prfOutput: Buffer.alloc(32, 22).toString('base64') },
+      CONNECTION_ID,
+      clientPubkey,
+    );
+    state.resultQueue.push({ status: 200, body: { status: 'answered', ciphertext: sealed } });
+
+    expect(await result).toEqual({ ok: true, credentialId: 'cred-a', prfOutput: Buffer.alloc(32, 22).toString('base64') });
+    const req = decodeFragmentRequest(getUrl()!);
+    expect(req).toEqual({ v: 1, ceremony: 'grant', candidates });
+  });
+
+  test('an answer framed ceremony:"unlock" is rejected for a grant request — the two must never be interchangeable', async () => {
+    const { result } = captureRelayedUrl(() =>
+      transport().requestGrant({ userId: 'u', candidates: [{ credentialId: 'c1', prfSalt: Buffer.alloc(32, 1).toString('base64') }] }),
+    );
+    await Bun.sleep(20);
+    const clientPubkey = (state.requests[0].body as any).client_pubkey as string;
+    const sealed = await sealAnswer(
+      { v: 1, flow: 'device-key', ceremony: 'unlock', ok: true, credentialId: 'c1', prfOutput: Buffer.alloc(32, 2).toString('base64') },
+      CONNECTION_ID,
+      clientPubkey,
+    );
+    state.resultQueue.push({ status: 200, body: { status: 'answered', ciphertext: sealed } });
+    expect(await result).toEqual({ ok: false, code: 'transport_error' });
+  });
+
+  test('caps: more than MAX_UNLOCK_CANDIDATES throws a coded error before any network call, same as unlock', async () => {
+    const candidates = Array.from({ length: MAX_UNLOCK_CANDIDATES + 1 }, (_, i) => ({
+      credentialId: `cred-${i}`,
+      prfSalt: Buffer.alloc(32, i % 255).toString('base64'),
+    }));
+    let thrown: unknown;
+    try {
+      await transport().requestGrant({ userId: 'u', candidates });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CapyError);
+    expect((thrown as CapyError).code).toBe(ERROR_CODES.DEVICE_KEY_TOO_MANY_CANDIDATES);
+    expect(state.requests.length).toBe(0);
+  });
+
+  test('a declined ceremony (cancelled) maps through untouched', async () => {
+    const { result } = captureRelayedUrl(() =>
+      transport().requestGrant({ userId: 'u', candidates: [{ credentialId: 'c1', prfSalt: Buffer.alloc(32, 1).toString('base64') }] }),
+    );
+    await Bun.sleep(20);
+    const clientPubkey = (state.requests[0].body as any).client_pubkey as string;
+    const sealed = await sealAnswer({ v: 1, flow: 'device-key', ceremony: 'grant', ok: false, code: 'cancelled' }, CONNECTION_ID, clientPubkey);
+    state.resultQueue.push({ status: 200, body: { status: 'answered', ciphertext: sealed } });
+    expect(await result).toEqual({ ok: false, code: 'cancelled' });
+  });
+});
+
 describe('production defaults', () => {
   test('the default ttl/deadline satisfy the Gate-2 ceremony guidance (>=900s, deadline >= ttl*1000)', async () => {
     const mod = await import('../../../src/auth/deviceKey/brokerCeremonyTransport');

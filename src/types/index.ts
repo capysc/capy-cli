@@ -393,6 +393,14 @@ export const ERROR_CODES = {
    * can name the real cause instead of a bare request failure.
    */
   DOORS_NOT_SUPPORTED: 'DOORS_NOT_SUPPORTED',
+  // Sandbox grant codes (CAP-384, client-side only). A grant is an in-memory,
+  // per-chat key holder — see src/auth/deviceKey/grantHolder.ts's header for
+  // the full design. These are never sent by the server: the grant daemon and
+  // its client live entirely inside the CLI.
+  /** No grant daemon is reachable at the configured socket (never started, or the process died). */
+  DEVICE_KEY_GRANT_NOT_FOUND: 'DEVICE_KEY_GRANT_NOT_FOUND',
+  /** The grant daemon is reachable but its TTL has elapsed; it has discarded the key material. Re-run `capy device-key grant`. */
+  DEVICE_KEY_GRANT_EXPIRED: 'DEVICE_KEY_GRANT_EXPIRED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

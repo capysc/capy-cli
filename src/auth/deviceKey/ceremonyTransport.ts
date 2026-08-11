@@ -96,9 +96,42 @@ export interface UnlockSuccess {
   prfOutput: string;
 }
 
+/**
+ * The third ceremony variant (CAP-384): identical WebAuthn mechanics to
+ * `unlock` (get() with evalByCredential across every live door), but a
+ * DIFFERENT destination for the result. Unlock installs K_local durably
+ * (local.key + key.enc) via onboarding.ts's `installOrgFromServer`. A grant
+ * hands the same PRF output to `grant.ts`'s ceremony-only path, which derives
+ * K_local and stops — nothing touches disk (see grantHolder.ts). The wire
+ * shape is identical to UnlockRequest/UnlockSuccess; a distinct type alias
+ * keeps the two call sites self-documenting about which destination they
+ * feed, and keeps the `ceremony:'grant'` framing on the wire (deviceKeyWire.ts)
+ * distinct from `ceremony:'unlock'` so the keep-app page can show copy that
+ * "plainly states" this is a temporary, in-memory grant (CAP-384 requirement)
+ * rather than an ordinary machine unlock.
+ */
+export type GrantRequest = UnlockRequest;
+export type GrantSuccess = UnlockSuccess;
+
 export interface CeremonyTransport {
   /** Create a new device-key credential and evaluate its PRF. */
   requestEnrollment(req: EnrollmentRequest): Promise<EnrollmentSuccess | CeremonyFailure>;
   /** Evaluate the PRF of one already-enrolled credential. */
   requestUnlock(req: UnlockRequest): Promise<UnlockSuccess | CeremonyFailure>;
+  /**
+   * Evaluate the PRF of one already-enrolled credential for a per-chat
+   * sandbox grant. The page must render copy that plainly states this is
+   * granting a temporary, in-memory key to a named sandbox for this chat
+   * only — never conflated with an ordinary unlock. Implementations SHOULD
+   * pass the sandbox's display label as the connection's `machineName` (the
+   * same field enroll/unlock already use for "asked by <machine>"), so the
+   * page needs no new wire field to show who is asking.
+   *
+   * OPTIONAL on the interface (unlike requestEnrollment/requestUnlock) so
+   * every existing CeremonyTransport fake across the test suite — including
+   * CAP-383's equivalence test, which invariant 4 requires stays untouched —
+   * keeps compiling without adding a method it never exercises. grant.ts
+   * treats a missing implementation as `transport_error`.
+   */
+  requestGrant?(req: GrantRequest): Promise<GrantSuccess | CeremonyFailure>;
 }

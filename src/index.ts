@@ -5,6 +5,7 @@ import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
+import { GRANT_DAEMON_SUBCOMMAND } from './auth/deviceKey/grantHolder';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -714,6 +715,31 @@ deviceKeyCmd
     const { DeviceKeyRemoveCommand } = await import('./commands/deviceKeyCommand');
     const cmd = new DeviceKeyRemoveCommand();
     await cmd.execute(id);
+  });
+
+deviceKeyCmd
+  .command('grant')
+  .description('Grant a temporary, in-memory device key to this (sandboxed) session — never written to disk')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--label <name>', 'display label the ceremony page shows (defaults to this host\'s name)')
+  .option('--ttl-minutes <n>', 'grant lifetime in minutes (default 30)', (v) => parseInt(v, 10))
+  .action(async (options) => {
+    assertNotLocalOnly('device-key grant');
+    const { DeviceKeyGrantCommand } = await import('./commands/deviceKeyCommand');
+    const cmd = new DeviceKeyGrantCommand();
+    await cmd.execute({ json: options.json, label: options.label, ttlMinutes: options.ttlMinutes });
+  });
+
+// CAP-384: internal-only. Never invoked directly by a human — spawnGrantDaemon
+// (auth/deviceKey/grantHolder.ts) re-execs this same binary with this hidden
+// subcommand to start the long-lived, in-memory grant holder. Reads the key
+// material from stdin (never argv/env — see grantHolder.ts's header) and
+// blocks until the grant's TTL elapses or it receives a shutdown request.
+program
+  .command(GRANT_DAEMON_SUBCOMMAND, { hidden: true })
+  .action(async () => {
+    const { runGrantDaemonForever } = await import('./auth/deviceKey/grantHolder');
+    await runGrantDaemonForever(process.stdin);
   });
 
 program

@@ -16,6 +16,7 @@
  * as every other CAP-382 wiring point: off by default, and off means "this
  * command refuses with a coded message", not a silently different behavior.
  */
+import { hostname } from 'os';
 import { AuthService } from '../auth/authService';
 import { ServiceClient, KeyWrapperMetadata } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
@@ -26,6 +27,11 @@ import {
   reportEnrollmentOutcome,
   DeviceKeyWiringContext,
 } from '../auth/deviceKey/wiring';
+import { createDeviceKeyServiceOps } from '../auth/deviceKey/serviceOps';
+import { BrokerCeremonyTransport } from '../auth/deviceKey/brokerCeremonyTransport';
+import { runGrantCeremony } from '../auth/deviceKey/grant';
+import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
+import { resolveActiveUrl } from '../config/profileConfig';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -170,5 +176,86 @@ export class DeviceKeyRemoveCommand {
       console.error(`\n  Failed to remove device key: ${err instanceof Error ? err.message : String(err)}\n`);
       process.exit(1);
     }
+  }
+}
+
+export interface DeviceKeyGrantCommandOptions {
+  json?: boolean;
+  /** Display label the ceremony page shows ("granting a key to <label>"). Defaults to this host's name — the same default enroll/unlock already use for "asked by <machine>". */
+  label?: string;
+  ttlMinutes?: number;
+}
+
+/**
+ * `capy device-key grant` (CAP-384) — the CLI-sealed half of the per-chat
+ * sandbox grant. Runs the SAME WebAuthn ceremony as `enroll`/`unlock` (a
+ * live door on this account, a fresh PRF touch), but instead of writing
+ * local.key + key.enc to disk (what `unlock` does), it starts a
+ * process-lived, in-memory holder daemon (grantHolder.ts) and prints the
+ * socket a later `capy run` (or any other secret-touching command) should
+ * point at via CAPY_DEVICE_KEY_GRANT_SOCKET.
+ *
+ * Intended caller: an orchestrator (capy-mcp's sandbox bootstrap, or a human
+ * setting up a throwaway environment by hand) that captures this command's
+ * `--json` output ONCE per chat/session and propagates
+ * CAPY_DEVICE_KEY_GRANT_SOCKET on every subsequent `capy` invocation's env.
+ * This command never sets that env var itself — a child process cannot
+ * mutate its parent's environment, so the propagation is necessarily the
+ * caller's job (documented in the CAP-384 report).
+ */
+export class DeviceKeyGrantCommand {
+  constructor(private apiUrl?: string, private devMode: boolean = false) {}
+
+  async execute(options: DeviceKeyGrantCommandOptions = {}): Promise<void> {
+    if (!deviceKeysEnabled()) refuseFlagOff();
+
+    const { authService, authResult, serviceClient } = await bootstrapAuth(this.apiUrl, this.devMode);
+    const { ops } = createDeviceKeyServiceOps(serviceClient, authService);
+    const label = options.label || `sandbox:${hostname()}`;
+    const ttlMs = options.ttlMinutes ? options.ttlMinutes * 60_000 : DEFAULT_GRANT_TTL_MS;
+
+    const ceremony = new BrokerCeremonyTransport({
+      serviceUrl: resolveActiveUrl(this.devMode),
+      getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+      machineName: label,
+    });
+
+    let outcome;
+    try {
+      outcome = await runGrantCeremony({ userId: authResult.user_id!, ceremony, ops });
+    } catch (err) {
+      if (err instanceof CapyError && err.code === ERROR_CODES.WRAPPER_NOT_FOUND) {
+        console.error('\n  No device key is enrolled for this account yet.');
+        console.error(`  Enroll one from an already-unlocked machine first: ${B('capy device-key enroll')}.\n`);
+        process.exit(1);
+      }
+      throw err;
+    }
+
+    if (!outcome.ok) {
+      console.error(`\n  Grant ceremony not completed (${outcome.code}). No key was granted.\n`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const daemon = await spawnGrantDaemon(outcome.material, { ttlMs });
+
+    if (options.json) {
+      console.log(JSON.stringify({
+        socketPath: daemon.socketPath,
+        expiresAt: daemon.expiresAt,
+        envVar: GRANT_SOCKET_ENV_VAR,
+      }, null, 2));
+      return;
+    }
+
+    console.log('');
+    console.log(`  Granted a temporary device key to ${B(label)} for this chat only.`);
+    console.log(`  It lives in memory and is never written to disk; it expires at ${new Date(daemon.expiresAt).toISOString()}.`);
+    console.log('');
+    console.log('  Set this on every subsequent capy invocation in this session:');
+    console.log('');
+    console.log(`    ${B(`${GRANT_SOCKET_ENV_VAR}=${daemon.socketPath}`)}`);
+    console.log('');
   }
 }

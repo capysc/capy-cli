@@ -11,6 +11,7 @@ import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
+import { GRANT_DAEMON_SUBCOMMAND } from './auth/deviceKey/grantHolder';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -799,6 +800,26 @@ deviceKeyCmd
     const { DeviceKeyRemoveCommand } = await import('./commands/deviceKeyCommand');
     const cmd = new DeviceKeyRemoveCommand(process.env.CAPY_API_URL, true);
     await cmd.execute(id);
+  });
+
+deviceKeyCmd
+  .command('grant')
+  .description('Grant a temporary, in-memory device key to this (sandboxed) session — never written to disk')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--label <name>', 'display label the ceremony page shows (defaults to this host\'s name)')
+  .option('--ttl-minutes <n>', 'grant lifetime in minutes (default 30)', (v) => parseInt(v, 10))
+  .action(async (options) => {
+    const { DeviceKeyGrantCommand } = await import('./commands/deviceKeyCommand');
+    const cmd = new DeviceKeyGrantCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute({ json: options.json, label: options.label, ttlMinutes: options.ttlMinutes });
+  });
+
+// CAP-384: internal-only — see index.ts's identical registration for why.
+program
+  .command(GRANT_DAEMON_SUBCOMMAND, { hidden: true })
+  .action(async () => {
+    const { runGrantDaemonForever } = await import('./auth/deviceKey/grantHolder');
+    await runGrantDaemonForever(process.stdin);
   });
 
 program

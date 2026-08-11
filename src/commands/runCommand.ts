@@ -4,6 +4,7 @@ import { join } from 'path';
 import { FileManager } from '../files/fileManager';
 import { debug } from '../ui/debug';
 import { CapyError, ERROR_CODES } from '../types/index';
+import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -252,27 +253,62 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
         const enabled = deviceKeysEnabled();
         let unlocked = false;
         if (enabled) {
-          // attemptCaseCUnlock does its own "does this account have live
-          // doors" detection internally (via detectOnboardingCase) — it is a
-          // safe no-op, never a throw, when there is nothing to unlock with.
-          const { attemptCaseCUnlock } = await import('../auth/deviceKey/wiring');
-          const unlock = await attemptCaseCUnlock({
-            authService: auth,
-            serviceClient: svc,
-            devMode,
-            userId: result.user_id,
-            userEmail: result.user_email,
-            organizations: result.organizations || [],
-            activeOrgId: orgId,
-          });
-          if (unlock.ok) {
+          // CAP-384: a sandbox that has an active per-chat grant MUST NOT
+          // fall through to attemptCaseCUnlock below — that path durably
+          // writes local.key + key.enc for every org this account belongs
+          // to, exactly the persistent-key-on-ephemeral-infra defect the
+          // grant exists to prevent (final-gate.md §1.4 item 5). So when the
+          // ephemeral signal is present, the grant is the ONLY path tried;
+          // its own failure (never granted, or expired) surfaces as a coded
+          // remediation instead of silently degrading to a durable unlock.
+          const { configuredGrantSocketPath } = await import('../auth/deviceKey/ephemeral');
+          const grantSocket = configuredGrantSocketPath();
+          if (grantSocket) {
+            const { fetchGrantedKLocal } = await import('../auth/deviceKey/grantHolder');
+            const { resolveProjectKeyFromGrant, createGrantResolutionOps } = await import('../auth/deviceKey/grantResolver');
+            let grant;
             try {
-              // Retry once now that the unlock ceremony may have installed
-              // key.enc for this org.
-              projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
-              unlocked = true;
-            } catch {
-              unlocked = false;
+              grant = await fetchGrantedKLocal(grantSocket, result.user_id);
+            } catch (grantErr) {
+              // EXIT_NEEDS_INPUT (3), not the generic failure exit (1): a
+              // missing/expired grant needs a human (or the orchestrating
+              // agent) to re-run `capy device-key grant` — a coded signal an
+              // MCP caller can branch on, never message text (Rule 4).
+              const code =
+                grantErr instanceof CapyError && grantErr.code === ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED
+                  ? ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED
+                  : ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND;
+              console.error(`\ncapy run: [${code}] ${grantErr instanceof Error ? grantErr.message : String(grantErr)}`);
+              console.error('  Re-run `capy device-key grant` for this chat, then try again.\n');
+              process.exit(EXIT_NEEDS_INPUT);
+            }
+            const grantOps = createGrantResolutionOps(svc, auth);
+            projectKeyHex = await resolveProjectKeyFromGrant(grant.kLocal, orgId, projectId, result.user_id, grantOps);
+            unlocked = true;
+          } else {
+            // attemptCaseCUnlock does its own "does this account have live
+            // doors" detection internally (via detectOnboardingCase) — it is
+            // a safe no-op, never a throw, when there is nothing to unlock
+            // with.
+            const { attemptCaseCUnlock } = await import('../auth/deviceKey/wiring');
+            const unlock = await attemptCaseCUnlock({
+              authService: auth,
+              serviceClient: svc,
+              devMode,
+              userId: result.user_id,
+              userEmail: result.user_email,
+              organizations: result.organizations || [],
+              activeOrgId: orgId,
+            });
+            if (unlock.ok) {
+              try {
+                // Retry once now that the unlock ceremony may have installed
+                // key.enc for this org.
+                projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
+                unlocked = true;
+              } catch {
+                unlocked = false;
+              }
             }
           }
         }

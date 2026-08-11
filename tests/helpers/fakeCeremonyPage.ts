@@ -18,7 +18,10 @@ import type { FakeWrapperService } from './fakeWrapperService';
 
 type WireRequest =
   | { v: 1; ceremony: 'enroll'; prfSalt: string }
-  | { v: 1; ceremony: 'unlock'; candidates: { credentialId: string; prfSalt: string }[] };
+  | { v: 1; ceremony: 'unlock'; candidates: { credentialId: string; prfSalt: string }[] }
+  /** CAP-384: same shape as 'unlock' — a grant runs the identical WebAuthn
+   *  ceremony, just framed differently on the wire (see brokerCeremonyTransport.ts). */
+  | { v: 1; ceremony: 'grant'; candidates: { credentialId: string; prfSalt: string }[] };
 
 /** One physical authenticator, reusable across "machines" (separate homedirs/processes) — same object, same PRF map, simulating the same hardware key. */
 export class SharedAuthenticator {
