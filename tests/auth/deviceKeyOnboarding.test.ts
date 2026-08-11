@@ -1,4 +1,4 @@
-import { mock, describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { mock, describe, it, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
@@ -328,6 +328,92 @@ describe('device-key onboarding engine', () => {
       expect(gc.readLocalRoot('orgA', USER)).not.toBeNull();
       expect(gc.readMasterKey('orgA', USER)).not.toBeNull();
       expect(server.rows.length).toBe(0);
+      expect(gc.isKeyEncSyncPending('orgA', USER)).toBe(false);
+    });
+  });
+
+  describe('Case A — ephemeral environment (CAP-402)', () => {
+    const GRANT_SOCKET_ENV_VAR = 'CAPY_DEVICE_KEY_GRANT_SOCKET';
+    const prevGrantSocket = process.env[GRANT_SOCKET_ENV_VAR];
+
+    afterEach(() => {
+      // Never let the ephemeral signal leak into a later test in this file —
+      // every OTHER describe block here asserts the durable-machine behavior.
+      if (prevGrantSocket === undefined) delete process.env[GRANT_SOCKET_ENV_VAR];
+      else process.env[GRANT_SOCKET_ENV_VAR] = prevGrantSocket;
+    });
+
+    it('a declined ceremony rolls back the mint completely — no local.key, no key.enc, no sync marker, no door', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-case-a-ephemeral-decline';
+      process.env[GRANT_SOCKET_ENV_VAR] = '/tmp/fake-grant.sock';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      ceremony.failNextWith = 'cancelled';
+      const deps = makeDeps(server, ceremony, [org('orgA')]);
+
+      const result = await onboarding.runNewUserEnrollment(deps, { orgId: 'orgA', masterKey: randomBytes(32) });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result.code).toBe(ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE);
+      if (result.code !== ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE) throw new Error('unreachable');
+      expect(result.reason).toBe('ceremony_declined');
+      expect(result.ceremonyCode).toBe('cancelled');
+
+      // The opposite of the durable-machine assertion above: NOTHING this
+      // call minted is left on disk, and no door exists server-side either —
+      // the machine ends the call exactly as it started.
+      expect(gc.readLocalRoot('orgA', USER)).toBeNull();
+      expect(gc.readMasterKey('orgA', USER)).toBeNull();
+      expect(gc.isKeyEncSyncPending('orgA', USER)).toBe(false);
+      expect(server.rows.length).toBe(0);
+    });
+
+    it('a key.enc upload that never lands rolls back the mint AND best-effort deletes the already-uploaded door', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-case-a-ephemeral-upload-fail';
+      process.env[GRANT_SOCKET_ENV_VAR] = '/tmp/fake-grant.sock';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      const deps = makeDeps(server, ceremony, [org('orgA')]);
+      // The ceremony succeeds (door uploads fine); the SUBSEQUENT key.enc
+      // upload is the one that fails — proving the rollback covers both
+      // halves of the sequence, not just a ceremony decline.
+      server.failKeyEncUploadFor.set('orgA', new CapyError('network blip', ERROR_CODES.NETWORK_ERROR));
+
+      const result = await onboarding.runNewUserEnrollment(deps, { orgId: 'orgA', masterKey: randomBytes(32) });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error('unreachable');
+      expect(result.code).toBe(ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE);
+      if (result.code !== ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE) throw new Error('unreachable');
+      expect(result.reason).toBe('upload_incomplete');
+
+      expect(gc.readLocalRoot('orgA', USER)).toBeNull();
+      expect(gc.readMasterKey('orgA', USER)).toBeNull();
+      expect(gc.isKeyEncSyncPending('orgA', USER)).toBe(false);
+      // The door that DID make it to the server before the key.enc upload
+      // failed is best-effort cleaned up too — no orphaned credential left
+      // wrapping a K_local nothing else can reach.
+      expect(server.liveDoor()).toBeUndefined();
+      expect(server.rows.every(r => r.deleted_at !== null)).toBe(true);
+    });
+
+    it('a successful mint→ceremony→upload sequence is unaffected by the ephemeral signal — same result as the durable-machine happy path', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-case-a-ephemeral-success';
+      process.env[GRANT_SOCKET_ENV_VAR] = '/tmp/fake-grant.sock';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      const deps = makeDeps(server, ceremony, [org('orgA')]);
+      const masterKey = randomBytes(32);
+
+      const result = await onboarding.runNewUserEnrollment(deps, { orgId: 'orgA', masterKey });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error('unreachable');
+      expect(result.orgs).toEqual([{ orgId: 'orgA', status: 'uploaded' }]);
+
+      // Files present and correct — the ephemeral gate only changes the
+      // FAILURE path, never the success path.
+      const root = gc.readLocalRoot('orgA', USER);
+      expect(root).not.toBeNull();
+      expect(rootFromDoor(server, ceremony).equals(root!)).toBe(true);
       expect(gc.isKeyEncSyncPending('orgA', USER)).toBe(false);
     });
   });

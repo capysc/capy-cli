@@ -42,6 +42,8 @@ let isKeyEncSyncPending: typeof import('../../src/config/globalConfig').isKeyEnc
 let readKeyEncSyncPendingMarker: typeof import('../../src/config/globalConfig').readKeyEncSyncPendingMarker;
 let getKeyEncSyncPendingPath: typeof import('../../src/config/globalConfig').getKeyEncSyncPendingPath;
 let rootFingerprint: typeof import('../../src/config/globalConfig').rootFingerprint;
+let deleteLocalKeyMaterial: typeof import('../../src/config/globalConfig').deleteLocalKeyMaterial;
+let getLocalRootModePath: typeof import('../../src/config/globalConfig').getLocalRootModePath;
 
 beforeAll(async () => {
   const mod = await import('../../src/config/globalConfig');
@@ -75,6 +77,8 @@ beforeAll(async () => {
   readKeyEncSyncPendingMarker = mod.readKeyEncSyncPendingMarker;
   getKeyEncSyncPendingPath = mod.getKeyEncSyncPendingPath;
   rootFingerprint = mod.rootFingerprint;
+  deleteLocalKeyMaterial = mod.deleteLocalKeyMaterial;
+  getLocalRootModePath = mod.getLocalRootModePath;
 });
 
 afterAll(() => {
@@ -351,6 +355,47 @@ describe('GlobalConfig', () => {
       expect(saveLocalRootExclusive(ORG, b, 'user_excl')).toBe(false);
       // The winner's root is what's on disk
       expect(readLocalRoot(ORG, 'user_excl')!.equals(a)).toBe(true);
+    });
+  });
+
+  describe('deleteLocalKeyMaterial (CAP-402 ephemeral-environment rollback)', () => {
+    const ORG = 'org_delete_km';
+    const USER = 'user_delete_km';
+
+    it('removes local.key, key.enc, and the sync-pending marker, and leaves a clean read state', () => {
+      const kLocal = require('crypto').randomBytes(32);
+      saveLocalRoot(ORG, kLocal, USER);
+      saveMasterKey(ORG, 'ciphertext-blob', USER);
+      markKeyEncSyncPending(ORG, USER, ORG, kLocal);
+
+      expect(hasLocalRoot(ORG, USER)).toBe(true);
+      expect(readMasterKey(ORG, USER)).not.toBeNull();
+      expect(isKeyEncSyncPending(ORG, USER)).toBe(true);
+
+      deleteLocalKeyMaterial(ORG, USER);
+
+      expect(readLocalRoot(ORG, USER)).toBeNull();
+      expect(readMasterKey(ORG, USER)).toBeNull();
+      expect(isKeyEncSyncPending(ORG, USER)).toBe(false);
+      expect(existsSync(getLocalRootModePath(ORG, USER))).toBe(false);
+    });
+
+    it('is a safe no-op when there is nothing to delete', () => {
+      expect(() => deleteLocalKeyMaterial('org_never_touched', 'user_never_touched')).not.toThrow();
+    });
+
+    it('only touches the named (org, user) — a sibling org/user is untouched', () => {
+      const mine = require('crypto').randomBytes(32);
+      const sibling = require('crypto').randomBytes(32);
+      saveLocalRoot(ORG, mine, USER);
+      saveLocalRoot(ORG, sibling, 'user_sibling');
+      saveMasterKey(ORG, 'sibling-blob', 'user_sibling');
+
+      deleteLocalKeyMaterial(ORG, USER);
+
+      expect(readLocalRoot(ORG, USER)).toBeNull();
+      expect(readLocalRoot(ORG, 'user_sibling')!.equals(sibling)).toBe(true);
+      expect(readMasterKey(ORG, 'user_sibling')).toBe('sibling-blob');
     });
   });
 

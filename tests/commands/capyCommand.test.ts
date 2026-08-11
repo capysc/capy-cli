@@ -42,6 +42,14 @@ mock.module('../../src/config/globalConfig', () => ({
   writeKeepCache: mock(() => undefined),
   fetchSecretsWithCache: mock(async () => null),
 }));
+// CAP-402's org-creation tests below simulate a real terminal (isTTY=true)
+// so displayAndConfirmRecoveryPhrase's own TTY gate lets them through — but
+// bun test's stdin has no real setRawMode, so the clipboard offer inside it
+// would throw. Stubbed the same way the rest of this file stubs peripheral
+// concerns; nothing here asserts on clipboard behavior.
+mock.module('../../src/ui/clipboard', () => ({
+  promptCopyToClipboard: mock(async () => undefined),
+}));
 // The device-key wiring layer (CAP-382/final-gate MAJOR-5 + item 4) — kept
 // as a thin spy here rather than the real module: the real wiring.ts pulls
 // in the broker/ceremony/onboarding stack (tests/auth/deviceKey/wiring.test.ts
@@ -1378,7 +1386,16 @@ describe('CapyCommand', () => {
   });
 
   describe('initializeProject — new org creation is atomic with seed phrase', () => {
+    // These tests drive the REAL displayAndConfirmRecoveryPhrase (only
+    // `inquirer` is mocked, to answer its 'confirmed' prompt as a human
+    // would) — CAP-402 gated that function on a real TTY, so a run against
+    // bun test's own non-TTY stdin would refuse before the prompt is ever
+    // reached. Simulate the human-at-a-terminal case this describe block is
+    // actually about; a separate suite (recoveryPhrase.test.ts) pins the
+    // non-TTY refusal itself.
+    const savedIsTTY = process.stdin.isTTY;
     beforeEach(() => {
+      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
       // No orgs — user will be prompted to create one
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
@@ -1411,6 +1428,10 @@ describe('CapyCommand', () => {
       });
 
       mockServiceClient.listProjects.mockResolvedValue([]);
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process.stdin, 'isTTY', { value: savedIsTTY, configurable: true });
     });
 
     test('should re-prompt and not create org while user declines seed phrase', async () => {
@@ -1480,8 +1501,13 @@ describe('CapyCommand', () => {
     // review flagged (syncOrgOntoDeviceKeyIfEnrolled previously ran only
     // from `capy redeem`).
     const ORIGINAL_FLAG = process.env.CAPY_DEVICE_KEYS;
+    // Same reason as the describe block above: the "create new org" tests
+    // here drive the REAL displayAndConfirmRecoveryPhrase via a mocked
+    // inquirer 'confirmed' answer, which CAP-402 now gates on a real TTY.
+    const savedIsTTY = process.stdin.isTTY;
 
     beforeEach(() => {
+      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
       deviceKeyWiringCalls.attemptCaseCUnlock.length = 0;
       deviceKeyWiringCalls.runPendingSyncBestEffort.length = 0;
       deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled.length = 0;
@@ -1522,6 +1548,7 @@ describe('CapyCommand', () => {
     afterEach(() => {
       if (ORIGINAL_FLAG === undefined) delete process.env.CAPY_DEVICE_KEYS;
       else process.env.CAPY_DEVICE_KEYS = ORIGINAL_FLAG;
+      Object.defineProperty(process.stdin, 'isTTY', { value: savedIsTTY, configurable: true });
     });
 
     test('picking "Create new organization +" syncs the NEW org onto any already-enrolled device key, not the old one', async () => {

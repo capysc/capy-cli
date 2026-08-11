@@ -57,6 +57,7 @@ import {
   listOrgsWithKeyEncSyncPending,
   readKeyEncSyncPendingMarker,
   rootFingerprint,
+  deleteLocalKeyMaterial,
 } from '../../config/globalConfig';
 import type { CeremonyTransport, CeremonyFailureCode } from './ceremonyTransport';
 import {
@@ -68,6 +69,7 @@ import {
   unwrapKLocal,
 } from './crypto';
 import { decideOnboardingCase, OnboardingCaseKind } from './detect';
+import { isEphemeralEnvironment } from './ephemeral';
 
 // --- Service seams -----------------------------------------------------------
 
@@ -166,6 +168,24 @@ export interface CeremonyAborted {
   ok: false;
   code: typeof ERROR_CODES.DEVICE_KEY_CEREMONY_FAILED;
   ceremonyCode: CeremonyFailureCode;
+}
+
+/**
+ * CAP-402, ephemeral environments only: Case A's mint→ceremony→upload
+ * sequence did not finish, so `runNewUserEnrollment` rolled back everything
+ * it had minted on this disk (see `deleteLocalKeyMaterial`) rather than
+ * leave local.key/key.enc stranded on infrastructure that will not outlive
+ * this process. Never returned when `isEphemeralEnvironment()` is false —
+ * that path keeps returning `CeremonyAborted` exactly as before (CAP-383's
+ * byte-identical-refusal test pins it).
+ */
+export interface EphemeralEnrollmentIncomplete {
+  ok: false;
+  code: typeof ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE;
+  /** Which half of the sequence failed to complete. */
+  reason: 'ceremony_declined' | 'upload_incomplete';
+  /** The ceremony's own refusal code, only when reason is 'ceremony_declined'. */
+  ceremonyCode?: CeremonyFailureCode;
 }
 
 export interface UnlockSummary {
@@ -402,11 +422,31 @@ function candidateOrgIds(deps: OnboardingDeps): string[] {
  * root), and a refusal means no door ever will, so the refusal path clears
  * that marker explicitly rather than leaving a permanent, unpayable retry
  * debt for a user who never opted in (gate-2 MAJOR-3).
+ *
+ * CAP-402 EPHEMERAL-ENVIRONMENT ADDENDUM: the ordering decision above is a
+ * deliberate trade FOR A DURABLE DISK — a declined ceremony leaves
+ * local.key/key.enc sitting on the SAME machine that is about to read them
+ * again tomorrow, so "byte-identical to the non-passkey flow" is exactly
+ * right there. `isEphemeralEnvironment()` (CAPY_DEVICE_KEY_GRANT_SOCKET —
+ * see ephemeral.ts) means the opposite is true: this disk will not exist
+ * tomorrow, so the same "leave it byte-identical" behavior would stage M
+ * (via key.enc, inner-keyed by HKDF(K_local)) somewhere that vanishes with
+ * nothing else able to decrypt it — the seed phrase becomes the ONLY way
+ * back in, silently. So in an ephemeral environment the mint→ceremony→
+ * upload sequence is made atomic instead: if the ceremony declines, or the
+ * key.enc upload never lands, everything this call minted is deleted
+ * (`deleteLocalKeyMaterial`) and a coded `EphemeralEnrollmentIncomplete` is
+ * returned — the machine ends the call exactly as it started, never holding
+ * a half-finished mint. The door, if one was already uploaded before the
+ * key.enc upload failed, is best-effort deleted too (inert otherwise, but
+ * tidy). This branch is a straight no-op when `isEphemeralEnvironment()` is
+ * false — the durable-machine path above, and CAP-383's byte-identical-
+ * refusal test, are unchanged.
  */
 export async function runNewUserEnrollment(
   deps: OnboardingDeps,
   args: { orgId: string; masterKey: Buffer },
-): Promise<EnrollmentSummary | CeremonyAborted> {
+): Promise<EnrollmentSummary | CeremonyAborted | EphemeralEnrollmentIncomplete> {
   const orgOps = await deps.opsForOrg(args.orgId);
   if (!orgOps) {
     throw new CapyError(
@@ -416,23 +456,70 @@ export async function runNewUserEnrollment(
     );
   }
 
+  const ephemeral = isEphemeralEnvironment();
+
   // Today's exact persistence path (helper reused wholesale): mints/adopts
   // K_local, writes local.key before key.enc, self-heals mint races. The
   // ops hook marks key.enc.sync-pending so the upload below is owed.
   await wrapAndSaveMasterKey(args.masterKey, args.orgId, deps.userId, orgOps);
   const root = loadOrMintLocalRoot(args.orgId, deps.userId);
 
-  const door = await enrollDoor(deps, root);
+  let door: DoorEnrollment | CeremonyAborted;
+  try {
+    door = await enrollDoor(deps, root);
+  } catch (err) {
+    if (ephemeral) {
+      // The ceremony threw instead of declining gracefully (e.g. a network
+      // failure mid-upload) — same "no half-created org" obligation as a
+      // graceful decline below.
+      clearKeyEncSyncPending(args.orgId, deps.userId);
+      deleteLocalKeyMaterial(args.orgId, deps.userId);
+    }
+    throw err;
+  }
+
   if (!door.ok) {
-    // Refusal costs nothing: clear the marker the pre-ceremony
-    // wrapAndSaveMasterKey hook set, so the tree is byte-identical to
-    // today's non-passkey org creation (gate-2 MAJOR-3) — nothing to retry
-    // for an org that was never enrolled.
+    // Refusal costs nothing on a durable machine: clear the marker the
+    // pre-ceremony wrapAndSaveMasterKey hook set, so the tree is
+    // byte-identical to today's non-passkey org creation (gate-2 MAJOR-3) —
+    // nothing to retry for an org that was never enrolled.
     clearKeyEncSyncPending(args.orgId, deps.userId);
+    if (ephemeral) {
+      deleteLocalKeyMaterial(args.orgId, deps.userId);
+      return {
+        ok: false,
+        code: ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE,
+        reason: 'ceremony_declined',
+        ceremonyCode: door.ceremonyCode,
+      };
+    }
     return door;
   }
 
-  const orgs: OrgOutcome[] = [await syncOrgKeyEnc(deps, args.orgId, root, args.orgId)];
+  let orgOutcome: OrgOutcome;
+  try {
+    orgOutcome = await syncOrgKeyEnc(deps, args.orgId, root, args.orgId);
+  } catch (err) {
+    if (ephemeral) {
+      deleteLocalKeyMaterial(args.orgId, deps.userId);
+      await bestEffortDeleteWrapper(deps, door.wrapperId);
+    }
+    throw err;
+  }
+
+  const landedOnServer = orgOutcome.status === 'uploaded' || orgOutcome.status === 'rekeyed_and_uploaded';
+  if (ephemeral && !landedOnServer) {
+    // The door made it to the server, but this org's key.enc — the other
+    // half of what makes M recoverable off this disk — did not. Roll back
+    // for the same reason as the ceremony-declined branch above.
+    deleteLocalKeyMaterial(args.orgId, deps.userId);
+    await bestEffortDeleteWrapper(deps, door.wrapperId);
+    return {
+      ok: false,
+      code: ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE,
+      reason: 'upload_incomplete',
+    };
+  }
 
   return {
     ok: true,
@@ -441,8 +528,19 @@ export async function runNewUserEnrollment(
     verified: door.verified,
     backupEligible: door.backupEligible,
     backupState: door.backupState,
-    orgs,
+    orgs: [orgOutcome],
   };
+}
+
+/** Best-effort cleanup of an orphaned door on ephemeral rollback — inert if
+ *  it stays (nothing decrypts through it without a matching key.enc), but
+ *  tidy to remove. Never lets a delete failure mask the real outcome. */
+async function bestEffortDeleteWrapper(deps: OnboardingDeps, wrapperId: string): Promise<void> {
+  try {
+    await deps.ops.deleteWrapper(wrapperId);
+  } catch {
+    // Best-effort by contract — see docblock above.
+  }
 }
 
 // --- Case B — existing user, existing machine, first device key --------------

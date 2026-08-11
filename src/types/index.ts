@@ -401,6 +401,36 @@ export const ERROR_CODES = {
   DEVICE_KEY_GRANT_NOT_FOUND: 'DEVICE_KEY_GRANT_NOT_FOUND',
   /** The grant daemon is reachable but its TTL has elapsed; it has discarded the key material. Re-run `capy device-key grant`. */
   DEVICE_KEY_GRANT_EXPIRED: 'DEVICE_KEY_GRANT_EXPIRED',
+  // CAP-402 (client-side only). Two independent gates: one on where a
+  // one-time recovery phrase may be RENDERED, one on whether Case A's
+  // ephemeral-environment mint may be left half-finished on disk.
+  /**
+   * A caller tried to render a one-time recovery phrase (org creation,
+   * local-only setup) with no real TTY to read it from — an agent/piped/CI
+   * invocation, or any other non-interactive run. Printing it there would
+   * hand a master-key-equivalent secret to whatever is capturing stdout.
+   * Refused rather than downgraded; see recoveryPhrase.ts's docblock.
+   */
+  RECOVERY_PHRASE_UNSAFE_SURFACE: 'RECOVERY_PHRASE_UNSAFE_SURFACE',
+  /**
+   * `capy transport`'s non-`--web` path tried to print a redeem code — a
+   * bearer credential wrapping this account's org master key — with no real
+   * TTY to read it from. Same failure class and same fix shape as
+   * RECOVERY_PHRASE_UNSAFE_SURFACE, kept as a separate code because it is a
+   * different artifact (a short-lived wrapped credential, not the seed
+   * phrase) — see transportCommand.ts's own pre-existing SECURITY comment,
+   * which named this exact risk before CAP-402 closed it.
+   */
+  TRANSPORT_CODE_UNSAFE_SURFACE: 'TRANSPORT_CODE_UNSAFE_SURFACE',
+  /**
+   * Case A's mint→ceremony→upload sequence did not complete in an
+   * ephemeral environment (CAPY_DEVICE_KEY_GRANT_SOCKET set — see
+   * ephemeral.ts). Any local.key/key.enc this call minted has already been
+   * deleted (see globalConfig.deleteLocalKeyMaterial) rather than left
+   * stranded on a disk that will not outlive this process — the seed
+   * phrase, if the caller could safely show it, is the only remaining copy.
+   */
+  DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE: 'DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
