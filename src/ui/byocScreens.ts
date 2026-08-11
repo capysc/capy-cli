@@ -235,6 +235,7 @@ export async function connectByocInBrowser(p: WebByocParams): Promise<WebByocRes
   const out = await runBrowserWizard(
     {
       title: 'Connect a self-hosted Capy',
+      flow: 'byoc',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,

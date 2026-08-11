@@ -10,6 +10,7 @@ import {
   resolveInviteTtlMs,
 } from '../crypto/inviteCrypto';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { emitHandoffUrlEvent } from '../ui/handoffEvent';
 import {
   invitePlan,
   unansweredInviteStops,
@@ -561,6 +562,7 @@ export class InviteCommand {
         console.log('  The redeem code is on this page — it is deliberately not printed here:');
         console.log(`  ${page.url}`);
         console.log('');
+        emitHandoffUrlEvent(page.url, 'invite');
         console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
         console.log('');
       } else {

@@ -187,6 +187,7 @@ export async function createBranchInBrowser(p: WebBranchCreateParams): Promise<W
   const out = await runBrowserWizard(
     {
       title: `New branch — ${p.projectName}`,
+      flow: 'branch',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.
@@ -324,6 +325,7 @@ export async function chooseBranchInBrowser(p: WebBranchListParams): Promise<Web
   const out = await runBrowserWizard(
     {
       title: `Branches — ${p.projectName}`,
+      flow: 'branch',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,

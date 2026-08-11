@@ -213,6 +213,7 @@ export async function chooseDeployDestinationInBrowser(
   const out = await runBrowserWizard(
     {
       title: 'Deploy',
+      flow: 'deploy',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -581,6 +582,7 @@ export async function setUpDeployTargetInBrowser(
   const out = await runBrowserWizard(
     {
       title: 'Set up a deploy target',
+      flow: 'deploy',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -864,6 +866,7 @@ export async function confirmDeployInBrowser(
   const out = await runBrowserWizard(
     {
       title: `Review this deploy — ${p.target.name}`,
+      flow: 'deploy',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -995,6 +998,7 @@ export async function chooseDeployTargetInBrowser(
   const out = await runBrowserWizard(
     {
       title: p.purpose === 'pick' ? 'Which target?' : `Deploy targets — ${p.projectName}`,
+      flow: 'deploy',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -1128,6 +1132,7 @@ export async function showDeployTokensInBrowser(
   const out = await runBrowserWizard(
     {
       title: `Deploy tokens — ${p.projectName ?? 'this project'}`,
+      flow: 'deploy',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -1233,6 +1238,7 @@ export async function showScreenInBrowser<K extends ScreenName>(
       onListen: opts.onListen,
       timeoutMs: opts.timeoutMs ?? 120_000,
       lead: opts.note ?? 'Open this in your browser:',
+      flow: 'deploy',
     });
   } catch (err) {
     // A page that cannot be served must not undo a deploy that already

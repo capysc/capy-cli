@@ -4,6 +4,7 @@ import { URL } from 'url';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { openScreen } from '../ui/openScreen';
 import { renderScreen, screenHeaders } from '../ui/screens/serve';
+import { emitHandoffUrlEvent } from '../ui/handoffEvent';
 
 const CALLBACK_PORTS = [19420, 19421, 19422, 19423, 19424];
 
@@ -131,6 +132,7 @@ export class OAuthServer {
       console.log(`  If the browser doesn't open, visit:`);
       console.log(`  ${authUrl}`);
       console.log('');
+      emitHandoffUrlEvent(authUrl, 'login');
 
       // `handoff`, and it is the ONLY handoff in the CLI: sign-in is the one
       // page we do not serve. The person needs the address bar to check where

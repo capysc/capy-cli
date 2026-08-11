@@ -282,6 +282,7 @@ export async function recoverInBrowser(p: WebRecoverParams): Promise<WebRecoverR
   const out = await runBrowserWizard(
     {
       title: 'Recover master key',
+      flow: 'recover',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.
@@ -474,6 +475,7 @@ export async function endRecoverInBrowser(p: WebEndRecoverParams): Promise<WebEn
   const out = await runBrowserWizard(
     {
       title: 'End recovery session',
+      flow: 'end-recover',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -603,6 +605,7 @@ export async function showTransportInBrowser(p: WebTransportParams): Promise<Web
   const out = await runBrowserWizard(
     {
       title: 'Move to another machine',
+      flow: 'transport',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,

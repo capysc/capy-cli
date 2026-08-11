@@ -29,6 +29,7 @@
 // A stricter page would mean two different reports called by one name, and the
 // browser test asserts the shape rather than assuming it.
 import { ScreenServer } from './screens/serve';
+import { emitHandoffUrlEvent } from './handoffEvent';
 import type {
   DiffType,
   ExpiringCredential,
@@ -158,6 +159,7 @@ export async function showSyncStatusInBrowser(p: WebSyncStatusParams): Promise<s
   console.log('  Your status report is in your browser:');
   console.log(`  ${url}`);
   console.log('');
+  emitHandoffUrlEvent(url, 'sync');
   p.onListen?.(url);
   if (p.open ?? true) await openUrl(url, 'sync-status');
   return url;
@@ -207,6 +209,7 @@ export async function showSyncResultInBrowser(p: WebSyncResultParams): Promise<s
   console.log('  What this run did is in your browser:');
   console.log(`  ${url}`);
   console.log('');
+  emitHandoffUrlEvent(url, 'sync');
   p.onListen?.(url);
   if (p.open ?? true) await openUrl(url, 'sync-result');
   return url;

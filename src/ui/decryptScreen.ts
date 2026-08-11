@@ -167,6 +167,7 @@ export async function decryptInBrowser(
     out = await runBrowserWizard(
     {
       title: `Decrypt secrets — ${p.projectName}/${p.branch}`,
+      flow: 'decrypt',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -280,6 +281,7 @@ export async function showDecryptResult(
       onListen: p.onListen,
       timeoutMs: opts.timeoutMs ?? RESULT_PAGE_GRACE_MS,
       lead: 'The result, in your browser:',
+      flow: 'decrypt',
     },
   );
   return url;

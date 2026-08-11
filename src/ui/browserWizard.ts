@@ -42,6 +42,7 @@ import { CapyError, ERROR_CODES } from '../types';
 import { nonceEqual, isLoopbackHost, isAllowedOrigin } from '../commands/intakeSecurity';
 import { DEPLOY_PAGE_CSS } from './deployPage/generatedAssets';
 import { screenHeaders } from './screens/serve';
+import { emitHandoffUrlEvent, type HandoffFlow } from './handoffEvent';
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_BODY = 5_000_000;
@@ -175,6 +176,13 @@ export interface WizardScreen {
 
 export interface WizardParams {
   title: string;
+  /**
+   * CAP-386: which flow this wizard belongs to, stamped onto the
+   * machine-readable event emitted alongside the printed URL (see
+   * `handoffEvent.ts`). Required rather than inferred from `title` — a
+   * human-facing string is exactly what nothing here may be keyed off of.
+   */
+  flow: HandoffFlow;
   firstScreen: WizardScreen;
   open: boolean;
   /** Test-only: receives the loopback URL once listening. Unset in production. */
@@ -666,6 +674,7 @@ export function runBrowserWizard(params: WizardParams, onSubmit: WizardSubmit): 
       console.log(`  Continue in your browser (your inputs never touch this terminal or the AI):`);
       console.log(`  ${url}`);
       console.log('');
+      emitHandoffUrlEvent(url, params.flow);
       if (params.open) {
         // A dialog, never a tab: this is the CLI's own page, served on
         // loopback behind a single-use nonce, with nothing to sign into. The

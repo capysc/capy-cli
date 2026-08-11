@@ -131,6 +131,7 @@ export async function chooseConnectorInBrowser(
   const out = await runBrowserWizard(
     {
       title: `Connect a provider — ${p.projectName}`,
+      flow: 'connect',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.
@@ -376,6 +377,7 @@ export async function askConnectInBrowser(
   const out = await runBrowserWizard(
     {
       title: `Connect ${p.provider} — ${p.projectName}`,
+      flow: 'connect',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -492,6 +494,7 @@ export async function signInInBrowser(
   const out = await runBrowserWizard(
     {
       title: `Sign in to ${p.provider} — ${p.projectName}`,
+      flow: 'connect',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -590,6 +593,7 @@ export async function confirmLiveActionInBrowser(p: WebLiveGateParams): Promise<
   const out = await runBrowserWizard(
     {
       title: `Confirm live mode — ${p.varName}`,
+      flow: 'connect',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -687,6 +691,7 @@ export async function showConnectResultInBrowser(p: WebConnectResultParams): Pro
     ...(p.onListen ? { onListen: p.onListen } : {}),
     ...(p.timeoutMs === undefined ? {} : { timeoutMs: p.timeoutMs }),
     lead: 'What this run did, in your browser:',
+    flow: 'connect',
   });
   return url;
 }
@@ -749,6 +754,7 @@ export async function showConnectBlockedInBrowser(
     ...(p.onListen ? { onListen: p.onListen } : {}),
     ...(p.timeoutMs === undefined ? {} : { timeoutMs: p.timeoutMs }),
     lead: 'Why this run cannot continue, in your browser:',
+    flow: 'connect',
   });
   return url;
 }

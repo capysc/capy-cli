@@ -44,6 +44,7 @@ import { BrokerClient, type BrokerConnection } from '../../service/brokerClient'
 import { keepOrigin } from '../../ui/screens/keepScreens';
 import { openScreen } from '../../ui/openScreen';
 import { isInteractive } from '../../ui/interactive';
+import { emitHandoffUrlEvent, type HandoffFlow } from '../../ui/handoffEvent';
 import type {
   CeremonyFailure,
   CeremonyFailureCode,
@@ -140,11 +141,12 @@ function buildDeviceKeyUrl(connectionId: string, fragment: string, origin: strin
  * business opening on someone else's machine. `openScreen`'s own
  * `CAPY_WEB_NO_OPEN` check remains underneath as the CI/test backstop.
  */
-export function relayUrl(label: string, url: string): void {
+export function relayUrl(label: string, url: string, flow: HandoffFlow): void {
   console.log('');
   console.log(`  ${label}`);
   console.log(`  ${url}`);
   console.log('');
+  emitHandoffUrlEvent(url, flow);
   if (isInteractive()) {
     void openScreen(url, { kind: 'handoff' });
   }
@@ -287,7 +289,7 @@ export class BrokerCeremonyTransport implements CeremonyTransport {
         : ceremony === 'unlock'
           ? 'Unlock with your device key:'
           : 'Grant a temporary device key:';
-    relayUrl(relayLabel, url);
+    relayUrl(relayLabel, url, ceremony);
 
     const ack = await this.broker.awaitAnswer(connection, {
       deadlineMs: this.options.deadlineMs ?? DEVICE_KEY_DEADLINE_MS,

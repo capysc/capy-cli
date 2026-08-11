@@ -114,6 +114,7 @@ export async function displayErrorAndExit(
         // and nothing is pending, so a page nobody collects must not hold a
         // failed command open for two minutes.
         timeoutMs: 60_000,
+        flow: 'error',
       });
     } catch {
       // A failure while reporting a failure is not worth a second failure.

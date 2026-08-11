@@ -157,6 +157,7 @@ export function runWebIntake(
   return runBrowserWizard(
     {
       title: 'Add secrets',
+      flow: 'add',
       firstScreen: { html: '', standalone: true },
       open: params.open,
       onListen: params.onListen,

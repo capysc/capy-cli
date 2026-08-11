@@ -4,6 +4,7 @@ import { OAuthServer } from './oauthServer';
 import { BrokerClient } from '../service/brokerClient';
 import { parseCompletionPayload } from '../service/brokerEnvelope';
 import { keepFlowUrl, keepScreensEnabled, type KeepAuthFlow } from '../ui/screens/keepScreens';
+import { emitHandoffUrlEvent } from '../ui/handoffEvent';
 import { consumeForceLoginMarker } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
@@ -254,6 +255,7 @@ export class AuthService {
     console.log('  Finish in your browser:');
     console.log(`  ${url}`);
     console.log('');
+    emitHandoffUrlEvent(url, 'login');
 
     oauthServer.completeDeferred({ kind: 'redirect', url });
 

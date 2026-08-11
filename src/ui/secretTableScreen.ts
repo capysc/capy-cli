@@ -381,6 +381,7 @@ export async function serveSecretTable(
   const out = await refusalIsCancel(runBrowserWizard(
     {
       title: `Variables — ${p.projectName}/${p.branch}`,
+      flow: 'edit',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.
@@ -467,6 +468,7 @@ export async function serveSecretValueEditor(p: WebSecretValueParams): Promise<S
   const out = await refusalIsCancel(runBrowserWizard(
     {
       title: `${p.row.key} — ${p.projectName}/${p.branch}`,
+      flow: 'edit',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,

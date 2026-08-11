@@ -334,6 +334,7 @@ export class InitWizardSession {
       this.wizard = runBrowserWizard(
         {
           title: 'Set up this directory',
+          flow: 'init',
           // Rendered per-request so the nonce the page echoes is the one this
           // server minted. `standalone` because a compiled screen is a whole
           // document and cannot be dropped into the wizard shell.

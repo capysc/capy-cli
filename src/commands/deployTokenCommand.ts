@@ -17,6 +17,7 @@ import ora from '../ui/spinner';
 import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
 import { formatRelativeTime } from '../ui/relativeTime';
+import { emitHandoffUrlEvent } from '../ui/handoffEvent';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -516,6 +517,7 @@ export class DeployCommand {
           console.log(`\n  Temporary deploy instructions — if the browser doesn't open, visit:`);
           console.log(`  ${url}`);
           console.log('  Press Ctrl+C to close.\n');
+          emitHandoffUrlEvent(url, 'deploy-token');
 
           await openInBrowser(url);
           serverStarted = true;

@@ -357,6 +357,7 @@ export async function askInviteInBrowser(p: WebInviteParams): Promise<WebInviteR
   const out = await runBrowserWizard(
     {
       title: `Invite ${p.email} — ${p.orgName}`,
+      flow: 'invite',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.
@@ -595,6 +596,7 @@ export async function confirmKickInBrowser(p: WebKickParams): Promise<boolean> {
   const out = await runBrowserWizard(
     {
       title: `Remove ${p.member.email} — ${p.orgName}`,
+      flow: 'kick',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,

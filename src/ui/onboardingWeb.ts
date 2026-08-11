@@ -160,6 +160,7 @@ export async function runLocalOnboardingWeb(
   const result = await runBrowserWizard(
     {
       title: 'Set up Capy — local mode',
+      flow: 'byoc',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.
@@ -384,6 +385,7 @@ export async function createOrganizationInBrowser(
   const out = await runBrowserWizard(
     {
       title: 'New organization',
+      flow: 'org',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -519,6 +521,7 @@ export async function unlockPassphraseInBrowser(
   const out = await runBrowserWizard(
     {
       title: 'Local passphrase',
+      flow: 'unlock-passphrase',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,

@@ -23,6 +23,7 @@ import { runBrowserWizard, type WizardScreen } from './browserWizard';
 import { renderScreen } from './screens/serve';
 import { ORG_CREATE_STOP_IDS, orgSwitchPlan } from '../core/onboardingPlan';
 import type { OrgProjectRow, OrgRow, SwitchOrganizationData } from './screens/contract';
+import type { HandoffFlow } from './handoffEvent';
 
 export interface SelectOption {
   id: string;
@@ -37,6 +38,13 @@ export interface SelectWebOptions {
   open?: boolean;
   onListen?: (url: string) => void;
   timeoutMs?: number;
+  /**
+   * CAP-386: which flow this prompt belongs to — see `handoffEvent.ts`.
+   * `selectInBrowser`/`promptTextInBrowser` are generic and currently
+   * unreferenced (see file header); a future caller supplies its own real
+   * flow rather than this module guessing one from a human-facing title.
+   */
+  flow: HandoffFlow;
 }
 
 const esc = (s: string): string =>
@@ -101,12 +109,13 @@ export function selectScreen(intro: string, options: SelectOption[], defaultId?:
  */
 export async function selectInBrowser(
   params: { title: string; intro: string; options: SelectOption[]; defaultId?: string },
-  opts: SelectWebOptions = {},
+  opts: SelectWebOptions,
 ): Promise<string | null> {
   const valid = new Set(params.options.map(o => o.id));
   const result = await runBrowserWizard(
     {
       title: params.title,
+      flow: opts.flow,
       firstScreen: selectScreen(params.intro, params.options, params.defaultId),
       open: opts.open ?? true,
       onListen: opts.onListen,
@@ -148,11 +157,12 @@ export async function promptTextInBrowser(
     /** Sync or async — org-name entry checks availability against the server. */
     validate?: (input: string) => true | string | Promise<true | string>;
   },
-  opts: SelectWebOptions = {},
+  opts: SelectWebOptions,
 ): Promise<string | null> {
   const result = await runBrowserWizard(
     {
       title: params.title,
+      flow: opts.flow,
       firstScreen: textScreen(params.intro, params.label, params.defaultValue),
       open: opts.open ?? true,
       onListen: opts.onListen,
@@ -307,6 +317,7 @@ export async function switchOrganizationInBrowser(
   const out = await runBrowserWizard(
     {
       title: 'Switch organization',
+      flow: 'org',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,
@@ -413,6 +424,7 @@ export async function nameFirstProjectInBrowser(
   const out = await runBrowserWizard(
     {
       title: 'First project',
+      flow: 'org',
       firstScreen: { html: '', standalone: true },
       open: p.open ?? true,
       onListen: p.onListen,

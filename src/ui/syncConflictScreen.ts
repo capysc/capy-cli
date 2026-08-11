@@ -143,6 +143,7 @@ export async function resolveConflictInBrowser(p: WebConflictParams): Promise<We
   const out = await runBrowserWizard(
     {
       title: `Resolve ${p.rows.length} conflict${p.rows.length !== 1 ? 's' : ''} — ${p.projectName}/${p.branch}`,
+      flow: 'sync',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.

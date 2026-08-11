@@ -23,6 +23,7 @@
 // costs that ceiling, and the caller carries on and exits either way.
 import { ScreenServer } from './screens/serve';
 import type { ScreenDataMap, ScreenName } from './screens/contract';
+import { emitHandoffUrlEvent, type HandoffFlow } from './handoffEvent';
 
 export interface EndingPageOptions {
   /** Open the browser automatically (false in tests; the URL is still printed). */
@@ -37,6 +38,8 @@ export interface EndingPageOptions {
   timeoutMs?: number;
   /** The line printed above the URL. Says what is on the page, in one clause. */
   lead: string;
+  /** CAP-386: which flow this ending belongs to — see `handoffEvent.ts`. */
+  flow: HandoffFlow;
 }
 
 /**
@@ -62,6 +65,7 @@ export async function serveEndingPage<K extends ScreenName>(
   console.log(`  ${p.lead}`);
   console.log(`  ${url}`);
   console.log('');
+  emitHandoffUrlEvent(url, p.flow);
 
   if (p.open ?? true) {
     // An ending is a loopback screen like any other, so it gets the same

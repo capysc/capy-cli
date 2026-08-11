@@ -139,6 +139,7 @@ async function serveRotateStep(
   return runBrowserWizard(
     {
       title,
+      flow: 'rotate',
       // Rendered per-request so the nonce the page echoes is the one this
       // server minted. `standalone` because a compiled screen is a whole
       // document and cannot be dropped into the wizard shell.
@@ -320,6 +321,7 @@ export async function showRotateProgressInBrowser(
     ...(p.onListen ? { onListen: p.onListen } : {}),
     ...(p.timeoutMs === undefined ? {} : { timeoutMs: p.timeoutMs }),
     lead: 'What this rotation did, in your browser:',
+    flow: 'rotate',
   });
   return url;
 }
