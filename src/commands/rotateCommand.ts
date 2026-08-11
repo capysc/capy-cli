@@ -22,6 +22,7 @@ import type {
   RotateRunStep,
   RotateRunStop,
 } from '../ui/screens/contract';
+import type { AuthService } from '../auth/authService';
 import { writeSync } from 'fs';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -674,7 +675,7 @@ export class RotateCommand {
       }
     }
 
-    return { succeeded, keys, stopped };
+    return { succeeded, keys, stopped, authService: ctx.authService };
   }
 
   /**
@@ -1002,6 +1003,12 @@ export class RotateCommand {
         targetCount,
       },
       open: shouldOpen(),
+      // `authService` opts this call into the keep-hosted transport when
+      // CAPY_KEEP_SCREENS=1 (W2-B) — surfaced from `rotateMany`'s own
+      // `resolveContext()` call via `RotateRunReport.authService`, not a
+      // second auth construction. Undefined on the two live-mode-firewall
+      // early-return paths, which is an unremarkable "fall back to loopback".
+      authService: report.authService,
     });
   }
 
@@ -1150,4 +1157,13 @@ interface RotateRunReport {
    * before the browser could fetch the page that explains what happened.
    */
   stopped: boolean;
+  /**
+   * Surfaced from `resolveContext()` for `reportRun`'s keep-hosted dispatch
+   * (W2-B) — undefined on the two live-mode-firewall early returns above,
+   * which exit before `resolveContext` runs; `reportRun` degrades to the
+   * loopback path exactly like any other missing `authService`, so this is
+   * never a second auth construction, only surfacing the one `rotateMany`
+   * already made.
+   */
+  authService?: AuthService;
 }

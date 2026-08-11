@@ -334,6 +334,10 @@ export class StatusCommand {
         // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI /
         // headless verification drive the loopback without hijacking one.
         open: !process.env.CAPY_WEB_NO_OPEN,
+        // `authService` opts this call into the keep-hosted transport when
+        // CAPY_KEEP_SCREENS=1 (W2-B) — already-authenticated and already in
+        // scope on this class, same as the silent-auth call a few lines up.
+        authService: this.authService,
       });
       return;
     }

@@ -41,6 +41,9 @@ import type {
   SyncResultData,
   SyncStatusData,
 } from './screens/contract';
+import type { AuthService } from '../auth/authService';
+import { keepScreensEnabled } from './screens/keepScreens';
+import { runKeepInfoScreen } from '../service/keepPayloadRelay';
 
 /** Strip terminal colour codes: the CLI bolds these names on its way to a TTY. */
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -86,6 +89,12 @@ export interface WebSyncStatusParams {
   open?: boolean;
   onListen?: (url: string) => void;
   timeoutMs?: number;
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1, W2-B). Optional
+   * and additive: omitted (or the flag unset) is exactly today's loopback
+   * behavior, byte for byte.
+   */
+  authService?: AuthService;
 }
 
 /**
@@ -151,8 +160,48 @@ export function buildSyncStatusData(p: WebSyncStatusParams): SyncStatusData {
  * listening socket holds the process open by itself, so the CLI hands the URL
  * over and the run ends when the browser has the page (or when the server's
  * own timeout closes it, if nobody comes).
+ *
+ * Dispatches to the keep-hosted transport (W2-B) when `CAPY_KEEP_SCREENS=1`
+ * AND an `authService` was supplied; any keep-path outcome short of `sent`
+ * degrades to the loopback body below unchanged.
  */
 export async function showSyncStatusInBrowser(p: WebSyncStatusParams): Promise<string> {
+  if (p.authService && keepScreensEnabled()) {
+    const url = await runSyncStatusViaKeep(p, p.authService);
+    if (url) return url;
+  }
+  return showSyncStatusInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-B). `sync-status` is a `payload-in` screen:
+ * the report is real, structured data that has to ride the broker reverse
+ * channel, but the page has no submit control at all — it is read and
+ * closed, never answered — so this returns once the request has been sealed
+ * and handed to the broker, exactly the same "served, not read" contract the
+ * loopback body above already has. Returns the URL on success (mirroring the
+ * function's own public contract) or `undefined` to signal "fall back".
+ */
+async function runSyncStatusViaKeep(
+  p: WebSyncStatusParams,
+  authService: AuthService,
+): Promise<string | undefined> {
+  const outcome = await runKeepInfoScreen({
+    screen: 'sync-status',
+    handoffFlow: 'sync',
+    label: 'Your status report is in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload: buildSyncStatusData(p),
+    // A report, not a ceremony — sized like the loopback ending's own
+    // default wait, not `runKeepPayloadScreen`'s 900s human-typing budget.
+    ttlSeconds: 60,
+    deadlineMs: p.timeoutMs ?? 60_000,
+  });
+  return outcome.kind === 'sent' ? outcome.url : undefined;
+}
+
+async function showSyncStatusInBrowserLoopback(p: WebSyncStatusParams): Promise<string> {
   const server = new ScreenServer('sync-status', buildSyncStatusData(p), { timeoutMs: p.timeoutMs });
   const url = await server.start();
   console.log('');
@@ -184,6 +233,9 @@ export interface WebSyncResultParams {
   open?: boolean;
   onListen?: (url: string) => void;
   timeoutMs?: number;
+  /** Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1, W2-B). See
+   *  `WebSyncStatusParams.authService`. */
+  authService?: AuthService;
 }
 
 export function buildSyncResultData(p: WebSyncResultParams): SyncResultData {
@@ -201,8 +253,38 @@ export function buildSyncResultData(p: WebSyncResultParams): SyncResultData {
   };
 }
 
-/** Serve the end-of-run report. Same one-shot posture as the status page. */
+/**
+ * Serve the end-of-run report. Same one-shot posture as the status page, and
+ * the same keep-hosted dispatch (W2-B) when `authService` + the flag opt in.
+ */
 export async function showSyncResultInBrowser(p: WebSyncResultParams): Promise<string> {
+  if (p.authService && keepScreensEnabled()) {
+    const url = await runSyncResultViaKeep(p, p.authService);
+    if (url) return url;
+  }
+  return showSyncResultInBrowserLoopback(p);
+}
+
+/** The keep-hosted transport (W2-B). See `runSyncStatusViaKeep`'s comment —
+ *  same `payload-in` shape, same "served, not read" contract. */
+async function runSyncResultViaKeep(
+  p: WebSyncResultParams,
+  authService: AuthService,
+): Promise<string | undefined> {
+  const outcome = await runKeepInfoScreen({
+    screen: 'sync-result',
+    handoffFlow: 'sync',
+    label: 'What this run did is in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload: buildSyncResultData(p),
+    ttlSeconds: 60,
+    deadlineMs: p.timeoutMs ?? 60_000,
+  });
+  return outcome.kind === 'sent' ? outcome.url : undefined;
+}
+
+async function showSyncResultInBrowserLoopback(p: WebSyncResultParams): Promise<string> {
   const server = new ScreenServer('sync-result', buildSyncResultData(p), { timeoutMs: p.timeoutMs });
   const url = await server.start();
   console.log('');

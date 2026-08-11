@@ -29,6 +29,9 @@ import { runBrowserWizard } from './browserWizard';
 import { renderScreen } from './screens/serve';
 import { serveEndingPage } from './endingPage';
 import { stripAnsi } from './connectScreens';
+import type { AuthService } from '../auth/authService';
+import { keepScreensEnabled } from './screens/keepScreens';
+import { runKeepInfoScreen } from '../service/keepPayloadRelay';
 import type {
   RotateAdvisory,
   RotateCandidate,
@@ -266,6 +269,10 @@ export interface WebRotateProgressParams extends ServeOptions {
   keys: RotateKeyResult[];
   deploy?: RotateDeployResult;
   pairing?: RotatePairing;
+  /** Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1, W2-B). Optional
+   *  and additive: omitted (or the flag unset) is exactly today's loopback
+   *  behavior, byte for byte. */
+  authService?: AuthService;
 }
 
 export function buildRotateProgressData(p: WebRotateProgressParams): RotateProgressData {
@@ -314,6 +321,35 @@ export function buildRotateProgressData(p: WebRotateProgressParams): RotateProgr
  * about. The wait is bounded by `timeoutMs`.
  */
 export async function showRotateProgressInBrowser(
+  p: WebRotateProgressParams,
+): Promise<string> {
+  if (p.authService && keepScreensEnabled()) {
+    const url = await runRotateProgressViaKeep(p, p.authService);
+    if (url) return url;
+  }
+  return showRotateProgressInBrowserLoopback(p);
+}
+
+/** The keep-hosted transport (W2-B) — `payload-in`: see `syncScreens.ts`'s
+ *  `runSyncStatusViaKeep` for the shared shape. */
+async function runRotateProgressViaKeep(
+  p: WebRotateProgressParams,
+  authService: AuthService,
+): Promise<string | undefined> {
+  const outcome = await runKeepInfoScreen({
+    screen: 'rotate-progress',
+    handoffFlow: 'rotate',
+    label: 'What this rotation did, in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload: buildRotateProgressData(p),
+    ttlSeconds: 60,
+    deadlineMs: p.timeoutMs ?? 60_000,
+  });
+  return outcome.kind === 'sent' ? outcome.url : undefined;
+}
+
+async function showRotateProgressInBrowserLoopback(
   p: WebRotateProgressParams,
 ): Promise<string> {
   const { url } = await serveEndingPage('rotate-progress', buildRotateProgressData(p), {

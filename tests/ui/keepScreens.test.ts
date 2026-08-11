@@ -22,16 +22,27 @@ describe('KEEP_SCREENS registry', () => {
       { name: 'auth-success', kind: 'no-submit' },
       { name: 'auth-error', kind: 'no-submit' },
       { name: 'secret-intake', kind: 'payload-both' },
+      // W2-B: the seven no-submit "ending" screens — real CLI->page payload,
+      // no answer at all (see `keepPayloadRelay.ts`'s `runKeepInfoScreen`).
+      { name: 'command-error', kind: 'payload-in' },
+      { name: 'connect-result', kind: 'payload-in' },
+      { name: 'deploy-run-result', kind: 'payload-in' },
+      { name: 'rotate-progress', kind: 'payload-in' },
+      { name: 'session-info', kind: 'payload-in' },
+      { name: 'sync-result', kind: 'payload-in' },
+      { name: 'sync-status', kind: 'payload-in' },
     ]);
   });
 
   test('isKeepScreen / keepScreenKind agree with the registry', () => {
     expect(isKeepScreen('auth-success')).toBe(true);
     expect(isKeepScreen('secret-intake')).toBe(true);
+    expect(isKeepScreen('sync-status')).toBe(true);
     expect(isKeepScreen('branch-create')).toBe(false);
 
     expect(keepScreenKind('auth-error')).toBe('no-submit');
     expect(keepScreenKind('secret-intake')).toBe('payload-both');
+    expect(keepScreenKind('sync-status')).toBe('payload-in');
     expect(keepScreenKind('branch-create')).toBeUndefined();
   });
 });
@@ -40,6 +51,9 @@ describe('keepFlowUrl', () => {
   test('builds the documented route for any registered screen, not just auth-success/auth-error', () => {
     expect(keepFlowUrl('secret-intake', 'conn-1')).toBe(
       'https://keep.capy.sc/flow/secret-intake?c=conn-1',
+    );
+    expect(keepFlowUrl('sync-status', 'conn-1')).toBe(
+      'https://keep.capy.sc/flow/sync-status?c=conn-1',
     );
   });
 
