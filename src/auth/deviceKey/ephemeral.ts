@@ -40,13 +40,41 @@ export function configuredGrantSocketPath(): string | null {
 }
 
 /**
- * The yes/no reading of the signal above, for callers that only need to
- * branch on "ephemeral or not" (CAP-402's atomic-mint gate in
- * onboarding.ts is the first of these) rather than the socket path itself.
- * Deliberately NOT liveness-checked (`isGrantActive`) — this is asked
- * before any grant exists to check the liveness OF, at the point Case A
+ * An orchestrator's DIRECT declaration that this environment is disposable,
+ * independent of whether a grant exists yet.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM THE GRANT SOCKET: the socket only appears
+ * AFTER `capy device-key grant` succeeds, and a grant can only succeed for a
+ * user who already has an enrolled door to unlock. A brand-new user (Case A)
+ * in a sandbox has no door yet — so at the exact moment Case A decides
+ * whether it may leave freshly-minted key material on an ephemeral disk,
+ * the socket is necessarily absent. Keying the atomic-mint gate on the
+ * socket alone therefore misses the one case it was written to protect:
+ * mint in a container, container dies, K_local is gone, and the uploaded
+ * `key.enc` (inner layer keyed by HKDF(K_local)) is undecryptable forever.
+ *
+ * So an orchestrator that knows its box is disposable says so up front.
+ * This stays true to the module's stance — intent, declared by whoever
+ * knows, never a guess about the host.
+ */
+export const EPHEMERAL_ENV_VAR = 'CAPY_EPHEMERAL';
+
+function declaredEphemeral(): boolean {
+  return process.env[EPHEMERAL_ENV_VAR] === '1';
+}
+
+/**
+ * The yes/no reading for callers that only need to branch on "ephemeral or
+ * not" (CAP-402's atomic-mint gate in onboarding.ts is the first of these)
+ * rather than the socket path itself. True when EITHER signal is present: a
+ * live grant socket (a grant is already preferred here) or an orchestrator's
+ * up-front declaration (which is the only signal available before a grant
+ * can exist).
+ *
+ * Deliberately NOT liveness-checked (`isGrantActive`) — this is asked before
+ * there is any grant whose liveness could be checked, at the point Case A
  * decides whether it may leave newly-minted key material on disk at all.
  */
 export function isEphemeralEnvironment(): boolean {
-  return configuredGrantSocketPath() !== null;
+  return configuredGrantSocketPath() !== null || declaredEphemeral();
 }
