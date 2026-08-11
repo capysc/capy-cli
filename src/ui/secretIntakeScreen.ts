@@ -14,10 +14,21 @@
 // into a page the CLI serves on loopback and encrypted in-process — they never
 // pass back through the terminal or the model. This transport prints and logs
 // nothing but variable NAMES.
+//
+// W2-A: under CAPY_KEEP_SCREENS=1, this same promise is kept over the
+// connection broker instead of loopback — the page is hosted at
+// keep.capy.sc, the request payload (this same SecretIntakeData, minus the
+// loopback-only nonce) is sealed to the page's key, and the entered values
+// come back sealed to this connection's key. Either transport, the values
+// are handled in-process and never printed, logged or returned as plain
+// data — see `runWebIntakeViaKeep` below and its own comment.
 import { runBrowserWizard, BrowserRefusal } from './browserWizard';
 import { renderScreen } from './screens/serve';
 import { VENDOR_LOGOS } from './vendorLogos';
 import type { IntakeVar, SecretIntakeData } from './screens/contract';
+import type { AuthService } from '../auth/authService';
+import { keepScreensEnabled } from './screens/keepScreens';
+import { runKeepPayloadScreen } from '../service/keepPayloadRelay';
 
 /** The CLI's variable-name rule, shared with `addCommand`. */
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -84,6 +95,13 @@ export interface WebIntakeParams {
   /** Test hook: receives the loopback URL once listening. */
   onListen?: (url: string) => void;
   timeoutMs?: number;
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte — see `authServiceKeepScreens.test.ts`'s sibling
+   * pin in `secretIntakeScreen.test.ts` for the enforced guarantee.
+   */
+  authService?: AuthService;
 }
 
 export interface SecretPair {
@@ -139,10 +157,11 @@ export function parseVars(input: unknown): SecretPair[] | null {
 /**
  * Open the intake form and run `onSubmit` with the pairs the user entered.
  *
- * The save runs INSIDE the request, so the browser learns whether it really
- * succeeded: a throw becomes a 500 with the reason and the form stays live and
- * retryable, exactly as the hand-written page behaved. Values are handled
- * in-process — never printed, logged, or returned.
+ * Dispatches to the keep-hosted transport when `CAPY_KEEP_SCREENS=1` AND an
+ * `authService` was supplied; otherwise (and on any keep-path failure) this
+ * is exactly today's loopback flow, byte for byte — the flag-off case never
+ * even imports/touches the keep machinery's request path beyond the two
+ * cheap checks below, matching the fork CAP-376 established.
  *
  * Resolves whether or not anything was entered: `onSubmit` having run is the
  * only signal that it was, and the caller has to check it. The form is the
@@ -150,7 +169,85 @@ export function parseVars(input: unknown): SecretPair[] | null {
  * which is exactly what refusing the terminal's confirm meant, and it must not
  * come back as a save of nothing.
  */
-export function runWebIntake(
+export async function runWebIntake(
+  params: WebIntakeParams,
+  onSubmit: (pairs: SecretPair[]) => Promise<void>,
+): Promise<void> {
+  if (params.authService && keepScreensEnabled()) {
+    const handled = await runWebIntakeViaKeep(params, params.authService, onSubmit);
+    if (handled) return;
+    // Any keep-path outcome short of a validated answer degrades to the
+    // loopback form below — broker unavailable, the page never attached, no
+    // answer in time, or an answer that failed typed validation. Matches
+    // CAP-376's own "any broker failure degrades to the loopback screen"
+    // posture (invariant 8 coexistence). Known gap: a user who opens the
+    // keep page and deliberately closes it without saving lands here too,
+    // and sees a second (loopback) form rather than a clean "nothing was
+    // added" — there is no page->CLI "I declined" signal today, only
+    // "answered" or "never answered". Flagged rather than silently accepted.
+  }
+  return runWebIntakeLoopback(params, onSubmit);
+}
+
+/**
+ * The keep-hosted transport (W2-A). Seals this same `SecretIntakeData` the
+ * loopback path would have served (minus the loopback-only `nonce`, which
+ * has no meaning once the broker's connection identity + encryption are
+ * doing the job a CSRF-style token did) to the page's key over the broker
+ * reverse channel, then waits for the page to seal the entered `{name,
+ * value}[]` pairs back. `onSubmit` runs in-process on the plaintext exactly
+ * once, on the same contract the loopback path has always had: the values
+ * are never printed, logged, or returned by this function — only whether
+ * they were saved (via `onSubmit` having run) is observable to the caller.
+ *
+ * Returns `true` iff a validated answer arrived and `onSubmit` ran —
+ * anything else (including a thrown `onSubmit`, which propagates) is the
+ * caller's cue to fall back to the loopback form.
+ */
+async function runWebIntakeViaKeep(
+  params: WebIntakeParams,
+  authService: AuthService,
+  onSubmit: (pairs: SecretPair[]) => Promise<void>,
+): Promise<boolean> {
+  // '' — nonce is a loopback-only CSRF-style token; the keep transport's
+  // security boundary is the broker connection's identity + E2E encryption
+  // instead. Kept in the payload only because SecretIntakeData's shape is
+  // otherwise byte-identical to the kit's (and the loopback contract's).
+  const requestPayload = buildSecretIntakeData(params, '');
+
+  const outcome = await runKeepPayloadScreen<SecretPair[]>({
+    screen: 'secret-intake',
+    handoffFlow: 'add',
+    label: 'Add secrets in your browser (your inputs never touch this terminal or the AI):',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    // A ceremony a human deliberates and types into, not a no-submit ack —
+    // see brokerClient.ts's DEFAULT_TTL_SECONDS guidance. Independent
+    // budgets: up to 15 minutes to open the link, then up to another 15 to
+    // finish and submit the form.
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const { v, vars } = parsed as Record<string, unknown>;
+      if (v !== 1) return null;
+      return parseVars(vars);
+    },
+  });
+
+  if (outcome.kind !== 'answered') return false;
+  await onSubmit(outcome.answer);
+  return true;
+}
+
+async function runWebIntakeLoopback(
   params: WebIntakeParams,
   onSubmit: (pairs: SecretPair[]) => Promise<void>,
 ): Promise<void> {

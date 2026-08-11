@@ -496,6 +496,18 @@ export class AuthService {
     return this.currentOrgId;
   }
 
+  /**
+   * Base service URL this instance talks to. Exposed for a caller that
+   * needs to build its own transport against the same backend without
+   * duplicating URL resolution — e.g. a `payload-both` keep screen's
+   * `BrokerClient` (see `src/service/keepPayloadRelay.ts`), the same way
+   * `relayAuthScreenViaKeep` below already uses `this.serviceApiUrl`
+   * in-process.
+   */
+  getServiceApiUrl(): string {
+    return this.serviceApiUrl;
+  }
+
   async checkOrgName(name: string): Promise<{ available: boolean; reason?: string }> {
     return postJson<{ available: boolean; reason?: string }>(
       `${this.serviceApiUrl}/auth/check-org-name`,

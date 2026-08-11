@@ -102,7 +102,15 @@ export class AddCommand {
       await runWebIntake(
         // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
         // headless runs drive the loopback without hijacking a real browser.
-        { vars, reason, open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN },
+        // `authService` opts this call into the keep-hosted transport when
+        // CAPY_KEEP_SCREENS=1 (W2-A) — omitted, this is unreachable and the
+        // flow is the loopback-only path unchanged.
+        {
+          vars,
+          reason,
+          open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN,
+          authService: ctx.authService,
+        },
         async (pairs) => {
           await writeMany(pairs);
           captured = pairs.map((p) => p.name);
