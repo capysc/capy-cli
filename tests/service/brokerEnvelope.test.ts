@@ -7,6 +7,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   ENVELOPE_HKDF_INFO_PREFIX,
+  envelopeHkdfInfo,
   mintConnectionKeypair,
   openEnvelope,
   parseCompletionPayload,
@@ -25,6 +26,19 @@ const CONNECTION_ID = '4f9c02e2-92cf-4a6b-8f3e-27cf6f6f2f10';
 // silently on keep-app's.
 test('the HKDF info prefix is pinned to the literal keep-app hardcodes independently (interop tripwire)', () => {
   expect(ENVELOPE_HKDF_INFO_PREFIX).toBe('capy-broker-envelope-v1');
+});
+
+// The DIRECTION TAG is the other half of the same tripwire. The broker now
+// carries two channels over one connection — page->CLI answers and CLI->page
+// requests — sharing the envelope shape and both public keys. The `ans`
+// segment is what keeps their derived keys disjoint, so an envelope from one
+// direction cannot be replayed into the other. keep-app and capy-mcp pin this
+// exact string independently; if any repo drops or renames the tag, real
+// interop breaks while each repo's self-consistent tests stay green.
+test('the answer info string carries the `ans` direction tag (interop tripwire)', () => {
+  expect(envelopeHkdfInfo('conn-1', 'CLIENTPUB', 'EPK')).toBe(
+    'capy-broker-envelope-v1|ans|conn-1|CLIENTPUB|EPK',
+  );
 });
 
 describe('mintConnectionKeypair', () => {

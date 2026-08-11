@@ -74,13 +74,29 @@ export function mintConnectionKeypair(): ConnectionKeypair {
   return { publicKeyB64: raw.toString('base64'), privateKey };
 }
 
-/** The HKDF info string. One producer, imported by tests on both sides. */
+/**
+ * The HKDF info string. One producer, imported by tests on both sides.
+ *
+ * The `ans` segment is a DIRECTION TAG. The broker gained a reverse channel
+ * (CLI→page sealed requests) alongside this original page→CLI answer channel,
+ * and both ride the same envelope shape over the same connection with the same
+ * two public keys. Without a direction tag an envelope captured in one
+ * direction would derive an identical key in the other, so a request could be
+ * replayed as an answer. Tagging the info string makes the two derivations
+ * disjoint by construction. Requests use `req`; this producer only ever seals
+ * and opens answers.
+ *
+ * MIGRATION: keep-app and capy-mcp carry byte-identical producers and moved to
+ * the tagged form in the same change as this one — all three must agree or
+ * envelopes stop opening. Each repo pins the literal in its own interop test as
+ * a cross-repo tripwire.
+ */
 export function envelopeHkdfInfo(
   connectionId: string,
   clientPubkeyB64: string,
   epkB64: string,
 ): string {
-  return `${ENVELOPE_HKDF_INFO_PREFIX}|${connectionId}|${clientPubkeyB64}|${epkB64}`;
+  return `${ENVELOPE_HKDF_INFO_PREFIX}|ans|${connectionId}|${clientPubkeyB64}|${epkB64}`;
 }
 
 /** Why an envelope could not be opened. Codes, never sentences. */
