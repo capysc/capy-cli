@@ -210,6 +210,9 @@ export class ConnectCommand {
             pushFromFlag: opts.noPush === true,
             accountFromFlag: Boolean(opts.account),
             varFromFlag: Boolean(opts.var),
+            // Opts this call into the keep-hosted transport when
+            // CAPY_KEEP_SCREENS=1 (W2-D) — omitted, unreachable, loopback-only.
+            authService: ctx.authService,
             stops: connectPlan({
               provider,
               branch: ctx.branch,

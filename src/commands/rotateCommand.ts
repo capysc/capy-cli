@@ -580,6 +580,9 @@ export class RotateCommand {
                   pushFromFlag: opts.noPush === true,
                 }),
                 open: shouldOpen(),
+                // Opts this call into the keep-hosted transport when
+                // CAPY_KEEP_SCREENS=1 (W2-D) — omitted, unreachable, loopback-only.
+                authService: ctx.authService,
               })
             : await confirmLiveAction({
                 action: 'rotate',

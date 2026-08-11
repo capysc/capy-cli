@@ -31,6 +31,9 @@ import { runBrowserWizard } from './browserWizard';
 import { renderScreen } from './screens/serve';
 import { serveEndingPage } from './endingPage';
 import { connectPlan, type ConnectPlanInput } from '../commands/connectors/plans';
+import type { AuthService } from '../auth/authService';
+import { keepScreensEnabled } from './screens/keepScreens';
+import { runKeepPayloadScreen } from '../service/keepPayloadRelay';
 import type {
   Blocked,
   ConnectAuthState,
@@ -533,6 +536,13 @@ export interface WebLiveGateParams extends ServeOptions {
   branch: string;
   varName: string;
   /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte — see `secretIntakeScreen.ts`'s `WebIntakeParams`
+   * for the precedent this mirrors (W2-D).
+   */
+  authService?: AuthService;
+  /**
    * The string the user must type back. Null when the provider's config
    * section carried no account id — the terminal's fallback there is to ask
    * for the literal `(unknown)`, which satisfies the prompt and proves
@@ -588,8 +598,82 @@ export function buildLiveGateData(p: WebLiveGateParams, nonce: string): ConnectL
  * The comparison is made HERE, against the account id the CLI resolved, and
  * never in the page: a gate whose verdict is computed by the thing being gated
  * is not a gate.
+ *
+ * Dispatches to the keep-hosted transport (W2-D) when `CAPY_KEEP_SCREENS=1`
+ * AND an `authService` was supplied; any keep-path outcome short of a
+ * validated answer falls back to today's loopback flow, byte for byte —
+ * mirrors `runWebIntake`'s dispatcher in `secretIntakeScreen.ts`. One real
+ * UX difference from the loopback path, worth stating rather than silently
+ * accepting: the "typed != accountId" comparison the doc comment above
+ * insists stays server-side can no longer be inline-and-retry over the
+ * broker's single-request/single-answer channel — a wrong confirmation on
+ * the keep path is indistinguishable from any other decline and surfaces as
+ * a SECOND (loopback) form, not an inline error on the same page.
  */
 export async function confirmLiveActionInBrowser(p: WebLiveGateParams): Promise<boolean> {
+  if (p.authService && keepScreensEnabled()) {
+    const handled = await confirmLiveActionViaKeep(p, p.authService);
+    if (handled.kind === 'handled') return handled.result;
+    // Falls through to the loopback form below — broker unavailable, the
+    // page never attached, no answer in time, an explicit cancel, or an
+    // answer that failed typed validation (including a wrong confirmation).
+  }
+  return confirmLiveActionLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-D). Seals this same `ConnectLiveGateData`
+ * the loopback path would have served (minus the loopback-only `nonce`) to
+ * the page's key over the broker reverse channel, then waits for the page to
+ * seal its answer back. The account-id comparison stays CLI-side, inside
+ * `validateAnswer` — the page never learns whether it matched beyond
+ * whatever it already had from the request payload — so a gate whose
+ * verdict is computed by the thing being gated stays true on this transport
+ * too, just resolved after the round trip instead of during it.
+ */
+async function confirmLiveActionViaKeep(
+  p: WebLiveGateParams,
+  authService: AuthService,
+): Promise<{ kind: 'handled'; result: boolean } | { kind: 'fall-through' }> {
+  const requestPayload = buildLiveGateData(p, '');
+
+  const outcome = await runKeepPayloadScreen<boolean>({
+    screen: 'connect-live-gate',
+    handoffFlow: 'connect',
+    label: `Confirm live mode for ${p.varName} in your browser:`,
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    // A ceremony a human deliberates and types into, not a no-submit ack —
+    // see brokerClient.ts's DEFAULT_TTL_SECONDS guidance.
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const rec = parsed as Record<string, unknown>;
+      if (rec.v !== 1) return null;
+      if (rec.__action === 'cancel') return null;
+      if (rec.__action !== 'submit') return null;
+      if (p.accountId === null) return null;
+      const typed = typeof rec.confirmed === 'string' ? rec.confirmed.trim() : '';
+      // A mismatch is folded into `declined` (null), same as every other
+      // unfinished ceremony — see the dispatcher's doc comment above for why
+      // this can no longer be an inline, same-page retry.
+      return typed === p.accountId ? true : null;
+    },
+  });
+
+  if (outcome.kind !== 'answered') return { kind: 'fall-through' };
+  return { kind: 'handled', result: outcome.answer };
+}
+
+async function confirmLiveActionLoopback(p: WebLiveGateParams): Promise<boolean> {
   const out = await runBrowserWizard(
     {
       title: `Confirm live mode — ${p.varName}`,
