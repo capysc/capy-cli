@@ -22,6 +22,14 @@ describe('KEEP_SCREENS registry', () => {
       { name: 'auth-success', kind: 'no-submit' },
       { name: 'auth-error', kind: 'no-submit' },
       { name: 'secret-intake', kind: 'payload-both' },
+      { name: 'branch-list', kind: 'payload-both' },
+      { name: 'connect-overwrite', kind: 'payload-both' },
+      { name: 'connect-provider', kind: 'payload-both' },
+      { name: 'connect-setup', kind: 'payload-both' },
+      { name: 'deploy-destination', kind: 'payload-both' },
+      { name: 'deploy-plan-confirm', kind: 'payload-both' },
+      { name: 'deploy-targets', kind: 'payload-both' },
+      { name: 'deploy-tokens', kind: 'payload-both' },
     ]);
   });
 

@@ -33,6 +33,9 @@ import type {
   BranchRow,
 } from './screens/contract';
 import type { Branch } from '../types/index';
+import type { AuthService } from '../auth/authService';
+import { keepScreensEnabled } from './screens/keepScreens';
+import { runKeepPayloadScreen } from '../service/keepPayloadRelay';
 
 /**
  * Strip terminal colour codes on the way into a payload.
@@ -268,6 +271,13 @@ export interface WebBranchListParams {
   timeoutMs?: number;
   /** Test hook only: fixes `now` so the age column is deterministic. */
   now?: Date;
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte — mirrors `secretIntakeScreen.ts`'s
+   * `WebIntakeParams.authService`.
+   */
+  authService?: AuthService;
 }
 
 /** What the browser picked. `cancelled` means the run must not switch. */
@@ -317,11 +327,81 @@ export function buildBranchListData(p: WebBranchListParams, nonce: string): Bran
 /**
  * Serve the branch list and wait for a row.
  *
- * The submitted name is resolved against the list the server sent, not
- * trusted: `switch` is followed by a real checkout of whatever comes back, and
- * a name the screen could not have offered did not come from the screen.
+ * Dispatches to the keep-hosted transport when `CAPY_KEEP_SCREENS=1` AND an
+ * `authService` was supplied; otherwise (and on any keep-path failure) this
+ * is exactly today's loopback flow, byte for byte — mirrors
+ * `secretIntakeScreen.ts`'s `runWebIntake` dispatcher.
  */
 export async function chooseBranchInBrowser(p: WebBranchListParams): Promise<WebBranchListResult> {
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await chooseBranchInBrowserViaKeep(p, p.authService);
+    if (viaKeep) return viaKeep;
+    // Any keep-path outcome short of a validated answer degrades to the
+    // loopback picker below — broker unavailable, the page never attached,
+    // no answer in time, or an answer that failed typed validation. Matches
+    // CAP-376's own "any broker failure degrades to the loopback screen"
+    // posture (invariant 8 coexistence).
+  }
+  return chooseBranchInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-C). Seals this same `BranchListData` the
+ * loopback path would have served (minus the loopback-only `nonce`) to the
+ * page's key over the broker reverse channel, then waits for the page to
+ * seal a `{__action, branch}` answer back. Resolved the same way the
+ * loopback reducer resolves one — against the list THIS run offered, never
+ * trusted blind — so a name the screen could not have shown does not
+ * short-circuit into a real checkout.
+ *
+ * Returns `null` (never throws) on anything short of a validated switch —
+ * the caller's cue to fall back to the loopback picker, same contract as
+ * `runWebIntakeViaKeep`'s boolean return.
+ */
+async function chooseBranchInBrowserViaKeep(
+  p: WebBranchListParams,
+  authService: AuthService,
+): Promise<WebBranchListResult | null> {
+  const requestPayload = buildBranchListData(p, '');
+
+  const outcome = await runKeepPayloadScreen<WebBranchListResult>({
+    screen: 'branch-list',
+    handoffFlow: 'branch',
+    label: 'Pick a branch in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const { __action, branch } = parsed as Record<string, unknown>;
+      // `delete` is refused here exactly as the loopback reducer refuses it
+      // (checkout never sets `canDelete`); anything but a real `switch` is
+      // treated as a malformed/declined answer, same as the loopback path's
+      // inline `{ error }` — except there is no page left to show it to, so
+      // it folds into `declined` and the caller falls back to loopback.
+      if (__action !== 'switch') return null;
+      const name = typeof branch === 'string' ? branch : '';
+      const row = p.branches.find((b) => b.name === name);
+      if (!row || row.name === p.activeBranch) return null;
+      return { branch: row.name, cancelled: false };
+    },
+  });
+
+  if (outcome.kind !== 'answered') return null;
+  return outcome.answer;
+}
+
+async function chooseBranchInBrowserLoopback(
+  p: WebBranchListParams,
+): Promise<WebBranchListResult> {
   const out = await runBrowserWizard(
     {
       title: `Branches — ${p.projectName}`,

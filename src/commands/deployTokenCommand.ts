@@ -359,6 +359,7 @@ export class DeployCommand {
               }
             : undefined,
           open: !process.env.CAPY_WEB_NO_OPEN,
+          authService,
         });
         if (picked.cancelled) {
           console.log('Cancelled.');
@@ -695,6 +696,7 @@ export class DeployRevokeCommand {
           view: 'confirm-revoke',
           subjectToken: subject.deployId,
           open: !process.env.CAPY_WEB_NO_OPEN,
+          authService,
         });
         // A decline, a closed window and an unanswered page are one outcome and
         // it is not a failure: the token is still active, which is what the
@@ -768,6 +770,7 @@ export class DeployListCommand {
           projectName: projectState.projectName ?? null,
           tokens: tokenRows(tokens),
           open: !process.env.CAPY_WEB_NO_OPEN,
+          authService,
         });
         if (picked.deployId) {
           await serviceClient.revokeDeployToken(picked.deployId);

@@ -70,6 +70,14 @@ export const KEEP_SCREENS: readonly KeepScreenDefinition[] = [
   { name: 'auth-error', kind: 'no-submit' },
   { name: 'secret-intake', kind: 'payload-both' },
   // <<< keep-migrated screens: append below >>>
+  { name: 'branch-list', kind: 'payload-both' },
+  { name: 'connect-overwrite', kind: 'payload-both' },
+  { name: 'connect-provider', kind: 'payload-both' },
+  { name: 'connect-setup', kind: 'payload-both' },
+  { name: 'deploy-destination', kind: 'payload-both' },
+  { name: 'deploy-plan-confirm', kind: 'payload-both' },
+  { name: 'deploy-targets', kind: 'payload-both' },
+  { name: 'deploy-tokens', kind: 'payload-both' },
 ];
 
 export function isKeepScreen(name: string): boolean {
