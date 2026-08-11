@@ -33,6 +33,14 @@ describe('KEEP_SCREENS registry', () => {
       { name: 'session-info', kind: 'payload-in' },
       { name: 'sync-result', kind: 'payload-in' },
       { name: 'sync-status', kind: 'payload-in' },
+      { name: 'branch-list', kind: 'payload-both' },
+      { name: 'connect-overwrite', kind: 'payload-both' },
+      { name: 'connect-provider', kind: 'payload-both' },
+      { name: 'connect-setup', kind: 'payload-both' },
+      { name: 'deploy-destination', kind: 'payload-both' },
+      { name: 'deploy-plan-confirm', kind: 'payload-both' },
+      { name: 'deploy-targets', kind: 'payload-both' },
+      { name: 'deploy-tokens', kind: 'payload-both' },
     ]);
   });
 

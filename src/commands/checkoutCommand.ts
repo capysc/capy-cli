@@ -487,6 +487,7 @@ export class CheckoutCommand {
       variableCounts: countVariablesPerBranch(this.projectManager.readKeepFile()),
       canDelete: false,
       open: !process.env.CAPY_WEB_NO_OPEN,
+      authService: this.authService,
     });
     return picked.cancelled ? null : picked.branch;
   }

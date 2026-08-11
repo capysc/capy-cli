@@ -88,6 +88,13 @@ export interface WebConnectProviderParams extends ServeOptions {
   connectors: ConnectorChoice[];
   /** What the caller typed that matched nothing, so the mistake and the menu arrive together. */
   unknownProvider?: string;
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte — mirrors `secretIntakeScreen.ts`'s
+   * `WebIntakeParams.authService`.
+   */
+  authService?: AuthService;
 }
 
 /** What the browser picked. `cancelled` means no connector may be run. */
@@ -129,6 +136,59 @@ export function buildConnectProviderData(
  * could not have shown did not come from the screen.
  */
 export async function chooseConnectorInBrowser(
+  p: WebConnectProviderParams,
+): Promise<WebConnectProviderResult> {
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await chooseConnectorInBrowserViaKeep(p, p.authService);
+    if (viaKeep) return viaKeep;
+  }
+  return chooseConnectorInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-C). Seals this same `ConnectProviderData` the
+ * loopback path would have served (minus the loopback-only `nonce`) to the
+ * page's key over the broker reverse channel, then waits for the page to
+ * seal a `{provider}` answer back (`Wizard`'s generic `{__action:'submit',
+ * ...answer()}` shape). Resolved against the list THIS run offered, never
+ * trusted blind, same as the loopback reducer.
+ */
+async function chooseConnectorInBrowserViaKeep(
+  p: WebConnectProviderParams,
+  authService: AuthService,
+): Promise<WebConnectProviderResult | null> {
+  const requestPayload = buildConnectProviderData(p, '');
+
+  const outcome = await runKeepPayloadScreen<WebConnectProviderResult>({
+    screen: 'connect-provider',
+    handoffFlow: 'connect',
+    label: 'Pick a connector in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const { provider } = parsed as Record<string, unknown>;
+      const id = typeof provider === 'string' ? provider : '';
+      const row = p.connectors.find((c) => c.id === id);
+      if (!row || row.toolFound === false) return null;
+      return { provider: row.id, cancelled: false };
+    },
+  });
+
+  if (outcome.kind !== 'answered') return null;
+  return outcome.answer;
+}
+
+async function chooseConnectorInBrowserLoopback(
   p: WebConnectProviderParams,
 ): Promise<WebConnectProviderResult> {
   const out = await runBrowserWizard(
@@ -210,6 +270,15 @@ export interface WebConnectSetupParams extends ServeOptions {
   plan: ConnectPlanInput;
   /** The questions this session will ask, in the order the command asks them. */
   questions: ConnectQuestion[];
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte — mirrors `secretIntakeScreen.ts`'s
+   * `WebIntakeParams.authService`. See `askConnectInBrowserViaKeep`'s
+   * comment for how this session's up-to-six questions map onto the
+   * broker's one-request-per-connection design.
+   */
+  authService?: AuthService;
 }
 
 export interface WebConnectSetupResult {
@@ -344,6 +413,145 @@ export function buildConnectOverwriteData(
 const VAR_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
 
 /**
+ * Serve the run's outstanding questions, one at a time.
+ *
+ * Dispatches to the keep-hosted transport when `CAPY_KEEP_SCREENS=1` AND an
+ * `authService` was supplied; otherwise (and on any keep-path failure) this
+ * is exactly today's loopback flow, byte for byte — mirrors
+ * `secretIntakeScreen.ts`'s `runWebIntake` dispatcher.
+ */
+export async function askConnectInBrowser(
+  p: WebConnectSetupParams,
+): Promise<WebConnectSetupResult> {
+  if (p.questions.length === 0) return { answers: {}, cancelled: false };
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await askConnectInBrowserViaKeep(p, p.authService);
+    if (viaKeep) return viaKeep;
+    // Falls all the way back to the loopback sequence below, from question 1
+    // — never a mid-sequence transport switch. See `askConnectInBrowserViaKeep`'s
+    // comment for why: an `auth`/`account` question's answer can have already
+    // caused a real side effect (a `stripe login` pairing), and resuming a
+    // PARTIALLY-answered sequence over a different transport would need to
+    // reconcile answers collected under two different security boundaries.
+    // Restarting is the same "any broker failure degrades to the loopback
+    // screen" posture CAP-376 established, applied to a whole sequence
+    // instead of a single screen.
+  }
+  return askConnectInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-C) for a MULTI-QUESTION connect session.
+ *
+ * `secretIntakeScreen.ts`'s `runWebIntakeViaKeep` and this file's own
+ * `chooseConnectorInBrowserViaKeep` are each ONE broker connection: one
+ * request payload sealed to the page, one answer sealed back, done — the
+ * broker's `POST /connections/:id/request` is single-send-per-connection by
+ * design (CAP-376/W1-A), and there is no server-side push, so a connection
+ * cannot be reused to ask a SECOND question once the first is answered.
+ *
+ * `askConnectInBrowser`'s loopback body reloads the SAME page for each of up
+ * to six questions (`var`, `mode`, `overwrite`, `account`, `refresh` — `auth`
+ * is `signInInBrowser`'s, not this loop's), because a loopback server can
+ * serve a fresh document on every GET of the same URL. The broker has no
+ * equivalent of "the same URL, again, with different content" — so this
+ * function's ceremony-per-question is the closest faithful adaptation: EACH
+ * question in `p.questions` gets its OWN connection, its OWN printed/opened
+ * URL, and its OWN request/answer round trip, run in the same order the
+ * loopback loop would ask them. Known UX cost, written down rather than
+ * silently accepted: a run with two outstanding questions opens two browser
+ * tabs in sequence instead of reloading one — there is no way to avoid that
+ * without a second broker capability (multiple sends per connection) that
+ * does not exist yet and is out of this migration's scope to add.
+ *
+ * Returns `null` (never throws) the moment any single question's ceremony
+ * fails to produce a validated answer — the caller's cue to fall back to
+ * the FULL loopback sequence from question 1, discarding whatever partial
+ * answers this function collected (see the caller's comment for why partial
+ * reuse is not attempted).
+ */
+async function askConnectInBrowserViaKeep(
+  p: WebConnectSetupParams,
+  authService: AuthService,
+): Promise<WebConnectSetupResult | null> {
+  const answers: ConnectAnswers = {};
+
+  for (const q of p.questions) {
+    const screen = q.kind === 'overwrite' ? 'connect-overwrite' : 'connect-setup';
+    const requestPayload =
+      q.kind === 'overwrite'
+        ? buildConnectOverwriteData(p, q, '')
+        : buildConnectSetupData(p, q, answers, '');
+
+    const outcome = await runKeepPayloadScreen<Partial<ConnectAnswers>>({
+      screen,
+      handoffFlow: 'connect',
+      label: `Answer "${STEP_FOR[q.kind] ?? 'overwrite'}" in your browser:`,
+      serviceApiUrl: authService.getServiceApiUrl(),
+      getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+      requestPayload,
+      ttlSeconds: 900,
+      deadlineMs: 900_000,
+      validateAnswer: (plaintext) => validateConnectQuestionAnswer(q, plaintext),
+    });
+
+    if (outcome.kind !== 'answered') return null;
+    Object.assign(answers, outcome.answer);
+  }
+
+  return { answers, cancelled: false };
+}
+
+/**
+ * Typed-validate one question's sealed answer plaintext.
+ *
+ * Deliberately a SEPARATE function from the loopback reducer's inline
+ * `{ error }` branches below, not a shared helper the two call — the
+ * loopback body must stay byte-identical (this migration's non-negotiable),
+ * and a shared extraction would have meant editing it. Each branch mirrors
+ * its loopback counterpart's validation exactly; drift between the two is a
+ * bug, but merging them is a bigger refactor than this migration should make.
+ */
+function validateConnectQuestionAnswer(
+  q: ConnectQuestion,
+  plaintext: string,
+): Partial<ConnectAnswers> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plaintext);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const payload = parsed as Record<string, unknown>;
+
+  if (q.kind === 'var') {
+    const name = typeof payload.var === 'string' ? payload.var.trim() : '';
+    if (!name) return null;
+    if (!q.vars.some((v) => v.name === name) && !VAR_NAME_RE.test(name)) return null;
+    return { var: name };
+  }
+  if (q.kind === 'mode') {
+    const mode = payload.mode;
+    const offered = q.modes.find((m) => m.id === mode);
+    if (!offered || !offered.available) return null;
+    return { mode: offered.id };
+  }
+  if (q.kind === 'overwrite') {
+    if (payload.overwrite !== true) return null;
+    return { overwrite: true };
+  }
+  if (q.kind === 'account') {
+    const account = typeof payload.account === 'string' ? payload.account : '';
+    if (!q.accounts.some((a) => a.id === account)) return null;
+    return { account };
+  }
+  // 'refresh'
+  if (typeof payload.relogin !== 'boolean') return null;
+  return { refresh: payload.relogin };
+}
+
+/**
  * Serve the run's outstanding questions, one screen at a time, over one server.
  *
  * Standalone rather than the wizard shell, so advancing is a page RELOAD: a
@@ -356,7 +564,7 @@ const VAR_NAME_RE = /^[A-Z_][A-Z0-9_]*$/;
  * offers exactly the accounts the config holds, the mode list holds two ids,
  * the overwrite screen has one button and it means yes.
  */
-export async function askConnectInBrowser(
+async function askConnectInBrowserLoopback(
   p: WebConnectSetupParams,
 ): Promise<WebConnectSetupResult> {
   if (p.questions.length === 0) return { answers: {}, cancelled: false };
@@ -494,6 +702,69 @@ export async function signInInBrowser(
     throw new Error('signInInBrowser serves exactly one auth step.');
   }
 
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await signInInBrowserViaKeep(p, q, p.authService, approve);
+    if (viaKeep !== null) return viaKeep;
+  }
+  return signInInBrowserLoopback(p, q, approve);
+}
+
+/**
+ * The keep-hosted transport (W2-C). Unlike the loopback version, the
+ * connection is spent the instant the page's `{step:'auth'}` click is
+ * sealed and received — the broker has no way to hold that same POST open
+ * while `approve()` polls Stripe for up to five minutes and then push a
+ * live status to the SAME page afterwards (single-send-per-connection,
+ * CAP-376/W1-A). So the keep-hosted page's "Open Stripe" click ends its own
+ * part of the ceremony immediately; `approve()` still runs server-side
+ * exactly as it does on loopback, and its result decides the CLI's own next
+ * step (which happens in the user's SEPARATE, already-open Stripe tab —
+ * `approve()`'s own `openScreen(pairing.browserUrl, ...)` call, not this
+ * page). Known UX cost, written down rather than silently accepted: the
+ * keep-hosted page cannot show a live "waiting for Stripe" status past the
+ * initial click, where the loopback page can.
+ *
+ * Returns `null` (never throws) on anything short of the one click this
+ * step can produce — the caller's cue to fall back to the loopback page.
+ */
+async function signInInBrowserViaKeep(
+  p: WebConnectSetupParams,
+  q: Extract<ConnectQuestion, { kind: 'auth' }>,
+  authService: AuthService,
+  approve: () => Promise<boolean>,
+): Promise<WebSignInResult | null> {
+  const requestPayload = buildConnectSetupData(p, q, {}, '');
+
+  const outcome = await runKeepPayloadScreen<true>({
+    screen: 'connect-setup',
+    handoffFlow: 'connect',
+    label: `Sign in to ${p.provider} in your browser:`,
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      return (parsed as Record<string, unknown>).step === 'auth' ? true : null;
+    },
+  });
+
+  if (outcome.kind !== 'answered') return null;
+  return (await approve()) ? 'paired' : 'not-approved';
+}
+
+async function signInInBrowserLoopback(
+  p: WebConnectSetupParams,
+  q: Extract<ConnectQuestion, { kind: 'auth' }>,
+  approve: () => Promise<boolean>,
+): Promise<WebSignInResult> {
   const out = await runBrowserWizard(
     {
       title: `Sign in to ${p.provider} — ${p.projectName}`,

@@ -60,7 +60,7 @@ import type {
 import type { DeployMode } from '../deploy/adapter';
 import type { AuthService } from '../auth/authService';
 import { keepScreensEnabled } from './screens/keepScreens';
-import { runKeepInfoScreen } from '../service/keepPayloadRelay';
+import { runKeepInfoScreen, runKeepPayloadScreen } from '../service/keepPayloadRelay';
 
 /**
  * Strip terminal colour codes on the way into a payload.
@@ -141,6 +141,12 @@ export interface WebDeployDestinationParams extends WebServeOptions {
   mode?: 'connector' | 'token';
   /** Why the previous answer was refused — an invalid `--platform`, usually. */
   rejected?: { argv?: string; message: string };
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte.
+   */
+  authService?: AuthService;
 }
 
 export interface WebDeployDestinationResult {
@@ -197,11 +203,89 @@ export function buildDeployDestinationData(
 /**
  * Serve the two questions at the front of `capy deploy`.
  *
- * Two stops over one server, so answering the first is a page RELOAD and the
- * same address then serves the second — a compiled screen is a whole document
- * and cannot be spliced into the open page.
+ * Dispatches to the keep-hosted transport when `CAPY_KEEP_SCREENS=1` AND an
+ * `authService` was supplied; otherwise (and on any keep-path failure) this
+ * is exactly today's loopback flow, byte for byte.
  */
 export async function chooseDeployDestinationInBrowser(
+  p: WebDeployDestinationParams,
+): Promise<WebDeployDestinationResult> {
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await chooseDeployDestinationInBrowserViaKeep(p, p.authService);
+    if (viaKeep) return viaKeep;
+    // Falls back to the FULL loopback sequence from question 1 — never a
+    // mid-sequence transport switch. Same posture as
+    // `askConnectInBrowserViaKeep` (connectScreens.ts): simpler here (up to
+    // two questions, neither with an external side effect like Stripe's
+    // pairing), but kept consistent rather than special-cased.
+  }
+  return chooseDeployDestinationInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-C). Mirrors `askConnectInBrowserViaKeep`'s
+ * ceremony-per-question design: the broker is single-send-per-connection
+ * (CAP-376/W1-A), so a screen whose loopback version reloads one page for
+ * up to two sequential questions (`platform`, then `mode`) gets ONE broker
+ * connection — one printed/opened URL — per question instead. Known UX
+ * cost, same as connect-setup's: a run with both questions outstanding
+ * opens two tabs in sequence rather than reloading one.
+ *
+ * Returns `null` (never throws) the moment either question's ceremony
+ * fails to produce a validated answer.
+ */
+async function chooseDeployDestinationInBrowserViaKeep(
+  p: WebDeployDestinationParams,
+  authService: AuthService,
+): Promise<WebDeployDestinationResult | null> {
+  let answered: WebDeployDestinationParams = { ...p };
+
+  while (destinationStep(answered) !== null) {
+    const step = destinationStep(answered)!;
+    const requestPayload = buildDeployDestinationData(answered, '');
+
+    const outcome = await runKeepPayloadScreen<Partial<WebDeployDestinationParams>>({
+      screen: 'deploy-destination',
+      handoffFlow: 'deploy',
+      label: `Answer the ${step} question in your browser:`,
+      serviceApiUrl: authService.getServiceApiUrl(),
+      getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+      requestPayload,
+      ttlSeconds: 900,
+      deadlineMs: 900_000,
+      validateAnswer: (plaintext) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(plaintext);
+        } catch {
+          return null;
+        }
+        if (typeof parsed !== 'object' || parsed === null) return null;
+        const payload = parsed as Record<string, unknown>;
+        if (step === 'platform') {
+          const id = typeof payload.platform === 'string' ? payload.platform : '';
+          if (!p.platforms.some((x) => x.id === id)) return null;
+          return { platform: id };
+        }
+        const mode = payload.mode;
+        if (mode !== 'connector' && mode !== 'token') return null;
+        return { mode };
+      },
+    });
+
+    if (outcome.kind !== 'answered') return null;
+    answered = { ...answered, ...outcome.answer };
+  }
+
+  const row = p.platforms.find((x) => x.id === answered.platform);
+  return {
+    platform: answered.platform!,
+    mode: row?.hasConnector ? (answered.mode ?? 'connector') : null,
+    cancelled: false,
+  };
+}
+
+async function chooseDeployDestinationInBrowserLoopback(
   p: WebDeployDestinationParams,
 ): Promise<WebDeployDestinationResult> {
   // The nonce is minted inside `runBrowserWizard` and reaches a caller only
@@ -787,6 +871,21 @@ export interface WebDeployConfirmParams extends WebServeOptions {
    */
   allow?: readonly WebDeployDecision[];
   rejected?: string;
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte.
+   *
+   * NOT YET WIRED at its call site (W2-C): `confirmDeployOnScreen`
+   * (deployCommand.ts) runs before `capy deploy` authenticates
+   * (`decryptCurrentBranch`/`mintForDeploy` build the only `AuthService` in
+   * that command, and only once the plan is already approved). Threading
+   * one in here means moving that authentication earlier, which is outside
+   * this migration's scope — flagged per the harness recipe's own guidance
+   * rather than improvised. The dispatcher below is inert (always loopback)
+   * until a caller supplies one.
+   */
+  authService?: AuthService;
 }
 
 export interface WebDeployConfirmResult {
@@ -865,6 +964,61 @@ export function buildDeployPlanConfirmData(
 export async function confirmDeployInBrowser(
   p: WebDeployConfirmParams,
 ): Promise<WebDeployConfirmResult> {
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await confirmDeployInBrowserViaKeep(p, p.authService);
+    if (viaKeep) return viaKeep;
+  }
+  return confirmDeployInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-C) — see `WebDeployConfirmParams.authService`
+ * for why no call site supplies one yet. Built so wiring it later is a
+ * one-line addition at the call site rather than a second implementation.
+ * The delete gate's typed-name confirmation is re-verified here exactly as
+ * the loopback reducer verifies it (`payload.target !== p.target.name`) —
+ * the CLI never trusts what a page merely displayed.
+ */
+async function confirmDeployInBrowserViaKeep(
+  p: WebDeployConfirmParams,
+  authService: AuthService,
+): Promise<WebDeployConfirmResult | null> {
+  const allow = p.allow ?? (['deploy', 'edit', 'delete'] as const);
+  const requestPayload = buildDeployPlanConfirmData(p, '');
+
+  const outcome = await runKeepPayloadScreen<WebDeployConfirmResult>({
+    screen: 'deploy-plan-confirm',
+    handoffFlow: 'deploy',
+    label: `Review this deploy in your browser: ${p.target.name}`,
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const payload = parsed as Record<string, unknown>;
+      const decision = payload.decision;
+      if (decision !== 'deploy' && decision !== 'edit' && decision !== 'delete') return null;
+      if (!allow.includes(decision)) return null;
+      if (decision === 'delete' && str(payload.target) !== p.target.name) return null;
+      return { decision, force: payload.force === true, cancelled: false };
+    },
+  });
+
+  if (outcome.kind !== 'answered') return null;
+  return outcome.answer;
+}
+
+async function confirmDeployInBrowserLoopback(
+  p: WebDeployConfirmParams,
+): Promise<WebDeployConfirmResult> {
   const allow = p.allow ?? (['deploy', 'edit', 'delete'] as const);
   const out = await runBrowserWizard(
     {
@@ -930,6 +1084,23 @@ export interface WebDeployTargetsParams extends WebServeOptions {
   subjectTarget?: string;
   /** The actions this run will honour. Anything else is refused inline. */
   allow: readonly WebTargetsAction[];
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte.
+   *
+   * NOT YET WIRED at any call site (W2-C): `deployList`/`deployRemove`
+   * (`capy deploy targets`/`targets-remove`) authenticate only lazily —
+   * `pickTargetInBrowser`'s callers inside `capy deploy` itself authenticate
+   * even later, after the picker and the plan-confirm gate both resolve
+   * (see `decryptCurrentBranch`/`mintForDeploy`). Threading a real
+   * `authService` into any of them means moving that authentication earlier
+   * in the command, which changes behavior beyond this migration's scope —
+   * flagged per the harness recipe's own guidance rather than improvised.
+   * The dispatcher below is inert (always loopback) until a caller supplies
+   * one.
+   */
+  authService?: AuthService;
 }
 
 export interface WebDeployTargetsResult {
@@ -995,6 +1166,61 @@ export function buildDeployTargetsData(
  * Until (2) lands, `NO_REFUSAL_TIMEOUT_MS` is the listing's only ending.
  */
 export async function chooseDeployTargetInBrowser(
+  p: WebDeployTargetsParams,
+): Promise<WebDeployTargetsResult> {
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await chooseDeployTargetInBrowserViaKeep(p, p.authService);
+    if (viaKeep) return viaKeep;
+  }
+  return chooseDeployTargetInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-C) — see `WebDeployTargetsParams.authService`
+ * for why no call site supplies one yet. Built so wiring it later is a
+ * one-line addition at the call site rather than a second implementation.
+ */
+async function chooseDeployTargetInBrowserViaKeep(
+  p: WebDeployTargetsParams,
+  authService: AuthService,
+): Promise<WebDeployTargetsResult | null> {
+  const requestPayload = buildDeployTargetsData(p, '');
+
+  const outcome = await runKeepPayloadScreen<WebDeployTargetsResult>({
+    screen: 'deploy-targets',
+    handoffFlow: 'deploy',
+    label: p.purpose === 'pick' ? 'Pick a target in your browser:' : 'Review deploy targets in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const payload = parsed as Record<string, unknown>;
+      const action = payload.__action;
+      if (action !== 'use' && action !== 'new' && action !== 'edit' && action !== 'remove') {
+        return null;
+      }
+      if (!p.allow.includes(action)) return null;
+      if (action === 'new') return { action, target: '', cancelled: false };
+      const name = typeof payload.target === 'string' ? payload.target : '';
+      if (!p.targets.some((t) => t.name === name)) return null;
+      return { action, target: name, cancelled: false };
+    },
+  });
+
+  if (outcome.kind !== 'answered') return null;
+  return outcome.answer;
+}
+
+async function chooseDeployTargetInBrowserLoopback(
   p: WebDeployTargetsParams,
 ): Promise<WebDeployTargetsResult> {
   const refused: WebDeployTargetsResult = { action: null, target: '', cancelled: true };
@@ -1066,6 +1292,12 @@ export interface WebDeployTokensParams extends WebServeOptions {
   tokens: DeployTokenRow[];
   view?: DeployTokensData['view'];
   subjectToken?: string;
+  /**
+   * Enables the keep-hosted transport (CAPY_KEEP_SCREENS=1). Optional and
+   * additive: omitted (or the flag unset) is exactly today's loopback-only
+   * behavior, byte for byte.
+   */
+  authService?: AuthService;
 }
 
 export interface WebDeployTokensResult {
@@ -1129,6 +1361,58 @@ export function buildDeployTokensData(
  * `NO_REFUSAL_TIMEOUT_MS` is the listing's only ending.
  */
 export async function showDeployTokensInBrowser(
+  p: WebDeployTokensParams,
+): Promise<WebDeployTokensResult> {
+  if (p.authService && keepScreensEnabled()) {
+    const viaKeep = await showDeployTokensInBrowserViaKeep(p, p.authService);
+    if (viaKeep) return viaKeep;
+  }
+  return showDeployTokensInBrowserLoopback(p);
+}
+
+/**
+ * The keep-hosted transport (W2-C). Only a real `{action:'revoke',
+ * deployId}` answer counts; the listing's other exits ("Leave it active",
+ * closing the tab) never send anything at all on either transport — there
+ * is no decline signal to relay, same as the loopback path's own
+ * `NO_REFUSAL_TIMEOUT_MS`/`withDeclineBridge` posture.
+ */
+async function showDeployTokensInBrowserViaKeep(
+  p: WebDeployTokensParams,
+  authService: AuthService,
+): Promise<WebDeployTokensResult | null> {
+  const requestPayload = buildDeployTokensData(p, '');
+
+  const outcome = await runKeepPayloadScreen<string>({
+    screen: 'deploy-tokens',
+    handoffFlow: 'deploy',
+    label: 'Review deploy tokens in your browser:',
+    serviceApiUrl: authService.getServiceApiUrl(),
+    getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+    requestPayload,
+    ttlSeconds: 900,
+    deadlineMs: 900_000,
+    validateAnswer: (plaintext) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(plaintext);
+      } catch {
+        return null;
+      }
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      const payload = parsed as Record<string, unknown>;
+      if (payload.action !== 'revoke') return null;
+      const id = typeof payload.deployId === 'string' ? payload.deployId : '';
+      if (!p.tokens.some((t) => t.deployId === id)) return null;
+      return id;
+    },
+  });
+
+  if (outcome.kind !== 'answered') return null;
+  return { deployId: outcome.answer, cancelled: false };
+}
+
+async function showDeployTokensInBrowserLoopback(
   p: WebDeployTokensParams,
 ): Promise<WebDeployTokensResult> {
   const refused: WebDeployTokensResult = { deployId: null, cancelled: true };

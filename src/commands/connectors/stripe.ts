@@ -796,6 +796,11 @@ function webParams(
     // Honoured by every browser path so a test never opens the developer's
     // real browser; the URL is printed either way.
     open: !process.env.CAPY_WEB_NO_OPEN,
+    // One insertion point threads the keep-hosted transport through every
+    // caller below (`askConnectPhaseA`, `pickAccountInBrowser`, the sign-in
+    // hand-off) — `resolveContext` already builds this per CAP-376's
+    // established "no second auth path" rule.
+    authService: ctx.authService,
   };
 }
 
