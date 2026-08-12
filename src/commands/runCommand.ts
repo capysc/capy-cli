@@ -5,6 +5,7 @@ import { FileManager } from '../files/fileManager';
 import { debug } from '../ui/debug';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
+import { stripReservedRuntimeVars } from '../core/reservedVars';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -73,6 +74,14 @@ function missingKeyRemediation(deviceKeysEnabled: boolean): CapyError {
 /**
  * Spawns the child process with the provided environment, forwards signals,
  * and resolves with its exit code. Shared between local and deployed modes.
+ *
+ * Reserved runtime variables are stripped HERE rather than at each call site
+ * (CAP-423). This is the single chokepoint every mode funnels through, so a
+ * future spawn path cannot forget to strip: the deploy credentials are
+ * consumed by the time we get here, and the child is precisely the process
+ * whose environment leaks — debug pages, `phpinfo()`, error-tracker SDKs that
+ * capture env by default, `/proc/<pid>/environ`, crash dumps — with every
+ * grandchild inheriting whatever we pass.
  */
 function spawnChild(args: string[], env: Record<string, string | undefined>): Promise<number> {
   let child: ChildProcess | null = null;
@@ -84,7 +93,7 @@ function spawnChild(args: string[], env: Record<string, string | undefined>): Pr
   // won't execute without a shell — bare `cross-env`/`nodemon` fail with
   // ENOENT. shell:true delegates to cmd.exe so PATHEXT resolution kicks in.
   child = spawn(args[0], args.slice(1), {
-    env: env as Record<string, string>,
+    env: stripReservedRuntimeVars(env) as Record<string, string>,
     stdio: 'inherit',
     shell: process.platform === 'win32',
   });
