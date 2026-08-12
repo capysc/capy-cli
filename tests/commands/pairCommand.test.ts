@@ -36,6 +36,23 @@ mock.module('../../src/auth/pairing/installPairedSession', () => ({
   },
 }));
 
+// The key-material resolution step (fetch + KEK-derive + unwrap) is its own
+// module (pairKeyMaterial.ts) with its own unit tests
+// (tests/auth/pairing/pairKeyMaterial.test.ts) — mocked here so this file
+// stays about the COMMAND's branching, not the real network/AuthService
+// paths that module's production entry point touches.
+let resolveKeyMaterialImpl: (answer: any, opts: any) => Promise<any> = async () => ({
+  ok: true,
+  material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) },
+});
+const resolveKeyMaterialCalls: any[] = [];
+mock.module('../../src/auth/pairing/pairKeyMaterial', () => ({
+  resolvePairedKeyMaterial: async (answer: any, opts: any) => {
+    resolveKeyMaterialCalls.push({ answer, opts });
+    return resolveKeyMaterialImpl(answer, opts);
+  },
+}));
+
 const spawnCalls: any[] = [];
 let spawnResult = { socketPath: '/tmp/fake.sock', expiresAt: Date.now() + 1_800_000, pid: 4242 };
 mock.module('../../src/auth/deviceKey/grantHolder', () => ({
@@ -81,8 +98,7 @@ const VALID_ANSWER = {
   },
   keyMaterial: {
     orgId: 'org_1',
-    kLocal: Buffer.alloc(32, 9).toString('base64'),
-    kdfVersion: '1',
+    prfOutput: Buffer.alloc(32, 3).toString('base64'),
     credentialId: 'cred_1',
   },
 };
@@ -96,8 +112,13 @@ const ORIGINAL_FLAG = process.env.CAPY_DEVICE_KEYS;
 beforeEach(async () => {
   ceremonyCalls.length = 0;
   installCalls.length = 0;
+  resolveKeyMaterialCalls.length = 0;
   spawnCalls.length = 0;
   installImpl = async () => ({ orgId: 'org_1', orgName: 'Org One', orgTokenReady: true });
+  resolveKeyMaterialImpl = async () => ({
+    ok: true,
+    material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) },
+  });
   // Bun (unlike Node) does not treat `process.exitCode = undefined` as
   // clearing a previously-set nonzero value — the process still exits 1 at
   // the end even though the value reads back as `undefined` in between.
@@ -192,16 +213,45 @@ describe('PairCommand — answered', () => {
     expect(spawnCalls[0].opts.ttlMs).toBe(5 * 60_000);
   });
 
-  test('malformed key material (wrong length) is rejected before spawning a daemon', async () => {
-    const badAnswer = { ...VALID_ANSWER, keyMaterial: { ...VALID_ANSWER.keyMaterial, kLocal: Buffer.alloc(4).toString('base64') } };
+  test('a coded key-material resolution failure (e.g. malformed PRF output) is rejected before spawning a daemon', async () => {
     ceremonyImpl = async (opts: any) => {
       opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: badAnswer, userCode: 'ABCD-1234' };
+      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
     };
+    resolveKeyMaterialImpl = async () => ({ ok: false, code: ERROR_CODES.DEVICE_KEY_UNWRAP_FAILED });
 
     await new PairCommand().execute({});
     expect(spawnCalls.length).toBe(0);
     expect((process as any).exitCode).toBe(1);
+  });
+
+  test('the session installs BEFORE key material is resolved — the fetch authenticates with the just-installed session', async () => {
+    ceremonyImpl = async (opts: any) => {
+      opts.onCodeReady('ABCD-1234');
+      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
+    };
+
+    await new PairCommand().execute({});
+    expect(installCalls.length).toBe(1);
+    expect(resolveKeyMaterialCalls.length).toBe(1);
+    expect(resolveKeyMaterialCalls[0].answer).toEqual(VALID_ANSWER);
+    // installImpl (above) resolves { orgId: 'org_1', ... } — that's the org
+    // pairKeyMaterial.ts should authenticate the wrapper fetch against.
+    expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBe('org_1');
+  });
+
+  test('a non-interactive multi-org install (orgId: null) still authenticates the key-material fetch, against answer.keyMaterial.orgId', async () => {
+    installImpl = async () => ({ orgId: null, orgTokenReady: false });
+    ceremonyImpl = async (opts: any) => {
+      opts.onCodeReady('ABCD-1234');
+      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
+    };
+
+    await new PairCommand().execute({});
+    expect(resolveKeyMaterialCalls.length).toBe(1);
+    // VALID_ANSWER's keyMaterial.orgId is 'org_1' — the fallback when
+    // install.orgId is null (see pairCommand.ts's finish()).
+    expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBe('org_1');
   });
 });
 

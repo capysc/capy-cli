@@ -11,17 +11,29 @@
  * that code on. See `../auth/pairing/pairCeremony.ts` for the poll loop and
  * `../auth/pairing/pairContract.ts` for the sealed payload's shape.
  *
- * Two halves land on success, mirroring the CAP-384 sandbox grant's split:
+ * Two halves land on success, mirroring the CAP-384 sandbox grant's split,
+ * installed IN THIS ORDER (the second half depends on the first):
  *   - Session: written to ~/.capy through the CLI's one existing session
  *     writer (`installPairedSession.ts`) — every other command that reads
  *     ~/.capy afterward just works.
- *   - Key material: NEVER written to disk (this is a headless machine; the
- *     acceptance criterion is explicit that no recovery-equivalent material
- *     is ever displayed or persisted anywhere). Handed to the exact same
- *     in-memory grant daemon `capy device-key grant` already uses
- *     (`spawnGrantDaemon`), so `capy run` and friends find a live
- *     `CAPY_DEVICE_KEY_GRANT_SOCKET` exactly as they would after a manual
- *     grant.
+ *   - Key material: the sealed answer never carries K_local (CAP-372,
+ *     restored — see `../auth/pairing/pairContract.ts`'s header), only the
+ *     raw PRF output. `resolvePairedKeyMaterial` (`../auth/pairing/
+ *     pairKeyMaterial.ts`) uses the session just installed above to fetch
+ *     this account's own wrapped_k_local over the authenticated API and
+ *     unwraps it locally — the identical ceremony CAP-384's grant already
+ *     runs. K_local itself is still NEVER written to disk (this is a
+ *     headless machine; the acceptance criterion is explicit that no
+ *     recovery-equivalent material is ever displayed or persisted anywhere)
+ *     — it is handed to the exact same in-memory grant daemon `capy
+ *     device-key grant` already uses (`spawnGrantDaemon`), so `capy run` and
+ *     friends find a live `CAPY_DEVICE_KEY_GRANT_SOCKET` exactly as they
+ *     would after a manual grant. The cost of this extra round trip over the
+ *     old (page-unwraps) design is one accepted trade: it turns "read
+ *     K_local out of page memory" into "make an authenticated,
+ *     fresh-auth-gated, rate-limited, audit-logged API call" for an attacker
+ *     who has only compromised the page (XSS, a malicious dependency), not
+ *     the whole keep-app origin.
  *
  * GATED BEHIND CAPY_DEVICE_KEYS, matching `capy device-key grant`'s own
  * `refuseFlagOff()` exactly — verified necessary, not assumed: `runCommand.ts`'s
@@ -36,12 +48,13 @@
  * `device-key grant` already gives, instead of a surprise ten minutes later.
  */
 import { hostname } from 'os';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
 import { runPairCeremony } from '../auth/pairing/pairCeremony';
 import { installPairedSession } from '../auth/pairing/installPairedSession';
+import { resolvePairedKeyMaterial } from '../auth/pairing/pairKeyMaterial';
 import type { PairMachineAnswer } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
 
@@ -167,19 +180,27 @@ export class PairCommand {
       return;
     }
 
-    let kLocal: Buffer;
-    try {
-      kLocal = Buffer.from(answer.keyMaterial.kLocal, 'base64');
-      if (kLocal.length !== 32) {
-        throw new CapyError('Malformed key material in the pairing answer.', ERROR_CODES.DEVICE_KEY_UNWRAP_FAILED);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+    // The session is on disk now — fetch this account's own wrapped_k_local
+    // over the authenticated API and unwrap it locally (see this file's
+    // header and pairKeyMaterial.ts). Doors are org-less server-side, so
+    // ANY org this account belongs to authenticates the fetch: prefer the
+    // org the session just activated, falling back to answer.keyMaterial.orgId
+    // (the org the browser had active at approval time) for the
+    // non-interactive multi-org case where install.orgId is deliberately
+    // null (installPairedSession.ts's own doc explains why).
+    const authOrgId = install.orgId ?? answer.keyMaterial.orgId;
+    const resolved = await resolvePairedKeyMaterial(answer, {
+      apiUrl: this.apiUrl,
+      devMode: this.devMode,
+      authOrgId,
+    });
+    if (!resolved.ok) {
       if (options.json) {
-        console.log(JSON.stringify({ ok: false, code: ERROR_CODES.DEVICE_KEY_UNWRAP_FAILED, detail: message, userCode }, null, 2));
+        console.log(JSON.stringify({ ok: false, code: resolved.code, userCode }, null, 2));
       } else {
         console.error('');
-        console.error(`  Pairing succeeded but the key material was malformed: ${message}`);
+        console.error(`  Pairing succeeded but the key material could not be granted (${resolved.code}).`);
+        console.error(`  The session was installed; run ${B('capy pair')} again to retry the key grant.`);
         console.error('');
       }
       process.exitCode = 1;
@@ -187,10 +208,7 @@ export class PairCommand {
     }
 
     const ttlMs = options.ttlMinutes ? options.ttlMinutes * 60_000 : DEFAULT_GRANT_TTL_MS;
-    const daemon = await spawnGrantDaemon(
-      { userId: answer.session.user.id, credentialId: answer.keyMaterial.credentialId, kLocal },
-      { ttlMs },
-    );
+    const daemon = await spawnGrantDaemon(resolved.material, { ttlMs });
 
     if (options.json) {
       console.log(

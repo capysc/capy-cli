@@ -17,8 +17,7 @@ function validAnswerPayload(overrides: Record<string, unknown> = {}) {
     },
     keyMaterial: {
       orgId: 'org_1',
-      kLocal: Buffer.alloc(32, 7).toString('base64'),
-      kdfVersion: '1',
+      prfOutput: Buffer.alloc(32, 7).toString('base64'),
       credentialId: 'cred_1',
     },
     ...overrides,
@@ -118,9 +117,30 @@ describe('parsePairPayload', () => {
     expect(parsePairPayload(JSON.stringify(payload)).kind).toBe('malformed');
   });
 
-  test('keyMaterial missing kLocal -> malformed', () => {
+  test('keyMaterial missing prfOutput -> malformed', () => {
     const payload = validAnswerPayload({
-      keyMaterial: { orgId: 'org_1', kdfVersion: '1', credentialId: 'c1' },
+      keyMaterial: { orgId: 'org_1', credentialId: 'c1' },
+    });
+    expect(parsePairPayload(JSON.stringify(payload)).kind).toBe('malformed');
+  });
+
+  // THE FALSIFICATION TEST (CAP-372, restored): a payload that carries a
+  // `kLocal` field — even alongside an otherwise-valid prfOutput — must be
+  // REJECTED, not silently accepted with the extra field ignored. This is
+  // what stops a rolled-back or compromised page from quietly resuming the
+  // old "ship raw K_local" behavior: the validator fails closed on the
+  // field's mere PRESENCE, not just its absence. Confirmed to fail against
+  // the pre-hardening validator (which only checked kLocal's own shape and
+  // had no such rejection) — see the pair-hardening task's report for the
+  // observed failure count.
+  test('keyMaterial carrying a kLocal field -> malformed, even if otherwise well-formed (CAP-372 falsification)', () => {
+    const payload = validAnswerPayload({
+      keyMaterial: {
+        orgId: 'org_1',
+        prfOutput: Buffer.alloc(32, 7).toString('base64'),
+        credentialId: 'c1',
+        kLocal: Buffer.alloc(32, 9).toString('base64'),
+      },
     });
     expect(parsePairPayload(JSON.stringify(payload)).kind).toBe('malformed');
   });
