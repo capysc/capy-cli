@@ -114,8 +114,57 @@ export function keepScreensEnabled(): boolean {
   return process.env.CAPY_KEEP_SCREENS === '1';
 }
 
+/**
+ * CAP-374 step 1: a SEPARATE switch from {@link keepScreensEnabled}, on
+ * purpose. `CAPY_KEEP_SCREENS` governs whether an already-in-flight OAuth
+ * callback's response gets deferred and redirected to a keep-hosted DISPLAY
+ * ending; this flag governs something upstream of that — whether the FIRST
+ * hop (`capy login`'s browser link) routes through keep's own `/auth/start`
+ * at all, so the same browser also comes away with a keep session cookie.
+ * They are orthogonal (either can be on without the other) and deliberately
+ * decoupled: CAP-376's existing tests fix `/auth/initiate` as the FIRST
+ * network call whenever `CAPY_KEEP_SCREENS=1`, so reusing that flag here
+ * would silently break the ending-display feature's own test suite.
+ */
+export function keepLoginBridgeEnabled(): boolean {
+  return process.env.CAPY_KEEP_LOGIN_BRIDGE === '1';
+}
+
 export function keepOrigin(): string {
   return process.env.CAPY_KEEP_ORIGIN || KEEP_DEFAULT_ORIGIN;
+}
+
+/**
+ * CAP-374 step 1: a bounded reachability probe for keep, used ONLY to
+ * decide whether `capy login` should route the browser through keep's
+ * `/auth/start` (the "double duty" callback) or fall back to today's direct
+ * `/auth/initiate` + own-loopback `redirect_uri` — the ORIGINAL flow,
+ * unchanged, that this whole feature must degrade to whenever keep can't be
+ * reached. Once the browser is sent into keep's flow there is no way back
+ * (WorkOS won't retarget mid-flight), so this check has to happen BEFORE
+ * that decision, not react to a failure after the fact. A short timeout: a
+ * real outage should fail fast, not cost the user multiple seconds waiting
+ * on a probe before they even see a login link.
+ */
+export async function isKeepReachable(
+  origin: string,
+  opts: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<boolean> {
+  const timeoutMs = opts.timeoutMs ?? 2000;
+  const doFetch = opts.fetchImpl ?? fetch;
+  try {
+    const res = await doFetch(new URL('/auth/start', origin).toString(), {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    // Any response at all (even a redirect, even a 4xx/5xx) means something
+    // is listening and answering HTTP — that's all this gate needs to know.
+    // A network error / timeout is the only "unreachable" outcome.
+    return res.status > 0;
+  } catch {
+    return false;
+  }
 }
 
 /**

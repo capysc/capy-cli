@@ -76,6 +76,28 @@ export class OAuthServer {
   }
 
   /**
+   * CAP-374 step 1: the URL to open INSTEAD of a direct `/auth/initiate`
+   * call, when routing sign-in through keep's own `/auth/start` first (the
+   * "double duty" callback — see `keep-app/src/lib/auth/cliBridge.ts`'s
+   * module doc for the full chain). Keep completes its OWN separate PKCE
+   * dance against the service (its own state/verifier, never these), then —
+   * once its session cookie is written — calls `/auth/initiate` a SECOND
+   * time using exactly the values threaded through here as
+   * `cli_redirect`/`cli_challenge`/`cli_state`, and 302s to the result. That
+   * second authorization is bound to THIS server's own `state` and
+   * `code_challenge`, so `handleCallback` below validates it exactly like
+   * any other callback, and only the holder of `getCodeVerifier()` (this
+   * process, never keep) can complete the eventual exchange.
+   */
+  getKeepBridgeUrl(keepOrigin: string): string {
+    const url = new URL('/auth/start', keepOrigin);
+    url.searchParams.set('cli_redirect', this.getRedirectUri());
+    url.searchParams.set('cli_challenge', this.pkce.codeChallenge);
+    url.searchParams.set('cli_state', this.state);
+    return url.toString();
+  }
+
+  /**
    * Bind to the first available port from the candidate list.
    * Must be called before startAuthFlow.
    *

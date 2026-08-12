@@ -77,6 +77,31 @@ describe('OAuthServer', () => {
     });
   });
 
+  describe('getKeepBridgeUrl (CAP-374 step 1)', () => {
+    test('carries this server\'s own redirect_uri, code_challenge, and state — nothing else', async () => {
+      mockServer.listen.mockImplementation((_port: number, _host: string, callback: () => void) => callback());
+      await oauthServer.bind();
+
+      const url = new URL(oauthServer.getKeepBridgeUrl('https://keep.capy.sc'));
+      expect(url.origin).toBe('https://keep.capy.sc');
+      expect(url.pathname).toBe('/auth/start');
+      expect(url.searchParams.get('cli_redirect')).toBe(oauthServer.getRedirectUri());
+      expect(url.searchParams.get('cli_challenge')).toBe(oauthServer.getCodeChallenge());
+      expect(url.searchParams.get('cli_state')).toBe(oauthServer.getState());
+      // Exactly these three params — nothing riding along that keep doesn't
+      // validate (spec: the code_verifier itself never leaves this process).
+      expect([...url.searchParams.keys()].sort()).toEqual(['cli_challenge', 'cli_redirect', 'cli_state']);
+    });
+
+    test('honors a CAPY_KEEP_ORIGIN-style custom origin verbatim', async () => {
+      mockServer.listen.mockImplementation((_port: number, _host: string, callback: () => void) => callback());
+      await oauthServer.bind();
+
+      const url = new URL(oauthServer.getKeepBridgeUrl('http://keep.localhost:4100'));
+      expect(url.origin).toBe('http://keep.localhost:4100');
+    });
+  });
+
   describe('startAuthFlow', () => {
     /**
      * Sign-in now goes through `openScreen`, which honours CAPY_WEB_NO_OPEN —

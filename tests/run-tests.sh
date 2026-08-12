@@ -69,6 +69,7 @@ ISOLATED_FILES=(
   tests/auth/deviceKey/grantE2E.e2e.test.ts
   # <<< isolated test files (mock.module): append below >>>
   tests/ui/recoveryPhrase.test.ts
+  tests/auth/authServiceKeepLoginBridge.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

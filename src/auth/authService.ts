@@ -3,9 +3,16 @@ import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_
 import { OAuthServer } from './oauthServer';
 import { BrokerClient } from '../service/brokerClient';
 import { parseCompletionPayload } from '../service/brokerEnvelope';
-import { keepFlowUrl, keepScreensEnabled, type KeepAuthFlow } from '../ui/screens/keepScreens';
+import {
+  keepFlowUrl,
+  keepOrigin,
+  keepScreensEnabled,
+  keepLoginBridgeEnabled,
+  isKeepReachable,
+  type KeepAuthFlow,
+} from '../ui/screens/keepScreens';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
-import { consumeForceLoginMarker } from '../config/globalConfig';
+import { consumeForceLoginMarker, isForceLoginMarkerPending } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
 import { SessionStorageBackend } from './session/backend';
@@ -141,26 +148,50 @@ export class AuthService {
     const keepScreens = keepScreensEnabled();
     const oauthServer = new OAuthServer({ deferCompletion: keepScreens });
     await oauthServer.bind();
-    const redirectUri = oauthServer.getRedirectUri();
-    const state = oauthServer.getState();
 
-    // If `capy logout` left a marker, ask the service to add prompt=login to
-    // the WorkOS auth URL so AuthKit re-prompts instead of silently reusing
-    // its SSO cookie. Consume the marker now — even if the OAuth round-trip
-    // fails later, "force_login" was the user's intent for this attempt and
-    // we don't want it sticking forever.
-    const forceLogin = consumeForceLoginMarker();
+    // CAP-374 step 1: route the FIRST hop through keep's own /auth/start
+    // instead of calling /auth/initiate directly, so the SAME browser also
+    // comes away with a keep session cookie ("double duty" — see
+    // oauthServer.ts's getKeepBridgeUrl doc and
+    // keep-app/src/lib/auth/cliBridge.ts). Gated by its OWN flag, separate
+    // from CAPY_KEEP_SCREENS (keepLoginBridgeEnabled's doc explains why),
+    // and only for the plain fresh-sign-in case: keep's bridge doesn't (yet)
+    // forward organization_id or force_login, so either one falls back to
+    // today's direct path, which fully supports both. A short reachability
+    // probe keeps the loopback fallback working when keep can't be reached
+    // at all — once the browser is sent into a flow there's no retargeting
+    // it mid-flight.
+    const canUseKeepBridge =
+      keepLoginBridgeEnabled() && !organizationId && !isForceLoginMarkerPending();
+    const useKeepBridge =
+      canUseKeepBridge && (await isKeepReachable(keepOrigin()));
 
-    const { auth_url } = await postJson<{ auth_url: string }>(
-      `${this.serviceApiUrl}/auth/initiate`,
-      {
-        state,
-        redirect_uri: redirectUri,
-        organization_id: organizationId,
-        code_challenge: oauthServer.getCodeChallenge(),
-        ...(forceLogin ? { force_login: true } : {}),
-      },
-    );
+    let auth_url: string;
+    if (useKeepBridge) {
+      auth_url = oauthServer.getKeepBridgeUrl(keepOrigin());
+    } else {
+      const redirectUri = oauthServer.getRedirectUri();
+      const state = oauthServer.getState();
+
+      // If `capy logout` left a marker, ask the service to add prompt=login
+      // to the WorkOS auth URL so AuthKit re-prompts instead of silently
+      // reusing its SSO cookie. Consume the marker now — even if the OAuth
+      // round-trip fails later, "force_login" was the user's intent for
+      // this attempt and we don't want it sticking forever.
+      const forceLogin = consumeForceLoginMarker();
+
+      const response = await postJson<{ auth_url: string }>(
+        `${this.serviceApiUrl}/auth/initiate`,
+        {
+          state,
+          redirect_uri: redirectUri,
+          organization_id: organizationId,
+          code_challenge: oauthServer.getCodeChallenge(),
+          ...(forceLogin ? { force_login: true } : {}),
+        },
+      );
+      auth_url = response.auth_url;
+    }
 
     const code = await oauthServer.startAuthFlow(auth_url);
 

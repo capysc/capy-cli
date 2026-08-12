@@ -10,8 +10,10 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   isKeepScreen,
+  isKeepReachable,
   KEEP_SCREENS,
   keepFlowUrl,
+  keepLoginBridgeEnabled,
   keepScreenKind,
   keepScreensEnabled,
 } from '../../src/ui/screens/keepScreens';
@@ -93,5 +95,82 @@ describe('keepScreensEnabled', () => {
       if (saved === undefined) delete process.env.CAPY_KEEP_SCREENS;
       else process.env.CAPY_KEEP_SCREENS = saved;
     }
+  });
+});
+
+describe('keepLoginBridgeEnabled (CAP-374 step 1)', () => {
+  test('is its OWN switch, independent of CAPY_KEEP_SCREENS', () => {
+    const savedBridge = process.env.CAPY_KEEP_LOGIN_BRIDGE;
+    const savedScreens = process.env.CAPY_KEEP_SCREENS;
+    try {
+      delete process.env.CAPY_KEEP_LOGIN_BRIDGE;
+      process.env.CAPY_KEEP_SCREENS = '1';
+      expect(keepLoginBridgeEnabled()).toBe(false);
+
+      process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
+      delete process.env.CAPY_KEEP_SCREENS;
+      expect(keepLoginBridgeEnabled()).toBe(true);
+
+      process.env.CAPY_KEEP_LOGIN_BRIDGE = 'true';
+      expect(keepLoginBridgeEnabled()).toBe(false); // exact '1', never a loose truthy check
+    } finally {
+      if (savedBridge === undefined) delete process.env.CAPY_KEEP_LOGIN_BRIDGE;
+      else process.env.CAPY_KEEP_LOGIN_BRIDGE = savedBridge;
+      if (savedScreens === undefined) delete process.env.CAPY_KEEP_SCREENS;
+      else process.env.CAPY_KEEP_SCREENS = savedScreens;
+    }
+  });
+});
+
+describe('isKeepReachable', () => {
+  test('true when the origin answers any HTTP status at all', async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response('ok', { status: 200 }) });
+    try {
+      expect(await isKeepReachable(`http://127.0.0.1:${server.port}`)).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('true even for a redirect or error status — reachability, not success', async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response('nope', { status: 503 }) });
+    try {
+      expect(await isKeepReachable(`http://127.0.0.1:${server.port}`)).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('false on connection refused (nothing listening)', async () => {
+    // Port 9 (discard) refuses connections on every platform this runs on.
+    expect(await isKeepReachable('http://127.0.0.1:9')).toBe(false);
+  });
+
+  test('false on timeout — a hung origin must not block sign-in for long', async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch() {
+        await new Promise((r) => setTimeout(r, 5_000));
+        return new Response('too slow');
+      },
+    });
+    try {
+      const start = Date.now();
+      const reachable = await isKeepReachable(`http://127.0.0.1:${server.port}`, { timeoutMs: 100 });
+      expect(reachable).toBe(false);
+      expect(Date.now() - start).toBeLessThan(1_000);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test('injectable fetch implementation is honored', async () => {
+    let called = false;
+    const fakeFetch = (async () => {
+      called = true;
+      return new Response('ok', { status: 200 });
+    }) as typeof fetch;
+    expect(await isKeepReachable('http://example.invalid', { fetchImpl: fakeFetch })).toBe(true);
+    expect(called).toBe(true);
   });
 });
