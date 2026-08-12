@@ -1008,8 +1008,8 @@ export interface CreateOrganizationData {
  * first frame.
  *
  * Carries no secret material. The credentials this flow eventually mints —
- * SECRETS_BLOB and PROJECT_KEY — belong to the credentials screen and never
- * reach this one.
+ * `_CAPY_SECRETS_BLOB` and `_CAPY_DEPLOY_KEY` (legacy: `SECRETS_BLOB` and
+ * `PROJECT_KEY`) — belong to the credentials screen and never reach this one.
  */
 
 /** Which of the two questions this page is serving. One step per render. */
@@ -1830,6 +1830,14 @@ export interface DeployTokenRow {
   createdBy?: string;
   /** Humanised age of the revocation. Null while the token is still live. */
   revokedAge: string | null;
+  /**
+   * True when this token was minted in the legacy `SECRETS_BLOB` +
+   * `PROJECT_KEY` shape — the deployed artifact carries the raw project key
+   * rather than a per-deploy derivation token (CAP-411), so revoking it is
+   * the only client-side recourse for a leak; re-minting is how a customer
+   * upgrades a live token to the current, revocation-inert-on-leak shape.
+   */
+  isLegacy?: boolean;
 }
 
 export interface DeployTokensData {

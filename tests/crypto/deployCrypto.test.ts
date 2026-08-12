@@ -6,8 +6,7 @@ import {
   generateDerivationToken,
   deployInnerWrap,
   deployInnerUnwrap,
-  buildDeployCode,
-  parseDeployCode,
+  deriveServiceKeyFromInnerBlob,
   encryptEnvBlob,
   buildSecretsBlob,
 } from '../../src/crypto/deployCrypto';
@@ -105,40 +104,24 @@ describe('deployCrypto', () => {
     });
   });
 
-  describe('buildDeployCode / parseDeployCode', () => {
-    it('round-trips deploy ID, DT, and outer blob', () => {
-      const deployId = generateDeployId();
-      const dt = generateDerivationToken();
-      const outerBlob = randomBytes(96).toString('base64');
+  // `buildDeployCode` / `parseDeployCode` (base64(deployId || DT || outerBlob),
+  // a single opaque `CAPY_DEPLOY_CODE`) were deleted from deployCrypto.ts —
+  // dead crypto from a design superseded 2026-04-09 by the two-variable
+  // SECRETS_BLOB/DEPLOY_KEY shape a human pastes into a platform dashboard
+  // (CAP-411 archaeology). Nothing in the shipping path builds or parses that
+  // container anymore.
 
-      const code = buildDeployCode(deployId, dt, outerBlob);
-      const parsed = parseDeployCode(code);
-
-      expect(parsed.deployId.equals(deployId)).toBe(true);
-      expect(parsed.dt.equals(dt)).toBe(true);
-      expect(parsed.outerBlob).toBe(outerBlob);
-    });
-
-    it('throws on too-short deploy code', () => {
-      const shortCode = randomBytes(32).toString('base64');
-      expect(() => parseDeployCode(shortCode)).toThrow(/too short/);
-    });
-
-    it('throws on exactly 64 bytes (no outer blob)', () => {
-      const exactCode = randomBytes(64).toString('base64');
-      expect(() => parseDeployCode(exactCode)).toThrow(/too short/);
-    });
-  });
-
-  describe('full deploy roundtrip', () => {
-    it('simulates setup -> KMS wrap -> CI decrypt -> SDK key', () => {
-      // 1. Setup: generate deploy ID, DT, inner-wrap PK
+  describe('full deploy roundtrip (the shape capy actually ships)', () => {
+    it('simulates setup -> KMS wrap -> CI fetches inner_blob -> DT recovers PK', () => {
+      // 1. Setup: generate deploy ID, DT, inner-wrap PK. This is exactly
+      //    mintDeployToken's mint sequence — the artifact ends up carrying
+      //    `dt`, never `projectKey`.
       const deployId = generateDeployId();
       const dt = generateDerivationToken();
       const innerBlob = deployInnerWrap(projectKey, dt, projectId);
 
-      // 2. Simulate KMS outer wrap (local dev: simple AES)
-      const { createCipheriv, createDecipheriv } = require('crypto');
+      // 2. Simulate KMS outer wrap (local dev: simple AES).
+      const { createDecipheriv } = require('crypto');
       const kmsKey = randomBytes(32);
       const iv = randomBytes(12);
       const cipher = createCipheriv('aes-256-gcm', kmsKey, iv, { authTagLength: 16 });
@@ -146,14 +129,13 @@ describe('deployCrypto', () => {
       const tag = cipher.getAuthTag();
       const outerBlob = Buffer.concat([iv, enc, tag]).toString('base64');
 
-      // 3. Build deploy code
-      const code = buildDeployCode(deployId, dt, outerBlob);
+      // 3. `_CAPY_SECRETS_BLOB` carries deployId + outerBlob (buildSecretsBlob,
+      //    exercised end-to-end elsewhere in this file); `_CAPY_DEPLOY_KEY`
+      //    carries `dt` verbatim, hex-encoded, as its own top-level env var —
+      //    no container needed for a single 32-byte value.
 
-      // 4. CI parses deploy code
-      const parsed = parseDeployCode(code);
-
-      // 5. Service KMS-unwraps outer blob
-      const outerCombined = Buffer.from(parsed.outerBlob, 'base64');
+      // 4. Service KMS-unwraps outer blob → recovers innerBlob byte-for-byte.
+      const outerCombined = Buffer.from(outerBlob, 'base64');
       const oIv = outerCombined.subarray(0, 12);
       const oTag = outerCombined.subarray(outerCombined.length - 16);
       const oEnc = outerCombined.subarray(12, outerCombined.length - 16);
@@ -161,13 +143,41 @@ describe('deployCrypto', () => {
       decipher.setAuthTag(oTag);
       const recoveredInnerBlob = Buffer.concat([decipher.update(oEnc), decipher.final()]).toString('base64');
 
-      // 6. CI unwraps inner layer with DT
-      const recoveredPK = deployInnerUnwrap(recoveredInnerBlob, parsed.dt, projectId);
+      // 5. `capy run` unwraps the inner layer with the DT it holds — this is
+      //    the literal call `runCommand.ts`'s DT path makes.
+      const recoveredPK = deployInnerUnwrap(recoveredInnerBlob, dt, projectId);
       expect(recoveredPK.equals(projectKey)).toBe(true);
 
-      // 7. Verify the recovered key is a valid hex CAPY_KEY
+      // 6. Verify the recovered key is a valid hex project key.
       const pkHex = recoveredPK.toString('hex');
       expect(pkHex).toMatch(/^[0-9a-f]{64}$/);
+    });
+  });
+
+  // CAP-411: `deriveServiceKeyFromInnerBlob` is duplicated across the CLI and
+  // service repos (they cannot share code across the repo boundary), kept in
+  // lockstep only by a hand-maintained comment pointing at each other's line
+  // numbers. A known-answer test with FIXED input bytes and a hard-coded
+  // expected output, pinned identically in both repos
+  // (service/tests/routes/deploy.test.ts), turns a silent drift in either
+  // repo's salt/info/algorithm into a deterministic test failure instead of
+  // only a production decrypt error. Do not "fix" this vector to be prettier
+  // — its exact bytes must match the service-side copy verbatim.
+  describe('deriveServiceKeyFromInnerBlob — cross-repo known-answer test', () => {
+    it('matches the pinned vector service/tests/routes/deploy.test.ts also asserts', () => {
+      const innerBlobHex = '00112233445566778899aabbccddeeff001122334455';
+      const katProjectId = 'kat-project-411';
+      const deployId = Buffer.from('11'.repeat(32), 'hex');
+
+      const serviceKey = deriveServiceKeyFromInnerBlob(
+        Buffer.from(innerBlobHex, 'hex').toString('base64'),
+        katProjectId,
+        deployId,
+      );
+
+      expect(serviceKey.toString('hex')).toBe(
+        '4be441e118ebd72c8acb464037222b1a89686cdd136a95716a3173707d69758e',
+      );
     });
   });
 

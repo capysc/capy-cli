@@ -18,7 +18,11 @@ import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
-import { isReservedRuntimeVar } from '../core/reservedVars';
+import {
+  isReservedRuntimeVar,
+  CURRENT_SECRETS_BLOB_VAR,
+  CURRENT_DEPLOY_KEY_VAR,
+} from '../core/reservedVars';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -136,11 +140,17 @@ async function platformRows(): Promise<
 const BLOB_SIZE_WARN_THRESHOLD = 32 * 1024; // 32KB
 
 /** Result of one full deploy-token mint. Shared by the token+docs flow and the
- * github-actions connector — both want the same SECRETS_BLOB / PROJECT_KEY
- * pair, they just deliver it differently. */
+ * github-actions connector — both want the same `_CAPY_SECRETS_BLOB` /
+ * `_CAPY_DEPLOY_KEY` pair, they just deliver it differently.
+ *
+ * `deployKey` is DT (a per-deploy derivation token), never the raw project
+ * key (CAP-411). It decrypts nothing on its own: recovering the project key
+ * from it requires a revocation-gated round trip to the service at `capy run`
+ * time. Legacy `PROJECT_KEY`-based tokens are never minted by this build —
+ * only pre-existing deploys still carry that shape. */
 export interface MintedDeployToken {
   secretsBlob: string;
-  projectKey: string;
+  deployKey: string;
   deployId: string;
   secretCount: number;
   blobBytes: number;
@@ -165,7 +175,17 @@ export class EmptyEnvError extends Error {
 
 /**
  * Resolve the project key, mint a deploy id, KMS-wrap, and produce the
- * SECRETS_BLOB + PROJECT_KEY pair the deployed app feeds into `capy run`.
+ * `_CAPY_SECRETS_BLOB` + `_CAPY_DEPLOY_KEY` pair the deployed app feeds into
+ * `capy run`.
+ *
+ * CAP-411: the artifact ships DT (`dt`), not the project key. `dt` is used
+ * once, in-process, to inner-wrap `pk` into `innerBlob` — the value that
+ * actually goes to the service for KMS-wrapping — and then it is returned as
+ * the credential itself rather than discarded. Recovering `pk` from `dt`
+ * requires `innerBlob` back from the service's `/deploy/:deployId/decrypt`,
+ * which is revocation-gated, so a leaked artifact is inert after one
+ * `capy deploy revoke` with no project-key rotation. `pk` itself never
+ * appears in the returned material.
  *
  * Pure-ish: the caller owns auth and progress UI. This function reads
  * `.env`, talks to the service for KMS wrap + co-decrypt, and returns the
@@ -185,11 +205,18 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
   const dt = generateDerivationToken();
   const innerBlob = deployInnerWrap(pk, dt, projectId);
 
+  // credential_generation tells the service which shape this token was
+  // minted as, so `capy deploy list` can mark legacy (PROJECT_KEY-carrying)
+  // tokens for customers to re-mint. This build only ever mints 'dt' — an
+  // older CLI binary that hasn't upgraded never sends this field, and the
+  // service defaults absent/unrecognized values to 'legacy', which is
+  // correct: that is exactly what an unupgraded binary mints.
   const { outer_blob: outerBlob } = await serviceClient.createDeployToken(
     orgId,
     deployId.toString('hex'),
     projectId,
     innerBlob,
+    'dt',
   );
 
   const rawEnv = fm.readEnvFile();
@@ -215,7 +242,7 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
 
   return {
     secretsBlob,
-    projectKey: pkHex,
+    deployKey: dt.toString('hex'),
     deployId: deployId.toString('hex'),
     secretCount: Object.keys(plaintextEnv).length,
     blobBytes,
@@ -490,16 +517,16 @@ export class DeployCommand {
         spinner.fail(err?.message ?? 'Failed to generate deploy credentials');
         process.exit(1);
       }
-      const { secretsBlob, projectKey, secretCount, blobBytes } = minted;
+      const { secretsBlob, deployKey, secretCount, blobBytes } = minted;
       if (blobBytes > BLOB_SIZE_WARN_THRESHOLD) {
-        spinner.warn(`SECRETS_BLOB is ${Math.round(blobBytes / 1024)}KB — some platforms have 32-64KB env var limits. Consider splitting into multiple projects.`);
+        spinner.warn(`${CURRENT_SECRETS_BLOB_VAR} is ${Math.round(blobBytes / 1024)}KB — some platforms have 32-64KB env var limits. Consider splitting into multiple projects.`);
       } else {
         spinner.succeed(`Deploy credentials generated (${secretCount} secrets)`);
       }
 
       // Step 3: Fetch instructions and serve HTML page
       const { markdown } = await serviceClient.fetchDeployInstructions(platform!);
-      const html = generateDeployHtml(secretsBlob, projectKey, platformLabel, platform!, markdown);
+      const html = generateDeployHtml(secretsBlob, deployKey, platformLabel, platform!, markdown);
 
       // Try to serve via localhost (needed for clipboard API)
       let serverStarted = false;
@@ -557,11 +584,11 @@ export class DeployCommand {
       if (!serverStarted) {
         // Fallback: print values to terminal
         console.log('');
-        console.log('  SECRETS_BLOB:');
+        console.log(`  ${CURRENT_SECRETS_BLOB_VAR}:`);
         console.log(`  ${secretsBlob}`);
         console.log('');
-        console.log('  PROJECT_KEY:');
-        console.log(`  ${projectKey}`);
+        console.log(`  ${CURRENT_DEPLOY_KEY_VAR}:`);
+        console.log(`  ${deployKey}`);
         console.log('');
         console.log(`  Set these as environment variables in ${platformLabel}.`);
       }
@@ -583,6 +610,15 @@ export interface DeployTokenListRow {
   createdOn: string;
   createdBy?: string;
   revokedAge: string | null;
+  /**
+   * True when this token was minted in the legacy `SECRETS_BLOB` +
+   * `PROJECT_KEY` shape — the deployed artifact carries the raw project key,
+   * not a per-deploy derivation token (CAP-411). Optional so older/mocked
+   * server responses that predate `credential_generation` degrade to
+   * "unknown, not flagged" rather than a type error; `tokenRows` always sets
+   * it for live data.
+   */
+  isLegacy?: boolean;
 }
 
 /**
@@ -599,6 +635,7 @@ function tokenRows(
     created_by: string;
     created_at: string;
     revoked_at: string | null;
+    credential_generation?: string;
   }>,
 ): DeployTokenListRow[] {
   return tokens.map(t => ({
@@ -608,6 +645,10 @@ function tokenRows(
     createdOn: new Date(t.created_at).toISOString().slice(0, 10),
     createdBy: t.created_by || undefined,
     revokedAge: t.revoked_at ? formatRelativeTime(t.revoked_at) : null,
+    // Absent/unrecognized generation is treated as legacy, matching the
+    // service's own default (CAP-411): a row minted before this column
+    // existed, or by a CLI binary too old to send it, IS a legacy token.
+    isLegacy: t.credential_generation !== 'dt',
   }));
 }
 
@@ -802,7 +843,14 @@ export class DeployListCommand {
         const status = t.revoked_at ? '\x1b[31mrevoked\x1b[0m' : '\x1b[32mactive\x1b[0m';
         const label = t.label ? ` (${t.label})` : '';
         const created = new Date(t.created_at).toLocaleDateString();
-        console.log(`  ${t.deploy_id.slice(0, 12)}...${label}  ${status}  created ${created}`);
+        // CAP-411: a legacy token's deployed artifact carries the raw
+        // project key rather than a per-deploy derivation token — flagged so
+        // a customer can see which deploys to re-mint.
+        const generation =
+          (t as { credential_generation?: string }).credential_generation !== 'dt'
+            ? '  \x1b[33mlegacy — carries a project key, re-mint with `capy deploy`\x1b[0m'
+            : '';
+        console.log(`  ${t.deploy_id.slice(0, 12)}...${label}  ${status}  created ${created}${generation}`);
       }
       console.log('');
     } catch (error) {

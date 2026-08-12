@@ -225,14 +225,15 @@ async function decryptCurrentBranch(
 }
 
 /**
- * Mint the SECRETS_BLOB + PROJECT_KEY pair for build-time injection (what
- * `capy run` consumes). Same devMode-aware auth as decryptCurrentBranch — so
- * under capy-dev it talks to the dev service, not prod.
+ * Mint the `_CAPY_SECRETS_BLOB` + `_CAPY_DEPLOY_KEY` pair for build-time
+ * injection (what `capy run` consumes). Same devMode-aware auth as
+ * decryptCurrentBranch — so under capy-dev it talks to the dev service, not
+ * prod.
  */
 async function mintForDeploy(
   cwd: string,
   devMode: boolean = false,
-): Promise<{ secretsBlob: string; projectKey: string }> {
+): Promise<{ secretsBlob: string; deployKey: string }> {
   const keep = readKeep(cwd);
   if (!keep) throw new Error('no keep.lock — run `capy` to sync first.');
 
@@ -254,7 +255,7 @@ async function mintForDeploy(
     projectId: keep.projectId,
     userId: result.user_id,
   });
-  return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
+  return { secretsBlob: minted.secretsBlob, deployKey: minted.deployKey };
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -1885,7 +1886,7 @@ export async function deployCommand(
   // ── Decrypt the secrets we're about to push. In CI mode these same values
   //    drive the change-gate, so it measures exactly what ships.
   let env: Record<string, string> = {};
-  let deployToken: { secretsBlob: string; projectKey: string } | undefined;
+  let deployToken: { secretsBlob: string; deployKey: string } | undefined;
   if (options.dryRun) {
     console.log(YELLOW('  --dry-run: no secrets will be decrypted or pushed.'));
   } else if (adapter.needsDeployToken) {
@@ -2164,18 +2165,19 @@ function buildDeployPrBody(target: TargetConfig): string {
     ? `- **Git base:** \`${target.gitBaseBranch}\` — merging this PR is the deploy signal for that branch.`
     : '';
 
-  // Secret-delivery wording depends on the adapter. Blob adapters (Vercel) push
-  // SECRETS_BLOB + PROJECT_KEY and let the build decrypt via `capy run`; others
-  // push the individual secrets into the vendor's store.
+  // Secret-delivery wording depends on the adapter. Blob adapters push
+  // _CAPY_SECRETS_BLOB + _CAPY_DEPLOY_KEY and let the build decrypt via
+  // `capy run`; others push the individual secrets into the vendor's store.
   const varsSection = adapter?.needsDeployToken
     ? [
-        `Delivered to ${adapterLabel} as \`SECRETS_BLOB\` + \`PROJECT_KEY\` **before** this`,
-        `PR was opened — the encrypted bundle of your secrets plus its build-time`,
-        `key. Your individual secret values stay encrypted in the bundle and never`,
-        `appear in git history; the build decrypts them with \`capy run\`:`,
+        `Delivered to ${adapterLabel} as \`_CAPY_SECRETS_BLOB\` + \`_CAPY_DEPLOY_KEY\` **before**`,
+        `this PR was opened — the encrypted bundle of your secrets plus a per-deploy`,
+        `key that decrypts nothing on its own. Your individual secret values stay`,
+        `encrypted in the bundle and never appear in git history; the build`,
+        `decrypts them with \`capy run\`:`,
         ``,
-        `- \`SECRETS_BLOB\``,
-        `- \`PROJECT_KEY\``,
+        `- \`_CAPY_SECRETS_BLOB\``,
+        `- \`_CAPY_DEPLOY_KEY\``,
       ].join('\n')
     : [
         `Already delivered to the vendor's secret store **before** this PR was`,
@@ -2188,8 +2190,8 @@ function buildDeployPrBody(target: TargetConfig): string {
   const mergeSection = adapter?.needsDeployToken
     ? [
         `Merging this PR is the deploy signal. ${adapterLabel}'s git CI builds on`,
-        `merge, and \`capy run\` injects your secrets from \`SECRETS_BLOB\` at build`,
-        `time. capy does **not** ship code from the local machine — only the`,
+        `merge, and \`capy run\` injects your secrets from \`_CAPY_SECRETS_BLOB\` at`,
+        `build time. capy does **not** ship code from the local machine — only the`,
         `keep.lock pin lands here.`,
       ].join('\n')
     : adapter?.ciOnly

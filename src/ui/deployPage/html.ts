@@ -9,7 +9,7 @@ const escHtml = (s: string) =>
 
 export function generateDeployHtml(
   secretsBlob: string,
-  projectKey: string,
+  deployKey: string,
   platformName: string,
   platformKey: string,
   instructionMarkdown: string,
@@ -34,7 +34,7 @@ export function generateDeployHtml(
 
     <div class="space-y-3 mb-8 border border-black dark:border-white">
       <div class="grid grid-cols-3 p-3">
-        <label class="text-sm font-mono">SECRETS_BLOB</label>
+        <label class="text-sm font-mono">_CAPY_SECRETS_BLOB</label>
         <div class="flex gap-2 col-span-2 items-start">
           <textarea id="secrets-blob" readonly rows="3" class="flex-grow font-mono text-sm dark:bg-black">${escHtml(secretsBlob)}</textarea>
           <button onclick="copyValue('secrets-blob', this)" class="bg-black text-white dark:bg-white dark:text-black w-16 text-xs uppercase -mt-3 -mr-3">Copy</button>
@@ -42,10 +42,10 @@ export function generateDeployHtml(
       </div>
 
       <div class="grid grid-cols-3 border-t border-t-black dark:border-t-white p-3">
-        <label class="text-sm font-mono">PROJECT_KEY</label>
+        <label class="text-sm font-mono">_CAPY_DEPLOY_KEY</label>
         <div class="flex gap-2 col-span-2 items-start">
-          <textarea id="project-key" readonly rows="1" class="flex-grow font-mono text-sm dark:bg-black">${escHtml(projectKey)}</textarea>
-          <button onclick="copyValue('project-key', this)" class="bg-black text-white dark:bg-white dark:text-black w-16 text-xs uppercase -mt-3 -mr-3">Copy</button>
+          <textarea id="deploy-key" readonly rows="1" class="flex-grow font-mono text-sm dark:bg-black">${escHtml(deployKey)}</textarea>
+          <button onclick="copyValue('deploy-key', this)" class="bg-black text-white dark:bg-white dark:text-black w-16 text-xs uppercase -mt-3 -mr-3">Copy</button>
         </div>
       </div>
     </div>

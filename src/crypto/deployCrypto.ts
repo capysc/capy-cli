@@ -39,38 +39,46 @@ export function deployInnerUnwrap(innerBlob: string, dt: Buffer, projectId: stri
   return aesDecrypt(innerBlob, innerKey);
 }
 
-/**
- * Builds a deploy code: base64(deployId[32] + DT[32] + outerBlob[rest])
- * Fixed-offset binary encoding, same technique as invite redeemCode.
- */
-export function buildDeployCode(deployId: Buffer, dt: Buffer, outerBlob: string): string {
-  const outerBuf = Buffer.from(outerBlob, 'base64');
-  return Buffer.concat([deployId, dt, outerBuf]).toString('base64');
-}
+// NOTE: this file used to also export `buildDeployCode` / `parseDeployCode` —
+// base64(deployId[32] || DT[32] || outerBlob), a single opaque credential for
+// `gh secret set`. Shipped 2026-04-01, replaced 2026-04-09 by the two-variable
+// SECRETS_BLOB/PROJECT_KEY(-now-DEPLOY_KEY) shape so the ciphertext could ride
+// self-contained inside one env var — required for platforms that need a human
+// pasting named values into a dashboard, not a `gh secret set` one-liner (see
+// CAP-411 archaeology). They had zero call sites outside their own tests and
+// implemented a credential shape we no longer ship; deleted here rather than
+// left as dead crypto implying a guarantee this build doesn't provide.
 
 /**
- * Parses a deploy code into its components by byte offset.
+ * service_key = HKDF-SHA256(innerBlob, salt=projectId+hex(deployId), info="capy:deploy:service-key", 32)
+ *
+ * Pulled out to a named, exported function for two reasons: `encryptEnvBlob`
+ * needs it at mint time (it has `innerBlob` in hand, having just built it),
+ * and `service/src/routes/deploy.ts`'s `/deploy/:deployId/decrypt` needs the
+ * IDENTICAL derivation at request time (it recovers the same `innerBlob` via
+ * KMS-unwrap). The two implementations can't share code across the CLI/service
+ * repo boundary, so they are kept in lockstep by a hand-maintained comment —
+ * fragile, called out in CAP-411. `deployCrypto.test.ts` and the service's
+ * `deploy.test.ts` both pin the SAME known-answer vector (fixed innerBlob/
+ * projectId/deployId → fixed expected hex) so a divergence in either repo's
+ * salt, info string, or algorithm fails a deterministic test instead of only
+ * surfacing as a production decrypt failure.
  */
-export function parseDeployCode(deployCode: string): {
-  deployId: Buffer;
-  dt: Buffer;
-  outerBlob: string;
-} {
-  const buf = Buffer.from(deployCode, 'base64');
-  if (buf.length <= DEPLOY_ID_LENGTH + DT_LENGTH) {
-    throw new Error('Invalid deploy code: too short');
-  }
-  const deployId = buf.subarray(0, DEPLOY_ID_LENGTH);
-  const dt = buf.subarray(DEPLOY_ID_LENGTH, DEPLOY_ID_LENGTH + DT_LENGTH);
-  const outerBlob = buf.subarray(DEPLOY_ID_LENGTH + DT_LENGTH).toString('base64');
-  return { deployId, dt, outerBlob };
+export function deriveServiceKeyFromInnerBlob(
+  innerBlob: string,
+  projectId: string,
+  deployId: Buffer,
+): Buffer {
+  const innerBlobBytes = Buffer.from(innerBlob, 'base64');
+  const salt = projectId + deployId.toString('hex');
+  return Buffer.from(hkdfSync('sha256', innerBlobBytes, salt, 'capy:deploy:service-key', 32));
 }
 
 /**
  * Encrypts all env vars into a single blob.
  *
  * Zero-trust derivation:
- *   service_key = HKDF-SHA256(innerBlob, salt=projectId+hex(deployId), info="capy:deploy:service-key", 32)
+ *   service_key = deriveServiceKeyFromInnerBlob(innerBlob, projectId, deployId)
  *   DECRYPT_KEY = HKDF-SHA256(projectKey || service_key, salt=deployId, info="capy:deploy:decrypt", 32)
  *
  * Encrypted with AES-256-GCM(envBlob, DECRYPT_KEY) where envBlob is a JSON
@@ -98,12 +106,7 @@ export function encryptEnvBlob(
   projectId: string,
   deployId: Buffer,
 ): Buffer {
-  // service_key derivation matches service/src/routes/deploy.ts:250-253
-  const innerBlobBytes = Buffer.from(innerBlob, 'base64');
-  const saltService = projectId + deployId.toString('hex');
-  const serviceKey = Buffer.from(
-    hkdfSync('sha256', innerBlobBytes, saltService, 'capy:deploy:service-key', 32),
-  );
+  const serviceKey = deriveServiceKeyFromInnerBlob(innerBlob, projectId, deployId);
 
   // DECRYPT_KEY derivation matches deployRuntime.decryptSecretsBlob
   const combined = Buffer.concat([projectKey, serviceKey]);

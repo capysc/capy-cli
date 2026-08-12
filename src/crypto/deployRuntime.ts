@@ -46,14 +46,38 @@ export function parseSecretsBlob(blob: string): ParsedSecretsBlob {
 }
 
 /**
- * Calls the service to get SERVICE_KEY for a deploy token.
- * 30-second timeout; clear error on network failure so builds fail loudly.
+ * What `/deploy/:deployId/decrypt` returns after KMS-unwrapping the outer
+ * layer. The service computes all three fields unconditionally, on every
+ * call, regardless of which credential generation minted the token — it does
+ * not need to know or branch on that. Each consumer reads only the subset it
+ * needs:
+ *
+ *   - legacy (PROJECT_KEY) callers already hold PK directly and use only
+ *     `serviceKey` to derive DECRYPT_KEY.
+ *   - DT (_CAPY_DEPLOY_KEY) callers hold only a derivation token and need
+ *     `innerBlob` (to recover PK via `deployInnerUnwrap`) and `projectId`
+ *     (the HKDF salt `deployInnerWrap` bound PK to at mint time — the
+ *     deployed artifact carries no project files, so this is the only way a
+ *     CI/serverless process learns it). `projectId` is a non-secret
+ *     identifier, not a credential.
  */
-export async function fetchServiceKey(
+export interface DeployDecryptMaterial {
+  serviceKey: string;
+  innerBlob: string;
+  projectId: string;
+}
+
+/**
+ * Calls the service to KMS-unwrap a deploy token's outer blob. Returns the
+ * material either credential generation needs to finish decrypting — see
+ * {@link DeployDecryptMaterial}. 30-second timeout; clear error on network
+ * failure so builds fail loudly.
+ */
+export async function fetchDeployDecryptMaterial(
   apiUrl: string,
   deployId: string,
   outerBlob: string,
-): Promise<string> {
+): Promise<DeployDecryptMaterial> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -87,8 +111,8 @@ export async function fetchServiceKey(
     throw new Error(`Deploy decrypt failed (${res.status}): ${(body as any).error || 'unknown'}`);
   }
 
-  const body = await res.json() as { service_key: string };
-  return body.service_key;
+  const body = await res.json() as { service_key: string; inner_blob: string; project_id: string };
+  return { serviceKey: body.service_key, innerBlob: body.inner_blob, projectId: body.project_id };
 }
 
 /**

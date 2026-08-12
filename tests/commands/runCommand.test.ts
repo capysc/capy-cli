@@ -152,10 +152,19 @@ describe('capy run', () => {
 // ---------------------------------------------------------------------------
 // Deployed-mode tests
 //
-// SECRETS_BLOB + PROJECT_KEY in process.env triggers the deployed path:
-// parse blob, POST to /deploy/:id/decrypt to fetch service_key, derive
-// DECRYPT_KEY = HKDF(pk || service_key, deployId, "capy:deploy:decrypt"),
-// AES-256-GCM decrypt the env vars, spawn child.
+// The variable NAME selects the path (CAP-411/CAP-424), never the value:
+//   _CAPY_SECRETS_BLOB + _CAPY_DEPLOY_KEY  → DT path (current generation)
+//   SECRETS_BLOB + PROJECT_KEY             → legacy PK path
+//   neither pair                           → local mode
+//   anything else                          → hard error
+//
+// Both deployed paths: parse the blob, POST to /deploy/:id/decrypt (the real
+// service always returns service_key + inner_blob + project_id, regardless of
+// generation — see deployRuntime.fetchDeployDecryptMaterial). Legacy mode
+// already holds PK and uses only service_key. DT mode recovers PK in memory
+// via deployInnerUnwrap(inner_blob, dt, project_id) first. Both then derive
+// DECRYPT_KEY = HKDF(pk || service_key, deployId, "capy:deploy:decrypt") and
+// AES-256-GCM decrypt the env vars before spawning the child.
 // ---------------------------------------------------------------------------
 
 function buildDeployedFixture(envVars: Record<string, string>) {
@@ -177,18 +186,28 @@ function buildDeployedFixture(envVars: Record<string, string>) {
     hkdfSync('sha256', Buffer.from(innerBlob, 'base64'), salt, 'capy:deploy:service-key', 32),
   ).toString('hex');
 
-  return { projectId, pk, deployId, innerBlob, secretsBlob, serviceKeyHex };
+  return { projectId, pk, dt, deployId, innerBlob, secretsBlob, serviceKeyHex };
 }
 
 /**
- * Starts a minimal HTTP server that answers POST /deploy/:id/decrypt with the
- * provided service_key. Returns { url, close }.
+ * Starts a minimal HTTP server that answers POST /deploy/:id/decrypt the way
+ * the real service does: service_key + inner_blob + project_id together,
+ * regardless of which credential generation the caller holds (the real route
+ * computes all three unconditionally — see service/src/routes/deploy.ts).
+ * Legacy-mode tests only read `.service_key` off the response; DT-mode tests
+ * need all three. Returns { url, close }.
  */
-async function startFakeService(serviceKeyHex: string): Promise<{ url: string; close: () => void; server: Server }> {
+async function startFakeService(
+  material: { serviceKeyHex: string; innerBlob?: string; projectId?: string },
+): Promise<{ url: string; close: () => void; server: Server }> {
   const server = createServer((req, res) => {
     if (req.method === 'POST' && /^\/deploy\/[0-9a-f]+\/decrypt$/.test(req.url ?? '')) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ service_key: serviceKeyHex }));
+      res.end(JSON.stringify({
+        service_key: material.serviceKeyHex,
+        inner_blob: material.innerBlob ?? '',
+        project_id: material.projectId ?? '',
+      }));
     } else {
       res.writeHead(404);
       res.end();
@@ -211,10 +230,10 @@ describe('capy run (deployed mode)', () => {
     }
   });
 
-  test('decrypts SECRETS_BLOB via fetched service_key and injects env', async () => {
+  test('legacy path: decrypts SECRETS_BLOB via fetched service_key using PROJECT_KEY directly', async () => {
     const envVars = { API_KEY: 'sk-test-xyz', DATABASE_URL: 'postgres://h/d' };
     const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
-    fake = await startFakeService(serviceKeyHex);
+    fake = await startFakeService({ serviceKeyHex });
 
     const result = await capy(['--', 'node', '-e', 'console.log(process.env.API_KEY, "|", process.env.DATABASE_URL)'], {
       env: {
@@ -228,10 +247,10 @@ describe('capy run (deployed mode)', () => {
     expect(result.stdout.trim()).toBe('sk-test-xyz | postgres://h/d');
   });
 
-  test('writes .capy/next-env.js with decrypted keys', async () => {
+  test('legacy path: writes .capy/next-env.js with decrypted keys', async () => {
     const envVars = { VERCEL_SECRET: 'v1', STRIPE: 'sk_1' };
     const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
-    fake = await startFakeService(serviceKeyHex);
+    fake = await startFakeService({ serviceKeyHex });
 
     const result = await capy(['--', 'node', '-e', 'console.log("ok")'], {
       env: {
@@ -250,20 +269,20 @@ describe('capy run (deployed mode)', () => {
     expect(content).toContain('process.env["VERCEL_SECRET"]');
   });
 
-  test('exits 1 if SECRETS_BLOB set but PROJECT_KEY missing', async () => {
+  test('exits 1 if SECRETS_BLOB set but PROJECT_KEY missing (legacy half-set)', async () => {
     const result = await capy(['--', 'echo', 'unreached'], {
       env: { SECRETS_BLOB: 'anything', PROJECT_KEY: undefined as any },
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/must both be set/);
+    expect(result.stderr).toMatch(/ambiguous deploy credentials/);
   });
 
-  test('exits 1 if PROJECT_KEY set but SECRETS_BLOB missing', async () => {
+  test('exits 1 if PROJECT_KEY set but SECRETS_BLOB missing (legacy half-set)', async () => {
     const result = await capy(['--', 'echo', 'unreached'], {
       env: { PROJECT_KEY: 'a'.repeat(64), SECRETS_BLOB: undefined as any },
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/must both be set/);
+    expect(result.stderr).toMatch(/ambiguous deploy credentials/);
   });
 
   test('exits 1 with clean error when service is unreachable', async () => {
@@ -309,7 +328,7 @@ describe('capy run (deployed mode)', () => {
   test('shell-set env overrides decrypted value (dotenv precedence)', async () => {
     const envVars = { OVERRIDDEN: 'from-secrets-blob' };
     const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
-    fake = await startFakeService(serviceKeyHex);
+    fake = await startFakeService({ serviceKeyHex });
 
     const result = await capy(['--', 'node', '-e', 'console.log(process.env.OVERRIDDEN)'], {
       env: {
@@ -321,6 +340,150 @@ describe('capy run (deployed mode)', () => {
     });
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('from-shell');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CAP-411 — DT path (current generation): _CAPY_SECRETS_BLOB + _CAPY_DEPLOY_KEY.
+//
+// The artifact holds DT, never the project key. `capy run` recovers PK in
+// memory via deployInnerUnwrap(inner_blob, dt, project_id) — inner_blob and
+// project_id both come back from the service's /decrypt response, which is
+// revocation-gated exactly like the legacy path's service_key.
+// ---------------------------------------------------------------------------
+
+describe('capy run (deployed mode, DT path)', () => {
+  let fake: { url: string; close: () => void } | null = null;
+
+  afterEach(() => {
+    if (fake) {
+      fake.close();
+      fake = null;
+    }
+  });
+
+  test('decrypts _CAPY_SECRETS_BLOB via recovered PK (dt never appears in the child env)', async () => {
+    const envVars = { API_KEY: 'sk-test-xyz', DATABASE_URL: 'postgres://h/d' };
+    const { dt, secretsBlob, serviceKeyHex, innerBlob, projectId } = buildDeployedFixture(envVars);
+    fake = await startFakeService({ serviceKeyHex, innerBlob, projectId });
+
+    const result = await capy(['--', 'node', '-e', 'console.log(process.env.API_KEY, "|", process.env.DATABASE_URL)'], {
+      env: {
+        _CAPY_SECRETS_BLOB: secretsBlob,
+        _CAPY_DEPLOY_KEY: dt.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('sk-test-xyz | postgres://h/d');
+  });
+
+  test('writes .capy/next-env.js with decrypted keys', async () => {
+    const envVars = { VERCEL_SECRET: 'v1', STRIPE: 'sk_1' };
+    const { dt, secretsBlob, serviceKeyHex, innerBlob, projectId } = buildDeployedFixture(envVars);
+    fake = await startFakeService({ serviceKeyHex, innerBlob, projectId });
+
+    const result = await capy(['--', 'node', '-e', 'console.log("ok")'], {
+      env: {
+        _CAPY_SECRETS_BLOB: secretsBlob,
+        _CAPY_DEPLOY_KEY: dt.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+    expect(result.exitCode).toBe(0);
+
+    const nextEnvPath = join(TEST_DIR, '.capy', 'next-env.js');
+    expect(existsSync(nextEnvPath)).toBe(true);
+    const content = readFileSync(nextEnvPath, 'utf-8');
+    expect(content).toContain('"VERCEL_SECRET"');
+    expect(content).toContain('"STRIPE"');
+  });
+
+  test('wrong DT (right blob, wrong key) fails loudly rather than decrypting garbage', async () => {
+    const envVars = { X: 'y' };
+    const { secretsBlob, serviceKeyHex, innerBlob, projectId } = buildDeployedFixture(envVars);
+    fake = await startFakeService({ serviceKeyHex, innerBlob, projectId });
+
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: {
+        _CAPY_SECRETS_BLOB: secretsBlob,
+        _CAPY_DEPLOY_KEY: generateDerivationToken().toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('exits 1 if _CAPY_SECRETS_BLOB set but _CAPY_DEPLOY_KEY missing (current-gen half-set)', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { _CAPY_SECRETS_BLOB: 'anything', _CAPY_DEPLOY_KEY: undefined as any },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/ambiguous deploy credentials/);
+  });
+
+  test('exits 1 if _CAPY_DEPLOY_KEY set but _CAPY_SECRETS_BLOB missing (current-gen half-set)', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: { _CAPY_DEPLOY_KEY: 'a'.repeat(64), _CAPY_SECRETS_BLOB: undefined as any },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/ambiguous deploy credentials/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CAP-411/CAP-424 — the selection table's cross-generation cells.
+//
+// Both generations set at once, or a name from each, must hard-error rather
+// than guess. Never resolved by inspecting the VALUES (DT and PK are both
+// 64-char hex, structurally indistinguishable) — only by which NAMES are
+// present, so these fixtures use garbage values on purpose: if the guard ever
+// regressed into trial decryption, garbage would surface as a decrypt error
+// instead of this loud, pre-network refusal.
+// ---------------------------------------------------------------------------
+
+describe('capy run (deploy credential selection: both generations / cross-generation)', () => {
+  test('both generations fully set at once → hard error, no guessing', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: {
+        _CAPY_SECRETS_BLOB: 'x',
+        _CAPY_DEPLOY_KEY: 'y',
+        SECRETS_BLOB: 'a',
+        PROJECT_KEY: 'b',
+      },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/ambiguous deploy credentials/);
+  });
+
+  test('cross-generation mix (_CAPY_SECRETS_BLOB + legacy PROJECT_KEY) → hard error', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: {
+        _CAPY_SECRETS_BLOB: 'x',
+        PROJECT_KEY: 'b',
+      },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/ambiguous deploy credentials/);
+  });
+
+  test('cross-generation mix (legacy SECRETS_BLOB + _CAPY_DEPLOY_KEY) → hard error', async () => {
+    const result = await capy(['--', 'echo', 'unreached'], {
+      env: {
+        SECRETS_BLOB: 'a',
+        _CAPY_DEPLOY_KEY: 'y',
+      },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/ambiguous deploy credentials/);
+  });
+
+  test('neither pair present → local mode, not an error', async () => {
+    writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello\n');
+    const result = await capy(['--', 'node', '-e', 'console.log(process.env.PLAIN_VAR)']);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('hello');
   });
 });
 
@@ -349,7 +512,7 @@ describe('capy run (reserved runtime variables)', () => {
 
   test('deployed mode: child sees neither SECRETS_BLOB nor PROJECT_KEY', async () => {
     const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture({ API_KEY: 'sk-test-xyz' });
-    fake = await startFakeService(serviceKeyHex);
+    fake = await startFakeService({ serviceKeyHex });
 
     const result = await capy(['--', 'node', '-e', DUMP], {
       env: {
@@ -370,7 +533,7 @@ describe('capy run (reserved runtime variables)', () => {
   test('deployed mode: decrypted values are unchanged by the strip', async () => {
     const envVars = { API_KEY: 'sk-test-xyz', DATABASE_URL: 'postgres://h/d' };
     const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
-    fake = await startFakeService(serviceKeyHex);
+    fake = await startFakeService({ serviceKeyHex });
 
     const result = await capy(
       ['--', 'node', '-e', 'console.log(process.env.API_KEY, "|", process.env.DATABASE_URL)'],
@@ -389,7 +552,7 @@ describe('capy run (reserved runtime variables)', () => {
 
   test('grandchildren do not see them either', async () => {
     const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture({ API_KEY: 'sk-test-xyz' });
-    fake = await startFakeService(serviceKeyHex);
+    fake = await startFakeService({ serviceKeyHex });
 
     // The app spawns a worker — the realistic shape (queue workers, cron,
     // migration scripts). Inheritance means stripping once at the child covers
@@ -430,15 +593,29 @@ describe('capy run (reserved runtime variables)', () => {
   });
 
   test('the _CAPY_ prefix reserves future runtime vars with no code change', async () => {
-    writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello\n');
+    // _CAPY_SECRETS_BLOB / _CAPY_DEPLOY_KEY are now the REAL current-generation
+    // pair (CAP-411), so this uses a genuine working DT fixture rather than
+    // garbage values — the run actually boots via the DT path — alongside a
+    // hypothetical _CAPY_SOMETHING_UNINVENTED to prove the prefix rule covers
+    // a variable nobody has written the reservation for yet.
+    const { dt, secretsBlob, serviceKeyHex, innerBlob, projectId } = buildDeployedFixture({
+      API_KEY: 'sk-test-xyz',
+    });
+    fake = await startFakeService({ serviceKeyHex, innerBlob, projectId });
 
     const result = await capy(['--', 'node', '-e', DUMP], {
-      env: { _CAPY_SECRETS_BLOB: 'x', _CAPY_DEPLOY_KEY: 'y', _CAPY_SOMETHING_UNINVENTED: 'z' },
+      env: {
+        _CAPY_SECRETS_BLOB: secretsBlob,
+        _CAPY_DEPLOY_KEY: dt.toString('hex'),
+        _CAPY_SOMETHING_UNINVENTED: 'z',
+        CAPY_API_URL: fake.url,
+      },
     });
 
     expect(result.exitCode).toBe(0);
     const names = result.stdout.trim().split('\n');
     expect(names.filter((n) => n.startsWith('_CAPY_'))).toEqual([]);
+    expect(names).toContain('API_KEY');
   });
 
   test('bare DEPLOY_KEY is NOT reserved — it is a plausible application name', async () => {
