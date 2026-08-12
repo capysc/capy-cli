@@ -98,7 +98,11 @@ beforeEach(async () => {
   installCalls.length = 0;
   spawnCalls.length = 0;
   installImpl = async () => ({ orgId: 'org_1', orgName: 'Org One', orgTokenReady: true });
-  process.exitCode = undefined;
+  // Bun (unlike Node) does not treat `process.exitCode = undefined` as
+  // clearing a previously-set nonzero value — the process still exits 1 at
+  // the end even though the value reads back as `undefined` in between.
+  // `0` is the only value that actually clears it under Bun.
+  process.exitCode = 0;
   // Every describe block below exercises the ceremony/install/daemon
   // branching, which only runs with the flag on (see pairCommand.ts's
   // module doc: a grant obtained with the flag off is unusable by
@@ -120,6 +124,14 @@ afterEach(() => {
   console.error = originalErr;
   if (ORIGINAL_FLAG === undefined) delete process.env.CAPY_DEVICE_KEYS;
   else process.env.CAPY_DEVICE_KEYS = ORIGINAL_FLAG;
+  // Several tests intentionally drive PairCommand down a failure path that
+  // sets process.exitCode = 1 (asserted above via `expect((process as
+  // any).exitCode).toBe(1)`). Without resetting it here, whichever test
+  // happens to run last leaves it set for the rest of the process — bun
+  // test then exits 1 for this whole file even though every assertion
+  // passed, which run-tests.sh's isolation loop (correctly) reads as FAIL.
+  // Must be `0`, not `undefined` — see the beforeEach comment above.
+  process.exitCode = 0;
 });
 
 describe('PairCommand — flag off', () => {
