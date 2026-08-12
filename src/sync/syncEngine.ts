@@ -9,6 +9,7 @@ import {
   KeepVariableEntry,
   SyncState,
 } from '../types/index';
+import { isReservedRuntimeVar } from '../core/reservedVars';
 
 export class SyncEngine {
   /**
@@ -31,8 +32,18 @@ export class SyncEngine {
     remoteEncrypted?: Record<string, string>,
     syncState?: SyncState | null
   ): ChangeSet {
-    const localKeys = new Set(Object.keys(local));
-    const remoteKeys = new Set(Object.keys(remote));
+    // Reserved runtime variables are filtered out HERE, at the one place every
+    // downstream category is derived from, so a rename cannot leave a path
+    // behind (CAP-424). They are machine-local runtime config, not project
+    // secrets, and every category below gets them wrong in its own way — most
+    // destructively `conflicts`, since SECRETS_BLOB is per-deploy-target by
+    // construction: two droplets legitimately hold different values for the
+    // same name, and "keep remote" would overwrite one machine's deploy
+    // credential with another's, leaving it unable to boot. There is no
+    // correct resolution because the premise that a name has one right value
+    // per branch is false for these.
+    const localKeys = new Set(Object.keys(local).filter((k) => !isReservedRuntimeVar(k)));
+    const remoteKeys = new Set(Object.keys(remote).filter((k) => !isReservedRuntimeVar(k)));
     const syncedKeys = syncState ? new Set(syncState.synced_variables) : new Set();
 
     const newLocal: EnvVariable[] = [];

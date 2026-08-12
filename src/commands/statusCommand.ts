@@ -8,6 +8,7 @@ import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
 import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
+import { isReservedRuntimeVar } from '../core/reservedVars';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -230,6 +231,10 @@ export class StatusCommand {
 
       const rawLocal = this.fileManager.readEnvFile();
       for (const [key, value] of Object.entries(rawLocal)) {
+        // A reserved runtime variable is never pushed, so counting it as
+        // local drift would report the deploy artifact as unpushed changes
+        // forever — which trains people to ignore drift output (CAP-424).
+        if (isReservedRuntimeVar(key)) continue;
         let plaintext = value;
         if (value.startsWith('capy:') && encryptionKey) {
           try {
