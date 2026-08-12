@@ -1,18 +1,19 @@
 /**
  * GitHub Actions connector.
  *
- * Pushes SECRETS_BLOB + PROJECT_KEY into the repo's GitHub Actions secret
- * store (repo-scoped or environment-scoped) so workflows can call
- * `capy run -- <deploy command>` without manual copy-paste.
+ * Pushes `_CAPY_SECRETS_BLOB` + `_CAPY_DEPLOY_KEY` into the repo's GitHub
+ * Actions secret store (repo-scoped or environment-scoped) so workflows can
+ * call `capy run -- <deploy command>` without manual copy-paste.
  *
  * Auth model: `gh` CLI handoff. We never see a PAT — `gh auth status`
  * must already be green. No custom OAuth app, no device flow, no token
  * prompts. Per CAP-9, this is intentional for v1.
  *
- * Trust model: SECRETS_BLOB + PROJECT_KEY land in GitHub as long-lived
- * secrets. Revocation runs through `capy deploy revoke <deployId>` which
- * invalidates the project key server-side; once revoked, the GitHub-stored
- * blob is inert.
+ * Trust model (CAP-411): `_CAPY_DEPLOY_KEY` is a per-deploy derivation token,
+ * not the raw project key. It decrypts nothing on its own — recovering the
+ * project key requires a revocation-gated round trip to the service at
+ * `capy run` time. So a leaked GitHub secret costs one
+ * `capy deploy revoke <deployId>`, not a project-key rotation.
  */
 import { spawnSync } from 'child_process';
 import { readFileSync } from 'fs';
@@ -22,6 +23,7 @@ import ora from '../ui/spinner';
 import { ServiceClient } from '../service/serviceClient';
 import { FileManager } from '../files/fileManager';
 import { mintDeployToken, EmptyEnvError } from './deployTokenCommand';
+import { CURRENT_SECRETS_BLOB_VAR, CURRENT_DEPLOY_KEY_VAR } from '../core/reservedVars';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = (s: string) => `\x1b[90m${s}\x1b[0m`;
@@ -137,8 +139,8 @@ export function renderYamlPatch(version: string, env: string | null): string {
 - name: Deploy
   run: capy run -- <your existing deploy command>
   env:
-    SECRETS_BLOB: \${{ secrets.SECRETS_BLOB }}
-    PROJECT_KEY:  \${{ secrets.PROJECT_KEY }}
+    ${CURRENT_SECRETS_BLOB_VAR}: \${{ secrets.${CURRENT_SECRETS_BLOB_VAR} }}
+    ${CURRENT_DEPLOY_KEY_VAR}:  \${{ secrets.${CURRENT_DEPLOY_KEY_VAR} }}
 `;
 }
 
@@ -297,7 +299,7 @@ export async function runGithubActionsConnector(
     try {
       const existing = JSON.parse(listR.stdout) as Array<{ name: string }>;
       const names = new Set(existing.map((e) => e.name));
-      const clash = ['SECRETS_BLOB', 'PROJECT_KEY'].filter((n) => names.has(n));
+      const clash = [CURRENT_SECRETS_BLOB_VAR, CURRENT_DEPLOY_KEY_VAR].filter((n) => names.has(n));
       if (clash.length > 0) {
         const where = envName ? `environment "${envName}"` : 'repo secrets';
         if (options.yes) {
@@ -323,7 +325,7 @@ export async function runGithubActionsConnector(
     }
   }
 
-  // 5. Mint SECRETS_BLOB + PROJECT_KEY.
+  // 5. Mint _CAPY_SECRETS_BLOB + _CAPY_DEPLOY_KEY.
   const spinner = ora('Generating deploy credentials...').start();
   let minted;
   try {
@@ -350,14 +352,14 @@ export async function runGithubActionsConnector(
       ? `Pushing secrets to ${repo} → env:${envName}`
       : `Pushing secrets to ${repo}`,
   ).start();
-  const blobR = setSecret('SECRETS_BLOB', minted.secretsBlob, envName);
+  const blobR = setSecret(CURRENT_SECRETS_BLOB_VAR, minted.secretsBlob, envName);
   if (!blobR.ok) {
-    push.fail(`SECRETS_BLOB push failed: ${blobR.stderr.trim().split('\n').slice(-2).join(' | ')}`);
+    push.fail(`${CURRENT_SECRETS_BLOB_VAR} push failed: ${blobR.stderr.trim().split('\n').slice(-2).join(' | ')}`);
     return 1;
   }
-  const pkR = setSecret('PROJECT_KEY', minted.projectKey, envName);
-  if (!pkR.ok) {
-    push.fail(`PROJECT_KEY push failed: ${pkR.stderr.trim().split('\n').slice(-2).join(' | ')}`);
+  const keyR = setSecret(CURRENT_DEPLOY_KEY_VAR, minted.deployKey, envName);
+  if (!keyR.ok) {
+    push.fail(`${CURRENT_DEPLOY_KEY_VAR} push failed: ${keyR.stderr.trim().split('\n').slice(-2).join(' | ')}`);
     return 1;
   }
   push.succeed('Secrets pushed to GitHub.');

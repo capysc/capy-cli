@@ -5,7 +5,13 @@ import { FileManager } from '../files/fileManager';
 import { debug } from '../ui/debug';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
-import { stripReservedRuntimeVars } from '../core/reservedVars';
+import {
+  stripReservedRuntimeVars,
+  CURRENT_SECRETS_BLOB_VAR,
+  CURRENT_DEPLOY_KEY_VAR,
+  LEGACY_SECRETS_BLOB_VAR,
+  LEGACY_PROJECT_KEY_VAR,
+} from '../core/reservedVars';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -113,36 +119,79 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     return 1;
   }
 
-  const secretsBlob = process.env.SECRETS_BLOB;
-  const projectKey = process.env.PROJECT_KEY;
+  // Deploy-credential selection (CAP-411/CAP-424): the variable NAME is the
+  // only discriminator, never the value. DT (current-generation) and PK
+  // (legacy) are both 32 random bytes rendered as 64-char hex — structurally
+  // indistinguishable as values, so there is no length check, no charset
+  // check, and no trial decryption (Rule 4: branch on a stable signal, never
+  // by trying a value and seeing what happens — that is both a prose-parsing
+  // analog and a silent-fallback footgun).
+  //
+  //   both current-generation vars present  → DT path
+  //   both legacy vars present              → legacy PK path
+  //   neither pair present                  → local mode
+  //   anything else (half-set pair, both
+  //     generations at once, or a cross-
+  //     generation mix)                     → hard, loud error
+  const currentBlob = process.env[CURRENT_SECRETS_BLOB_VAR];
+  const currentKey = process.env[CURRENT_DEPLOY_KEY_VAR];
+  const legacyBlob = process.env[LEGACY_SECRETS_BLOB_VAR];
+  const legacyKey = process.env[LEGACY_PROJECT_KEY_VAR];
 
-  // Guard: both or neither. Half-configured deploys fail loudly instead of
-  // silently falling back to local mode and picking up wrong secrets.
-  if ((secretsBlob && !projectKey) || (!secretsBlob && projectKey)) {
+  const currentCount = (currentBlob ? 1 : 0) + (currentKey ? 1 : 0);
+  const legacyCount = (legacyBlob ? 1 : 0) + (legacyKey ? 1 : 0);
+
+  const deployMode: 'dt' | 'legacy' | 'local' | 'error' =
+    currentCount === 2 && legacyCount === 0
+      ? 'dt'
+      : legacyCount === 2 && currentCount === 0
+        ? 'legacy'
+        : currentCount === 0 && legacyCount === 0
+          ? 'local'
+          : 'error';
+
+  if (deployMode === 'error') {
     console.error(
-      'capy run: SECRETS_BLOB and PROJECT_KEY must both be set, or neither. ' +
-        'Got only one — refusing to guess which mode you meant.',
+      'capy run: ambiguous deploy credentials in the environment. Expected exactly one ' +
+        `complete pair — either ${CURRENT_SECRETS_BLOB_VAR} + ${CURRENT_DEPLOY_KEY_VAR} ` +
+        `(current) or ${LEGACY_SECRETS_BLOB_VAR} + ${LEGACY_PROJECT_KEY_VAR} (legacy) — or ` +
+        'neither, for local mode. Got a half-set pair, both generations at once, or a ' +
+        'cross-generation mix. Refusing to guess which one you meant.',
     );
     return 1;
   }
 
   // Deployed mode: CI, serverless, Vercel builds, etc.
-  if (secretsBlob && projectKey) {
-    const { parseSecretsBlob, fetchServiceKey, decryptSecretsBlob } = await import(
+  if (deployMode === 'dt' || deployMode === 'legacy') {
+    const { parseSecretsBlob, fetchDeployDecryptMaterial, decryptSecretsBlob } = await import(
       '../crypto/deployRuntime'
     );
 
     let envMap: Record<string, string>;
     try {
-      const { deployId, outerBlob, encryptedVars } = parseSecretsBlob(secretsBlob);
+      const blob = deployMode === 'dt' ? currentBlob! : legacyBlob!;
+      const { deployId, outerBlob, encryptedVars } = parseSecretsBlob(blob);
       const apiUrl = process.env.CAPY_API_URL ?? 'https://api.capy.sc';
       debug('capy run: fetching deploy key...');
-      const serviceKey = await fetchServiceKey(
+      const material = await fetchDeployDecryptMaterial(
         apiUrl,
         deployId.toString('hex'),
         outerBlob.toString('base64'),
       );
-      envMap = decryptSecretsBlob(encryptedVars, projectKey, serviceKey, deployId);
+
+      let projectKeyHex: string;
+      if (deployMode === 'dt') {
+        // DT path (CAP-411): recover PK in memory from the service's
+        // KMS-unwrapped inner blob + the DT this deploy target holds. Nothing
+        // on disk or in the environment ever holds PK itself.
+        const { deployInnerUnwrap } = await import('../crypto/deployCrypto');
+        const pk = deployInnerUnwrap(material.innerBlob, Buffer.from(currentKey!, 'hex'), material.projectId);
+        projectKeyHex = pk.toString('hex');
+      } else {
+        projectKeyHex = legacyKey!;
+      }
+
+      envMap = decryptSecretsBlob(encryptedVars, projectKeyHex, material.serviceKey, deployId);
     } catch (err: any) {
       console.error(`capy run: ${err.message}`);
       return 1;

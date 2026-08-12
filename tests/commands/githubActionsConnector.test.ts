@@ -18,11 +18,11 @@ describe('githubActionsConnector — readCliVersion', () => {
 });
 
 describe('githubActionsConnector — renderYamlPatch', () => {
-  test('repo-secret form pins the npm install version and uses raw env var names', () => {
+  test('repo-secret form pins the npm install version and uses the current-generation var names', () => {
     const yaml = renderYamlPatch('9.9.9', null);
     expect(yaml).toContain('npm install -g @capysc/cli@9.9.9');
-    expect(yaml).toContain('SECRETS_BLOB: ${{ secrets.SECRETS_BLOB }}');
-    expect(yaml).toContain('PROJECT_KEY:  ${{ secrets.PROJECT_KEY }}');
+    expect(yaml).toContain('_CAPY_SECRETS_BLOB: ${{ secrets._CAPY_SECRETS_BLOB }}');
+    expect(yaml).toContain('_CAPY_DEPLOY_KEY:  ${{ secrets._CAPY_DEPLOY_KEY }}');
     expect(yaml).toContain('capy run -- <your existing deploy command>');
   });
 
@@ -40,11 +40,18 @@ describe('githubActionsConnector — renderYamlPatch', () => {
     );
   });
 
-  test('uses the secret names capy run actually reads (no CAPY_ prefix)', () => {
+  // CAP-411 reverses the guard this test used to encode: the un-prefixed
+  // SECRETS_BLOB/PROJECT_KEY pair carried the raw project key, and the fix is
+  // exactly to stop shipping that value under any name. New mints — GitHub
+  // Actions included — now use the `_CAPY_` prefix on purpose, matching
+  // `capy run`'s selection table (reservedVars.ts) and reserved on day one by
+  // the prefix rule (CAP-424). The legacy pair keeps working for tokens
+  // already out in the wild; this connector never mints one on purpose.
+  test('uses the current-generation secret names (_CAPY_ prefix), never the legacy pair', () => {
     const yaml = renderYamlPatch(VERSION, null);
-    // Guards against a future "namespace collision" temptation. capy run
-    // reads SECRETS_BLOB + PROJECT_KEY verbatim; renaming forces users to
-    // maintain a mismatch.
-    expect(yaml).not.toMatch(/CAPY_SECRETS_BLOB|CAPY_PROJECT_KEY/);
+    expect(yaml).toContain('_CAPY_SECRETS_BLOB');
+    expect(yaml).toContain('_CAPY_DEPLOY_KEY');
+    expect(yaml).not.toMatch(/[^_]SECRETS_BLOB|^SECRETS_BLOB/);
+    expect(yaml).not.toMatch(/PROJECT_KEY/);
   });
 });

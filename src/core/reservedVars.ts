@@ -37,6 +37,26 @@ export const RESERVED_VAR_PREFIX = '_CAPY_';
 export const LEGACY_RESERVED_VARS = ['SECRETS_BLOB', 'PROJECT_KEY'] as const;
 
 /**
+ * The two credential-generation name pairs `capy run` discriminates on
+ * (CAP-411). The variable NAME is the only discriminator — DT and PK are
+ * both 32 random bytes rendered as 64-char hex, structurally indistinguishable
+ * as values, so there is no length check, no charset check, and no trial
+ * decryption. Destructured from the arrays above rather than re-literaled, so
+ * a rename can't leave the two definitions disagreeing.
+ *
+ * `LEGACY_PROJECT_KEY_VAR`'s value is the raw project key — the same value
+ * that decrypts every `capy:` line in `.env`. `CURRENT_DEPLOY_KEY_VAR`'s value
+ * is a per-deploy derivation token (DT): useless on its own, and useless even
+ * combined with `CURRENT_SECRETS_BLOB_VAR` without a revocation-gated server
+ * round trip to recover the project key in memory.
+ */
+export const [LEGACY_SECRETS_BLOB_VAR, LEGACY_PROJECT_KEY_VAR] = LEGACY_RESERVED_VARS;
+
+/** Current-generation runtime variable names emitted by new mints (CAP-411). */
+export const CURRENT_SECRETS_BLOB_VAR = `${RESERVED_VAR_PREFIX}SECRETS_BLOB`;
+export const CURRENT_DEPLOY_KEY_VAR = `${RESERVED_VAR_PREFIX}DEPLOY_KEY`;
+
+/**
  * True when `name` is machine-local runtime configuration rather than a
  * project secret. Callers must skip these in sync, push, pull, conflict
  * detection, encrypt-on-write, the `capy edit` TUI, `capy status` drift, and

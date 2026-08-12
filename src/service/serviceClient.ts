@@ -575,8 +575,26 @@ export class ServiceClient {
     await this.request('DELETE', `/orgs/${orgId}/members/${encodeURIComponent(membershipId)}`);
   }
 
-  async createDeployToken(orgId: string, deployId: string, projectId: string, innerBlob: string): Promise<{ outer_blob: string }> {
-    return this.request('POST', `/orgs/${orgId}/deploy`, { deploy_id: deployId, project_id: projectId, inner_blob: innerBlob });
+  /**
+   * `credentialGeneration` records which shape (CAP-411) this token was
+   * minted as, so `capy deploy list` can flag legacy (raw-project-key)
+   * tokens. Always `'dt'` from this build — there is no code path that
+   * mints a legacy token on purpose; the service defaults an absent value to
+   * `'legacy'`, which is what an un-upgraded CLI binary would mint anyway.
+   */
+  async createDeployToken(
+    orgId: string,
+    deployId: string,
+    projectId: string,
+    innerBlob: string,
+    credentialGeneration: 'dt' | 'legacy' = 'dt',
+  ): Promise<{ outer_blob: string }> {
+    return this.request('POST', `/orgs/${orgId}/deploy`, {
+      deploy_id: deployId,
+      project_id: projectId,
+      inner_blob: innerBlob,
+      credential_generation: credentialGeneration,
+    });
   }
 
   /**
@@ -634,12 +652,12 @@ export class ServiceClient {
       });
     } catch {
       clearTimeout(timeout);
-      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
+      return { platform, markdown: `Set _CAPY_SECRETS_BLOB and _CAPY_DEPLOY_KEY as environment variables in your deployment platform.` };
     }
     clearTimeout(timeout);
 
     if (!res.ok) {
-      return { platform, markdown: `Set SECRETS_BLOB and PROJECT_KEY as environment variables in your deployment platform.` };
+      return { platform, markdown: `Set _CAPY_SECRETS_BLOB and _CAPY_DEPLOY_KEY as environment variables in your deployment platform.` };
     }
 
     return res.json() as Promise<{ platform: string; markdown: string }>;
@@ -649,7 +667,7 @@ export class ServiceClient {
     await this.request('DELETE', `/deploy/${encodeURIComponent(deployId)}`);
   }
 
-  async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: Array<{ deploy_id: string; label: string | null; created_by: string; created_at: string; revoked_at: string | null }> }> {
+  async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: Array<{ deploy_id: string; label: string | null; created_by: string; created_at: string; revoked_at: string | null; credential_generation?: string }> }> {
     return this.request('GET', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/deploy-tokens`);
   }
 

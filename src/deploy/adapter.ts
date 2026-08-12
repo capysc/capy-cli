@@ -88,11 +88,14 @@ export interface DeployContext {
   /** Decrypted env for the chosen branch. Adapter may filter to config.vars. */
   env: Record<string, string>;
   /**
-   * Minted SECRETS_BLOB + PROJECT_KEY for build-time secret injection (the
-   * pair `capy run` consumes). Present only when the adapter sets
-   * `needsDeployToken`; the deploy flow mints it instead of decrypting `env`.
+   * Minted `_CAPY_SECRETS_BLOB` + `_CAPY_DEPLOY_KEY` for build-time secret
+   * injection (the pair `capy run` consumes). Present only when the adapter
+   * sets `needsDeployToken`; the deploy flow mints it instead of decrypting
+   * `env`. `deployKey` is a per-deploy derivation token (DT), never the raw
+   * project key (CAP-411) — it decrypts nothing without a revocation-gated
+   * round trip to the service at `capy run` time.
    */
-  deployToken?: { secretsBlob: string; projectKey: string };
+  deployToken?: { secretsBlob: string; deployKey: string };
   /** Set by `capy deploy --dry-run`. Adapter must not push anything. */
   dryRun: boolean;
   /**
@@ -152,10 +155,11 @@ export interface DeployAdapter {
    */
   ciOnly?: boolean;
   /**
-   * When true, the deploy flow mints a SECRETS_BLOB + PROJECT_KEY and passes it
-   * as `ctx.deployToken` (instead of decrypting individual vars into `ctx.env`).
-   * For build-time adapters that inject secrets via `capy run` at build, rather
-   * than setting each secret as a plaintext vendor env var.
+   * When true, the deploy flow mints a `_CAPY_SECRETS_BLOB` + `_CAPY_DEPLOY_KEY`
+   * pair and passes it as `ctx.deployToken` (instead of decrypting individual
+   * vars into `ctx.env`). For build-time adapters that inject secrets via
+   * `capy run` at build, rather than setting each secret as a plaintext
+   * vendor env var.
    */
   needsDeployToken?: boolean;
   /**
