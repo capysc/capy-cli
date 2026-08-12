@@ -323,3 +323,134 @@ describe('capy run (deployed mode)', () => {
     expect(result.stdout.trim()).toBe('from-shell');
   });
 });
+
+// ---------------------------------------------------------------------------
+// CAP-423 — reserved runtime variables must not reach the child process.
+//
+// `capy run` has already consumed the deploy credentials by the time it
+// spawns; the child is the process whose environment leaks (framework debug
+// pages, phpinfo(), error-tracker SDKs that capture env by default,
+// /proc/<pid>/environ, crash dumps), and every grandchild inherits it.
+// ---------------------------------------------------------------------------
+
+describe('capy run (reserved runtime variables)', () => {
+  let fake: { url: string; close: () => void } | null = null;
+
+  afterEach(() => {
+    if (fake) {
+      fake.close();
+      fake = null;
+    }
+  });
+
+  // Dumps the names the child can actually see, one per line, so an assertion
+  // failure names the offender instead of just failing a boolean.
+  const DUMP = 'console.log(Object.keys(process.env).join("\\n"))';
+
+  test('deployed mode: child sees neither SECRETS_BLOB nor PROJECT_KEY', async () => {
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture({ API_KEY: 'sk-test-xyz' });
+    fake = await startFakeService(serviceKeyHex);
+
+    const result = await capy(['--', 'node', '-e', DUMP], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    const names = result.stdout.trim().split('\n');
+    expect(names).not.toContain('SECRETS_BLOB');
+    expect(names).not.toContain('PROJECT_KEY');
+    // The whole point of the command still works: decrypted values arrive.
+    expect(names).toContain('API_KEY');
+  });
+
+  test('deployed mode: decrypted values are unchanged by the strip', async () => {
+    const envVars = { API_KEY: 'sk-test-xyz', DATABASE_URL: 'postgres://h/d' };
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+    fake = await startFakeService(serviceKeyHex);
+
+    const result = await capy(
+      ['--', 'node', '-e', 'console.log(process.env.API_KEY, "|", process.env.DATABASE_URL)'],
+      {
+        env: {
+          SECRETS_BLOB: secretsBlob,
+          PROJECT_KEY: pk.toString('hex'),
+          CAPY_API_URL: fake.url,
+        },
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('sk-test-xyz | postgres://h/d');
+  });
+
+  test('grandchildren do not see them either', async () => {
+    const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture({ API_KEY: 'sk-test-xyz' });
+    fake = await startFakeService(serviceKeyHex);
+
+    // The app spawns a worker — the realistic shape (queue workers, cron,
+    // migration scripts). Inheritance means stripping once at the child covers
+    // this, but it is the case that actually bites, so pin it.
+    const spawnGrandchild =
+      'require("child_process").execFileSync(process.execPath,["-e",' +
+      JSON.stringify(DUMP) +
+      '],{stdio:"inherit"})';
+
+    const result = await capy(['--', 'node', '-e', spawnGrandchild], {
+      env: {
+        SECRETS_BLOB: secretsBlob,
+        PROJECT_KEY: pk.toString('hex'),
+        CAPY_API_URL: fake.url,
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    const names = result.stdout.trim().split('\n');
+    expect(names).not.toContain('SECRETS_BLOB');
+    expect(names).not.toContain('PROJECT_KEY');
+    expect(names).toContain('API_KEY');
+  });
+
+  test('local mode strips them too', async () => {
+    writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello\n');
+
+    // No blob/key pair, so this is the plaintext local path — but a machine
+    // that ran a deploy earlier can still have them in its shell.
+    const result = await capy(['--', 'node', '-e', DUMP], {
+      env: { SECRETS_BLOB: undefined as any, PROJECT_KEY: undefined as any, _CAPY_LEFTOVER: 'x' },
+    });
+
+    expect(result.exitCode).toBe(0);
+    const names = result.stdout.trim().split('\n');
+    expect(names).not.toContain('_CAPY_LEFTOVER');
+    expect(names).toContain('PLAIN_VAR');
+  });
+
+  test('the _CAPY_ prefix reserves future runtime vars with no code change', async () => {
+    writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello\n');
+
+    const result = await capy(['--', 'node', '-e', DUMP], {
+      env: { _CAPY_SECRETS_BLOB: 'x', _CAPY_DEPLOY_KEY: 'y', _CAPY_SOMETHING_UNINVENTED: 'z' },
+    });
+
+    expect(result.exitCode).toBe(0);
+    const names = result.stdout.trim().split('\n');
+    expect(names.filter((n) => n.startsWith('_CAPY_'))).toEqual([]);
+  });
+
+  test('bare DEPLOY_KEY is NOT reserved — it is a plausible application name', async () => {
+    // CAP-424 resolved this deliberately: reserving a generic word steals it
+    // from users, and tests/sync/spliceKeepBranch.test.ts already uses
+    // DEPLOY_KEY as an ordinary variable. The real credential is
+    // _CAPY_DEPLOY_KEY, which the prefix rule covers.
+    writeFileSync(join(TEST_DIR, '.env'), 'DEPLOY_KEY=my-own-app-value\n');
+
+    const result = await capy(['--', 'node', '-e', 'console.log(process.env.DEPLOY_KEY)']);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('my-own-app-value');
+  });
+});
