@@ -11,6 +11,9 @@ import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isReservedRuntimeVar } from '../core/reservedVars';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+const DIM = '\x1b[90m';
+const DIM_B = '\x1b[90;1m';
+const RESET = '\x1b[0m';
 
 type RemoteFailure = 'access_denied' | 'network_error' | 'no_data';
 
@@ -373,8 +376,7 @@ export class StatusCommand {
       } else {
         console.log('> Remote is up to date.');
       }
-      const { printExpiryWarnings } = await import('./connectors/shared');
-      printExpiryWarnings();
+      await this.printFooter();
       process.exit(0);
     }
 
@@ -444,10 +446,28 @@ export class StatusCommand {
       console.log(`  Run ${B('capy')} to sync these changes.`);
     }
 
-    if (!this.terse) {
-      const { printExpiryWarnings } = await import('./connectors/shared');
-      printExpiryWarnings();
-    }
+    await this.printFooter();
     process.exit(0);
+  }
+
+  /**
+   * The one place the full report ends.
+   *
+   * Both exit paths route through here so a third cannot quietly ship
+   * without the footer — the in-sync path and the has-differences path used
+   * to carry their own copy of the expiry-warning call.
+   */
+  private async printFooter(): Promise<void> {
+    if (this.terse) return;
+    const { printExpiryWarnings } = await import('./connectors/shared');
+    printExpiryWarnings();
+    // Doors discoverability. `capy doors` and keep's doors page are the
+    // answer to "my laptop was stolen", and until now nothing anywhere
+    // pointed at either — you had to already know the command existed, at
+    // exactly the moment nobody is browsing help. One dim line on a report
+    // the user asked for by hand is the cheapest place to say it; the terse
+    // path (git hooks) is deliberately excluded.
+    console.log('');
+    console.log(`  ${DIM}Lost a device? ${DIM_B}capy doors${DIM} lists everything that can act as you.${RESET}`);
   }
 }
