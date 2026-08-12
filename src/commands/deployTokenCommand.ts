@@ -18,6 +18,7 @@ import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
+import { isReservedRuntimeVar } from '../core/reservedVars';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -194,6 +195,12 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
   const rawEnv = fm.readEnvFile();
   const plaintextEnv: Record<string, string> = {};
   for (const [key, value] of Object.entries(rawEnv)) {
+    // Never embed a reserved runtime variable in the artifact (CAP-424).
+    // The previous deploy left its own SECRETS_BLOB in .env, so embedding it
+    // would nest the last blob inside the next one and compound the size on
+    // every deploy — into the 32 KB warning below and then real platform
+    // limits.
+    if (isReservedRuntimeVar(key)) continue;
     plaintextEnv[key] = value.startsWith('capy:') ? fm.decryptValue(value, pkHex) : value;
   }
   if (Object.keys(plaintextEnv).length === 0) throw new EmptyEnvError();

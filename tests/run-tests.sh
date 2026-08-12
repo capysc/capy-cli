@@ -70,6 +70,7 @@ ISOLATED_FILES=(
   tests/auth/pairing/installPairedSession.test.ts
   tests/commands/pairCommand.test.ts
   tests/auth/pairing/pairE2E.e2e.test.ts
+  tests/files/reservedVarsWrite.test.ts
   # <<< isolated test files (mock.module): append below >>>
   tests/ui/recoveryPhrase.test.ts
   tests/auth/authServiceKeepLoginBridge.test.ts

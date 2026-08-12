@@ -13,6 +13,7 @@ import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash } from '../types/index';
+import { isReservedRuntimeVar } from '../core/reservedVars';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -149,6 +150,10 @@ export class EditCommand {
     const undecryptableKeys: string[] = [];
     const rawLocal = fileManager.readEnvFile();
     for (const [key, value] of Object.entries(rawLocal)) {
+      // Reserved runtime variables are not editable secrets (CAP-424). They
+      // are long opaque blobs that crowd out the real list, and editing one
+      // silently breaks that machine's boot while deleting one is worse.
+      if (isReservedRuntimeVar(key)) continue;
       if (value.startsWith('capy:')) {
         try {
           localPlaintext[key] = fileManager.decryptValue(value, projectKey);
