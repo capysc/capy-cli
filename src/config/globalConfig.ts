@@ -543,6 +543,18 @@ export function consumeForceLoginMarker(): boolean {
   return true;
 }
 
+/**
+ * Peek without consuming — CAP-374's keep-bridge login path (authService.ts)
+ * needs to know whether a fresh WorkOS prompt is required BEFORE deciding
+ * whether to route through keep at all: keep's own `/auth/start` doesn't
+ * (yet) forward `force_login`, so a pending marker must steer the flow back
+ * to the direct `/auth/initiate` path — the one that actually honors it —
+ * rather than silently dropping the shared-machine re-auth guarantee.
+ */
+export function isForceLoginMarkerPending(): boolean {
+  return existsSync(getForceLoginMarkerPath());
+}
+
 // --- Device-key enrollment nudge marker (~/.capy/auth/.device-key-nudge-declined) ---
 //
 // Final-gate MAJOR-5: the ordinary `capy` run offers a ONE-TIME, declinable

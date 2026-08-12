@@ -44,6 +44,7 @@ let getKeyEncSyncPendingPath: typeof import('../../src/config/globalConfig').get
 let rootFingerprint: typeof import('../../src/config/globalConfig').rootFingerprint;
 let deleteLocalKeyMaterial: typeof import('../../src/config/globalConfig').deleteLocalKeyMaterial;
 let getLocalRootModePath: typeof import('../../src/config/globalConfig').getLocalRootModePath;
+let isForceLoginMarkerPending: typeof import('../../src/config/globalConfig').isForceLoginMarkerPending;
 
 beforeAll(async () => {
   const mod = await import('../../src/config/globalConfig');
@@ -79,6 +80,7 @@ beforeAll(async () => {
   rootFingerprint = mod.rootFingerprint;
   deleteLocalKeyMaterial = mod.deleteLocalKeyMaterial;
   getLocalRootModePath = mod.getLocalRootModePath;
+  isForceLoginMarkerPending = mod.isForceLoginMarkerPending;
 });
 
 afterAll(() => {
@@ -261,6 +263,23 @@ describe('GlobalConfig', () => {
       const stat = statSync(getForceLoginMarkerPath());
       expect(stat.mode & 0o777).toBe(0o600);
       consumeForceLoginMarker();
+    });
+
+    it('isForceLoginMarkerPending peeks without consuming (CAP-374 keep-bridge gate)', () => {
+      const { existsSync: realExists, rmSync } = require('fs');
+      if (realExists(getForceLoginMarkerPath())) rmSync(getForceLoginMarkerPath(), { force: true });
+
+      expect(isForceLoginMarkerPending()).toBe(false);
+
+      setForceLoginMarker();
+      // Peeking twice never consumes it — unlike consumeForceLoginMarker.
+      expect(isForceLoginMarkerPending()).toBe(true);
+      expect(isForceLoginMarkerPending()).toBe(true);
+      expect(existsSync(getForceLoginMarkerPath())).toBe(true);
+
+      // consumeForceLoginMarker still works normally afterward.
+      expect(consumeForceLoginMarker()).toBe(true);
+      expect(isForceLoginMarkerPending()).toBe(false);
     });
   });
 
