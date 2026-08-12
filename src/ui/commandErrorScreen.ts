@@ -97,6 +97,10 @@ export function buildCommandErrorData(error: any, ctx: ErrorContext = {}): Comma
             text: 'Already set up on another machine? Copy a redeem code across',
             command: 'capy transport',
           },
+          {
+            text: 'No other machine and no browser here? Pair this one with a code entered elsewhere',
+            command: 'capy pair',
+          },
           { text: 'Or have a teammate send you an invite' },
         ],
       };

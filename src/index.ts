@@ -579,6 +579,18 @@ program
   });
 
 program
+  .command('pair')
+  .description('Sign this headless machine in with a code entered on another device (no browser needed here)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--ttl-minutes <n>', 'granted device-key lifetime in minutes (default 30)', (v) => parseInt(v, 10))
+  .action(async (options) => {
+    assertNotLocalOnly('pair');
+    const { PairCommand } = await import('./commands/pairCommand');
+    const cmd = new PairCommand();
+    await cmd.execute({ json: options.json, ttlMinutes: options.ttlMinutes });
+  });
+
+program
   .command('kick <email>')
   .description('Remove a teammate from this organization')
   .action(async (email, _options, command) => {

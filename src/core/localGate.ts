@@ -19,6 +19,7 @@ export const LOCAL_ONLY_DISABLED_COMMANDS = [
   'org',
   'redeem',
   'transport',
+  'pair',
   'deploy',
   'connect',
   'rotate',
