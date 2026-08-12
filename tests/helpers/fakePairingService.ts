@@ -3,15 +3,27 @@
  * e2e test needs: the CAP-403 anonymous bootstrap/poll/cancel verbs
  * (`POST /connections/bootstrap`, `GET /connections/:id/result` gated by
  * `X-Connection-Secret`, `DELETE /connections/:id`), plus the minimal
- * `key_enc` wrapper + KMS co-decrypt surface `grantResolver.ts`'s production
- * ops factory (`createGrantResolutionOps`) calls when a later `capy run`
- * resolves a project key from the granted K_local.
+ * `wrapped_k_local` door + `key_enc` wrapper + KMS co-decrypt surface the
+ * hardened pairing flow needs: `pairKeyMaterial.ts`'s `resolvePairedKeyMaterial`
+ * fetches the paired-in door over `/wrappers*` (fresh-auth-gated, same as
+ * every other device-key caller — see `serviceOps.ts`) using the session
+ * `capy pair` just installed, and `grantResolver.ts`'s production ops
+ * factory (`createGrantResolutionOps`) calls `/wrappers*` + `/orgs/:id/
+ * co-decrypt` again when a later `capy run` resolves a project key from the
+ * granted K_local.
  *
  * Deliberately NOT an extension of `fakeWrapperService.ts` (which implements
  * the AUTHENTICATED `POST /connections` create — a different, owned-
  * connection surface this ticket's anonymous bootstrap is not) — a fresh,
  * narrow fixture keeps this file's contract legible and avoids widening a
- * fixture many other test files already depend on staying stable.
+ * fixture many other test files already depend on staying stable. The
+ * `/wrappers*` row shape below mirrors `fakeWrapperService.ts`'s `WrapperRow`
+ * field-for-field on purpose (same server contract, two independent stubs).
+ *
+ * Doors (`wrapped_k_local`) are org-less and per-credential server-side (see
+ * `serviceClient.ts`'s own comment) — this stub's `GET /wrappers` therefore
+ * returns every door regardless of the caller's org claim, exactly like the
+ * real service does, while `key_enc` rows stay org-filtered.
  *
  * KMS mock: same deterministic reversible prefix scheme
  * `fakeWrapperService.ts` uses, so the two fixtures could seed
@@ -35,11 +47,23 @@ export interface FakeKeyEncRow {
   keyEnc: string;
 }
 
+/** A pre-enrolled `wrapped_k_local` door row — the account's own device-key
+ *  wrapper the hardened `capy pair` now fetches AFTER installing the
+ *  session, instead of receiving K_local directly in the sealed answer. */
+export interface FakeDoorRow {
+  credentialId: string;
+  wrappedKLocal: string;
+  iv: string;
+  prfSalt: string;
+  kdfVersion: number;
+}
+
 export interface FakePairingService {
   url: string;
   connections: Map<string, FakePairingConnection>;
   findByUserCode(userCode: string): FakePairingConnection | undefined;
   keyEncRows: FakeKeyEncRow[];
+  doorRows: FakeDoorRow[];
   close(): void;
 }
 
@@ -71,6 +95,7 @@ function mintUserCode(): string {
 export function startFakePairingService(): FakePairingService {
   const connections = new Map<string, FakePairingConnection>();
   const keyEncRows: FakeKeyEncRow[] = [];
+  const doorRows: FakeDoorRow[] = [];
 
   const server = Bun.serve({
     port: 0,
@@ -123,22 +148,60 @@ export function startFakePairingService(): FakePairingService {
         return Response.json({ status: 'cancelled' });
       }
 
-      // --- key_enc wrapper + KMS surface (grantResolver.ts's ops) ---
+      // --- wrapped_k_local doors + key_enc wrapper + KMS surface ---
+      // (pairKeyMaterial.ts's resolvePairedKeyMaterial, grantResolver.ts's
+      // production ops). Doors are org-less: listed/fetched regardless of
+      // the caller's org claim, matching the real service (see this file's
+      // header). key_enc rows stay org-filtered, as before.
       if (req.method === 'GET' && url.pathname === '/wrappers') {
         const orgId = orgFromAuth(auth);
-        const rows = keyEncRows
+        const doorMeta = doorRows.map((row, i) => ({
+          id: `door-${i}`,
+          type: 'wrapped_k_local',
+          credential_id: row.credentialId,
+          kdf_version: row.kdfVersion,
+          is_seed: true,
+          verified_at: new Date().toISOString(),
+          organization_id: null,
+          created_at: new Date().toISOString(),
+          deleted_at: null,
+          mirror_state: 'mirrored',
+        }));
+        const keyEncMeta = keyEncRows
           .map((row, i) => ({ row, id: `keyenc-${i}` }))
           .filter(({ row }) => row.organizationId === orgId)
           .map(({ id, row }) => ({ id, type: 'key_enc', organization_id: row.organizationId, deleted_at: null }));
-        return Response.json({ wrappers: rows });
+        return Response.json({ wrappers: [...doorMeta, ...keyEncMeta] });
       }
       const wrapperIdMatch = url.pathname.match(/^\/wrappers\/([^/]+)$/);
       if (req.method === 'GET' && wrapperIdMatch) {
-        const idx = Number(wrapperIdMatch[1].replace('keyenc-', ''));
+        const rawId = wrapperIdMatch[1];
+        if (rawId.startsWith('door-')) {
+          const row = doorRows[Number(rawId.replace('door-', ''))];
+          if (!row) return Response.json({ error: 'not found', code: 'WRAPPER_NOT_FOUND' }, { status: 404 });
+          return Response.json({
+            wrapper: {
+              id: rawId,
+              type: 'wrapped_k_local',
+              credential_id: row.credentialId,
+              kdf_version: row.kdfVersion,
+              is_seed: true,
+              verified_at: new Date().toISOString(),
+              organization_id: null,
+              created_at: new Date().toISOString(),
+              deleted_at: null,
+              mirror_state: 'mirrored',
+              wrapped_k_local: row.wrappedKLocal,
+              iv: row.iv,
+              prf_salt: row.prfSalt,
+            },
+          });
+        }
+        const idx = Number(rawId.replace('keyenc-', ''));
         const row = keyEncRows[idx];
         if (!row) return Response.json({ error: 'not found', code: 'WRAPPER_NOT_FOUND' }, { status: 404 });
         return Response.json({
-          wrapper: { id: wrapperIdMatch[1], type: 'key_enc', organization_id: row.organizationId, key_enc: row.keyEnc },
+          wrapper: { id: rawId, type: 'key_enc', organization_id: row.organizationId, key_enc: row.keyEnc },
         });
       }
       const codecryptMatch = url.pathname.match(/^\/orgs\/([^/]+)\/co-decrypt$/);
@@ -160,6 +223,7 @@ export function startFakePairingService(): FakePairingService {
     connections,
     findByUserCode: (userCode) => [...connections.values()].find((c) => c.userCode === userCode),
     keyEncRows,
+    doorRows,
     close: () => server.stop(true),
   };
 }

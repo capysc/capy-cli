@@ -1,18 +1,30 @@
 /**
- * CAP-409 — THE acceptance-criterion proof for `capy pair`.
+ * CAP-409 — THE acceptance-criterion proof for `capy pair`, now hardened per
+ * CAP-372's restored invariant: the sealed answer carries only the raw PRF
+ * output (never K_local — see `pairContract.ts`'s header). This test proves
+ * the FULL two-step dance works end to end against real subprocesses and a
+ * real (loopback) door fetch:
  *
  * Spawns the REAL BUILT CLI as separate OS processes, mirroring
  * `grantE2E.e2e.test.ts`'s technique exactly:
  *
  *   1. `dist/index.js pair --json` — runs the real anonymous bootstrap +
  *      poll ceremony against a mocked broker (real envelope crypto via
- *      tests/helpers/sealEnvelope.ts), installs the session, and starts the
- *      in-memory grant daemon (a THIRD real, detached process) — printing
- *      `{socketPath, ...}`.
+ *      tests/helpers/sealEnvelope.ts). The sealed answer carries only
+ *      {prfOutput, credentialId} (no prf_salt/kdf_version echoed on the
+ *      wire) for a door this test pre-seeds into the fake service
+ *      (`service.doorRows`), wrapped with the SAME production crypto
+ *      (`deriveDeviceKeyKek`/`wrapKLocal`) a real enrollment would use.
+ *      `pair` installs the session FIRST, then fetches that door's own
+ *      prf_salt/kdf_version over `/wrappers*` using the just-installed
+ *      session and unwraps K_local locally (`pairKeyMaterial.ts`) — exactly
+ *      the CAP-384 grant ceremony's own door-fetch dance — before starting
+ *      the in-memory grant daemon (a THIRD real, detached process) and
+ *      printing `{socketPath, ...}`.
  *   2. `dist/index.js run -- node -e '...'` — a SEPARATE process, with
  *      CAPY_DEVICE_KEY_GRANT_SOCKET pointed at that socket and no prior
  *      local.key/key.enc anywhere — decrypts a real secret using ONLY the
- *      paired-in K_local and the session `pair` just wrote.
+ *      unwrapped K_local and the session `pair` just wrote.
  *
  * Then walks the ENTIRE temp HOME tree and asserts no file named `local.key`
  * or `key.enc` exists anywhere under it — the literal proof that pairing a
@@ -33,6 +45,7 @@ import { randomBytes } from 'crypto';
 import { startFakePairingService, kmsWrap, type FakePairingService } from '../../helpers/fakePairingService';
 import { sealEnvelopePageSide } from '../../helpers/sealEnvelope';
 import { PAIR_FLOW, PAIR_CEREMONY } from '../../../src/auth/pairing/pairContract';
+import { deriveDeviceKeyKek, deviceKeyWrapAAD, wrapKLocal, DEVICE_KEY_KDF_VERSION } from '../../../src/auth/deviceKey/crypto';
 import { encryptMasterKey, masterKeyAAD, deriveProjectKey } from '../../../src/crypto/keyManager';
 import { deriveLocalInnerKey } from '../../../src/crypto/localKeyRoot';
 import { Encryptor } from '../../../src/crypto/encryptor';
@@ -202,6 +215,25 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     const innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(USER_ID, ORG_ID));
     service.keyEncRows.push({ organizationId: ORG_ID, keyEnc: kmsWrap(innerWrapped) });
 
+    // A pre-enrolled live door, as if enrolled from some OTHER,
+    // already-unlocked machine — this test never runs an enroll ceremony.
+    // The sealed answer below carries only {prfOutput, credentialId} (never
+    // kLocal, never prf_salt/kdf_version — CAP-372, restored); `pair` must
+    // fetch THIS row itself, over the authenticated API, after installing
+    // the session, reading prf_salt/kdf_version from the fetched wrapper,
+    // and unwrap it locally to arrive at the same kLocal.
+    const prfSalt = randomBytes(32);
+    const prfOutput = randomBytes(32);
+    const kek = deriveDeviceKeyKek(prfOutput, prfSalt, DEVICE_KEY_KDF_VERSION);
+    const wrapped = wrapKLocal(kLocal, kek, deviceKeyWrapAAD(USER_ID, CRED_ID));
+    service.doorRows.push({
+      credentialId: CRED_ID,
+      wrappedKLocal: wrapped.wrappedKLocal,
+      iv: wrapped.iv,
+      prfSalt: prfSalt.toString('base64'),
+      kdfVersion: DEVICE_KEY_KDF_VERSION,
+    });
+
     const pair = spawnCli(['pair', '--json'], home, home, service.url);
     await driveCeremonyOverSubprocess(pair.stdoutSoFar, service, (userCode) => ({
       v: 1,
@@ -215,8 +247,7 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
       },
       keyMaterial: {
         orgId: ORG_ID,
-        kLocal: kLocal.toString('base64'),
-        kdfVersion: '1',
+        prfOutput: prfOutput.toString('base64'),
         credentialId: CRED_ID,
       },
     }));

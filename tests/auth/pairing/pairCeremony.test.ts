@@ -26,8 +26,7 @@ function validAnswerBody() {
     },
     keyMaterial: {
       orgId: 'org_1',
-      kLocal: randomBytes(32).toString('base64'),
-      kdfVersion: '1',
+      prfOutput: randomBytes(32).toString('base64'),
       credentialId: 'cred_1',
     },
   };

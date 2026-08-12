@@ -9,6 +9,24 @@
  * the same envelope on decline/cancel/error. Nothing here reaches the
  * network or disk — this module only parses and validates.
  *
+ * SECURITY CONTRACT (CAP-372, restored — see the pair-hardening task brief):
+ * the approving page never unwraps K_local and never sends it. The ONLY
+ * secret that crosses this seam is the raw PRF output, exactly like every
+ * other ceremony (see `../deviceKey/ceremonyTransport.ts`'s own header).
+ * `PairMachineAnswerKeyMaterial` carries `prfOutput`, never a `kLocal`
+ * field — `isValidKeyMaterial` below REJECTS any payload that carries one,
+ * so a rolled-back or compromised page cannot quietly resume shipping raw
+ * key material. Deliberately no `prfSalt`/`kdfVersion` echo on the wire
+ * either: those aren't secrets, but the CLI doesn't need the approving page
+ * to relay them — it fetches this account's own wrapped_k_local wrapper
+ * record directly (which already carries its own prf_salt/kdf_version)
+ * over the authenticated API (using the session this same answer just
+ * installed) and unwraps locally — the identical KEK-derivation/unwrap
+ * step CAP-384's grant ceremony already runs (`../deviceKey/grant.ts`'s
+ * `runGrantCeremony`). Keeping the wire payload minimal also keeps it
+ * byte-for-byte identical to what keep-app's `/pair` screen actually seals
+ * (`PairKeyMaterial` in keep-app's `src/lib/flow/pairWire.ts`).
+ *
  * Purpose slug for the anonymous bootstrap connection: `machine-pair`.
  */
 import type { CeremonyFailureCode } from '../deviceKey/ceremonyTransport';
@@ -50,9 +68,15 @@ export interface PairMachineAnswerSession {
 
 export interface PairMachineAnswerKeyMaterial {
   orgId: string;
-  /** base64 — the raw, already-unwrapped K_local for that org. Never disk. */
-  kLocal: string;
-  kdfVersion: string;
+  /** base64, 32 bytes — the raw PRF evaluation for the door (credential)
+   *  that answered. NEVER logged. This is the only secret in the payload;
+   *  K_local itself never appears here (see this file's header). The CLI
+   *  fetches that door's own prf_salt/kdf_version fresh from its wrapper
+   *  record rather than trusting an echoed copy on the wire. */
+  prfOutput: string;
+  /** Which door (WebAuthn credential) the browser's ceremony used — the
+   *  ONLY wrapper the CLI may fetch, never "any live door" of its own
+   *  choosing (the browser already made that selection). */
   credentialId: string;
 }
 
@@ -110,9 +134,14 @@ function isValidKeyMaterial(value: unknown): value is PairMachineAnswerKeyMateri
   return (
     isRecord(value) &&
     typeof value.orgId === 'string' &&
-    typeof value.kLocal === 'string' &&
-    typeof value.kdfVersion === 'string' &&
-    typeof value.credentialId === 'string'
+    typeof value.prfOutput === 'string' &&
+    typeof value.credentialId === 'string' &&
+    // Fail CLOSED on a `kLocal` field, rather than silently ignoring it: a
+    // rolled-back or compromised page that resumes shipping raw key
+    // material must never be quietly accepted as a valid answer. See this
+    // file's header (SECURITY CONTRACT) and pairContract.test.ts's
+    // falsification test.
+    !('kLocal' in value)
   );
 }
 
