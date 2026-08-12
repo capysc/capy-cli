@@ -17,4 +17,12 @@ if (!process.env.CAPY_API_URL) {
 if (!process.env.CAPY_BIN_NAME) {
   process.env.CAPY_BIN_NAME = 'capy-staging';
 }
+// Keep must move with the backend. A device key is minted against keep's
+// WebAuthn RP ID, so a door recorded in the staging database has to be
+// enrolled on the staging keep origin — point a staging-backed CLI at prod
+// keep and the credential is minted under the wrong RP ID, leaving a door row
+// nothing can ever satisfy. Set together, they cannot drift.
+if (!process.env.CAPY_KEEP_ORIGIN) {
+  process.env.CAPY_KEEP_ORIGIN = 'https://staging-keep.capy.sc';
+}
 require('../dist/index.js');
