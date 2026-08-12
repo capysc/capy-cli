@@ -274,3 +274,104 @@ describe('PairCommand — install failure', () => {
     expect(spawnCalls.length).toBe(0);
   });
 });
+
+// CAP-409 QR follow-up. `printPairingBlock` always prints the plain URL and
+// code (spec §5's bright-line exception, unrelated to TTY-ness); the QR is
+// purely additive on top and gated by `renderTerminalQr` (src/ui/terminalQr.ts).
+// These tests exercise that gate through the real command, not just the
+// helper in isolation — proving the wiring, not just the decision function.
+describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
+  const HALF_BLOCK = /[█▀▄]/;
+  const originalIsTTY = process.stdout.isTTY;
+  const originalColumns = process.stdout.columns;
+  const originalRows = process.stdout.rows;
+  const originalNoColor = process.env.NO_COLOR;
+
+  afterEach(() => {
+    process.stdout.isTTY = originalIsTTY;
+    process.stdout.columns = originalColumns;
+    process.stdout.rows = originalRows;
+    if (originalNoColor === undefined) delete process.env.NO_COLOR;
+    else process.env.NO_COLOR = originalNoColor;
+  });
+
+  function pending() {
+    // Never resolves within a test's lifetime — these tests only care about
+    // what `onCodeReady` prints synchronously, not about a ceremony outcome.
+    ceremonyImpl = (opts: any) =>
+      new Promise(() => {
+        opts.onCodeReady('QR12-3456');
+      });
+  }
+
+  test('a wide real TTY gets the QR alongside the unconditional plain text', () => {
+    process.stdout.isTTY = true;
+    process.stdout.columns = 80;
+    process.stdout.rows = 24;
+    delete process.env.NO_COLOR;
+    pending();
+
+    void new PairCommand().execute({});
+
+    const all = logs.join('\n');
+    expect(all).toContain('QR12-3456');
+    expect(all).toContain('keep.capy.sc/pair');
+    expect(HALF_BLOCK.test(all)).toBe(true);
+  });
+
+  test('a piped, non-TTY stdout gets the plain text but never the QR', () => {
+    process.stdout.isTTY = undefined as unknown as true; // spawned-process shape
+    process.stdout.columns = 80;
+    process.stdout.rows = 24;
+    pending();
+
+    void new PairCommand().execute({});
+
+    const all = logs.join('\n');
+    expect(all).toContain('QR12-3456');
+    expect(all).toContain('keep.capy.sc/pair');
+    expect(HALF_BLOCK.test(all)).toBe(false);
+  });
+
+  test('a narrow real TTY falls back to plain text only — no QR, no crash', () => {
+    process.stdout.isTTY = true;
+    process.stdout.columns = 10;
+    process.stdout.rows = 24;
+    pending();
+
+    void new PairCommand().execute({});
+
+    const all = logs.join('\n');
+    expect(all).toContain('QR12-3456');
+    expect(all).toContain('keep.capy.sc/pair');
+    expect(HALF_BLOCK.test(all)).toBe(false);
+  });
+
+  test('NO_COLOR suppresses the QR even on a wide real TTY, text stays', () => {
+    process.stdout.isTTY = true;
+    process.stdout.columns = 80;
+    process.stdout.rows = 24;
+    process.env.NO_COLOR = '1';
+    pending();
+
+    void new PairCommand().execute({});
+
+    const all = logs.join('\n');
+    expect(all).toContain('QR12-3456');
+    expect(HALF_BLOCK.test(all)).toBe(false);
+  });
+
+  test('the CAP-386 CAPY_EVENT_V1 marker never appears here, TTY or not — the two stay mutually exclusive', () => {
+    for (const isTTY of [true, undefined]) {
+      logs = [];
+      process.stdout.isTTY = isTTY as unknown as true;
+      process.stdout.columns = 80;
+      process.stdout.rows = 24;
+      pending();
+
+      void new PairCommand().execute({});
+
+      expect(logs.join('\n')).not.toContain('CAPY_EVENT_V1');
+    }
+  });
+});

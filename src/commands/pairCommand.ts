@@ -44,6 +44,8 @@ import { runPairCeremony } from '../auth/pairing/pairCeremony';
 import { installPairedSession } from '../auth/pairing/installPairedSession';
 import type { PairMachineAnswer } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
+import { keepOrigin } from '../ui/screens/keepScreens';
+import { renderTerminalQr } from '../ui/terminalQr';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -134,15 +136,33 @@ export class PairCommand {
   }
 
   /**
-   * The spec's exact terminal UX (§4.2). No TTY-gating — spec §5's
-   * documented bright-line exception: this code is a claim ticket, not a
-   * credential, so printing it unconditionally is safe (unlike
-   * `capy transport`'s TRANSPORT_CODE_UNSAFE_SURFACE class of secret).
+   * The spec's exact terminal UX (§4.2). No TTY-gating for the URL/code
+   * themselves — spec §5's documented bright-line exception: this code is a
+   * claim ticket, not a credential, so printing it unconditionally is safe
+   * (unlike `capy transport`'s TRANSPORT_CODE_UNSAFE_SURFACE class of
+   * secret). The URL and code below print unconditionally, every time.
+   *
+   * The QR (CAP-409 follow-up) is purely additive on top of that: a
+   * Unicode half-block rendering of the exact same URL, shown only when
+   * `renderTerminalQr` decides the terminal can actually display it (real
+   * TTY, no NO_COLOR-style opt-out, wide/tall enough for this URL's
+   * encoding). It never carries information the text above doesn't already
+   * have, and it is never the only way to reach the code — see
+   * `../ui/terminalQr.ts`'s file header. It cannot encode the user code
+   * itself: the `/pair` page (packages/ui/screens/pair) has no
+   * query-param-prefill contract today, only a manually-typed code field,
+   * so a `?code=` URL would silently do nothing on the other end.
    */
   private printPairingBlock(userCode: string): void {
+    const url = `${keepOrigin()}/pair`;
     console.log('');
-    console.log(`  To sign this machine in, go to ${B('keep.capy.sc/pair')}`);
+    console.log(`  To sign this machine in, go to ${B(url)}`);
     console.log(`  on a device where you're signed in, and enter:  ${B(userCode)}`);
+    const qr = renderTerminalQr(url);
+    if (qr) {
+      console.log('');
+      console.log(qr);
+    }
     console.log('');
     console.log('  Waiting…');
   }
