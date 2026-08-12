@@ -18,6 +18,7 @@ describe('local-only command gating', () => {
       'org',
       'redeem',
       'transport',
+      'pair',
       'deploy',
       'connect',
       'rotate',

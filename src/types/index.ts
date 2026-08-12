@@ -431,6 +431,13 @@ export const ERROR_CODES = {
    * phrase, if the caller could safely show it, is the only remaining copy.
    */
   DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE: 'DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE',
+  // CAP-409 (client-side only). `capy pair`'s RFC 8628-style device-pairing
+  // flow. The bootstrap connection's own `expires_at` passed with no answer
+  // ever delivered — distinct from a CeremonyFailureCode (those come from the
+  // approving device actively declining/erroring; this is nobody ever
+  // showing up in time). Mirrors DEVICE_KEY_GRANT_EXPIRED's shape: a coded,
+  // non-string signal an orchestrator can branch on (Rule 4).
+  PAIR_CODE_EXPIRED: 'PAIR_CODE_EXPIRED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
