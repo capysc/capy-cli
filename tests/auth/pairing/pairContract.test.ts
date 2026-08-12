@@ -129,16 +129,28 @@ describe('parsePairPayload', () => {
   // REJECTED, not silently accepted with the extra field ignored. This is
   // what stops a rolled-back or compromised page from quietly resuming the
   // old "ship raw K_local" behavior: the validator fails closed on the
-  // field's mere PRESENCE, not just its absence. Confirmed to fail against
-  // the pre-hardening validator (which only checked kLocal's own shape and
-  // had no such rejection) — see the pair-hardening task's report for the
-  // observed failure count.
+  // field's mere PRESENCE, not just its absence.
+  //
+  // The fixture DELIBERATELY also carries `kdfVersion` — a field the
+  // CURRENT (hardened) contract no longer requires, but the PRE-hardening
+  // one did — so this payload is "otherwise a complete, valid answer" under
+  // BOTH schemas, isolating the falsification to the kLocal check alone.
+  // Without `kdfVersion` here, this test would spuriously "pass" against
+  // the pre-hardening validator for the WRONG reason (missing kdfVersion),
+  // not because it ever rejected kLocal's presence — verified by hand
+  // against a checkout of the pre-hardening pairContract.ts: with
+  // `kdfVersion` omitted this test passed for the wrong reason (0 relevant
+  // failures); with it included as below, the pre-hardening validator
+  // accepts the payload as `{kind: 'answer'}` and this test fails exactly
+  // as intended (1 failure) — see the pair-hardening task's report for the
+  // full suite's observed failure count under the old code.
   test('keyMaterial carrying a kLocal field -> malformed, even if otherwise well-formed (CAP-372 falsification)', () => {
     const payload = validAnswerPayload({
       keyMaterial: {
         orgId: 'org_1',
         prfOutput: Buffer.alloc(32, 7).toString('base64'),
         credentialId: 'c1',
+        kdfVersion: '1',
         kLocal: Buffer.alloc(32, 9).toString('base64'),
       },
     });
