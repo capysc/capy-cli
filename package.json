@@ -64,6 +64,9 @@
     "esbuild": "^0.25.8",
     "typescript": "^5.0.0"
   },
+  "overrides": {
+    "@yao-pkg/pkg-fetch/undici": "^7.29.0"
+  },
   "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=18.0.0"
