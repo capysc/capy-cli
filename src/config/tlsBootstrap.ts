@@ -29,11 +29,15 @@ export function installProfileTlsTrust(): void {
   }
 
   try {
-    // undici ships with Node 18+; the global fetch implementation uses it
-    // under the hood, so installing a global dispatcher affects every fetch
-    // in the process. require() (not import) keeps this synchronous so the
-    // dispatcher is in place before ServiceClient's first request. undici
-    // has no ambient typings in @types/node, hence the local require.
+    // Node embeds undici for global fetch but does not expose it as a
+    // resolvable module, so `undici` is a declared dependency — see
+    // package.json. Both copies coordinate through the same well-known
+    // `Symbol.for('undici.globalDispatcher.1')`, so a dispatcher set here
+    // does apply to every global fetch() in the process.
+    //
+    // require() (not import) keeps this synchronous, so the dispatcher is in
+    // place before ServiceClient's first request. undici has no ambient
+    // typings in @types/node, hence the local cast.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const undici = require('undici') as { Agent: new (opts: any) => any; setGlobalDispatcher: (d: any) => void };
     undici.setGlobalDispatcher(new undici.Agent({ connect: { ca } }));

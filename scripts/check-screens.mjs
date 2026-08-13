@@ -21,6 +21,11 @@ const ALLOWED_DEPS = [
   'inquirer',
   'open',
   'proper-lockfile',
+  // Not a screens dependency, and not new code either: `capy byoc` and
+  // tlsBootstrap have always required undici to trust a self-signed CA. It
+  // used to resolve only by accident, via a devDependency's hoisted copy, so
+  // declaring it shrinks the real tree rather than growing it.
+  'undici',
 ];
 
 const URL_ALLOWLIST = [

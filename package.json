@@ -22,7 +22,8 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "!dist/index-dev.*",
-    "bin/capy"
+    "bin/capy",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -42,6 +43,8 @@
     "test:plugins:cloudflare-pages": "bash tests/plugins/run-plugin-tests.sh cloudflare-pages",
     "test:plugins:vercel": "bash tests/plugins/run-plugin-tests.sh vercel",
     "clean": "rm -rf dist build bin-pkg",
+    "notices": "node scripts/gen-third-party-notices.mjs",
+    "notices:check": "node scripts/gen-third-party-notices.mjs --check",
     "bundle": "node build.esbuild.mjs",
     "build:binary": "node scripts/build-binary.mjs"
   },
@@ -50,7 +53,8 @@
     "dotenv": "^16.3.0",
     "inquirer": "^12.9.6",
     "open": "8.4.2",
-    "proper-lockfile": "^4.1.2"
+    "proper-lockfile": "^4.1.2",
+    "undici": "^6.21.0"
   },
   "devDependencies": {
     "@types/inquirer": "^9.0.0",
