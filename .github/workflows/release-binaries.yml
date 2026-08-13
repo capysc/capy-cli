@@ -54,6 +54,11 @@ jobs:
             exit 1
           fi
 
+      # Regenerated from the exact dependency tree that is about to be bundled,
+      # so the notices shipped in the archives match the code in the binary.
+      - name: Regenerate third-party notices
+        run: bun run notices
+
       - name: Bundle CLI with esbuild
         run: bun run bundle
 
@@ -74,11 +79,16 @@ jobs:
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
           mkdir -p dist
+          # The binaries embed our AGPL code plus MIT/ISC/BSD/Apache dependencies;
+          # both sets of terms ship inside every archive.
+          for d in bin-pkg/*/; do
+            cp LICENSE THIRD-PARTY-NOTICES.md "$d"
+          done
           cd bin-pkg
           for d in capy-darwin-x64 capy-darwin-arm64 capy-linux-x64 capy-linux-arm64; do
             tar -czf "../dist/${d}-${VERSION}.tar.gz" -C "$d" .
           done
-          (cd capy-win-x64 && zip "../../dist/capy-win-x64-${VERSION}.zip" capy.exe)
+          (cd capy-win-x64 && zip "../../dist/capy-win-x64-${VERSION}.zip" capy.exe LICENSE THIRD-PARTY-NOTICES.md)
           cd ../dist
           shasum -a 256 *.tar.gz *.zip > "checksums-${VERSION}.txt"
           ls -la
