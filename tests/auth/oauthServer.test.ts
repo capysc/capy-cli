@@ -142,6 +142,64 @@ describe('OAuthServer', () => {
       expect(result).toBe('test-auth-code');
     });
 
+    test('emits the CAPY_EVENT_V1 line BEFORE the human-readable url line (CAP-442 G7 — write-order chunk race)', async () => {
+      // capy-mcp's L-harness reproduced this 4/4 against a real capy-dev
+      // child: the prose "If the browser doesn't open, visit: <url>" line
+      // used to print BEFORE emitHandoffUrlEvent ran, so a chunked stdout
+      // consumer could see the prose write before the event write and
+      // permanently commit to a no-flow relay for the login handoff. Pins
+      // the fix at the source: the event line is now the FIRST write that
+      // carries this url, full stop — see capy-mcp's elicit.test.ts /
+      // FAILURES.md for the consumer-side half of this regression.
+      const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
+      (oauthServer as any).server = mockServer;
+
+      // Two independent writers put the url on stdout: `emitHandoffUrlEvent`
+      // (via `process.stdout.write` directly) and the human `console.log`
+      // lines. Bun's `console.log` does not route through a spied
+      // `process.stdout.write`, so both are spied separately and pushed into
+      // ONE shared, ordered array — call order is what is under test, not
+      // which underlying primitive carried the bytes.
+      const originalIsTTY = process.stdout.isTTY;
+      process.stdout.isTTY = undefined as unknown as true; // spawned-process shape: isTTY is undefined, not false
+      const writes: string[] = [];
+      const writeSpy = spyOn(process.stdout, 'write').mockImplementation(((chunk: string) => {
+        writes.push(chunk);
+        return true;
+      }) as typeof process.stdout.write);
+      const logSpy = spyOn(console, 'log').mockImplementation(((...args: unknown[]) => {
+        writes.push(args.map(String).join(' '));
+      }) as typeof console.log);
+
+      setTimeout(() => {
+        const closeHandler = mockServer.on.mock.calls.find((call: any) => call[0] === 'close')?.[1];
+        if (closeHandler) {
+          (oauthServer as any).authorizationCode = 'test-auth-code';
+          closeHandler();
+        }
+      }, 10);
+
+      try {
+        await oauthServer.startAuthFlow(authUrl);
+      } finally {
+        writeSpy.mockRestore();
+        logSpy.mockRestore();
+        process.stdout.isTTY = originalIsTTY;
+      }
+
+      const eventIndex = writes.findIndex((w) => w.startsWith('CAPY_EVENT_V1 '));
+      // The event line's JSON body also contains the url as a substring, so
+      // the prose search must exclude it — otherwise it would (wrongly)
+      // match the event line itself at the same index.
+      const proseIndex = writes.findIndex((w) => w.includes(authUrl) && !w.startsWith('CAPY_EVENT_V1 '));
+      expect(eventIndex).toBeGreaterThanOrEqual(0);
+      expect(proseIndex).toBeGreaterThan(eventIndex);
+
+      const parsed = JSON.parse(writes[eventIndex].slice('CAPY_EVENT_V1 '.length).trimEnd());
+      expect(parsed.flow).toBe('login');
+      expect(parsed.url).toBe(authUrl);
+    });
+
     test('should open browser and resolve with auth code on success', async () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
 

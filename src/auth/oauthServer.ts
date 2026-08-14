@@ -147,6 +147,18 @@ export class OAuthServer {
     return new Promise((resolve, reject) => {
       console.log(`🔐 Starting OAuth authentication...`);
 
+      // CAP-442 G7: emit the structured handoff event BEFORE any human-
+      // readable line that carries the same url. These are separate stdout
+      // writes, and a `child_process` consumer's chunk boundaries do not
+      // have to land on a write boundary — a machine reader watching this
+      // stream (capy-mcp's onStdout) can see whichever write flushes first.
+      // Printing the prose line first (the old order) let a per-chunk
+      // "prefer the event, but only once seen" consumer commit to the
+      // prose-only url — permanently losing the `flow:'login'` tag once the
+      // event caught up a chunk later (see capy-mcp's FAILURES.md, 4/4
+      // repro). Writing the event first closes that race at the source.
+      emitHandoffUrlEvent(authUrl, 'login');
+
       // Always print the URL up front so it's available even if the browser
       // never opens (no TTY, headless, --web driven through the MCP, or `open`
       // silently failing). The auto-open below is a best-effort convenience.
@@ -154,7 +166,6 @@ export class OAuthServer {
       console.log(`  If the browser doesn't open, visit:`);
       console.log(`  ${authUrl}`);
       console.log('');
-      emitHandoffUrlEvent(authUrl, 'login');
 
       // `handoff`, and it is the ONLY handoff in the CLI: sign-in is the one
       // page we do not serve. The person needs the address bar to check where
