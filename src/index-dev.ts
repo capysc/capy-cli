@@ -71,6 +71,13 @@ if (!process.env.CAPY_API_URL) {
   }
 }
 
+// Browser-backed dev flows belong to the local Keep app by default. Keep an
+// explicit origin authoritative so alternate local ports and remote testbeds
+// remain usable.
+if (!process.env.CAPY_KEEP_ORIGIN) {
+  process.env.CAPY_KEEP_ORIGIN = 'http://keep.localhost:3002';
+}
+
 const program = new Command();
 
 program
