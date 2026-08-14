@@ -194,7 +194,7 @@ export function resolveActiveUrl(devMode: boolean = false): string {
 
   // No profile, no env override — built-in default. Dev mode keeps its
   // historical localhost behavior to match the legacy ServiceClient.
-  return devMode ? 'http://localhost:3000' : DEFAULT_CLOUD_URL;
+  return devMode ? 'http://localhost:3001' : DEFAULT_CLOUD_URL;
 }
 
 /**

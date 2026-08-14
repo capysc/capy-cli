@@ -27,7 +27,7 @@ const CLI_ROOT = resolve(import.meta.dir, '../..');
  *
  * `index-dev.ts` is what `capy-dev` runs, which is what every local run against
  * a dev service uses — including the MCP, whose README points `CAPY_BIN` at it
- * with `CAPY_API_URL=http://localhost:3000`. It had FIVE `optsWithGlobals`
+ * with `CAPY_API_URL=http://localhost:3001`. It had FIVE `optsWithGlobals`
  * calls to `index.ts`'s twenty, so `capy-dev rotate --web` parsed the flag,
  * accepted it, and prompted a TTY nobody was watching. This file checked only
  * `index.ts` and reported green throughout.

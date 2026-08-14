@@ -67,7 +67,7 @@ if (!process.env.CAPY_API_URL) {
   const { homedir } = require('os') as typeof import('os');
   const configPath = join(homedir(), process.env.CAPY_GLOBAL_DIR_NAME, 'config.json');
   if (!existsSync(configPath)) {
-    process.env.CAPY_API_URL = 'http://localhost:3000';
+    process.env.CAPY_API_URL = 'http://localhost:3001';
   }
 }
 

@@ -116,7 +116,7 @@ export function buildCommandErrorData(error: any, ctx: ErrorContext = {}): Comma
         detail: 'Could not reach the Capy service.',
         remedies: [
           { text: 'Check your internet connection' },
-          { text: 'Check the service is running (capy-dev: http://localhost:3000)' },
+          { text: 'Check the service is running (capy-dev: http://localhost:3001)' },
           {
             text: 'If you own the org, decrypt offline with your seed phrase',
             command: 'capy decrypt',

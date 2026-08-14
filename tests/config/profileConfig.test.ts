@@ -74,7 +74,7 @@ describe('profileConfig', () => {
     });
 
     it('falls back to localhost in dev mode', () => {
-      expect(mod.resolveActiveUrl(true)).toBe('http://localhost:3000');
+      expect(mod.resolveActiveUrl(true)).toBe('http://localhost:3001');
     });
 
     it('CAPY_API_URL wins over everything', () => {
