@@ -21,6 +21,7 @@ const ALLOWED_DEPS = [
   'inquirer',
   'open',
   'proper-lockfile',
+  'qrcode-terminal',
 ];
 
 const URL_ALLOWLIST = [
