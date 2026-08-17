@@ -1,0 +1,18 @@
+{
+  "generatedFrom": "shared/flows",
+  "contractVersion": "1",
+  "files": {
+    "steps.json": {
+      "source": "shared/flows/steps.json",
+      "sha256": "f5d688651d24effdcb513e6e2737b9b9c0531e0c48e0f344aa4972fb1acf3c83"
+    },
+    "observations.json": {
+      "source": "shared/flows/observations.json",
+      "sha256": "f0f2c357ab8465bf5b3bf91def4ff45b086ac54164642c4ff312a96c9a5ad23b"
+    },
+    "version.json": {
+      "source": "shared/flows/version",
+      "sha256": "edc876bd8c8d64d60a86766e797e0a7f9be2102bfddbb351dc9ea96263164834"
+    }
+  }
+}

@@ -332,6 +332,41 @@ export class CapyCommand {
    * through a failure, so a run that dies between two stops does not leave a
    * page claiming to still be working on it.
    */
+  /**
+   * First-run initialization, as a public entry point for the flow driver's
+   * `write_keep_lock(select_or_create)` executor (src/flows/onboard/executors).
+   *
+   * Deliberately the SAME method the ordinary `capy` path calls — the flow
+   * layer sequences the CLI's existing actuators, it does not re-implement
+   * them. `assumeEncryptConsent` is threaded through for the one question the
+   * flow has already asked in its own consent dialog; everything else behaves
+   * identically.
+   */
+  async initializeProjectForFlow(opts: { assumeEncryptConsent?: boolean } = {}): Promise<void> {
+    this.assumeEncryptConsent = opts.assumeEncryptConsent === true;
+    try {
+      await this.initializeProject();
+    } finally {
+      this.assumeEncryptConsent = false;
+    }
+  }
+
+  /**
+   * Adopt an existing project into this directory, as a public entry point for
+   * the flow driver's `write_keep_lock(env_header)` executor. Same method the
+   * ordinary path uses when the user picks an existing project.
+   */
+  async bootstrapProjectForFlow(
+    project: { id: string; name: string; organization_id: string },
+    orgId: string,
+    userId: string,
+  ): Promise<void> {
+    await this.bootstrapExistingProject(project, orgId, userId);
+  }
+
+  /** Set for the duration of a flow-driven init: the plan dialog already carried this question. */
+  private assumeEncryptConsent = false;
+
   private async initializeProject(): Promise<void> {
     // Imported only on the `--web` path: the module pulls in every compiled
     // screen, and a terminal run has no use for them.
@@ -840,7 +875,13 @@ export class CapyCommand {
         // right project on first setup. After this step .env is rewritten
         // with ciphertext, so getting it wrong is painful to recover from.
         let confirmEncrypt: boolean;
-        if (wizard) {
+        if (this.assumeEncryptConsent) {
+          // Under the flow driver this question was already asked, once, by the
+          // onboard plan dialog — and the answer is recorded server-side on the
+          // flow instance. Asking again is the consent fatigue the flow layer
+          // exists to remove; it is NOT a consent being skipped.
+          confirmEncrypt = true;
+        } else if (wizard) {
           // NAMES and a count reach the page — never a value, and not even a
           // snippet of one. The whole question this stop asks is whether these
           // may stop being plaintext, and showing more than the terminal shows

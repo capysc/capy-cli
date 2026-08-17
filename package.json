@@ -29,6 +29,7 @@
     "build:deploy-assets": "node scripts/build-deploy-assets.mjs",
     "build:screens": "node scripts/build-screen-assets.mjs",
     "check:screens": "node scripts/check-screens.mjs",
+    "check:flow-contract": "bun run scripts/sync-flow-contract.ts --check",
     "start": "ts-node ./bin/capy.ts",
     "dev": "tsc --watch",
     "capy-dev": "bun run build && node bin/capy-dev",
