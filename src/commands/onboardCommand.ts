@@ -18,6 +18,7 @@
 import { isLocalOnly } from '../config/profileConfig';
 import { CapyError, ERROR_CODES, CliOptions } from '../types/index';
 import { FlowClient } from '../flows/client';
+import { ProjectManager } from '../core/projectManager';
 import { FlowContractError, FlowStep } from '../flows/validate';
 import { runOnboardFlow, confirmOnboardPlan } from '../flows/onboard/driver';
 import { buildPlan } from '../flows/onboard/plan';
@@ -66,8 +67,18 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   // token minted mid-flow never travelled, the service never rebound the
   // instance, sessionLive stayed false, and the flow re-issued `authenticate`
   // until the driver gave up.
-  const getToken = async (): Promise<string | undefined> =>
-    (await new AuthService(undefined, devMode).getValidToken())?.access_token ?? undefined;
+  //
+  // Scoped to the user this directory already knows about, when it does: the
+  // session file is user-scoped (~/.capy*/auth/sessions/<userId>.json) and the
+  // ordinary `capy` run finds it through `.capy/sync-state`'s user_id — the
+  // `authenticate` executor writes that id for exactly this reason. Without
+  // the scope a fresh reader looks at the unscoped path and finds nothing.
+  const getToken = async (): Promise<string | undefined> => {
+    const auth = new AuthService(undefined, devMode);
+    const knownUserId = new ProjectManager(targetDir).readSyncState()?.user_id;
+    if (knownUserId) auth.setSessionUserId(knownUserId);
+    return (await auth.getValidToken())?.access_token ?? undefined;
+  };
   const token = await getToken();
 
   // Answering a dialog is a separate invocation: record it, then re-drive so

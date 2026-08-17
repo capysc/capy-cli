@@ -114,25 +114,41 @@ export const authenticate: Executor = async (step, ctx) => {
   const auth = new AuthService(undefined, ctx.devMode);
   const orgHint = (step.params.org_hint as string | null) ?? undefined;
 
-  const publish = async (userId: string | undefined): Promise<void> => {
+  const publish = async (userId: string | undefined, orglessToken: string | undefined): Promise<void> => {
     if (!userId) return;
+    // Persist the user id to the project's sync-state immediately — the same
+    // thing the ordinary first run does right after signing in — so a LATER
+    // invocation in this directory (the next `capy onboard` call, or plain
+    // `capy`) can find the user-scoped session file instead of looking at the
+    // unscoped path and sending the user through sign-in again.
+    new ProjectManager(ctx.targetDir).writeSyncStateUserId(userId);
     // Scope the reader to the user whose session was just written, then hand
     // the bearer straight to the driver.
     auth.setSessionUserId(userId);
     const token = await auth.getValidToken();
-    if (token?.access_token) ctx.onSession?.({ token: token.access_token, userId });
+    if (token?.access_token) {
+      ctx.onSession?.({ token: token.access_token, userId });
+      return;
+    }
+    // A brand-new identity with zero organizations gets an org-less
+    // (scope:"user") access token from the exchange that is deliberately never
+    // persisted to the session store, so getValidToken() has nothing to hand
+    // back. The flow endpoints are org-optional for exactly this caller — pass
+    // that bearer along or the instance can never be rebound and the flow
+    // re-issues `authenticate` forever.
+    if (orglessToken) ctx.onSession?.({ token: orglessToken, userId });
   };
 
   const silent = await auth.authenticateSilent(orgHint);
   if (silent.success) {
-    await publish(silent.user_id);
+    await publish(silent.user_id, silent._orgless_access_token);
     return { outcome: 'ok', result: silent.organization_id ? { org_id: silent.organization_id } : undefined };
   }
   // Not terminal: escalate to the interactive path, exactly as the ordinary
   // `capy` run does. Only its failure ends the step, and it reports why.
   const result = await auth.authenticate(orgHint);
   if (!result.success) return { outcome: 'failed', code: codeForSilentAuthFailure(result.error_code) };
-  await publish(result.user_id);
+  await publish(result.user_id, result._orgless_access_token);
   return { outcome: 'ok', result: result.organization_id ? { org_id: result.organization_id } : undefined };
 };
 
