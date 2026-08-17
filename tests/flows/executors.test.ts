@@ -49,7 +49,17 @@ mock.module('../../src/auth/deviceKey/flag', () => ({ deviceKeysEnabled }));
 const attemptCaseCUnlock = jest.fn();
 mock.module('../../src/auth/deviceKey/wiring', () => ({ attemptCaseCUnlock }));
 
-mock.module('../../src/service/serviceClient', () => ({ ServiceClient: class {} }));
+// The unlock executor must hand the client a token provider (the bug the live
+// second-machine run found: without one every ceremony request went out
+// unauthenticated). Record it so a test can assert it was wired.
+const tokenProviders: Array<() => unknown> = [];
+mock.module('../../src/service/serviceClient', () => ({
+  ServiceClient: class {
+    setTokenProvider(p: () => unknown) {
+      tokenProviders.push(p);
+    }
+  },
+}));
 
 afterAll(() => {
   mock.restore();
@@ -274,6 +284,7 @@ describe('unlock_org_key — CAP-382 Case C, moved not rewritten', () => {
 
     const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
 
+    expect(tokenProviders.length).toBeGreaterThan(0);
     expect(result.outcome).toBe('ok');
     expect(attemptCaseCUnlock).toHaveBeenCalledTimes(1);
     expect(attemptCaseCUnlock).toHaveBeenCalledWith(
