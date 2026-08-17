@@ -104,6 +104,25 @@ async function run(
   }
 }
 
+
+/**
+ * An AuthService scoped to the user this directory already knows about. The
+ * session file is user-scoped (auth/sessions/<userId>.json under the global capy dir) and the
+ * ordinary `capy` run reaches it through `.capy/sync-state`'s user_id — which
+ * the `authenticate` step writes for exactly this reason. An UNSCOPED reader
+ * looks at the unscoped path and either finds nothing or a stale session, and
+ * every step after sign-in that needs a bearer (adopting a project, the
+ * device-key unlock) then fails with a missing-authorization error that has
+ * nothing to do with the step itself.
+ */
+async function scopedAuthService(ctx: ExecutorContext) {
+  const { AuthService } = await import('../../../auth/authService');
+  const auth = new AuthService(undefined, ctx.devMode);
+  const knownUserId = new ProjectManager(ctx.targetDir).readSyncState()?.user_id;
+  if (knownUserId) auth.setSessionUserId(knownUserId);
+  return auth;
+}
+
 /**
  * `authenticate` — the CLI's own auth path, unchanged. Silent first, browser
  * only if that fails, which is why re-running it against a live session costs
@@ -202,8 +221,7 @@ export const writeKeepLock: Executor = async (step, ctx) => {
   const pinnedBranch = (step.params.branch as string | null) ?? undefined;
 
   const adopt = async (orgId: string, projectId: string, branch?: string): Promise<StepResult> => {
-    const { AuthService } = await import('../../../auth/authService');
-    const auth = new AuthService(undefined, ctx.devMode);
+    const auth = await scopedAuthService(ctx);
     const session = await auth.authenticateSilent(orgId);
     if (!session.success || !session.user_id) {
       return { outcome: 'failed', code: codeForSilentAuthFailure(session.error_code) };
@@ -323,8 +341,7 @@ export const unlockOrgKey: Executor = async (step, ctx) => {
   const orgId = (step.params.org_id as string | null) ?? keep?.org_id ?? fm.readEnvMeta(ctx.envPath).org_id ?? null;
   if (!orgId) return { outcome: 'failed', code: ERROR_CODES.SERVICE_ERROR };
 
-  const { AuthService } = await import('../../../auth/authService');
-  const auth = new AuthService(undefined, ctx.devMode);
+  const auth = await scopedAuthService(ctx);
   const session = await auth.authenticateSilent(orgId);
   if (!session.success || !session.user_id) {
     return { outcome: 'failed', code: codeForSilentAuthFailure(session.error_code) };
@@ -338,9 +355,14 @@ export const unlockOrgKey: Executor = async (step, ctx) => {
   if (deviceKeysEnabled()) {
     const { attemptCaseCUnlock } = await import('../../../auth/deviceKey/wiring');
     const { ServiceClient } = await import('../../../service/serviceClient');
+    // Same wiring the ordinary command does: the client pulls a bearer from
+    // the (scoped) auth service on every request. Without a provider every
+    // call goes out unauthenticated and the ceremony is skipped.
+    const serviceClient = new ServiceClient(undefined, ctx.devMode);
+    serviceClient.setTokenProvider(() => auth.getValidToken());
     await attemptCaseCUnlock({
       authService: auth,
-      serviceClient: new ServiceClient(undefined, ctx.devMode),
+      serviceClient,
       devMode: ctx.devMode,
       userId,
       userEmail: session.user_email,
