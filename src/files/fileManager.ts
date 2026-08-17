@@ -389,22 +389,33 @@ export class FileManager {
    * save a backup as .env.pre-capy.old with all values commented out,
    * and add .env.pre-capy.old to .gitignore.
    */
+  /**
+   * Does this .env still hold at least one value that is not capy ciphertext?
+   *
+   * Extracted from `backupPlaintextEnv`, which is the definition of "there is
+   * still plaintext here" and now the only implementation of it — the flow
+   * layer's `envStillPlaintext` observation reports exactly this, and a second
+   * hand-rolled parser would drift from the file that actually decides whether
+   * a backup gets written.
+   *
+   * Uses the real dotenv parser rather than splitting on `=`: `FOO="capy:..."`,
+   * `export FOO=...` and multi-line values all have to classify the way the
+   * writer classifies them, or a value that IS encrypted reads as plaintext and
+   * the step that would fix it never converges.
+   */
+  hasPlaintextValues(path?: string): boolean {
+    const envPath = path || join(this.projectRoot, '.env');
+    if (!existsSync(envPath)) return false;
+    const parsed = parseDotenv(readFileSync(envPath, 'utf-8'));
+    return Object.values(parsed).some((value) => !value.startsWith('capy:'));
+  }
+
   backupPlaintextEnv(path?: string): boolean {
     const envPath = path || join(this.projectRoot, '.env');
     if (!existsSync(envPath)) return false;
 
     const content = readFileSync(envPath, 'utf-8');
-    const lines = content.split('\n').filter(l => l.trim() && !l.startsWith('#'));
-
-    // Check if any values are already encrypted
-    const hasPlaintext = lines.some(line => {
-      const eqIdx = line.indexOf('=');
-      if (eqIdx === -1) return false;
-      const value = line.substring(eqIdx + 1);
-      return !value.startsWith('capy:');
-    });
-
-    if (!hasPlaintext) return false;
+    if (!this.hasPlaintextValues(path)) return false;
 
     // Comment out all lines
     const commented = content.split('\n').map(line => {

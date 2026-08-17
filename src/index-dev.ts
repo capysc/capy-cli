@@ -131,8 +131,55 @@ program
       web: options.web
     };
 
+    // Flow-driven onboarding, off by default while the existing path is the
+    // shipped one. Never in local-only mode: that path has no server to ask.
+    if (process.env.CAPY_FLOW_ONBOARD === '1') {
+      const { isLocalOnly } = await import('./config/profileConfig');
+      if (!isLocalOnly()) {
+        const { runOnboardCommand } = await import('./commands/onboardCommand');
+        await runOnboardCommand({ ...cliOptions, web: cliOptions.web === true }, true);
+        return;
+      }
+    }
+
     const command = new CapyCommand(cliOptions, true);
     await command.execute();
+  });
+
+// Undocumented while the flag is off: the flow-driven onboarding path. Parity
+// with the production entry point is asserted by entrypointParity.test.ts.
+program
+  .command('onboard', { hidden: true })
+  .description('Onboard this project to Capy through the flow service')
+  .option('--json', 'print the step this run stopped on as JSON')
+  .option('--target-dir <path>', 'directory to onboard (defaults to the current one)')
+  .option('--flow-id <id>', 'resume an existing flow instance')
+  .option('--flow-secret <secret>', 'credential for an anonymous flow instance')
+  .option('--client-pubkey <base64>', 'ephemeral public key; selects the browser-approval auth path')
+  .option('--confirm <planHash>', 'answer the onboarding plan dialog')
+  .option('--accepted <bool>', 'the answer to --confirm', (v: string) => v === 'true')
+  .action(async (options, cmd) => {
+    const globals = cmd.optsWithGlobals();
+    try {
+      const { runOnboardCommand } = await import('./commands/onboardCommand');
+      await runOnboardCommand(
+        {
+          envPath: globals.envPath,
+          json: options.json === true,
+          web: globals.web === true,
+          targetDir: options.targetDir,
+          flowId: options.flowId,
+          flowSecret: options.flowSecret,
+          clientPubkey: options.clientPubkey,
+          confirm: options.confirm,
+          accepted: options.accepted,
+        },
+        true,
+      );
+    } catch (error) {
+      const { displayErrorAndExit } = await import('./ui/errorScreen');
+      await displayErrorAndExit(error);
+    }
   });
 
 program

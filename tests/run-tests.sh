@@ -19,8 +19,23 @@ export CAPY_WEB_NO_OPEN=1
 
 FAIL=0
 
+# The vendored flow contract must match what it was vendored from. Gate 1 (the
+# manifest hash) runs anywhere; gate 2 (byte-compare against the source) only
+# when the monorepo is alongside. A hand-edited vendored copy fails the suite.
+echo "=== Checking the vendored flow contract ==="
+if ! bun run scripts/sync-flow-contract.ts --check; then
+  FAIL=1
+fi
+
 # Files that use mock.module() — must run in isolation
 ISOLATED_FILES=(
+  # driver.test.ts mocks profileConfig for the local-only refusal case;
+  # executors.test.ts mocks capyCommand/authService/apply; observe.test.ts
+  # mocks os.homedir() for the orgKeyOnDevice (CAP-382 Case C) cases — all
+  # three would leak into the validator tests, which use the real modules.
+  tests/flows/driver.test.ts
+  tests/flows/executors.test.ts
+  tests/flows/observe.test.ts
   tests/auth/authService.test.ts
   tests/auth/authServiceKeepScreens.test.ts
   tests/auth/oauthServer.test.ts

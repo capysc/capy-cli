@@ -1,0 +1,595 @@
+{
+  "contract_version": "1",
+  "doc": "Step vocabulary for the service-owned flow layer. CLOSED sets: a client MUST fail closed on any kind, verb, screen id, dialog id or blocked reason not listed here for the contract version pinned on its flow instance. Params carry NAMES, IDS, COUNTS and BOOLEANS only \u2014 never a secret value, never a value snippet. Prose is never sent for a client to trust: `confirm` and `blocked` carry an id/reason and the client renders its OWN copy for it.",
+  "flows": [
+    "onboard"
+  ],
+  "envelope": {
+    "doc": "Every step, of every kind, is wrapped in this envelope. `contract_version` is pinned on the flow instance at creation and repeated on every step so a client can refuse a step minted under a version it does not implement.",
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "flow_id",
+        "flow_type",
+        "step_id",
+        "kind",
+        "resumed"
+      ],
+      "properties": {
+        "contract_version": {
+          "type": "string",
+          "enum": [
+            "1"
+          ]
+        },
+        "flow_id": {
+          "type": "string",
+          "description": "Flow instance id."
+        },
+        "flow_type": {
+          "type": "string",
+          "enum": [
+            "onboard"
+          ]
+        },
+        "step_id": {
+          "type": "string",
+          "description": "Idempotency key for THIS step of THIS instance. Re-asking from unchanged observations returns the same step_id; executing the same step_id twice must be a no-op the second time."
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "local_action",
+            "screen",
+            "confirm",
+            "blocked",
+            "done"
+          ]
+        },
+        "resumed": {
+          "type": "boolean",
+          "description": "True when this instance re-entered mid-flow rather than starting fresh (SPEC: resumed vs fresh must be distinguishable)."
+        },
+        "skipped": {
+          "type": "array",
+          "description": "Verbs the service determined were already satisfied by the reported observations, so the caller can say what it skipped and why.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verb": {
+          "type": "string"
+        },
+        "screen": {
+          "type": "string"
+        },
+        "dialog": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "kinds": {
+    "local_action": {
+      "doc": "A CLOSED verb the client executes locally. NEVER 'run this command' \u2014 the verb selects a function the client already ships; `params` only parameterises it. Every verb is gated by an observation predicate that flips when the verb succeeds, so a level-triggered re-ask converges.",
+      "requires": [
+        "verb",
+        "params"
+      ]
+    },
+    "screen": {
+      "doc": "A browser page the human finishes. `url` MUST be validated against the client's own pinned Keep origin (packages/cli/src/ui/screens/keepScreens.ts:134, the agent server's pinned Keep origin:27) BEFORE it is rendered or opened; a URL on any other origin is a hard failure, not a warning. The URL is handed over through the existing handoff seam (the browser-handoff seam relayHandoff), never opened behind the user's back.",
+      "requires": [
+        "screen",
+        "url",
+        "params"
+      ]
+    },
+    "confirm": {
+      "doc": "A consent gate. The service names the dialog and supplies structured params; the CLIENT renders the copy from its own vendored template for that dialog id. A confirm is never inferred, never auto-answered, and never collapsed into the step it gates.",
+      "requires": [
+        "dialog",
+        "params"
+      ]
+    },
+    "blocked": {
+      "doc": "First-class terminal state, not an error. Carries a reason from the closed enum and (for reasons that have one) a Keep-origin URL. The client renders its own copy for the reason; it MUST NOT parse any prose the service sends.",
+      "requires": [
+        "reason",
+        "params"
+      ]
+    },
+    "done": {
+      "doc": "Terminal success. Nothing left to do for this flow instance in this directory.",
+      "requires": [
+        "params"
+      ]
+    }
+  },
+  "auth_modes": {
+    "doc": "Declared by the client at instance creation. It selects WHICH auth path the flow hands the caller when there is no session \u2014 nothing else. Both paths end in a server-verified identity, so this steers sequencing and never authorization. It is NOT the instance binding: a TTY user in a fresh repo has no session at all, creates the instance anonymously, and still completes ordinary OAuth rather than a broker ceremony.",
+    "interactive_oauth": {
+      "doc": "The caller can complete a browser OAuth round trip itself \u2014 a human at a TTY, or `capy --web`. Maps to local_action `authenticate` (packages/cli/src/auth/authService.ts via capyCommand.ts:371,1322-1348)."
+    },
+    "broker_ceremony": {
+      "doc": "The caller cannot complete OAuth in its own process \u2014 a sandboxed MCP server with no browser and no session. Maps to screen `sandbox_session`, the anonymous broker ceremony (the sandbox-session ceremony client)."
+    }
+  },
+  "local_action_verbs": {
+    "authenticate": {
+      "flips": "sessionLive",
+      "requires_consent": {
+        "default": false,
+        "why": "Authentication is its own consent: the human signs in, or approves the ceremony against the user_code. Putting the onboarding plan dialog in front of it would ask someone to approve writes before they have been told which org and project they are writing to."
+      },
+      "executor": "The client's own auth path \u2014 packages/cli/src/commands/capyCommand.ts:1322-1348 (silent, then interactive) and :371 for the first-run path. INCLUDES the device-key unlock attempt (capyCommand.ts:524-529): by the time the flow observes a live session, that attempt has already happened, which is why `orgKeyOnDevice` is not an observation \u2014 see observations.json.",
+      "idempotent_because": "authenticateSilent runs first and is a no-op against a live session; once the session exists the predicate flips and this verb is never selected again.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "org_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Org id hint from .capy/sync-state (capyCommand.ts:366-367). An id, never a name."
+          }
+        }
+      }
+    },
+    "write_capy_dir": {
+      "flips": "hasCapyDir",
+      "requires_consent": {
+        "default": false,
+        "why": "A silent cache rebuild, not an onboarding write. `.capy/` is gitignored and derived; today's plain `capy` rebuilds it without asking (capyCommand.ts:176-178,191,239). A teammate cloning an already-onboarded repo must not be shown an onboarding plan dialog just to repopulate a cache."
+      },
+      "executor": "projectManager.writeActiveBranch + writeSyncStateUserId (packages/cli/src/core/projectManager.ts:140, :225) \u2014 the branch/sync-state cache under .capy/. Branch resolution itself stays inside the executor for contract version 1 (capyCommand.ts:167-241): local signals first, server branch list only when there is no local signal.",
+      "idempotent_because": "Writes a derived value; re-running writes identical bytes. .capy/ is a gitignored cache, so rebuilding it is never destructive (projectManager.ts:68-72).",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Branch NAME to pin, or null to let the executor resolve it."
+          }
+        }
+      }
+    },
+    "write_keep_lock": {
+      "flips": "hasKeepLock",
+      "requires_consent": {
+        "default": true,
+        "by_param": "source",
+        "values": {
+          "env_header": false,
+          "select_or_create": true
+        },
+        "why": "`env_header` is the silent recovery today's `capy` already performs from the .env header (capyCommand.ts:124-129) \u2014 the org and project were chosen long ago and nothing new is being decided, so it must not raise a dialog. `select_or_create` picks or creates a project and creates a branch: new decisions, and the first irreversible ones, so it is gated."
+      },
+      "executor": "fileManager.writeKeepFile plus the repo hygiene that has always ridden with it: ensureCapyGitignore, `git add keep.lock`, git hooks, auto-commit (capyCommand.ts:672-760, :944-947; the empty-project variants at :1019-1032 and :1042-1055). `source` selects which of today's two paths runs.",
+      "idempotent_because": "Gated by hasKeepLock. The project id chosen on the first execution is recorded on the flow instance, so a retry after a crash between 'project created on the service' and 'keep.lock written' reuses that project instead of creating a second one. Every hygiene write is content-idempotent (gitignore entries are deduped, `git add` and hook install overwrite).",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "consent_recorded"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "env_header",
+              "select_or_create"
+            ],
+            "description": "env_header = rebuild from the org_id/project_id already in the .env header (capyCommand.ts:124-129 + bootstrapExistingProject). select_or_create = the full first-run path (runInitialization)."
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "consent_recorded": {
+            "type": "boolean",
+            "description": "True when the instance already holds a recorded answer to the onboard_plan dialog covering the plan this step is about to execute (engine.ts paramsForVerb, from instance.consentPlanHash === plan.plan_hash). This verb is only ever issued in local_action form when consent was not required (source=env_header) or was already required-and-granted (source=select_or_create) — the executor reads this rather than re-asking, so the human is never shown the encrypt/write confirmation twice for one approval."
+          }
+        }
+      }
+    },
+    "wrap_run_commands": {
+      "flips": "commandsWrapped",
+      "requires_consent": {
+        "default": true,
+        "why": "Edits the user's own source files. `capy_onboard_apply` refuses without confirm:true today (the agent server's onboarding tools:132-134) and that gate does not get consolidated away."
+      },
+      "executor": "the onboarding edit writer (capy-cli src/flows/onboard/apply.ts) applyPlan over the edits computed by plan.ts:81 (computeRunWrapEdits + computeAgentDocsEdits). Deploy config is NOT written here and has no verb \u2014 apply.ts:4-5.",
+      "idempotent_because": "apply.ts's four guards stay exactly as they are: noop (:31), create-but-exists (:37), already-applied (:52) and the TOCTOU changed-since-planning skip (:56).",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plan_hash",
+          "kinds",
+          "consent_recorded"
+        ],
+        "properties": {
+          "plan_hash": {
+            "type": "string",
+            "description": "sha256 of the approved diffs (plan.ts:101). Binds this execution to what the human approved."
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "run-wrap",
+                "agent-docs"
+              ]
+            },
+            "description": "Edit.kind values from the onboarding edit computation (capy-cli src/flows/onboard/edits.ts):11. 'deploy-wire' is deliberately not offered."
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Repo-relative file paths. Names only."
+          },
+          "consent_recorded": {
+            "type": "boolean",
+            "description": "True when the instance already holds a recorded answer to the onboard_plan dialog covering plan_hash (engine.ts paramsForVerb). This verb is always consent-gated, so this local_action is only ever issued once that answer is on record — the executor reads this rather than assuming."
+          }
+        }
+      }
+    },
+    "encrypt_env": {
+      "flips": "envStillPlaintext",
+      "requires_consent": {
+        "default": true,
+        "why": "The irreversible one: it pushes the values and rewrites .env as ciphertext. capyCommand.ts:838-862 asks before this today, and that question is what the single onboard_plan dialog carries."
+      },
+      "executor": "capyCommand.ts:882-947 \u2014 push the encrypted blob, adopt the server keep, write sync state, back up the plaintext .env (fileManager.ts:392-422), then rewrite .env as ciphertext (fileManager.ts:149).",
+      "idempotent_because": "Gated by envStillPlaintext. backupPlaintextEnv only writes when a plaintext value is actually present (fileManager.ts:400-407) and writeEncryptedEnvFile passes already-`capy:` values through after verifying they belong to this project's key (fileManager.ts:171-180) \u2014 so a partially encrypted file converges instead of double-encrypting or dropping the encrypted half.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "branch",
+          "variable_count",
+          "consent_recorded"
+        ],
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "variable_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "variable_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "NAMES only. capyCommand.ts:824-830 and :851-854 already hold this line."
+          },
+          "consent_recorded": {
+            "type": "boolean",
+            "description": "True when the instance already holds a recorded answer to the onboard_plan dialog covering this push (engine.ts paramsForVerb). This verb is always consent-gated, so this local_action is only ever issued once that answer is on record."
+          }
+        }
+      }
+    },
+    "unlock_org_key": {
+      "flips": "orgKeyOnDevice",
+      "requires_consent": {
+        "default": false,
+        "why": "The CAP-382 device-key unlock ceremony is its own consent surface (the human compares the ceremony's own confirmation, the same as the authenticate step) — putting the onboarding plan dialog in front of it would ask someone to approve writes to a project the flow has not even named yet on this device."
+      },
+      "executor": "The CAP-382 Case-C device-key unlock ceremony — attemptCaseCUnlock + deviceKeyWiringContext (packages/cli/src/auth/deviceKey/wiring.ts), the same functions capyCommand.ts:524-529 already calls inline during authentication. This verb runs them explicitly, once a live session still finds the key missing after authenticate has completed.",
+      "idempotent_because": "Gated by orgKeyOnDevice. hasOrgKey short-circuits when the key is already present; a still-missing key after the ceremony reports KEY_NOT_ON_DEVICE again with no side effect beyond the ceremony attempt itself, which the existing Case-C flow already treats as safe to retry.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Org id the instance has pinned so far, or null when it has not pinned one yet — the executor falls back to reading it from keep.lock or the .env header locally, the same source that computed orgKeyOnDevice."
+          }
+        }
+      }
+    }
+  },
+  "screens": {
+    "sandbox_session": {
+      "purpose": "sandbox-session",
+      "doc": "The anonymous broker ceremony page (the sandbox-session ceremony client:137-141). In contract version 1 the connection is created and owned by the FLOW INSTANCE, so re-asking returns the same connection_id and the same user_code instead of minting a new one.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "connection_id",
+          "user_code"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "user_code": {
+            "type": "string",
+            "description": "anti-phishing binding. Not a secret and MUST be shown to the human so they can compare it against the page (elicit.ts:184-197, :628-631)."
+          },
+          "machine_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "RFC 3339."
+          }
+        }
+      }
+    }
+  },
+  "dialogs": {
+    "onboard_plan": {
+      "doc": "The ONE consent gate of the onboard flow (SPEC: one consent per flow, not one per hop). Covers both the local file edits and the encrypt-and-push, so the separate encrypt confirmation (capyCommand.ts:842-862) is folded in rather than asked a second time. Answer is recorded on the flow instance \u2014 this is what replaces the in-process planStore (plan.ts:74).",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plan_hash",
+          "target_dir"
+        ],
+        "properties": {
+          "plan_hash": {
+            "type": "string"
+          },
+          "target_dir": {
+            "type": "string"
+          },
+          "framework": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "edit_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "connector_providers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cli_checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cli",
+                "installed"
+              ],
+              "properties": {
+                "cli": {
+                  "type": "string"
+                },
+                "installed": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "variable_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "variable_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "will_encrypt": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  },
+  "blocked_reasons": {
+    "invalid_target_dir": {
+      "source": "observation",
+      "terminal": false,
+      "terminal_why": "Level-triggered: the caller can point at a directory that exists and ask again. Nothing was written, the instance keeps its lock and its pins.",
+      "doc": "targetDirValid is false. Fixes the cheerful-empty-plan bug: buildPlan happily plans nothing for a directory that does not exist (plan.ts:81 -> edits.ts:35/:72 existsSync -> null)."
+    },
+    "branch_conflict": {
+      "source": "observation",
+      "terminal": false,
+      "terminal_why": "The human fixes it with `capy checkout <branch>` and the next report shows branchConflict false. Killing the instance here would drop the pinned project id and let the next one create a SECOND project.",
+      "doc": ".env header branch and .capy/branch disagree and both name real branches \u2014 today a process.exit(1) (capyCommand.ts:279-285). Human decision: `capy checkout <one of the two>`."
+    },
+    "incompatible_project": {
+      "source": "creation",
+      "terminal": true,
+      "terminal_why": "Decided once, at creation, from findings that do not change under this instance.",
+      "doc": "checkCompat verdict at instance creation (plan.ts:26-44): an external secret manager, or nothing reading env vars. Instance is created terminal-blocked."
+    },
+    "key_not_on_device": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "`capy redeem <code>` fixes it in another terminal; the next call re-derives with the key present.",
+      "from_codes": [
+        "KEY_NOT_ON_DEVICE"
+      ],
+      "doc": "capyCommand.ts:517-559 \u2014 the account can reach the org but this device holds no org key, after the Case-C unlock attempt failed. Carries no URL; the remedy is an invite code the user gets out of band. The code is minted for this condition rather than reusing the generic AUTH_FAILED it is thrown as today."
+    },
+    "keep_lock_corrupt": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "The human repairs or restores the file from git; the next call re-derives.",
+      "from_codes": [
+        "INVALID_FORMAT"
+      ],
+      "doc": "keep.lock exists but does not parse \u2014 projectManager.ts:32-39 throws INVALID_FORMAT. It is NOT the hasKeepLock predicate being false (that predicate is existence only), precisely so that no row of the table can propose initializing over it. Reported by the first step that has to read the file; never auto-repaired, because keep.lock is git-owned."
+    },
+    "foreign_encrypted_values": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "The human removes or replaces the foreign values; the next call re-derives.",
+      "from_codes": [
+        "PERMISSION_DENIED",
+        "DECRYPT_KEY_MISMATCH"
+      ],
+      "doc": ".env holds values encrypted to a different project's key (capyCommand.ts:789-816). Carries the variable NAMES only."
+    },
+    "plan_changed": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "The files moved under the plan; the client rebuilds it and the human approves the new one. Nothing was written, and the instance keeps its identity and its pins.",
+      "from_codes": [
+        "PLAN_CHANGED"
+      ],
+      "doc": "The plan the human approved is not the plan that would be applied now \u2014 the files changed since consent. The client refuses to apply the newer one under the older approval, sends the freshly built plan with its next report, and the service asks for consent again."
+    },
+    "auth_declined": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "A decline is an answer to one prompt, not a verdict on the flow. Asking again is the whole point of a level-triggered reconciler.",
+      "from_codes": [
+        "AUTH_FAILED",
+        "MEMBERSHIP_REVOKED"
+      ],
+      "doc": "The human declined or abandoned the auth handoff, or the identity no longer has access (elicit.ts mapAction -> 'declined'/'cancelled')."
+    },
+    "ceremony_declined": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "Same as auth_declined. The declined connection is dead, so a retry mints a fresh one \u2014 never a second code for a page still open.",
+      "from_codes": [
+        "BOOTSTRAP_DECLINED"
+      ],
+      "doc": "AUTH_CODES.BOOTSTRAP_DECLINED (bootstrap.ts:216-219, :261-263)."
+    },
+    "ceremony_expired": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "Expiry is a timeout, not a refusal.",
+      "from_codes": [
+        "BOOTSTRAP_EXPIRED",
+        "BOOTSTRAP_TIMEOUT",
+        "BOOTSTRAP_CONSUMED"
+      ],
+      "doc": "AUTH_CODES.BOOTSTRAP_EXPIRED / BOOTSTRAP_TIMEOUT / BOOTSTRAP_CONSUMED (bootstrap.ts:244-246)."
+    },
+    "consent_declined": {
+      "source": "consent",
+      "terminal": true,
+      "terminal_why": "The human said no to the plan itself. Nothing has been written; a NEW instance starts the flow again, which is also how they get a freshly computed plan.",
+      "doc": "The human answered the onboard_plan dialog with no. Terminal and unremarkable \u2014 today's equivalent simply stops and tells them nothing was modified (capyCommand.ts:864-868). Nothing has been written at this point; a new instance starts the flow again."
+    },
+    "concurrent_flow": {
+      "source": "creation",
+      "terminal": true,
+      "terminal_why": "The caller never owned an instance; there is nothing here to keep alive.",
+      "doc": "Another live flow instance already holds the lock for this repo identity. SPEC Concurrency: two agents must not both write."
+    },
+    "upgrade_required": {
+      "source": "creation",
+      "terminal": true,
+      "terminal_why": "The client cannot execute anything this service would emit until it is upgraded.",
+      "doc": "The caller pinned a contract version the service no longer speaks (service speaks N and N-1)."
+    },
+    "service_error": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "Transient by assumption. A terminal service_error would discard the pinned project id over a network blip \u2014 the exact duplicate-irreversible-act this design exists to prevent.",
+      "from_codes": [
+        "SERVICE_ERROR",
+        "BOOTSTRAP_SERVICE_ERROR",
+        "BOOTSTRAP_BAD_ENVELOPE",
+        "BOOTSTRAP_BAD_PAYLOAD",
+        "BOOTSTRAP_CREATE_FAILED",
+        "NO_ACTIVE_BRANCH"
+      ],
+      "doc": "The service could not answer, or answered outside its own contract. Terminal for this call; the caller may open a new instance later."
+    },
+    "network_error": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "Same as service_error.",
+      "from_codes": [
+        "NETWORK_ERROR",
+        "BOOTSTRAP_NETWORK_ERROR"
+      ],
+      "doc": "The client could not reach the service or the push failed in transit (capyCommand.ts:953)."
+    }
+  },
+  "done_params_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+      "project_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "branch": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "variable_count": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  },
+  "blocked_reasons_doc": "TERMINAL says whether the instance dies with the answer. Only reasons decided at CREATION (or the human declining the plan) are terminal. Every observation and step-outcome reason is NOT terminal: the instance stays active, keeps its repo lock, its recorded consent and its pinned project id, and the next POST /next re-derives from fresh observations. This is the level-triggered rule doing real work \u2014 a transient network error, or a key the user then redeems, must never discard the pinned project id, because the next instance would create a SECOND project."
+}

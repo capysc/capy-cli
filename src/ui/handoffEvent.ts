@@ -76,6 +76,7 @@ export type HandoffFlow =
   | 'byoc'
   | 'decrypt'
   | 'init'
+  | 'onboard'
   | 'recover'
   | 'end-recover'
   | 'transport'
