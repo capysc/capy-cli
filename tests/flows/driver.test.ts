@@ -303,6 +303,130 @@ describe('driver: creation', () => {
   });
 });
 
+describe('G1 — a token minted mid-flow travels on the next request', () => {
+  test('the request AFTER a successful authenticate carries it; the one before does not', async () => {
+    const seen: Array<string | undefined> = [];
+    let signedIn = false;
+    const transport: FlowTransport = {
+      async create() {
+        return {
+          flow_id: FLOW_ID,
+          flow_type: 'onboard',
+          contract_version: FLOW_CONTRACT_VERSION,
+          binding: 'anonymous',
+          flow_secret: 'sekrit',
+          step: null,
+        };
+      },
+      async next(_id, _body, creds) {
+        seen.push(creds.token);
+        return {
+          step: seen.length === 1
+            ? envelope({ kind: 'local_action', verb: 'authenticate', params: {} })
+            : envelope({ kind: 'done', params: {} }),
+        };
+      },
+      async confirm() {
+        return {};
+      },
+      async cancel() {},
+    };
+
+    const map: ExecutorMap = {
+      authenticate: async () => {
+        signedIn = true;
+        return { outcome: 'ok' };
+      },
+    };
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      getToken: async () => (signedIn ? 'jwt-after-auth' : undefined),
+    });
+
+    expect(seen).toEqual([undefined, 'jwt-after-auth']);
+  });
+
+  test('a FAILED step does not promote a token', async () => {
+    const seen: Array<string | undefined> = [];
+    const transport: FlowTransport = {
+      async create() {
+        return { flow_id: FLOW_ID, flow_type: 'onboard', contract_version: FLOW_CONTRACT_VERSION, binding: 'anonymous', step: null };
+      },
+      async next(_id, _body, creds) {
+        seen.push(creds.token);
+        return {
+          step: seen.length === 1
+            ? envelope({ kind: 'local_action', verb: 'authenticate', params: {} })
+            : envelope({ kind: 'blocked', reason: 'auth_declined', params: {} }),
+        };
+      },
+      async confirm() {
+        return {};
+      },
+      async cancel() {},
+    };
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: { authenticate: async () => ({ outcome: 'failed', code: 'AUTH_FAILED' }) },
+      observe: observeStub(),
+      getToken: async () => 'should-not-be-used',
+    });
+    expect(seen).toEqual([undefined, undefined]);
+  });
+});
+
+describe('G4 — ids resolved by a step that then failed are still reported', () => {
+  test('the failed report carries the result, so the service can pin it', async () => {
+    const { transport, reports } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_keep_lock', params: { source: 'select_or_create' } }),
+      envelope({ kind: 'blocked', reason: 'service_error', params: {} }),
+    ]);
+    const map: ExecutorMap = {
+      write_keep_lock: async () => ({
+        outcome: 'failed',
+        code: 'SERVICE_ERROR',
+        result: { org_id: 'org_1', project_id: 'proj_1' },
+      }),
+    };
+
+    await runOnboardFlow({ targetDir: '/tmp/x', transport, executors: map, observe: observeStub() });
+
+    expect(reports[1].last_step).toEqual({
+      step_id: expect.any(String),
+      outcome: 'failed',
+      code: 'SERVICE_ERROR',
+      result: { org_id: 'org_1', project_id: 'proj_1' },
+    });
+  });
+});
+
+describe('G5 — a plan that moved under the human is resent', () => {
+  test('sends the rebuilt plan only after a PLAN_CHANGED outcome', async () => {
+    const { transport, reports } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'wrap_run_commands', params: { plan_hash: 'h1', kinds: ['run-wrap'] } }),
+      envelope({ kind: 'blocked', reason: 'plan_changed', params: {} }),
+    ]);
+    const map: ExecutorMap = { wrap_run_commands: async () => ({ outcome: 'failed', code: 'PLAN_CHANGED' }) };
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      buildPlan: () => ({ plan_hash: 'h2', target_dir: '/tmp/x' }),
+    });
+
+    // Not on the first report: an unchanged plan is never resent.
+    expect(reports[0].plan).toBeUndefined();
+    expect(reports[1].plan).toEqual({ plan_hash: 'h2', target_dir: '/tmp/x' });
+  });
+});
+
 describe('driver: local-only mode never reaches the service', () => {
   afterEach(() => {
     mock.restore();

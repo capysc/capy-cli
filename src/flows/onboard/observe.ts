@@ -14,7 +14,6 @@
  * Booleans and names only ever leave here. No value, no snippet of one.
  */
 import { existsSync, statSync } from 'fs';
-import { join } from 'path';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { resolveBranchFromLocalState, branchesFromKeep, syncedBranchNames } from '../../core/branchResolver';
@@ -46,29 +45,6 @@ function isDirectory(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * `.env` holds at least one value that is not capy ciphertext.
- *
- * The same test `FileManager.backupPlaintextEnv` makes before deciding there is
- * something to protect: a value not starting with `capy:`. No .env at all, and
- * a fully encrypted one, are both FALSE — there is nothing to encrypt in
- * either, and they must sequence identically.
- */
-function envStillPlaintext(envFile: string): boolean {
-  if (!existsSync(envFile)) return false;
-  const { readFileSync } = require('fs') as typeof import('fs');
-  const content = readFileSync(envFile, 'utf-8');
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) continue;
-    const value = trimmed.slice(eq + 1);
-    if (!value.startsWith('capy:')) return true;
-  }
-  return false;
 }
 
 /**
@@ -130,7 +106,6 @@ export function observeOnboard(opts: ObserveOptions): OnboardObservations {
 
   const pm = new ProjectManager(targetDir);
   const fm = new FileManager(targetDir);
-  const envFile = opts.envPath ?? join(targetDir, '.env');
   const envMeta = fm.readEnvMeta(opts.envPath);
 
   return {
@@ -141,7 +116,11 @@ export function observeOnboard(opts: ObserveOptions): OnboardObservations {
     // surfaces instead as the failure code of the first step that reads it.
     hasKeepLock: existsSync(pm.getKeepPath()),
     envMetaRecoverable: Boolean(envMeta.org_id && envMeta.project_id),
-    envStillPlaintext: envStillPlaintext(envFile),
+    // The CLI's own definition, not a second parser: `hasPlaintextValues` is
+    // the exact predicate `backupPlaintextEnv` uses to decide whether there is
+    // anything to protect, so a quoted or exported value classifies here the
+    // way it classifies where it matters.
+    envStillPlaintext: fm.hasPlaintextValues(opts.envPath),
     commandsWrapped: commandsWrapped(targetDir),
     branchConflict: branchConflict(pm, fm, opts.envPath),
     sessionLive: opts.sessionLive,

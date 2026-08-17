@@ -89,6 +89,29 @@ describe('observeOnboard', () => {
     expect(observe().envStillPlaintext).toBe(true);
   });
 
+  test('a QUOTED encrypted value is not plaintext', () => {
+    // Splitting on `=` and testing startsWith('capy:') calls this plaintext,
+    // which would make the encrypt step a no-op forever and the flow spin.
+    writeFileSync(join(dir, '.env'), 'FOO="capy:rid:ciphertext"\n');
+    expect(observe().envStillPlaintext).toBe(false);
+  });
+
+  test('an exported plaintext value IS plaintext', () => {
+    writeFileSync(join(dir, '.env'), 'export FOO=bar\n');
+    expect(observe().envStillPlaintext).toBe(true);
+  });
+
+  test('an empty value classifies the way the CLI classifies it', () => {
+    writeFileSync(join(dir, '.env'), 'FOO=\n');
+    const { FileManager } = require('../../src/files/fileManager') as typeof import('../../src/files/fileManager');
+    expect(observe().envStillPlaintext).toBe(new FileManager(dir).hasPlaintextValues());
+  });
+
+  test('a multi-line quoted encrypted value is not plaintext', () => {
+    writeFileSync(join(dir, '.env'), 'KEY="capy:rid:line1\nline2"\n');
+    expect(observe().envStillPlaintext).toBe(false);
+  });
+
   test('comments and blank lines are not values', () => {
     writeFileSync(join(dir, '.env'), '# a comment\n\nFOO=capy:rid:ct\n');
     expect(observe().envStillPlaintext).toBe(false);

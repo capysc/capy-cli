@@ -137,7 +137,7 @@ program
       const { isLocalOnly } = await import('./config/profileConfig');
       if (!isLocalOnly()) {
         const { runOnboardCommand } = await import('./commands/onboardCommand');
-        await runOnboardCommand({ ...cliOptions }, true);
+        await runOnboardCommand({ ...cliOptions, web: cliOptions.web === true }, true);
         return;
       }
     }
@@ -166,6 +166,7 @@ program
         {
           envPath: globals.envPath,
           json: options.json === true,
+          web: globals.web === true,
           targetDir: options.targetDir,
           flowId: options.flowId,
           flowSecret: options.flowSecret,

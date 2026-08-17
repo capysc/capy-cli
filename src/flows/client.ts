@@ -50,6 +50,8 @@ export interface CreateFlowResponse {
 export interface NextRequest {
   contract_version: string;
   observations: OnboardObservations;
+  /** Sent only when the client found the plan no longer matches the one the instance holds. */
+  plan?: unknown;
   last_step?: {
     step_id: string;
     outcome: 'ok' | 'failed';

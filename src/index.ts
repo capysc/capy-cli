@@ -106,7 +106,7 @@ program
       const { isLocalOnly } = await import('./config/profileConfig');
       if (!isLocalOnly()) {
         const { runOnboardCommand } = await import('./commands/onboardCommand');
-        await runOnboardCommand({ ...cliOptions });
+        await runOnboardCommand({ ...cliOptions, web: cliOptions.web === true });
         return;
       }
     }
@@ -135,6 +135,9 @@ program
       await runOnboardCommand({
         envPath: globals.envPath,
         json: options.json === true,
+        // `--web` is a program-level flag: the same one `capy --web` uses, so
+        // the browser wizard here is the one every other command already has.
+        web: globals.web === true,
         targetDir: options.targetDir,
         flowId: options.flowId,
         flowSecret: options.flowSecret,

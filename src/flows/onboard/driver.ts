@@ -34,6 +34,18 @@ import { EXECUTORS, ExecutorContext, ExecutorMap, StepResult } from './executors
 export interface DriverOptions {
   targetDir: string;
   transport: FlowTransport;
+  /**
+   * Reads the current bearer, if any. Called AFTER every successful step, not
+   * once at the start: `authenticate` is a step, so the token that step mints is
+   * the one the next request has to carry. Without the re-read the service
+   * never sees secret+JWT together, never rebinds the instance, keeps deriving
+   * sessionLive as false, and re-issues the auth step forever.
+   */
+  getToken?: () => Promise<string | undefined>;
+  /** Recompute the plan when the service reports the one it holds is stale. */
+  buildPlan?: () => unknown;
+  /** Render interactive stops in a browser rather than the terminal. */
+  web?: boolean;
   /** Injectable so tests can drive the loop without touching the machine. */
   executors?: ExecutorMap;
   observe?: (opts: { targetDir: string; sessionLive: boolean; envPath?: string }) => OnboardObservations;
@@ -94,7 +106,10 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     envPath: opts.envPath,
     devMode: opts.devMode === true,
     consented: false,
+    web: opts.web === true,
   };
+  const getToken = opts.getToken ?? (async () => opts.token);
+  let sessionLive = opts.sessionLive ?? false;
 
   let flowId = opts.flowId;
   let creds: FlowCreds = { secret: opts.flowSecret, token: opts.token };
@@ -136,13 +151,17 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     // Re-observed every pass, never carried over.
     const observations = observe({
       targetDir: opts.targetDir,
-      sessionLive: opts.sessionLive ?? false,
+      sessionLive,
       envPath: opts.envPath,
     });
 
+    // A plan that moved under the human is resent so the service can replace it
+    // and ask for consent again. Only then: an unchanged plan is not resent.
+    const plan = lastStep?.code === ERROR_CODES.PLAN_CHANGED ? opts.buildPlan?.() : undefined;
+
     const answer = await opts.transport.next(
       flowId,
-      { contract_version: FLOW_CONTRACT_VERSION, observations, last_step: lastStep },
+      { contract_version: FLOW_CONTRACT_VERSION, observations, last_step: lastStep, plan },
       creds,
     );
 
@@ -169,6 +188,18 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     const result = await executor(step, ctx);
     executed.push({ step_id: step.step_id, verb: step.verb as string, outcome: result.outcome, code: result.code });
     lastStep = { step_id: step.step_id, outcome: result.outcome, code: result.code, result: result.result };
+
+    if (result.outcome === 'ok') {
+      // A step may have minted a session. Carry it on the NEXT request — that
+      // is what lets the service rebind an anonymous instance to a real
+      // identity (it needs the secret and the JWT together) and start deriving
+      // sessionLive as true.
+      const token = await getToken();
+      if (token) {
+        creds = { ...creds, token };
+        sessionLive = true;
+      }
+    }
   }
 
   throw new CapyError(

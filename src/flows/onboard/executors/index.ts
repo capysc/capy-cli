@@ -32,6 +32,8 @@ export interface ExecutorContext {
   devMode: boolean;
   /** Consent was recorded on the flow instance before this step was issued. */
   consented: boolean;
+  /** Render interactive stops in a browser instead of the terminal (`capy --web`'s wizard). */
+  web?: boolean;
 }
 
 export type Executor = (step: FlowStep, ctx: ExecutorContext) => Promise<StepResult>;
@@ -72,12 +74,21 @@ function hasRedeemRemedy(err: CapyError): boolean {
   return Boolean(err.details && typeof err.details === 'object' && 'needsRedeem' in (err.details as object));
 }
 
-async function run(fn: () => Promise<void>, result?: StepResult['result']): Promise<StepResult> {
+/**
+ * Run a step body. A FAILED outcome carries whatever the body managed to
+ * resolve before it died — `resolved()` is read after the throw, not before,
+ * because the ids a half-finished run created are exactly the ones that must be
+ * pinned so a retry adopts them instead of creating a second project.
+ */
+async function run(
+  fn: () => Promise<void>,
+  resolved: () => StepResult['result'] | undefined = () => undefined,
+): Promise<StepResult> {
   try {
     await fn();
-    return { outcome: 'ok', result };
+    return { outcome: 'ok', result: resolved() };
   } catch (err) {
-    return { outcome: 'failed', code: codeFor(err) };
+    return { outcome: 'failed', code: codeFor(err), result: resolved() };
   }
 }
 
@@ -115,64 +126,86 @@ export const writeCapyDir: Executor = async (step, ctx) => {
   });
   const branch = pinned ?? (local.kind === 'resolved' ? local.branch : null);
   if (!branch) return { outcome: 'failed', code: ERROR_CODES.NO_ACTIVE_BRANCH };
-  return run(async () => {
-    pm.writeActiveBranch(branch);
-  }, { branch });
+  return run(
+    async () => {
+      pm.writeActiveBranch(branch);
+    },
+    () => ({ branch }),
+  );
 };
 
 /**
  * `write_keep_lock` — both sources are existing entry points on CapyCommand.
  *  - env_header:       adopt the project the .env header already names.
  *  - select_or_create: the ordinary first-run initialization.
+ *
+ * Worth knowing about the second one: it runs the WHOLE existing initialization,
+ * which — in a directory that already holds a plaintext .env — encrypts and
+ * pushes it in the same pass. So on a fresh repo the encrypt can happen inside
+ * this step, before the wrap. The single consent dialog covers both, and the
+ * next observation simply reports envStillPlaintext false, so the flow still
+ * converges; but "reversible before irreversible" holds only when the two are
+ * separate steps (the resumed case), and nothing here should claim otherwise.
  */
 export const writeKeepLock: Executor = async (step, ctx) => {
   const { CapyCommand } = await import('../../../commands/capyCommand');
   const source = step.params.source as string;
-  const command = new CapyCommand({ envPath: ctx.envPath }, ctx.devMode);
+  const command = new CapyCommand({ envPath: ctx.envPath, web: ctx.web }, ctx.devMode);
+
+  // Ids the instance already pinned. Their whole purpose is this line: a run
+  // that crashed after creating the project must ADOPT it, never walk the user
+  // back through a picker that can create a second one.
+  const pinnedOrg = (step.params.org_id as string | null) ?? null;
+  const pinnedProject = (step.params.project_id as string | null) ?? null;
+  const pinnedBranch = (step.params.branch as string | null) ?? undefined;
+
+  const adopt = async (orgId: string, projectId: string, branch?: string): Promise<StepResult> => {
+    const { AuthService } = await import('../../../auth/authService');
+    const auth = new AuthService(undefined, ctx.devMode);
+    const session = await auth.authenticateSilent(orgId);
+    if (!session.success || !session.user_id) {
+      return { outcome: 'failed', code: codeForSilentAuthFailure(session.error_code) };
+    }
+    const userId = session.user_id;
+    return run(
+      () => command.bootstrapProjectForFlow({ id: projectId, name: '', organization_id: orgId }, orgId, userId),
+      () => ({ org_id: orgId, project_id: projectId, branch }),
+    );
+  };
+
+  if (pinnedOrg && pinnedProject) {
+    return adopt(pinnedOrg, pinnedProject, pinnedBranch);
+  }
 
   if (source === 'env_header') {
     const fm = new FileManager(ctx.targetDir);
     const meta = fm.readEnvMeta(ctx.envPath);
     if (!meta.org_id || !meta.project_id) return { outcome: 'failed', code: ERROR_CODES.NO_KEEP_FILE };
-    const { AuthService } = await import('../../../auth/authService');
-    const auth = new AuthService(undefined, ctx.devMode);
-    const session = await auth.authenticateSilent(meta.org_id);
-    if (!session.success || !session.user_id) {
-      // Report WHY, not just "failed": the service maps a network failure and a
-      // dead session to different blocked reasons, and only one of them is
-      // fixed by signing in again.
-      return { outcome: 'failed', code: codeForSilentAuthFailure(session.error_code) };
-    }
-    return run(
-      () =>
-        command.bootstrapProjectForFlow(
-          { id: meta.project_id!, name: '', organization_id: meta.org_id! },
-          meta.org_id!,
-          session.user_id!,
-        ),
-      { org_id: meta.org_id, project_id: meta.project_id, branch: meta.branch },
-    );
+    return adopt(meta.org_id, meta.project_id, meta.branch);
   }
 
   if (source === 'select_or_create') {
-    const outcome = await run(() => command.initializeProjectForFlow({ assumeEncryptConsent: ctx.consented }));
-    if (outcome.outcome === 'failed') return outcome;
-    // Report the ids the run resolved, read back off what it WROTE rather than
-    // remembered — the service pins them so a retry can never create a second
-    // project.
-    const pm = new ProjectManager(ctx.targetDir);
-    let keep = null;
-    try {
-      keep = pm.readKeepFile();
-    } catch {
-      keep = null;
-    }
-    return {
-      outcome: 'ok',
-      result: keep
-        ? { org_id: keep.org_id, project_id: keep.project_id, branch: pm.readActiveBranch() ?? undefined }
-        : undefined,
-    };
+    // The ids are reported the moment the project is chosen or created —
+    // through the callback, not read off disk afterwards — so a failure between
+    // that point and the keep.lock write still pins them.
+    let resolved: { org_id: string; project_id: string; branch?: string } | undefined;
+    const outcome = await run(
+      () =>
+        command.initializeProjectForFlow({
+          assumeEncryptConsent: ctx.consented,
+          onProjectResolved: (ids) => {
+            resolved = ids;
+          },
+        }),
+      () => {
+        if (resolved) {
+          const pm = new ProjectManager(ctx.targetDir);
+          return { ...resolved, branch: resolved.branch ?? pm.readActiveBranch() ?? undefined };
+        }
+        return undefined;
+      },
+    );
+    return outcome;
   }
 
   // No default branch: a source this build does not implement is a refusal.
@@ -180,15 +213,25 @@ export const writeKeepLock: Executor = async (step, ctx) => {
 };
 
 /**
- * `wrap_run_commands` — the plan/apply pair moved here from the MCP server,
- * with its TOCTOU guard intact (apply.ts re-reads every file and skips one that
- * changed since planning).
+ * `wrap_run_commands` — the plan/apply pair moved here from the agent server,
+ * with its TOCTOU guard intact (the applier re-reads every file and skips one
+ * that changed since planning).
+ *
+ * Before applying anything it rebuilds the plan and compares its hash to the
+ * one the human approved. A mismatch is a refusal, not a merge: consent was
+ * given for one set of edits, and applying a different set under it would make
+ * the dialog a formality. The driver sends the fresh plan with its next report
+ * and the human is asked again.
  */
-export const wrapRunCommands: Executor = async (_step, ctx) => {
+export const wrapRunCommands: Executor = async (step, ctx) => {
   const { buildPlan } = await import('../plan');
   const { applyPlan } = await import('../apply');
+  const plan = buildPlan({ targetDir: ctx.targetDir });
+  const approved = step.params.plan_hash as string | undefined;
+  if (approved && approved !== plan.planHash) {
+    return { outcome: 'failed', code: ERROR_CODES.PLAN_CHANGED };
+  }
   return run(async () => {
-    const plan = buildPlan({ targetDir: ctx.targetDir });
     applyPlan(plan);
   });
 };
@@ -198,17 +241,24 @@ export const wrapRunCommands: Executor = async (_step, ctx) => {
  * directory has a keep.lock and a .capy/, which is exactly the state `capy`
  * treats as "sync this": it pushes the plaintext, backs it up, and rewrites
  * .env as ciphertext. No crypto is re-implemented here.
+ *
+ * `syncForFlow` rather than `execute`: the latter ends its catch in
+ * `displayErrorAndExit`, which would take the whole driver process down instead
+ * of returning a failed outcome with a code.
  */
 export const encryptEnv: Executor = async (_step, ctx) => {
   const { CapyCommand } = await import('../../../commands/capyCommand');
-  const command = new CapyCommand({ envPath: ctx.envPath }, ctx.devMode);
+  const command = new CapyCommand({ envPath: ctx.envPath, web: ctx.web }, ctx.devMode);
   const pm = new ProjectManager(ctx.targetDir);
-  return run(async () => {
-    if (!existsSync(join(ctx.targetDir, 'keep.lock'))) {
-      throw new CapyError('keep.lock missing', ERROR_CODES.NO_KEEP_FILE);
-    }
-    await command.execute();
-  }, { branch: pm.readActiveBranch() ?? undefined });
+  return run(
+    async () => {
+      if (!existsSync(join(ctx.targetDir, 'keep.lock'))) {
+        throw new CapyError('keep.lock missing', ERROR_CODES.NO_KEEP_FILE);
+      }
+      await command.syncForFlow();
+    },
+    () => ({ branch: pm.readActiveBranch() ?? undefined }),
+  );
 };
 
 /** The closed executor map. A verb with no entry here is never executed — the driver refuses. */

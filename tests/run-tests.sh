@@ -29,8 +29,11 @@ fi
 
 # Files that use mock.module() — must run in isolation
 ISOLATED_FILES=(
-  # driver.test.ts mocks profileConfig for the local-only refusal case.
+  # driver.test.ts mocks profileConfig for the local-only refusal case;
+  # executors.test.ts mocks capyCommand/authService/apply — both would leak
+  # into the observer and validator tests, which use the real modules.
   tests/flows/driver.test.ts
+  tests/flows/executors.test.ts
   tests/auth/authService.test.ts
   tests/auth/authServiceKeepScreens.test.ts
   tests/auth/oauthServer.test.ts

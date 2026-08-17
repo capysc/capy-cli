@@ -338,6 +338,23 @@ export const ERROR_CODES = {
   DEPLOY_TOKEN_NOT_FOUND: 'DEPLOY_TOKEN_NOT_FOUND',
   ORG_NOT_FOUND: 'ORG_NOT_FOUND',
   LOCAL_KEY_BACKEND_ERROR: 'LOCAL_KEY_BACKEND_ERROR',
+  /**
+   * The account can reach this organization, but this device holds no key for
+   * it — the invite has never been redeemed here, and the device-key unlock
+   * ceremony did not (or could not) run.
+   *
+   * Minted as its own code rather than reusing AUTH_FAILED: the remedy is an
+   * invite code from an owner, not signing in again, and a caller that cannot
+   * tell the two apart sends people into a browser round-trip that can never
+   * succeed. Nothing may distinguish them by reading the message.
+   */
+  KEY_NOT_ON_DEVICE: 'KEY_NOT_ON_DEVICE',
+  /**
+   * The onboarding plan that would be applied now is not the plan that was
+   * approved — the files moved under it. Refusing is the point: an approval of
+   * one set of edits is not an approval of a different one.
+   */
+  PLAN_CHANGED: 'PLAN_CHANGED',
   // Local-state refusals: the command cannot start because this directory,
   // this branch or this build does not hold what it needs. Nothing has been
   // asked of the service yet, so none of these is a SERVICE_ERROR — and each

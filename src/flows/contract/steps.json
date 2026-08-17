@@ -448,6 +448,15 @@
       ],
       "doc": ".env holds values encrypted to a different project's key (capyCommand.ts:789-816). Carries the variable NAMES only."
     },
+    "plan_changed": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "The files moved under the plan; the client rebuilds it and the human approves the new one. Nothing was written, and the instance keeps its identity and its pins.",
+      "from_codes": [
+        "PLAN_CHANGED"
+      ],
+      "doc": "The plan the human approved is not the plan that would be applied now \u2014 the files changed since consent. The client refuses to apply the newer one under the older approval, sends the freshly built plan with its next report, and the service asks for consent again."
+    },
     "auth_declined": {
       "source": "step_outcome",
       "terminal": false,

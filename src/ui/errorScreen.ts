@@ -25,6 +25,8 @@ export function renderError(error: any, context: ErrorContext = {}): string {
     switch (error.code) {
       case ERROR_CODES.AUTH_FAILED:
         return renderAuthFailed(error);
+      case ERROR_CODES.KEY_NOT_ON_DEVICE:
+        return renderKeyNotOnDevice(error);
       case ERROR_CODES.PERMISSION_DENIED:
         // Being kicked and being denied are different sentences to read, and
         // the first was UNREACHABLE: its check lived in `renderServiceError`
@@ -140,6 +142,16 @@ function renderAuthFailed(error: CapyError): string {
     '',
   ];
   return lines.join('\n');
+}
+
+/**
+ * The account can reach the org; this device has no key for it. Its own screen
+ * because the remedy is an invite code, not signing in again — the sentence
+ * this error carries already says so, and it used to be rendered under
+ * "Authentication failed", which pointed at the wrong fix.
+ */
+function renderKeyNotOnDevice(error: CapyError): string {
+  return ['', `  ${bold('This device has no key for that organization')}`, `  ${grey(error.message)}`, ''].join('\n');
 }
 
 function renderPermissionDenied(error: CapyError, ctx: ErrorContext): string {

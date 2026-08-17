@@ -1,6 +1,6 @@
 {
   "contract_version": "1",
-  "doc": "Observation vocabulary per flow. The client re-observes and re-reports EVERY predicate on EVERY 'what's next' call — nothing is remembered client-side, and the service never asks for a value. Booleans only. `ownership` says who the fact belongs to: a local-fact is observed by the CLI (the CLI owns the answer — it is never a filesystem probe by another process) and may steer SEQUENCING only, never authorization; a server-fact is owned by the service and is authoritative even when the client can see something that looks like it.",
+  "doc": "Observation vocabulary per flow. The client re-observes and re-reports EVERY predicate on EVERY 'what's next' call \u2014 nothing is remembered client-side, and the service never asks for a value. Booleans only. `ownership` says who the fact belongs to: a local-fact is observed by the CLI (the CLI owns the answer \u2014 it is never a filesystem probe by another process) and may steer SEQUENCING only, never authorization; a server-fact is owned by the service and is authoritative even when the client can see something that looks like it.",
   "flows": {
     "onboard": {
       "order": [
@@ -26,7 +26,7 @@
           "type": "boolean",
           "ownership": "local-fact",
           "definition": "`.capy/` exists in the target directory (the gitignored local cache: `branch`, `sync-state.json`).",
-          "why": "BASE. Deliberately NOT a proxy for 'initialized': detectProjectState keys initialization off keep.lock alone (packages/cli/src/core/projectManager.ts:17,45), while `.capy/` is created much earlier — writeSyncStateUserId runs immediately after authentication, before org selection (packages/cli/src/commands/capyCommand.ts:403-405, projectManager.ts:225). So a run that died at the redeem dead end leaves .capy/ with no keep.lock.",
+          "why": "BASE. Deliberately NOT a proxy for 'initialized': detectProjectState keys initialization off keep.lock alone (packages/cli/src/core/projectManager.ts:17,45), while `.capy/` is created much earlier \u2014 writeSyncStateUserId runs immediately after authentication, before org selection (packages/cli/src/commands/capyCommand.ts:403-405, projectManager.ts:225). So a run that died at the redeem dead end leaves .capy/ with no keep.lock.",
           "source": "packages/cli/src/core/projectManager.ts:60-62,140,225; packages/cli/src/commands/capyCommand.ts:403-405,749"
         },
         "hasKeepLock": {
@@ -53,7 +53,7 @@
         "commandsWrapped": {
           "type": "boolean",
           "ownership": "local-fact",
-          "definition": "Every local edit the onboard plan computes for this directory is already applied — i.e. computeRunWrapEdits + computeAgentDocsEdits yield only `noop` edits. A directory the plan computes NO edits for is vacuously TRUE. Note the agent-instructions edit is not conditional on an agent file already existing: when none of the candidates is present the plan creates AGENTS.md, so a fresh directory reports FALSE and flips true once the verb has run.",
+          "definition": "Every local edit the onboard plan computes for this directory is already applied \u2014 i.e. computeRunWrapEdits + computeAgentDocsEdits yield only `noop` edits. A directory the plan computes NO edits for is vacuously TRUE. Note the agent-instructions edit is not conditional on an agent file already existing: when none of the candidates is present the plan creates AGENTS.md, so a fresh directory reports FALSE and flips true once the verb has run.",
           "why": "BASE. The wrap is detected, not remembered: WRAPPED_RE decides 'already wrapped' per script (the onboarding edit computation (capy-cli src/flows/onboard/edits.ts):24,52,64) and apply.ts skips on noop / already-applied (the onboarding edit writer (capy-cli src/flows/onboard/apply.ts):31,52). The vacuous-true rule exists so a repo the plan computes nothing for terminates instead of looping on a verb that can never flip a predicate.",
           "source": "the onboarding edit computation (capy-cli src/flows/onboard/edits.ts):24,52,64,102-109; the onboarding edit writer (capy-cli src/flows/onboard/apply.ts):28-59; the onboarding plan builder (capy-cli src/flows/onboard/plan.ts):81"
         },
@@ -61,7 +61,7 @@
           "type": "boolean",
           "ownership": "local-fact",
           "definition": "`.env`'s header branch and `.capy/branch` both exist, disagree, and the `.capy/branch` side names a branch that really exists.",
-          "why": "ADDED. Today this is a hard `process.exit(1)` with two recovery commands printed (packages/cli/src/commands/capyCommand.ts:183-184,250-285) — an interrupted checkout. It must become blocked{branch_conflict} rather than an exit code, and it must be observed BEFORE any write step, because every write step downstream needs a branch and would otherwise pick the wrong one. Note the stale-cache case is NOT a conflict: when .capy/branch names no real branch the .env header simply wins and the cache is rebuilt (capyCommand.ts:273-277), so this predicate is false there.",
+          "why": "ADDED. Today this is a hard `process.exit(1)` with two recovery commands printed (packages/cli/src/commands/capyCommand.ts:183-184,250-285) \u2014 an interrupted checkout. It must become blocked{branch_conflict} rather than an exit code, and it must be observed BEFORE any write step, because every write step downstream needs a branch and would otherwise pick the wrong one. Note the stale-cache case is NOT a conflict: when .capy/branch names no real branch the .env header simply wins and the cache is rebuilt (capyCommand.ts:273-277), so this predicate is false there.",
           "source": "packages/cli/src/commands/capyCommand.ts:167-184,250-285; packages/cli/src/core/branchResolver.ts resolveBranchFromLocalState"
         },
         "sessionLive": {
@@ -70,7 +70,7 @@
           "client_may_report": true,
           "server_view_wins": true,
           "definition": "A capy session usable for this org exists on this machine.",
-          "why": "BASE. Server-fact even though the client can see it. The SERVICE'S OWN VIEW ALWAYS WINS: it is derived from the credential presented on the request together with the instance binding (an identified caller has a verified session by construction; an anonymous instance has none until its ceremony is claimed and the instance is rebound). The client's boolean is a HINT that may steer sequencing only — a client reporting `true` with no credential on the request gets the service's `false`, and a client reporting `false` while presenting a valid JWT gets the service's `true`. The client's honest observation comes from the CLI, never a filesystem probe — `capy info --json` (the sandbox-session ceremony client:124-127), the CLI-owns-the-answer doctrine.",
+          "why": "BASE. Server-fact even though the client can see it. The SERVICE'S OWN VIEW ALWAYS WINS: it is derived from the credential presented on the request together with the instance binding (an identified caller has a verified session by construction; an anonymous instance has none until its ceremony is claimed and the instance is rebound). The client's boolean is a HINT that may steer sequencing only \u2014 a client reporting `true` with no credential on the request gets the service's `false`, and a client reporting `false` while presenting a valid JWT gets the service's `true`. The client's honest observation comes from the CLI, never a filesystem probe \u2014 `capy info --json` (the sandbox-session ceremony client:124-127), the CLI-owns-the-answer doctrine.",
           "source": "the sandbox-session ceremony client:124-127,299-309; packages/cli/src/commands/capyCommand.ts:1322-1348"
         },
         "ceremonyPending": {
@@ -78,14 +78,14 @@
           "ownership": "server-fact",
           "client_may_report": false,
           "definition": "This flow instance holds an unconsumed, unexpired broker connection.",
-          "why": "BASE, and the one predicate the client must NOT report: it is exactly the in-flight state that is not locally observable and that the SPEC requires to live with the flow instance. Today it lives in a module-level cache in the MCP process (the sandbox-session ceremony client:100-101), so a restarted process re-runs createConnection and mints a NEW user_code for a ceremony the human is still looking at — HANDOFF bug 2. The service reads it off the connections row (status='pending' AND expires_at > now()).",
+          "why": "BASE, and the one predicate the client must NOT report: it is exactly the in-flight state that is not locally observable and that the SPEC requires to live with the flow instance. Today it lives in a module-level cache in the MCP process (the sandbox-session ceremony client:100-101), so a restarted process re-runs createConnection and mints a NEW user_code for a ceremony the human is still looking at \u2014 HANDOFF bug 2. The service reads it off the connections row (status='pending' AND expires_at > now()).",
           "source": "the sandbox-session ceremony client:100-107,155-165,282-323; the service's connection broker:902-995"
         }
       },
       "not_predicates": {
         "orgKeyOnDevice": {
           "branches_at": "packages/cli/src/commands/capyCommand.ts:517,524-529,532-559",
-          "why_excluded": "It is not a fact about this repository and it has no referent until an org has been resolved, which happens INSIDE authentication. The Case-C device-key unlock ceremony that can flip it already runs there (capyCommand.ts:524-529). So the flow learns about it as the OUTCOME CODE of the authenticate step and answers blocked{key_not_on_device} — keeping the observation vector purely repo-scoped and the table a pure function of it."
+          "why_excluded": "It is not a fact about this repository and it has no referent until an org has been resolved, which happens INSIDE authentication. The Case-C device-key unlock ceremony that can flip it already runs there (capyCommand.ts:524-529). So the flow learns about it as the OUTCOME CODE of the authenticate step and answers blocked{key_not_on_device} \u2014 keeping the observation vector purely repo-scoped and the table a pure function of it."
         },
         "compatible": {
           "branches_at": "the onboarding plan builder (capy-cli src/flows/onboard/plan.ts):26-44",
@@ -93,7 +93,7 @@
         },
         "planApproved": {
           "branches_at": "the agent server's onboarding tools:132-134",
-          "why_excluded": "Consent is instance state, not an observation — the same class as ceremony state, and it is what replaces the in-process planStore (plan.ts:74). It is applied as a gate in front of the ONBOARDING WRITE steps only (see steps.json `requires_consent` per verb), not as a predicate, so the predicate table stays a pure function of what the client can observe. See docs/flows/onboard-flow.md."
+          "why_excluded": "Consent is instance state, not an observation \u2014 the same class as ceremony state, and it is what replaces the in-process planStore (plan.ts:74). It is applied as a gate in front of the ONBOARDING WRITE steps only (see steps.json `requires_consent` per verb), not as a predicate, so the predicate table stays a pure function of what the client can observe. See docs/flows/onboard-flow.md."
         }
       },
       "preconditions": {
@@ -104,7 +104,7 @@
         }
       },
       "report_schema": {
-        "doc": "The body of POST /flows/:id/next. The client re-observes and re-reports EVERY local fact on every call; nothing is remembered client-side. Booleans and codes only — never a value. `ceremonyPending` is FORBIDDEN, not merely optional: it is the one predicate the client cannot honestly observe, and `additionalProperties: false` on `observations` is what rejects it.",
+        "doc": "The body of POST /flows/:id/next. The client re-observes and re-reports EVERY local fact on every call; nothing is remembered client-side. Booleans and codes only \u2014 never a value. `ceremonyPending` is FORBIDDEN, not merely optional: it is the one predicate the client cannot honestly observe, and `additionalProperties: false` on `observations` is what rejects it.",
         "forbidden_observations": [
           "ceremonyPending"
         ],
@@ -183,7 +183,7 @@
                 "result": {
                   "type": "object",
                   "additionalProperties": false,
-                  "description": "IDS AND NAMES a successful step resolved, which the service pins on the instance so a retry cannot resolve them a second time (a second project, a second branch). Never a value, never a count of anything secret. Only `ok` outcomes carry one.",
+                  "description": "IDS AND NAMES a step resolved, which the service pins on the instance so a retry cannot resolve them a second time (a second project, a second branch). Never a value. Carried on a FAILED outcome too, and deliberately: a step that created the project and then died is exactly the case the pin exists for \u2014 losing the id there is what lets the next attempt create a second project.",
                   "properties": {
                     "org_id": {
                       "type": "string"
@@ -208,6 +208,7 @@
                     "DECRYPT_KEY_MISMATCH",
                     "NO_ACTIVE_BRANCH",
                     "KEY_NOT_ON_DEVICE",
+                    "PLAN_CHANGED",
                     "BOOTSTRAP_DECLINED",
                     "BOOTSTRAP_EXPIRED",
                     "BOOTSTRAP_CONSUMED",
@@ -218,7 +219,71 @@
                     "BOOTSTRAP_BAD_PAYLOAD",
                     "BOOTSTRAP_CREATE_FAILED"
                   ],
-                  "description": "Closed set. Every member except KEY_NOT_ON_DEVICE is an existing code: ERROR_CODES (the service's error codes, packages/cli/src/types/index.ts:317-347) or AUTH_CODES (the agent server's auth outcome codes). KEY_NOT_ON_DEVICE is minted here because today that condition is thrown as a generic AUTH_FAILED (capyCommand.ts:552) and would be indistinguishable from an ordinary auth failure — mint the code where the condition is first known rather than sniff it downstream. The mapping from code to blocked reason is in steps.json `blocked_reasons[].from_codes`."
+                  "description": "Closed set. Every member except KEY_NOT_ON_DEVICE is an existing code: ERROR_CODES (the service's error codes, packages/cli/src/types/index.ts:317-347) or AUTH_CODES (the agent server's auth outcome codes). KEY_NOT_ON_DEVICE is minted here because today that condition is thrown as a generic AUTH_FAILED (capyCommand.ts:552) and would be indistinguishable from an ordinary auth failure \u2014 mint the code where the condition is first known rather than sniff it downstream. The mapping from code to blocked reason is in steps.json `blocked_reasons[].from_codes`."
+                }
+              }
+            },
+            "plan": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "The freshly computed plan, sent only when the client found it no longer matches the one the instance holds. The service replaces the stored plan and CLEARS any recorded consent, so the next step is the dialog again \u2014 a human who approved one set of edits is never taken to have approved a different one. Names, paths, counts and a hash only.",
+              "required": [
+                "plan_hash",
+                "target_dir"
+              ],
+              "properties": {
+                "plan_hash": {
+                  "type": "string"
+                },
+                "target_dir": {
+                  "type": "string"
+                },
+                "framework": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "edit_paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "connector_providers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "cli_checks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "cli",
+                      "installed"
+                    ],
+                    "properties": {
+                      "cli": {
+                        "type": "string"
+                      },
+                      "installed": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                },
+                "variable_names": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "variable_count": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               }
             }

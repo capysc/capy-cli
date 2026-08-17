@@ -342,13 +342,50 @@ export class CapyCommand {
    * flow has already asked in its own consent dialog; everything else behaves
    * identically.
    */
-  async initializeProjectForFlow(opts: { assumeEncryptConsent?: boolean } = {}): Promise<void> {
+  async initializeProjectForFlow(
+    opts: {
+      assumeEncryptConsent?: boolean;
+      /**
+       * Called the instant a project is chosen or created — BEFORE the intake
+       * that follows it. The flow records the ids there and then, so a run that
+       * dies between "project created" and "keep.lock written" still leaves the
+       * id pinned and the retry adopts it instead of creating a second project.
+       */
+      onProjectResolved?: (ids: { org_id: string; project_id: string; branch?: string }) => void;
+    } = {},
+  ): Promise<void> {
     this.assumeEncryptConsent = opts.assumeEncryptConsent === true;
+    this.onProjectResolved = opts.onProjectResolved;
     try {
       await this.initializeProject();
     } finally {
       this.assumeEncryptConsent = false;
+      this.onProjectResolved = undefined;
     }
+  }
+
+  /**
+   * The ordinary sync, as an entry point for the flow driver's `encrypt_env`
+   * executor — with one difference that matters: it THROWS.
+   *
+   * `execute()` ends its catch in `displayErrorAndExit`, which calls
+   * process.exit. Under the driver that would kill the run instead of returning
+   * a failed outcome with a code, and the flow layer's whole contract is that a
+   * step reports what happened rather than ending the process.
+   */
+  async syncForFlow(): Promise<void> {
+    const projectState = await this.projectManager.detectProjectState();
+    if (!projectState.initialized) {
+      const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
+      if (!envMeta.org_id || !envMeta.project_id) {
+        throw new CapyError('No keep.lock in this directory', ERROR_CODES.NO_KEEP_FILE);
+      }
+      projectState.initialized = true;
+      projectState.organizationId = envMeta.org_id;
+      projectState.projectId = envMeta.project_id;
+      projectState.activeBranch = envMeta.branch ?? null;
+    }
+    await this.syncProject(projectState);
   }
 
   /**
@@ -366,6 +403,8 @@ export class CapyCommand {
 
   /** Set for the duration of a flow-driven init: the plan dialog already carried this question. */
   private assumeEncryptConsent = false;
+  /** Set for the duration of a flow-driven init — see initializeProjectForFlow. */
+  private onProjectResolved?: (ids: { org_id: string; project_id: string; branch?: string }) => void;
 
   private async initializeProject(): Promise<void> {
     // Imported only on the `--web` path: the module pulls in every compiled
@@ -584,12 +623,15 @@ export class CapyCommand {
         },
         { facts: [{ label: 'Organization', value: selectedOrg.name }] },
       );
+      // Its own code, not AUTH_FAILED: signing in again cannot fix this, and a
+      // caller that has to tell the two apart must not do it by reading the
+      // sentence. The message is unchanged.
       throw new CapyError(
         `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
         '  Ask your org owner for an invite code, then run:\n\n' +
         '    capy redeem <code>\n\n' +
         '  This will securely transfer the shared encryption key to your device.',
-        ERROR_CODES.AUTH_FAILED
+        ERROR_CODES.KEY_NOT_ON_DEVICE
       );
     }
 
@@ -660,6 +702,8 @@ export class CapyCommand {
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
+        // Known now, before anything is pulled or written.
+        this.onProjectResolved?.({ org_id: selectedOrg.id, project_id: picked.id });
         await this.bootstrapExistingProject(
           picked,
           selectedOrg.id,
@@ -715,6 +759,11 @@ export class CapyCommand {
     this.fileManager.writeKeepFile(keep);
 
     keySpinner.succeed('keep.lock created (0 secrets)');
+
+    // The project exists on the service from here on. Report it immediately:
+    // everything after this point can fail, and a retry that did not know this
+    // id would create a SECOND project.
+    this.onProjectResolved?.({ org_id: projectResult.org_id, project_id: projectResult.project_id });
 
     // Create the initial branch. `POST /projects` no longer auto-creates
     // one, so pick the name: default 'development', or a custom name the

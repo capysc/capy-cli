@@ -25,6 +25,8 @@ import { readEnvKeys } from '../flows/onboard/edits';
 
 export interface OnboardOptions extends CliOptions {
   json?: boolean;
+  /** Render interactive stops in a browser (the same wizard `capy --web` uses). */
+  web?: boolean;
   targetDir?: string;
   flowId?: string;
   flowSecret?: string;
@@ -57,8 +59,12 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   const { AuthService } = await import('../auth/authService');
   const authService = new AuthService(undefined, devMode);
   // The bearer the flow API sees. Absent = an anonymous instance, which is the
-  // ordinary state of a first run in a fresh repo.
-  const token = (await authService.getValidToken())?.access_token ?? undefined;
+  // ordinary state of a first run in a fresh repo. Re-read after every step
+  // that succeeds — `authenticate` is a step, and the token it mints has to
+  // travel on the next request.
+  const getToken = async (): Promise<string | undefined> =>
+    (await authService.getValidToken())?.access_token ?? undefined;
+  const token = await getToken();
 
   // Answering a dialog is a separate invocation: record it, then re-drive so
   // the table decides what the approval unlocked.
@@ -75,8 +81,8 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     });
   }
 
-  // The plan and the compat findings are computed LOCALLY, once, at creation —
-  // names, paths and counts only, never a value.
+  // The plan and the compat findings are computed LOCALLY — names, paths and
+  // counts only, never a value.
   const plan = buildPlan({ targetDir });
   const envKeys = readEnvKeys(targetDir);
 
@@ -88,22 +94,23 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       devMode,
       sessionLive: Boolean(token),
       token,
+      getToken,
+      web: options.web === true,
+      // Recomputed on demand: only sent when the plan the instance holds has
+      // gone stale under the human.
+      buildPlan: () => planPayload(targetDir),
       flowId: options.flowId,
       flowSecret: options.flowSecret,
       authMode: options.clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
       clientPubkey: options.clientPubkey,
-      plan: {
-        plan_hash: plan.planHash,
-        target_dir: plan.targetDir,
-        framework: plan.framework ?? null,
-        edit_paths: plan.diffs.map((d) => d.path),
-        connector_providers: plan.connectors.map((c) => c.provider),
-        cli_checks: plan.cliChecks.map((c) => ({ cli: c.cli, installed: c.installed })),
-        variable_names: envKeys,
-        variable_count: envKeys.length,
-      },
+      plan: planPayload(targetDir),
       compat: { usesEnvVars: envKeys.length > 0, framework: plan.framework },
     });
+
+    // A screen is the one stop an agent cannot answer for the user, so its URL
+    // goes out through the SAME structured event every other Capy handoff uses
+    // — in json mode too, where the object below is the only other output.
+    if (result.step.kind === 'screen') surfaceScreen(result.step);
 
     if (options.json) {
       const out: OnboardJson = {
@@ -119,7 +126,13 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       return;
     }
 
-    await renderInteractive(result, transport, { secret: result.flowSecret ?? options.flowSecret, token }, options, devMode);
+    await renderInteractive(
+      result,
+      transport,
+      { secret: result.flowSecret ?? options.flowSecret, token: await getToken() },
+      options,
+      devMode,
+    );
   } catch (err) {
     if (err instanceof FlowContractError && options.json) {
       // A refused step is a failure of the SERVICE's side of the contract, and
@@ -131,6 +144,22 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     }
     throw err;
   }
+}
+
+/** The plan, in the contract's shape. Names, paths, counts and a hash — never a value. */
+function planPayload(targetDir: string): Record<string, unknown> {
+  const plan = buildPlan({ targetDir });
+  const envKeys = readEnvKeys(targetDir);
+  return {
+    plan_hash: plan.planHash,
+    target_dir: plan.targetDir,
+    framework: plan.framework ?? null,
+    edit_paths: plan.diffs.map((d) => d.path),
+    connector_providers: plan.connectors.map((c) => c.provider),
+    cli_checks: plan.cliChecks.map((c) => ({ cli: c.cli, installed: c.installed })),
+    variable_names: envKeys,
+    variable_count: envKeys.length,
+  };
 }
 
 /**
@@ -163,9 +192,7 @@ async function renderInteractive(
   }
 
   if (step.kind === 'screen') {
-    const { describeScreen } = await import('../flows/onboard/copy');
-    console.log(`\n${describeScreen(step.screen as string, step.params)}`);
-    console.log(`\n  ${step.url}\n`);
+    surfaceScreen(step);
     return;
   }
 
@@ -183,4 +210,19 @@ async function renderInteractive(
   }
   // Approval recorded — re-drive, same instance, fresh observations.
   await runOnboardCommand({ ...options, flowId: result.flowId, flowSecret: creds.secret }, devMode);
+}
+
+/**
+ * Hand a screen step to the human: the readable line, and — byte-identical, on
+ * the line after it — the structured handoff event every Capy browser handoff
+ * emits. An agent driving this reads the event; a person reads the line above
+ * it. Never one without the other.
+ */
+function surfaceScreen(step: FlowStep): void {
+  const { describeScreen } = require('../flows/onboard/copy') as typeof import('../flows/onboard/copy');
+  const { emitHandoffUrlEvent } = require('../ui/handoffEvent') as typeof import('../ui/handoffEvent');
+  const url = step.url as string;
+  console.log(`\n${describeScreen(step.screen as string, step.params)}`);
+  console.log(`\n  ${url}\n`);
+  emitHandoffUrlEvent(url, 'onboard');
 }
