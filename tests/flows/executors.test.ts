@@ -37,6 +37,20 @@ mock.module('../../src/auth/authService', () => ({
 const applyPlan = jest.fn();
 mock.module('../../src/flows/onboard/apply', () => ({ applyPlan }));
 
+// unlock_org_key (CAP-382 Case C) — mocked so the test drives the SAME
+// functions capyCommand.ts:524-529 calls, without a real filesystem key or a
+// real ceremony.
+const hasOrgKey = jest.fn();
+mock.module('../../src/crypto/keyResolver', () => ({ hasOrgKey }));
+
+const deviceKeysEnabled = jest.fn(() => true);
+mock.module('../../src/auth/deviceKey/flag', () => ({ deviceKeysEnabled }));
+
+const attemptCaseCUnlock = jest.fn();
+mock.module('../../src/auth/deviceKey/wiring', () => ({ attemptCaseCUnlock }));
+
+mock.module('../../src/service/serviceClient', () => ({ ServiceClient: class {} }));
+
 afterAll(() => {
   mock.restore();
 });
@@ -63,6 +77,11 @@ beforeEach(() => {
   getValidToken.mockResolvedValue(null);
   applyPlan.mockReset();
   authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1', organization_id: 'org_1' });
+  hasOrgKey.mockReset();
+  deviceKeysEnabled.mockReset();
+  deviceKeysEnabled.mockReturnValue(true);
+  attemptCaseCUnlock.mockReset();
+  attemptCaseCUnlock.mockResolvedValue({ ok: false, installedCurrentOrg: false });
 });
 
 const ctx = (over: Partial<ExecutorContext> = {}): ExecutorContext => ({
@@ -83,6 +102,16 @@ const step = (over: Partial<FlowStep> = {}): FlowStep =>
     params: {},
     ...over,
   }) as FlowStep;
+
+/** A well-formed keep.lock naming the given org — readKeepFile() validates the shape. */
+const keepLockFixture = (orgId: string) =>
+  JSON.stringify({
+    version: '3.0',
+    org_id: orgId,
+    project_id: 'proj_1',
+    project_name: 'x',
+    variables: {},
+  });
 
 describe('codeFor — the reason travels as a code', () => {
   test('carries a CapyError code through untouched', () => {
@@ -222,6 +251,97 @@ describe('encrypt_env — a failure is reported, never fatal', () => {
     );
     expect(result.code).toBe(ERROR_CODES.NO_KEEP_FILE);
     expect(syncForFlow).not.toHaveBeenCalled();
+  });
+});
+
+describe('unlock_org_key — CAP-382 Case C, moved not rewritten', () => {
+  test('a no-op when the key is already on this device', async () => {
+    hasOrgKey.mockReturnValue(true);
+    writeFileSync(join(dir, 'keep.lock'), keepLockFixture('org_1'));
+
+    const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
+
+    expect(result.outcome).toBe('ok');
+    // Already present — the ceremony is never even attempted.
+    expect(attemptCaseCUnlock).not.toHaveBeenCalled();
+  });
+
+  test('runs the SAME Case-C ceremony capyCommand.ts calls, and succeeds when it installs the key', async () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLockFixture('org_1'));
+    // hasOrgKey is false, then true — the ceremony ran in between.
+    hasOrgKey.mockReturnValueOnce(false).mockReturnValueOnce(true);
+    attemptCaseCUnlock.mockResolvedValue({ ok: true, installedCurrentOrg: true });
+
+    const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
+
+    expect(result.outcome).toBe('ok');
+    expect(attemptCaseCUnlock).toHaveBeenCalledTimes(1);
+    expect(attemptCaseCUnlock).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'user_1', activeOrgId: 'org_1' }),
+    );
+  });
+
+  test('reports KEY_NOT_ON_DEVICE — never a bare auth failure — when the ceremony does not install it', async () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLockFixture('org_1'));
+    hasOrgKey.mockReturnValue(false);
+    attemptCaseCUnlock.mockResolvedValue({ ok: false, installedCurrentOrg: false });
+
+    const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
+
+    expect(result.outcome).toBe('failed');
+    expect(result.code).toBe('KEY_NOT_ON_DEVICE');
+  });
+
+  test('skips the ceremony entirely when device keys are disabled, and still reports KEY_NOT_ON_DEVICE', async () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLockFixture('org_1'));
+    hasOrgKey.mockReturnValue(false);
+    deviceKeysEnabled.mockReturnValue(false);
+
+    const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
+
+    expect(attemptCaseCUnlock).not.toHaveBeenCalled();
+    expect(result.outcome).toBe('failed');
+    expect(result.code).toBe('KEY_NOT_ON_DEVICE');
+  });
+
+  test('falls back to the .env header for org_id when keep.lock is absent and the step carries none', async () => {
+    writeFileSync(
+      join(dir, '.env'),
+      '# capy:org_id=org_from_header\n# capy:project_id=proj_1\nFOO=capy:r:ct\n',
+    );
+    hasOrgKey.mockReturnValue(true);
+
+    const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
+
+    expect(result.outcome).toBe('ok');
+    expect(hasOrgKey).toHaveBeenCalledWith('org_from_header', 'user_1');
+  });
+
+  test('prefers the org_id the step carries over keep.lock or the header', async () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLockFixture('org_from_keep_lock'));
+    hasOrgKey.mockReturnValue(true);
+
+    await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: 'org_from_step' } }), ctx());
+
+    expect(hasOrgKey).toHaveBeenCalledWith('org_from_step', 'user_1');
+  });
+
+  test('reports WHY the silent auth failed rather than a bare failure', async () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLockFixture('org_1'));
+    authenticateSilent.mockResolvedValue({ success: false, error_code: 'network' });
+
+    const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
+
+    expect(result.outcome).toBe('failed');
+    expect(result.code).toBe(ERROR_CODES.NETWORK_ERROR);
+    expect(hasOrgKey).not.toHaveBeenCalled();
+  });
+
+  test('refuses when no org is named anywhere — never a guess', async () => {
+    const result = await EXECUTORS.unlock_org_key(step({ verb: 'unlock_org_key', params: { org_id: null } }), ctx());
+    expect(result.outcome).toBe('failed');
+    expect(hasOrgKey).not.toHaveBeenCalled();
+    expect(authenticateSilent).not.toHaveBeenCalled();
   });
 });
 

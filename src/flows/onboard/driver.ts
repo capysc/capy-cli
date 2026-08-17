@@ -120,7 +120,13 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
 
   let flowId = opts.flowId;
   let creds: FlowCreds = { secret: opts.flowSecret, token: opts.token };
+  // The service decides `resumed` ONCE per instance and echoes it on every
+  // step (engine.ts resolveResumed) — so the value from the FIRST envelope
+  // this run receives is authoritative for the whole run. Reading it again
+  // from a later envelope and OR-ing it in would make step 2 of a genuinely
+  // fresh flow report resumed:true, which is the exact bug this replaced.
   let resumed = false;
+  let resumedSeen = false;
   let createdSecret: string | undefined;
 
   if (!flowId) {
@@ -175,7 +181,16 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     // Validated BEFORE anything else looks at it. A refusal throws out of the
     // loop with no executor having run.
     const step = validateStep(answer.step, flowId);
-    if (step.resumed) resumed = true;
+    // The service decides this once per INSTANCE and echoes it on every step
+    // (engine.ts resolveResumed), so every envelope this run receives already
+    // carries the same value — take it from the first one and never OR later
+    // envelopes into it. OR-ing was the bug: it made step 2 of a genuinely
+    // fresh run report resumed:true just because the instance had, by then,
+    // of course already issued a step.
+    if (!resumedSeen) {
+      resumed = step.resumed;
+      resumedSeen = true;
+    }
 
     if (isStopStep(step)) {
       return { flowId, step, executed, resumed, flowSecret: createdSecret };
@@ -192,6 +207,13 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
       );
     }
 
+    // Consent was recorded on the flow instance, not in this process — the
+    // step says so (params.consent_recorded, filled server-side from
+    // instance.consentPlanHash) rather than this driver ever guessing. Only
+    // the consent-gated verbs carry it; everything else leaves ctx.consented
+    // false, which those executors never consult.
+    ctx.consented = (step.params as { consent_recorded?: boolean }).consent_recorded === true;
+
     const result = await executor(step, ctx);
     executed.push({ step_id: step.step_id, verb: step.verb as string, outcome: result.outcome, code: result.code });
     lastStep = { step_id: step.step_id, outcome: result.outcome, code: result.code, result: result.result };
@@ -200,8 +222,12 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
       // A step may have minted a session. Carry it on the NEXT request — that
       // is what lets the service rebind an anonymous instance to a real
       // identity (it needs the secret and the JWT together) and start deriving
-      // sessionLive as true.
-      const token = mintedToken ?? (await getToken());
+      // sessionLive as true. A FRESH read wins over a stale minted one: once
+      // sync-state carries a user id (write_keep_lock/write_capy_dir), getToken
+      // resolves to the org-scoped session that step's authenticate call never
+      // had, and the org-less bearer authenticate minted must not keep shadowing
+      // it for the rest of the run.
+      const token = (await getToken()) ?? mintedToken;
       if (token) {
         creds = { ...creds, token };
         sessionLive = true;

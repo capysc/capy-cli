@@ -29,6 +29,12 @@ export interface OnboardObservations {
   branchConflict: boolean;
   /** A hint. The service derives its own answer and its answer wins. */
   sessionLive: boolean;
+  /**
+   * The org named by keep.lock (or the .env header when keep.lock is absent)
+   * has its master key on this device. VACUOUSLY TRUE when no org is named
+   * locally, or when there is no session yet — see `orgKeyOnDevice` below.
+   */
+  orgKeyOnDevice: boolean;
 }
 
 export interface ObserveOptions {
@@ -86,6 +92,38 @@ function commandsWrapped(targetDir: string): boolean {
   return edits.every((e) => e.noop);
 }
 
+/**
+ * CAP-382 Case C, as an observation: does THIS device hold the master key for
+ * the org named locally?
+ *
+ * VACUOUSLY TRUE in both cases the definition names, and in that order:
+ *   - no org is named locally at all (no keep.lock, no .env header) — there is
+ *     nothing to check `hasOrgKey` against;
+ *   - `sessionLive` is false — `hasOrgKey` needs a userId, and there is no
+ *     identity yet to check it with.
+ * Both are exactly what the contract's `orgKeyOnDevice` predicate requires an
+ * honest client to report, and what makes the corresponding rows of the
+ * onboard table unreachable (`U4`/`U5` in `scripts/gen-onboard-table.ts`).
+ */
+function orgKeyOnDevice(pm: ProjectManager, fm: FileManager, sessionLive: boolean, envPath?: string): boolean {
+  if (!sessionLive) return true;
+
+  let keep: KeepFile | null = null;
+  try {
+    keep = pm.readKeepFile();
+  } catch {
+    keep = null;
+  }
+  const orgId = keep?.org_id ?? fm.readEnvMeta(envPath).org_id ?? null;
+  if (!orgId) return true;
+
+  const userId = pm.readSyncState()?.user_id;
+  if (!userId) return true;
+
+  const { hasOrgKey } = require('../../crypto/keyResolver') as typeof import('../../crypto/keyResolver');
+  return hasOrgKey(orgId, userId);
+}
+
 export function observeOnboard(opts: ObserveOptions): OnboardObservations {
   const { targetDir } = opts;
 
@@ -101,6 +139,8 @@ export function observeOnboard(opts: ObserveOptions): OnboardObservations {
       commandsWrapped: false,
       branchConflict: false,
       sessionLive: opts.sessionLive,
+      // Vacuously true: no target dir means no org can be named locally.
+      orgKeyOnDevice: true,
     };
   }
 
@@ -124,5 +164,6 @@ export function observeOnboard(opts: ObserveOptions): OnboardObservations {
     commandsWrapped: commandsWrapped(targetDir),
     branchConflict: branchConflict(pm, fm, opts.envPath),
     sessionLive: opts.sessionLive,
+    orgKeyOnDevice: orgKeyOnDevice(pm, fm, opts.sessionLive, opts.envPath),
   };
 }

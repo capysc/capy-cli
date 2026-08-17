@@ -12,6 +12,7 @@
         "commandsWrapped",
         "branchConflict",
         "sessionLive",
+        "orgKeyOnDevice",
         "ceremonyPending"
       ],
       "predicates": {
@@ -73,6 +74,13 @@
           "why": "BASE. Server-fact even though the client can see it. The SERVICE'S OWN VIEW ALWAYS WINS: it is derived from the credential presented on the request together with the instance binding (an identified caller has a verified session by construction; an anonymous instance has none until its ceremony is claimed and the instance is rebound). The client's boolean is a HINT that may steer sequencing only \u2014 a client reporting `true` with no credential on the request gets the service's `false`, and a client reporting `false` while presenting a valid JWT gets the service's `true`. The client's honest observation comes from the CLI, never a filesystem probe \u2014 `capy info --json` (the sandbox-session ceremony client:124-127), the CLI-owns-the-answer doctrine.",
           "source": "the sandbox-session ceremony client:124-127,299-309; packages/cli/src/commands/capyCommand.ts:1322-1348"
         },
+        "orgKeyOnDevice": {
+          "type": "boolean",
+          "ownership": "local-fact",
+          "definition": "The org named by keep.lock (or the .env header when keep.lock is absent) has its master key on this device: hasOrgKey(orgId, userId) is true. VACUOUSLY TRUE when no org is locally named (no keep.lock and no .env header) or when there is no session yet (no userId to check hasOrgKey against).",
+          "why": "ADDED, post-live-E2E (2026-08-17). HANDOFF-successor bug D: on a second machine with keep.lock present but this device never having received the org's master key (CAP-382 Case C), the table used to route authenticate -> write_capy_dir -> done, and the first `capy run` afterwards failed with 'no access to this project's secrets on this device' (packages/cli/src/crypto/keyResolver.ts, the syncProject access check) — the flow never modeled Case C as a step at all. capyCommand.ts:517-559 already runs the Case-C device-key unlock ceremony (attemptCaseCUnlock) inline during authentication; this predicate is what lets the table offer that same ceremony explicitly, as its own step, when a live session still finds the key missing.",
+          "source": "packages/cli/src/commands/capyCommand.ts:517-559; packages/cli/src/auth/deviceKey/wiring.ts attemptCaseCUnlock; packages/cli/src/crypto/keyResolver.ts hasOrgKey"
+        },
         "ceremonyPending": {
           "type": "boolean",
           "ownership": "server-fact",
@@ -83,10 +91,6 @@
         }
       },
       "not_predicates": {
-        "orgKeyOnDevice": {
-          "branches_at": "packages/cli/src/commands/capyCommand.ts:517,524-529,532-559",
-          "why_excluded": "It is not a fact about this repository and it has no referent until an org has been resolved, which happens INSIDE authentication. The Case-C device-key unlock ceremony that can flip it already runs there (capyCommand.ts:524-529). So the flow learns about it as the OUTCOME CODE of the authenticate step and answers blocked{key_not_on_device} \u2014 keeping the observation vector purely repo-scoped and the table a pure function of it."
-        },
         "compatible": {
           "branches_at": "the onboarding plan builder (capy-cli src/flows/onboard/plan.ts):26-44",
           "why_excluded": "Decided once, at instance creation, from findings the caller supplies; an incompatible project yields an instance that is created terminal-blocked{incompatible_project}. It is not re-observable per call and never changes mid-flow."
@@ -133,7 +137,8 @@
                 "envStillPlaintext",
                 "commandsWrapped",
                 "branchConflict",
-                "sessionLive"
+                "sessionLive",
+                "orgKeyOnDevice"
               ],
               "properties": {
                 "targetDirValid": {
@@ -158,6 +163,9 @@
                   "type": "boolean"
                 },
                 "sessionLive": {
+                  "type": "boolean"
+                },
+                "orgKeyOnDevice": {
                   "type": "boolean"
                 }
               }

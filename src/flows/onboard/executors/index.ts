@@ -13,7 +13,7 @@
  */
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { CapyError, ERROR_CODES, SilentAuthFailureCode } from '../../../types/index';
+import { CapyError, ERROR_CODES, SilentAuthFailureCode, KeepFile } from '../../../types/index';
 import { ProjectManager } from '../../../core/projectManager';
 import { FileManager } from '../../../files/fileManager';
 import { resolveBranchFromLocalState } from '../../../core/branchResolver';
@@ -303,6 +303,55 @@ export const encryptEnv: Executor = async (_step, ctx) => {
   );
 };
 
+/**
+ * `unlock_org_key` — CAP-382 Case C as a flow step: a live session, an org
+ * already named locally (by keep.lock, or the .env header when keep.lock is
+ * absent), but no local master key for it. Runs the SAME functions
+ * `capyCommand.ts:524-529` already calls inline during authentication
+ * (`attemptCaseCUnlock` + `deviceKeyWiringContext`) — moved here, not
+ * reimplemented — then re-checks `hasOrgKey`, exactly as that call site does.
+ */
+export const unlockOrgKey: Executor = async (step, ctx) => {
+  const pm = new ProjectManager(ctx.targetDir);
+  const fm = new FileManager(ctx.targetDir);
+  let keep: KeepFile | null = null;
+  try {
+    keep = pm.readKeepFile();
+  } catch {
+    keep = null;
+  }
+  const orgId = (step.params.org_id as string | null) ?? keep?.org_id ?? fm.readEnvMeta(ctx.envPath).org_id ?? null;
+  if (!orgId) return { outcome: 'failed', code: ERROR_CODES.SERVICE_ERROR };
+
+  const { AuthService } = await import('../../../auth/authService');
+  const auth = new AuthService(undefined, ctx.devMode);
+  const session = await auth.authenticateSilent(orgId);
+  if (!session.success || !session.user_id) {
+    return { outcome: 'failed', code: codeForSilentAuthFailure(session.error_code) };
+  }
+  const userId = session.user_id;
+
+  const { hasOrgKey } = await import('../../../crypto/keyResolver');
+  if (hasOrgKey(orgId, userId)) return { outcome: 'ok' };
+
+  const { deviceKeysEnabled } = await import('../../../auth/deviceKey/flag');
+  if (deviceKeysEnabled()) {
+    const { attemptCaseCUnlock } = await import('../../../auth/deviceKey/wiring');
+    const { ServiceClient } = await import('../../../service/serviceClient');
+    await attemptCaseCUnlock({
+      authService: auth,
+      serviceClient: new ServiceClient(undefined, ctx.devMode),
+      devMode: ctx.devMode,
+      userId,
+      userEmail: session.user_email,
+      organizations: session.organizations || [],
+      activeOrgId: orgId,
+    });
+  }
+
+  return hasOrgKey(orgId, userId) ? { outcome: 'ok' } : { outcome: 'failed', code: KEY_NOT_ON_DEVICE };
+};
+
 /** The closed executor map. A verb with no entry here is never executed — the driver refuses. */
 export const EXECUTORS: ExecutorMap = {
   authenticate,
@@ -310,4 +359,5 @@ export const EXECUTORS: ExecutorMap = {
   write_keep_lock: writeKeepLock,
   wrap_run_commands: wrapRunCommands,
   encrypt_env: encryptEnv,
+  unlock_org_key: unlockOrgKey,
 };

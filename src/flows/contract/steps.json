@@ -190,7 +190,8 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "source"
+          "source",
+          "consent_recorded"
         ],
         "properties": {
           "source": {
@@ -218,6 +219,10 @@
               "string",
               "null"
             ]
+          },
+          "consent_recorded": {
+            "type": "boolean",
+            "description": "True when the instance already holds a recorded answer to the onboard_plan dialog covering the plan this step is about to execute (engine.ts paramsForVerb, from instance.consentPlanHash === plan.plan_hash). This verb is only ever issued in local_action form when consent was not required (source=env_header) or was already required-and-granted (source=select_or_create) — the executor reads this rather than re-asking, so the human is never shown the encrypt/write confirmation twice for one approval."
           }
         }
       }
@@ -235,7 +240,8 @@
         "additionalProperties": false,
         "required": [
           "plan_hash",
-          "kinds"
+          "kinds",
+          "consent_recorded"
         ],
         "properties": {
           "plan_hash": {
@@ -259,6 +265,10 @@
               "type": "string"
             },
             "description": "Repo-relative file paths. Names only."
+          },
+          "consent_recorded": {
+            "type": "boolean",
+            "description": "True when the instance already holds a recorded answer to the onboard_plan dialog covering plan_hash (engine.ts paramsForVerb). This verb is always consent-gated, so this local_action is only ever issued once that answer is on record — the executor reads this rather than assuming."
           }
         }
       }
@@ -276,7 +286,8 @@
         "additionalProperties": false,
         "required": [
           "branch",
-          "variable_count"
+          "variable_count",
+          "consent_recorded"
         ],
         "properties": {
           "branch": {
@@ -292,6 +303,33 @@
               "type": "string"
             },
             "description": "NAMES only. capyCommand.ts:824-830 and :851-854 already hold this line."
+          },
+          "consent_recorded": {
+            "type": "boolean",
+            "description": "True when the instance already holds a recorded answer to the onboard_plan dialog covering this push (engine.ts paramsForVerb). This verb is always consent-gated, so this local_action is only ever issued once that answer is on record."
+          }
+        }
+      }
+    },
+    "unlock_org_key": {
+      "flips": "orgKeyOnDevice",
+      "requires_consent": {
+        "default": false,
+        "why": "The CAP-382 device-key unlock ceremony is its own consent surface (the human compares the ceremony's own confirmation, the same as the authenticate step) — putting the onboarding plan dialog in front of it would ask someone to approve writes to a project the flow has not even named yet on this device."
+      },
+      "executor": "The CAP-382 Case-C device-key unlock ceremony — attemptCaseCUnlock + deviceKeyWiringContext (packages/cli/src/auth/deviceKey/wiring.ts), the same functions capyCommand.ts:524-529 already calls inline during authentication. This verb runs them explicitly, once a live session still finds the key missing after authenticate has completed.",
+      "idempotent_because": "Gated by orgKeyOnDevice. hasOrgKey short-circuits when the key is already present; a still-missing key after the ceremony reports KEY_NOT_ON_DEVICE again with no side effect beyond the ceremony attempt itself, which the existing Case-C flow already treats as safe to retry.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Org id the instance has pinned so far, or null when it has not pinned one yet — the executor falls back to reading it from keep.lock or the .env header locally, the same source that computed orgKeyOnDevice."
           }
         }
       }

@@ -1,5 +1,6 @@
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
+import { FlowHttpError } from '../flows/client';
 
 const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -18,6 +19,21 @@ export function renderError(error: any, context: ErrorContext = {}): string {
   // Handle Ctrl+C
   if (error?.name === 'ExitPromptError') {
     return '';
+  }
+
+  // A flow-service HTTP failure (packages/cli/src/flows/client.ts). It already
+  // carries a machine-readable `code` preserved from the service's response —
+  // route it through the SAME switch a CapyError gets rather than falling to
+  // the generic "unexpected error" branch below, which showed nothing but the
+  // bare HTTP status and looked indistinguishable from a real crash (cardinal
+  // rule 4: branch on the code, never re-derive one from prose).
+  if (error instanceof FlowHttpError) {
+    const known = (Object.values(ERROR_CODES) as string[]).includes(error.code ?? '');
+    const code = known ? (error.code as string) : ERROR_CODES.SERVICE_ERROR;
+    return renderError(
+      new CapyError(`Flow request failed: ${code} (HTTP ${error.status}).`, code),
+      context,
+    );
   }
 
   // Handle CapyError with specific layouts

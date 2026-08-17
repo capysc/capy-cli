@@ -43,6 +43,7 @@ const OBS: OnboardObservations = {
   commandsWrapped: false,
   branchConflict: false,
   sessionLive: false,
+  orgKeyOnDevice: true,
 };
 
 /** A fake service that hands back a scripted sequence and records what it was told. */
@@ -93,6 +94,7 @@ function recordingExecutors(outcome: StepResult = { outcome: 'ok' }): { map: Exe
       write_keep_lock: make('write_keep_lock'),
       wrap_run_commands: make('wrap_run_commands'),
       encrypt_env: make('encrypt_env'),
+      unlock_org_key: make('unlock_org_key'),
     },
   };
 }
@@ -125,7 +127,7 @@ describe('driver: the happy loop', () => {
 
   test('reports the previous step outcome, with the ids it resolved', async () => {
     const { transport, reports } = fakeTransport([
-      envelope({ kind: 'local_action', verb: 'write_keep_lock', params: { source: 'select_or_create' } }),
+      envelope({ kind: 'local_action', verb: 'write_keep_lock', params: { source: 'select_or_create', consent_recorded: true } }),
       envelope({ kind: 'done', params: {} }),
     ]);
     const map: ExecutorMap = {
@@ -244,7 +246,7 @@ describe('driver: refusals happen BEFORE anything runs', () => {
 
   test('a known kind with a verb this build cannot execute is refused, never skipped', async () => {
     const { transport } = fakeTransport([
-      envelope({ kind: 'local_action', verb: 'encrypt_env', params: { branch: 'main', variable_count: 1 } }),
+      envelope({ kind: 'local_action', verb: 'encrypt_env', params: { branch: 'main', variable_count: 1, consent_recorded: true } }),
     ]);
     // A build whose executor map is missing that verb.
     const map: ExecutorMap = { authenticate: async () => ({ outcome: 'ok' }) };
@@ -378,12 +380,150 @@ describe('G1 — a token minted mid-flow travels on the next request', () => {
     });
     expect(seen).toEqual([undefined, undefined]);
   });
+
+  // HANDOFF bug B, CLI side: `authenticate` runs before the caller has an org
+  // (org-less mint), but `write_keep_lock` selects/creates one — after which
+  // `getToken()` (scoped via sync-state user_id) resolves to the FRESH,
+  // org-scoped session, not the org-less one `authenticate` minted. The old
+  // `mintedToken ?? (await getToken())` kept shadowing it with the stale one
+  // for the rest of the run, which is exactly what sent the org-less bearer
+  // into the pin check that 403'd.
+  test('a token getToken() resolves AFTER write_keep_lock wins over the one authenticate minted', async () => {
+    const seen: Array<string | undefined> = [];
+    let orgCreated = false;
+    const transport: FlowTransport = {
+      async create() {
+        return { flow_id: FLOW_ID, flow_type: 'onboard', contract_version: FLOW_CONTRACT_VERSION, binding: 'anonymous', flow_secret: 'sekrit', step: null };
+      },
+      async next(_id, _body, creds) {
+        seen.push(creds.token);
+        if (seen.length === 1) return { step: envelope({ kind: 'local_action', verb: 'authenticate', params: {} }) };
+        if (seen.length === 2) {
+          return {
+            step: envelope({
+              kind: 'local_action',
+              verb: 'write_keep_lock',
+              params: { source: 'select_or_create', consent_recorded: true },
+            }),
+          };
+        }
+        return { step: envelope({ kind: 'done', params: {} }) };
+      },
+      async confirm() { return {}; },
+      async cancel() {},
+    };
+    const map: ExecutorMap = {
+      authenticate: async (_step, ctx) => {
+        // Mints an ORG-LESS session — exactly what a brand-new identity gets.
+        ctx.onSession?.({ token: 'orgless-token', userId: 'user_1' });
+        return { outcome: 'ok' };
+      },
+      write_keep_lock: async () => {
+        orgCreated = true;
+        return { outcome: 'ok', result: { org_id: 'org_1', project_id: 'proj_1' } };
+      },
+    };
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      // Scoped exactly the way the real getToken (AuthService, keyed by
+      // sync-state user_id) behaves: nothing until an org exists, then the
+      // real org-scoped session.
+      getToken: async () => (orgCreated ? 'org-scoped-token' : undefined),
+    });
+
+    // step 1 (authenticate) carries nothing; step 2 (write_keep_lock) carries
+    // the org-less token authenticate minted (getToken() has nothing yet);
+    // step 3 (done) carries the FRESH org-scoped token, not the stale org-less one.
+    expect(seen).toEqual([undefined, 'orgless-token', 'org-scoped-token']);
+  });
+});
+
+describe('BUG A — ctx.consented is set from the step, per step, not fixed at false', () => {
+  test('the executor sees consented=true exactly when the step says consent_recorded=true', async () => {
+    const seenConsented: boolean[] = [];
+    const { transport } = fakeTransport([
+      envelope({
+        kind: 'local_action',
+        verb: 'write_keep_lock',
+        params: { source: 'env_header', consent_recorded: false },
+      }),
+      envelope({
+        kind: 'local_action',
+        verb: 'wrap_run_commands',
+        params: { plan_hash: 'h', kinds: ['run-wrap'], consent_recorded: true },
+      }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const map: ExecutorMap = {
+      write_keep_lock: async (_step, ctx) => {
+        seenConsented.push(ctx.consented);
+        return { outcome: 'ok' };
+      },
+      wrap_run_commands: async (_step, ctx) => {
+        seenConsented.push(ctx.consented);
+        return { outcome: 'ok' };
+      },
+    };
+
+    await runOnboardFlow({ targetDir: '/tmp/x', transport, executors: map, observe: observeStub() });
+
+    expect(seenConsented).toEqual([false, true]);
+  });
+});
+
+describe('BUG C — resumed is read from the FIRST envelope only, never OR-ed across steps', () => {
+  test('a genuinely fresh run reports resumed:false even though it has, by step 2, already issued a step', async () => {
+    // Every envelope in this scripted run says resumed:false — the server-side
+    // fix means the SAME instance echoes the same decided value on every step,
+    // but the point of this test is the DRIVER: even if it were handed a stale
+    // true on a later step by a service that had not yet been fixed, the old
+    // bug was ORing `step.resumed` across steps. Assert the driver reports
+    // exactly the FIRST envelope's value.
+    const { transport } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'authenticate', params: {}, resumed: false }),
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' }, resumed: false }),
+      envelope({ kind: 'done', params: {}, resumed: false }),
+    ]);
+    const { map } = recordingExecutors();
+
+    const result = await runOnboardFlow({ targetDir: '/tmp/x', transport, executors: map, observe: observeStub() });
+    expect(result.resumed).toBe(false);
+  });
+
+  test('reports the value from the FIRST envelope even if a later one disagrees', async () => {
+    const { transport } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'authenticate', params: {}, resumed: false }),
+      // A later step reporting true must NOT flip the run's answer — the
+      // service is supposed to echo one decided value for the whole instance,
+      // and the driver's job is to trust the first one, not accumulate them.
+      envelope({ kind: 'done', params: {}, resumed: true }),
+    ]);
+    const { map } = recordingExecutors();
+
+    const result = await runOnboardFlow({ targetDir: '/tmp/x', transport, executors: map, observe: observeStub() });
+    expect(result.resumed).toBe(false);
+  });
+
+  test('a run that starts already resumed reports true from its first envelope', async () => {
+    const { transport } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' }, resumed: true }),
+      envelope({ kind: 'done', params: {}, resumed: true }),
+    ]);
+    const { map } = recordingExecutors();
+
+    const result = await runOnboardFlow({ targetDir: '/tmp/x', transport, executors: map, observe: observeStub() });
+    expect(result.resumed).toBe(true);
+  });
 });
 
 describe('G4 — ids resolved by a step that then failed are still reported', () => {
   test('the failed report carries the result, so the service can pin it', async () => {
     const { transport, reports } = fakeTransport([
-      envelope({ kind: 'local_action', verb: 'write_keep_lock', params: { source: 'select_or_create' } }),
+      envelope({ kind: 'local_action', verb: 'write_keep_lock', params: { source: 'select_or_create', consent_recorded: true } }),
       envelope({ kind: 'blocked', reason: 'service_error', params: {} }),
     ]);
     const map: ExecutorMap = {
@@ -408,7 +548,7 @@ describe('G4 — ids resolved by a step that then failed are still reported', ()
 describe('G5 — a plan that moved under the human is resent', () => {
   test('sends the rebuilt plan only after a PLAN_CHANGED outcome', async () => {
     const { transport, reports } = fakeTransport([
-      envelope({ kind: 'local_action', verb: 'wrap_run_commands', params: { plan_hash: 'h1', kinds: ['run-wrap'] } }),
+      envelope({ kind: 'local_action', verb: 'wrap_run_commands', params: { plan_hash: 'h1', kinds: ['run-wrap'], consent_recorded: true } }),
       envelope({ kind: 'blocked', reason: 'plan_changed', params: {} }),
     ]);
     const map: ExecutorMap = { wrap_run_commands: async () => ({ outcome: 'failed', code: 'PLAN_CHANGED' }) };

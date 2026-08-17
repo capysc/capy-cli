@@ -9,11 +9,26 @@
  * as plaintext (the half-finished encrypt), and the wrap predicate must flip
  * once its verb has run, or the flow loops on a step that never converges.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, afterAll, mock } from 'bun:test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { observeOnboard } from '../../src/flows/onboard/observe';
+import { ProjectManager } from '../../src/core/projectManager';
+
+// Mock homedir to a temp directory — must come before any import that touches
+// os.homedir() (the org-key predicate below reads it lazily, via
+// crypto/keyResolver -> config/globalConfig, at call time rather than at
+// import time, but this mirrors the established pattern regardless).
+const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-observe-home-'));
+mock.module('os', () => {
+  const actual = require('os');
+  return { ...actual, homedir: () => tempHome };
+});
+afterAll(() => {
+  mock.restore();
+  rmSync(tempHome, { recursive: true, force: true });
+});
 
 let dir: string;
 
@@ -47,6 +62,8 @@ describe('observeOnboard', () => {
     expect(obs.branchConflict).toBe(false);
     // The session hint is not a fact about the directory, so it survives.
     expect(obs.sessionLive).toBe(true);
+    // Vacuously true: no target dir means no org can be named locally.
+    expect(obs.orgKeyOnDevice).toBe(true);
   });
 
   test('a file where a directory should be is not a valid target', () => {
@@ -189,6 +206,72 @@ describe('observeOnboard', () => {
     const obs = observe();
     expect(JSON.stringify(obs)).not.toContain('hunter2');
     for (const value of Object.values(obs)) expect(typeof value).toBe('boolean');
+  });
+});
+
+/**
+ * BUG D: orgKeyOnDevice — CAP-382 Case C as an observation.
+ *
+ * The live E2E's second-machine run had a keep.lock naming an org this device
+ * never received the master key for, and the table routed straight past it to
+ * write_capy_dir -> done. These pin the predicate itself: vacuously true with
+ * no org named locally and with no session, and the real filesystem check
+ * otherwise.
+ */
+describe('observeOnboard: orgKeyOnDevice (CAP-382 Case C)', () => {
+  function writeOrgKey(orgId: string, userId: string): void {
+    const { getOrgKeyPath } = require('../../src/config/globalConfig') as typeof import('../../src/config/globalConfig');
+    const path = getOrgKeyPath(orgId, userId);
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, JSON.stringify({ encrypted_master_key: 'ct' }));
+  }
+
+  test('vacuously true with no session, even with an org named locally by keep.lock', () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLock());
+    const obs = observeOnboard({ targetDir: dir, sessionLive: false });
+    expect(obs.hasKeepLock).toBe(true);
+    expect(obs.orgKeyOnDevice).toBe(true);
+  });
+
+  test('vacuously true with a session but no org named locally — no keep.lock, no .env header', () => {
+    const obs = observeOnboard({ targetDir: dir, sessionLive: true });
+    expect(obs.hasKeepLock).toBe(false);
+    expect(obs.envMetaRecoverable).toBe(false);
+    expect(obs.orgKeyOnDevice).toBe(true);
+  });
+
+  test('FALSE: a session, an org named by keep.lock, and no local key for it', () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLock());
+    new ProjectManager(dir).writeSyncStateUserId('user_1');
+    const obs = observeOnboard({ targetDir: dir, sessionLive: true });
+    expect(obs.orgKeyOnDevice).toBe(false);
+  });
+
+  test('TRUE once the key is actually on this device', () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLock());
+    new ProjectManager(dir).writeSyncStateUserId('user_1');
+    writeOrgKey('org_1', 'user_1');
+    const obs = observeOnboard({ targetDir: dir, sessionLive: true });
+    expect(obs.orgKeyOnDevice).toBe(true);
+  });
+
+  test('falls back to the .env header when keep.lock is absent', () => {
+    writeFileSync(
+      join(dir, '.env'),
+      '# capy:org_id=org_2\n# capy:project_id=proj_2\n# capy:branch=development\nFOO=capy:rid:ct\n',
+    );
+    new ProjectManager(dir).writeSyncStateUserId('user_1');
+    expect(observeOnboard({ targetDir: dir, sessionLive: true }).orgKeyOnDevice).toBe(false);
+
+    writeOrgKey('org_2', 'user_1');
+    expect(observeOnboard({ targetDir: dir, sessionLive: true }).orgKeyOnDevice).toBe(true);
+  });
+
+  test('a session with no sync-state user id yet is vacuously true — nothing to check hasOrgKey against', () => {
+    writeFileSync(join(dir, 'keep.lock'), keepLock());
+    // No writeSyncStateUserId call: sync-state has no user_id.
+    const obs = observeOnboard({ targetDir: dir, sessionLive: true });
+    expect(obs.orgKeyOnDevice).toBe(true);
   });
 });
 
