@@ -13,7 +13,8 @@ const syncForFlow = jest.fn();
 const execute = jest.fn();
 const authenticateSilent = jest.fn();
 const authenticate = jest.fn();
-const getValidToken = jest.fn(async () => null);
+const getValidToken = jest.fn(async () => null as { access_token?: string } | null);
+const setSessionUserId = jest.fn();
 
 mock.module('../../src/commands/capyCommand', () => ({
   CapyCommand: class {
@@ -29,6 +30,7 @@ mock.module('../../src/auth/authService', () => ({
     authenticateSilent = authenticateSilent;
     authenticate = authenticate;
     getValidToken = getValidToken;
+    setSessionUserId = setSessionUserId;
   },
 }));
 
@@ -56,6 +58,9 @@ beforeEach(() => {
   execute.mockReset();
   authenticateSilent.mockReset();
   authenticate.mockReset();
+  setSessionUserId.mockReset();
+  getValidToken.mockReset();
+  getValidToken.mockResolvedValue(null);
   applyPlan.mockReset();
   authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1', organization_id: 'org_1' });
 });
@@ -286,5 +291,110 @@ describe('capy onboard --json --web never prompts', () => {
     const out = JSON.parse(logged.join('\n'));
     expect(out.step.kind).toBe('confirm');
     expect(out.flow_id).toBe('f-1');
+  });
+});
+
+
+describe('authenticate — the bearer a zero-organization identity has', () => {
+  test('publishes the org-less bearer when there is no stored token', async () => {
+    // A brand-new identity with no organizations gets a scope:"user" access
+    // token that is deliberately never persisted, so getValidToken() has
+    // nothing to hand back. Dropping it here left the instance unbindable and
+    // the service re-issued `authenticate` forever.
+    getValidToken.mockResolvedValue(null);
+    authenticateSilent.mockResolvedValue({
+      success: true,
+      user_id: 'user_orgless',
+      _orgless_access_token: 'orgless-bearer',
+    });
+    const onSession = jest.fn();
+
+    const result = await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx({ onSession }));
+
+    expect(result.outcome).toBe('ok');
+    expect(onSession).toHaveBeenCalledWith({ token: 'orgless-bearer', userId: 'user_orgless' });
+  });
+
+  test('a stored token wins, and the org-less one is not published on top of it', async () => {
+    getValidToken.mockResolvedValue({ access_token: 'stored-bearer' });
+    authenticateSilent.mockResolvedValue({
+      success: true,
+      user_id: 'user_1',
+      organization_id: 'org_1',
+      _orgless_access_token: 'orgless-bearer',
+    });
+    const onSession = jest.fn();
+
+    await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx({ onSession }));
+
+    expect(onSession).toHaveBeenCalledTimes(1);
+    expect(onSession).toHaveBeenCalledWith({ token: 'stored-bearer', userId: 'user_1' });
+  });
+
+  test('writes the user id to .capy/sync-state so the NEXT invocation finds the session', async () => {
+    getValidToken.mockResolvedValue({ access_token: 'stored-bearer' });
+    authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_written', organization_id: 'org_1' });
+
+    await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx());
+
+    const { ProjectManager } = await import('../../src/core/projectManager');
+    expect(new ProjectManager(dir).readSyncState()?.user_id).toBe('user_written');
+    // …and the reader for THIS process is scoped to it too, or the token it
+    // just wrote is invisible to the very next call.
+    expect(setSessionUserId).toHaveBeenCalledWith('user_written');
+  });
+});
+
+describe('capy onboard — the token reader is scoped to the directory\'s user', () => {
+  test('a sync-state user_id scopes the session lookup before the flow starts', async () => {
+    // Without this the command reads the UNSCOPED session path, finds nothing,
+    // and sends an already-signed-in user back through the browser.
+    const { ProjectManager } = await import('../../src/core/projectManager');
+    new ProjectManager(dir).writeSyncStateUserId('user_on_disk');
+
+    mock.module('../../src/flows/client', () => ({
+      FlowHttpError: class extends Error {},
+      FlowClient: class {
+        async create() {
+          return {
+            flow_id: 'f-2',
+            flow_type: 'onboard',
+            contract_version: '1',
+            binding: 'anonymous',
+            flow_secret: 's',
+            step: null,
+          };
+        }
+        async next() {
+          return {
+            step: {
+              contract_version: '1',
+              flow_id: 'f-2',
+              flow_type: 'onboard',
+              step_id: 's-2',
+              kind: 'blocked',
+              reason: 'invalid_target_dir',
+              resumed: false,
+              params: {},
+            },
+          };
+        }
+        async confirm() {
+          return { recorded: true };
+        }
+        async cancel() {}
+      },
+    }));
+
+    const originalLog = console.log;
+    console.log = () => {};
+    try {
+      const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+      await runOnboardCommand({ json: true, web: true, targetDir: dir });
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(setSessionUserId).toHaveBeenCalledWith('user_on_disk');
   });
 });
