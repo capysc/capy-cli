@@ -107,7 +107,14 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     devMode: opts.devMode === true,
     consented: false,
     web: opts.web === true,
+    onSession: (session) => {
+      // A step minted a session. It travels on the NEXT request, which is what
+      // lets the service rebind an anonymous instance (it needs the secret and
+      // the JWT together) and start deriving sessionLive as true.
+      mintedToken = session.token;
+    },
   };
+  let mintedToken: string | undefined;
   const getToken = opts.getToken ?? (async () => opts.token);
   let sessionLive = opts.sessionLive ?? false;
 
@@ -194,7 +201,7 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
       // is what lets the service rebind an anonymous instance to a real
       // identity (it needs the secret and the JWT together) and start deriving
       // sessionLive as true.
-      const token = await getToken();
+      const token = mintedToken ?? (await getToken());
       if (token) {
         creds = { ...creds, token };
         sessionLive = true;

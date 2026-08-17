@@ -34,6 +34,18 @@ export interface ExecutorContext {
   consented: boolean;
   /** Render interactive stops in a browser instead of the terminal (`capy --web`'s wizard). */
   web?: boolean;
+  /**
+   * Called by `authenticate` with the session it just minted.
+   *
+   * The token has to reach the NEXT request or the service cannot rebind the
+   * instance — and re-reading it from disk afterwards does not work: the
+   * session file is user-scoped, so a reader that does not already know the
+   * user id looks at the unscoped path and finds nothing (the same trap
+   * capyCommand.ts:399-405 documents). The step that minted it is the one
+   * place that knows, so it hands it over rather than leaving it to be
+   * rediscovered. Process-local: never a step param, never on disk.
+   */
+  onSession?: (session: { token: string; userId: string }) => void;
 }
 
 export type Executor = (step: FlowStep, ctx: ExecutorContext) => Promise<StepResult>;
@@ -101,13 +113,27 @@ export const authenticate: Executor = async (step, ctx) => {
   const { AuthService } = await import('../../../auth/authService');
   const auth = new AuthService(undefined, ctx.devMode);
   const orgHint = (step.params.org_hint as string | null) ?? undefined;
+
+  const publish = async (userId: string | undefined): Promise<void> => {
+    if (!userId) return;
+    // Scope the reader to the user whose session was just written, then hand
+    // the bearer straight to the driver.
+    auth.setSessionUserId(userId);
+    const token = await auth.getValidToken();
+    if (token?.access_token) ctx.onSession?.({ token: token.access_token, userId });
+  };
+
   const silent = await auth.authenticateSilent(orgHint);
-  if (silent.success) return { outcome: 'ok', result: { org_id: silent.organization_id } };
+  if (silent.success) {
+    await publish(silent.user_id);
+    return { outcome: 'ok', result: silent.organization_id ? { org_id: silent.organization_id } : undefined };
+  }
   // Not terminal: escalate to the interactive path, exactly as the ordinary
   // `capy` run does. Only its failure ends the step, and it reports why.
   const result = await auth.authenticate(orgHint);
   if (!result.success) return { outcome: 'failed', code: codeForSilentAuthFailure(result.error_code) };
-  return { outcome: 'ok', result: { org_id: result.organization_id } };
+  await publish(result.user_id);
+  return { outcome: 'ok', result: result.organization_id ? { org_id: result.organization_id } : undefined };
 };
 
 /**

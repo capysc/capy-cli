@@ -57,13 +57,17 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   const targetDir = options.targetDir ?? process.cwd();
   const transport = new FlowClient(undefined, devMode);
   const { AuthService } = await import('../auth/authService');
-  const authService = new AuthService(undefined, devMode);
   // The bearer the flow API sees. Absent = an anonymous instance, which is the
-  // ordinary state of a first run in a fresh repo. Re-read after every step
-  // that succeeds — `authenticate` is a step, and the token it mints has to
-  // travel on the next request.
+  // ordinary state of a first run in a fresh repo.
+  //
+  // A FRESH AuthService per read, deliberately: the `authenticate` step writes
+  // the session to disk from its own instance, and one constructed before that
+  // step ran has already decided there is no session. Reusing it meant the
+  // token minted mid-flow never travelled, the service never rebound the
+  // instance, sessionLive stayed false, and the flow re-issued `authenticate`
+  // until the driver gave up.
   const getToken = async (): Promise<string | undefined> =>
-    (await authService.getValidToken())?.access_token ?? undefined;
+    (await new AuthService(undefined, devMode).getValidToken())?.access_token ?? undefined;
   const token = await getToken();
 
   // Answering a dialog is a separate invocation: record it, then re-drive so
