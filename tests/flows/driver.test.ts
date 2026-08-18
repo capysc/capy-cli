@@ -13,12 +13,33 @@
  *
  * Executors are injected, so nothing here authenticates, writes or shells out.
  */
-import { describe, test, expect, mock, afterEach } from 'bun:test';
+import { describe, test, expect, mock, afterEach, afterAll } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import { join } from 'path';
+
+// CAP-451's broker-ceremony test writes a real (isolated) session file
+// through FileSessionStorageBackend — pin HOME to a throwaway tmpdir first,
+// same convention as tests/flows/observe.test.ts / sessionLifecycle.test.ts.
+// getGlobalCapyDir() reads os.homedir() lazily at call time, so this mock
+// works regardless of when driver.ts itself was imported.
+const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-'));
+mock.module('os', () => {
+  const actual = require('os');
+  return { ...actual, homedir: () => tempHome };
+});
+afterAll(() => {
+  mock.restore();
+  rmSync(tempHome, { recursive: true, force: true });
+});
+
 import { runOnboardFlow } from '../../src/flows/onboard/driver';
 import { FLOW_CONTRACT_VERSION, FlowContractError, FLOW_ERROR_CODES } from '../../src/flows/validate';
 import { ExecutorMap, StepResult } from '../../src/flows/onboard/executors';
 import { CreateFlowRequest, FlowTransport, NextRequest } from '../../src/flows/client';
 import { OnboardObservations } from '../../src/flows/onboard/observe';
+import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
+import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
+import { keepOrigin } from '../../src/ui/screens/keepScreens';
 
 const FLOW_ID = 'flow-1';
 
@@ -564,6 +585,110 @@ describe('G5 — a plan that moved under the human is resent', () => {
     // Not on the first report: an unchanged plan is never resent.
     expect(reports[0].plan).toBeUndefined();
     expect(reports[1].plan).toEqual({ plan_hash: 'h2', target_dir: '/tmp/x' });
+  });
+});
+
+describe('CAP-451 — the in-process broker ceremony intercepts sandbox_session under --broker-ceremony', () => {
+  test('a screen:sandbox_session step is answered in-process, never returned as a stop, when brokerCeremonyKeypair is set', async () => {
+    const keypair = mintConnectionKeypair();
+    // A fake, already-valid access token for org_1 — so applyFirstRun's own
+    // authenticateSilent('org_1') call resolves from CACHE (no network),
+    // keeping this test scoped to "did the driver run the ceremony and
+    // continue", not a full re-test of SessionLifecycle's refresh paths
+    // (those are covered in tests/auth/sessionLifecycle.test.ts).
+    const fakeJwt = `${Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')}.` +
+      `${Buffer.from(JSON.stringify({ org_id: 'workos-org-1' })).toString('base64url')}.sig`;
+    const answerPlaintext = JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_1', email: 'a@b.com' },
+      refresh_token: 'rt-1',
+      organizations: [{ id: 'org_1', workos_org_id: 'workos-org-1', name: 'Org One' }],
+      sessions: { org_1: { access_token: fakeJwt, expires_at: Date.now() + 3600_000 } },
+      // No first_run: the "1 org, key on device" rail.
+    });
+    const ciphertext = await sealEnvelopePageSide({
+      plaintext: answerPlaintext,
+      connectionId: 'conn-1',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+
+    const fetchCalls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      fetchCalls.push(String(url));
+      if (String(url).includes('/connections/')) {
+        return new Response(JSON.stringify({ status: 'answered', ciphertext }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected fetch in this test: ${url}`);
+    }) as typeof fetch;
+
+    const sandboxStep = envelope({
+      kind: 'screen',
+      screen: 'sandbox_session',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-1`,
+      params: { connection_id: 'conn-1', user_code: 'BCDF-GHJK' },
+    });
+    const { transport, calls: callCount } = fakeTransport([
+      sandboxStep,
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map, calls } = recordingExecutors();
+
+    let result: Awaited<ReturnType<typeof runOnboardFlow>>;
+    try {
+      result = await runOnboardFlow({
+        targetDir: '/tmp/x',
+        transport,
+        executors: map,
+        observe: observeStub(),
+        authMode: 'broker_ceremony',
+        clientPubkey: keypair.publicKeyB64,
+        brokerCeremonyKeypair: keypair,
+        serviceUrl: 'https://api.test.invalid',
+        flowSecret: 'flow-secret-1',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    // Never stopped on the screen — it ran through to done.
+    expect(result.step.kind).toBe('done');
+    // No local_action executor was reached for this step (authenticate,
+    // write_capy_dir, etc.) — the ceremony handled it entirely itself.
+    expect(calls).toEqual([]);
+    expect(result.executed.map((e) => e.verb)).toEqual(['sandbox_ceremony']);
+    expect(result.executed[0].outcome).toBe('ok');
+    expect(result.executed[0].code).toBeUndefined();
+    // The poll used the FLOW's own secret, never a second connection/secret.
+    expect(fetchCalls[0]).toContain('/connections/conn-1/result');
+    expect(callCount()).toBe(2); // sandbox_session step, then done
+  });
+
+  test('the SAME screen, with no brokerCeremonyKeypair, still stops exactly as before (additive-only)', async () => {
+    const sandboxStep = envelope({
+      kind: 'screen',
+      screen: 'sandbox_session',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-1`,
+      params: { connection_id: 'conn-1', user_code: 'BCDF-GHJK' },
+    });
+    const { transport } = fakeTransport([sandboxStep]);
+    const { map, calls } = recordingExecutors();
+
+    const result = await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+    });
+
+    expect(result.step.kind).toBe('screen');
+    expect(result.step.params.connection_id).toBe('conn-1');
+    expect(calls).toEqual([]);
   });
 });
 

@@ -476,6 +476,49 @@ describe('authenticate — the bearer a zero-organization identity has', () => {
   });
 });
 
+describe('authenticate — CAP-451 session_ended under --broker-ceremony', () => {
+  test('a sandboxed broker-ceremony caller gets the coded failure, never interactive escalation', async () => {
+    authenticateSilent.mockResolvedValue({
+      success: false,
+      error: 'Session expired — sign-in required',
+      error_code: 'session_ended',
+    });
+
+    const result = await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx({ brokerCeremony: true }));
+
+    expect(result).toEqual({ outcome: 'failed', code: 'AUTH_FAILED' });
+    // No fall-through to interactive OAuth — nothing to open a browser on.
+    expect(authenticate).not.toHaveBeenCalled();
+  });
+
+  test('the SAME failure, without brokerCeremony, still escalates to interactive auth (unchanged)', async () => {
+    authenticateSilent.mockResolvedValue({
+      success: false,
+      error: 'Session expired — sign-in required',
+      error_code: 'session_ended',
+    });
+    authenticate.mockResolvedValue({ success: false, error: 'declined', error_code: 'session_ended' });
+
+    const result = await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx());
+
+    expect(authenticate).toHaveBeenCalledTimes(1);
+    expect(result.outcome).toBe('failed');
+  });
+
+  test('a network failure under broker-ceremony is also refused with its own code, not just session_ended', async () => {
+    authenticateSilent.mockResolvedValue({
+      success: false,
+      error: 'Could not reach the Capy service to refresh your session',
+      error_code: 'network',
+    });
+
+    const result = await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx({ brokerCeremony: true }));
+
+    expect(result).toEqual({ outcome: 'failed', code: 'NETWORK_ERROR' });
+    expect(authenticate).not.toHaveBeenCalled();
+  });
+});
+
 describe('capy onboard — the token reader is scoped to the directory\'s user', () => {
   test('a sync-state user_id scopes the session lookup before the flow starts', async () => {
     // Without this the command reads the UNSCOPED session path, finds nothing,

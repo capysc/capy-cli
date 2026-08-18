@@ -1627,6 +1627,175 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('initializeProjectForFlow — CAP-451 pinned org / project name / wizard-stop refusal', () => {
+    beforeEach(() => {
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: false });
+      mockAuthService.refreshWithCredentials.mockResolvedValue({
+        success: true, organization_id: 'org-B', user_id: 'user-456',
+      });
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-B', project_id: 'proj-1', project_name: 'flow-project', created: true,
+      });
+      mockServiceClient.listProjects.mockResolvedValue([]);
+    });
+
+    test('a pinned org is used directly — the org picker never fires even with >1 orgs', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: '',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [
+          { id: 'org-A', workos_org_id: 'workos-A', name: 'Org Alpha' },
+          { id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' },
+        ],
+        _refresh_token: 'refresh-token',
+      });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(Array.isArray(questions) ? questions[0] : questions);
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProjectForFlow({
+          pinnedOrgId: 'org-B',
+          projectName: 'flow-project',
+        });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      expect(promptCalls.some((q) => q?.name === 'orgId')).toBe(false);
+      // Pinned org routed through the existing "switch organization" path.
+      expect(mockAuthService.refreshWithCredentials).toHaveBeenCalledWith(
+        'refresh-token', 'org-B', 'user-456',
+      );
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-B');
+    });
+
+    test('no pinned org, >1 orgs, no wizard: the org picker is a coded refusal, never inquirer', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: '',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [
+          { id: 'org-A', workos_org_id: 'workos-A', name: 'Org Alpha' },
+          { id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' },
+        ],
+        _refresh_token: 'refresh-token',
+      });
+
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      let promptCalled = false;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalled = true;
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await expect(
+          (capyCommand as any).initializeProjectForFlow({ projectName: 'flow-project' }),
+        ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+      expect(promptCalled).toBe(false);
+    });
+
+    test('a given project name skips the name prompt', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-B',
+        organization_name: 'Org Beta',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+      });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalls.push(Array.isArray(questions) ? questions[0] : questions);
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProjectForFlow({
+          pinnedOrgId: 'org-B',
+          projectName: 'flow-project',
+        });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      expect(promptCalls.some((q) => q?.name === 'projectName')).toBe(false);
+      expect(mockPromptEngine.promptForProjectName).not.toHaveBeenCalled();
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-B');
+    });
+
+    test('no project name, existing projects present: the project picker is a coded refusal', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-B',
+        organization_name: 'Org Beta',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+      });
+      mockServiceClient.listProjects.mockResolvedValue([
+        { id: 'proj-existing', name: 'existing', organization_id: 'org-B' },
+      ]);
+
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      let promptCalled = false;
+      (inquirer as any).prompt = async () => {
+        promptCalled = true;
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await expect(
+          (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B' }),
+        ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+      expect(promptCalled).toBe(false);
+    });
+
+    test('no project name, no existing projects: the name prompt itself is a coded refusal', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-B',
+        organization_name: 'Org Beta',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+      });
+
+      await expect(
+        (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B' }),
+      ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+      expect(mockPromptEngine.promptForProjectName).not.toHaveBeenCalled();
+    });
+  });
+
   describe('error handling', () => {
     test('should use displayErrorAndExit for errors in execute', async () => {
       // The execute method now uses displayErrorAndExit from errorScreen module

@@ -220,6 +220,13 @@
               "null"
             ]
           },
+          "project_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CAP-451: the project name the plan dialog already carried (from `capy onboard --project-name` / the MCP tool's `project_name` param, in the plan hash) — optional and tolerated absent (the service adds it in parallel). When present with source=select_or_create, initializeProjectForFlow skips the project-name prompt entirely instead of re-asking."
+          },
           "consent_recorded": {
             "type": "boolean",
             "description": "True when the instance already holds a recorded answer to the onboard_plan dialog covering the plan this step is about to execute (engine.ts paramsForVerb, from instance.consentPlanHash === plan.plan_hash). This verb is only ever issued in local_action form when consent was not required (source=env_header) or was already required-and-granted (source=select_or_create) — the executor reads this rather than re-asking, so the human is never shown the encrypt/write confirmation twice for one approval."

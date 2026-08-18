@@ -32,9 +32,26 @@ export interface OnboardOptions extends CliOptions {
   flowId?: string;
   flowSecret?: string;
   clientPubkey?: string;
+  /**
+   * CAP-451: this process mints its OWN ephemeral keypair and runs the
+   * in-process broker ceremony (`../flows/onboard/sandboxCeremony.ts`)
+   * against the flow-owned `sandbox_session` connection, instead of
+   * stopping on the screen and handing its URL to a caller that cannot
+   * open it — the MCP sets this. Off by default; distinct from
+   * `clientPubkey`, which is the existing explicit-keypair caller and is
+   * left untouched.
+   */
+  brokerCeremony?: boolean;
+  /** The project name to create with, skipping the interactive name prompt. In the plan hash. */
+  projectName?: string;
   /** Answer a confirm dialog: `--confirm <plan_hash> --accepted true|false`. */
   confirm?: string;
   accepted?: boolean;
+}
+
+/** Same rule the TTY project-name prompt validates (`../ui/promptEngine.ts`). */
+function isValidFlowProjectName(name: string): boolean {
+  return name.trim().length > 0 && /^[a-zA-Z0-9-_]+$/.test(name);
 }
 
 /** What the run stopped on, plus what it did on the way — printed as one object in --json mode. */
@@ -55,8 +72,31 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     );
   }
 
+  if (options.projectName !== undefined && !isValidFlowProjectName(options.projectName)) {
+    throw new CapyError(
+      'Project name can only contain letters, numbers, hyphens, and underscores',
+      ERROR_CODES.INVALID_FORMAT,
+    );
+  }
+
   const targetDir = options.targetDir ?? process.cwd();
   const transport = new FlowClient(undefined, devMode);
+
+  // CAP-451: `--broker-ceremony` mints its OWN ephemeral keypair — its
+  // pubkey becomes `client_pubkey` at flow creation (the existing plumbing
+  // the explicit `--client-pubkey` caller already uses), and the private
+  // half is held here, in this process, for the in-process ceremony to
+  // decrypt the sealed answer with. Distinct from the existing explicit
+  // `--client-pubkey` caller, whose behavior (and whose keypair, since it
+  // never mints one here) is unchanged.
+  let clientPubkey = options.clientPubkey;
+  let brokerCeremonyKeypair: import('../service/brokerEnvelope').ConnectionKeypair | undefined;
+  if (options.brokerCeremony) {
+    const { mintConnectionKeypair } = await import('../service/brokerEnvelope');
+    const keypair = mintConnectionKeypair();
+    clientPubkey = keypair.publicKeyB64;
+    brokerCeremonyKeypair = keypair;
+  }
   const { AuthService } = await import('../auth/authService');
   // The bearer the flow API sees. Absent = an anonymous instance, which is the
   // ordinary state of a first run in a fresh repo.
@@ -113,12 +153,13 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       web: options.web === true,
       // Recomputed on demand: only sent when the plan the instance holds has
       // gone stale under the human.
-      buildPlan: () => planPayload(targetDir),
+      buildPlan: () => planPayload(targetDir, options.projectName),
       flowId: options.flowId,
       flowSecret: options.flowSecret,
-      authMode: options.clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
-      clientPubkey: options.clientPubkey,
-      plan: planPayload(targetDir),
+      authMode: clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
+      clientPubkey,
+      brokerCeremonyKeypair,
+      plan: planPayload(targetDir, options.projectName),
       compat: { usesEnvVars: envKeys.length > 0, framework: plan.framework },
     });
 
@@ -161,8 +202,13 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   }
 }
 
-/** The plan, in the contract's shape. Names, paths, counts and a hash — never a value. */
-function planPayload(targetDir: string): Record<string, unknown> {
+/**
+ * The plan, in the contract's shape. Names, paths, counts and a hash — never
+ * a value. `projectName`, when given, rides in the plan so the plan hash
+ * covers it (a change re-asks) — the service is tolerated to ignore it for
+ * now (CAP-451 §9 row 11); nothing here depends on it being echoed back.
+ */
+function planPayload(targetDir: string, projectName?: string): Record<string, unknown> {
   const plan = buildPlan({ targetDir });
   const envKeys = readEnvKeys(targetDir);
   return {
@@ -174,6 +220,7 @@ function planPayload(targetDir: string): Record<string, unknown> {
     cli_checks: plan.cliChecks.map((c) => ({ cli: c.cli, installed: c.installed })),
     variable_names: envKeys,
     variable_count: envKeys.length,
+    ...(projectName ? { project_name: projectName } : {}),
   };
 }
 

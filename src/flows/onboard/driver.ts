@@ -19,8 +19,9 @@
  *     identity — the flow API is meaningless there, and the CLI stays on its
  *     existing path.
  */
-import { isLocalOnly } from '../../config/profileConfig';
+import { isLocalOnly, resolveActiveUrl } from '../../config/profileConfig';
 import { CapyError, ERROR_CODES } from '../../types/index';
+import { ConnectionKeypair } from '../../service/brokerEnvelope';
 import {
   CreateFlowRequest,
   FlowCreds,
@@ -30,6 +31,7 @@ import {
 import { FLOW_CONTRACT_VERSION, FlowContractError, FlowStep, validateStep } from '../validate';
 import { OnboardObservations, observeOnboard } from './observe';
 import { EXECUTORS, ExecutorContext, ExecutorMap, StepResult } from './executors';
+import { runSandboxCeremony } from './sandboxCeremony';
 
 export interface DriverOptions {
   targetDir: string;
@@ -56,6 +58,18 @@ export interface DriverOptions {
   authMode?: 'interactive_oauth' | 'broker_ceremony';
   clientPubkey?: string;
   machineName?: string;
+  /**
+   * CAP-451: this process's own ephemeral keypair, minted by
+   * `capy onboard --broker-ceremony` BEFORE the flow was created (its
+   * pubkey IS `clientPubkey` above). Presence is the gate: when set, the
+   * driver runs the `sandbox_session` screen ITSELF instead of stopping on
+   * it — see the loop below. Every other caller (TTY, `--web`, the existing
+   * explicit `--client-pubkey` caller with no keypair of its own) leaves
+   * this unset and hits `isStopStep` exactly as before, unchanged.
+   */
+  brokerCeremonyKeypair?: ConnectionKeypair;
+  /** Service base URL for the ceremony's own connection poll. Defaults to the ordinary URL resolution. */
+  serviceUrl?: string;
   /** Resume an instance instead of creating one. */
   flowId?: string;
   flowSecret?: string;
@@ -107,6 +121,10 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     devMode: opts.devMode === true,
     consented: false,
     web: opts.web === true,
+    // CAP-451: same gate as the sandbox_session interception above — only
+    // true for `capy onboard --broker-ceremony`'s own ceremony, never the
+    // existing explicit `--client-pubkey` caller.
+    brokerCeremony: opts.brokerCeremonyKeypair !== undefined,
     onSession: (session) => {
       // A step minted a session. It travels on the NEXT request, which is what
       // lets the service rebind an anonymous instance (it needs the secret and
@@ -190,6 +208,44 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     if (!resumedSeen) {
       resumed = step.resumed;
       resumedSeen = true;
+    }
+
+    // CAP-451: under `--broker-ceremony` the driver runs the ONE screen it
+    // knows how to answer itself — the flow-owned `sandbox_session`
+    // ceremony connection — instead of stopping and handing the URL to a
+    // caller that cannot open it (a sandboxed MCP with no browser). Every
+    // other screen, and this same screen for every OTHER caller (no
+    // keypair minted), still falls through to `isStopStep` below unchanged.
+    if (step.kind === 'screen' && step.screen === 'sandbox_session' && opts.brokerCeremonyKeypair) {
+      const outcome = await runSandboxCeremony({
+        step,
+        keypair: opts.brokerCeremonyKeypair,
+        flowSecret: creds.secret ?? '',
+        serviceUrl: opts.serviceUrl ?? resolveActiveUrl(opts.devMode === true),
+        devMode: opts.devMode === true,
+        machineName: opts.machineName,
+      });
+      executed.push({
+        step_id: step.step_id,
+        verb: 'sandbox_ceremony',
+        outcome: outcome.result.outcome,
+        code: outcome.result.code,
+      });
+      lastStep = {
+        step_id: step.step_id,
+        outcome: outcome.result.outcome,
+        code: outcome.result.code,
+        result: outcome.result.result,
+      };
+      if (outcome.result.outcome === 'ok') {
+        if (outcome.session) ctx.onSession?.(outcome.session);
+        const token = (await getToken()) ?? mintedToken;
+        if (token) {
+          creds = { ...creds, token };
+          sessionLive = true;
+        }
+      }
+      continue;
     }
 
     if (isStopStep(step)) {

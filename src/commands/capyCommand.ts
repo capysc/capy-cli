@@ -352,15 +352,38 @@ export class CapyCommand {
        * id pinned and the retry adopts it instead of creating a second project.
        */
       onProjectResolved?: (ids: { org_id: string; project_id: string; branch?: string }) => void;
+      /**
+       * CAP-451: the org the flow instance already pinned (from the
+       * `authenticate` step's own result, or an earlier `select_organization`
+       * screen). When set, the org picker this wizard-less path would
+       * otherwise show is skipped entirely — the ORG resolution below runs
+       * exactly as if that id had been chosen.
+       */
+      pinnedOrgId?: string;
+      /**
+       * CAP-451: the project name the plan dialog already carried
+       * (`write_keep_lock`'s optional `project_name` param, or `capy onboard
+       * --project-name`). When set, the project-name prompt is skipped.
+       */
+      projectName?: string;
     } = {},
   ): Promise<void> {
     this.assumeEncryptConsent = opts.assumeEncryptConsent === true;
     this.onProjectResolved = opts.onProjectResolved;
+    // Flow-driven: no wizard/inquirer stop may be reached in THIS call,
+    // whether or not pinnedOrgId/projectName cover the specific prompt that
+    // would otherwise fire — see refuseWizardStop's own doc.
+    this.flowDriven = true;
+    this.pinnedOrgId = opts.pinnedOrgId;
+    this.flowProjectName = opts.projectName;
     try {
       await this.initializeProject();
     } finally {
       this.assumeEncryptConsent = false;
       this.onProjectResolved = undefined;
+      this.flowDriven = false;
+      this.pinnedOrgId = undefined;
+      this.flowProjectName = undefined;
     }
   }
 
@@ -405,6 +428,28 @@ export class CapyCommand {
   private assumeEncryptConsent = false;
   /** Set for the duration of a flow-driven init — see initializeProjectForFlow. */
   private onProjectResolved?: (ids: { org_id: string; project_id: string; branch?: string }) => void;
+  /** CAP-451: true only inside a call reached through initializeProjectForFlow. */
+  private flowDriven = false;
+  /** CAP-451: skips the org picker when set — see initializeProjectForFlow. */
+  private pinnedOrgId?: string;
+  /** CAP-451: skips the project-name prompt when set — see initializeProjectForFlow. */
+  private flowProjectName?: string;
+
+  /**
+   * A flow-driven run has no TTY and, unless `--web` supplied a wizard, no
+   * browser either — reaching a stop only a human can answer (org picker,
+   * org-create wizard, project picker, project-name prompt) with neither
+   * available would otherwise fall through to `inquirer.prompt`, which hangs
+   * a non-interactive process forever. Refused instead, with a code the flow
+   * layer's driver reports upward like any other step outcome — never
+   * `openScreen`/inquirer under the flow.
+   */
+  private refuseWizardStop(): never {
+    throw new CapyError(
+      'This step needs a human decision the flow cannot make for it here.',
+      ERROR_CODES.FLOW_STOP_UNREACHABLE,
+    );
+  }
 
   private async initializeProject(): Promise<void> {
     // Imported only on the `--web` path: the module pulls in every compiled
@@ -506,7 +551,12 @@ export class CapyCommand {
 
     } else {
       let orgId: string;
-      if (wizard) {
+      if (this.flowDriven && this.pinnedOrgId) {
+        // CAP-451: the flow instance already pinned this org (the
+        // `authenticate` step's own result, or a `select_organization`
+        // screen upstream of this call) — no picker to show.
+        orgId = this.pinnedOrgId;
+      } else if (wizard) {
         // No TTY under --web (e.g. driven through the MCP): the picker is the
         // wizard's `organization` stop, which carries the same list and the
         // same "create new" row an inquirer prompt would have shown — and, on
@@ -518,6 +568,8 @@ export class CapyCommand {
           throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
         orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
+      } else if (this.flowDriven) {
+        this.refuseWizardStop();
       } else {
         ({ orgId } = await inquirer.prompt([{
           type: 'list',
@@ -672,7 +724,12 @@ export class CapyCommand {
     }
     wizard?.record({ projectCount: existingProjects.length, projectsUnavailable });
 
-    if (existingProjects.length > 0) {
+    // CAP-451: a projectName the plan dialog already carried means the
+    // decision "create fresh with this name" was already made — the
+    // existing-project picker below is exactly the wizard stop that
+    // decision exists to skip, so it never runs in that case.
+    const skipProjectPicker = this.flowDriven && Boolean(this.flowProjectName);
+    if (existingProjects.length > 0 && !skipProjectPicker) {
       const choices = [
         { name: 'New project', value: CREATE_NEW_PROJECT },
         ...existingProjects.map(p => ({
@@ -690,6 +747,8 @@ export class CapyCommand {
           throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
         projectChoice = chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
+      } else if (this.flowDriven) {
+        this.refuseWizardStop();
       } else {
         ({ projectChoice } = await inquirer.prompt([{
           type: 'list',
@@ -716,7 +775,11 @@ export class CapyCommand {
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
     let projectName: string;
-    if (wizard) {
+    if (this.flowDriven && this.flowProjectName) {
+      // CAP-451: the plan dialog already named it (`write_keep_lock`'s
+      // `project_name` param, or `capy onboard --project-name`).
+      projectName = this.flowProjectName;
+    } else if (wizard) {
       // Same two refusals the TTY validator makes, in the same words — the
       // screen holds its button on both, so either arriving here means the
       // submit did not come from the screen.
@@ -725,6 +788,8 @@ export class CapyCommand {
         throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
       }
       projectName = entered;
+    } else if (this.flowDriven) {
+      this.refuseWizardStop();
     } else {
       projectName = await this.promptEngine.promptForProjectName(defaultName);
     }

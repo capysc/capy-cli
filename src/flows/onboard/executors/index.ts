@@ -35,6 +35,15 @@ export interface ExecutorContext {
   /** Render interactive stops in a browser instead of the terminal (`capy --web`'s wizard). */
   web?: boolean;
   /**
+   * CAP-451: this run is driven by `capy onboard --broker-ceremony` — a
+   * sandboxed caller with no browser and no session of its own. `authenticate`
+   * reads this to refuse a `session_ended` failure with a coded outcome
+   * instead of escalating to interactive `auth.authenticate()` (loopback
+   * OAuth), which would hang forever with nothing to open a browser on.
+   * Never set for the TTY or `--web` paths.
+   */
+  brokerCeremony?: boolean;
+  /**
    * Called by `authenticate` with the session it just minted.
    *
    * The token has to reach the NEXT request or the service cannot rebind the
@@ -163,6 +172,17 @@ export const authenticate: Executor = async (step, ctx) => {
     await publish(silent.user_id, silent._orgless_access_token);
     return { outcome: 'ok', result: silent.organization_id ? { org_id: silent.organization_id } : undefined };
   }
+
+  // CAP-451: a sandboxed broker-ceremony caller has no browser and no TTY —
+  // `auth.authenticate()` would only fall through to loopback OAuth, which
+  // hangs forever with nothing to open a browser on. Report the coded
+  // failure (session_ended is the expected case: the session the ceremony
+  // wrote has since ended) and let the flow re-issue sign-in through the
+  // SAME ceremony on the next pass, never through loopback.
+  if (ctx.brokerCeremony) {
+    return { outcome: 'failed', code: codeForSilentAuthFailure(silent.error_code) };
+  }
+
   // Not terminal: escalate to the interactive path, exactly as the ordinary
   // `capy` run does. Only its failure ends the step, and it reports why.
   const result = await auth.authenticate(orgHint);
@@ -245,6 +265,12 @@ export const writeKeepLock: Executor = async (step, ctx) => {
   }
 
   if (source === 'select_or_create') {
+    // CAP-451: an org the instance already pinned (from `authenticate`'s own
+    // result, or a `select_organization` screen) and the project name the
+    // plan dialog already carried — both OPTIONAL, both tolerated absent
+    // (a TTY/`--web` run still picks/names interactively when they are).
+    const pinnedOrgIdForInit = (step.params.org_id as string | null) ?? undefined;
+    const projectName = (step.params.project_name as string | null) ?? undefined;
     // The ids are reported the moment the project is chosen or created —
     // through the callback, not read off disk afterwards — so a failure between
     // that point and the keep.lock write still pins them.
@@ -256,6 +282,8 @@ export const writeKeepLock: Executor = async (step, ctx) => {
           onProjectResolved: (ids) => {
             resolved = ids;
           },
+          pinnedOrgId: pinnedOrgIdForInit,
+          projectName,
         }),
       () => {
         if (resolved) {

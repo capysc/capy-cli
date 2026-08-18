@@ -615,7 +615,13 @@ export class AuthService {
     this.clearSession();
   }
 
-  private buildAuthResult(method: 'cached' | 'refreshed'): AuthResult {
+  private buildAuthResult(method: 'cached' | 'refreshed' | 'refreshed_orgless'): AuthResult {
+    // CAP-451 §7.1.1: the org-less silent-refresh branch has no
+    // `currentOrgId` (there is no org to scope into) and reports its bearer
+    // through `_orgless_access_token`, the same field the exchange-time
+    // mint uses — never through the ordinary session-store token path,
+    // which stays untouched (nothing was persisted for it).
+    const orglessToken = method === 'refreshed_orgless' ? this.lifecycle.orglessAccessToken : null;
     return {
       success: true,
       organization_id: this.currentOrgId || '',
@@ -624,7 +630,11 @@ export class AuthService {
       user_first_name: this.session!.user_first_name,
       user_last_name: this.session!.user_last_name,
       organizations: this.session!.organizations,
-      _auth_method: method,
+      // `_auth_method` has no 'refreshed_orgless' slot — it is still a
+      // refresh from the caller's point of view, just one that resolved to
+      // an org-less bearer instead of an org-scoped one.
+      _auth_method: method === 'refreshed_orgless' ? 'refreshed' : method,
+      ...(orglessToken ? { _orgless_access_token: orglessToken } : {}),
     };
   }
 }
