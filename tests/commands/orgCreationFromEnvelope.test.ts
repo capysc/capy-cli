@@ -184,6 +184,7 @@ describe('createOrganizationFromEnvelope — 409 suffix loop', () => {
 describe('createOrganizationFromEnvelope — canned Case A enrollment', () => {
   test('a complete PRF pair runs Case A through a canned transport with the pre-obtained result', async () => {
     const authService = fakeAuthService(async (name: string) => ({ id: 'org_1', workos_org_id: 'w1', name }));
+    const prfSalt = Buffer.from('deadbeefdeadbeefdeadbeefdeadbeef', 'hex');
 
     await createOrganizationFromEnvelope({
       authService,
@@ -192,7 +193,7 @@ describe('createOrganizationFromEnvelope — canned Case A enrollment', () => {
       userId: 'user_1',
       name: 'Acme',
       phrase: 'valid phrase words here',
-      prf: { credentialId: 'cred-1', prfOutput: 'prf-1', backupEligible: true, backupState: false },
+      prf: { credentialId: 'cred-1', prfOutput: 'prf-1', backupEligible: true, backupState: false, prfSalt },
     });
 
     expect(runNewUserEnrollment).toHaveBeenCalledTimes(1);
@@ -209,6 +210,35 @@ describe('createOrganizationFromEnvelope — canned Case A enrollment', () => {
       backupState: false,
     });
     expect(reportEnrollmentOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  // Regression: the canned transport's `requestEnrollment` ignores whatever
+  // salt it is asked to use (see the fixture above — it hands back a fixed
+  // result no matter what `prfSalt` the request carries), so the ONLY way
+  // `runNewUserEnrollment` ends up deriving its wrap KEK from the salt the
+  // browser's WebAuthn PRF extension actually ran under is if this call
+  // passes it through explicitly as `presetPrfSalt`. The bug this closes:
+  // `enrollDoor` used to mint a SECOND, unrelated salt here every time,
+  // silently producing a device-key door no unlock could ever open again
+  // (live finding: `DEVICE_KEY_UNWRAP_FAILED` on a genuinely fresh second
+  // machine, 100% reproducible, not actually intermittent).
+  test('the EXACT prfSalt from the envelope is threaded through as presetPrfSalt, never re-minted', async () => {
+    const authService = fakeAuthService(async (name: string) => ({ id: 'org_2', workos_org_id: 'w2', name }));
+    const prfSalt = Buffer.from('0123456789abcdef0123456789abcdef', 'hex');
+
+    await createOrganizationFromEnvelope({
+      authService,
+      serviceClient: fakeServiceClient,
+      refreshToken: 'rt',
+      userId: 'user_2',
+      name: 'Acme',
+      phrase: 'valid phrase words here',
+      prf: { credentialId: 'cred-2', prfOutput: 'prf-2', backupEligible: false, backupState: true, prfSalt },
+    });
+
+    const { args } = runNewUserEnrollmentCalls[0];
+    expect(args.presetPrfSalt).toBe(prfSalt);
+    expect(Buffer.isBuffer(args.presetPrfSalt)).toBe(true);
   });
 
   test('a failed Case A enrollment does not fail org creation (best-effort)', async () => {

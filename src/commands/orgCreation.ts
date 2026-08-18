@@ -267,6 +267,13 @@ export interface CreateOrgFromEnvelopeArgs {
     prfOutput: string;
     backupEligible: boolean;
     backupState: boolean;
+    /**
+     * The salt `prfOutput` was actually computed under — the one embedded in
+     * this ceremony's own request fragment, NOT re-minted here. Required so
+     * the canned enrollment below derives a wrap KEK a later unlock can
+     * reproduce; see `enrollDoor`'s doc in `../auth/deviceKey/onboarding.ts`.
+     */
+    prfSalt: Buffer;
   };
 }
 
@@ -337,7 +344,7 @@ async function runCannedCaseAEnrollment(opts: {
   userEmail?: string;
   org: Organization;
   masterKey: Buffer;
-  prf: { credentialId: string; prfOutput: string; backupEligible: boolean; backupState: boolean };
+  prf: { credentialId: string; prfOutput: string; backupEligible: boolean; backupState: boolean; prfSalt: Buffer };
 }): Promise<void> {
   try {
     const { createDeviceKeyServiceOps } = await import('../auth/deviceKey/serviceOps');
@@ -355,7 +362,15 @@ async function runCannedCaseAEnrollment(opts: {
       ops,
       opsForOrg,
     };
-    const result = await runNewUserEnrollment(deps, { orgId: opts.org.id, masterKey: opts.masterKey });
+    // The canned ceremony's `requestEnrollment` ignores whatever salt
+    // `enrollDoor` would otherwise mint on its own — pass THIS ceremony's
+    // real one through explicitly so it derives (and stores) a wrap KEK a
+    // later unlock can actually reproduce.
+    const result = await runNewUserEnrollment(deps, {
+      orgId: opts.org.id,
+      masterKey: opts.masterKey,
+      presetPrfSalt: opts.prf.prfSalt,
+    });
     reportEnrollmentOutcome(result, opts.org.name);
   } catch {
     // Best-effort — see docblock above.

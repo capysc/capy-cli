@@ -109,13 +109,25 @@ function encodeFragment(payload: unknown): string {
   return `#r=${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}`;
 }
 
-/** The `sandbox_session` screen's URL with this ceremony's request fragment appended. */
-export function buildCeremonyUrl(step: FlowStep, machineName?: string): string {
+/**
+ * The `sandbox_session` screen's URL with this ceremony's request fragment
+ * appended.
+ *
+ * `presetPrfSalt`, when given, is embedded instead of minting a fresh one —
+ * so the caller (`runSandboxCeremony`) can hold on to the EXACT salt the
+ * browser's `create_org` device-key ceremony will run its WebAuthn PRF
+ * extension against, and later hand that same salt to the CANNED
+ * enrollment path instead of letting it mint an unrelated second one (see
+ * `enrollDoor`'s doc in `../../auth/deviceKey/onboarding.ts` for the bug
+ * this closes). Optional and defaults to a fresh mint so every existing
+ * caller — this function's own unit test included — is unaffected.
+ */
+export function buildCeremonyUrl(step: FlowStep, machineName?: string, presetPrfSalt?: Buffer): string {
   const fragment = encodeFragment({
     v: 1,
     flow: 'sandbox-session',
     first_run: {
-      prf_salt: generatePrfSalt().toString('base64'),
+      prf_salt: (presetPrfSalt ?? generatePrfSalt()).toString('base64'),
       no_local_key_material: !hasAnyLocalKeyMaterial(),
       machine_name: machineName ?? hostname(),
     },
@@ -394,6 +406,14 @@ async function applyFirstRun(opts: {
   backend: SessionStorageBackend;
   serviceUrl: string;
   devMode: boolean;
+  /**
+   * The EXACT salt embedded in this ceremony's own request fragment
+   * (`buildCeremonyUrl`) — the one the browser's `create_org` device-key
+   * stop actually ran its WebAuthn PRF extension against. Required for the
+   * `create_org` branch's canned enrollment to derive a wrap KEK that a
+   * later unlock can ever reproduce; see `enrollDoor`'s doc.
+   */
+  prfSalt: Buffer;
 }): Promise<FirstRunOutcome> {
   const { AuthService } = await import('../../auth/authService');
   const { ServiceClient } = await import('../../service/serviceClient');
@@ -422,6 +442,7 @@ async function applyFirstRun(opts: {
                 prfOutput: fr.prfOutput,
                 backupEligible: fr.backupEligible ?? false,
                 backupState: fr.backupState ?? false,
+                prfSalt: opts.prfSalt,
               }
             : undefined,
       });
@@ -448,6 +469,22 @@ async function applyFirstRun(opts: {
     }
     orgId = opts.answer.organizations[0].id;
     try {
+      // Pin the org BEFORE any service call this branch makes. `authService`
+      // is a BRAND NEW instance (constructed a few lines up) whose
+      // `currentOrgId` starts null — `serviceClient`'s token provider
+      // (`authService.getValidToken()`) returns null until something sets
+      // it, so `deps.ops.listWrappers()` below (the top-level, non-org-scoped
+      // op `runUnlock` calls FIRST, before `opsForOrg`'s own per-call
+      // `authenticateSilent`) would otherwise go out with no Authorization
+      // header at all — a 401 `runUnlock` cannot distinguish from a genuine
+      // ceremony failure, silently swallowed by the catch below and
+      // misreported downstream as "key not on device". The refresh_token
+      // this envelope carries is already on `authService`'s session (written
+      // to the backend just above, in the caller) — this just spends it.
+      const pinned = await authService.authenticateSilent(orgId);
+      if (!pinned.success) {
+        throw new Error(`could not pin org before unlock: ${pinned.error_code ?? pinned.error ?? 'unknown'}`);
+      }
       const { createDeviceKeyServiceOps } = await import('../../auth/deviceKey/serviceOps');
       const { runUnlock } = await import('../../auth/deviceKey/onboarding');
       const { cannedUnlockTransport } = await import('../../auth/deviceKey/cannedCeremony');
@@ -462,9 +499,10 @@ async function applyFirstRun(opts: {
         opsForOrg,
       });
     } catch {
-      // Best-effort: a failed unlock leaves the org exactly as unreachable
-      // as it was — the next step's own key check (`unlock_org_key`)
-      // reports KEY_NOT_ON_DEVICE, same as any other Case C failure.
+      // Best-effort: a failed unlock (ceremony refusal, org-pin failure, a
+      // genuine service error) leaves the org exactly as unreachable as it
+      // was — the next step's own key check (`unlock_org_key`) reports
+      // KEY_NOT_ON_DEVICE, same as any other Case C failure.
     }
   } else {
     // 'none' — key already on this device. Same internal-consistency
@@ -511,7 +549,13 @@ export interface SandboxCeremonyOutcome {
 }
 
 export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<SandboxCeremonyOutcome> {
-  const url = buildCeremonyUrl(opts.step, opts.machineName);
+  // Minted ONCE, here, and reused for both the URL the browser's `create_org`
+  // device-key stop runs its WebAuthn PRF extension against AND (below,
+  // via applyFirstRun) the canned enrollment's wrap KEK — never minted a
+  // second time independently. See `enrollDoor`'s doc in
+  // `../../auth/deviceKey/onboarding.ts` for the bug this closes.
+  const prfSalt = generatePrfSalt();
+  const url = buildCeremonyUrl(opts.step, opts.machineName, prfSalt);
   emitHandoffUrlEvent(url, 'onboard');
 
   const connectionId = opts.step.params.connection_id as string;
@@ -556,6 +600,7 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
     backend,
     serviceUrl: opts.serviceUrl,
     devMode: opts.devMode,
+    prfSalt,
   });
   if (!firstRun.ok) {
     return { result: { outcome: 'failed', code: firstRun.code } };

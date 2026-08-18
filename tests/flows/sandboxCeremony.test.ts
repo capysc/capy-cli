@@ -6,7 +6,7 @@
  * `orgCreationFromEnvelope` tests — this file is about the parts that are
  * pure functions or a single HTTP round trip.
  */
-import { mock, describe, test, expect, afterAll } from 'bun:test';
+import { mock, describe, test, expect, afterAll, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 
@@ -440,5 +440,123 @@ describe('runSandboxCeremony — applyFirstRun refuses an internally-inconsisten
 
     expect(outcome.result.outcome).toBe('ok');
     expect(outcome.result.result).toEqual({ org_id: 'org_1' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: applyFirstRun's `unlock` branch must pin the org (so
+// serviceClient's token provider has something to hand out) BEFORE it makes
+// any service call — not after. The bug this closes: `runUnlock` calls
+// `deps.ops.listWrappers()` (the top-level, non-org-scoped op) as its very
+// first step, and that op is NOT gated by `opsForOrg`'s own per-call
+// `authenticateSilent`. A brand-new `AuthService` starts with `currentOrgId
+// === null`, so `serviceClient`'s token provider (`authService.getValidToken
+// ()`) returned null and the request went out with NO Authorization header
+// at all — a 401 the old code's `catch { /* best-effort */ }` swallowed
+// indistinguishably from a genuine ceremony failure, silently discarding the
+// device-key unlock and leaving the org's key uninstalled (surfaced live as
+// `blocked{key_not_on_device}` on a second machine that should have unlocked
+// cleanly). NOT ISOLATED: globalThis.fetch swap only, restored in
+// `afterEach`, no `mock.module()` — same convention as
+// `tests/ui/keepInfoRelay.test.ts`.
+// ---------------------------------------------------------------------------
+describe('runSandboxCeremony — unlock pins the org before its first service call', () => {
+  const SVC = 'https://api.test.invalid';
+  const realFetch = globalThis.fetch;
+  // header.payload.signature, unsigned — decodeJwtPayload only reads the
+  // middle segment. No `org_id` claim, so getToken()'s org-match check is
+  // trivially satisfied (see that method's `if (payload.org_id && ...)`).
+  const FAKE_JWT = `h.${Buffer.from(JSON.stringify({ sub: 'user_unlock_1' })).toString('base64url')}.s`;
+  let wrappersAuthHeader: string | null | undefined;
+  let refreshCalledBeforeWrappers: boolean;
+  let sawRefresh: boolean;
+
+  beforeEach(() => {
+    wrappersAuthHeader = undefined;
+    refreshCalledBeforeWrappers = false;
+    sawRefresh = false;
+    globalThis.fetch = (async (url: any, init?: any) => {
+      const u = String(url);
+      if (!u.startsWith(SVC)) return realFetch(url, init);
+      const path = u.slice(SVC.length);
+
+      if (path.startsWith('/connections/conn-unlock-1/result')) {
+        const ciphertext = (globalThis as any).__testUnlockCiphertext;
+        return Response.json({ status: 'answered', ciphertext });
+      }
+      if (path === '/auth/refresh' && init?.method === 'POST') {
+        sawRefresh = true;
+        return Response.json({
+          // getToken() decodes this and checks a `org_id` claim against the
+          // org's workos_org_id — a shapeless string fails that decode and
+          // is silently discarded as an invalid token, so this needs to be a
+          // real (if unsigned) JWT with no `org_id` claim to validate against.
+          access_token: FAKE_JWT,
+          refresh_token: 'rt-rotated',
+          expires_in: 3600,
+        });
+      }
+      if (path.startsWith('/wrappers')) {
+        wrappersAuthHeader = new Headers(init?.headers ?? {}).get('Authorization');
+        refreshCalledBeforeWrappers = sawRefresh;
+        return Response.json({ wrappers: [] });
+      }
+      throw new Error(`unexpected fetch in test: ${init?.method ?? 'GET'} ${path}`);
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    delete (globalThis as any).__testUnlockCiphertext;
+  });
+
+  test('the org is pinned (Authorization header present) before listWrappers() runs', async () => {
+    const keypair = mintConnectionKeypair();
+    const step = {
+      contract_version: '1',
+      flow_id: 'flow-unlock-1',
+      flow_type: 'onboard',
+      step_id: 's-unlock-1',
+      kind: 'screen',
+      resumed: false,
+      screen: 'sandbox_session',
+      url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-unlock-1',
+      params: { connection_id: 'conn-unlock-1', user_code: 'BCDF-GHJK' },
+    } as unknown as FlowStep;
+
+    const plaintext = JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_unlock_1' },
+      refresh_token: 'rt-unlock-1',
+      // Deliberately NO `sessions` map — the org has no cached access token
+      // yet, exactly like a fresh cross-device sign-in, forcing the org pin
+      // through the real refresh path this regression is about.
+      organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
+      first_run: { kind: 'unlock', credential_id: 'cred-1', prf_output: 'prf-1' },
+    });
+    (globalThis as any).__testUnlockCiphertext = await sealEnvelopePageSide({
+      plaintext,
+      connectionId: 'conn-unlock-1',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+
+    const outcome = await runSandboxCeremony({
+      step,
+      keypair,
+      flowSecret: 'flow-secret',
+      serviceUrl: SVC,
+      devMode: false,
+    });
+
+    // No live door for this manufactured credential, so runUnlock itself
+    // still fails (WRAPPER_NOT_FOUND) — that part is expected and fine, it
+    // is caught as best-effort. What matters is that the listWrappers()
+    // call it made along the way carried a real bearer, not none at all.
+    expect(outcome.result.outcome).toBe('ok');
+    expect(outcome.result.result).toEqual({ org_id: 'org_1' });
+    expect(wrappersAuthHeader).toBe(`Bearer ${FAKE_JWT}`);
+    expect(refreshCalledBeforeWrappers).toBe(true);
   });
 });
