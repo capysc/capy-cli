@@ -6,7 +6,7 @@
  * `orgCreationFromEnvelope` tests — this file is about the parts that are
  * pure functions or a single HTTP round trip.
  */
-import { mock, describe, test, expect, afterAll, beforeEach, afterEach } from 'bun:test';
+import { mock, describe, test, expect, afterAll, beforeEach, afterEach, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 
@@ -34,6 +34,8 @@ import {
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
 import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
 import { FlowStep } from '../../src/flows/validate';
+import { HANDOFF_EVENT_MARKER, type HandoffUrlEvent } from '../../src/ui/handoffEvent';
+import { setOnboardJsonMode } from '../../src/ui/webMode';
 
 function envelope(over: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -660,5 +662,149 @@ describe('runSandboxCeremony — a failed final bearer settle is a coded failure
     expect(typeof outcome.result.code).toBe('string');
     // No session handed to the driver — nothing minted a working bearer.
     expect(outcome.session).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The `sandbox_session` step's `user_code` is the RFC-8628 anti-phishing
+// binding a human is supposed to compare against the page
+// (`shared/flows/steps.json`: "not a secret and MUST be shown to the
+// human"). Under `--broker-ceremony` this ceremony is the ONLY place that
+// code is available — it must ride on the `capy:handoff-url` event so a
+// relaying caller (capy-mcp) can show it, and it must also print for the
+// rare case of a human running `--broker-ceremony` directly at a terminal.
+// ---------------------------------------------------------------------------
+describe('runSandboxCeremony — surfaces the sandbox_session user_code', () => {
+  const originalIsTTY = process.stdout.isTTY;
+
+  const step = {
+    contract_version: '1',
+    flow_id: 'flow-code-1',
+    flow_type: 'onboard',
+    step_id: 's-code-1',
+    kind: 'screen',
+    resumed: false,
+    screen: 'sandbox_session',
+    url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-code-1',
+    params: { connection_id: 'conn-code-1', user_code: 'BCDF-GHJK' },
+  } as unknown as FlowStep;
+
+  /** Never answered within the test — every case here only inspects what happens BEFORE the poll settles. */
+  function neverAnsweredFetch(): typeof fetch {
+    return (async () => new Response(JSON.stringify({ status: 'pending' }), { status: 200 })) as unknown as typeof fetch;
+  }
+
+  afterEach(() => {
+    process.stdout.isTTY = originalIsTTY;
+    setOnboardJsonMode(false);
+  });
+
+  test('the CAPY_EVENT_V1 line carries the step\'s user_code', async () => {
+    process.stdout.isTTY = undefined as unknown as true; // spawned-process shape, same as handoffEvent's own tests
+    const writes: string[] = [];
+    const writeSpy = spyOn(process.stdout, 'write').mockImplementation(((chunk: string) => {
+      writes.push(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      const outcome = runSandboxCeremony({
+        step,
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        fetchImpl: neverAnsweredFetch(),
+        deadlineMs: 1, // times out immediately — this test is only about the event emitted up front
+        targetDir: tempHome,
+      });
+      await outcome;
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    const eventLine = writes.find((w) => w.startsWith(HANDOFF_EVENT_MARKER));
+    expect(eventLine).toBeDefined();
+    const parsed = JSON.parse(eventLine!.slice(HANDOFF_EVENT_MARKER.length).trimEnd()) as HandoffUrlEvent;
+    expect(parsed.flow).toBe('onboard');
+    expect(parsed.userCode).toBe('BCDF-GHJK');
+  });
+
+  test('prints the code at a real TTY when not in --json mode', async () => {
+    process.stdout.isTTY = true;
+    setOnboardJsonMode(false);
+    const logs: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation(((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    }) as typeof console.log);
+
+    try {
+      await runSandboxCeremony({
+        step,
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        fetchImpl: neverAnsweredFetch(),
+        deadlineMs: 1,
+        targetDir: tempHome,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(logs.some((l) => l.includes('BCDF-GHJK'))).toBe(true);
+  });
+
+  test('never prints the code in --json mode, even at a real TTY', async () => {
+    process.stdout.isTTY = true;
+    setOnboardJsonMode(true);
+    const logs: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation(((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    }) as typeof console.log);
+
+    try {
+      await runSandboxCeremony({
+        step,
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        fetchImpl: neverAnsweredFetch(),
+        deadlineMs: 1,
+        targetDir: tempHome,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(logs.some((l) => l.includes('BCDF-GHJK'))).toBe(false);
+  });
+
+  test('never prints the code when stdout is not a TTY (the ordinary --broker-ceremony caller)', async () => {
+    process.stdout.isTTY = undefined as unknown as true;
+    setOnboardJsonMode(false);
+    const logs: string[] = [];
+    const logSpy = spyOn(console, 'log').mockImplementation(((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    }) as typeof console.log);
+
+    try {
+      await runSandboxCeremony({
+        step,
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        fetchImpl: neverAnsweredFetch(),
+        deadlineMs: 1,
+        targetDir: tempHome,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(logs.some((l) => l.includes('BCDF-GHJK'))).toBe(false);
   });
 });

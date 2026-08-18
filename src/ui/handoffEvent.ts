@@ -102,6 +102,15 @@ export interface HandoffUrlEvent {
   location: HandoffLocation;
   /** ISO-8601 timestamp, when the event was emitted. */
   ts: string;
+  /**
+   * RFC-8628 anti-phishing binding, when the flow step carries one (e.g.
+   * `sandbox_session`'s `user_code` — `shared/flows/steps.json`: "not a
+   * secret and MUST be shown to the human so they can compare it against the
+   * page"). Optional and additive: every existing call site that doesn't
+   * pass one keeps emitting the exact same event shape as before. Never a
+   * secret — safe on the same channel as the URL it accompanies.
+   */
+  userCode?: string;
 }
 
 /** loopback iff the URL's hostname is one of this process's own loopback addresses. */
@@ -137,8 +146,13 @@ export function classifyHandoffLocation(url: string): HandoffLocation {
  *      see it). Emitting it here would reopen the same hole through a
  *      second channel. When in doubt: if the human-readable line right
  *      above your call doesn't print the URL, don't call this either.
+ *
+ * `extra.userCode`, when the call site's step carries one, rides along on
+ * the same event — see `HandoffUrlEvent.userCode`'s own doc. Omitted entirely
+ * (not even `undefined`) when not given, so an existing consumer diffing the
+ * JSON shape sees nothing new.
  */
-export function emitHandoffUrlEvent(url: string, flow: HandoffFlow): void {
+export function emitHandoffUrlEvent(url: string, flow: HandoffFlow, extra?: { userCode?: string }): void {
   if (process.stdout.isTTY) return; // real terminal: emit nothing new, ever
   const event: HandoffUrlEvent = {
     v: 1,
@@ -147,6 +161,7 @@ export function emitHandoffUrlEvent(url: string, flow: HandoffFlow): void {
     flow,
     location: classifyHandoffLocation(url),
     ts: new Date().toISOString(),
+    ...(extra?.userCode ? { userCode: extra.userCode } : {}),
   };
   process.stdout.write(HANDOFF_EVENT_MARKER + JSON.stringify(event) + '\n');
 }

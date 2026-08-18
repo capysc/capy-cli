@@ -56,3 +56,25 @@ export function setBrokerCeremonyMode(on: boolean): void {
 export function isBrokerCeremonyMode(): boolean {
   return brokerCeremonyMode;
 }
+
+/**
+ * Whether `capy onboard` was invoked with `--json`. `--json` is a per-command
+ * option (declared per subcommand in `index.ts`, unlike `--web`), so nothing
+ * upstream already tracks it as a process-global — this one exists for the
+ * same reason `brokerCeremonyMode` does: `runSandboxCeremony`
+ * (`flows/onboard/sandboxCeremony.ts`) is reached deep inside the flow
+ * driver loop, with no command object to ask, and needs to know whether a
+ * human line it's about to print (the ceremony's `user_code`, for the rare
+ * case of a human running `--broker-ceremony` at a real terminal) would
+ * pollute an agent's `--json` output stream.
+ */
+let onboardJsonMode = false;
+
+/** Called once, from `capy onboard`'s own handler, alongside `setBrokerCeremonyMode`. */
+export function setOnboardJsonMode(on: boolean): void {
+  onboardJsonMode = on;
+}
+
+export function isOnboardJsonMode(): boolean {
+  return onboardJsonMode;
+}

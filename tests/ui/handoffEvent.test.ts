@@ -93,6 +93,64 @@ describe('emitHandoffUrlEvent', () => {
     }
   });
 
+  test('carries an optional userCode through to the emitted event', () => {
+    process.stdout.isTTY = undefined as unknown as true;
+    const writes: string[] = [];
+    const spy = spyOn(process.stdout, 'write').mockImplementation(((chunk: string) => {
+      writes.push(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      emitHandoffUrlEvent('https://keep.capy.sc/flow/sandbox-session?c=conn-1', 'onboard', {
+        userCode: 'BCDF-GHJK',
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const parsed = JSON.parse(writes[0].slice(HANDOFF_EVENT_MARKER.length, -1)) as HandoffUrlEvent;
+    expect(parsed.userCode).toBe('BCDF-GHJK');
+  });
+
+  test('omits userCode entirely — not even as undefined — when the call site passes none', () => {
+    process.stdout.isTTY = undefined as unknown as true;
+    const writes: string[] = [];
+    const spy = spyOn(process.stdout, 'write').mockImplementation(((chunk: string) => {
+      writes.push(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      emitHandoffUrlEvent('http://127.0.0.1:9999/?n=deadbeef', 'edit');
+    } finally {
+      spy.mockRestore();
+    }
+
+    const json = writes[0].slice(HANDOFF_EVENT_MARKER.length, -1);
+    expect(json.includes('userCode')).toBe(false);
+    const parsed = JSON.parse(json) as HandoffUrlEvent;
+    expect(parsed.userCode).toBeUndefined();
+  });
+
+  test('omits userCode when extra.userCode is an empty string — existing call sites unaffected', () => {
+    process.stdout.isTTY = undefined as unknown as true;
+    const writes: string[] = [];
+    const spy = spyOn(process.stdout, 'write').mockImplementation(((chunk: string) => {
+      writes.push(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      emitHandoffUrlEvent('http://127.0.0.1:9999/?n=deadbeef', 'onboard', { userCode: '' });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const json = writes[0].slice(HANDOFF_EVENT_MARKER.length, -1);
+    expect(json.includes('userCode')).toBe(false);
+  });
+
   test('the marker never collides with ordinary human-facing output', () => {
     // Nothing this CLI prints for a person should start a line with the
     // marker — that is the whole point of using a fixed sentinel rather than
