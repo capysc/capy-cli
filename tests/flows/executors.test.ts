@@ -232,6 +232,56 @@ describe('wrap_run_commands — consent is for the plan that was shown', () => {
     expect(result.outcome).toBe('ok');
     expect(applyPlan).toHaveBeenCalledTimes(1);
   });
+
+  // CAP-451: planHash now folds in ctx.projectName (capy onboard
+  // --project-name) — proving the executor side of that stays consistent
+  // with what the confirm dialog approved, not just the pure function.
+  test('rebuilds the SAME hash the confirm dialog used when ctx carries the same projectName', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+    const { buildPlan } = require('../../src/flows/onboard/plan') as typeof import('../../src/flows/onboard/plan');
+    const approvedHash = buildPlan({ targetDir: dir, projectName: 'my-app' }).planHash;
+
+    const result = await EXECUTORS.wrap_run_commands(
+      step({ verb: 'wrap_run_commands', params: { plan_hash: approvedHash, kinds: ['run-wrap'] } }),
+      ctx({ projectName: 'my-app' }),
+    );
+    expect(result.outcome).toBe('ok');
+  });
+
+  test('refuses when ctx carries a DIFFERENT projectName than what was approved — proves the hash genuinely covers it', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+    const { buildPlan } = require('../../src/flows/onboard/plan') as typeof import('../../src/flows/onboard/plan');
+    const approvedHash = buildPlan({ targetDir: dir, projectName: 'my-app' }).planHash;
+
+    const result = await EXECUTORS.wrap_run_commands(
+      step({ verb: 'wrap_run_commands', params: { plan_hash: approvedHash, kinds: ['run-wrap'] } }),
+      ctx({ projectName: 'a-different-name' }),
+    );
+    expect(result.outcome).toBe('failed');
+    expect(result.code).toBe(ERROR_CODES.PLAN_CHANGED);
+  });
+});
+
+describe('buildPlan — planHash covers projectName (CAP-451)', () => {
+  test('a given project name changes the hash; omitting it reproduces the pre-CAP-451 hash exactly', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+    const { buildPlan } = require('../../src/flows/onboard/plan') as typeof import('../../src/flows/onboard/plan');
+    const { createHash } = require('crypto') as typeof import('crypto');
+
+    const withoutName = buildPlan({ targetDir: dir });
+    const withName = buildPlan({ targetDir: dir, projectName: 'my-app' });
+    const withDifferentName = buildPlan({ targetDir: dir, projectName: 'other-app' });
+
+    expect(withName.planHash).not.toBe(withoutName.planHash);
+    expect(withName.planHash).not.toBe(withDifferentName.planHash);
+    // Stable serialization, not just "different from no-name": the same
+    // inputs always produce the same hash.
+    expect(buildPlan({ targetDir: dir, projectName: 'my-app' }).planHash).toBe(withName.planHash);
+    // Unchanged from the pre-CAP-451 formula (sha256 of the diffs alone) —
+    // every caller that never passes projectName gets byte-identical hashes.
+    const expectedLegacyHash = createHash('sha256').update(JSON.stringify(withoutName.diffs)).digest('hex');
+    expect(withoutName.planHash).toBe(expectedLegacyHash);
+  });
 });
 
 describe('encrypt_env — a failure is reported, never fatal', () => {

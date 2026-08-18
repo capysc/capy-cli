@@ -480,6 +480,14 @@ export const ERROR_CODES = {
    * present without the other. Nothing in the envelope is acted on.
    */
   FLOW_ENVELOPE_INVALID: 'FLOW_ENVELOPE_INVALID',
+  /**
+   * `createOrganizationFromEnvelope`'s 409-name-collision suffix loop
+   * (`Acme` -> `Acme 2` -> `Acme 3` ...) hit its retry cap without landing a
+   * free name. Refused rather than looping forever against a service that
+   * keeps saying the name is taken — there is nobody on this source to ask
+   * for a different one.
+   */
+  ORG_NAME_SUFFIX_EXHAUSTED: 'ORG_NAME_SUFFIX_EXHAUSTED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

@@ -430,8 +430,23 @@ async function applyFirstRun(opts: {
       return { ok: false, code: codeFor(err) };
     }
   } else if (fr.kind === 'select_org') {
-    orgId = fr.orgId;
+    // The picked org MUST be one the envelope itself named — a foreign
+    // org_id (typo, stale answer, tampering) is refused rather than
+    // silently pinning something the rest of the answer never vouched for.
+    const target = opts.answer.organizations.find((o) => o.id === fr.orgId);
+    if (!target) {
+      return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
+    }
+    orgId = target.id;
   } else if (fr.kind === 'unlock') {
+    // `unlock` only makes sense for the "1 org, key not on device" row of
+    // the gate table — an envelope claiming it with zero or several orgs is
+    // internally inconsistent (which one would the ceremony have run
+    // against?) and is refused rather than guessing organizations[0].
+    if (opts.answer.organizations.length !== 1) {
+      return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
+    }
+    orgId = opts.answer.organizations[0].id;
     try {
       const { createDeviceKeyServiceOps } = await import('../../auth/deviceKey/serviceOps');
       const { runUnlock } = await import('../../auth/deviceKey/onboarding');
@@ -441,7 +456,7 @@ async function applyFirstRun(opts: {
         userId: opts.answer.user.id,
         userEmail: opts.answer.user.email,
         organizations: opts.answer.organizations,
-        activeOrgId: opts.answer.organizations[0]?.id ?? null,
+        activeOrgId: orgId,
         ceremony: cannedUnlockTransport({ credentialId: fr.credentialId, prfOutput: fr.prfOutput }),
         ops,
         opsForOrg,
@@ -451,10 +466,14 @@ async function applyFirstRun(opts: {
       // as it was — the next step's own key check (`unlock_org_key`)
       // reports KEY_NOT_ON_DEVICE, same as any other Case C failure.
     }
-    orgId = opts.answer.organizations[0]?.id;
   } else {
-    // 'none' — key already on this device; nothing to do.
-    orgId = opts.answer.organizations.length === 1 ? opts.answer.organizations[0].id : undefined;
+    // 'none' — key already on this device. Same internal-consistency
+    // requirement as `unlock`: exactly one org, or there is nothing this
+    // kind can legitimately mean.
+    if (opts.answer.organizations.length !== 1) {
+      return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
+    }
+    orgId = opts.answer.organizations[0].id;
   }
 
   const settled = await authService.authenticateSilent(orgId);

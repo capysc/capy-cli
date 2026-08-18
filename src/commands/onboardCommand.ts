@@ -151,6 +151,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       token,
       getToken,
       web: options.web === true,
+      projectName: options.projectName,
       // Recomputed on demand: only sent when the plan the instance holds has
       // gone stale under the human.
       buildPlan: () => planPayload(targetDir, options.projectName),
@@ -204,12 +205,14 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
 
 /**
  * The plan, in the contract's shape. Names, paths, counts and a hash — never
- * a value. `projectName`, when given, rides in the plan so the plan hash
- * covers it (a change re-asks) — the service is tolerated to ignore it for
- * now (CAP-451 §9 row 11); nothing here depends on it being echoed back.
+ * a value. `projectName`, when given, is passed into `buildPlan` itself so
+ * `planHash` actually covers it (a rename produces a different hash and
+ * re-opens consent — CAP-451 §9 row 7) rather than riding alongside a hash
+ * that never saw it. The service now has its own `project_name` slot on
+ * this dialog to render (`shared/flows/steps.json`'s `onboard_plan`).
  */
 function planPayload(targetDir: string, projectName?: string): Record<string, unknown> {
-  const plan = buildPlan({ targetDir });
+  const plan = buildPlan({ targetDir, projectName });
   const envKeys = readEnvKeys(targetDir);
   return {
     plan_hash: plan.planHash,

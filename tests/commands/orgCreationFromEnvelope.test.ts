@@ -45,7 +45,7 @@ mock.module('../../src/auth/deviceKey/wiring', () => ({ reportEnrollmentOutcome 
 
 afterAll(() => mock.restore());
 
-import { createOrganizationFromEnvelope } from '../../src/commands/orgCreation';
+import { createOrganizationFromEnvelope, MAX_NAME_SUFFIX_ATTEMPTS } from '../../src/commands/orgCreation';
 import { ERROR_CODES } from '../../src/types/index';
 
 function fakeAuthService(createOrganization: (name: string) => Promise<any>) {
@@ -131,6 +131,30 @@ describe('createOrganizationFromEnvelope — 409 suffix loop', () => {
     // retry never regenerates or re-asks for a phrase.
     expect(seedPhraseToMasterKey).toHaveBeenCalledTimes(1);
     expect(seedPhraseToMasterKey).toHaveBeenCalledWith('valid phrase words here', 2);
+  });
+
+  test('caps the retry loop instead of looping forever against a service that always says 409', async () => {
+    let calls = 0;
+    const authService = fakeAuthService(async () => {
+      calls++;
+      const err: any = new Error('conflict');
+      err.status = 409;
+      throw err;
+    });
+
+    await expect(
+      createOrganizationFromEnvelope({
+        authService,
+        serviceClient: fakeServiceClient,
+        refreshToken: 'rt',
+        userId: 'user_1',
+        name: 'Acme',
+        phrase: 'valid phrase words here',
+      }),
+    ).rejects.toMatchObject({ code: ERROR_CODES.ORG_NAME_SUFFIX_EXHAUSTED });
+
+    // Exactly the cap's worth of real create-org attempts — never one more.
+    expect(calls).toBe(MAX_NAME_SUFFIX_ATTEMPTS);
   });
 
   test('a non-409 failure propagates without looping', async () => {

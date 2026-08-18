@@ -35,6 +35,16 @@ export interface ExecutorContext {
   /** Render interactive stops in a browser instead of the terminal (`capy --web`'s wizard). */
   web?: boolean;
   /**
+   * CAP-451: `capy onboard --project-name`, when given. `wrap_run_commands`
+   * needs this to rebuild the SAME `OnboardPlan` (and therefore the same
+   * `planHash`) the confirm dialog was built from — `plan.ts`'s `planHash`
+   * folds the project name in when present, so recomputing without it here
+   * would produce a different hash than the one that was approved and spuriously
+   * refuse with PLAN_CHANGED. Absent for every caller that never passes
+   * `--project-name`, which is unaffected (same hash as before this field existed).
+   */
+  projectName?: string;
+  /**
    * CAP-451: this run is driven by `capy onboard --broker-ceremony` — a
    * sandboxed caller with no browser and no session of its own. `authenticate`
    * reads this to refuse a `session_ended` failure with a coded outcome
@@ -267,8 +277,11 @@ export const writeKeepLock: Executor = async (step, ctx) => {
   if (source === 'select_or_create') {
     // CAP-451: an org the instance already pinned (from `authenticate`'s own
     // result, or a `select_organization` screen) and the project name the
-    // plan dialog already carried — both OPTIONAL, both tolerated absent
-    // (a TTY/`--web` run still picks/names interactively when they are).
+    // plan dialog already carried — both OPTIONAL, both tolerated absent (a
+    // TTY/`--web` run still picks/names interactively when they are). A
+    // human-only stop NEITHER of these covers is refused only under
+    // `ctx.brokerCeremony` (no browser, no TTY) — a plain TTY `capy onboard`
+    // still gets its ordinary inquirer prompts, exactly as before CAP-451.
     const pinnedOrgIdForInit = (step.params.org_id as string | null) ?? undefined;
     const projectName = (step.params.project_name as string | null) ?? undefined;
     // The ids are reported the moment the project is chosen or created —
@@ -284,6 +297,7 @@ export const writeKeepLock: Executor = async (step, ctx) => {
           },
           pinnedOrgId: pinnedOrgIdForInit,
           projectName,
+          noWizardStops: ctx.brokerCeremony === true,
         }),
       () => {
         if (resolved) {
@@ -314,7 +328,7 @@ export const writeKeepLock: Executor = async (step, ctx) => {
 export const wrapRunCommands: Executor = async (step, ctx) => {
   const { buildPlan } = await import('../plan');
   const { applyPlan } = await import('../apply');
-  const plan = buildPlan({ targetDir: ctx.targetDir });
+  const plan = buildPlan({ targetDir: ctx.targetDir, projectName: ctx.projectName });
   const approved = step.params.plan_hash as string | undefined;
   if (approved && approved !== plan.planHash) {
     return { outcome: 'failed', code: ERROR_CODES.PLAN_CHANGED };

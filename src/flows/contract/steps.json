@@ -214,18 +214,18 @@
               "null"
             ]
           },
-          "branch": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "project_name": {
             "type": [
               "string",
               "null"
             ],
-            "description": "CAP-451: the project name the plan dialog already carried (from `capy onboard --project-name` / the MCP tool's `project_name` param, in the plan hash) — optional and tolerated absent (the service adds it in parallel). When present with source=select_or_create, initializeProjectForFlow skips the project-name prompt entirely instead of re-asking."
+            "description": "OPTIONAL (CAP-451). The project NAME the plan targets, when the client already knows one — from the plan (engine.ts paramsForVerb). Display only; the pinned project_id remains the identity."
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "consent_recorded": {
             "type": "boolean",
@@ -441,6 +441,27 @@
           },
           "will_encrypt": {
             "type": "boolean"
+          },
+          "org_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OPTIONAL (CAP-451). The pinned org, when one is pinned — `instance.pinnedOrgId` as-is. Display only; org_id is never decided from this dialog, and it is never re-asked here either — the org is pinned ONCE, from an `authenticate` step's own result, before this dialog is ever shown, and a later report naming a different org is refused outright (blocked_reasons are not involved; the report itself errors). So org_id in this dialog can go from null to a value across calls, but never from one value to a different one."
+          },
+          "org_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OPTIONAL (CAP-451). The pinned org's display name, looked up server-side from org_id. Display only — see org_id for why it cannot change once shown with a value."
+          },
+          "project_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OPTIONAL (CAP-451). The project NAME the plan targets, when known. Unlike org_id, this is free to change: it rides the client's own plan (plan_hash), so a client that folds project_name into that hash gets a rename to re-open this dialog (blocked_reasons.plan_changed) the same way any other plan edit does — the service enforces nothing about what plan_hash covers."
           }
         }
       }

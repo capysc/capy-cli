@@ -1627,7 +1627,7 @@ describe('CapyCommand', () => {
     });
   });
 
-  describe('initializeProjectForFlow — CAP-451 pinned org / project name / wizard-stop refusal', () => {
+  describe('initializeProjectForFlow — CAP-451 pinned org / project name / wizard-stop refusal (--broker-ceremony only)', () => {
     beforeEach(() => {
       mockAuthService.authenticateSilent.mockResolvedValue({ success: false });
       mockAuthService.refreshWithCredentials.mockResolvedValue({
@@ -1679,7 +1679,7 @@ describe('CapyCommand', () => {
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-B');
     });
 
-    test('no pinned org, >1 orgs, no wizard: the org picker is a coded refusal, never inquirer', async () => {
+    test('no pinned org, >1 orgs, noWizardStops (--broker-ceremony): the org picker is a coded refusal, never inquirer', async () => {
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
         organization_id: '',
@@ -1703,13 +1703,52 @@ describe('CapyCommand', () => {
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
       try {
         await expect(
-          (capyCommand as any).initializeProjectForFlow({ projectName: 'flow-project' }),
+          (capyCommand as any).initializeProjectForFlow({ projectName: 'flow-project', noWizardStops: true }),
         ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
       } finally {
         (inquirer as any).prompt = origPrompt;
         consoleSpy.mockRestore();
       }
       expect(promptCalled).toBe(false);
+    });
+
+    // The regression this test guards: a plain, interactive `capy onboard`
+    // (flow-driven, but with a real TTY — noWizardStops left false/unset)
+    // must keep its EXISTING inquirer prompt, never the coded refusal.
+    // Only `--broker-ceremony` (noWizardStops: true, above) refuses.
+    test('no pinned org, >1 orgs, noWizardStops OMITTED (a plain TTY capy onboard): the org picker still prompts via inquirer', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: '',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [
+          { id: 'org-A', workos_org_id: 'workos-A', name: 'Org Alpha' },
+          { id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' },
+        ],
+        _refresh_token: 'refresh-token',
+      });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        promptCalls.push(q);
+        if (q.name === 'orgId') return { orgId: 'org-B' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProjectForFlow({ projectName: 'flow-project' });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      expect(promptCalls.some((q) => q?.name === 'orgId')).toBe(true);
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-B');
     });
 
     test('a given project name skips the name prompt', async () => {
@@ -1746,7 +1785,7 @@ describe('CapyCommand', () => {
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-B');
     });
 
-    test('no project name, existing projects present: the project picker is a coded refusal', async () => {
+    test('no project name, existing projects present, noWizardStops (--broker-ceremony): the project picker is a coded refusal', async () => {
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
         organization_id: 'org-B',
@@ -1770,7 +1809,7 @@ describe('CapyCommand', () => {
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
       try {
         await expect(
-          (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B' }),
+          (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B', noWizardStops: true }),
         ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
       } finally {
         (inquirer as any).prompt = origPrompt;
@@ -1779,7 +1818,7 @@ describe('CapyCommand', () => {
       expect(promptCalled).toBe(false);
     });
 
-    test('no project name, no existing projects: the name prompt itself is a coded refusal', async () => {
+    test('no project name, no existing projects, noWizardStops (--broker-ceremony): the name prompt itself is a coded refusal', async () => {
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
         organization_id: 'org-B',
@@ -1790,9 +1829,73 @@ describe('CapyCommand', () => {
       });
 
       await expect(
-        (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B' }),
+        (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B', noWizardStops: true }),
       ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
       expect(mockPromptEngine.promptForProjectName).not.toHaveBeenCalled();
+    });
+
+    // Regression guard: same two situations, but a plain TTY capy onboard
+    // (noWizardStops omitted) — must fall through to the existing prompts.
+    test('no project name, existing projects present, noWizardStops OMITTED: the project picker still prompts via inquirer', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-B',
+        organization_name: 'Org Beta',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+      });
+      mockServiceClient.listProjects.mockResolvedValue([
+        { id: 'proj-existing', name: 'existing', organization_id: 'org-B' },
+      ]);
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        promptCalls.push(q);
+        if (q.name === 'projectChoice') return { projectChoice: 'proj-existing' };
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B' });
+      } catch {
+        // Picking the existing project goes on to bootstrapExistingProject,
+        // which this describe block's mocks don't fully wire up (e.g.
+        // getDecryptData) — irrelevant here, this test only cares whether
+        // the prompt fired, matching the same tolerance the pre-existing
+        // "multi-org selector" test above uses for the same reason.
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      expect(promptCalls.some((q) => q?.name === 'projectChoice')).toBe(true);
+    });
+
+    test('no project name, no existing projects, noWizardStops OMITTED: the name prompt still fires via promptEngine', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-B',
+        organization_name: 'Org Beta',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+      });
+      mockPromptEngine.promptForProjectName.mockResolvedValue('typed-name');
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B' });
+      } finally {
+        consoleSpy.mockRestore();
+      }
+
+      expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledTimes(1);
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('typed-name', 'org-B');
     });
   });
 

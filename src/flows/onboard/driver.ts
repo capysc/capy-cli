@@ -48,6 +48,8 @@ export interface DriverOptions {
   buildPlan?: () => unknown;
   /** Render interactive stops in a browser rather than the terminal. */
   web?: boolean;
+  /** CAP-451: `capy onboard --project-name`, when given — see ExecutorContext.projectName's own doc. */
+  projectName?: string;
   /** Injectable so tests can drive the loop without touching the machine. */
   executors?: ExecutorMap;
   observe?: (opts: { targetDir: string; sessionLive: boolean; envPath?: string }) => OnboardObservations;
@@ -121,6 +123,7 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     devMode: opts.devMode === true,
     consented: false,
     web: opts.web === true,
+    projectName: opts.projectName,
     // CAP-451: same gate as the sandbox_session interception above — only
     // true for `capy onboard --broker-ceremony`'s own ceremony, never the
     // existing explicit `--client-pubkey` caller.

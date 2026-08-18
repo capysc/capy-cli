@@ -28,6 +28,7 @@ import {
   pollSandboxConnection,
   buildCeremonyUrl,
   hasAnyLocalKeyMaterial,
+  runSandboxCeremony,
   CEREMONY_CODES,
 } from '../../src/flows/onboard/sandboxCeremony';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
@@ -308,5 +309,136 @@ describe('pollSandboxConnection', () => {
     });
     expect(result).toEqual({ kind: 'timeout' });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('runSandboxCeremony — applyFirstRun refuses an internally-inconsistent envelope', () => {
+  const baseStep = {
+    contract_version: '1',
+    flow_id: 'flow-1',
+    flow_type: 'onboard',
+    step_id: 's-1',
+    kind: 'screen',
+    resumed: false,
+    screen: 'sandbox_session',
+    url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-1',
+    params: { connection_id: 'conn-1', user_code: 'BCDF-GHJK' },
+  } as unknown as FlowStep;
+
+  /** Seal `plaintext` as the page would, and serve it as the ONE poll answer. */
+  async function runWithAnswer(plaintext: string) {
+    const keypair = mintConnectionKeypair();
+    const ciphertext = await sealEnvelopePageSide({
+      plaintext,
+      connectionId: 'conn-1',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+    const fetchImpl = mock(async () => new Response(
+      JSON.stringify({ status: 'answered', ciphertext }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )) as unknown as typeof fetch;
+
+    return runSandboxCeremony({
+      step: baseStep,
+      keypair,
+      flowSecret: 'flow-secret',
+      serviceUrl: 'https://api.test.invalid',
+      devMode: false,
+      fetchImpl,
+    });
+  }
+
+  test('select_org picking an org_id NOT in the envelope\'s own organizations list is refused', async () => {
+    const outcome = await runWithAnswer(JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_1' },
+      refresh_token: 'rt-1',
+      organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
+      first_run: { kind: 'select_org', org_id: 'org_NOT_LISTED' },
+    }));
+
+    expect(outcome.result).toEqual({ outcome: 'failed', code: 'FLOW_ENVELOPE_INVALID' });
+    expect(outcome.session).toBeUndefined();
+  });
+
+  test('select_org picking a listed org_id succeeds', async () => {
+    const outcome = await runWithAnswer(JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_2' },
+      refresh_token: 'rt-2',
+      organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
+      sessions: { org_1: { access_token: 'tok', expires_at: Date.now() + 3600_000 } },
+      first_run: { kind: 'select_org', org_id: 'org_1' },
+    }));
+
+    expect(outcome.result.outcome).toBe('ok');
+    expect(outcome.result.result).toEqual({ org_id: 'org_1' });
+  });
+
+  test('unlock with ZERO organizations is refused rather than picking organizations[0]', async () => {
+    const outcome = await runWithAnswer(JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_3' },
+      refresh_token: 'rt-3',
+      organizations: [],
+      first_run: { kind: 'unlock', credential_id: 'cred-1', prf_output: 'prf-1' },
+    }));
+
+    expect(outcome.result).toEqual({ outcome: 'failed', code: 'FLOW_ENVELOPE_INVALID' });
+  });
+
+  test('unlock with MULTIPLE organizations is refused rather than picking organizations[0]', async () => {
+    const outcome = await runWithAnswer(JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_4' },
+      refresh_token: 'rt-4',
+      organizations: [
+        { id: 'org_1', workos_org_id: 'w1', name: 'Org One' },
+        { id: 'org_2', workos_org_id: 'w2', name: 'Org Two' },
+      ],
+      first_run: { kind: 'unlock', credential_id: 'cred-1', prf_output: 'prf-1' },
+    }));
+
+    expect(outcome.result).toEqual({ outcome: 'failed', code: 'FLOW_ENVELOPE_INVALID' });
+  });
+
+  test('none with MULTIPLE organizations is refused rather than picking organizations[0]', async () => {
+    const outcome = await runWithAnswer(JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_5' },
+      refresh_token: 'rt-5',
+      organizations: [
+        { id: 'org_1', workos_org_id: 'w1', name: 'Org One' },
+        { id: 'org_2', workos_org_id: 'w2', name: 'Org Two' },
+      ],
+      // No first_run — parses as {kind:'none'}.
+    }));
+
+    expect(outcome.result).toEqual({ outcome: 'failed', code: 'FLOW_ENVELOPE_INVALID' });
+  });
+
+  test('none with EXACTLY ONE organization still succeeds (unaffected by the new guard)', async () => {
+    const outcome = await runWithAnswer(JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_6' },
+      refresh_token: 'rt-6',
+      organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
+      sessions: { org_1: { access_token: 'tok', expires_at: Date.now() + 3600_000 } },
+    }));
+
+    expect(outcome.result.outcome).toBe('ok');
+    expect(outcome.result.result).toEqual({ org_id: 'org_1' });
   });
 });

@@ -19,6 +19,15 @@ import type { OrgNameVerdict } from '../ui/onboardingWeb';
 /** The CLI's cap. One definition; the browser screen is handed this value. */
 export const MAX_ORG_NAME_LENGTH = 100;
 
+/**
+ * `createOrganizationFromEnvelope`'s 409-suffix retry loop (CAP-451) has
+ * nobody to ask for a different name on this source, so it cannot retry
+ * forever against a service that keeps saying every suffix is taken —
+ * capped at this many `/auth/create-org` attempts before refusing with
+ * ORG_NAME_SUFFIX_EXHAUSTED.
+ */
+export const MAX_NAME_SUFFIX_ATTEMPTS = 10;
+
 // (recovery-phrase display + confirm lives in ../ui/recoveryPhrase; the browser
 // half of both questions lives in ../ui/onboardingWeb)
 
@@ -276,6 +285,13 @@ export async function createOrganizationFromEnvelope(
 
   while (true) {
     try {
+      if (suffix > MAX_NAME_SUFFIX_ATTEMPTS) {
+        throw new CapyError(
+          `Could not find a free organization name after ${MAX_NAME_SUFFIX_ATTEMPTS} attempts starting from "${args.name}".`,
+          ERROR_CODES.ORG_NAME_SUFFIX_EXHAUSTED,
+          { name: args.name, attempts: MAX_NAME_SUFFIX_ATTEMPTS },
+        );
+      }
       const org = await args.authService.createOrganization(orgName, args.refreshToken, args.userId);
 
       // Same KDF/wrap tail as createNewOrganization — see its own comment.

@@ -366,24 +366,38 @@ export class CapyCommand {
        * --project-name`). When set, the project-name prompt is skipped.
        */
       projectName?: string;
+      /**
+       * CAP-451: true ONLY under `capy onboard --broker-ceremony` — a
+       * sandboxed caller with no browser and no TTY to prompt in. Any
+       * human-only stop (org picker, project picker, project-name prompt)
+       * NOT already resolved by pinnedOrgId/projectName above is refused
+       * (FLOW_STOP_UNREACHABLE) instead of falling through to inquirer,
+       * which would hang that process forever.
+       *
+       * Left false (the default) for every other flow-driven call —
+       * notably a plain, interactive `capy onboard` at a real terminal
+       * (auth_mode interactive_oauth, no --web): that run has a real TTY,
+       * so it keeps the SAME inquirer prompts the wizard-less path has
+       * always shown, byte-identical to before pinnedOrgId/projectName/this
+       * flag existed. A `--web` run is unaffected either way — the `wizard`
+       * check above always wins when one is present.
+       */
+      noWizardStops?: boolean;
     } = {},
   ): Promise<void> {
     this.assumeEncryptConsent = opts.assumeEncryptConsent === true;
     this.onProjectResolved = opts.onProjectResolved;
-    // Flow-driven: no wizard/inquirer stop may be reached in THIS call,
-    // whether or not pinnedOrgId/projectName cover the specific prompt that
-    // would otherwise fire — see refuseWizardStop's own doc.
-    this.flowDriven = true;
     this.pinnedOrgId = opts.pinnedOrgId;
     this.flowProjectName = opts.projectName;
+    this.noWizardStops = opts.noWizardStops === true;
     try {
       await this.initializeProject();
     } finally {
       this.assumeEncryptConsent = false;
       this.onProjectResolved = undefined;
-      this.flowDriven = false;
       this.pinnedOrgId = undefined;
       this.flowProjectName = undefined;
+      this.noWizardStops = false;
     }
   }
 
@@ -428,21 +442,28 @@ export class CapyCommand {
   private assumeEncryptConsent = false;
   /** Set for the duration of a flow-driven init — see initializeProjectForFlow. */
   private onProjectResolved?: (ids: { org_id: string; project_id: string; branch?: string }) => void;
-  /** CAP-451: true only inside a call reached through initializeProjectForFlow. */
-  private flowDriven = false;
   /** CAP-451: skips the org picker when set — see initializeProjectForFlow. */
   private pinnedOrgId?: string;
   /** CAP-451: skips the project-name prompt when set — see initializeProjectForFlow. */
   private flowProjectName?: string;
+  /**
+   * CAP-451: true ONLY under `capy onboard --broker-ceremony` — see
+   * initializeProjectForFlow's own doc on this option. A plain flow-driven
+   * `capy onboard` at a real terminal, and any `--web` run, leave this
+   * false and keep their existing prompts.
+   */
+  private noWizardStops = false;
 
   /**
-   * A flow-driven run has no TTY and, unless `--web` supplied a wizard, no
-   * browser either — reaching a stop only a human can answer (org picker,
-   * org-create wizard, project picker, project-name prompt) with neither
-   * available would otherwise fall through to `inquirer.prompt`, which hangs
-   * a non-interactive process forever. Refused instead, with a code the flow
-   * layer's driver reports upward like any other step outcome — never
-   * `openScreen`/inquirer under the flow.
+   * A broker-ceremony run has no TTY and no browser to prompt in — reaching
+   * a stop only a human can answer (org picker, org-create wizard, project
+   * picker, project-name prompt) would otherwise fall through to
+   * `inquirer.prompt`, which hangs that non-interactive process forever.
+   * Refused instead, with a code the flow layer's driver reports upward
+   * like any other step outcome — never `openScreen`/inquirer under
+   * `--broker-ceremony`. Only ever called when `this.noWizardStops` is
+   * true — see that field's own doc for why a plain TTY `capy onboard`
+   * never reaches this.
    */
   private refuseWizardStop(): never {
     throw new CapyError(
@@ -551,7 +572,7 @@ export class CapyCommand {
 
     } else {
       let orgId: string;
-      if (this.flowDriven && this.pinnedOrgId) {
+      if (this.pinnedOrgId) {
         // CAP-451: the flow instance already pinned this org (the
         // `authenticate` step's own result, or a `select_organization`
         // screen upstream of this call) — no picker to show.
@@ -568,7 +589,7 @@ export class CapyCommand {
           throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
         orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
-      } else if (this.flowDriven) {
+      } else if (this.noWizardStops) {
         this.refuseWizardStop();
       } else {
         ({ orgId } = await inquirer.prompt([{
@@ -728,7 +749,7 @@ export class CapyCommand {
     // decision "create fresh with this name" was already made — the
     // existing-project picker below is exactly the wizard stop that
     // decision exists to skip, so it never runs in that case.
-    const skipProjectPicker = this.flowDriven && Boolean(this.flowProjectName);
+    const skipProjectPicker = Boolean(this.flowProjectName);
     if (existingProjects.length > 0 && !skipProjectPicker) {
       const choices = [
         { name: 'New project', value: CREATE_NEW_PROJECT },
@@ -747,7 +768,7 @@ export class CapyCommand {
           throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
         projectChoice = chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
-      } else if (this.flowDriven) {
+      } else if (this.noWizardStops) {
         this.refuseWizardStop();
       } else {
         ({ projectChoice } = await inquirer.prompt([{
@@ -775,7 +796,7 @@ export class CapyCommand {
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
     let projectName: string;
-    if (this.flowDriven && this.flowProjectName) {
+    if (this.flowProjectName) {
       // CAP-451: the plan dialog already named it (`write_keep_lock`'s
       // `project_name` param, or `capy onboard --project-name`).
       projectName = this.flowProjectName;
@@ -788,7 +809,7 @@ export class CapyCommand {
         throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
       }
       projectName = entered;
-    } else if (this.flowDriven) {
+    } else if (this.noWizardStops) {
       this.refuseWizardStop();
     } else {
       projectName = await this.promptEngine.promptForProjectName(defaultName);

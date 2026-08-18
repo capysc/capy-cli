@@ -292,6 +292,13 @@
                 "variable_count": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "project_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "OPTIONAL (CAP-451). The project NAME the plan targets, when the client already knows one. A client that folds this into its own plan_hash gets a rename to produce a different hash and re-open consent, the same way any other plan edit does. The org, by contrast, is never covered by plan_hash: it is pinned once (from an `authenticate` step's own result, verified against real membership) and a later report naming a different org is refused outright rather than reconciled through a plan change — see steps.json dialogs.onboard_plan.params_schema.properties.org_id."
                 }
               }
             }
