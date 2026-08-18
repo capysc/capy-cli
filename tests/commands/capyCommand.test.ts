@@ -1818,7 +1818,12 @@ describe('CapyCommand', () => {
       expect(promptCalled).toBe(false);
     });
 
-    test('no project name, no existing projects, noWizardStops (--broker-ceremony): the name prompt itself is a coded refusal', async () => {
+    // CAP-451 (follow-up fix): unlike the org/project pickers, the
+    // project-name prompt HAS a documented default (getDefaultProjectName())
+    // — noWizardStops uses it instead of refusing. See the
+    // 'web:true + noWizardStops, no --project-name given' test below for
+    // the --web variant of this same case.
+    test('no project name, no existing projects, noWizardStops (--broker-ceremony): falls back to the default name, never a prompt', async () => {
       mockAuthService.authenticate.mockResolvedValue({
         success: true,
         organization_id: 'org-B',
@@ -1828,10 +1833,16 @@ describe('CapyCommand', () => {
         organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
       });
 
-      await expect(
-        (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B', noWizardStops: true }),
-      ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B', noWizardStops: true });
+      } finally {
+        consoleSpy.mockRestore();
+      }
+
       expect(mockPromptEngine.promptForProjectName).not.toHaveBeenCalled();
+      // 'test-project' is this describe block's mocked getDefaultProjectName().
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-B');
     });
 
     // Regression guard: same two situations, but a plain TTY capy onboard
@@ -1896,6 +1907,155 @@ describe('CapyCommand', () => {
 
       expect(mockPromptEngine.promptForProjectName).toHaveBeenCalledTimes(1);
       expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('typed-name', 'org-B');
+    });
+
+    // CAP-451 (follow-up fix): --broker-ceremony must win over --web for the
+    // init path — a broker-ceremony caller is agent-driven with no LOCAL
+    // browser, even when --web was also passed. `mock.module` here replaces
+    // InitWizardSession with a spy that throws if any `ask*` is ever
+    // reached, and counts constructions — proving no loopback server is
+    // bound (the real class only binds one lazily, on the first `ask*`
+    // call, so "never constructed" is the strongest, simplest guarantee).
+    describe('noWizardStops wins over --web (no loopback server, no browser)', () => {
+      let wizardConstructions: number;
+
+      beforeEach(() => {
+        wizardConstructions = 0;
+        mock.module('../../src/ui/initWizardScreen', () => ({
+          InitWizardSession: class {
+            constructor() {
+              wizardConstructions++;
+            }
+            record() {}
+            async finish() {}
+            async abort() {}
+            async askOrganization() {
+              throw new Error('wizard.askOrganization must never be reached under noWizardStops');
+            }
+            async askProject() {
+              throw new Error('wizard.askProject must never be reached under noWizardStops');
+            }
+            async askProjectName() {
+              throw new Error('wizard.askProjectName must never be reached under noWizardStops');
+            }
+            async askBranchChoice() {
+              throw new Error('wizard.askBranchChoice must never be reached under noWizardStops');
+            }
+            async askBranchName() {
+              throw new Error('wizard.askBranchName must never be reached under noWizardStops');
+            }
+            async askEncrypt() {
+              throw new Error('wizard.askEncrypt must never be reached under noWizardStops');
+            }
+            willBlock() {}
+          },
+        }));
+      });
+
+      test('web:true + noWizardStops: the wizard is never constructed, project name flows from the option, branch defaults to development', async () => {
+        mockAuthService.authenticate.mockResolvedValue({
+          success: true,
+          organization_id: 'org-B',
+          organization_name: 'Org Beta',
+          user_id: 'user-456',
+          user_email: 'test@example.com',
+          organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+        });
+
+        const webCommand = new CapyCommand({ web: true });
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await (webCommand as any).initializeProjectForFlow({
+            pinnedOrgId: 'org-B',
+            projectName: 'flow-project',
+            noWizardStops: true,
+          });
+        } finally {
+          consoleSpy.mockRestore();
+        }
+
+        expect(wizardConstructions).toBe(0);
+        expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-B');
+        expect(mockServiceClient.createBranch).toHaveBeenCalledWith('proj-1', 'development', false);
+      });
+
+      test('web:true + noWizardStops, no --project-name given: falls back to the CLI\'s existing default rather than refusing', async () => {
+        mockAuthService.authenticate.mockResolvedValue({
+          success: true,
+          organization_id: 'org-B',
+          organization_name: 'Org Beta',
+          user_id: 'user-456',
+          user_email: 'test@example.com',
+          organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+        });
+
+        const webCommand = new CapyCommand({ web: true });
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await (webCommand as any).initializeProjectForFlow({
+            pinnedOrgId: 'org-B',
+            noWizardStops: true,
+          });
+        } finally {
+          consoleSpy.mockRestore();
+        }
+
+        expect(wizardConstructions).toBe(0);
+        // 'test-project' is this describe block's mocked getDefaultProjectName().
+        expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('test-project', 'org-B');
+      });
+
+      test('web:true + noWizardStops, existing projects and no pin: refuses (FLOW_STOP_UNREACHABLE), never opens the wizard picker', async () => {
+        mockAuthService.authenticate.mockResolvedValue({
+          success: true,
+          organization_id: 'org-B',
+          organization_name: 'Org Beta',
+          user_id: 'user-456',
+          user_email: 'test@example.com',
+          organizations: [{ id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' }],
+        });
+        mockServiceClient.listProjects.mockResolvedValue([
+          { id: 'proj-existing', name: 'existing', organization_id: 'org-B' },
+        ]);
+
+        const webCommand = new CapyCommand({ web: true });
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await expect(
+            (webCommand as any).initializeProjectForFlow({ pinnedOrgId: 'org-B', noWizardStops: true }),
+          ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+        } finally {
+          consoleSpy.mockRestore();
+        }
+
+        expect(wizardConstructions).toBe(0);
+      });
+
+      test('web:true + noWizardStops, no pinned org and >1 orgs: refuses, never opens the wizard org picker', async () => {
+        mockAuthService.authenticate.mockResolvedValue({
+          success: true,
+          organization_id: '',
+          user_id: 'user-456',
+          user_email: 'test@example.com',
+          organizations: [
+            { id: 'org-A', workos_org_id: 'workos-A', name: 'Org Alpha' },
+            { id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' },
+          ],
+          _refresh_token: 'refresh-token',
+        });
+
+        const webCommand = new CapyCommand({ web: true });
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await expect(
+            (webCommand as any).initializeProjectForFlow({ projectName: 'flow-project', noWizardStops: true }),
+          ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+        } finally {
+          consoleSpy.mockRestore();
+        }
+
+        expect(wizardConstructions).toBe(0);
+      });
     });
   });
 

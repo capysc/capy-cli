@@ -478,7 +478,15 @@ export class CapyCommand {
     //
     // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless
     // verification drive the loopback without hijacking a real browser.
-    const wizard = this.options.web
+    //
+    // CAP-451: `noWizardStops` (only ever true under `capy onboard
+    // --broker-ceremony`) wins over `--web` here — a broker-ceremony caller
+    // is agent-driven with no LOCAL browser to send to, even when `--web`
+    // was also passed (the MCP path always used to imply loopback before
+    // this flag existed). No wizard is constructed at all in that case, so
+    // no loopback server is ever bound and no handoff URL is ever printed —
+    // every `if (wizard)` stop below simply has nothing to check.
+    const wizard = this.options.web && !this.noWizardStops
       ? new (await import('../ui/initWizardScreen')).InitWizardSession({
           open: !process.env.CAPY_WEB_NO_OPEN,
         })
@@ -577,6 +585,12 @@ export class CapyCommand {
         // `authenticate` step's own result, or a `select_organization`
         // screen upstream of this call) — no picker to show.
         orgId = this.pinnedOrgId;
+      } else if (this.noWizardStops) {
+        // No default to fall back to: which org to use is a genuine human
+        // decision this source has no way to make. Checked BEFORE `wizard`
+        // — `wizard` is guaranteed null here anyway (see initializeProject),
+        // but the order itself is the contract: broker-ceremony always wins.
+        this.refuseWizardStop();
       } else if (wizard) {
         // No TTY under --web (e.g. driven through the MCP): the picker is the
         // wizard's `organization` stop, which carries the same list and the
@@ -589,8 +603,6 @@ export class CapyCommand {
           throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
         orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
-      } else if (this.noWizardStops) {
-        this.refuseWizardStop();
       } else {
         ({ orgId } = await inquirer.prompt([{
           type: 'list',
@@ -760,7 +772,13 @@ export class CapyCommand {
       ];
 
       let projectChoice: string;
-      if (wizard) {
+      if (this.noWizardStops) {
+        // Existing projects, no name pinned: adopt-vs-create is a genuine
+        // human decision this source cannot make — refuse rather than
+        // guess. Checked before `wizard` for the same reason as the org
+        // picker above.
+        this.refuseWizardStop();
+      } else if (wizard) {
         const chosen = await wizard.askProject(
           existingProjects.map(p => ({ id: p.id, name: p.name })),
         );
@@ -768,8 +786,6 @@ export class CapyCommand {
           throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
         }
         projectChoice = chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
-      } else if (this.noWizardStops) {
-        this.refuseWizardStop();
       } else {
         ({ projectChoice } = await inquirer.prompt([{
           type: 'list',
@@ -800,6 +816,12 @@ export class CapyCommand {
       // CAP-451: the plan dialog already named it (`write_keep_lock`'s
       // `project_name` param, or `capy onboard --project-name`).
       projectName = this.flowProjectName;
+    } else if (this.noWizardStops) {
+      // Unlike the org/project pickers above, this stop HAS a documented
+      // default — the same one the TTY prompt pre-fills — so it uses it
+      // rather than refusing. Checked before `wizard` for the same reason
+      // as the pickers above.
+      projectName = defaultName;
     } else if (wizard) {
       // Same two refusals the TTY validator makes, in the same words — the
       // screen holds its button on both, so either arriving here means the
@@ -809,8 +831,6 @@ export class CapyCommand {
         throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
       }
       projectName = entered;
-    } else if (this.noWizardStops) {
-      this.refuseWizardStop();
     } else {
       projectName = await this.promptEngine.promptForProjectName(defaultName);
     }
@@ -856,7 +876,12 @@ export class CapyCommand {
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
     let initialBranchChoice: string;
-    if (wizard) {
+    if (this.noWizardStops) {
+      // CAP-451: the same default the TTY prompt's first (and effectively
+      // default) row offers — 'development' — used directly, never asked.
+      // Checked before `wizard` for the same reason as the stops above.
+      initialBranchChoice = 'development';
+    } else if (wizard) {
       // No TTY under --web: without a browser screen here, init dies one step
       // before createBranch/writeActiveBranch and leaves a branchless project.
       const chosen = await wizard.askBranchChoice();
@@ -878,7 +903,12 @@ export class CapyCommand {
 
     let initialBranchName: string;
     if (initialBranchChoice === 'other') {
-      if (wizard) {
+      // Unreachable under noWizardStops — that branch always hard-codes
+      // 'development' above and never produces 'other' — but refuse rather
+      // than silently falling to inquirer if that ever changes.
+      if (this.noWizardStops) {
+        this.refuseWizardStop();
+      } else if (wizard) {
         const entered = await wizard.askBranchName();
         if (entered === null) {
           throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
@@ -1016,6 +1046,13 @@ export class CapyCommand {
           // flow instance. Asking again is the consent fatigue the flow layer
           // exists to remove; it is NOT a consent being skipped.
           confirmEncrypt = true;
+        } else if (this.noWizardStops) {
+          // Defensive: `write_keep_lock(select_or_create)` is always
+          // consent-gated, so assumeEncryptConsent should already be true
+          // by the time a broker-ceremony run reaches here. If it somehow
+          // isn't, refuse rather than fall through to a prompt nobody can
+          // answer — never silently encrypt-and-push without consent either.
+          this.refuseWizardStop();
         } else if (wizard) {
           // NAMES and a count reach the page — never a value, and not even a
           // snippet of one. The whole question this stop asks is whether these
