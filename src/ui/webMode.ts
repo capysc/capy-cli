@@ -30,3 +30,29 @@ export function setWebMode(on: boolean): void {
 export function isWebMode(): boolean {
   return webMode;
 }
+
+/**
+ * CAP-451: whether this process was invoked with `capy onboard
+ * --broker-ceremony` — a sandboxed, agent-driven caller with no LOCAL
+ * browser to send ANYTHING to, `--web` notwithstanding (broker-ceremony
+ * always wins over `--web` for exactly this reason — see
+ * `capyCommand.ts`'s `noWizardStops`). Same process-global shape as
+ * `webMode` above, and for the same reason: `displayErrorAndExit` is reached
+ * from deep inside call sites with no way to ask a command object whether
+ * this run is agent-driven.
+ *
+ * Read by `errorScreen.ts` to skip opening a loopback error page even when
+ * `isWebMode()` is true — that failure must surface as the coded
+ * `blocked`/`failed` step in the flow's own JSON envelope only, never a
+ * `capy:handoff-url` event pointing at a server nothing in this run can see.
+ */
+let brokerCeremonyMode = false;
+
+/** Called once, from `capy onboard`'s own handler — `--broker-ceremony` is not a global program option. */
+export function setBrokerCeremonyMode(on: boolean): void {
+  brokerCeremonyMode = on;
+}
+
+export function isBrokerCeremonyMode(): boolean {
+  return brokerCeremonyMode;
+}

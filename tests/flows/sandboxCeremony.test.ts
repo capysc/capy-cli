@@ -47,6 +47,19 @@ function envelope(over: Record<string, unknown> = {}): string {
   });
 }
 
+/**
+ * A real (if unsigned) JWT with an `org_id` claim — CAP-451's fix requires
+ * `applyFirstRun`'s final `authenticateSilent(orgId)` to genuinely succeed
+ * (validateTokenOrg decodes the token and checks its `org_id` claim against
+ * the org's `workos_org_id`), so a `sessions` fixture that wants the CACHED
+ * branch to hit needs this rather than an opaque placeholder string.
+ */
+function fakeJwt(orgId: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ org_id: orgId })).toString('base64url');
+  return `${header}.${payload}.sig`;
+}
+
 describe('parseSandboxSessionAnswer', () => {
   test('a minimal answer with no first_run parses to kind:none', () => {
     const result = parseSandboxSessionAnswer(envelope());
@@ -345,6 +358,7 @@ describe('runSandboxCeremony — applyFirstRun refuses an internally-inconsisten
       serviceUrl: 'https://api.test.invalid',
       devMode: false,
       fetchImpl,
+      targetDir: tempHome,
     });
   }
 
@@ -371,7 +385,7 @@ describe('runSandboxCeremony — applyFirstRun refuses an internally-inconsisten
       user: { id: 'user_2' },
       refresh_token: 'rt-2',
       organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
-      sessions: { org_1: { access_token: 'tok', expires_at: Date.now() + 3600_000 } },
+      sessions: { org_1: { access_token: fakeJwt('w1'), expires_at: Date.now() + 3600_000 } },
       first_run: { kind: 'select_org', org_id: 'org_1' },
     }));
 
@@ -435,7 +449,7 @@ describe('runSandboxCeremony — applyFirstRun refuses an internally-inconsisten
       user: { id: 'user_6' },
       refresh_token: 'rt-6',
       organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
-      sessions: { org_1: { access_token: 'tok', expires_at: Date.now() + 3600_000 } },
+      sessions: { org_1: { access_token: fakeJwt('w1'), expires_at: Date.now() + 3600_000 } },
     }));
 
     expect(outcome.result.outcome).toBe('ok');
@@ -548,6 +562,7 @@ describe('runSandboxCeremony — unlock pins the org before its first service ca
       flowSecret: 'flow-secret',
       serviceUrl: SVC,
       devMode: false,
+      targetDir: tempHome,
     });
 
     // No live door for this manufactured credential, so runUnlock itself
@@ -558,5 +573,92 @@ describe('runSandboxCeremony — unlock pins the org before its first service ca
     expect(outcome.result.result).toEqual({ org_id: 'org_1' });
     expect(wrappersAuthHeader).toBe(`Bearer ${FAKE_JWT}`);
     expect(refreshCalledBeforeWrappers).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression (CAP-451, "403 mid-onboard"): applyFirstRun's final bearer
+// settle used to report `{ok:true, token:undefined}` whenever
+// authenticateSilent(orgId) failed after the org itself was resolved
+// (create_org/select_org/unlock all share this tail) — e.g. a moment of
+// WorkOS role-propagation lag right after an org is created, or any other
+// transient 403/401 on the follow-up refresh. That false "ok" meant the
+// driver carried on into write_keep_lock with no real bearer update, which
+// then encrypted-and-pushed under a stale/absent one and 403'd — AFTER
+// already rewriting .env. The fix: a failed settle is now a coded failure,
+// never a silent ok with token:undefined.
+// ---------------------------------------------------------------------------
+describe('runSandboxCeremony — a failed final bearer settle is a coded failure, never a false ok', () => {
+  const SVC = 'https://api.test.invalid';
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test('select_org: authenticateSilent(orgId) 403ing on the follow-up refresh fails the step, never reports ok with no bearer', async () => {
+    const keypair = mintConnectionKeypair();
+    const step = {
+      contract_version: '1',
+      flow_id: 'flow-403-1',
+      flow_type: 'onboard',
+      step_id: 's-403-1',
+      kind: 'screen',
+      resumed: false,
+      screen: 'sandbox_session',
+      url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-403-1',
+      params: { connection_id: 'conn-403-1', user_code: 'BCDF-GHJK' },
+    } as unknown as FlowStep;
+
+    const plaintext = JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_403_1' },
+      refresh_token: 'rt-403-1',
+      // No `sessions` entry for org_1 — forces the real refresh path, the
+      // one this regression is about, exactly like a just-created org whose
+      // create-org response carried no access_token of its own.
+      organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
+      first_run: { kind: 'select_org', org_id: 'org_1' },
+    });
+    const ciphertext = await sealEnvelopePageSide({
+      plaintext,
+      connectionId: 'conn-403-1',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+
+    globalThis.fetch = (async (url: any, init?: any) => {
+      const u = String(url);
+      if (!u.startsWith(SVC)) return realFetch(url, init);
+      const path = u.slice(SVC.length);
+
+      if (path.startsWith('/connections/conn-403-1/result')) {
+        return Response.json({ status: 'answered', ciphertext });
+      }
+      if (path === '/auth/refresh' && init?.method === 'POST') {
+        return new Response(
+          JSON.stringify({ error: 'You do not have access to these secrets.', code: 'PERMISSION_DENIED' }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      throw new Error(`unexpected fetch in test: ${init?.method ?? 'GET'} ${path}`);
+    }) as typeof fetch;
+
+    const outcome = await runSandboxCeremony({
+      step,
+      keypair,
+      flowSecret: 'flow-secret',
+      serviceUrl: SVC,
+      devMode: false,
+      targetDir: tempHome,
+    });
+
+    // The core assertion: a failed refresh is a FAILED step, never `ok`
+    // with the caller left to discover the missing bearer downstream.
+    expect(outcome.result.outcome).toBe('failed');
+    expect(typeof outcome.result.code).toBe('string');
+    // No session handed to the driver — nothing minted a working bearer.
+    expect(outcome.session).toBeUndefined();
   });
 });

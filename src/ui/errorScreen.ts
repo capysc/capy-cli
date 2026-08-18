@@ -121,8 +121,14 @@ export async function displayErrorAndExit(
   const output = renderError(error, context);
   if (output) console.log(output);
 
-  const { isWebMode } = await import('./webMode');
-  if (isWebMode()) {
+  const { isWebMode, isBrokerCeremonyMode } = await import('./webMode');
+  // CAP-451: broker-ceremony wins over --web here too — a sandboxed caller
+  // has no local browser to send an error page to, and the URL a
+  // `capy:handoff-url` event would carry points at a server nothing in this
+  // run can reach. The failure already printed above; the flow's own
+  // coded blocked/failed step (once the exception unwinds to
+  // onboardCommand.ts) is the only other surface it gets.
+  if (isWebMode() && !isBrokerCeremonyMode()) {
     try {
       const { buildCommandErrorData } = await import('./commandErrorScreen');
       const { serveEndingPage } = await import('./endingPage');

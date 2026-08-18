@@ -512,7 +512,15 @@ export class CapyCommand {
 
     // Check if sync-state has an org hint (e.g. from a recent `capy redeem`)
     const syncState = this.projectManager.readSyncState();
-    const orgHint = syncState?.org_id;
+    // CAP-451: the flow's own pinned org — settled moments ago by the
+    // sandbox-session ceremony (create_org/select_org/unlock) or a
+    // `select_organization` screen — wins over sync-state's org hint. Sync
+    // state is written for the SAME org in the ordinary case, but relying on
+    // it alone leaves a window (a org created THIS run, on a machine with a
+    // stale/ambiguous sync-state left from something else) where
+    // authenticate(undefined) would resolve organizations[0] instead of the
+    // org this process is actually supposed to be scoped to.
+    const orgHint = this.pinnedOrgId ?? syncState?.org_id;
 
     // Authenticate — pass org hint so session scopes to the right org
     const spinner = ora('Logging in...').start();

@@ -181,6 +181,25 @@ describe('write_keep_lock — pinned ids are adopted, never re-picked', () => {
     expect(result.result?.project_id).toBe('proj_new');
   });
 
+  // CAP-451 item 3: a full success (not just a failure after partial
+  // resolution, covered above) must report the real {org_id, project_id,
+  // branch} too — this is what makes `done.params` show real pins instead
+  // of null, once the driver's own last successful report reaches the
+  // service.
+  test('a full success reports {org_id, project_id, branch} — not null pins', async () => {
+    initializeProjectForFlow.mockImplementation(async (opts: any) => {
+      opts.onProjectResolved({ org_id: 'org_new', project_id: 'proj_new', branch: 'development' });
+    });
+
+    const result = await EXECUTORS.write_keep_lock(
+      step({ verb: 'write_keep_lock', params: { source: 'select_or_create' } }),
+      ctx(),
+    );
+
+    expect(result.outcome).toBe('ok');
+    expect(result.result).toEqual({ org_id: 'org_new', project_id: 'proj_new', branch: 'development' });
+  });
+
   test('env_header adopts the project the .env header names', async () => {
     writeFileSync(
       join(dir, '.env'),

@@ -17,6 +17,7 @@
  */
 import { isLocalOnly } from '../config/profileConfig';
 import { CapyError, ERROR_CODES, CliOptions } from '../types/index';
+import { debug } from '../ui/debug';
 import { FlowClient } from '../flows/client';
 import { ProjectManager } from '../core/projectManager';
 import { FlowContractError, FlowStep } from '../flows/validate';
@@ -97,6 +98,14 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     clientPubkey = keypair.publicKeyB64;
     brokerCeremonyKeypair = keypair;
   }
+  // CAP-451: read by errorScreen.ts so a failure anywhere in this process —
+  // including one that escapes all the way out, below — never opens a
+  // loopback error page, `--web` notwithstanding. Set unconditionally (not
+  // just in the `if` above) so it's also correctly OFF on a re-drive that
+  // dropped the flag (there is none today, but this is the same posture
+  // `setWebMode` takes: always assert the CURRENT invocation's value).
+  const { setBrokerCeremonyMode } = await import('../ui/webMode');
+  setBrokerCeremonyMode(options.brokerCeremony === true);
   const { AuthService } = await import('../auth/authService');
   // The bearer the flow API sees. Absent = an anonymous instance, which is the
   // ordinary state of a first run in a fresh repo.
@@ -115,9 +124,28 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   // the scope a fresh reader looks at the unscoped path and finds nothing.
   const getToken = async (): Promise<string | undefined> => {
     const auth = new AuthService(undefined, devMode);
-    const knownUserId = new ProjectManager(targetDir).readSyncState()?.user_id;
+    const pm = new ProjectManager(targetDir);
+    const knownUserId = pm.readSyncState()?.user_id;
     if (knownUserId) auth.setSessionUserId(knownUserId);
-    return (await auth.getValidToken())?.access_token ?? undefined;
+    // CAP-451 fix: `getValidToken()` alone never resolves anything — it
+    // requires `currentOrgId` already set, and nothing on a freshly loaded
+    // AuthService sets that (`load()`/`setSessionUserId()` only load the
+    // session, they don't authenticate into an org). `authenticateSilent`
+    // does that as a side effect on success — cached, refreshed, or the
+    // org-less §7.1.1 branch — scoped to sync-state's org hint when one is
+    // known (written by the `authenticate` local_action's own `publish()`,
+    // or — under `--broker-ceremony` — by the sandbox-session ceremony,
+    // which replaces that local_action and writes the same hint).
+    const orgHint = pm.readSyncState()?.org_id;
+    const result = await auth.authenticateSilent(orgHint);
+    if (!result.success) {
+      // Not terminal for the RUN — the caller falls back to `mintedToken`
+      // (driver.ts) or simply proceeds anonymous — but worth knowing why
+      // this particular re-read came up empty.
+      debug(`[onboard] getToken: silent auth came up empty (${result.error_code ?? 'no_session'})`);
+      return undefined;
+    }
+    return (await auth.getValidToken())?.access_token ?? result._orgless_access_token ?? undefined;
   };
   const token = await getToken();
 
@@ -196,6 +224,23 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       // it must be loud: exit non-zero with the code, never a step-shaped
       // object that a caller might act on.
       console.error(JSON.stringify({ error: 'flow_contract_violation', code: err.code, detail: err.detail }, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+    // CAP-451: under --broker-ceremony there is no human at a terminal and
+    // no local browser to redirect to — an escaped exception (one that got
+    // past every executor's own coded-failure handling) must still surface
+    // as JSON on stderr, never a bare re-throw to index.ts's generic
+    // `displayErrorAndExit` (whose loopback error page is independently
+    // gated off for this mode too, in errorScreen.ts — this is belt and
+    // suspenders: the caller gets a parseable object either way).
+    if (options.brokerCeremony && options.json) {
+      const code = err instanceof CapyError ? err.code : ERROR_CODES.SERVICE_ERROR;
+      console.error(JSON.stringify({
+        error: 'onboard_failed',
+        code,
+        detail: err instanceof Error ? err.message : String(err),
+      }, null, 2));
       process.exitCode = 1;
       return;
     }

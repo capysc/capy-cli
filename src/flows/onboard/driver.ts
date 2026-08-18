@@ -227,6 +227,7 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         serviceUrl: opts.serviceUrl ?? resolveActiveUrl(opts.devMode === true),
         devMode: opts.devMode === true,
         machineName: opts.machineName,
+        targetDir: opts.targetDir,
       });
       executed.push({
         step_id: step.step_id,

@@ -42,7 +42,7 @@ import { SessionStorageBackend } from '../../auth/session/backend';
 import { FileSessionStorageBackend } from '../../auth/session/fileBackend';
 import { generatePrfSalt } from '../../auth/deviceKey/crypto';
 import { emitHandoffUrlEvent } from '../../ui/handoffEvent';
-import { codeFor, StepResult } from './executors';
+import { codeFor, codeForSilentAuthFailure, StepResult } from './executors';
 import { FlowStep } from '../validate';
 
 /**
@@ -514,10 +514,24 @@ async function applyFirstRun(opts: {
     orgId = opts.answer.organizations[0].id;
   }
 
+  // Settle a REAL, org-scoped bearer for the org this branch just resolved —
+  // never report success with an org-less or absent token standing in for
+  // it. A failure here (e.g. a moment of WorkOS role-propagation lag right
+  // after `create_org`) is surfaced as a coded failure rather than silently
+  // handed back as `ok:true` with `token:undefined`: the caller (driver.ts)
+  // would otherwise carry on with no bearer update at all, so `write_keep_lock`
+  // — reached next — would run its encrypt-and-push under whatever STALE
+  // bearer it can scrounge up (org-less, or none), and 403 on the push AFTER
+  // already having encrypted .env. No sleep/retry here — see this function's
+  // module doc; a caller that wants one drives it by re-asking the flow.
   const settled = await authService.authenticateSilent(orgId);
-  const token = settled.success
-    ? ((await authService.getValidToken())?.access_token ?? settled._orgless_access_token)
-    : undefined;
+  if (!settled.success) {
+    return { ok: false, code: codeForSilentAuthFailure(settled.error_code) };
+  }
+  const token = (await authService.getValidToken())?.access_token ?? settled._orgless_access_token;
+  if (!token) {
+    return { ok: false, code: ERROR_CODES.SERVICE_ERROR };
+  }
 
   return { ok: true, orgId, token };
 }
@@ -540,6 +554,19 @@ export interface SandboxCeremonyOptions {
   fetchImpl?: typeof fetch;
   /** Injectable for tests; production default is the real `~/.capy` file backend. */
   sessionBackend?: SessionStorageBackend;
+  /**
+   * The directory this onboard flow is running against. Required so this
+   * ceremony can write `.capy/sync-state`'s user_id the same way the
+   * ordinary `authenticate` local_action's `publish()` does
+   * (`../onboard/executors/index.ts`) — under `--broker-ceremony` this
+   * screen REPLACES that local_action (the service never issues it), so
+   * without this write nothing in THIS process, or a later one resuming the
+   * same directory (the `--confirm` invocation), can find the session file
+   * deterministically — every reader falls back to `discover()`'s
+   * first-file-that-parses scan instead of the specific user this ceremony
+   * just authenticated.
+   */
+  targetDir: string;
 }
 
 export interface SandboxCeremonyOutcome {
@@ -595,6 +622,13 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
   };
   backend.save(session, answer.user.id);
 
+  // Mirror the `authenticate` local_action's own `publish()` (this screen
+  // REPLACES it under --broker-ceremony, so nothing else in this run ever
+  // does this write) — see SandboxCeremonyOptions.targetDir's own doc.
+  const { ProjectManager } = await import('../../core/projectManager');
+  const projectManager = new ProjectManager(opts.targetDir);
+  projectManager.writeSyncStateUserId(answer.user.id);
+
   const firstRun = await applyFirstRun({
     answer,
     backend,
@@ -604,6 +638,15 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
   });
   if (!firstRun.ok) {
     return { result: { outcome: 'failed', code: firstRun.code } };
+  }
+
+  // Same reasoning as the user_id write above: `capyCommand.ts`'s own org
+  // hint resolution (`runInitialization`'s orgHint) reads sync-state's
+  // org_id as ITS fallback when a pinned org isn't threaded through — this
+  // is what makes that fallback actually point at the org this ceremony
+  // just resolved, rather than nothing.
+  if (firstRun.orgId) {
+    projectManager.writeSyncStateOrgId(firstRun.orgId);
   }
 
   return {
