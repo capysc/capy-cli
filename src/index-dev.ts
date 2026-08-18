@@ -156,6 +156,8 @@ program
   .option('--flow-id <id>', 'resume an existing flow instance')
   .option('--flow-secret <secret>', 'credential for an anonymous flow instance')
   .option('--client-pubkey <base64>', 'ephemeral public key; selects the browser-approval auth path')
+  .option('--broker-ceremony', 'run the sandbox-session broker ceremony in-process (mints its own keypair)')
+  .option('--project-name <name>', 'project name to create with, skipping the interactive name prompt')
   .option('--confirm <planHash>', 'answer the onboarding plan dialog')
   .option('--accepted <bool>', 'the answer to --confirm', (v: string) => v === 'true')
   .action(async (options, cmd) => {
@@ -171,6 +173,8 @@ program
           flowId: options.flowId,
           flowSecret: options.flowSecret,
           clientPubkey: options.clientPubkey,
+          brokerCeremony: options.brokerCeremony === true,
+          projectName: options.projectName,
           confirm: options.confirm,
           accepted: options.accepted,
         },
