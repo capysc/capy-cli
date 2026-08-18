@@ -17,6 +17,7 @@
  */
 import { isLocalOnly } from '../config/profileConfig';
 import { CapyError, ERROR_CODES, CliOptions } from '../types/index';
+import { debug } from '../ui/debug';
 import { FlowClient } from '../flows/client';
 import { ProjectManager } from '../core/projectManager';
 import { FlowContractError, FlowStep } from '../flows/validate';
@@ -32,9 +33,26 @@ export interface OnboardOptions extends CliOptions {
   flowId?: string;
   flowSecret?: string;
   clientPubkey?: string;
+  /**
+   * CAP-451: this process mints its OWN ephemeral keypair and runs the
+   * in-process broker ceremony (`../flows/onboard/sandboxCeremony.ts`)
+   * against the flow-owned `sandbox_session` connection, instead of
+   * stopping on the screen and handing its URL to a caller that cannot
+   * open it — the MCP sets this. Off by default; distinct from
+   * `clientPubkey`, which is the existing explicit-keypair caller and is
+   * left untouched.
+   */
+  brokerCeremony?: boolean;
+  /** The project name to create with, skipping the interactive name prompt. In the plan hash. */
+  projectName?: string;
   /** Answer a confirm dialog: `--confirm <plan_hash> --accepted true|false`. */
   confirm?: string;
   accepted?: boolean;
+}
+
+/** Same rule the TTY project-name prompt validates (`../ui/promptEngine.ts`). */
+function isValidFlowProjectName(name: string): boolean {
+  return name.trim().length > 0 && /^[a-zA-Z0-9-_]+$/.test(name);
 }
 
 /** What the run stopped on, plus what it did on the way — printed as one object in --json mode. */
@@ -55,8 +73,39 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     );
   }
 
+  if (options.projectName !== undefined && !isValidFlowProjectName(options.projectName)) {
+    throw new CapyError(
+      'Project name can only contain letters, numbers, hyphens, and underscores',
+      ERROR_CODES.INVALID_FORMAT,
+    );
+  }
+
   const targetDir = options.targetDir ?? process.cwd();
   const transport = new FlowClient(undefined, devMode);
+
+  // CAP-451: `--broker-ceremony` mints its OWN ephemeral keypair — its
+  // pubkey becomes `client_pubkey` at flow creation (the existing plumbing
+  // the explicit `--client-pubkey` caller already uses), and the private
+  // half is held here, in this process, for the in-process ceremony to
+  // decrypt the sealed answer with. Distinct from the existing explicit
+  // `--client-pubkey` caller, whose behavior (and whose keypair, since it
+  // never mints one here) is unchanged.
+  let clientPubkey = options.clientPubkey;
+  let brokerCeremonyKeypair: import('../service/brokerEnvelope').ConnectionKeypair | undefined;
+  if (options.brokerCeremony) {
+    const { mintConnectionKeypair } = await import('../service/brokerEnvelope');
+    const keypair = mintConnectionKeypair();
+    clientPubkey = keypair.publicKeyB64;
+    brokerCeremonyKeypair = keypair;
+  }
+  // CAP-451: read by errorScreen.ts so a failure anywhere in this process —
+  // including one that escapes all the way out, below — never opens a
+  // loopback error page, `--web` notwithstanding. Set unconditionally (not
+  // just in the `if` above) so it's also correctly OFF on a re-drive that
+  // dropped the flag (there is none today, but this is the same posture
+  // `setWebMode` takes: always assert the CURRENT invocation's value).
+  const { setBrokerCeremonyMode } = await import('../ui/webMode');
+  setBrokerCeremonyMode(options.brokerCeremony === true);
   const { AuthService } = await import('../auth/authService');
   // The bearer the flow API sees. Absent = an anonymous instance, which is the
   // ordinary state of a first run in a fresh repo.
@@ -75,9 +124,28 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   // the scope a fresh reader looks at the unscoped path and finds nothing.
   const getToken = async (): Promise<string | undefined> => {
     const auth = new AuthService(undefined, devMode);
-    const knownUserId = new ProjectManager(targetDir).readSyncState()?.user_id;
+    const pm = new ProjectManager(targetDir);
+    const knownUserId = pm.readSyncState()?.user_id;
     if (knownUserId) auth.setSessionUserId(knownUserId);
-    return (await auth.getValidToken())?.access_token ?? undefined;
+    // CAP-451 fix: `getValidToken()` alone never resolves anything — it
+    // requires `currentOrgId` already set, and nothing on a freshly loaded
+    // AuthService sets that (`load()`/`setSessionUserId()` only load the
+    // session, they don't authenticate into an org). `authenticateSilent`
+    // does that as a side effect on success — cached, refreshed, or the
+    // org-less §7.1.1 branch — scoped to sync-state's org hint when one is
+    // known (written by the `authenticate` local_action's own `publish()`,
+    // or — under `--broker-ceremony` — by the sandbox-session ceremony,
+    // which replaces that local_action and writes the same hint).
+    const orgHint = pm.readSyncState()?.org_id;
+    const result = await auth.authenticateSilent(orgHint);
+    if (!result.success) {
+      // Not terminal for the RUN — the caller falls back to `mintedToken`
+      // (driver.ts) or simply proceeds anonymous — but worth knowing why
+      // this particular re-read came up empty.
+      debug(`[onboard] getToken: silent auth came up empty (${result.error_code ?? 'no_session'})`);
+      return undefined;
+    }
+    return (await auth.getValidToken())?.access_token ?? result._orgless_access_token ?? undefined;
   };
   const token = await getToken();
 
@@ -111,14 +179,16 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       token,
       getToken,
       web: options.web === true,
+      projectName: options.projectName,
       // Recomputed on demand: only sent when the plan the instance holds has
       // gone stale under the human.
-      buildPlan: () => planPayload(targetDir),
+      buildPlan: () => planPayload(targetDir, options.projectName),
       flowId: options.flowId,
       flowSecret: options.flowSecret,
-      authMode: options.clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
-      clientPubkey: options.clientPubkey,
-      plan: planPayload(targetDir),
+      authMode: clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
+      clientPubkey,
+      brokerCeremonyKeypair,
+      plan: planPayload(targetDir, options.projectName),
       compat: { usesEnvVars: envKeys.length > 0, framework: plan.framework },
     });
 
@@ -157,13 +227,37 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       process.exitCode = 1;
       return;
     }
+    // CAP-451: under --broker-ceremony there is no human at a terminal and
+    // no local browser to redirect to — an escaped exception (one that got
+    // past every executor's own coded-failure handling) must still surface
+    // as JSON on stderr, never a bare re-throw to index.ts's generic
+    // `displayErrorAndExit` (whose loopback error page is independently
+    // gated off for this mode too, in errorScreen.ts — this is belt and
+    // suspenders: the caller gets a parseable object either way).
+    if (options.brokerCeremony && options.json) {
+      const code = err instanceof CapyError ? err.code : ERROR_CODES.SERVICE_ERROR;
+      console.error(JSON.stringify({
+        error: 'onboard_failed',
+        code,
+        detail: err instanceof Error ? err.message : String(err),
+      }, null, 2));
+      process.exitCode = 1;
+      return;
+    }
     throw err;
   }
 }
 
-/** The plan, in the contract's shape. Names, paths, counts and a hash — never a value. */
-function planPayload(targetDir: string): Record<string, unknown> {
-  const plan = buildPlan({ targetDir });
+/**
+ * The plan, in the contract's shape. Names, paths, counts and a hash — never
+ * a value. `projectName`, when given, is passed into `buildPlan` itself so
+ * `planHash` actually covers it (a rename produces a different hash and
+ * re-opens consent — CAP-451 §9 row 7) rather than riding alongside a hash
+ * that never saw it. The service now has its own `project_name` slot on
+ * this dialog to render (`shared/flows/steps.json`'s `onboard_plan`).
+ */
+function planPayload(targetDir: string, projectName?: string): Record<string, unknown> {
+  const plan = buildPlan({ targetDir, projectName });
   const envKeys = readEnvKeys(targetDir);
   return {
     plan_hash: plan.planHash,
@@ -174,6 +268,7 @@ function planPayload(targetDir: string): Record<string, unknown> {
     cli_checks: plan.cliChecks.map((c) => ({ cli: c.cli, installed: c.installed })),
     variable_names: envKeys,
     variable_count: envKeys.length,
+    ...(projectName ? { project_name: projectName } : {}),
   };
 }
 

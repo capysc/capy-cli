@@ -302,4 +302,168 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(service.getToken()?.organization_id).toBe('org-1');
     });
   });
+
+  describe('CAP-451 §7.1.1 — the org-less silent path', () => {
+    function makeOrglessSession(overrides: Partial<SessionStore> = {}): SessionStore {
+      return {
+        version: 2,
+        user_id: 'user-1',
+        user_email: 'user-1@test.com',
+        refresh_token: 'rt-original',
+        organizations: [],
+        sessions: {},
+        ...overrides,
+      };
+    }
+
+    test('refreshes with NO organization_id and returns refreshed_orgless', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      const calls = stubFetch([{
+        status: 200,
+        body: { access_token: 'orgless-access-token', refresh_token: 'rt-rotated', scope: 'user' },
+      }]);
+
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.load();
+      const method = await lifecycle.acquireSilent();
+
+      expect(method).toBe('refreshed_orgless');
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe(`${API}/auth/refresh`);
+      expect(calls[0].body).toEqual({ refresh_token: 'rt-original' });
+      // No organization_id key at all — org-scoped refreshForOrg always sends one.
+      expect('organization_id' in calls[0].body).toBe(false);
+    });
+
+    test('the org-less bearer is held in memory only — never written to the session store', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      stubFetch([{
+        status: 200,
+        body: { access_token: 'orgless-access-token', refresh_token: 'rt-rotated', scope: 'user' },
+      }]);
+
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.load();
+      await lifecycle.acquireSilent();
+
+      expect(lifecycle.orglessAccessToken).toBe('orgless-access-token');
+      const persisted = backend.load('user-1');
+      expect(persisted?.sessions).toEqual({});
+      expect(JSON.stringify(persisted)).not.toContain('orgless-access-token');
+    });
+
+    test('the rotated refresh token is persisted exactly as the org path does', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      stubFetch([{
+        status: 200,
+        body: { access_token: 'orgless-access-token', refresh_token: 'rt-rotated', scope: 'user' },
+      }]);
+
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.load();
+      await lifecycle.acquireSilent();
+
+      expect(backend.load('user-1')?.refresh_token).toBe('rt-rotated');
+    });
+
+    test('AuthService.authenticateSilent() surfaces the bearer as _orgless_access_token', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      stubFetch([{
+        status: 200,
+        body: { access_token: 'orgless-access-token', refresh_token: 'rt-rotated', scope: 'user' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      const result = await service.authenticateSilent();
+
+      expect(result.success).toBe(true);
+      expect(result._orgless_access_token).toBe('orgless-access-token');
+      // Still a "refreshed" method from the caller's point of view — no new
+      // slot on the public _auth_method union for this branch.
+      expect(result._auth_method).toBe('refreshed');
+      expect(result.organization_id).toBe('');
+    });
+
+    test('400 ORG_ID_REQUIRED (the user gained an org meanwhile) returns null — as today, no orgless token', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      stubFetch([{ status: 400, body: { error: 'organization_id is required', code: 'ORG_ID_REQUIRED' } }]);
+
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.load();
+      const method = await lifecycle.acquireSilent();
+
+      expect(method).toBeNull();
+      expect(lifecycle.orglessAccessToken).toBeNull();
+      // Not classified as a refresh failure — describeSilentAuthFailure falls
+      // through to its default (no_session), not a spurious server_error.
+      expect(lifecycle.lastRefreshFailure).toBeNull();
+    });
+
+    test('AuthService.authenticateSilent() reports no_session for the ORG_ID_REQUIRED case, not a message-parsed guess', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      stubFetch([{ status: 400, body: { error: 'organization_id is required', code: 'ORG_ID_REQUIRED' } }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      const result = await service.authenticateSilent();
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe('no_session');
+    });
+
+    test('a genuine network failure on the org-less refresh IS classified — describeSilentAuthFailure reports it', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      globalThis.fetch = (async () => { throw new TypeError('fetch failed'); }) as typeof fetch;
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      const result = await service.authenticateSilent();
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe('network');
+    });
+
+    test('never fires when an explicit organizationId is passed, even with zero known orgs', async () => {
+      backend.save(makeOrglessSession(), 'user-1');
+      // The org-SCOPED endpoint (refreshForOrg) is hit instead — its request
+      // body always carries organization_id, proving the org-less branch's
+      // `!organizationId` guard held.
+      const calls = stubFetch([{
+        status: 200,
+        body: { access_token: fakeJwt({ org_id: 'workos-org-1' }), refresh_token: 'rt-rotated', expires_in: 3600 },
+      }]);
+
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.load();
+      await lifecycle.acquireSilent('org-1');
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0].body.organization_id).toBe('org-1');
+    });
+
+    test('never fires when the session already has organizations — the existing first-known-org branch runs instead', async () => {
+      backend.save(makeSession(), 'user-1'); // has one org, one live session
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.load();
+
+      const method = await lifecycle.acquireSilent();
+
+      expect(method).toBe('cached');
+      expect(lifecycle.orglessAccessToken).toBeNull();
+    });
+
+    test('adopts a fresher session with an org that appeared meanwhile, instead of burning the refresh token', async () => {
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.session = makeOrglessSession();
+
+      // Meanwhile, elsewhere, the user gained an org.
+      const fresher = makeSession({ refresh_token: 'rt-theirs' });
+      backend.save(fresher, 'user-1');
+
+      const calls = stubFetch([]);
+      const refreshed = await lifecycle.refreshOrgless();
+
+      expect(refreshed).toBe(false);
+      expect(calls).toHaveLength(0); // no network — adopted the fresher copy instead
+      expect(lifecycle.session?.organizations.length).toBe(1);
+    });
+  });
 });

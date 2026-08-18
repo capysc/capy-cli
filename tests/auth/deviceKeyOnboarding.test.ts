@@ -332,6 +332,106 @@ describe('device-key onboarding engine', () => {
     });
   });
 
+  // CAP-451's broker-ceremony first-run rail runs Case A enrollment through a
+  // CANNED transport whose `requestEnrollment` ignores whatever salt it is
+  // asked to use (see `cannedEnrollmentTransport` — ceremonyTransport.ts's
+  // `EnrollmentRequest.prfSalt` is accepted but never read). The browser's
+  // WebAuthn PRF extension already ran, for real, against a salt minted
+  // BEFORE any of this — `runNewUserEnrollment`'s `presetPrfSalt` is the only
+  // way that exact salt reaches the wrap step instead of a second, unrelated
+  // one getting minted here. Live finding this closes: a device-key door
+  // enrolled through this rail could never be unlocked on a second machine —
+  // `unwrapKLocal` threw `DEVICE_KEY_UNWRAP_FAILED` every single time, not
+  // intermittently, because the stored `prf_salt` never corresponded to the
+  // `prfOutput` it was paired with.
+  describe('Case A — canned transport (CAP-451 broker-ceremony), presetPrfSalt', () => {
+    it('with presetPrfSalt: the door is wrapped under the EXACT salt the (real) ceremony used, and a later unlock recovers the same root', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-case-a-preset-salt-ok';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      const masterKey = randomBytes(32);
+
+      // The browser's own WebAuthn PRF ceremony, run for real against a
+      // salt it (or, here, the CLI minting the ceremony's own request
+      // fragment) chose — exactly `buildCeremonyUrl`'s role in production.
+      const browserSalt = randomBytes(32);
+      const real = await ceremony.requestEnrollment({
+        userId: USER,
+        prfSalt: browserSalt.toString('base64'),
+      });
+      if (!real.ok) throw new Error('unreachable');
+
+      // What the CLI actually has in hand after the sealed envelope: a
+      // canned transport that ignores any salt it is asked to use.
+      const { cannedEnrollmentTransport } = await import('../../src/auth/deviceKey/cannedCeremony');
+      const canned = cannedEnrollmentTransport({
+        credentialId: real.credentialId,
+        prfOutput: real.prfOutput,
+        backupEligible: real.backupEligible,
+        backupState: real.backupState,
+      });
+      const deps = makeDeps(server, canned as unknown as FakeAuthenticator, [org('orgA')]);
+
+      const result = await onboarding.runNewUserEnrollment(deps, {
+        orgId: 'orgA',
+        masterKey,
+        presetPrfSalt: browserSalt,
+      });
+      expect(result.ok).toBe(true);
+
+      const door = server.liveDoor()!;
+      expect(door.prf_salt).toBe(browserSalt.toString('base64'));
+
+      // A genuinely separate machine, recovering via the SAME credential +
+      // the STORED salt (exactly what `runUnlock`'s candidate list does):
+      // this only succeeds if the wrap KEK really was derived from
+      // (real.prfOutput, browserSalt), not some other pairing. The door
+      // wraps K_local (this machine's own local root), not the org's M —
+      // same value `gc.readLocalRoot` persisted to disk during enrollment.
+      const localRoot = gc.readLocalRoot('orgA', USER);
+      expect(localRoot).not.toBeNull();
+      const recovered = rootFromDoor(server, ceremony);
+      expect(recovered.equals(localRoot!)).toBe(true);
+    });
+
+    it('WITHOUT presetPrfSalt (the bug): the door is wrapped under a salt the browser never ran PRF against, so it can never be recovered', async () => {
+      process.env.CAPY_GLOBAL_DIR_NAME = '.capy-case-a-preset-salt-bug';
+      const server = new FakeWrapperServer();
+      const ceremony = new FakeAuthenticator();
+      const masterKey = randomBytes(32);
+
+      const browserSalt = randomBytes(32);
+      const real = await ceremony.requestEnrollment({
+        userId: USER,
+        prfSalt: browserSalt.toString('base64'),
+      });
+      if (!real.ok) throw new Error('unreachable');
+
+      const { cannedEnrollmentTransport } = await import('../../src/auth/deviceKey/cannedCeremony');
+      const canned = cannedEnrollmentTransport({
+        credentialId: real.credentialId,
+        prfOutput: real.prfOutput,
+        backupEligible: real.backupEligible,
+        backupState: real.backupState,
+      });
+      const deps = makeDeps(server, canned as unknown as FakeAuthenticator, [org('orgA')]);
+
+      // No presetPrfSalt — the pre-fix call shape.
+      await onboarding.runNewUserEnrollment(deps, { orgId: 'orgA', masterKey });
+
+      const door = server.liveDoor()!;
+      // A fresh salt was minted, unrelated to what the "browser" used.
+      expect(door.prf_salt).not.toBe(browserSalt.toString('base64'));
+
+      // No FakeAuthenticator PRF result exists for (credentialId, stored
+      // salt) — the browser never ran a ceremony against it — so a real
+      // second machine's unlock has nothing to look up here, proving the
+      // door is unrecoverable via the mechanism `runUnlock` actually uses.
+      const storedPrf = (ceremony as any).prf.get(`${door.credential_id}:${door.prf_salt}`);
+      expect(storedPrf).toBeUndefined();
+    });
+  });
+
   describe('Case A — ephemeral environment (CAP-402)', () => {
     const GRANT_SOCKET_ENV_VAR = 'CAPY_DEVICE_KEY_GRANT_SOCKET';
     const prevGrantSocket = process.env[GRANT_SOCKET_ENV_VAR];

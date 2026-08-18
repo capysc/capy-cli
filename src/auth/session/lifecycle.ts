@@ -87,11 +87,24 @@ interface RefreshResponse {
  * BRIGHT LINE: auth material only. No path in this module reads or writes
  * key material (local.key, key.enc, project keys) — see backend.ts.
  */
+interface OrglessRefreshResponse {
+  access_token: string;
+  refresh_token: string;
+  scope?: string;
+}
+
 export class SessionLifecycle {
   session: SessionStore | null = null;
   sessionUserId: string | undefined;
   currentOrgId: string | null = null;
   lastRefreshFailure: RefreshFailure | null = null;
+  /**
+   * CAP-451 §7.1.1: the org-less (`scope:"user"`) bearer minted by
+   * `refreshOrgless`. Held in memory only, exactly like the exchange-time
+   * `_orgless_access_token` it mirrors — never written to SessionStore.
+   * Overwritten by each successful org-less refresh; stale otherwise.
+   */
+  orglessAccessToken: string | null = null;
 
   constructor(
     private readonly storage: SessionStorageBackend,
@@ -164,7 +177,7 @@ export class SessionLifecycle {
    * next (interactive OAuth for `authenticate`, a typed failure for
    * `authenticateSilent`).
    */
-  async acquireSilent(organizationId?: string): Promise<'cached' | 'refreshed' | null> {
+  async acquireSilent(organizationId?: string): Promise<'cached' | 'refreshed' | 'refreshed_orgless' | null> {
     // If we have a session and a specific org is requested, try to use/refresh it
     if (this.session && organizationId) {
       const orgSession = this.session.sessions[organizationId];
@@ -199,7 +212,89 @@ export class SessionLifecycle {
       }
     }
 
+    // CAP-451 §7.1.1: a session with a refresh token but ZERO known
+    // organizations — a brand-new identity, or the org-less mint from a
+    // sandbox broker ceremony. Neither branch above applies: the first
+    // needs an org id to scope into, the second needs `organizations.length
+    // > 0`. Without this branch `acquireSilent` returns null here and
+    // `authenticate` escalates to loopback OAuth, which is exactly the
+    // unreachable-from-a-phone failure this closes — the org-less bearer
+    // this mints is held in memory only (never persisted) and is what lets
+    // the SECOND `capy onboard` process present a bearer to `POST /next` so
+    // the instance can rebind (executors/index.ts's `authenticate` already
+    // reads `_orgless_access_token` for this).
+    if (this.session?.refresh_token && this.session.organizations.length === 0 && !organizationId) {
+      const refreshed = await this.refreshOrgless();
+      if (refreshed) {
+        return 'refreshed_orgless';
+      }
+    }
+
     return null;
+  }
+
+  /**
+   * Refresh with no `organization_id` — the service answers with an
+   * org-less (`scope:"user"`) bearer, or 400 `code:ORG_ID_REQUIRED` if the
+   * user has since gained an organization (someone else redeemed an invite
+   * for them, or a concurrent process created one). The latter is not a
+   * failure of this call — it means the org-less branch no longer applies —
+   * so it returns false and lets the caller fall through to null exactly as
+   * it did before this method existed; no `lastRefreshFailure` is set for
+   * it (a caller reading `describeSilentAuthFailure` after this sees
+   * `no_session`, not a spurious server error).
+   *
+   * The rotated refresh token is persisted exactly as `refreshForOrg` does —
+   * through `withRefreshLock`, so a concurrent refresh cannot burn the same
+   * single-use token twice.
+   */
+  async refreshOrgless(): Promise<boolean> {
+    if (!this.session?.refresh_token) return false;
+    this.lastRefreshFailure = null;
+
+    const userId = this.sessionUserId || this.session.user_id;
+
+    try {
+      return await this.storage.withRefreshLock(userId, async (freshSession) => {
+        if (freshSession?.version === 2) {
+          // An org appeared on the persisted copy since this in-memory
+          // session was loaded — the org-less branch no longer applies.
+          // Adopt the fresher session and let the caller re-derive.
+          if (freshSession.organizations.length > 0) {
+            this.session = freshSession;
+            return false;
+          }
+          this.session!.refresh_token = freshSession.refresh_token;
+        }
+
+        const data = await postJson<OrglessRefreshResponse>(
+          `${this.serviceApiUrl}/auth/refresh`,
+          { refresh_token: this.session!.refresh_token },
+        );
+
+        this.session!.refresh_token = data.refresh_token;
+        this.orglessAccessToken = data.access_token;
+        this.save();
+        return true;
+      });
+    } catch (error: any) {
+      if (
+        error instanceof HttpStatusError &&
+        error.status === 400 &&
+        error.body?.code === 'ORG_ID_REQUIRED'
+      ) {
+        // The user gained an org between session load and this call — not a
+        // refresh failure, just means this branch no longer applies.
+        return false;
+      }
+      const failure = classifyRefreshFailure(error);
+      this.lastRefreshFailure = failure;
+      debug(
+        `[auth] org-less refresh failed (${failure.reason}` +
+        `${failure.status ? `, HTTP ${failure.status}` : ''}): ${failure.detail || 'no detail'}`
+      );
+      return false;
+    }
   }
 
   /**

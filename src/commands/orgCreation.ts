@@ -2,10 +2,11 @@ import inquirer from 'inquirer';
 import ora from '../ui/spinner';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { Organization } from '../types/index';
+import { CapyError, ERROR_CODES, Organization } from '../types/index';
 import {
   generateSeedPhrase,
   seedPhraseToMasterKey,
+  validateSeedPhrase,
   CURRENT_KDF_VERSION,
 } from '../crypto/keyManager';
 import { wrapAndSaveMasterKey, KeyServiceOps } from '../crypto/keyResolver';
@@ -17,6 +18,15 @@ import type { OrgNameVerdict } from '../ui/onboardingWeb';
 
 /** The CLI's cap. One definition; the browser screen is handed this value. */
 export const MAX_ORG_NAME_LENGTH = 100;
+
+/**
+ * `createOrganizationFromEnvelope`'s 409-suffix retry loop (CAP-451) has
+ * nobody to ask for a different name on this source, so it cannot retry
+ * forever against a service that keeps saying every suffix is taken —
+ * capped at this many `/auth/create-org` attempts before refusing with
+ * ORG_NAME_SUFFIX_EXHAUSTED.
+ */
+export const MAX_NAME_SUFFIX_ATTEMPTS = 10;
 
 // (recovery-phrase display + confirm lives in ../ui/recoveryPhrase; the browser
 // half of both questions lives in ../ui/onboardingWeb)
@@ -219,4 +229,150 @@ async function nameAndConfirmInBrowser(
     );
   }
   return result.name;
+}
+
+/**
+ * CAP-451: org creation from a broker-ceremony `first_run.kind:'create_org'`
+ * answer — the third source of a new organization, alongside the TTY prompt
+ * and the `--web` wizard. The name and phrase were both already confirmed on
+ * the Keep page in the same visit; this function's job is to reuse
+ * `createNewOrganization`'s TAIL exactly (create → derive M → wrap → Case A),
+ * with two differences that are specific to this source:
+ *
+ *  - the phrase is validated (BIP39, 24 words, checksum) BEFORE
+ *    `/auth/create-org` ever runs — a malformed phrase must not mint an org
+ *    nobody can ever recover;
+ *  - a 409 name collision is resolved by appending a numeric suffix
+ *    (`Acme` → `Acme 2` → `Acme 3` …) and retrying with the SAME phrase,
+ *    rather than re-asking — there is nobody left to ask on this source.
+ *
+ * When `prf` is present, Case A enrollment runs through a CANNED
+ * `CeremonyTransport` (`../auth/deviceKey/cannedCeremony.ts`) that hands back
+ * the PRF result the same sealed answer already carried — no second
+ * broker connection, no second relayed URL. `BrokerCeremonyTransport` is
+ * never touched by this path.
+ */
+export interface CreateOrgFromEnvelopeArgs {
+  authService: AuthService;
+  serviceClient: ServiceClient;
+  refreshToken: string;
+  userId: string;
+  userEmail?: string;
+  /** Already shown+confirmed on the Keep page — this call never renders it. */
+  name: string;
+  phrase: string;
+  /** Present only when the sealed answer paired a PRF result with the phrase (strict pair, both or neither). */
+  prf?: {
+    credentialId: string;
+    prfOutput: string;
+    backupEligible: boolean;
+    backupState: boolean;
+    /**
+     * The salt `prfOutput` was actually computed under — the one embedded in
+     * this ceremony's own request fragment, NOT re-minted here. Required so
+     * the canned enrollment below derives a wrap KEK a later unlock can
+     * reproduce; see `enrollDoor`'s doc in `../auth/deviceKey/onboarding.ts`.
+     */
+    prfSalt: Buffer;
+  };
+}
+
+export async function createOrganizationFromEnvelope(
+  args: CreateOrgFromEnvelopeArgs,
+): Promise<Organization> {
+  if (!validateSeedPhrase(args.phrase)) {
+    throw new CapyError(
+      'The recovery phrase in the sealed answer did not pass BIP39 validation.',
+      ERROR_CODES.INVALID_RECOVERY_PHRASE,
+    );
+  }
+
+  let orgName = args.name;
+  let suffix = 1;
+
+  while (true) {
+    try {
+      if (suffix > MAX_NAME_SUFFIX_ATTEMPTS) {
+        throw new CapyError(
+          `Could not find a free organization name after ${MAX_NAME_SUFFIX_ATTEMPTS} attempts starting from "${args.name}".`,
+          ERROR_CODES.ORG_NAME_SUFFIX_EXHAUSTED,
+          { name: args.name, attempts: MAX_NAME_SUFFIX_ATTEMPTS },
+        );
+      }
+      const org = await args.authService.createOrganization(orgName, args.refreshToken, args.userId);
+
+      // Same KDF/wrap tail as createNewOrganization — see its own comment.
+      const masterKey = seedPhraseToMasterKey(args.phrase, CURRENT_KDF_VERSION);
+      await wrapAndSaveMasterKey(masterKey, org.id, args.userId, keyServiceOpsFromClient(args.serviceClient));
+
+      if (args.prf) {
+        await runCannedCaseAEnrollment({
+          authService: args.authService,
+          serviceClient: args.serviceClient,
+          userId: args.userId,
+          userEmail: args.userEmail,
+          org,
+          masterKey,
+          prf: args.prf,
+        });
+      }
+
+      return org;
+    } catch (err: any) {
+      if (err && err.status === 409) {
+        suffix += 1;
+        orgName = `${args.name} ${suffix}`;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/**
+ * Case A enrollment against a PRF result already in hand — the broker
+ * ceremony's own device-key doors, `../auth/deviceKey/onboarding.ts`'s
+ * `runNewUserEnrollment`, driven with a canned transport instead of
+ * `BrokerCeremonyTransport`. Best-effort, same posture as
+ * `attemptCaseAEnrollment`: a failure here leaves the org exactly as it
+ * would be with no device key enrolled — never fails org creation itself.
+ */
+async function runCannedCaseAEnrollment(opts: {
+  authService: AuthService;
+  serviceClient: ServiceClient;
+  userId: string;
+  userEmail?: string;
+  org: Organization;
+  masterKey: Buffer;
+  prf: { credentialId: string; prfOutput: string; backupEligible: boolean; backupState: boolean; prfSalt: Buffer };
+}): Promise<void> {
+  try {
+    const { createDeviceKeyServiceOps } = await import('../auth/deviceKey/serviceOps');
+    const { runNewUserEnrollment } = await import('../auth/deviceKey/onboarding');
+    const { cannedEnrollmentTransport } = await import('../auth/deviceKey/cannedCeremony');
+    const { reportEnrollmentOutcome } = await import('../auth/deviceKey/wiring');
+
+    const { ops, opsForOrg } = createDeviceKeyServiceOps(opts.serviceClient, opts.authService);
+    const deps = {
+      userId: opts.userId,
+      userEmail: opts.userEmail,
+      organizations: [opts.org],
+      activeOrgId: opts.org.id,
+      ceremony: cannedEnrollmentTransport(opts.prf),
+      ops,
+      opsForOrg,
+    };
+    // The canned ceremony's `requestEnrollment` ignores whatever salt
+    // `enrollDoor` would otherwise mint on its own — pass THIS ceremony's
+    // real one through explicitly so it derives (and stores) a wrap KEK a
+    // later unlock can actually reproduce.
+    const result = await runNewUserEnrollment(deps, {
+      orgId: opts.org.id,
+      masterKey: opts.masterKey,
+      presetPrfSalt: opts.prf.prfSalt,
+    });
+    reportEnrollmentOutcome(result, opts.org.name);
+  } catch {
+    // Best-effort — see docblock above.
+  }
 }

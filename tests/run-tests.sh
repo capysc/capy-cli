@@ -35,6 +35,13 @@ ISOLATED_FILES=(
   # three would leak into the validator tests, which use the real modules.
   tests/flows/driver.test.ts
   tests/flows/executors.test.ts
+  # sandboxCeremony.test.ts mocks os.homedir() the same way (hasAnyLocalKeyMaterial).
+  tests/flows/sandboxCeremony.test.ts
+  # orgCreationFromEnvelope.test.ts mocks keyManager/keyResolver/deviceKey onboarding+wiring.
+  tests/commands/orgCreationFromEnvelope.test.ts
+  # errorScreenBrokerCeremony.test.ts mocks endingPage/commandErrorScreen and
+  # mutates webMode.ts's process-global flags.
+  tests/ui/errorScreenBrokerCeremony.test.ts
   tests/flows/observe.test.ts
   tests/auth/authService.test.ts
   tests/auth/authServiceKeepScreens.test.ts

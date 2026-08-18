@@ -246,12 +246,30 @@ interface DoorEnrollment {
 /**
  * Run the create ceremony and upload the door wrapping `root`.
  * Returns the ceremony's typed refusal untouched when it declines.
+ *
+ * `presetPrfSalt`, when given, is used instead of minting a fresh one — for
+ * a CANNED transport (`cannedEnrollmentTransport`) whose `requestEnrollment`
+ * ignores the salt on its request and just returns an already-computed
+ * `{credentialId, prfOutput}` (CAP-451's broker-ceremony first-run rail: the
+ * browser's WebAuthn ceremony already ran, against the salt embedded in the
+ * `sandbox_session` screen's OWN request fragment, BEFORE this function is
+ * ever called). Minting a second, unrelated salt here — the bug this
+ * parameter closes — derives the wrap KEK from a (prfOutput, salt) pair that
+ * never corresponded to any real ceremony: `prfOutput` was computed under
+ * the FIRST salt, `prfSalt` stored alongside it is a SECOND, disconnected
+ * one, so no later unlock (which correctly asks the browser to re-run PRF
+ * under the STORED salt) can ever reproduce this KEK — deterministic
+ * `DEVICE_KEY_UNWRAP_FAILED` on every subsequent machine. A real (non-canned)
+ * ceremony transport DOES carry the salt to the browser on this very
+ * `requestEnrollment` call, so it has no such preset and keeps minting one
+ * here exactly as before.
  */
 async function enrollDoor(
   deps: OnboardingDeps,
   root: Buffer,
+  presetPrfSalt?: Buffer,
 ): Promise<DoorEnrollment | CeremonyAborted> {
-  const prfSalt = generatePrfSalt();
+  const prfSalt = presetPrfSalt ?? generatePrfSalt();
   const ceremony = await deps.ceremony.requestEnrollment({
     userId: deps.userId,
     userEmail: deps.userEmail,
@@ -445,7 +463,7 @@ function candidateOrgIds(deps: OnboardingDeps): string[] {
  */
 export async function runNewUserEnrollment(
   deps: OnboardingDeps,
-  args: { orgId: string; masterKey: Buffer },
+  args: { orgId: string; masterKey: Buffer; presetPrfSalt?: Buffer },
 ): Promise<EnrollmentSummary | CeremonyAborted | EphemeralEnrollmentIncomplete> {
   const orgOps = await deps.opsForOrg(args.orgId);
   if (!orgOps) {
@@ -466,7 +484,7 @@ export async function runNewUserEnrollment(
 
   let door: DoorEnrollment | CeremonyAborted;
   try {
-    door = await enrollDoor(deps, root);
+    door = await enrollDoor(deps, root, args.presetPrfSalt);
   } catch (err) {
     if (ephemeral) {
       // The ceremony threw instead of declining gracefully (e.g. a network

@@ -181,6 +181,25 @@ describe('write_keep_lock — pinned ids are adopted, never re-picked', () => {
     expect(result.result?.project_id).toBe('proj_new');
   });
 
+  // CAP-451 item 3: a full success (not just a failure after partial
+  // resolution, covered above) must report the real {org_id, project_id,
+  // branch} too — this is what makes `done.params` show real pins instead
+  // of null, once the driver's own last successful report reaches the
+  // service.
+  test('a full success reports {org_id, project_id, branch} — not null pins', async () => {
+    initializeProjectForFlow.mockImplementation(async (opts: any) => {
+      opts.onProjectResolved({ org_id: 'org_new', project_id: 'proj_new', branch: 'development' });
+    });
+
+    const result = await EXECUTORS.write_keep_lock(
+      step({ verb: 'write_keep_lock', params: { source: 'select_or_create' } }),
+      ctx(),
+    );
+
+    expect(result.outcome).toBe('ok');
+    expect(result.result).toEqual({ org_id: 'org_new', project_id: 'proj_new', branch: 'development' });
+  });
+
   test('env_header adopts the project the .env header names', async () => {
     writeFileSync(
       join(dir, '.env'),
@@ -231,6 +250,56 @@ describe('wrap_run_commands — consent is for the plan that was shown', () => {
     );
     expect(result.outcome).toBe('ok');
     expect(applyPlan).toHaveBeenCalledTimes(1);
+  });
+
+  // CAP-451: planHash now folds in ctx.projectName (capy onboard
+  // --project-name) — proving the executor side of that stays consistent
+  // with what the confirm dialog approved, not just the pure function.
+  test('rebuilds the SAME hash the confirm dialog used when ctx carries the same projectName', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+    const { buildPlan } = require('../../src/flows/onboard/plan') as typeof import('../../src/flows/onboard/plan');
+    const approvedHash = buildPlan({ targetDir: dir, projectName: 'my-app' }).planHash;
+
+    const result = await EXECUTORS.wrap_run_commands(
+      step({ verb: 'wrap_run_commands', params: { plan_hash: approvedHash, kinds: ['run-wrap'] } }),
+      ctx({ projectName: 'my-app' }),
+    );
+    expect(result.outcome).toBe('ok');
+  });
+
+  test('refuses when ctx carries a DIFFERENT projectName than what was approved — proves the hash genuinely covers it', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+    const { buildPlan } = require('../../src/flows/onboard/plan') as typeof import('../../src/flows/onboard/plan');
+    const approvedHash = buildPlan({ targetDir: dir, projectName: 'my-app' }).planHash;
+
+    const result = await EXECUTORS.wrap_run_commands(
+      step({ verb: 'wrap_run_commands', params: { plan_hash: approvedHash, kinds: ['run-wrap'] } }),
+      ctx({ projectName: 'a-different-name' }),
+    );
+    expect(result.outcome).toBe('failed');
+    expect(result.code).toBe(ERROR_CODES.PLAN_CHANGED);
+  });
+});
+
+describe('buildPlan — planHash covers projectName (CAP-451)', () => {
+  test('a given project name changes the hash; omitting it reproduces the pre-CAP-451 hash exactly', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { dev: 'vite' } }));
+    const { buildPlan } = require('../../src/flows/onboard/plan') as typeof import('../../src/flows/onboard/plan');
+    const { createHash } = require('crypto') as typeof import('crypto');
+
+    const withoutName = buildPlan({ targetDir: dir });
+    const withName = buildPlan({ targetDir: dir, projectName: 'my-app' });
+    const withDifferentName = buildPlan({ targetDir: dir, projectName: 'other-app' });
+
+    expect(withName.planHash).not.toBe(withoutName.planHash);
+    expect(withName.planHash).not.toBe(withDifferentName.planHash);
+    // Stable serialization, not just "different from no-name": the same
+    // inputs always produce the same hash.
+    expect(buildPlan({ targetDir: dir, projectName: 'my-app' }).planHash).toBe(withName.planHash);
+    // Unchanged from the pre-CAP-451 formula (sha256 of the diffs alone) —
+    // every caller that never passes projectName gets byte-identical hashes.
+    const expectedLegacyHash = createHash('sha256').update(JSON.stringify(withoutName.diffs)).digest('hex');
+    expect(withoutName.planHash).toBe(expectedLegacyHash);
   });
 });
 
@@ -473,6 +542,49 @@ describe('authenticate — the bearer a zero-organization identity has', () => {
     // …and the reader for THIS process is scoped to it too, or the token it
     // just wrote is invisible to the very next call.
     expect(setSessionUserId).toHaveBeenCalledWith('user_written');
+  });
+});
+
+describe('authenticate — CAP-451 session_ended under --broker-ceremony', () => {
+  test('a sandboxed broker-ceremony caller gets the coded failure, never interactive escalation', async () => {
+    authenticateSilent.mockResolvedValue({
+      success: false,
+      error: 'Session expired — sign-in required',
+      error_code: 'session_ended',
+    });
+
+    const result = await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx({ brokerCeremony: true }));
+
+    expect(result).toEqual({ outcome: 'failed', code: 'AUTH_FAILED' });
+    // No fall-through to interactive OAuth — nothing to open a browser on.
+    expect(authenticate).not.toHaveBeenCalled();
+  });
+
+  test('the SAME failure, without brokerCeremony, still escalates to interactive auth (unchanged)', async () => {
+    authenticateSilent.mockResolvedValue({
+      success: false,
+      error: 'Session expired — sign-in required',
+      error_code: 'session_ended',
+    });
+    authenticate.mockResolvedValue({ success: false, error: 'declined', error_code: 'session_ended' });
+
+    const result = await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx());
+
+    expect(authenticate).toHaveBeenCalledTimes(1);
+    expect(result.outcome).toBe('failed');
+  });
+
+  test('a network failure under broker-ceremony is also refused with its own code, not just session_ended', async () => {
+    authenticateSilent.mockResolvedValue({
+      success: false,
+      error: 'Could not reach the Capy service to refresh your session',
+      error_code: 'network',
+    });
+
+    const result = await EXECUTORS.authenticate(step({ verb: 'authenticate' }), ctx({ brokerCeremony: true }));
+
+    expect(result).toEqual({ outcome: 'failed', code: 'NETWORK_ERROR' });
+    expect(authenticate).not.toHaveBeenCalled();
   });
 });
 

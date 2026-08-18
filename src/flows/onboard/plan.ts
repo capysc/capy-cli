@@ -53,6 +53,15 @@ export interface PlanInput {
   framework?: string;
   deployTargets?: string[];
   envVarNames?: string[];
+  /**
+   * CAP-451: the project name `capy onboard --project-name` / the MCP tool's
+   * `project_name` param carries. Folded into `planHash` (below) so a
+   * rename produces a different hash and re-opens consent, the same way any
+   * other plan change does — display-only otherwise, and absent by default,
+   * so a caller that never passes it (every pre-CAP-451 call site) gets the
+   * exact same hash as before this field existed.
+   */
+  projectName?: string;
 }
 
 export interface PlanDeployTarget {
@@ -97,7 +106,14 @@ export function buildPlan(input: PlanInput): OnboardPlan {
   const cliChecks = checkClis(recommendedClis);
 
   const deployTargets: PlanDeployTarget[] = targets.map((t) => ({ target: t.target, label: t.label, cli: t.cli, autoWire: t.autoWire }));
-  const planHash = createHash('sha256').update(JSON.stringify(diffs)).digest('hex');
+  // Stable serialization: `diffs` alone when there is no project name (byte-
+  // identical to every pre-CAP-451 caller, so their hashes are unchanged),
+  // otherwise `diffs` plus the name under its own key — never interpolated
+  // into the diffs array itself, so the two inputs can never collide.
+  const hashInput = input.projectName
+    ? JSON.stringify({ diffs, project_name: input.projectName })
+    : JSON.stringify(diffs);
+  const planHash = createHash('sha256').update(hashInput).digest('hex');
   const planId = randomUUID();
   const confirmDialog = renderDialog(input, diffs, connectors, deployTargets, cliChecks);
 
