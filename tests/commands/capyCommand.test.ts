@@ -105,6 +105,18 @@ mock.module('../../src/ui/syncScreens', () => ({
   }),
   showSyncStatusInBrowser: mock(async () => 'http://127.0.0.1:1/s/not-served'),
 }));
+// The branch-picker browser screen. Mocked so a test that DOES reach it (a
+// bug — a broker-ceremony run must never get here, see the `resolveActiveBranch`
+// tests below) fails loudly on a fake response rather than actually binding a
+// loopback server and hanging the test runner.
+const chooseBranchInBrowserCalls: unknown[] = [];
+mock.module('../../src/ui/branchScreens', () => ({
+  chooseBranchInBrowser: mock(async (opts: unknown) => {
+    chooseBranchInBrowserCalls.push(opts);
+    return { branch: 'development', cancelled: false };
+  }),
+  createBranchInBrowser: mock(async () => ({ branch: 'development', cancelled: false })),
+}));
 mock.module('../../src/ui/spinner', () => ({
   default: (text: string) => ({
     start: () => ({
@@ -1326,6 +1338,310 @@ describe('CapyCommand', () => {
       expect(choiceValues).toContain('retrieve_pinned');
 
       consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+  });
+
+  describe('resolveActiveBranch — broker-ceremony refuses instead of opening a loopback picker', () => {
+    // No local signal at all (no .env header, no .capy/branch) and more than
+    // one server branch — the exact shape that used to fall into
+    // `promptPick` and, under `--web`, bind a loopback server nothing in a
+    // sandboxed broker run can answer.
+    const mockProjectState = {
+      initialized: true,
+      hasKeepFile: false,
+      hasEnvFile: false,
+      projectName: 'test-project',
+      projectId: 'proj-123',
+      organizationId: 'org-123',
+    };
+
+    beforeEach(() => {
+      mockProjectManager.readActiveBranch.mockReturnValue(null);
+      mockFileManager.readEnvMeta.mockReturnValue({});
+      mockProjectManager.readSyncState.mockReturnValue(null);
+      mockServiceClient.listBranches.mockResolvedValue([
+        { id: 'b1', name: 'development', project_id: 'proj-123', is_protected: false },
+        { id: 'b2', name: 'main', project_id: 'proj-123', is_protected: true },
+      ]);
+      chooseBranchInBrowserCalls.length = 0;
+    });
+
+    test('web:true + broker-ceremony: coded refusal, no loopback server, no human text printed', async () => {
+      const brokerCommand = new CapyCommand({ web: true, brokerCeremony: true });
+      // Same field `syncProject` sets before calling `resolveActiveBranch` on
+      // a flow-driven run — set directly here to isolate this one method.
+      (brokerCommand as any).noWizardStops = true;
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      await expect(
+        (brokerCommand as any).resolveActiveBranch(mockProjectState, false),
+      ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+
+      // No loopback picker was ever opened — the real bug this guards against.
+      expect(chooseBranchInBrowserCalls).toEqual([]);
+      // Refused before printing anything a human-facing terminal would show.
+      expect(consoleSpy).not.toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+
+    test('web:false + broker-ceremony: same coded refusal, never falls through to inquirer', async () => {
+      const brokerCommand = new CapyCommand({ brokerCeremony: true });
+      (brokerCommand as any).noWizardStops = true;
+
+      // The shared inquirer.prompt mock's call count accumulates across every
+      // test in this file, so a plain `toHaveBeenCalled()` on it would be
+      // meaningless here — swap in a fresh counter for the duration of this
+      // one test instead, same as every other test in this file that needs
+      // to know whether ITS run reached inquirer.
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      let promptCallCount = 0;
+      (inquirer as any).prompt = async () => {
+        promptCallCount++;
+        return {};
+      };
+
+      try {
+        await expect(
+          (brokerCommand as any).resolveActiveBranch(mockProjectState, false),
+        ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+      }
+
+      expect(chooseBranchInBrowserCalls).toEqual([]);
+      expect(promptCallCount).toBe(0);
+    });
+
+    test('noWizardStops OMITTED (plain --web run): still opens the browser picker, unaffected', async () => {
+      const webCommand = new CapyCommand({ web: true } as any);
+
+      const branch = await (webCommand as any).resolveActiveBranch(mockProjectState, false);
+
+      expect(branch).toBe('development');
+      expect(chooseBranchInBrowserCalls.length).toBe(1);
+    });
+  });
+
+  describe('syncProject — conflict resolution gate keys off brokerCeremony alone (item 2)', () => {
+    const { createHash } = require('crypto');
+    const hash = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 16);
+
+    const remoteVars: Record<string, string> = {
+      API_KEY: 'sk_test_123',
+      DB_URL: 'postgres://localhost/app',
+    };
+    const staleHashes: Record<string, string> = {
+      API_KEY: 'aaaabbbbccccdddd',
+      DB_URL: 'eeeeffff00001111',
+    };
+    const makeKeep = (hashes: Record<string, string>) => ({
+      version: '3.0',
+      org_id: 'org-123',
+      project_id: 'proj-123',
+      project_name: 'test-project',
+      variables: Object.fromEntries(
+        Object.entries(hashes).map(([k, h]) => [k, [{ branch: 'development', resource_id: `dev:${k}`, value_hash: h }]])
+      ),
+    });
+
+    const mockProjectState = {
+      initialized: true,
+      hasKeepFile: true,
+      hasEnvFile: true,
+      projectName: 'test-project',
+      projectId: 'proj-123',
+      organizationId: 'org-123',
+      activeBranch: 'development',
+    };
+
+    beforeEach(() => {
+      mockProjectManager.readActiveBranch.mockReturnValue('development');
+      mockAuthService.authenticateSilent.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        _auth_method: 'cached',
+      });
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+      });
+      // Local .env matches remote — pinned is stale, so a diff exists and
+      // the conflict-resolution gate is reached.
+      mockFileManager.readEnvFile.mockReturnValue(remoteVars);
+      mockFileManager.parseEnvContent.mockReturnValue(remoteVars);
+      mockFileManager.decryptValue.mockImplementation((v: string) => v);
+      mockFileManager.readEnvMeta.mockReturnValue({ org_id: 'org-123', project_id: 'proj-123' });
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(staleHashes));
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: 'encrypted',
+        keep_hash: 'a'.repeat(64),
+      });
+      chooseBranchInBrowserCalls.length = 0;
+    });
+
+    test('brokerCeremony:true, web:false: coded refusal — used to fall through to inquirer and hang on piped stdin', async () => {
+      const brokerCommand = new CapyCommand({ brokerCeremony: true });
+
+      // Fresh counter for this test only — see the resolveActiveBranch test
+      // above for why the shared inquirer.prompt mock's call count can't be
+      // asserted on directly.
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      let promptCallCount = 0;
+      (inquirer as any).prompt = async () => {
+        promptCallCount++;
+        return {};
+      };
+
+      try {
+        await expect(
+          (brokerCommand as any).syncProject(mockProjectState),
+        ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+      }
+
+      expect(promptCallCount).toBe(0);
+    });
+
+    test('brokerCeremony:true, web:true: same coded refusal, no loopback conflict resolver bound', async () => {
+      const brokerCommand = new CapyCommand({ web: true, brokerCeremony: true });
+
+      await expect(
+        (brokerCommand as any).syncProject(mockProjectState),
+      ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+    });
+
+    test('brokerCeremony OMITTED, web:false (plain TTY): unaffected — still resolves via inquirer', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      let sawActionPrompt = false;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        if (q?.name === 'action') sawActionPrompt = true;
+        return { action: 'skip' };
+      };
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {
+        // 'skip' may throw after the menu — only reachability is under test.
+      }
+
+      expect(sawActionPrompt).toBe(true);
+
+      consoleSpy.mockRestore();
+      (inquirer as any).prompt = origPrompt;
+    });
+  });
+
+  describe('syncProject — --json stdout purity (item 3): human() routes to stderr, never stdout', () => {
+    const { createHash } = require('crypto');
+    const hash = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 16);
+
+    const remoteVars: Record<string, string> = {
+      API_KEY: 'sk_test_123',
+      DB_URL: 'postgres://localhost/app',
+    };
+    const staleHashes: Record<string, string> = {
+      API_KEY: 'aaaabbbbccccdddd',
+      DB_URL: 'eeeeffff00001111',
+    };
+    const makeKeep = (hashes: Record<string, string>) => ({
+      version: '3.0',
+      org_id: 'org-123',
+      project_id: 'proj-123',
+      project_name: 'test-project',
+      variables: Object.fromEntries(
+        Object.entries(hashes).map(([k, h]) => [k, [{ branch: 'development', resource_id: `dev:${k}`, value_hash: h }]])
+      ),
+    });
+
+    const mockProjectState = {
+      initialized: true,
+      hasKeepFile: true,
+      hasEnvFile: true,
+      projectName: 'test-project',
+      projectId: 'proj-123',
+      organizationId: 'org-123',
+      activeBranch: 'development',
+    };
+
+    beforeEach(() => {
+      mockProjectManager.readActiveBranch.mockReturnValue('development');
+      mockAuthService.authenticateSilent.mockResolvedValue({
+        success: true,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        _auth_method: 'cached',
+      });
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token-123',
+        refresh_token: 'refresh-123',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org-123',
+        user_id: 'user-456',
+      });
+      mockFileManager.readEnvFile.mockReturnValue(remoteVars);
+      mockFileManager.parseEnvContent.mockReturnValue(remoteVars);
+      mockFileManager.decryptValue.mockImplementation((v: string) => v);
+      mockFileManager.readEnvMeta.mockReturnValue({ org_id: 'org-123', project_id: 'proj-123' });
+      mockProjectManager.readKeepFile.mockReturnValue(makeKeep(staleHashes));
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        env_content: 'encrypted',
+        keep_hash: 'a'.repeat(64),
+      });
+    });
+
+    afterEach(async () => {
+      const { setOnboardJsonMode } = await import('../../src/ui/webMode');
+      setOnboardJsonMode(false);
+    });
+
+    test('a broker-ceremony sync that hits a conflict under --json fails with zero stdout writes — the flow layer owns the one JSON object', async () => {
+      const { setOnboardJsonMode } = await import('../../src/ui/webMode');
+      setOnboardJsonMode(true);
+
+      const brokerCommand = new CapyCommand({ brokerCeremony: true });
+      const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      await expect(
+        (brokerCommand as any).syncProject(mockProjectState),
+      ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+
+      // displayHeader alone used to write ~30 raw console.log lines before
+      // this fix — none of them may reach stdout under --json.
+      expect(logSpy).not.toHaveBeenCalled();
+
+      logSpy.mockRestore();
+    });
+
+    test('a plain (non-json) sync with the same conflict still prints its progress to stdout, unaffected', async () => {
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async () => ({ action: 'skip' });
+      const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      try {
+        await (capyCommand as any).syncProject(mockProjectState);
+      } catch {
+        // 'skip' may throw after the menu — only stdout routing is under test.
+      }
+
+      expect(logSpy.mock.calls.length).toBeGreaterThan(0);
+
+      logSpy.mockRestore();
       (inquirer as any).prompt = origPrompt;
     });
   });

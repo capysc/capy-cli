@@ -711,6 +711,77 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     expect(reports[1].last_step?.result).toEqual({ org_id: 'org-from-marker' });
   });
 
+  // Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): org-create failing on
+  // the Keep page (or the CLI) leaves a ceremony settled 'ok' with NO org.
+  // Reporting that upstream would let the flow advance into the zero-org
+  // refusal (capyCommand.ts's `noWizardStops` gate) with no way back to
+  // Keep. The driver must instead re-issue the SAME connection as a fresh
+  // screen — never a single `/next` call reporting this as done.
+  test('a settled "done" marker with NO orgId re-issues a fresh screen for the SAME connection, never reports upstream', async () => {
+    const keypair = mintConnectionKeypair();
+    const ceremonyDir = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-target-'));
+
+    // Seeded as if the worker's ceremony resolved (session created) but
+    // org-create did not — 'done', no `orgId` field at all.
+    writeCeremonyMarker(ceremonyDir, {
+      state: 'done',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-noorg-1#r=x`,
+      connectionId: 'conn-noorg-1',
+      createdAt: Date.now(),
+      targetDir: ceremonyDir,
+    });
+
+    const sandboxStep = envelope({
+      kind: 'screen',
+      screen: 'sandbox_session',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-noorg-1`,
+      params: { connection_id: 'conn-noorg-1', user_code: 'BCDF-GHJK' },
+    });
+    const { transport, calls: callCount } = fakeTransport([sandboxStep]);
+    const { map, calls } = recordingExecutors();
+
+    const spawnCalls: Array<{ command: string; args: string[] }> = [];
+    const fakeSpawnImpl = ((command: string, args: string[]) => {
+      spawnCalls.push({ command, args });
+      return {
+        stdin: { write: () => true, end: () => undefined },
+        unref: () => undefined,
+      } as unknown as ReturnType<typeof import('child_process').spawn>;
+    }) as typeof import('child_process').spawn;
+
+    let result: Awaited<ReturnType<typeof runOnboardFlow>>;
+    try {
+      result = await runOnboardFlow({
+        targetDir: ceremonyDir,
+        transport,
+        executors: map,
+        observe: observeStub(),
+        authMode: 'broker_ceremony',
+        clientPubkey: keypair.publicKeyB64,
+        brokerCeremonyKeypair: keypair,
+        serviceUrl: 'https://api.test.invalid',
+        flowSecret: 'flow-secret-noorg-1',
+        ceremonySpawnImpl: fakeSpawnImpl,
+        ceremonyResolveCommand: () => ({ command: 'node', args: ['cli-entry.js'] }),
+      });
+    } finally {
+      rmSync(ceremonyDir, { recursive: true, force: true });
+    }
+
+    // A screen, not a refusal — the SAME connection, ready for another
+    // attempt at creating the org on Keep.
+    expect(result.step.kind).toBe('screen');
+    expect(result.step.screen).toBe('sandbox_session');
+    expect(result.step.params.connection_id).toBe('conn-noorg-1');
+    // Never advanced past this step: no executor ran, and the service was
+    // never told this outcome (still just the one `/next` that returned the
+    // original screen — the retry is entirely local).
+    expect(calls).toEqual([]);
+    expect(callCount()).toBe(1);
+    // A fresh worker WAS spawned for another attempt.
+    expect(spawnCalls.length).toBe(1);
+  });
+
   test('the SAME screen, with no brokerCeremonyKeypair, still stops exactly as before (additive-only)', async () => {
     const sandboxStep = envelope({
       kind: 'screen',

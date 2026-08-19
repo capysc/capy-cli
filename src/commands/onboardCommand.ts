@@ -18,9 +18,9 @@
 import { isLocalOnly } from '../config/profileConfig';
 import { CapyError, ERROR_CODES, CliOptions } from '../types/index';
 import { debug } from '../ui/debug';
-import { FlowClient } from '../flows/client';
+import { FlowClient, FlowHttpError } from '../flows/client';
 import { ProjectManager } from '../core/projectManager';
-import { FlowContractError, FlowStep } from '../flows/validate';
+import { FLOW_CONTRACT_VERSION, FlowContractError, FlowStep } from '../flows/validate';
 import { runOnboardFlow, confirmOnboardPlan } from '../flows/onboard/driver';
 import { buildPlan } from '../flows/onboard/plan';
 import { readEnvKeys } from '../flows/onboard/edits';
@@ -45,7 +45,13 @@ export interface OnboardOptions extends CliOptions {
   brokerCeremony?: boolean;
   /** The project name to create with, skipping the interactive name prompt. In the plan hash. */
   projectName?: string;
-  /** Answer a confirm dialog: `--confirm <plan_hash> --accepted true|false`. */
+  /**
+   * Answer a confirm dialog: `--accepted true|false`. `--confirm <plan_hash>`
+   * is now OPTIONAL — when omitted, the plan_hash this process confirms with
+   * is computed locally (see `runOnboardCommand`'s own doc, Bug A) instead of
+   * requiring the caller to echo one back. `accepted` is the actual gate for
+   * "this invocation answers a dialog" — `confirm` alone answers nothing.
+   */
   confirm?: string;
   accepted?: boolean;
   /**
@@ -167,18 +173,52 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   const token = await getToken();
 
   // Answering a dialog is a separate invocation: record it, then re-drive so
-  // the table decides what the approval unlocked.
-  if (options.confirm) {
+  // the table decides what the approval unlocked. Gated on `--accepted`
+  // being PRESENT (not on `--confirm`): the hash is now optional — see below.
+  if (options.accepted !== undefined) {
     if (!options.flowId) {
       throw new CapyError(
         'Answering a plan dialog needs the flow it belongs to: pass --flow-id.',
         ERROR_CODES.INVALID_FORMAT,
       );
     }
-    await confirmOnboardPlan(transport, options.flowId, options.confirm, options.accepted === true, {
-      secret: options.flowSecret,
-      token,
-    });
+    // Bug A (CAPY-ONBOARD-SESSION-DUMP.md §3): `--confirm <planHash>` is now
+    // OPTIONAL. Requiring a caller to echo the hash back verbatim meant the
+    // hash had to round-trip through whatever sits between this process and
+    // the human — including a model, whose CLIENT can (and does: Cursor,
+    // confirmed) redact high-entropy strings out of tool results before the
+    // model ever reads them. When no `--confirm` is given, this process
+    // computes the SAME plan_hash locally (`planPayload`, below) that it
+    // already posted at flow-creation time for this exact target_dir/
+    // project_name, and confirms with that — its own value, never something
+    // that had to survive a round trip. A caller that still passes an
+    // explicit hash (the TTY path, or any future caller) is unaffected.
+    const planHash = options.confirm ?? (planPayload(targetDir, options.projectName).plan_hash as string);
+    try {
+      await confirmOnboardPlan(transport, options.flowId, planHash, options.accepted === true, {
+        secret: options.flowSecret,
+        token,
+      });
+    } catch (err) {
+      // The service refused this confirm because the plan it holds no
+      // longer matches the hash offered — the human approved a plan that
+      // has since moved (edited on disk, or a caller offering a hash it
+      // never actually saw for this instance, e.g. a redacted sentinel).
+      // This used to escape uncaught: past `runOnboardCommand` entirely (this
+      // whole block sits BEFORE the try/catch below), into index.ts's generic
+      // `displayErrorAndExit`, which prints prose to STDOUT unconditionally —
+      // exactly the "Onboarding did not return a result (exit 1).\nFlow
+      // request failed: CONFLICT_RESOLUTION (HTTP 409)." an MCP caller saw
+      // instead of a step it could act on. Caught here instead and turned
+      // into the SAME shape any other `blocked` step already is: coded,
+      // structured, and — in `--json` mode — still exactly one JSON object
+      // on stdout.
+      if (err instanceof FlowHttpError && err.status === 409) {
+        await reportPlanChanged(options, options.flowId);
+        return;
+      }
+      throw err;
+    }
   }
 
   // The plan and the compat findings are computed LOCALLY — names, paths and
@@ -270,6 +310,44 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     }
     throw err;
   }
+}
+
+/**
+ * A confirm the service refused with HTTP 409: the plan it holds moved out
+ * from under the hash offered (a stale re-approval, a directory edited since
+ * the dialog was shown, or a caller — Cursor's model, redacting a high-entropy
+ * string it mistook for a secret — that could never have offered the real
+ * hash in the first place). Reported exactly like any other `blocked` step
+ * this run could have stopped on: coded, never the raw HTTP prose, and — in
+ * `--json` mode — still exactly the one object on stdout the whole run
+ * promises. The remedy is the same one every other stale-plan case gets: call
+ * `capy_onboard`/`capy onboard` again with no `--confirm` to fetch the fresh
+ * plan and ask the human again. This run's own previous approval no longer
+ * applies — the caller must not silently re-show the old plan as if nothing
+ * happened.
+ */
+async function reportPlanChanged(options: OnboardOptions, flowId: string): Promise<void> {
+  const step: FlowStep = {
+    contract_version: FLOW_CONTRACT_VERSION,
+    flow_id: flowId,
+    flow_type: 'onboard',
+    step_id: `${flowId}-confirm-conflict`,
+    kind: 'blocked',
+    resumed: false,
+    reason: 'plan_changed',
+    params: {},
+  };
+  if (options.json) {
+    const out: OnboardJson = { flow_id: flowId, resumed: false, step, executed: [] };
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
+  // Same rendering renderInteractive's own `blocked` branch uses (console.error
+  // + exit 1) — this is a TTY/`--web` fallback path, not the json-purity fix
+  // `human()` exists for, so it stays byte-identical to that existing branch.
+  const { describeBlocked } = await import('../flows/onboard/copy');
+  console.error(`\n${describeBlocked('plan_changed')}`);
+  process.exitCode = 1;
 }
 
 /**

@@ -78,3 +78,30 @@ export function setOnboardJsonMode(on: boolean): void {
 export function isOnboardJsonMode(): boolean {
   return onboardJsonMode;
 }
+
+/**
+ * A line meant for a human, not for a `--json` consumer's parser.
+ *
+ * `capy onboard --json` promises exactly one JSON object on stdout (this
+ * module's doc, and `onboardCommand.ts`'s own). The flow-driven init path
+ * reuses the SAME `runInitialization` the plain interactive `capy` command
+ * has always used, and that function is full of `console.log` progress
+ * lines ('Welcome to Capy', 'No organization found...', etc.) written for a
+ * terminal that is not there under `--broker-ceremony --json` — an agent
+ * capturing stdout got that prose prepended to (and sometimes instead of)
+ * the JSON envelope, because `console.log` always writes to stdout
+ * regardless of who is listening.
+ *
+ * This is the one place those lines are allowed to change stream: identical
+ * to `console.log` for every caller (the plain TTY path, unaffected), but
+ * routed to stderr when `isOnboardJsonMode()` is true, so stdout stays pure
+ * JSON exactly like the spinner (`ui/spinner.ts`) already does off the same
+ * non-TTY signal.
+ */
+export function human(...args: unknown[]): void {
+  if (onboardJsonMode) {
+    console.error(...args);
+    return;
+  }
+  console.log(...args);
+}

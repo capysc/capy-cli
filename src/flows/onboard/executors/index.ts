@@ -350,7 +350,12 @@ export const wrapRunCommands: Executor = async (step, ctx) => {
  */
 export const encryptEnv: Executor = async (_step, ctx) => {
   const { CapyCommand } = await import('../../../commands/capyCommand');
-  const command = new CapyCommand({ envPath: ctx.envPath, web: ctx.web }, ctx.devMode);
+  // `brokerCeremony` (Bug D residual): `syncForFlow` -> `syncProject` has its
+  // own interactive-auth fallback and browser conflict-resolution wizard,
+  // neither of which `initializeProjectForFlow`'s `noWizardStops` covers —
+  // that field is scoped to ONE call this executor never makes. See
+  // `CliOptions.brokerCeremony`'s own doc.
+  const command = new CapyCommand({ envPath: ctx.envPath, web: ctx.web, brokerCeremony: ctx.brokerCeremony }, ctx.devMode);
   const pm = new ProjectManager(ctx.targetDir);
   return run(
     async () => {

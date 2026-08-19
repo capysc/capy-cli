@@ -1,4 +1,5 @@
 import ora from '../ui/spinner';
+import { human } from '../ui/webMode';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
@@ -196,8 +197,15 @@ export class CapyCommand {
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
       promptPick: async (branches, defaultName) => {
+        // CAP-451: a broker-ceremony run has no TTY and no local browser —
+        // picking a branch is a human-only stop. Refuse before binding a
+        // loopback server or printing anything, same as every other
+        // wizard stop under noWizardStops.
+        if (this.noWizardStops) {
+          this.refuseWizardStop();
+        }
         const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
-        console.log('\nNo branch is checked out in this directory yet.');
+        human('\nNo branch is checked out in this directory yet.');
         if (this.options.web) {
           // The compiled branch list, which is the same listing `capy checkout`
           // serves. It marks protection off `is_protected` — the terminal
@@ -508,7 +516,7 @@ export class CapyCommand {
     wizard: import('../ui/initWizardScreen').InitWizardSession | null,
   ): Promise<void> {
     this.debug('initializeProject start', { cwd: process.cwd() });
-    console.log('Welcome to Capy\n');
+    human('Welcome to Capy\n');
 
     // Check if sync-state has an org hint (e.g. from a recent `capy redeem`)
     const syncState = this.projectManager.readSyncState();
@@ -570,7 +578,21 @@ export class CapyCommand {
     const currentOrg = orgs.find(o => o.id === currentOrgId);
 
     if (orgs.length === 0) {
-      console.log('\nNo organization found. Let\'s create one.');
+      // CAP-451: a zero-org identity under `--broker-ceremony` hits this
+      // branch just as often as the org-picker branch below does (a fresh
+      // account with nothing to pick from at all), and it is the SAME class
+      // of human-only stop `refuseWizardStop`'s own doc already names ("an
+      // org-create wizard"). This branch used to call `createNewOrganization`
+      // unconditionally — no gate — which is exactly what let a sandboxed
+      // caller with no browser fall into the org-create wizard's loopback
+      // server (`this.options.web` was still true from the outer `--web`
+      // flag, `noWizardStops` notwithstanding). Checked BEFORE anything else
+      // in this branch, same as the `pinnedOrgId`-then-`noWizardStops`-then-
+      // `wizard` order below.
+      if (this.noWizardStops) {
+        this.refuseWizardStop();
+      }
+      human('\nNo organization found. Let\'s create one.');
       // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
       // Wave-B org-less token — flag-gated, and a no-op (org creation is
       // byte-identical) when the flag is off or no such token was captured.
@@ -958,7 +980,7 @@ export class CapyCommand {
 
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
-    console.log('> .gitignore updated (added .env, .capy/)');
+    human('> .gitignore updated (added .env, .capy/)');
 
     // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
     try {
@@ -1034,8 +1056,8 @@ export class CapyCommand {
         const displayNames = varNames.length > 5
           ? varNames.slice(0, 5).join(', ') + ', etc.'
           : varNames.join(', ');
-        console.log(`\nFound .env with ${localVarCount} secrets:`);
-        console.log(`  ${displayNames}`);
+        human(`\nFound .env with ${localVarCount} secrets:`);
+        human(`  ${displayNames}`);
 
         // The user already chose their initial branch above — push the
         // existing .env to that branch. (Previously we re-prompted for a
@@ -1083,8 +1105,8 @@ export class CapyCommand {
         }
 
         if (!confirmEncrypt) {
-          console.log(`\nSkipped. Your .env was not modified.`);
-          console.log(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
+          human(`\nSkipped. Your .env was not modified.`);
+          human(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
           return;
         }
 
@@ -1167,13 +1189,13 @@ export class CapyCommand {
           // Install git hooks
           this.installGitHooks();
 
-          console.log(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
-          console.log(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
-          console.log(`See: https://docs.capy.sc/using/running-your-app`);
-          console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
+          human(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
+          human(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
+          human(`See: https://docs.capy.sc/using/running-your-app`);
+          human(`\nRun ${B('capy push')} to share your secrets with teammates.`);
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
-          console.log(`You can run ${B('capy')} again to retry syncing`);
+          human(`You can run ${B('capy')} again to retry syncing`);
           // This is the one failure that happens after the last question, and
           // the terminal path swallows it and carries on — which under --web
           // used to mean the run ended with `finish()` and the page drew a
@@ -1190,16 +1212,16 @@ export class CapyCommand {
           });
         }
       } else {
-        console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
-        console.log('to share them with your team.');
+        human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+        human('to share them with your team.');
 
         // Install git hooks
         this.installGitHooks();
       }
     } else {
       wizard?.record({ localEnvCount: 0 });
-      console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
-      console.log('to share them with your team.');
+      human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+      human('to share them with your team.');
 
       // Install git hooks
       this.installGitHooks();
@@ -1468,9 +1490,9 @@ export class CapyCommand {
     const gap = 3;
     const maxLen = infoWidth + gap + capyWidth + 2;
 
-    console.log('');
-    console.log(grey('Capy CLI'));
-    console.log(grey('\u250c' + '\u2500'.repeat(maxLen) + '\u2510'));
+    human('');
+    human(grey('Capy CLI'));
+    human(grey('\u250c' + '\u2500'.repeat(maxLen) + '\u2510'));
 
     const totalRows = Math.max(info.length, capy.length);
     for (let i = 0; i < totalRows; i++) {
@@ -1496,11 +1518,11 @@ export class CapyCommand {
         const bg = blackBg[row]?.has(col) ? '\x1b[48;2;0;0;0m' : '';
         return `${bg}\x1b[38;2;${r};${g};${b}m${ch}\x1b[0m`;
       }).join('');
-      console.log(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right, i)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
+      human(`${grey('\u2502')} ${left}${' '.repeat(leftPad)}${' '.repeat(gap)}${furry(right, i)}${' '.repeat(rightPad + 1)}${grey('\u2502')}`);
     }
 
-    console.log(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
-    console.log('');
+    human(grey('\u2514' + '\u2500'.repeat(maxLen) + '\u2518'));
+    human('');
   }
 
   private async syncProject(projectState: ProjectState): Promise<void> {
@@ -1559,6 +1581,19 @@ export class CapyCommand {
             `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
             ERROR_CODES.NETWORK_ERROR,
             { detail: refreshFailure.detail }
+          );
+        }
+        // Bug D residual: a sandboxed `--broker-ceremony` caller has no
+        // browser to send loopback OAuth to — `this.authService.authenticate`
+        // below would otherwise bind one nothing can answer. Refused with a
+        // coded failure instead; the flow's own `authenticate` step (which
+        // DOES have a broker-driven ceremony) is what re-establishes a
+        // session for a broker-ceremony run, not this ordinary sync path.
+        if (this.options.brokerCeremony) {
+          spinner.fail('Session needs interactive sign-in');
+          throw new CapyError(
+            'This step needs interactive sign-in the flow cannot do here.',
+            ERROR_CODES.FLOW_STOP_UNREACHABLE,
           );
         }
         if (refreshFailure?.reason === 'session_ended') {
@@ -1786,12 +1821,12 @@ export class CapyCommand {
             const candidates = branches.filter(b => !b.is_protected);
             if (candidates.length > 0) {
               const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
-              console.log('\nBranches you can switch to:');
+              human('\nBranches you can switch to:');
               for (const b of candidates) {
-                console.log(`  ${B(b.name)}`);
+                human(`  ${B(b.name)}`);
               }
               const suggested = candidates[0].name;
-              console.log(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);
+              human(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);
             }
           } catch (listErr) {
             this.debugError('listBranches failed during 403 recovery', listErr);
@@ -1830,7 +1865,7 @@ export class CapyCommand {
     });
 
     if (diffs.length === 0) {
-      console.log('Everything is up to date!');
+      human('Everything is up to date!');
       // Always re-encrypt local .env
       const finalKeep = this.projectManager.readKeepFile();
       this.fileManager.writeEncryptedEnvFile(localPlaintext, encryptionKey, undefined, finalKeep, branch);
@@ -1904,12 +1939,12 @@ export class CapyCommand {
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
-    console.log(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
+    human(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
 
     // Display comparison table (TTY only — the --web resolver renders its own).
     if (!this.options.web) {
       this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
-      console.log(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
+      human(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
     }
 
     // Build menu options based on what columns are visible
@@ -1985,6 +2020,19 @@ export class CapyCommand {
     // When the conflict is resolved in the browser we already hold the final env;
     // we tag the action 'individual' and skip the TTY ResolveTable below.
     let webFinalEnv: Record<string, string> | undefined;
+    // Bug D residual: a sandboxed `--broker-ceremony` caller has no browser to
+    // send a conflict resolver to — `resolveConflictViaBrowser` below binds a
+    // loopback server nothing can answer — and no TTY either, so falling
+    // through to `inquirer.prompt` hangs the process on piped stdin. This must
+    // gate on `brokerCeremony` alone: a broker run without `--web` still has
+    // neither a browser nor a TTY, so `this.options.web` is not a precondition
+    // for the refusal.
+    if (this.options.brokerCeremony) {
+      throw new CapyError(
+        'This step needs a human decision the flow cannot make for it here.',
+        ERROR_CODES.FLOW_STOP_UNREACHABLE,
+      );
+    }
     if (this.options.web) {
       // The browser now answers the same two-level question the terminal asks,
       // so the whole-run menu goes to it verbatim — same wording, same order,
@@ -2003,7 +2051,7 @@ export class CapyCommand {
         },
       );
       if (resolved === null) {
-        console.log('\n  No changes applied.');
+        human('\n  No changes applied.');
         // A closed window changed nothing on disk, and the report says exactly
         // that rather than reporting a sync that did not happen.
         await this.reportSyncResult(projectState, branch, {
@@ -2061,7 +2109,7 @@ export class CapyCommand {
           }
         } catch (err) {
           this.debugError('retrieve_pinned fetch failed', err);
-          console.log('Could not fetch pinned values from remote.');
+          human('Could not fetch pinned values from remote.');
           return;
         }
       }
@@ -2164,7 +2212,7 @@ export class CapyCommand {
     });
 
     const changeCount = Object.keys(pushedVars).length;
-    console.log(`\n> keep.lock updated (${diffs.length} changes)`);
+    human(`\n> keep.lock updated (${diffs.length} changes)`);
 
     // Every action above rewrites pins (retrieve updates them, commit pushes
     // them) — commit the new pin so the team's keep.lock travels with git.
@@ -2172,7 +2220,7 @@ export class CapyCommand {
     autoCommitKeep(branch);
 
     if (action === 'commit_local') {
-      console.log(
+      human(
         localMode
           ? `\nStored ${changeCount} change(s) locally (local-only mode).`
           : `\nPushed ${changeCount} change(s) to Keep.`,
@@ -2295,8 +2343,8 @@ export class CapyCommand {
 
     // Print header
     const headerLine = headers.map((h, i) => h.padEnd(colWidths[i])).join('');
-    console.log(`  ${headerLine}`);
-    console.log(`  ${'─'.repeat(colWidths.reduce((a, b) => a + b, 0))}`);
+    human(`  ${headerLine}`);
+    human(`  ${'─'.repeat(colWidths.reduce((a, b) => a + b, 0))}`);
 
     // Print rows
     for (const diff of diffs) {
@@ -2311,7 +2359,7 @@ export class CapyCommand {
         cols.push(remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : '-');
       }
       const row = cols.map((c, i) => padCell(c, colWidths[i])).join('');
-      console.log(`  ${row}`);
+      human(`  ${row}`);
     }
   }
 

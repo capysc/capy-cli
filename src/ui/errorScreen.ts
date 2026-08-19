@@ -119,9 +119,19 @@ export async function displayErrorAndExit(
   }
 
   const output = renderError(error, context);
-  if (output) console.log(output);
-
-  const { isWebMode, isBrokerCeremonyMode } = await import('./webMode');
+  const { isWebMode, isBrokerCeremonyMode, isOnboardJsonMode } = await import('./webMode');
+  // `capy onboard --json` promises exactly one JSON object on stdout. An
+  // exception that escapes every coded-failure handler upstream (a network
+  // blip, a truly unexpected throw) still lands here, and `console.log`
+  // always writes to stdout regardless of who is listening — the same class
+  // of bug `human()` (webMode.ts) exists to close in the ordinary print
+  // path. Belt and suspenders: route this one to stderr under json mode too,
+  // so a caller parsing stdout never has to guess whether this run's failure
+  // arrived as prose or as JSON.
+  if (output) {
+    if (isOnboardJsonMode()) console.error(output);
+    else console.log(output);
+  }
   // CAP-451: broker-ceremony wins over --web here too — a sandboxed caller
   // has no local browser to send an error page to, and the URL a
   // `capy:handoff-url` event would carry points at a server nothing in this
