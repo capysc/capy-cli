@@ -615,6 +615,14 @@ export class CapyCommand {
         // `authenticate` step's own result, or a `select_organization`
         // screen upstream of this call) — no picker to show.
         orgId = this.pinnedOrgId;
+      } else if (this.noWizardStops && orgs.length === 1) {
+        // CAP-469: with exactly one organization, there is no human decision
+        // to make. The free tier is single-org by construction, so this is the
+        // dominant broker-ceremony path: fetch the list from the service (the
+        // source of truth), then proceed with that sole org. This resolves a
+        // dead-end at the org picker even when the session is already scoped to
+        // the only organization.
+        orgId = orgs[0].id;
       } else if (this.noWizardStops) {
         // No default to fall back to: which org to use is a genuine human
         // decision this source has no way to make. Checked BEFORE `wizard`

@@ -2086,6 +2086,131 @@ describe('CapyCommand', () => {
       expect(promptCalled).toBe(false);
     });
 
+    // CAP-469 regression: with exactly one organization, broker-ceremony should
+    // use it without refusal, since there is no human decision to make.
+    test('no pinned org, exactly 1 org, noWizardStops (--broker-ceremony): proceeds with the sole org, no refusal', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-single',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [
+          { id: 'org-single', workos_org_id: 'workos-single', name: 'Single Org' },
+        ],
+        _refresh_token: 'refresh-token',
+      });
+
+      mockAuthService.getToken.mockReturnValue({
+        access_token: 'token', refresh_token: 'refresh',
+        expires_at: Date.now() + 3600000, organization_id: 'org-single',
+        user_id: 'user-456',
+      });
+
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-single', project_id: 'proj-1', project_name: 'test', created: true,
+      });
+      mockServiceClient.listProjects.mockResolvedValue([]);
+
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      let promptCalled = false;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalled = true;
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await (capyCommand as any).initializeProjectForFlow({ projectName: 'flow-project', noWizardStops: true });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      // Should NOT call refuseWizardStop: inquirer prompt should not be called
+      expect(promptCalled).toBe(false);
+      // Should initialize the project with the sole org
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-single');
+    });
+
+    // CAP-469 regression: multiple orgs with noWizardStops must still refuse,
+    // since the session scope is a stale default and must not decide.
+    test('no pinned org, >1 orgs, noWizardStops (--broker-ceremony): still refuses with FLOW_STOP_UNREACHABLE', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: '',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [
+          { id: 'org-A', workos_org_id: 'workos-A', name: 'Org Alpha' },
+          { id: 'org-B', workos_org_id: 'workos-B', name: 'Org Beta' },
+        ],
+        _refresh_token: 'refresh-token',
+      });
+
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      let promptCalled = false;
+      (inquirer as any).prompt = async (questions: any) => {
+        promptCalled = true;
+        return {};
+      };
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        await expect(
+          (capyCommand as any).initializeProjectForFlow({ projectName: 'flow-project', noWizardStops: true }),
+        ).rejects.toMatchObject({ code: ERROR_CODES.FLOW_STOP_UNREACHABLE });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+      expect(promptCalled).toBe(false);
+    });
+
+    // CAP-469: even with exactly one org, a plain TTY run (noWizardStops omitted)
+    // must still show the picker to be byte-identical with pre-CAP-469 behavior.
+    test('no pinned org, exactly 1 org, noWizardStops OMITTED (TTY): the org picker still shows (byte-identical)', async () => {
+      mockAuthService.authenticate.mockResolvedValue({
+        success: true,
+        organization_id: 'org-single',
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [
+          { id: 'org-single', workos_org_id: 'workos-single', name: 'Single Org' },
+        ],
+        _refresh_token: 'refresh-token',
+      });
+
+      const promptCalls: any[] = [];
+      const inquirer = (await import('inquirer')).default;
+      const origPrompt = inquirer.prompt;
+      (inquirer as any).prompt = async (questions: any) => {
+        const q = Array.isArray(questions) ? questions[0] : questions;
+        promptCalls.push(q);
+        if (q.name === 'orgId') return { orgId: 'org-single' };
+        return {};
+      };
+
+      mockServiceClient.initializeProject.mockResolvedValue({
+        org_id: 'org-single', project_id: 'proj-1', project_name: 'test', created: true,
+      });
+      mockServiceClient.listProjects.mockResolvedValue([]);
+
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        // noWizardStops is omitted (defaults to false/undefined)
+        await (capyCommand as any).initializeProjectForFlow({ projectName: 'flow-project' });
+      } finally {
+        (inquirer as any).prompt = origPrompt;
+        consoleSpy.mockRestore();
+      }
+
+      // TTY run MUST show the org picker, even with one org
+      expect(promptCalls.some((q) => q?.name === 'orgId')).toBe(true);
+      expect(mockServiceClient.initializeProject).toHaveBeenCalledWith('flow-project', 'org-single');
+    });
+
     // The regression this test guards: a plain, interactive `capy onboard`
     // (flow-driven, but with a real TTY — noWizardStops left false/unset)
     // must keep its EXISTING inquirer prompt, never the coded refusal.
