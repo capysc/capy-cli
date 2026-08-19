@@ -216,6 +216,7 @@
                     "DECRYPT_KEY_MISMATCH",
                     "NO_ACTIVE_BRANCH",
                     "KEY_NOT_ON_DEVICE",
+                    "FLOW_STOP_UNREACHABLE",
                     "PLAN_CHANGED",
                     "BOOTSTRAP_DECLINED",
                     "BOOTSTRAP_EXPIRED",
@@ -227,7 +228,7 @@
                     "BOOTSTRAP_BAD_PAYLOAD",
                     "BOOTSTRAP_CREATE_FAILED"
                   ],
-                  "description": "Closed set. Every member except KEY_NOT_ON_DEVICE is an existing code: ERROR_CODES (the service's error codes, packages/cli/src/types/index.ts:317-347) or AUTH_CODES (the agent server's auth outcome codes). KEY_NOT_ON_DEVICE is minted here because today that condition is thrown as a generic AUTH_FAILED (capyCommand.ts:552) and would be indistinguishable from an ordinary auth failure \u2014 mint the code where the condition is first known rather than sniff it downstream. The mapping from code to blocked reason is in steps.json `blocked_reasons[].from_codes`."
+                  "description": "Closed set. Every member except KEY_NOT_ON_DEVICE and FLOW_STOP_UNREACHABLE is an existing code: ERROR_CODES (the service's error codes, packages/cli/src/types/index.ts:317-347) or AUTH_CODES (the agent server's auth outcome codes). KEY_NOT_ON_DEVICE is minted here because today that condition is thrown as a generic AUTH_FAILED (capyCommand.ts:552) and would be indistinguishable from an ordinary auth failure \u2014 mint the code where the condition is first known rather than sniff it downstream. FLOW_STOP_UNREACHABLE is reported when an agent-driven run reaches a stop only a human could answer (no TTY, no local browser) \u2014 it is a real step outcome, and omitting it from this enum turned an actionable coded failure into a schema rejection. The mapping from code to blocked reason is in steps.json `blocked_reasons[].from_codes`."
                 }
               }
             },

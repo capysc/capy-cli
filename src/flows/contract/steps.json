@@ -495,6 +495,15 @@
       ],
       "doc": "capyCommand.ts:517-559 \u2014 the account can reach the org but this device holds no org key, after the Case-C unlock attempt failed. Carries no URL; the remedy is an invite code the user gets out of band. The code is minted for this condition rather than reusing the generic AUTH_FAILED it is thrown as today."
     },
+    "human_stop_unreachable": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "The run reached a stop only a human could answer and this caller has neither a TTY nor a local browser. The next call may produce an interactive step if the flow supplies what was missing (a pinned org, a screen) or the human runs `capy` in a terminal.",
+      "from_codes": [
+        "FLOW_STOP_UNREACHABLE"
+      ],
+      "doc": "An agent-driven run reached a stop only a human could answer, but this caller has neither a TTY nor a local browser. The remedy is for the flow to supply what was missing (a pinned org, a screen) or for the human to run `capy` in a terminal \u2014 never a blind retry of the same call."
+    },
     "keep_lock_corrupt": {
       "source": "step_outcome",
       "terminal": false,

@@ -22,6 +22,8 @@ const BLOCKED_COPY: Record<string, string> = {
   key_not_on_device:
     "You have access to this organization, but its encryption key has never been transferred to this device.\n" +
     'Ask an owner for an invite code, then run `capy redeem <code>`.',
+  human_stop_unreachable:
+    'This step needs a decision only a human can make, and this run has no terminal or browser to ask in. Run `capy` in your terminal to finish it.',
   keep_lock_corrupt: 'keep.lock could not be read. It is tracked in git — restore it, then run this again.',
   foreign_encrypted_values:
     'Your .env holds values encrypted with a different project\'s key. Remove or replace them, then run this again.',
