@@ -42,6 +42,7 @@ import { SessionStorageBackend } from '../../auth/session/backend';
 import { FileSessionStorageBackend } from '../../auth/session/fileBackend';
 import { generatePrfSalt } from '../../auth/deviceKey/crypto';
 import { emitHandoffUrlEvent } from '../../ui/handoffEvent';
+import { isOnboardJsonMode } from '../../ui/webMode';
 import { codeFor, codeForSilentAuthFailure, StepResult } from './executors';
 import { FlowStep } from '../validate';
 
@@ -583,7 +584,26 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
   // `../../auth/deviceKey/onboarding.ts` for the bug this closes.
   const prfSalt = generatePrfSalt();
   const url = buildCeremonyUrl(opts.step, opts.machineName, prfSalt);
-  emitHandoffUrlEvent(url, 'onboard');
+  const userCode = typeof opts.step.params.user_code === 'string' ? opts.step.params.user_code : undefined;
+  emitHandoffUrlEvent(url, 'onboard', { userCode });
+
+  // This ceremony has no human line above it the way `onboardCommand.ts`'s
+  // `surfaceScreen` does — under `--broker-ceremony` the caller is normally
+  // a sandboxed agent reading only the event above. The one exception: a
+  // human running `--broker-ceremony` directly at a real terminal (unlikely,
+  // but nothing stops it) still needs the RFC-8628 anti-phishing code
+  // (`shared/flows/steps.json`'s `sandbox_session.params_schema.user_code`:
+  // "not a secret and MUST be shown to the human") to compare against the
+  // page — printed with the EXACT SAME copy function `surfaceScreen` uses,
+  // never a second hand-written copy of that sentence to drift out of sync.
+  // Gated on the SAME TTY check `emitHandoffUrlEvent` itself uses, and
+  // additionally never in `--json` mode, so an agent's parseable stdout
+  // never gets an extra human-prose line it didn't ask for.
+  if (process.stdout.isTTY && !isOnboardJsonMode()) {
+    const { describeScreen } = await import('./copy');
+    console.log(`\n${describeScreen('sandbox_session', opts.step.params)}`);
+    console.log(`\n  ${url}\n`);
+  }
 
   const connectionId = opts.step.params.connection_id as string;
   const poll = await pollSandboxConnection({

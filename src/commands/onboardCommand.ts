@@ -104,8 +104,11 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   // just in the `if` above) so it's also correctly OFF on a re-drive that
   // dropped the flag (there is none today, but this is the same posture
   // `setWebMode` takes: always assert the CURRENT invocation's value).
-  const { setBrokerCeremonyMode } = await import('../ui/webMode');
+  const { setBrokerCeremonyMode, setOnboardJsonMode } = await import('../ui/webMode');
   setBrokerCeremonyMode(options.brokerCeremony === true);
+  // Read by `runSandboxCeremony` so its rare human-at-a-TTY code print (see
+  // that file's doc) never lands inside a `--json` caller's parseable output.
+  setOnboardJsonMode(options.json === true);
   const { AuthService } = await import('../auth/authService');
   // The bearer the flow API sees. Absent = an anonymous instance, which is the
   // ordinary state of a first run in a fresh repo.
