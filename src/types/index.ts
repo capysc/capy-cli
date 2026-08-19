@@ -275,6 +275,18 @@ export interface CliOptions {
    *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
    *  interactive decision is actually reached (a clean sync stays terminal-only). */
   web?: boolean;
+  /**
+   * CAP-451 / Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): this instance
+   * is driven by `capy onboard --broker-ceremony` — a sandboxed caller with
+   * no local browser and no TTY. Threaded onto `CapyCommand`'s constructor
+   * options (distinct from `initializeProjectForFlow`'s own `noWizardStops`,
+   * which is scoped to ONE call and reset in a `finally`) so methods reached
+   * OUTSIDE that call — `syncProject`'s own interactive-auth fallback and its
+   * browser conflict-resolution wizard, both reachable from the `encrypt_env`
+   * executor via `syncForFlow` — can refuse a loopback stop instead of
+   * opening one nothing can answer. Never set outside the flow-driven path.
+   */
+  brokerCeremony?: boolean;
 }
 
 export interface ProjectInitResult {

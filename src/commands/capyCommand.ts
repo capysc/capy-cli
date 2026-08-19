@@ -1,4 +1,5 @@
 import ora from '../ui/spinner';
+import { human } from '../ui/webMode';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
@@ -508,7 +509,7 @@ export class CapyCommand {
     wizard: import('../ui/initWizardScreen').InitWizardSession | null,
   ): Promise<void> {
     this.debug('initializeProject start', { cwd: process.cwd() });
-    console.log('Welcome to Capy\n');
+    human('Welcome to Capy\n');
 
     // Check if sync-state has an org hint (e.g. from a recent `capy redeem`)
     const syncState = this.projectManager.readSyncState();
@@ -570,7 +571,21 @@ export class CapyCommand {
     const currentOrg = orgs.find(o => o.id === currentOrgId);
 
     if (orgs.length === 0) {
-      console.log('\nNo organization found. Let\'s create one.');
+      // CAP-451: a zero-org identity under `--broker-ceremony` hits this
+      // branch just as often as the org-picker branch below does (a fresh
+      // account with nothing to pick from at all), and it is the SAME class
+      // of human-only stop `refuseWizardStop`'s own doc already names ("an
+      // org-create wizard"). This branch used to call `createNewOrganization`
+      // unconditionally — no gate — which is exactly what let a sandboxed
+      // caller with no browser fall into the org-create wizard's loopback
+      // server (`this.options.web` was still true from the outer `--web`
+      // flag, `noWizardStops` notwithstanding). Checked BEFORE anything else
+      // in this branch, same as the `pinnedOrgId`-then-`noWizardStops`-then-
+      // `wizard` order below.
+      if (this.noWizardStops) {
+        this.refuseWizardStop();
+      }
+      human('\nNo organization found. Let\'s create one.');
       // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
       // Wave-B org-less token — flag-gated, and a no-op (org creation is
       // byte-identical) when the flag is off or no such token was captured.
@@ -958,7 +973,7 @@ export class CapyCommand {
 
     // Update gitignore
     this.fileManager.ensureCapyGitignore();
-    console.log('> .gitignore updated (added .env, .capy/)');
+    human('> .gitignore updated (added .env, .capy/)');
 
     // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
     try {
@@ -1034,8 +1049,8 @@ export class CapyCommand {
         const displayNames = varNames.length > 5
           ? varNames.slice(0, 5).join(', ') + ', etc.'
           : varNames.join(', ');
-        console.log(`\nFound .env with ${localVarCount} secrets:`);
-        console.log(`  ${displayNames}`);
+        human(`\nFound .env with ${localVarCount} secrets:`);
+        human(`  ${displayNames}`);
 
         // The user already chose their initial branch above — push the
         // existing .env to that branch. (Previously we re-prompted for a
@@ -1083,8 +1098,8 @@ export class CapyCommand {
         }
 
         if (!confirmEncrypt) {
-          console.log(`\nSkipped. Your .env was not modified.`);
-          console.log(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
+          human(`\nSkipped. Your .env was not modified.`);
+          human(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
           return;
         }
 
@@ -1167,13 +1182,13 @@ export class CapyCommand {
           // Install git hooks
           this.installGitHooks();
 
-          console.log(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
-          console.log(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
-          console.log(`See: https://docs.capy.sc/using/running-your-app`);
-          console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
+          human(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
+          human(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
+          human(`See: https://docs.capy.sc/using/running-your-app`);
+          human(`\nRun ${B('capy push')} to share your secrets with teammates.`);
         } catch (syncError: any) {
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
-          console.log(`You can run ${B('capy')} again to retry syncing`);
+          human(`You can run ${B('capy')} again to retry syncing`);
           // This is the one failure that happens after the last question, and
           // the terminal path swallows it and carries on — which under --web
           // used to mean the run ended with `finish()` and the page drew a
@@ -1190,16 +1205,16 @@ export class CapyCommand {
           });
         }
       } else {
-        console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
-        console.log('to share them with your team.');
+        human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+        human('to share them with your team.');
 
         // Install git hooks
         this.installGitHooks();
       }
     } else {
       wizard?.record({ localEnvCount: 0 });
-      console.log(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
-      console.log('to share them with your team.');
+      human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+      human('to share them with your team.');
 
       // Install git hooks
       this.installGitHooks();
@@ -1559,6 +1574,19 @@ export class CapyCommand {
             `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
             ERROR_CODES.NETWORK_ERROR,
             { detail: refreshFailure.detail }
+          );
+        }
+        // Bug D residual: a sandboxed `--broker-ceremony` caller has no
+        // browser to send loopback OAuth to — `this.authService.authenticate`
+        // below would otherwise bind one nothing can answer. Refused with a
+        // coded failure instead; the flow's own `authenticate` step (which
+        // DOES have a broker-driven ceremony) is what re-establishes a
+        // session for a broker-ceremony run, not this ordinary sync path.
+        if (this.options.brokerCeremony) {
+          spinner.fail('Session needs interactive sign-in');
+          throw new CapyError(
+            'This step needs interactive sign-in the flow cannot do here.',
+            ERROR_CODES.FLOW_STOP_UNREACHABLE,
           );
         }
         if (refreshFailure?.reason === 'session_ended') {
@@ -1985,6 +2013,18 @@ export class CapyCommand {
     // When the conflict is resolved in the browser we already hold the final env;
     // we tag the action 'individual' and skip the TTY ResolveTable below.
     let webFinalEnv: Record<string, string> | undefined;
+    // Bug D residual: a sandboxed `--broker-ceremony` caller has `this.options.web`
+    // true (the MCP always passes `--web`) but no browser to send a conflict
+    // resolver to — `resolveConflictViaBrowser` below binds a loopback server
+    // nothing can answer. Refused with a coded failure instead of opening one;
+    // there is no TTY here either, so this is a genuine stop, not a fallback
+    // to inquirer.
+    if (this.options.web && this.options.brokerCeremony) {
+      throw new CapyError(
+        'This step needs a human decision the flow cannot make for it here.',
+        ERROR_CODES.FLOW_STOP_UNREACHABLE,
+      );
+    }
     if (this.options.web) {
       // The browser now answers the same two-level question the terminal asks,
       // so the whole-run menu goes to it verbatim — same wording, same order,

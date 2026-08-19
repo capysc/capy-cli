@@ -239,7 +239,7 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     // OTHER caller (no keypair minted), still falls through to `isStopStep`
     // below unchanged.
     if (step.kind === 'screen' && step.screen === 'sandbox_session' && opts.brokerCeremonyKeypair) {
-      const prepared = await prepareCeremonyScreen({
+      const ceremonyOpts = {
         step,
         keypair: opts.brokerCeremonyKeypair,
         flowSecret: creds.secret ?? '',
@@ -249,7 +249,29 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         targetDir: opts.targetDir,
         spawnImpl: opts.ceremonySpawnImpl,
         resolveCommand: opts.ceremonyResolveCommand,
-      });
+      };
+      let prepared = await prepareCeremonyScreen(ceremonyOpts);
+
+      // Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): a ceremony can
+      // settle 'ok' with NO org — the human signed in, but org-create on the
+      // Keep page did not complete (declined, failed, or never reached).
+      // Advancing the flow from here dead-ends: the next steps run under
+      // `noWizardStops` (capyCommand.ts's zero-org gate), which REFUSES an
+      // org-create wizard rather than opening one it has no browser for —
+      // correctly, but with nothing left offering the human a way back to
+      // Keep. Instead of reporting this outcome to the service and letting
+      // the flow wander into that refusal, re-issue the SAME connection
+      // right here: `prepareCeremonyScreen`'s marker for it was just
+      // consumed (read once, deleted) by the call above, so calling it again
+      // for the identical `step` mints a fresh worker/URL for another
+      // attempt — same connection, same anti-phishing user_code, another
+      // shot at creating the org — without ever telling the service this
+      // step finished. The service still believes it is waiting on the
+      // original `sandbox_session` step, which is exactly right: it isn't
+      // done.
+      if (prepared.kind === 'settled' && prepared.outcome === 'ok' && !prepared.orgId) {
+        prepared = await prepareCeremonyScreen(ceremonyOpts);
+      }
 
       if (prepared.kind === 'screen') {
         // Stops here, same as any other screen — the URL (now carrying the
