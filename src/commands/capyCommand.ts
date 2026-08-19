@@ -279,7 +279,7 @@ export class CapyCommand {
     }
 
     if (!fileBranchIsReal) {
-      console.log(`Ignoring stale .capy/branch (${B(fileBranch)} is not a branch in this project); staying on ${B(envBranch)}.`);
+      human(`Ignoring stale .capy/branch (${B(fileBranch)} is not a branch in this project); staying on ${B(envBranch)}.`);
       this.projectManager.writeActiveBranch(envBranch);
       return envBranch;
     }

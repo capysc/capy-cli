@@ -1426,6 +1426,64 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('reconcileBranchConflict — stale .capy/branch notice routes through human() under --json', () => {
+    // .env header and .capy/branch disagree, and the .capy/branch side names
+    // no branch the server or local cache knows about — the "stale cache"
+    // shape that used to print via a raw console.log regardless of --json.
+    const mockProjectState = {
+      initialized: true,
+      hasKeepFile: false,
+      hasEnvFile: true,
+      projectName: 'test-project',
+      projectId: 'proj-123',
+      organizationId: 'org-123',
+    };
+
+    beforeEach(() => {
+      mockFileManager.readEnvMeta.mockReturnValue({ branch: 'main' });
+      mockProjectManager.readActiveBranch.mockReturnValue('stale-branch');
+      mockProjectManager.readKeepFile.mockReturnValue(undefined);
+      mockProjectManager.readSyncState.mockReturnValue(null);
+      mockServiceClient.listBranches.mockResolvedValue([
+        { id: 'b1', name: 'main', project_id: 'proj-123', is_protected: false },
+      ]);
+    });
+
+    afterEach(async () => {
+      const { setOnboardJsonMode } = await import('../../src/ui/webMode');
+      setOnboardJsonMode(false);
+    });
+
+    test('under --json: zero stdout writes, notice goes to stderr instead, .capy/branch is rebuilt from .env', async () => {
+      const { setOnboardJsonMode } = await import('../../src/ui/webMode');
+      setOnboardJsonMode(true);
+
+      const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+
+      const branch = await (capyCommand as any).resolveActiveBranch(mockProjectState, false);
+
+      expect(branch).toBe('main');
+      expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('main');
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalled();
+
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    test('plain (non-json) run: the same notice still prints to stdout, unaffected', async () => {
+      const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+
+      const branch = await (capyCommand as any).resolveActiveBranch(mockProjectState, false);
+
+      expect(branch).toBe('main');
+      expect(logSpy).toHaveBeenCalled();
+
+      logSpy.mockRestore();
+    });
+  });
+
   describe('syncProject — conflict resolution gate keys off brokerCeremony alone (item 2)', () => {
     const { createHash } = require('crypto');
     const hash = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 16);
