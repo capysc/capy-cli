@@ -2,4 +2,22 @@
 
 // Dev-only CLI wrapper with mock auth enabled.
 // NOT included in production npm package.
+//
+// `capy-dev` IS the staging/dev entrypoint: it talks to the staging service
+// and staging Keep with the rollout flags on, and keeps its state in
+// ~/.capy-dev — with NO env, profile, or config from the caller. Anything the
+// caller does set in the environment still wins (explicit > default). The
+// production `bin/capy` is untouched by this.
+const STAGING_DEFAULTS = {
+  CAPY_API_URL: 'https://staging-api.capy.sc',
+  CAPY_KEEP_ORIGIN: 'https://staging-keep.capy.sc',
+  CAPY_FLOW_ONBOARD: '1',
+  CAPY_DEVICE_KEYS: '1',
+  CAPY_KEEP_SCREENS: '1',
+  CAPY_KEEP_LOGIN_BRIDGE: '1',
+};
+for (const [key, value] of Object.entries(STAGING_DEFAULTS)) {
+  if (process.env[key] === undefined || process.env[key] === '') process.env[key] = value;
+}
+
 require('../dist/index-dev.js');

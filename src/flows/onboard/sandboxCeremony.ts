@@ -63,6 +63,16 @@ export const CEREMONY_CODES = {
   SERVICE_ERROR: 'BOOTSTRAP_SERVICE_ERROR',
   BAD_ENVELOPE: 'BOOTSTRAP_BAD_ENVELOPE',
   NETWORK_ERROR: 'BOOTSTRAP_NETWORK_ERROR',
+  /**
+   * `ceremonyWorker.ts`'s own failure mode, not `runSandboxCeremony`'s: the
+   * detached worker never actually started (ENOENT, EACCES, ... from
+   * `spawn`) — there is no ceremony to time out, decline, or poll at all.
+   * Reported the same way as any other coded ceremony failure so the driver
+   * (and the flow service) fold it into this step's outcome exactly like a
+   * genuinely-run-but-failed ceremony, rather than crashing the process that
+   * was about to print the `--json` envelope.
+   */
+  SPAWN_FAILED: 'BOOTSTRAP_SPAWN_FAILED',
 } as const;
 
 /** 15-minute ceiling — long enough for a human to notice a notification on another device. */
@@ -568,6 +578,15 @@ export interface SandboxCeremonyOptions {
    * just authenticated.
    */
   targetDir: string;
+  /**
+   * The exact PRF salt already embedded in the URL a caller showed the human
+   * — set by the detached ceremony worker (`ceremonyWorker.ts`), whose
+   * parent minted this salt BEFORE spawning it and built the human-facing
+   * URL from it. Optional and defaults to a fresh mint so every existing
+   * caller (this function's own unit tests included, which build their own
+   * URL out of band and never pass this) is byte-for-byte unaffected.
+   */
+  presetPrfSalt?: Buffer;
 }
 
 export interface SandboxCeremonyOutcome {
@@ -582,7 +601,7 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
   // via applyFirstRun) the canned enrollment's wrap KEK — never minted a
   // second time independently. See `enrollDoor`'s doc in
   // `../../auth/deviceKey/onboarding.ts` for the bug this closes.
-  const prfSalt = generatePrfSalt();
+  const prfSalt = opts.presetPrfSalt ?? generatePrfSalt();
   const url = buildCeremonyUrl(opts.step, opts.machineName, prfSalt);
   const userCode = typeof opts.step.params.user_code === 'string' ? opts.step.params.user_code : undefined;
   emitHandoffUrlEvent(url, 'onboard', { userCode });
