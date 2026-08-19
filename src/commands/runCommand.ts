@@ -3,6 +3,8 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { FileManager } from '../files/fileManager';
 import { debug } from '../ui/debug';
+import { getShellPinnedEnv } from '../config/prodPins';
+import { resolveActiveUrl } from '../config/profileConfig';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -86,7 +88,12 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     let envMap: Record<string, string>;
     try {
       const { deployId, outerBlob, encryptedVars } = parseSecretsBlob(secretsBlob);
-      const apiUrl = process.env.CAPY_API_URL ?? 'https://api.capy.sc';
+      // Deployed mode used to read CAPY_API_URL straight from the environment,
+      // which meant it ignored `capy byoc` profiles even before prod stopped
+      // honoring the variable. Route it through the same resolver as every
+      // other call so a BYOC deploy target resolves the way the rest of the CLI
+      // does — profile first, then the pinned cloud default.
+      const apiUrl = resolveActiveUrl();
       debug('capy run: fetching deploy key...');
       const serviceKey = await fetchServiceKey(
         apiUrl,
@@ -109,7 +116,13 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
 
     // dotenv precedence: pre-existing process.env wins over the decrypted
     // values. Shell overrides stay sovereign.
-    const childEnv = { ...envMap, ...process.env };
+    //
+    // getShellPinnedEnv() re-supplies the CAPY_* vars the prod entrypoint
+    // stripped for itself (config/prodPins.ts), at exactly the precedence they
+    // held when they were still in process.env. `capy` ignores them; the child
+    // is a different program and may well want them — capy-mcp reads
+    // CAPY_API_URL by design.
+    const childEnv = { ...envMap, ...process.env, ...getShellPinnedEnv() };
     return spawnChild(args, childEnv);
   }
 
@@ -133,7 +146,11 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   // Merge plaintext keys with dotenv precedence (shell wins). Encrypted keys
   // are re-applied after decryption below, so they always win regardless of
   // what process.env contains.
-  const env: Record<string, string | undefined> = { ...envFromFile, ...process.env };
+  const env: Record<string, string | undefined> = {
+    ...envFromFile,
+    ...process.env,
+    ...getShellPinnedEnv(),
+  };
 
   if (toDecrypt.length === 0) {
     // Pure plaintext .env — no key required.

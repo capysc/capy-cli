@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createCipheriv, createHash, randomBytes, hkdfSync } from 'crypto';
@@ -53,10 +53,26 @@ function capy(
   const cliPath = join(__dirname, '../../dist/index.js');
   const { spawn } = require('child_process');
 
+  // The prod entrypoint pins itself to api.capy.sc and ignores an ambient
+  // CAPY_API_URL (src/config/prodPins.ts), so a test that needs to reach its
+  // fake service retargets the binary the way a BYOC operator does: a profile
+  // on disk, under a throwaway HOME. That keeps this suite pointed at the
+  // mechanism that is still supported, instead of the one that was removed.
+  const { CAPY_API_URL: fakeServiceUrl, ...restEnv } = opts.env ?? {};
+  const fakeHome = mkdtempSync(join(tmpdir(), 'capy-run-home-'));
+  if (fakeServiceUrl) {
+    mkdirSync(join(fakeHome, '.capy'), { recursive: true });
+    writeFileSync(
+      join(fakeHome, '.capy', 'config.json'),
+      JSON.stringify({ default: 'test', profiles: { test: { url: fakeServiceUrl } } }),
+    );
+  }
+
   return new Promise((resolve) => {
     const child = spawn('node', [cliPath, 'run', ...args], {
       cwd: opts.cwd ?? TEST_DIR,
-      env: { ...process.env, ...opts.env },
+      // HOME redirect also keeps these runs off the developer's real ~/.capy.
+      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome, ...restEnv },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
