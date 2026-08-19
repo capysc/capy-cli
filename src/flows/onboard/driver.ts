@@ -265,10 +265,17 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         outcome: prepared.outcome,
         code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
       });
+      // `result.org_id`, when the ceremony resolved one, so the service pins
+      // the org off THIS step exactly as it would off any other 'ok'
+      // local_action's result — without this the service never learns which
+      // org a broker-ceremony run landed on.
+      const ceremonyOrgId =
+        prepared.kind === 'settled' && prepared.outcome === 'ok' ? prepared.orgId : undefined;
       lastStep = {
         step_id: step.step_id,
         outcome: prepared.outcome,
         code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
+        result: ceremonyOrgId ? { org_id: ceremonyOrgId } : undefined,
       };
       if (prepared.outcome === 'ok') {
         // The worker wrote its own session store directly (same writer a

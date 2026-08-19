@@ -39,6 +39,7 @@ import { CreateFlowRequest, FlowTransport, NextRequest } from '../../src/flows/c
 import { OnboardObservations } from '../../src/flows/onboard/observe';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
 import { keepOrigin } from '../../src/ui/screens/keepScreens';
+import { writeCeremonyMarker } from '../../src/flows/onboard/ceremonyWorker';
 
 const FLOW_ID = 'flow-1';
 
@@ -658,6 +659,56 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     // Exactly one detached worker spawned for this connection.
     expect(spawnCalls.length).toBe(1);
     expect(spawnCalls[0].args).toContain('cli-entry.js');
+  });
+
+  test('a settled "done" marker carrying an orgId is reported to the service as this step\'s result.org_id on the NEXT /next call', async () => {
+    const keypair = mintConnectionKeypair();
+    const ceremonyDir = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-target-'));
+
+    // Seeded BEFORE the driver ever runs — mirrors the worker having already
+    // settled this exact connection in an EARLIER `capy onboard` invocation
+    // against this same directory (S1-resume-ceremony).
+    writeCeremonyMarker(ceremonyDir, {
+      state: 'done',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-org-1#r=x`,
+      connectionId: 'conn-org-1',
+      createdAt: Date.now(),
+      targetDir: ceremonyDir,
+      orgId: 'org-from-marker',
+    });
+
+    const sandboxStep = envelope({
+      kind: 'screen',
+      screen: 'sandbox_session',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-org-1`,
+      params: { connection_id: 'conn-org-1', user_code: 'BCDF-GHJK' },
+    });
+    const doneStep = envelope({ kind: 'done', params: {} });
+    const { transport, reports } = fakeTransport([sandboxStep, doneStep]);
+    const { map } = recordingExecutors();
+
+    try {
+      await runOnboardFlow({
+        targetDir: ceremonyDir,
+        transport,
+        executors: map,
+        observe: observeStub(),
+        authMode: 'broker_ceremony',
+        clientPubkey: keypair.publicKeyB64,
+        brokerCeremonyKeypair: keypair,
+        serviceUrl: 'https://api.test.invalid',
+        flowSecret: 'flow-secret-org-1',
+      });
+    } finally {
+      rmSync(ceremonyDir, { recursive: true, force: true });
+    }
+
+    // The SECOND /next call is the one that reports back on the settled
+    // ceremony step — its last_step.result must carry the org the marker
+    // resolved, the same shape any other 'ok' local_action reports.
+    expect(reports.length).toBe(2);
+    expect(reports[1].last_step?.outcome).toBe('ok');
+    expect(reports[1].last_step?.result).toEqual({ org_id: 'org-from-marker' });
   });
 
   test('the SAME screen, with no brokerCeremonyKeypair, still stops exactly as before (additive-only)', async () => {

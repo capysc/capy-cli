@@ -48,6 +48,7 @@ import {
   exportConnectionPrivateKeyB64,
   importConnectionKeypair,
 } from '../../service/brokerEnvelope';
+import { getGlobalCapyDir } from '../../config/globalConfig';
 import { generatePrfSalt } from '../../auth/deviceKey/crypto';
 import { FlowStep } from '../validate';
 import {
@@ -71,6 +72,16 @@ export interface CeremonyMarker {
   userCode?: string;
   connectionId: string;
   createdAt: number;
+  /**
+   * The target dir this ceremony's flow instance is running against — not a
+   * secret, kept for the same reason the marker itself already carries
+   * `connectionId`: a human (or a future debugging pass) reading a marker in
+   * the global store, where the marker's OWN location no longer says which
+   * project it belongs to, needs it recorded on the marker itself.
+   */
+  targetDir?: string;
+  /** Set only when state is 'done' and the ceremony resolved an org. Not a secret. */
+  orgId?: string;
   /** Set only when state is 'failed'. A code, never prose. */
   code?: string;
 }
@@ -78,8 +89,21 @@ export interface CeremonyMarker {
 /** A marker older than this is treated as abandoned (worker died without writing an outcome). */
 export const CEREMONY_MARKER_STALE_MS = CEREMONY_DEADLINE_MS + 60_000;
 
-export function ceremonyMarkerPath(targetDir: string, connectionId: string): string {
-  return join(targetDir, '.capy', `ceremony-${connectionId}.json`);
+/**
+ * Markers live under the GLOBAL capy dir (`~/.capy/ceremonies/`), never under
+ * the target project directory. `prepareCeremonyScreen` used to `mkdir`
+ * `<targetDir>/.capy/` itself to hold this file — creating that directory is
+ * the FLOW's job (the `write_capy_dir` local_action, run later once the flow
+ * actually decides this directory is a Capy project), not a side effect of a
+ * ceremony that has not settled anything yet. Keyed by `connectionId` alone
+ * (globally unique — minted per flow instance by the service), so the
+ * `targetDir` param below is kept only for signature compatibility with
+ * every existing caller/test; the marker's own `targetDir` field (written by
+ * `prepareCeremonyScreen`) is the one source of truth for which project it
+ * belongs to.
+ */
+export function ceremonyMarkerPath(_targetDir: string, connectionId: string): string {
+  return join(getGlobalCapyDir(), 'ceremonies', `${connectionId}.json`);
 }
 
 function isCeremonyMarker(v: unknown): v is CeremonyMarker {
@@ -107,7 +131,10 @@ export function readCeremonyMarker(targetDir: string, connectionId: string): Cer
 
 export function writeCeremonyMarker(targetDir: string, marker: CeremonyMarker): void {
   const path = ceremonyMarkerPath(targetDir, marker.connectionId);
-  const dir = join(targetDir, '.capy');
+  // The GLOBAL `~/.capy/ceremonies/` dir, never `<targetDir>/.capy/` — see
+  // `ceremonyMarkerPath`'s own doc for why the flow, not this worker, owns
+  // creating a project's `.capy/` directory.
+  const dir = join(getGlobalCapyDir(), 'ceremonies');
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(path, JSON.stringify(marker), 'utf8');
 }
@@ -179,7 +206,7 @@ export interface PrepareCeremonyScreenOptions {
 
 export type PrepareCeremonyScreenResult =
   | { kind: 'screen'; step: FlowStep }
-  | { kind: 'settled'; outcome: 'ok' }
+  | { kind: 'settled'; outcome: 'ok'; orgId?: string }
   | { kind: 'settled'; outcome: 'failed'; code: string };
 
 /**
@@ -245,7 +272,11 @@ export async function prepareCeremonyScreen(
     // same connection id, which the service will not do once it has moved
     // the instance on.
     deleteCeremonyMarker(opts.targetDir, connectionId);
-    if (existing.state === 'done') return { kind: 'settled', outcome: 'ok' };
+    if (existing.state === 'done') {
+      return existing.orgId
+        ? { kind: 'settled', outcome: 'ok', orgId: existing.orgId }
+        : { kind: 'settled', outcome: 'ok' };
+    }
     if (existing.state === 'failed') {
       return { kind: 'settled', outcome: 'failed', code: existing.code ?? CEREMONY_CODES.SERVICE_ERROR };
     }
@@ -261,25 +292,64 @@ export async function prepareCeremonyScreen(
     userCode,
     connectionId,
     createdAt: Date.now(),
+    targetDir: opts.targetDir,
   });
 
-  spawnCeremonyWorker(
-    {
-      v: 1,
-      privateKeyB64: exportConnectionPrivateKeyB64(opts.keypair),
-      publicKeyB64: opts.keypair.publicKeyB64,
-      connectionId,
-      userCode,
-      baseUrl: opts.step.url as string,
-      flowSecret: opts.flowSecret,
-      prfSaltB64: prfSalt.toString('base64'),
-      targetDir: opts.targetDir,
-      serviceUrl: opts.serviceUrl,
-      devMode: opts.devMode,
-      machineName: opts.machineName,
-    },
-    { spawnImpl: opts.spawnImpl, resolveCommand: opts.resolveCommand },
-  );
+  // `spawnCeremonyWorker` can fail two ways: a SYNCHRONOUS throw out of
+  // `spawnImpl` itself (some platforms/Node versions surface a bad command
+  // this way; the injectable `spawnImpl` a test uses to reproduce ENOENT
+  // deterministically also throws synchronously), or an ASYNC 'error' event
+  // on the returned child (the more common real-world ENOENT/EACCES shape).
+  // Before this fix, the synchronous case propagated straight out of this
+  // function AFTER the 'pending' marker above had already been written —
+  // crashing the caller (`driver.ts`) with a stack trace instead of the
+  // `--json` envelope it is contractually never allowed to skip, and leaving
+  // a marker on disk with no worker ever running to settle it.
+  let child: ReturnType<typeof spawnCeremonyWorker>;
+  try {
+    child = spawnCeremonyWorker(
+      {
+        v: 1,
+        privateKeyB64: exportConnectionPrivateKeyB64(opts.keypair),
+        publicKeyB64: opts.keypair.publicKeyB64,
+        connectionId,
+        userCode,
+        baseUrl: opts.step.url as string,
+        flowSecret: opts.flowSecret,
+        prfSaltB64: prfSalt.toString('base64'),
+        targetDir: opts.targetDir,
+        serviceUrl: opts.serviceUrl,
+        devMode: opts.devMode,
+        machineName: opts.machineName,
+      },
+      { spawnImpl: opts.spawnImpl, resolveCommand: opts.resolveCommand },
+    );
+  } catch {
+    deleteCeremonyMarker(opts.targetDir, connectionId);
+    return { kind: 'settled', outcome: 'failed', code: CEREMONY_CODES.SPAWN_FAILED };
+  }
+
+  // Best-effort: an async 'error' event fires AFTER this function has
+  // already returned the 'screen' step below (nothing here awaits the
+  // worker), so it cannot change what THIS call reports. Rewriting the
+  // marker to 'failed' is what stops the NEXT `prepareCeremonyScreen` call
+  // for this same connection from reading a 'pending' marker forever — it
+  // instead reads the coded failure above and folds it into the driver loop
+  // exactly like a genuinely-run-but-failed ceremony. Guarded for test
+  // doubles that don't implement a real `ChildProcess`'s `.on`.
+  if (typeof (child as { on?: unknown }).on === 'function') {
+    child.on('error', () => {
+      writeCeremonyMarker(opts.targetDir, {
+        state: 'failed',
+        url,
+        userCode,
+        connectionId,
+        createdAt: Date.now(),
+        targetDir: opts.targetDir,
+        code: CEREMONY_CODES.SPAWN_FAILED,
+      });
+    });
+  }
 
   return { kind: 'screen', step: { ...opts.step, url } };
 }
@@ -333,6 +403,11 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
   };
 
   let outcomeCode: string | undefined;
+  // Not a secret — the org id the ceremony resolved, so `driver.ts` can
+  // report `result:{org_id}` back to the service on the NEXT `prepareCeremonyScreen`
+  // encounter of this connection, the same way any other 'ok' local_action
+  // already does. See `runSandboxCeremony`'s own `result.result.org_id`.
+  let orgId: string | undefined;
   let ok = false;
   try {
     const outcome = await runSandboxCeremony({
@@ -347,6 +422,7 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
     });
     ok = outcome.result.outcome === 'ok';
     outcomeCode = outcome.result.code;
+    orgId = outcome.result.result?.org_id;
   } catch {
     ok = false;
     outcomeCode = CEREMONY_CODES.SERVICE_ERROR;
@@ -358,6 +434,7 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
     userCode: payload.userCode,
     connectionId: payload.connectionId,
     createdAt: Date.now(),
-    ...(ok ? {} : { code: outcomeCode ?? CEREMONY_CODES.SERVICE_ERROR }),
+    targetDir: payload.targetDir,
+    ...(ok ? (orgId ? { orgId } : {}) : { code: outcomeCode ?? CEREMONY_CODES.SERVICE_ERROR }),
   });
 }

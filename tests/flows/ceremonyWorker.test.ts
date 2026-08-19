@@ -298,6 +298,125 @@ describe('prepareCeremonyScreen — returns the screen immediately, spawns exact
       rmSync(targetDir, { recursive: true, force: true });
     }
   });
+
+  test('a spawn that throws synchronously (ENOENT reproduced) is caught: no marker left behind, a coded failed step returned, nothing thrown', async () => {
+    const targetDir = mkdtempSync(join(require('os').tmpdir(), 'capy-ceremony-prepare-'));
+    const throwingSpawnImpl = (() => {
+      throw Object.assign(new Error('spawn capy ENOENT'), { code: 'ENOENT' });
+    }) as unknown as FakeSpawn;
+
+    try {
+      const result = await prepareCeremonyScreen({
+        step: makeStep('conn-prep-spawn-fail'),
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        targetDir,
+        spawnImpl: throwingSpawnImpl,
+        resolveCommand: () => ({ command: 'capy', args: ['onboard', '--ceremony-worker'] }),
+      });
+
+      // A coded failed step — never a thrown stack trace out of this
+      // function, and never left as a stale 'pending' marker (there is no
+      // worker running to ever settle it).
+      expect(result).toEqual({ kind: 'settled', outcome: 'failed', code: CEREMONY_CODES.SPAWN_FAILED });
+      expect(readCeremonyMarker(targetDir, 'conn-prep-spawn-fail')).toBeNull();
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a spawn that fails ASYNCHRONOUSLY (a real ChildProcess emitting "error") rewrites the marker to failed so the NEXT call reports it, without touching what THIS call already returned', async () => {
+    const targetDir = mkdtempSync(join(require('os').tmpdir(), 'capy-ceremony-prepare-'));
+    const { EventEmitter } = await import('events');
+
+    const asyncFailingSpawnImpl = (() => {
+      const child = new EventEmitter() as unknown as ReturnType<FakeSpawn> & { stdin: unknown };
+      Object.assign(child, {
+        stdin: { write: () => true, end: () => undefined },
+        unref: () => undefined,
+      });
+      // Fires on the next tick — after spawnCeremonyWorker (and
+      // prepareCeremonyScreen) have already returned the 'screen' step.
+      queueMicrotask(() => (child as unknown as EventEmitter).emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })));
+      return child;
+    }) as unknown as FakeSpawn;
+
+    try {
+      const first = await prepareCeremonyScreen({
+        step: makeStep('conn-prep-async-spawn-fail'),
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        targetDir,
+        spawnImpl: asyncFailingSpawnImpl,
+        resolveCommand: () => ({ command: 'capy', args: ['onboard', '--ceremony-worker'] }),
+      });
+      // The FIRST call still sees the ordinary screen — the async error
+      // hasn't fired yet at the point this function returns.
+      expect(first.kind).toBe('screen');
+
+      // Let the queued microtask (the 'error' event) run.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const marker = readCeremonyMarker(targetDir, 'conn-prep-async-spawn-fail');
+      expect(marker?.state).toBe('failed');
+      expect(marker?.code).toBe(CEREMONY_CODES.SPAWN_FAILED);
+
+      // A LATER call for the same connection now reports the coded failure
+      // instead of "pending" forever.
+      const second = await prepareCeremonyScreen({
+        step: makeStep('conn-prep-async-spawn-fail'),
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        targetDir,
+        spawnImpl: fakeSpawnRecorder().spawnImpl,
+        resolveCommand: () => ({ command: 'node', args: ['x'] }),
+      });
+      expect(second).toEqual({ kind: 'settled', outcome: 'failed', code: CEREMONY_CODES.SPAWN_FAILED });
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  test('never creates `.capy/` inside the target project directory — markers live under the GLOBAL capy dir only', async () => {
+    const { existsSync } = await import('fs');
+    const targetDir = mkdtempSync(join(require('os').tmpdir(), 'capy-ceremony-prepare-no-dotcapy-'));
+    const { spawnImpl } = fakeSpawnRecorder();
+
+    try {
+      const result = await prepareCeremonyScreen({
+        step: makeStep('conn-prep-no-dotcapy'),
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        targetDir,
+        spawnImpl,
+        resolveCommand: () => ({ command: 'node', args: ['x'] }),
+      });
+
+      expect(result.kind).toBe('screen');
+      // Ceremony preparation — even though it just wrote a pending marker —
+      // never creates the project's own `.capy/`. That directory is the
+      // FLOW's job (write_capy_dir), reached later, only once the flow has
+      // actually decided this directory is a Capy project.
+      expect(existsSync(join(targetDir, '.capy'))).toBe(false);
+
+      // The marker is still readable through the ordinary API (now backed
+      // by the global `~/.capy/ceremonies/` dir).
+      const marker = readCeremonyMarker(targetDir, 'conn-prep-no-dotcapy');
+      expect(marker?.state).toBe('pending');
+      expect(marker?.targetDir).toBe(targetDir);
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -361,6 +480,29 @@ describe('runCeremonyWorker — reuses the existing runSandboxCeremony/applyFirs
       const marker = readCeremonyMarker(targetDir, 'conn-worker-1');
       expect(marker?.state).toBe('done');
       expect(marker?.code).toBeUndefined();
+      // The "1 org, key on device" rail (`none`) still resolves an org — the
+      // worker records it (non-secret) so `prepareCeremonyScreen`'s NEXT
+      // read of this marker can report `result:{org_id}` back to the driver.
+      expect(marker?.orgId).toBe('org_1');
+      // The marker itself carries which project this ceremony belongs to —
+      // needed now that its FILE location no longer says so (it lives under
+      // the global `~/.capy/ceremonies/`, keyed only by connection id).
+      expect(marker?.targetDir).toBe(targetDir);
+
+      // A LATER `prepareCeremonyScreen` encounter of the same connection
+      // (the driver's own resume path — CAP-451 S1) reads this same marker
+      // back and reports the resolved org, not just a bare "ok".
+      const prepared = await prepareCeremonyScreen({
+        step: makeStep('conn-worker-1'),
+        keypair,
+        flowSecret: 'flow-secret-worker-1',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        targetDir,
+        spawnImpl: fakeSpawnRecorder().spawnImpl,
+        resolveCommand: () => ({ command: 'node', args: ['x'] }),
+      });
+      expect(prepared).toEqual({ kind: 'settled', outcome: 'ok', orgId: 'org_1' });
     } finally {
       rmSync(targetDir, { recursive: true, force: true });
     }

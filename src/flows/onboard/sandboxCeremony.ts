@@ -63,6 +63,16 @@ export const CEREMONY_CODES = {
   SERVICE_ERROR: 'BOOTSTRAP_SERVICE_ERROR',
   BAD_ENVELOPE: 'BOOTSTRAP_BAD_ENVELOPE',
   NETWORK_ERROR: 'BOOTSTRAP_NETWORK_ERROR',
+  /**
+   * `ceremonyWorker.ts`'s own failure mode, not `runSandboxCeremony`'s: the
+   * detached worker never actually started (ENOENT, EACCES, ... from
+   * `spawn`) — there is no ceremony to time out, decline, or poll at all.
+   * Reported the same way as any other coded ceremony failure so the driver
+   * (and the flow service) fold it into this step's outcome exactly like a
+   * genuinely-run-but-failed ceremony, rather than crashing the process that
+   * was about to print the `--json` envelope.
+   */
+  SPAWN_FAILED: 'BOOTSTRAP_SPAWN_FAILED',
 } as const;
 
 /** 15-minute ceiling — long enough for a human to notice a notification on another device. */
