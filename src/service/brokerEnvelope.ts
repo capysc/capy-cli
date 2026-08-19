@@ -38,6 +38,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createPrivateKey,
   createPublicKey,
   diffieHellman,
   generateKeyPairSync,
@@ -74,6 +75,34 @@ export function mintConnectionKeypair(): ConnectionKeypair {
     Buffer.from(jwk.y as string, 'base64url'),
   ]);
   return { publicKeyB64: raw.toString('base64'), privateKey };
+}
+
+/**
+ * Export a connection keypair's private half as base64 PKCS8 DER — the ONE
+ * wire form this process ever puts it in, and only for handing the SAME
+ * ceremony's private key to a detached worker of its own over that worker's
+ * stdin (never argv, never a file, never an env var — see
+ * `ceremonyWorker.ts`'s module doc). Never logged, never written to disk by
+ * this function itself.
+ */
+export function exportConnectionPrivateKeyB64(keypair: ConnectionKeypair): string {
+  return (keypair.privateKey.export({ type: 'pkcs8', format: 'der' }) as Buffer).toString('base64');
+}
+
+/**
+ * The inverse of {@link exportConnectionPrivateKeyB64} — reconstructs a
+ * {@link ConnectionKeypair} from its public half (as registered with the
+ * broker at connection creation) and the private half read off a worker's
+ * own stdin. Additive: every existing caller keeps minting a fresh keypair
+ * with `mintConnectionKeypair`.
+ */
+export function importConnectionKeypair(publicKeyB64: string, privateKeyB64: string): ConnectionKeypair {
+  const privateKey = createPrivateKey({
+    key: Buffer.from(privateKeyB64, 'base64'),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  return { publicKeyB64, privateKey };
 }
 
 /**

@@ -568,6 +568,15 @@ export interface SandboxCeremonyOptions {
    * just authenticated.
    */
   targetDir: string;
+  /**
+   * The exact PRF salt already embedded in the URL a caller showed the human
+   * — set by the detached ceremony worker (`ceremonyWorker.ts`), whose
+   * parent minted this salt BEFORE spawning it and built the human-facing
+   * URL from it. Optional and defaults to a fresh mint so every existing
+   * caller (this function's own unit tests included, which build their own
+   * URL out of band and never pass this) is byte-for-byte unaffected.
+   */
+  presetPrfSalt?: Buffer;
 }
 
 export interface SandboxCeremonyOutcome {
@@ -582,7 +591,7 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
   // via applyFirstRun) the canned enrollment's wrap KEK — never minted a
   // second time independently. See `enrollDoor`'s doc in
   // `../../auth/deviceKey/onboarding.ts` for the bug this closes.
-  const prfSalt = generatePrfSalt();
+  const prfSalt = opts.presetPrfSalt ?? generatePrfSalt();
   const url = buildCeremonyUrl(opts.step, opts.machineName, prfSalt);
   const userCode = typeof opts.step.params.user_code === 'string' ? opts.step.params.user_code : undefined;
   emitHandoffUrlEvent(url, 'onboard', { userCode });

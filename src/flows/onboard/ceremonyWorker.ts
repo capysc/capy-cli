@@ -1,0 +1,363 @@
+/**
+ * The DETACHED sandbox-session ceremony worker (CAP-451 follow-up: the
+ * broker-ceremony deadlock fix).
+ *
+ * `runSandboxCeremony` (`./sandboxCeremony.ts`) is correct but was run
+ * IN-PROCESS by the driver, which meant `capy onboard --broker-ceremony
+ * --json` did not print anything — including the URL and `user_code` a
+ * human needs to finish the ceremony — until the poll settled, up to
+ * `CEREMONY_DEADLINE_MS` (15 minutes) later. A caller that awaits that
+ * process (the MCP's `capy_onboard` tool) hangs for the same span, and an
+ * MCP HOST that cannot render an elicitation has no way to ever show the
+ * human the link at all: the tool call just hangs until the host aborts it,
+ * with an empty chat. `capy_whoami`'s auth gate has the identical shape.
+ *
+ * The fix: NOTHING waits on a human inside a tool call, or inside this
+ * process's own `--broker-ceremony` invocation. `prepareCeremonyScreen` —
+ * called by `driver.ts` in place of the old inline `runSandboxCeremony` call
+ * — mints the request fragment, builds the URL exactly as before, but
+ * instead of polling itself it SPAWNS A DETACHED CHILD PROCESS (this same
+ * CLI binary, re-invoked as `onboard --ceremony-worker`) and returns
+ * immediately with the `screen` step so the ordinary `surfaceScreen` /
+ * `--json` envelope path (`onboardCommand.ts`) prints the URL and
+ * `user_code` within the same tick — no different, from the caller's
+ * perspective, than any other screen step.
+ *
+ * The worker is that same `runSandboxCeremony` — UNCHANGED, reused verbatim
+ * (only handed a `presetPrfSalt` so it runs its ceremony against the EXACT
+ * salt already embedded in the URL the human was shown, additive on
+ * `SandboxCeremonyOptions`) — running in the background, polling the
+ * connection up to its existing 15-minute deadline, and on settling (either
+ * way) writing a small, secret-free marker file under this directory's
+ * `.capy/` so the NEXT `capy onboard` invocation against the same directory
+ * can tell "still waiting" from "declined/expired/failed" from "answered"
+ * without re-polling or re-spawning.
+ *
+ * Everything that crosses the worker's stdin (private key, flow secret, PRF
+ * salt) is exactly what `runSandboxCeremony` already held in memory in the
+ * old in-process design — nothing NEW is handed to a child process that the
+ * parent did not already hold. It never rides argv (visible in `ps`), never
+ * a file, and never an environment variable (inherited by children,
+ * sometimes logged by supervisors).
+ */
+import { spawn, type ChildProcess } from 'child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import {
+  ConnectionKeypair,
+  exportConnectionPrivateKeyB64,
+  importConnectionKeypair,
+} from '../../service/brokerEnvelope';
+import { generatePrfSalt } from '../../auth/deviceKey/crypto';
+import { FlowStep } from '../validate';
+import {
+  buildCeremonyUrl,
+  CEREMONY_CODES,
+  CEREMONY_DEADLINE_MS,
+  runSandboxCeremony,
+} from './sandboxCeremony';
+
+// ---------------------------------------------------------------------------
+// 1. The marker file — secret-free, keyed by connection id
+// ---------------------------------------------------------------------------
+
+export type CeremonyMarkerState = 'pending' | 'done' | 'failed';
+
+export interface CeremonyMarker {
+  state: CeremonyMarkerState;
+  /** The exact URL (with the CLI's `#r=` fragment) already shown to the human. Not a secret. */
+  url: string;
+  /** RFC-8628 anti-phishing code — not a secret, meant to be shown. */
+  userCode?: string;
+  connectionId: string;
+  createdAt: number;
+  /** Set only when state is 'failed'. A code, never prose. */
+  code?: string;
+}
+
+/** A marker older than this is treated as abandoned (worker died without writing an outcome). */
+export const CEREMONY_MARKER_STALE_MS = CEREMONY_DEADLINE_MS + 60_000;
+
+export function ceremonyMarkerPath(targetDir: string, connectionId: string): string {
+  return join(targetDir, '.capy', `ceremony-${connectionId}.json`);
+}
+
+function isCeremonyMarker(v: unknown): v is CeremonyMarker {
+  if (typeof v !== 'object' || v === null) return false;
+  const m = v as Record<string, unknown>;
+  return (
+    (m.state === 'pending' || m.state === 'done' || m.state === 'failed') &&
+    typeof m.url === 'string' &&
+    typeof m.connectionId === 'string' &&
+    typeof m.createdAt === 'number'
+  );
+}
+
+/** Best-effort: a marker that fails to parse is treated as absent, never thrown. */
+export function readCeremonyMarker(targetDir: string, connectionId: string): CeremonyMarker | null {
+  const path = ceremonyMarkerPath(targetDir, connectionId);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    return isCeremonyMarker(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeCeremonyMarker(targetDir: string, marker: CeremonyMarker): void {
+  const path = ceremonyMarkerPath(targetDir, marker.connectionId);
+  const dir = join(targetDir, '.capy');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify(marker), 'utf8');
+}
+
+/** Best-effort cleanup once a marker has been consumed by the driver. */
+export function deleteCeremonyMarker(targetDir: string, connectionId: string): void {
+  try {
+    rmSync(ceremonyMarkerPath(targetDir, connectionId), { force: true });
+  } catch {
+    // Nothing this driver can do about an un-removable marker; the next
+    // ceremony uses a different connection id, so a leftover file is inert.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. The worker's stdin payload — never argv, never a file, never an env var
+// ---------------------------------------------------------------------------
+
+export interface CeremonyWorkerPayload {
+  v: 1;
+  privateKeyB64: string;
+  publicKeyB64: string;
+  connectionId: string;
+  userCode?: string;
+  /** The base step URL (no `#r=` fragment) — the worker rebuilds the identical fragment from `prfSaltB64`. */
+  baseUrl: string;
+  flowSecret: string;
+  prfSaltB64: string;
+  targetDir: string;
+  serviceUrl: string;
+  devMode: boolean;
+  machineName?: string;
+}
+
+function isWorkerPayload(v: unknown): v is CeremonyWorkerPayload {
+  if (typeof v !== 'object' || v === null) return false;
+  const p = v as Record<string, unknown>;
+  return (
+    p.v === 1 &&
+    typeof p.privateKeyB64 === 'string' &&
+    typeof p.publicKeyB64 === 'string' &&
+    typeof p.connectionId === 'string' &&
+    typeof p.baseUrl === 'string' &&
+    typeof p.flowSecret === 'string' &&
+    typeof p.prfSaltB64 === 'string' &&
+    typeof p.targetDir === 'string' &&
+    typeof p.serviceUrl === 'string' &&
+    typeof p.devMode === 'boolean'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 3. Parent side: ensure a worker is running, never block on it
+// ---------------------------------------------------------------------------
+
+export interface PrepareCeremonyScreenOptions {
+  step: FlowStep;
+  keypair: ConnectionKeypair;
+  flowSecret: string;
+  serviceUrl: string;
+  devMode: boolean;
+  machineName?: string;
+  targetDir: string;
+  /** Injectable for tests — defaults to `child_process.spawn` against this binary's own entry. */
+  spawnImpl?: typeof spawn;
+  /** Injectable for tests — defaults to resolving this binary's own re-invocation. */
+  resolveCommand?: () => { command: string; args: string[] };
+}
+
+export type PrepareCeremonyScreenResult =
+  | { kind: 'screen'; step: FlowStep }
+  | { kind: 'settled'; outcome: 'ok' }
+  | { kind: 'settled'; outcome: 'failed'; code: string };
+
+/**
+ * How this binary re-invokes itself as a ceremony worker. A `pkg`-packaged
+ * binary IS the interpreter (`process.execPath` alone runs it — no script
+ * path to prepend); a `bun`/`node` dev invocation needs its own entry script
+ * as the first argument, exactly as the shell originally invoked it.
+ */
+function defaultResolveCommand(): { command: string; args: string[] } {
+  const isPackaged = Boolean((process as unknown as { pkg?: unknown }).pkg);
+  const base = isPackaged ? [] : [process.argv[1]];
+  return { command: process.execPath, args: [...base, 'onboard', '--ceremony-worker'] };
+}
+
+/**
+ * Spawn the detached worker and return immediately — never awaited by the
+ * caller. `detached: true` + `unref()` lets this process (and its whole
+ * process group, when the host kills it) exit without taking the worker
+ * down with it; `stdio: ['pipe', 'ignore', 'ignore']` is the one channel the
+ * payload rides (closed immediately after the write) with no output anyone
+ * reads.
+ */
+export function spawnCeremonyWorker(
+  payload: CeremonyWorkerPayload,
+  opts: { spawnImpl?: typeof spawn; resolveCommand?: () => { command: string; args: string[] } } = {},
+): ChildProcess {
+  const spawnImpl = opts.spawnImpl ?? spawn;
+  const { command, args } = (opts.resolveCommand ?? defaultResolveCommand)();
+  const child = spawnImpl(command, args, {
+    detached: true,
+    stdio: ['pipe', 'ignore', 'ignore'],
+  });
+  child.stdin?.write(JSON.stringify(payload));
+  child.stdin?.end();
+  child.unref();
+  return child;
+}
+
+/**
+ * Called by `driver.ts` in place of the old inline `runSandboxCeremony`
+ * call. Never polls, never awaits the worker — resolves as soon as a worker
+ * is confirmed spawned (first encounter) or the existing marker has been
+ * read (every later encounter of the same connection). S1-resume-ceremony
+ * semantics: re-asking the same pending ceremony returns the SAME url and
+ * `user_code`, never mints a second connection or spawns a second worker.
+ */
+export async function prepareCeremonyScreen(
+  opts: PrepareCeremonyScreenOptions,
+): Promise<PrepareCeremonyScreenResult> {
+  const connectionId = opts.step.params.connection_id as string;
+  const userCode =
+    typeof opts.step.params.user_code === 'string' ? (opts.step.params.user_code as string) : undefined;
+
+  const existing = readCeremonyMarker(opts.targetDir, connectionId);
+  if (existing) {
+    const stale = existing.state === 'pending' && Date.now() - existing.createdAt > CEREMONY_MARKER_STALE_MS;
+    if (existing.state === 'pending' && !stale) {
+      // Same connection, same URL, no second worker.
+      return { kind: 'screen', step: { ...opts.step, url: existing.url } };
+    }
+    // A settled marker ('done'/'failed') or a stale abandoned 'pending' one
+    // is consumed here — the next line starts fresh if it re-encounters this
+    // same connection id, which the service will not do once it has moved
+    // the instance on.
+    deleteCeremonyMarker(opts.targetDir, connectionId);
+    if (existing.state === 'done') return { kind: 'settled', outcome: 'ok' };
+    if (existing.state === 'failed') {
+      return { kind: 'settled', outcome: 'failed', code: existing.code ?? CEREMONY_CODES.SERVICE_ERROR };
+    }
+    // Stale pending: fall through and mint a fresh worker below.
+  }
+
+  const prfSalt = generatePrfSalt();
+  const url = buildCeremonyUrl(opts.step, opts.machineName, prfSalt);
+
+  writeCeremonyMarker(opts.targetDir, {
+    state: 'pending',
+    url,
+    userCode,
+    connectionId,
+    createdAt: Date.now(),
+  });
+
+  spawnCeremonyWorker(
+    {
+      v: 1,
+      privateKeyB64: exportConnectionPrivateKeyB64(opts.keypair),
+      publicKeyB64: opts.keypair.publicKeyB64,
+      connectionId,
+      userCode,
+      baseUrl: opts.step.url as string,
+      flowSecret: opts.flowSecret,
+      prfSaltB64: prfSalt.toString('base64'),
+      targetDir: opts.targetDir,
+      serviceUrl: opts.serviceUrl,
+      devMode: opts.devMode,
+      machineName: opts.machineName,
+    },
+    { spawnImpl: opts.spawnImpl, resolveCommand: opts.resolveCommand },
+  );
+
+  return { kind: 'screen', step: { ...opts.step, url } };
+}
+
+// ---------------------------------------------------------------------------
+// 4. Worker side: `capy onboard --ceremony-worker`, reading its payload from stdin
+// ---------------------------------------------------------------------------
+
+async function readAllStdin(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * The worker's entry point. Reads its payload from stdin ONCE, runs the
+ * SAME `runSandboxCeremony` tail the old in-process design ran (unchanged
+ * function, `presetPrfSalt` threaded through so it derives against the
+ * exact salt already embedded in the URL the human was shown), and writes
+ * the outcome to the marker file so the next `capy onboard` invocation in
+ * this directory can read it. Never throws out of this function: a
+ * malformed payload or a mid-ceremony exception both end in either a
+ * written 'failed' marker (when a connection id is known) or a silent exit
+ * (when it is not — nothing to key a marker on, and nothing was ever shown
+ * to a human for this attempt).
+ */
+export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.stdin): Promise<void> {
+  let payload: CeremonyWorkerPayload | undefined;
+  try {
+    const raw = await readAllStdin(input);
+    const parsed = JSON.parse(raw);
+    if (isWorkerPayload(parsed)) payload = parsed;
+  } catch {
+    payload = undefined;
+  }
+  if (!payload) return;
+
+  const keypair = importConnectionKeypair(payload.publicKeyB64, payload.privateKeyB64);
+  const step: FlowStep = {
+    contract_version: '1',
+    flow_id: 'ceremony-worker',
+    flow_type: 'onboard',
+    step_id: 'ceremony-worker',
+    kind: 'screen',
+    resumed: false,
+    screen: 'sandbox_session',
+    url: payload.baseUrl,
+    params: { connection_id: payload.connectionId, user_code: payload.userCode },
+  };
+
+  let outcomeCode: string | undefined;
+  let ok = false;
+  try {
+    const outcome = await runSandboxCeremony({
+      step,
+      keypair,
+      flowSecret: payload.flowSecret,
+      serviceUrl: payload.serviceUrl,
+      devMode: payload.devMode,
+      machineName: payload.machineName,
+      targetDir: payload.targetDir,
+      presetPrfSalt: Buffer.from(payload.prfSaltB64, 'base64'),
+    });
+    ok = outcome.result.outcome === 'ok';
+    outcomeCode = outcome.result.code;
+  } catch {
+    ok = false;
+    outcomeCode = CEREMONY_CODES.SERVICE_ERROR;
+  }
+
+  writeCeremonyMarker(payload.targetDir, {
+    state: ok ? 'done' : 'failed',
+    url: payload.baseUrl,
+    userCode: payload.userCode,
+    connectionId: payload.connectionId,
+    createdAt: Date.now(),
+    ...(ok ? {} : { code: outcomeCode ?? CEREMONY_CODES.SERVICE_ERROR }),
+  });
+}

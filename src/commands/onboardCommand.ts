@@ -48,6 +48,20 @@ export interface OnboardOptions extends CliOptions {
   /** Answer a confirm dialog: `--confirm <plan_hash> --accepted true|false`. */
   confirm?: string;
   accepted?: boolean;
+  /**
+   * Compat hint: the app reads configuration from environment variables, even
+   * when this directory carries no `.env`/`.env.example`/etc of its own (a
+   * caller with broader knowledge of the app — e.g. an agent that has read
+   * its source — can know this when `readEnvKeys` finds nothing to scan).
+   * OR'd with the local file-based detection below, never a replacement for
+   * it: a directory that DOES have a `.env` is `usesEnvVars: true` regardless
+   * of whether this flag is passed.
+   */
+  usesEnvVars?: boolean;
+  /** Compat hint: detected framework, e.g. "Next.js" — overrides the local guess when given. */
+  framework?: string;
+  /** Compat hint: name of an external secret manager already in use, e.g. "vault". */
+  externalSecretManager?: string;
 }
 
 /** Same rule the TTY project-name prompt validates (`../ui/promptEngine.ts`). */
@@ -192,7 +206,14 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       clientPubkey,
       brokerCeremonyKeypair,
       plan: planPayload(targetDir, options.projectName),
-      compat: { usesEnvVars: envKeys.length > 0, framework: plan.framework },
+      compat: {
+        // Local file detection OR's with the caller's own hint — a directory
+        // with a real .env/.env.example/etc is ALWAYS usesEnvVars:true,
+        // never overridden down by a caller that did not pass the hint.
+        usesEnvVars: envKeys.length > 0 || options.usesEnvVars === true,
+        framework: options.framework ?? plan.framework,
+        externalSecretManager: options.externalSecretManager,
+      },
     });
 
     // A screen is the one stop an agent cannot answer for the user, so its URL

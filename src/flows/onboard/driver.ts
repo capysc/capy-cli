@@ -31,7 +31,7 @@ import {
 import { FLOW_CONTRACT_VERSION, FlowContractError, FlowStep, validateStep } from '../validate';
 import { OnboardObservations, observeOnboard } from './observe';
 import { EXECUTORS, ExecutorContext, ExecutorMap, StepResult } from './executors';
-import { runSandboxCeremony } from './sandboxCeremony';
+import { prepareCeremonyScreen, PrepareCeremonyScreenOptions } from './ceremonyWorker';
 
 export interface DriverOptions {
   targetDir: string;
@@ -72,6 +72,17 @@ export interface DriverOptions {
   brokerCeremonyKeypair?: ConnectionKeypair;
   /** Service base URL for the ceremony's own connection poll. Defaults to the ordinary URL resolution. */
   serviceUrl?: string;
+  /**
+   * Injectable for tests only — `prepareCeremonyScreen`'s own worker-spawn
+   * seam, threaded straight through so a driver-level test can assert on the
+   * non-blocking path (screen returned immediately, no in-process poll)
+   * without launching a real child process. Every real caller (TTY, `--web`,
+   * the actual `capy onboard --broker-ceremony` binary) leaves both unset,
+   * which is `prepareCeremonyScreen`'s own default (a real detached spawn of
+   * this binary's own `onboard --ceremony-worker`).
+   */
+  ceremonySpawnImpl?: PrepareCeremonyScreenOptions['spawnImpl'];
+  ceremonyResolveCommand?: PrepareCeremonyScreenOptions['resolveCommand'];
   /** Resume an instance instead of creating one. */
   flowId?: string;
   flowSecret?: string;
@@ -213,14 +224,22 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
       resumedSeen = true;
     }
 
-    // CAP-451: under `--broker-ceremony` the driver runs the ONE screen it
-    // knows how to answer itself — the flow-owned `sandbox_session`
-    // ceremony connection — instead of stopping and handing the URL to a
-    // caller that cannot open it (a sandboxed MCP with no browser). Every
-    // other screen, and this same screen for every OTHER caller (no
-    // keypair minted), still falls through to `isStopStep` below unchanged.
+    // Non-blocking broker ceremony (deadlock fix): under `--broker-ceremony`
+    // the driver used to run the flow-owned `sandbox_session` ceremony
+    // IN-PROCESS and block on its poll (up to 15 minutes) before this run
+    // ever printed anything — which meant a caller awaiting this process
+    // (the MCP's `capy_onboard` tool, and any host that cannot render an
+    // elicitation) hung with nothing to show the human. `prepareCeremonyScreen`
+    // instead ensures a DETACHED worker is running the ceremony in the
+    // background (spawning one only the first time this connection is seen;
+    // S1-resume-ceremony reuses the same worker/url on every later
+    // encounter) and returns immediately — either the screen to show the
+    // human right now, or the worker's already-settled outcome to fold back
+    // into the loop. Every other screen, and this same screen for every
+    // OTHER caller (no keypair minted), still falls through to `isStopStep`
+    // below unchanged.
     if (step.kind === 'screen' && step.screen === 'sandbox_session' && opts.brokerCeremonyKeypair) {
-      const outcome = await runSandboxCeremony({
+      const prepared = await prepareCeremonyScreen({
         step,
         keypair: opts.brokerCeremonyKeypair,
         flowSecret: creds.secret ?? '',
@@ -228,21 +247,33 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         devMode: opts.devMode === true,
         machineName: opts.machineName,
         targetDir: opts.targetDir,
+        spawnImpl: opts.ceremonySpawnImpl,
+        resolveCommand: opts.ceremonyResolveCommand,
       });
+
+      if (prepared.kind === 'screen') {
+        // Stops here, same as any other screen — the URL (now carrying the
+        // ceremony's own request fragment) and user_code go out through the
+        // ordinary screen-step path (`surfaceScreen` in onboardCommand.ts),
+        // never through a second, parallel emission.
+        return { flowId, step: prepared.step, executed, resumed, flowSecret: createdSecret };
+      }
+
       executed.push({
         step_id: step.step_id,
         verb: 'sandbox_ceremony',
-        outcome: outcome.result.outcome,
-        code: outcome.result.code,
+        outcome: prepared.outcome,
+        code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
       });
       lastStep = {
         step_id: step.step_id,
-        outcome: outcome.result.outcome,
-        code: outcome.result.code,
-        result: outcome.result.result,
+        outcome: prepared.outcome,
+        code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
       };
-      if (outcome.result.outcome === 'ok') {
-        if (outcome.session) ctx.onSession?.(outcome.session);
+      if (prepared.outcome === 'ok') {
+        // The worker wrote its own session store directly (same writer a
+        // normal login uses) — nothing to hand through `ctx.onSession`, so
+        // the fresh disk read below is the only source of the new bearer.
         const token = (await getToken()) ?? mintedToken;
         if (token) {
           creds = { ...creds, token };
