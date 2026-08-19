@@ -699,6 +699,16 @@ program
   });
 
 program
+  .command('doctor')
+  .description('Report local Capy facts: binary, version, state dir, API/Keep origins, session presence (read-only, no network)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { DoctorCommand } = await import('./commands/doctorCommand');
+    const cmd = new DoctorCommand();
+    await cmd.execute({ json: options.json });
+  });
+
+program
   .command('list')
   .description('List variable names + connector metadata for the active branch (no values)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
