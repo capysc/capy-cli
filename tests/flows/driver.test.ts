@@ -38,7 +38,6 @@ import { ExecutorMap, StepResult } from '../../src/flows/onboard/executors';
 import { CreateFlowRequest, FlowTransport, NextRequest } from '../../src/flows/client';
 import { OnboardObservations } from '../../src/flows/onboard/observe';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
-import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
 import { keepOrigin } from '../../src/ui/screens/keepScreens';
 
 const FLOW_ID = 'flow-1';
@@ -588,44 +587,21 @@ describe('G5 — a plan that moved under the human is resent', () => {
   });
 });
 
-describe('CAP-451 — the in-process broker ceremony intercepts sandbox_session under --broker-ceremony', () => {
-  test('a screen:sandbox_session step is answered in-process, never returned as a stop, when brokerCeremonyKeypair is set', async () => {
+describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --broker-ceremony', () => {
+  // BEHAVIOR CHANGED BY DESIGN from the old in-process ceremony: the driver
+  // used to run `runSandboxCeremony` inline and block on its poll (up to 15
+  // minutes) before returning anything — so `capy onboard --broker-ceremony
+  // --json` printed nothing until the ceremony settled, and a caller
+  // awaiting this process (the MCP's `capy_onboard` tool) hung with no URL
+  // ever shown to the human. The driver now calls `prepareCeremonyScreen`,
+  // which spawns a detached worker and returns the `screen` step
+  // IMMEDIATELY — this test asserts the new non-blocking contract (screen
+  // returned on the first `/next`, a worker spawned exactly once, no poll
+  // performed by the driver itself) in place of the old "ran through to
+  // done inline" assertion.
+  test('a screen:sandbox_session step is returned immediately, with a detached worker spawned exactly once, when brokerCeremonyKeypair is set', async () => {
     const keypair = mintConnectionKeypair();
-    // A fake, already-valid access token for org_1 — so applyFirstRun's own
-    // authenticateSilent('org_1') call resolves from CACHE (no network),
-    // keeping this test scoped to "did the driver run the ceremony and
-    // continue", not a full re-test of SessionLifecycle's refresh paths
-    // (those are covered in tests/auth/sessionLifecycle.test.ts).
-    const fakeJwt = `${Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')}.` +
-      `${Buffer.from(JSON.stringify({ org_id: 'workos-org-1' })).toString('base64url')}.sig`;
-    const answerPlaintext = JSON.stringify({
-      v: 1,
-      flow: 'sandbox-session',
-      ok: true,
-      user: { id: 'user_1', email: 'a@b.com' },
-      refresh_token: 'rt-1',
-      organizations: [{ id: 'org_1', workos_org_id: 'workos-org-1', name: 'Org One' }],
-      sessions: { org_1: { access_token: fakeJwt, expires_at: Date.now() + 3600_000 } },
-      // No first_run: the "1 org, key on device" rail.
-    });
-    const ciphertext = await sealEnvelopePageSide({
-      plaintext: answerPlaintext,
-      connectionId: 'conn-1',
-      clientPubkeyB64: keypair.publicKeyB64,
-    });
-
-    const fetchCalls: string[] = [];
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (url: any) => {
-      fetchCalls.push(String(url));
-      if (String(url).includes('/connections/')) {
-        return new Response(JSON.stringify({ status: 'answered', ciphertext }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      throw new Error(`unexpected fetch in this test: ${url}`);
-    }) as typeof fetch;
+    const ceremonyDir = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-target-'));
 
     const sandboxStep = envelope({
       kind: 'screen',
@@ -633,16 +609,22 @@ describe('CAP-451 — the in-process broker ceremony intercepts sandbox_session 
       url: `${keepOrigin()}/flow/sandbox-session?c=conn-1`,
       params: { connection_id: 'conn-1', user_code: 'BCDF-GHJK' },
     });
-    const { transport, calls: callCount } = fakeTransport([
-      sandboxStep,
-      envelope({ kind: 'done', params: {} }),
-    ]);
+    const { transport, calls: callCount } = fakeTransport([sandboxStep]);
     const { map, calls } = recordingExecutors();
+
+    const spawnCalls: Array<{ command: string; args: string[] }> = [];
+    const fakeSpawnImpl = ((command: string, args: string[]) => {
+      spawnCalls.push({ command, args });
+      return {
+        stdin: { write: () => true, end: () => undefined },
+        unref: () => undefined,
+      } as unknown as ReturnType<typeof import('child_process').spawn>;
+    }) as typeof import('child_process').spawn;
 
     let result: Awaited<ReturnType<typeof runOnboardFlow>>;
     try {
       result = await runOnboardFlow({
-        targetDir: '/tmp/x',
+        targetDir: ceremonyDir,
         transport,
         executors: map,
         observe: observeStub(),
@@ -651,22 +633,31 @@ describe('CAP-451 — the in-process broker ceremony intercepts sandbox_session 
         brokerCeremonyKeypair: keypair,
         serviceUrl: 'https://api.test.invalid',
         flowSecret: 'flow-secret-1',
+        ceremonySpawnImpl: fakeSpawnImpl,
+        ceremonyResolveCommand: () => ({ command: 'node', args: ['cli-entry.js'] }),
       });
     } finally {
-      globalThis.fetch = originalFetch;
+      rmSync(ceremonyDir, { recursive: true, force: true });
     }
 
-    // Never stopped on the screen — it ran through to done.
-    expect(result.step.kind).toBe('done');
-    // No local_action executor was reached for this step (authenticate,
-    // write_capy_dir, etc.) — the ceremony handled it entirely itself.
+    // Stops on the screen — the caller sees it on the very first pass, no
+    // blocking poll in between.
+    expect(result.step.kind).toBe('screen');
+    expect(result.step.screen).toBe('sandbox_session');
+    expect(result.step.params.connection_id).toBe('conn-1');
+    // Same anti-phishing code the flow handed us — carried through untouched.
+    expect(result.step.params.user_code).toBe('BCDF-GHJK');
+    // The URL now carries the ceremony's own request fragment.
+    expect(result.step.url).toContain('#r=');
+    // No local_action executor reached — this step never falls through to
+    // the ordinary executor map.
     expect(calls).toEqual([]);
-    expect(result.executed.map((e) => e.verb)).toEqual(['sandbox_ceremony']);
-    expect(result.executed[0].outcome).toBe('ok');
-    expect(result.executed[0].code).toBeUndefined();
-    // The poll used the FLOW's own secret, never a second connection/secret.
-    expect(fetchCalls[0]).toContain('/connections/conn-1/result');
-    expect(callCount()).toBe(2); // sandbox_session step, then done
+    // Exactly one `/next` call: the driver returns on the FIRST screen, it
+    // never polls or re-asks the service for this step.
+    expect(callCount()).toBe(1);
+    // Exactly one detached worker spawned for this connection.
+    expect(spawnCalls.length).toBe(1);
+    expect(spawnCalls[0].args).toContain('cli-entry.js');
   });
 
   test('the SAME screen, with no brokerCeremonyKeypair, still stops exactly as before (additive-only)', async () => {

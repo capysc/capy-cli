@@ -37,6 +37,9 @@ ISOLATED_FILES=(
   tests/flows/executors.test.ts
   # sandboxCeremony.test.ts mocks os.homedir() the same way (hasAnyLocalKeyMaterial).
   tests/flows/sandboxCeremony.test.ts
+  # ceremonyWorker.test.ts mocks os.homedir() the same way (hasAnyLocalKeyMaterial
+  # + the real session backend reached via runCeremonyWorker's runSandboxCeremony call).
+  tests/flows/ceremonyWorker.test.ts
   # orgCreationFromEnvelope.test.ts mocks keyManager/keyResolver/deviceKey onboarding+wiring.
   tests/commands/orgCreationFromEnvelope.test.ts
   # errorScreenBrokerCeremony.test.ts mocks endingPage/commandErrorScreen and
