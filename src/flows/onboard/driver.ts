@@ -89,6 +89,8 @@ export interface DriverOptions {
   token?: string;
   /** Repo identity for the concurrency lock. Defaults to the absolute target dir. */
   repoKey?: string;
+  /** CAP-484: the org this repo names locally, if any — becomes the ceremony's member gate. See CreateFlowRequest.local_org_hint. */
+  localOrgHint?: string;
   /** Plan + compat findings, computed locally at creation. */
   plan?: unknown;
   compat?: CreateFlowRequest['compat'];
@@ -192,6 +194,7 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
       compat: opts.compat,
       client_pubkey: opts.clientPubkey,
       machine_name: opts.machineName,
+      local_org_hint: opts.localOrgHint,
     };
     let created = await opts.transport.create(createBody, opts.token);
 

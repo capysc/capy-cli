@@ -34,6 +34,14 @@ export interface CreateFlowRequest {
   compat?: { usesEnvVars?: boolean; framework?: string; externalSecretManager?: string };
   client_pubkey?: string;
   machine_name?: string;
+  /**
+   * CAP-484: the org this repo already names locally (keep.lock, or the
+   * .env header), when one exists. The service forwards it to the ceremony
+   * connection as its member gate, so a wrong-account sign-in on the Keep
+   * page is refused WITHOUT consuming the single-use ceremony. A hint,
+   * never authority — zero-trust custody is the real gate on the secrets.
+   */
+  local_org_hint?: string;
 }
 
 export interface CreateFlowResponse {
