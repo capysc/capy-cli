@@ -6,8 +6,30 @@
  */
 import { spawn } from 'child_process';
 import { join } from 'path';
-import { writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import { Encryptor } from '../../src/crypto/encryptor';
+
+/**
+ * Point a spawned CLI at a test service by writing a PROFILE into its HOME.
+ *
+ * CAPY_API_URL used to do this, but the environment can no longer name an
+ * origin — a var able to redirect a secrets CLI is an exfiltration channel.
+ * A profile is the sanctioned mechanism, so tests exercise the same path real
+ * operators use. `keepUrl` rides along on the same profile, which is what
+ * keeps the two origins from drifting.
+ */
+export function writeTestProfile(home: string, serviceUrl: string, keepUrl?: string): void {
+  const dir = join(home, '.capy');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'config.json'),
+    JSON.stringify({
+      default: 'test',
+      profiles: { test: { url: serviceUrl, ...(keepUrl ? { keepUrl } : {}), displayName: 'test' } },
+    }),
+    { mode: 0o600 },
+  );
+}
 
 export function capyRun(
   cwd: string,
@@ -16,14 +38,13 @@ export function capyRun(
   args: string[],
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const cliPath = join(__dirname, '../../dist/index.js');
+  writeTestProfile(home, serviceUrl);
   return new Promise((resolve) => {
     const child = spawn('node', [cliPath, 'run', ...args], {
       cwd,
       env: {
         ...process.env,
         HOME: home,
-        CAPY_API_URL: serviceUrl,
-        CAPY_GLOBAL_DIR_NAME: undefined,
       } as Record<string, string>,
       stdio: ['pipe', 'pipe', 'pipe'],
     });

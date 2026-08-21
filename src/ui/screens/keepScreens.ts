@@ -11,13 +11,13 @@
  * A screen "opts in" to the fork by being appended to {@link KEEP_SCREENS},
  * not by bespoke branching in its own caller.
  *
- * `CAPY_KEEP_ORIGIN` overrides the keep origin for dev/test only, with the
- * same standing and precedence style as `CAPY_API_URL` for the service. The
- * production origin is the default; nothing secret rides in these URLs (a
- * connection id is never a credential — the broker 404s non-owners).
+ * The keep origin is NOT settable from the environment. It comes from the
+ * entrypoint pin (capy-staging / capy-dev), else the active profile's
+ * `keepUrl`, else the production default — so it always moves together with
+ * the service URL it was minted against.
  */
 
-import { isStagingEntrypoint, STAGING_KEEP_ORIGIN } from '../../config/stagingTarget';
+import { isDevEntrypoint, isStagingEntrypoint, STAGING_KEEP_ORIGIN } from '../../config/stagingTarget';
 
 export const KEEP_DEFAULT_ORIGIN = 'https://keep.capy.sc';
 
@@ -132,12 +132,38 @@ export function keepLoginBridgeEnabled(): boolean {
   return process.env.CAPY_KEEP_LOGIN_BRIDGE === '1';
 }
 
+/**
+ * The active profile's paired keep origin, if it has one. Never throws — an
+ * unresolvable CAPY_PROFILE falls through to the built-in default rather than
+ * breaking every keep-routed screen.
+ */
+function activeProfileKeepUrl(): string | null {
+  const { getActiveProfile } = require('../../config/profileConfig') as typeof import('../../config/profileConfig');
+  try {
+    return getActiveProfile()?.profile.keepUrl ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function keepOrigin(): string {
   // capy-staging is pinned. Keep must move with the backend, so this early
   // return is what makes the two origins incapable of drifting apart.
   if (isStagingEntrypoint()) return STAGING_KEEP_ORIGIN;
 
-  return process.env.CAPY_KEEP_ORIGIN || KEEP_DEFAULT_ORIGIN;
+  // capy-dev's keep must move with its API default, or a device key is minted
+  // against the wrong RP ID (the 06a22cb drift).
+  if (isDevEntrypoint()) return STAGING_KEEP_ORIGIN;
+
+  // A profile carries its own keep origin beside its service URL, so the two
+  // move together or not at all.
+  const fromProfile = activeProfileKeepUrl();
+  if (fromProfile) return fromProfile;
+
+  // No env branch, deliberately — see resolveActiveUrl. Keep is where device
+  // keys are minted against a WebAuthn RP ID; letting ambient environment
+  // move it would let an attacker host the ceremony page itself.
+  return KEEP_DEFAULT_ORIGIN;
 }
 
 /**

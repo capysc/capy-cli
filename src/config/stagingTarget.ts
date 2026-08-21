@@ -21,3 +21,21 @@ export function isStagingEntrypoint(): boolean {
   if (!script) return false;
   return basename(script) === 'capy-staging';
 }
+
+/** The dev entrypoint's isolated state dir. */
+export const DEV_GLOBAL_DIR = '.capy-dev';
+
+/**
+ * Is this process the dev entrypoint (bin/capy-dev)?
+ *
+ * Same argv[1] signal as {@link isStagingEntrypoint}. Dev used to isolate its
+ * state by exporting CAPY_GLOBAL_DIR_NAME, but env is no longer a source of
+ * truth for where key material lives, so the isolation is derived here
+ * instead — otherwise `capy-dev` would write into prod's ~/.capy, which holds
+ * recovery-equivalent wrapped keys.
+ */
+export function isDevEntrypoint(): boolean {
+  const script = process.argv[1];
+  if (!script) return false;
+  return basename(script) === 'capy-dev';
+}

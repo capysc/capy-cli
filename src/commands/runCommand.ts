@@ -171,6 +171,14 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     try {
       const blob = deployMode === 'dt' ? currentBlob! : legacyBlob!;
       const { deployId, outerBlob, encryptedVars } = parseSecretsBlob(blob);
+      // The ONE surviving env-derived origin, and only inside deploy mode.
+      //
+      // A deployed artifact carries no project files and no profile config, so
+      // env is the only channel it has — the same channel that already handed
+      // it `_CAPY_DEPLOY_KEY`/`CAPY_SECRETS_BLOB`. Anything able to set this
+      // already holds the deploy credential, so no new trust is granted.
+      // Interactive `capy` reaches none of this: every non-deploy path resolves
+      // through resolveActiveUrl(), which reads no environment at all.
       const apiUrl = process.env.CAPY_API_URL ?? 'https://api.capy.sc';
       debug('capy run: fetching deploy key...');
       const material = await fetchDeployDecryptMaterial(

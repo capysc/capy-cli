@@ -7,11 +7,18 @@
  * juggling env vars.
  *
  * Resolution precedence at every CLI invocation:
- *   1. explicit apiUrl arg to ServiceClient        (call-site override)
- *   2. CAPY_API_URL env var                        (CI / scripts)
- *   3. CAPY_PROFILE env var                        (per-invocation override)
+ *   1. entrypoint pin (capy-staging)               (unconditional, see stagingTarget)
+ *   2. explicit apiUrl arg to ServiceClient        (call-site override)
+ *   3. CAPY_PROFILE env var                        (SELECTS an existing profile)
  *   4. config.default profile                      (what `capy use` writes)
- *   5. built-in default (https://api.capy.sc)      (no config = cloud user)
+ *   5. capy-dev default (staging)                  (below profiles, never above)
+ *   6. built-in default (https://api.capy.sc)      (no config = cloud user)
+ *
+ * NO env var supplies a URL. CAPY_API_URL and CAPY_KEEP_ORIGIN were removed
+ * from this chain deliberately: `capy` moves secrets, so an env var able to
+ * name an arbitrary origin is an exfiltration channel, not a convenience.
+ * CAPY_PROFILE survives because it can only NAME a profile the operator
+ * already registered on disk — it cannot introduce a new URL.
  *
  * v1 NOTE: every profile shares the existing ~/.capy/ session/cache/key
  * layout. Per-profile state subdirectories (~/.capy/profiles/<name>/...)
@@ -23,11 +30,21 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { getGlobalCapyDir, getGlobalConfigPath } from './globalConfig';
-import { isStagingEntrypoint, STAGING_API_URL } from './stagingTarget';
+import { isDevEntrypoint, isStagingEntrypoint, STAGING_API_URL } from './stagingTarget';
 
 export interface Profile {
   /** Base URL of the Capy service for this profile, no trailing slash. */
   url: string;
+  /**
+   * Keep origin paired with `url`, no trailing slash.
+   *
+   * Lives ON the profile, beside the service URL, precisely so the two cannot
+   * drift: a device key is minted against keep's WebAuthn RP ID, so a door
+   * recorded by one service must be enrolled on its own keep (the 06a22cb
+   * bug). Selecting a profile moves both or neither. Optional — omitted means
+   * the built-in production keep.
+   */
+  keepUrl?: string;
   /** Optional absolute path to a CA bundle. Set for BYOC instances with self-signed TLS. */
   caBundle?: string;
   /** Optional human-friendly name surfaced in `capy profile list`. */
@@ -187,17 +204,28 @@ export function resolveActiveUrl(devMode: boolean = false): string {
   // capy-staging is pinned. Nothing below this line runs for it.
   if (isStagingEntrypoint()) return STAGING_API_URL;
 
-  // CAPY_API_URL is the highest-precedence override — CI/scripts must keep
-  // working regardless of saved profiles.
-  if (process.env.CAPY_API_URL) {
-    return process.env.CAPY_API_URL;
-  }
-
+  // NO ENVIRONMENT VARIABLE IS READ HERE, DELIBERATELY.
+  //
+  // `capy` moves secrets. Anything that could set CAPY_API_URL — a shell
+  // profile, a CI config, a dependency's postinstall — could redirect
+  // authenticated secret traffic to a host of its choosing. That is
+  // exfiltration, not misconfiguration, so the env is not a source of truth
+  // for this value at all.
+  //
+  // A different service is selected by a PROFILE the operator registered
+  // (`capy use`), which is on-disk config they control, never ambient state
+  // inherited from whoever launched the process.
   const active = getActiveProfile();
   if (active) return active.profile.url;
 
-  // No profile, no env override — built-in default. Dev mode keeps its
-  // historical localhost behavior to match the legacy ServiceClient.
+  // capy-dev defaults to staging, as bin/capy-dev always has. Unlike staging
+  // this is a DEFAULT, not a pin: it sits below the profile lookup so a dev
+  // profile pointing at localhost still wins. Without this arm, dropping the
+  // env override would silently aim capy-dev at PRODUCTION.
+  if (isDevEntrypoint()) return STAGING_API_URL;
+
+  // No profile — built-in default. Dev mode keeps its historical localhost
+  // behavior to match the legacy ServiceClient.
   return devMode ? 'http://localhost:3001' : DEFAULT_CLOUD_URL;
 }
 
@@ -210,10 +238,8 @@ export function resolveActiveCaBundle(): string | null {
   // capy-staging is pinned, so it has no profile and no CA bundle.
   if (isStagingEntrypoint()) return null;
 
-  // CAPY_API_URL override implies no profile, hence no CA bundle from config.
-  // Operators using CAPY_API_URL against a self-signed BYOC must set
-  // NODE_EXTRA_CA_CERTS themselves.
-  if (process.env.CAPY_API_URL) return null;
+  // No env branch here either: the URL comes from a profile, so the CA bundle
+  // that pairs with it does too.
   const active = getActiveProfile();
   if (!active) return null;
   return active.profile.caBundle ? expandHome(active.profile.caBundle) : null;

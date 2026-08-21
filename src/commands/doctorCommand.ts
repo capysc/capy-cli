@@ -3,6 +3,7 @@ import { version as CLI_VERSION } from '../../package.json';
 import { getGlobalCapyDir } from '../config/globalConfig';
 import { resolveActiveUrl, getActiveProfile, DEFAULT_CLOUD_URL } from '../config/profileConfig';
 import { keepOrigin } from '../ui/screens/keepScreens';
+import { isStagingEntrypoint } from '../config/stagingTarget';
 import { FileSessionStorageBackend } from '../auth/session/fileBackend';
 import { ProjectManager } from '../core/projectManager';
 
@@ -24,8 +25,8 @@ export interface DoctorReport {
   origins: {
     api: string;
     keep: string;
-    apiFromEnv: boolean;
-    keepFromEnv: boolean;
+    /** True when this invocation's origins come from an entrypoint pin. */
+    pinned: boolean;
   };
   profile: { name: string; localOnly: boolean } | null;
   session: {
@@ -50,7 +51,6 @@ function safeResolveActiveUrl(): string {
   try {
     return resolveActiveUrl();
   } catch {
-    if (process.env.CAPY_API_URL) return process.env.CAPY_API_URL;
     return DEFAULT_CLOUD_URL;
   }
 }
@@ -130,8 +130,11 @@ export async function collectDoctorReport(): Promise<DoctorReport> {
       // rather than let a bad profile name crash a read-only diagnostic.
       api: safeResolveActiveUrl(),
       keep: keepOrigin(),
-      apiFromEnv: !!process.env.CAPY_API_URL,
-      keepFromEnv: !!process.env.CAPY_KEEP_ORIGIN,
+      // Replaces apiFromEnv/keepFromEnv: the environment can no longer move
+      // either origin, so "did it come from env" is never true and reporting
+      // it would be misleading. What matters now is whether this invocation is
+      // an entrypoint-pinned one.
+      pinned: isStagingEntrypoint(),
     },
     profile,
     session: {
@@ -157,8 +160,8 @@ export class DoctorCommand {
       ['CLI', `${report.cli.bin} ${DIM}(${report.cli.node}, ${report.cli.platform}/${report.cli.arch})${RESET}`],
       ['Version', report.cli.version],
       ['State dir', report.stateDir],
-      ['API origin', `${report.origins.api}${report.origins.apiFromEnv ? ` ${DIM}(from CAPY_API_URL)${RESET}` : ''}`],
-      ['Keep origin', `${report.origins.keep}${report.origins.keepFromEnv ? ` ${DIM}(from CAPY_KEEP_ORIGIN)${RESET}` : ''}`],
+      ['API origin', `${report.origins.api}${report.origins.pinned ? ` ${DIM}(pinned)${RESET}` : ''}`],
+      ['Keep origin', `${report.origins.keep}${report.origins.pinned ? ` ${DIM}(pinned)${RESET}` : ''}`],
       ['Profile', report.profile ? `${report.profile.name}${report.profile.localOnly ? ' (local-only)' : ''}` : `${DIM}none${RESET}`],
       ['Session', report.session.present ? `present ${DIM}(${report.session.userId})${RESET}` : `${DIM}none${RESET}`],
       ['Project', report.project.initialized ? (report.project.projectName || report.project.projectId || '—') : `${DIM}not initialized${RESET}`],
