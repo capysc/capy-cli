@@ -2,7 +2,10 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    # feat/portability is a long-lived integration branch that PRs land into
+    # before it reaches main. Without it here, build+test never runs on those
+    # PRs and only the security scan reports back.
+    branches: [main, feat/portability]
   push:
     branches: [main]
   workflow_dispatch:
