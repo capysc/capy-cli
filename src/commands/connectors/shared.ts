@@ -1,4 +1,5 @@
 import { createHash } from 'crypto';
+import { execFileSync } from 'child_process';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { AuthService } from '../../auth/authService';
@@ -7,6 +8,7 @@ import { SyncEngine } from '../../sync/syncEngine';
 import { Encryptor } from '../../crypto/encryptor';
 import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
+import { formatRelativeTime } from '../../ui/relativeTime';
 import {
   setSyncKeepHash,
   getSyncKeepHash,
@@ -57,6 +59,19 @@ export interface ResolvedContext {
    * `base_keep_hash` entirely rather than guess when this is `undefined`.
    */
   base_keep_hash?: string;
+  /**
+   * How lock-less identity was resolved — `'header'` when the `.env` capy
+   * header already named org/project (a previous lock-less write in this
+   * directory, or a git-synced teammate's `.env`), `'server'` when nothing
+   * local named it and this call fell back to auth + `listProjects`'s
+   * "default" project. `undefined` in lock-full mode (irrelevant — keep.lock
+   * is the identity source there).
+   *
+   * Drives `maybeWarnPersonalEnv`'s "first lock-less write in this
+   * directory" condition below: it only fires on `'server'`, since `'header'`
+   * means an earlier write already left the header behind.
+   */
+  identitySource?: 'header' | 'server';
 }
 
 /**
@@ -186,6 +201,10 @@ async function resolveLocklessContext(
   const envMeta = fileManager.readEnvMeta();
   let orgId = envMeta.org_id;
   let projectId = envMeta.project_id;
+  // Captured before the auth+listProjects fallback below can fill orgId in —
+  // this is the only point that knows whether identity came from the header
+  // or had to be looked up. See `identitySource` on `ResolvedContext`.
+  const identitySource: 'header' | 'server' = orgId && projectId ? 'header' : 'server';
   // Used only to synthesize an empty KeepFile's project_name below, when
   // nothing has ever been pushed to this branch — a KeepFile fetched from the
   // server always carries the project's real name instead. Lock-less mode
@@ -311,6 +330,7 @@ async function resolveLocklessContext(
     localPlaintext,
     lockless: true,
     base_keep_hash: baseKeepHash,
+    identitySource,
   };
 }
 
@@ -346,17 +366,23 @@ export async function writeAndSync(
     /**
      * Called when the retry below finds that `varName` itself changed on the
      * server since `ctx` was resolved (not just some other key) — i.e. a
-     * genuine edit-time conflict, not an unrelated concurrent push. Return
-     * `true` to overwrite the server's value with this write anyway. Omitted
-     * (or returning `false`) refuses and throws a coded STALE_KEEP_HASH
-     * error — the safe default for a non-interactive caller. See
-     * `addCommand.ts`'s `overwriteNotice` for the terminal wording this
-     * mirrors.
+     * genuine edit-time conflict, not an unrelated concurrent push. `true`
+     * overwrites the server's value with this write anyway. Omitted (or
+     * returning `false`) refuses and throws a coded STALE_KEEP_HASH error —
+     * the safe default for a non-interactive caller. See `addCommand.ts`'s
+     * `overwriteNotice` for the terminal wording this mirrors.
+     *
+     * `contextLines` — pre-rendered by `conflictContextLines` from the
+     * server's freshest copy of the conflicting entries (connector metadata,
+     * last-written time) — is handed to the caller to print above whatever
+     * question it asks; never itself part of the question text.
      */
-    confirmOverwrite?: (varNames: string[]) => Promise<boolean>;
+    confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   },
 ): Promise<void> {
   const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext, lockless } = ctx;
+
+  maybeWarnPersonalEnv(ctx);
 
   const finalEnv: Record<string, string> =
     value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
@@ -466,8 +492,100 @@ export async function writeAndSync(
 }
 
 /** The (varName, branch) entry, or undefined when the variable has no entry on this branch. */
-function keepEntryFor(keep: KeepFile, varName: string, branch: string) {
+export function keepEntryFor(keep: KeepFile, varName: string, branch: string) {
   return keep.variables[varName]?.find((e) => e.branch === branch);
+}
+
+/**
+ * Human-readable one-liner for a connector-managed key — `"stripe (test)"`,
+ * or just `"stripe"` when the connector has no mode. No account_id: that's
+ * shown elsewhere already redacted, and a conflict gate only needs "which
+ * service is this," not the account.
+ */
+export function describeConnector(connector: ConnectorMetadata): string {
+  return connector.mode ? `${connector.provider} (${connector.mode})` : connector.provider;
+}
+
+/**
+ * The same-key CAS conflict confirm question — one sentence, asked
+ * identically everywhere a caller hits it (`addCommand`, `editCommand`,
+ * `pushCommand`), so there is exactly one wording to keep in sync rather than
+ * three copies that can drift.
+ */
+export function conflictOverwriteQuestion(varNames: string[]): string {
+  return `${varNames.join(', ')} changed on the server while you were editing. Overwrite?`;
+}
+
+/**
+ * Context lines for an overwrite/conflict gate — one per `varName` that has
+ * something worth saying: connector metadata and/or when it was last written
+ * (`changed_at`, server-stamped). Printed ABOVE the existing confirm
+ * question, never folded into it — `overwriteNotice()`'s and
+ * `conflictOverwriteQuestion()`'s own return values are tested/relied-on
+ * verbatim and must stay byte-identical. A key with neither produces no
+ * line — an ordinary unmanaged variable someone is about to overwrite says
+ * nothing new.
+ */
+export function conflictContextLines(keep: KeepFile, varNames: string[], branch: string): string[] {
+  const lines: string[] = [];
+  for (const varName of varNames) {
+    const entry = keepEntryFor(keep, varName, branch);
+    if (!entry) continue;
+    const parts: string[] = [];
+    if (entry.connector) parts.push(describeConnector(entry.connector));
+    if (entry.changed_at) parts.push(`last written ${formatRelativeTime(entry.changed_at)}`);
+    if (parts.length === 0) continue;
+    lines.push(`  ${B(varName)} — ${parts.join(', ')}`);
+  }
+  return lines;
+}
+
+/**
+ * Cheap "does this look like a team project" probe for `maybeWarnPersonalEnv`
+ * below: inside a git work tree with at least one remote configured. Mirrors
+ * `autoCommitKeep`'s own `git rev-parse --is-inside-work-tree` pattern —
+ * never throws, folds any git failure (not a repo, git missing) into `false`.
+ */
+function hasGitRemote(cwd: string): boolean {
+  try {
+    const inRepo = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    }).trim() === 'true';
+    if (!inRepo) return false;
+    const remotes = execFileSync('git', ['remote'], {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    }).trim();
+    return remotes.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// Dedup key for `maybeWarnPersonalEnv` — one note per `ResolvedContext`, not
+// one per write, so a multi-var `capy add` or a multi-commit `capy edit`
+// session says it once rather than once per variable/commit.
+const personalEnvWarned = new WeakSet<object>();
+
+/**
+ * Soft, non-blocking heads-up — never a prompt, never blocks the write — for
+ * the FIRST lock-less write in a directory that git recognizes as a team
+ * project (a repo with at least one remote) whose `.env` has no capy
+ * identity header yet (`ctx.identitySource === 'server'`: see the field's own
+ * doc comment on `ResolvedContext`). Once a write lands, `writeEncryptedEnvFile`
+ * puts the header in place, so the very next command's `ctx.identitySource`
+ * reads `'header'` and this stays silent from then on — no separate state to
+ * track.
+ */
+export function maybeWarnPersonalEnv(ctx: ResolvedContext, cwd: string = process.cwd()): void {
+  if (!ctx.lockless || ctx.identitySource !== 'server') return;
+  if (personalEnvWarned.has(ctx)) return;
+  personalEnvWarned.add(ctx);
+  if (!hasGitRemote(cwd)) return;
+  console.error('Heads up: this saves to your personal env, not a team project.');
 }
 
 /**
@@ -516,7 +634,7 @@ export interface PushKeepWithRetryOpts {
   /** The variable name(s) this write is the author of — same-key conflict detection runs only against these. */
   primaryVarNames: string[];
   /** See `writeAndSync`'s `confirmOverwrite` — same contract, just plural. */
-  confirmOverwrite?: (varNames: string[]) => Promise<boolean>;
+  confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   maxRetries?: number;
 }
 
@@ -594,7 +712,11 @@ export async function pushKeepWithRetry(
         keepEntryChanged(baseKeep, serverKeep, name, opts.branch),
       );
       if (conflicted.length > 0) {
-        const proceed = opts.confirmOverwrite ? await opts.confirmOverwrite(conflicted) : false;
+        // The server's own copy — not `baseKeep` — is the freshest source for
+        // the confirm's context lines (connector metadata, changed_at): it's
+        // exactly the state the conflict was just detected against.
+        const contextLines = opts.confirmOverwrite ? conflictContextLines(serverKeep, conflicted, opts.branch) : [];
+        const proceed = opts.confirmOverwrite ? await opts.confirmOverwrite(conflicted, contextLines) : false;
         if (!proceed) {
           throw new CapyError(
             `${conflicted.join(', ')} changed on the server while you were editing. Aborted.`,

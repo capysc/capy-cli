@@ -18,7 +18,7 @@ import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
-import { pushKeepWithRetry } from './connectors/shared';
+import { pushKeepWithRetry, conflictOverwriteQuestion } from './connectors/shared';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -200,15 +200,33 @@ export class PushCommand {
     // (sync-state, when this machine has recorded one) — the CAS
     // precondition (single-user lock-less mode). On a 409 STALE_KEEP_HASH
     // the retry rebases onto the server's current keep_file and pushes
-    // again; `capy push` has no interactive overwrite gate to reuse (unlike
-    // `capy add`), so a same-key conflict — one of THIS push's own vars
-    // changed server-side since sync-state was last updated — refuses
-    // rather than clobbering it.
+    // again. `capy push` has no `--web`/non-interactive mode of its own, so
+    // a same-key conflict — one of THIS push's own vars changed server-side
+    // since sync-state was last updated — gets the same TTY inquirer confirm
+    // `capy add` uses (message + context lines); off a TTY it refuses rather
+    // than clobbering it. The spinner is paused for the question and resumed
+    // only if the answer is yes — the throw path below leaves it stopped.
     this.debug('pushSecrets request', {
       projectId: projectState.projectId,
       branch,
       envBlobLength: envBlob.length,
     });
+    const confirmOverwrite = async (changedNames: string[], contextLines: string[]): Promise<boolean> => {
+      if (!process.stdin.isTTY) return false;
+      pushSpinner.stop();
+      for (const line of contextLines) console.log(line);
+      const inquirer = (await import('inquirer')).default;
+      const { ok } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'ok',
+          message: conflictOverwriteQuestion(changedNames),
+          default: false,
+        },
+      ]);
+      if (ok) pushSpinner.start();
+      return ok;
+    };
     const baseKeepHash = getSyncKeepHash(this.projectManager.readSyncState(), branch);
     let finalKeep: KeepFile = buildUpdatedKeep(keep);
     let pushedEnvBlob = envBlob;
@@ -224,6 +242,7 @@ export class PushCommand {
           localVarNames: Object.keys(rawLocal),
           buildFinalKeep: buildUpdatedKeep,
           primaryVarNames: Object.keys(rawLocal),
+          confirmOverwrite,
         }).then((r) => {
           finalKeep = r.finalKeep;
           pushedEnvBlob = r.envBlob;
