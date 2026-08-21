@@ -380,6 +380,14 @@ export const ERROR_CODES = {
   VARIABLE_NOT_FOUND: 'VARIABLE_NOT_FOUND',
   /** No connector integrations are registered in this build. */
   NO_CONNECTORS: 'NO_CONNECTORS',
+  /**
+   * CAP-487: `capy run` in a directory whose .env holds plaintext values and
+   * which was never onboarded (no keep.lock). Passing those values through
+   * with exit 0 is a false-green — it looks decrypted when nothing was, and
+   * an agent reading the exit code concludes the repo is set up — so the run
+   * refuses with this code instead. The remedy is finishing onboarding.
+   */
+  NOT_ONBOARDED: 'NOT_ONBOARDED',
   /** `capy-dev` reached a live-mode credential. Dev never touches live. */
   DEV_LIVE_FIREWALL: 'DEV_LIVE_FIREWALL',
   // Wrapper-endpoint server codes (CAP-379/CAP-380). Mirrored from

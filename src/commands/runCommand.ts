@@ -234,6 +234,31 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   const env: Record<string, string | undefined> = { ...envFromFile, ...process.env };
 
   if (toDecrypt.length === 0) {
+    // CAP-487: an .env with plaintext values and NOTHING encrypted is not
+    // the ordinary mid-state of an onboarded repo (a new key awaiting a push
+    // rides alongside encrypted ones and lands in `toDecrypt` above) — it is
+    // what a repo looks like when onboarding never finished. Passing the
+    // values through with exit 0 was a false-green: `capy run` appeared to
+    // decrypt when it decrypted nothing, and an agent reading the exit code
+    // concluded the repo was set up. Branching is on stable local signals
+    // only — file existence and the structural isEncrypted check, never
+    // value content.
+    if (Object.keys(envFromFile).length > 0) {
+      if (!existsSync(join(process.cwd(), 'keep.lock'))) {
+        console.error(
+          `capy run: [${ERROR_CODES.NOT_ONBOARDED}] the .env here is plaintext and this ` +
+            'directory is not onboarded (no keep.lock) — nothing would be decrypted. ' +
+            'Run `capy` here to finish onboarding, or run your command directly if you ' +
+            'did not mean to use Capy in this directory.',
+        );
+        return 1;
+      }
+      // Onboarded (keep.lock present) but the whole .env is plaintext: run,
+      // but say out loud that no decryption happened.
+      console.error(
+        'capy run: warning — .env has no encrypted values; passing plaintext through unchanged.',
+      );
+    }
     // Pure plaintext .env — no key required.
     return spawnChild(args, env);
   }
