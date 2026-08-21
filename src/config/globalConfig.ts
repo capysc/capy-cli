@@ -2,12 +2,17 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync
 import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
+import { isStagingEntrypoint, STAGING_GLOBAL_DIR } from './stagingTarget';
 
 // Resolved lazily so `capy-dev` can isolate its state at `~/.capy-dev/` by
 // setting CAPY_GLOBAL_DIR_NAME at startup — without this, dev tooling like
 // sandbox/*/nuke.sh would clobber the user's prod `~/.capy/` (recovery-equivalent
 // state). Reading env on every call also keeps tests overriding HOME safe.
 export function getGlobalCapyDir(): string {
+  // capy-staging is pinned to its own home — ~/.capy holds recovery-equivalent
+  // wrapped keys and staging must never reach it.
+  if (isStagingEntrypoint()) return join(homedir(), STAGING_GLOBAL_DIR);
+
   return join(homedir(), process.env.CAPY_GLOBAL_DIR_NAME || '.capy');
 }
 

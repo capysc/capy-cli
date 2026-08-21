@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { getGlobalCapyDir, getGlobalConfigPath } from './globalConfig';
+import { isStagingEntrypoint, STAGING_API_URL } from './stagingTarget';
 
 export interface Profile {
   /** Base URL of the Capy service for this profile, no trailing slash. */
@@ -183,6 +184,9 @@ export function getLocalLockTimeoutMs(): number {
  * when constructed without an explicit apiUrl.
  */
 export function resolveActiveUrl(devMode: boolean = false): string {
+  // capy-staging is pinned. Nothing below this line runs for it.
+  if (isStagingEntrypoint()) return STAGING_API_URL;
+
   // CAPY_API_URL is the highest-precedence override — CI/scripts must keep
   // working regardless of saved profiles.
   if (process.env.CAPY_API_URL) {
@@ -203,6 +207,9 @@ export function resolveActiveUrl(devMode: boolean = false): string {
  * Returns null when no active profile has a caBundle set.
  */
 export function resolveActiveCaBundle(): string | null {
+  // capy-staging is pinned, so it has no profile and no CA bundle.
+  if (isStagingEntrypoint()) return null;
+
   // CAPY_API_URL override implies no profile, hence no CA bundle from config.
   // Operators using CAPY_API_URL against a self-signed BYOC must set
   // NODE_EXTRA_CA_CERTS themselves.

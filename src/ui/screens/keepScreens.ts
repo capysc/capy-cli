@@ -17,6 +17,8 @@
  * connection id is never a credential — the broker 404s non-owners).
  */
 
+import { isStagingEntrypoint, STAGING_KEEP_ORIGIN } from '../../config/stagingTarget';
+
 export const KEEP_DEFAULT_ORIGIN = 'https://keep.capy.sc';
 
 /** The two no-submit flows CAP-376 first shipped. Kept as a named alias
@@ -131,6 +133,10 @@ export function keepLoginBridgeEnabled(): boolean {
 }
 
 export function keepOrigin(): string {
+  // capy-staging is pinned. Keep must move with the backend, so this early
+  // return is what makes the two origins incapable of drifting apart.
+  if (isStagingEntrypoint()) return STAGING_KEEP_ORIGIN;
+
   return process.env.CAPY_KEEP_ORIGIN || KEEP_DEFAULT_ORIGIN;
 }
 

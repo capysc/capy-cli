@@ -1,28 +1,44 @@
 #!/usr/bin/env node
 
-// capy-staging — the production CLI codepath pointed at the staging backend.
+// capy-staging — the production CLI codepath, PINNED to the staging backend.
 //
 // Staging runs the *real* service (against the test WorkOS tenant), so this is
-// real auth — it requires dist/index.js (prod), NOT index-dev.js (mock auth).
+// real auth: it requires dist/index.js (prod), NOT index-dev.js (mock auth).
 //
-// Isolated home at ~/.capy-staging so it can never touch prod ~/.capy (which
-// holds recovery-equivalent wrapped keys) or dev ~/.capy-dev. Both env vars are
-// set only when unset, so `CAPY_API_URL=... capy-staging ...` still overrides.
-if (!process.env.CAPY_GLOBAL_DIR_NAME) {
-  process.env.CAPY_GLOBAL_DIR_NAME = '.capy-staging';
-}
-if (!process.env.CAPY_API_URL) {
-  process.env.CAPY_API_URL = 'https://staging-api.capy.sc';
-}
-if (!process.env.CAPY_BIN_NAME) {
-  process.env.CAPY_BIN_NAME = 'capy-staging';
-}
-// Keep must move with the backend. A device key is minted against keep's
-// WebAuthn RP ID, so a door recorded in the staging database has to be
-// enrolled on the staging keep origin — point a staging-backed CLI at prod
-// keep and the credential is minted under the wrong RP ID, leaving a door row
-// nothing can ever satisfy. Set together, they cannot drift.
-if (!process.env.CAPY_KEEP_ORIGIN) {
-  process.env.CAPY_KEEP_ORIGIN = 'https://staging-keep.capy.sc';
-}
+// PINNED, NOT DEFAULTED. Every value below is assigned unconditionally, so a
+// caller's CAPY_API_URL / CAPY_KEEP_ORIGIN cannot repoint this entrypoint at
+// prod (or anywhere else). Retargeting a secrets CLI by exporting an env var
+// is exactly the failure this entrypoint exists to make impossible; use
+// `capy` with a profile to talk to a different service.
+//
+// NEVER PUBLISHED: package.json `files` ships bin/capy only, and `prepack`
+// drops the capy-staging bin entry. scripts/check-package.mjs asserts both,
+// and asserts no staging origin string survives into the tarball.
+const STAGING_TARGET = Object.freeze({
+  // Isolated home so staging can never touch prod ~/.capy (which holds
+  // recovery-equivalent wrapped keys) or dev ~/.capy-dev.
+  CAPY_GLOBAL_DIR_NAME: '.capy-staging',
+  CAPY_BIN_NAME: 'capy-staging',
+
+  // Keep must move with the backend. A device key is minted against keep's
+  // WebAuthn RP ID, so a door recorded in the staging database has to be
+  // enrolled on the staging keep origin — point a staging-backed CLI at prod
+  // keep and the credential is minted under the wrong RP ID, leaving a door
+  // row nothing can ever satisfy. Pinned together, they cannot drift.
+  CAPY_API_URL: 'https://staging-api.capy.sc',
+  CAPY_KEEP_ORIGIN: 'https://staging-keep.capy.sc',
+
+  // Portability rollout flags, baked in so this entrypoint exercises the
+  // onboarding flow identically on every invocation instead of depending on
+  // what the caller remembered to export.
+  CAPY_FLOW_ONBOARD: '1',
+  CAPY_DEVICE_KEYS: '1',
+  CAPY_KEEP_SCREENS: '1',
+  CAPY_KEEP_LOGIN_BRIDGE: '1',
+});
+
+Object.entries(STAGING_TARGET).forEach(([key, value]) => {
+  process.env[key] = value;
+});
+
 require('../dist/index.js');

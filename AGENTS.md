@@ -1,5 +1,20 @@
 # Agent instructions — capy-cli
 
+## CARDINAL RULE — `let` IS ILLEGAL. EVERYTHING IS `const`
+
+NEVER write `let`. EVER. Under any circumstance. NO variable reassignment, ever, under any
+circumstances. No hoisted variables — never declare a binding before the value that fills it.
+`var` is likewise illegal. This is absolute and overrides style preferences, brevity, and your
+own judgment about readability.
+
+For CONTROL FLOW, ALWAYS USE EARLY RETURNS. Guard clauses first, the happy path last and
+unindented. Never build a result by mutating it across branches.
+
+Instead of reassignment, use:
+- a ternary, or a small helper function that RETURNS the value
+- `.map` / `.filter` / `.reduce` / `Object.fromEntries` over push-into-an-array loops
+- `const` inside each branch of an early-return chain, never one `let` above the branches
+
 ## STANDING RULE — every browser page goes through the monorepo workbench
 
 Not negotiable, and corrected more than once. If you are adding or changing ANY
