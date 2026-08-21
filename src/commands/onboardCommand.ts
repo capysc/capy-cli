@@ -20,7 +20,7 @@ import { CapyError, ERROR_CODES, CliOptions } from '../types/index';
 import { debug } from '../ui/debug';
 import { FlowClient, FlowHttpError } from '../flows/client';
 import { ProjectManager } from '../core/projectManager';
-import { FLOW_CONTRACT_VERSION, FlowContractError, FlowStep } from '../flows/validate';
+import { FLOW_CONTRACT_VERSION, FlowContractError, FlowStep, validateStep } from '../flows/validate';
 import { runOnboardFlow, confirmOnboardPlan } from '../flows/onboard/driver';
 import { buildPlan } from '../flows/onboard/plan';
 import { readEnvKeys } from '../flows/onboard/edits';
@@ -30,6 +30,12 @@ export interface OnboardOptions extends CliOptions {
   /** Render interactive stops in a browser (the same wizard `capy --web` uses). */
   web?: boolean;
   targetDir?: string;
+  /**
+   * Resume a specific instance. OPTIONAL everywhere, including `--accepted`
+   * (CAP-487): when omitted, this repo's own instance is resolved from
+   * repo_key + identity — the service's attach path, the same one the plain
+   * run uses — rather than requiring the caller to thread the id through.
+   */
   flowId?: string;
   flowSecret?: string;
   clientPubkey?: string;
@@ -185,11 +191,45 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
   // the table decides what the approval unlocked. Gated on `--accepted`
   // being PRESENT (not on `--confirm`): the hash is now optional — see below.
   if (options.accepted !== undefined) {
-    if (!options.flowId) {
-      throw new CapyError(
-        'Answering a plan dialog needs the flow it belongs to: pass --flow-id.',
-        ERROR_CODES.INVALID_FORMAT,
+    // CAP-487: `--flow-id` is OPTIONAL here now. Requiring the caller to
+    // hand it back was a gap of exactly the `--confirm` kind fixed below —
+    // the plain `capy onboard` run resolves this repo's own instance from
+    // repo_key + identity alone (the service's attach path), so an answer
+    // to that instance's dialog can resolve it the same way. Without this,
+    // an agent driving `--json` had no signal it must thread the id through,
+    // and its `--accepted` call silently recorded nothing: the consent-gated
+    // writes never ran and the repo stayed plaintext while looking onboarded.
+    let dialogFlowId = options.flowId;
+    if (!dialogFlowId) {
+      const created = await transport.create(
+        {
+          contract_version: FLOW_CONTRACT_VERSION,
+          auth_mode: clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
+          repo_key: targetDir,
+          plan: planPayload(targetDir, options.projectName),
+          compat: {
+            usesEnvVars: readEnvKeys(targetDir).length > 0 || options.usesEnvVars === true,
+            framework: options.framework,
+            externalSecretManager: options.externalSecretManager,
+          },
+          client_pubkey: clientPubkey,
+        },
+        token,
       );
+      // A create that answered with a step instead of an instance (a lock
+      // held by someone else, an incompatible project) is a stop: report it
+      // exactly like any other stop step — never confirm into the void.
+      if (!created.flow_id) {
+        const step = validateStep(created.step);
+        await reportResolveStop(options, step);
+        return;
+      }
+      dialogFlowId = created.flow_id;
+      options = {
+        ...options,
+        flowId: dialogFlowId,
+        flowSecret: created.flow_secret ?? options.flowSecret,
+      };
     }
     // Bug A (CAPY-ONBOARD-SESSION-DUMP.md §3): `--confirm <planHash>` is now
     // OPTIONAL. Requiring a caller to echo the hash back verbatim meant the
@@ -204,7 +244,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     // explicit hash (the TTY path, or any future caller) is unaffected.
     const planHash = options.confirm ?? (planPayload(targetDir, options.projectName).plan_hash as string);
     try {
-      await confirmOnboardPlan(transport, options.flowId, planHash, options.accepted === true, {
+      await confirmOnboardPlan(transport, dialogFlowId, planHash, options.accepted === true, {
         secret: options.flowSecret,
         token,
       });
@@ -223,7 +263,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       // structured, and — in `--json` mode — still exactly one JSON object
       // on stdout.
       if (err instanceof FlowHttpError && err.status === 409) {
-        await reportPlanChanged(options, options.flowId);
+        await reportPlanChanged(options, dialogFlowId);
         return;
       }
       throw err;
@@ -357,6 +397,26 @@ async function reportPlanChanged(options: OnboardOptions, flowId: string): Promi
   // `human()` exists for, so it stays byte-identical to that existing branch.
   const { describeBlocked } = await import('../flows/onboard/copy');
   console.error(`\n${describeBlocked('plan_changed')}`);
+  process.exitCode = 1;
+}
+
+/**
+ * CAP-487: the flow-resolving create (an `--accepted` call with no
+ * `--flow-id`) answered with a step instead of an instance — a lock held by
+ * a different identity, an incompatible project. Reported exactly like the
+ * same step from any other run: in `--json` mode still exactly one object on
+ * stdout, on a TTY the same blocked rendering `renderInteractive` uses. The
+ * dialog answer was NOT recorded — there is no instance of this caller's to
+ * record it on — and the caller must not proceed as if it was.
+ */
+async function reportResolveStop(options: OnboardOptions, step: FlowStep): Promise<void> {
+  if (options.json) {
+    const out: OnboardJson = { flow_id: step.flow_id, resumed: false, step, executed: [] };
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
+  const { describeBlocked } = await import('../flows/onboard/copy');
+  console.error(`\n${describeBlocked(step.reason as string)}`);
   process.exitCode = 1;
 }
 

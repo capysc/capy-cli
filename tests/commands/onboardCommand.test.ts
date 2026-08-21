@@ -37,6 +37,11 @@ const realFlowClientModule = require('../../src/flows/client');
 
 let confirmCalls: Array<{ flowId: string; planHash: string; accepted: boolean }> = [];
 let confirmBehavior: (planHash: string) => void = () => undefined;
+let createCalls: Array<Record<string, unknown>> = [];
+/** CAP-487: the flow-resolving create. Default preserves the pre-existing tests: create is never legitimately reached there. */
+let createBehavior: () => unknown = () => {
+  throw new StopAfterConfirm('stop: create() reached after confirm');
+};
 /** Thrown by the fake transport's other methods — these tests only care about `confirm`'s own call, not what the driver does afterward. */
 class StopAfterConfirm extends Error {}
 
@@ -47,8 +52,9 @@ mock.module('../../src/flows/client', () => {
       confirmBehavior(planHash);
       return Promise.resolve({});
     }
-    create() {
-      throw new StopAfterConfirm('stop: create() reached after confirm');
+    create(body: Record<string, unknown>) {
+      createCalls.push(body);
+      return Promise.resolve(createBehavior());
     }
     next() {
       throw new StopAfterConfirm('stop: next() reached after confirm');
@@ -75,6 +81,10 @@ let exitCode: number | string | undefined;
 beforeEach(() => {
   confirmCalls = [];
   confirmBehavior = () => undefined;
+  createCalls = [];
+  createBehavior = () => {
+    throw new StopAfterConfirm('stop: create() reached after confirm');
+  };
   targetDir = mkdtempSync(join(tmpdir(), 'capy-onboardcmd-target-'));
   writeFileSync(join(targetDir, 'package.json'), JSON.stringify({ name: 'onboardcmd-fixture', scripts: {} }));
   logs = [];
@@ -147,6 +157,83 @@ describe('runOnboardCommand: --confirm is optional (Bug A)', () => {
       restore();
     }
     expect(confirmCalls).toEqual([]);
+  });
+});
+
+describe('runOnboardCommand: --accepted with no --flow-id resolves the flow itself (CAP-487)', () => {
+  it('resolves via the repo_key create/attach path and confirms on the resolved instance', async () => {
+    createBehavior = () => ({
+      flow_id: 'resolved-flow',
+      flow_type: 'onboard',
+      contract_version: '1',
+      binding: 'identified',
+      resumed: true,
+      step: null,
+    });
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    const { buildPlan } = await import('../../src/flows/onboard/plan');
+    try {
+      await runOnboardCommand({ json: true, accepted: true, targetDir }, false).catch((err) => {
+        if (!(err instanceof StopAfterConfirm)) throw err;
+      });
+    } finally {
+      restore();
+    }
+    // One resolving create, carrying this repo's own identity + plan.
+    expect(createCalls.length).toBe(1);
+    expect(createCalls[0].repo_key).toBe(targetDir);
+    expect((createCalls[0].plan as Record<string, unknown>).plan_hash).toBe(
+      buildPlan({ targetDir }).planHash,
+    );
+    // The confirm landed on the instance the create resolved — never thrown
+    // away, never "needs --flow-id".
+    expect(confirmCalls.length).toBe(1);
+    expect(confirmCalls[0].flowId).toBe('resolved-flow');
+    expect(confirmCalls[0].accepted).toBe(true);
+  });
+
+  it('a create that answers with a blocked step is reported as that step — the confirm never fires', async () => {
+    createBehavior = () => ({
+      step: {
+        contract_version: '1',
+        flow_id: 'someone-elses-flow',
+        flow_type: 'onboard',
+        step_id: 'someone-elses-flow-blocked',
+        kind: 'blocked',
+        resumed: false,
+        reason: 'concurrent_flow',
+        params: {},
+      },
+    });
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    try {
+      await runOnboardCommand({ json: true, accepted: true, targetDir }, false);
+    } finally {
+      restore();
+    }
+    expect(confirmCalls).toEqual([]);
+    expect(logs.length).toBe(1);
+    const parsed = JSON.parse(logs[0]);
+    expect(parsed.step.kind).toBe('blocked');
+    expect(parsed.step.reason).toBe('concurrent_flow');
+  });
+
+  it('an explicit --flow-id still skips the resolving create entirely', async () => {
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    try {
+      await runOnboardCommand({ json: true, flowId: 'flow-explicit', accepted: true, targetDir }, false).catch(
+        (err) => {
+          if (!(err instanceof StopAfterConfirm)) throw err;
+        },
+      );
+    } finally {
+      restore();
+    }
+    // With an explicit id there is no resolving create, and the re-drive
+    // resumes the same instance (no driver-side create either).
+    expect(createCalls).toEqual([]);
+    expect(confirmCalls.length).toBe(1);
+    expect(confirmCalls[0].flowId).toBe('flow-explicit');
   });
 });
 
