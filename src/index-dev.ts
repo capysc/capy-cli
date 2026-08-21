@@ -155,6 +155,7 @@ program
   .option('--target-dir <path>', 'directory to onboard (defaults to the current one)')
   .option('--flow-id <id>', 'resume an existing flow instance')
   .option('--flow-secret <secret>', 'credential for an anonymous flow instance')
+  .option('--reset', 'cancel a flow stuck on this repo (authorized by org ownership) and mint a fresh one')
   .option('--client-pubkey <base64>', 'ephemeral public key; selects the browser-approval auth path')
   .option('--broker-ceremony', 'run the sandbox-session broker ceremony via a detached worker (mints its own keypair)')
   .option('--project-name <name>', 'project name to create with, skipping the interactive name prompt')
@@ -188,6 +189,7 @@ program
           targetDir: options.targetDir,
           flowId: options.flowId,
           flowSecret: options.flowSecret,
+          reset: options.reset === true,
           clientPubkey: options.clientPubkey,
           brokerCeremony: options.brokerCeremony === true,
           projectName: options.projectName,

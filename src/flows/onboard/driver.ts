@@ -94,6 +94,28 @@ export interface DriverOptions {
   compat?: CreateFlowRequest['compat'];
   /** Safety valve against a service that keeps handing back work. */
   maxSteps?: number;
+  /**
+   * CAP-484: `capy onboard --reset`. When the initial create comes back
+   * `blocked: concurrent_flow` — some OTHER instance already holds this
+   * repo's lock, including one stuck on a dead or foreign-bound ceremony
+   * this caller cannot otherwise reach — cancel that instance (the service's
+   * ownership-authorized cancel: `POST /flows/:id/cancel` also accepts a
+   * caller who is a member of the org/project the stuck flow has pinned, not
+   * only the flow's own secret or bound identity) and retry the create
+   * exactly once. Requires a token: an anonymous caller has no identity to
+   * authorize a cancel with, so this is a no-op without one. No-op also when
+   * the block is anything else (a bad target dir, a genuinely live ceremony
+   * — see `resolveLockHolder`'s doc, service-side) or the retry still comes
+   * back blocked: never a second cancel, never a loop.
+   */
+  resetStuckFlow?: boolean;
+}
+
+/** A `blocked: concurrent_flow` envelope carrying the holder's flow_id — the one case `resetStuckFlow` acts on. */
+function isConcurrentFlowBlock(step: unknown): step is { kind: 'blocked'; reason: 'concurrent_flow'; flow_id: string } {
+  if (!step || typeof step !== 'object') return false;
+  const s = step as Record<string, unknown>;
+  return s.kind === 'blocked' && s.reason === 'concurrent_flow' && typeof s.flow_id === 'string' && s.flow_id.length > 0;
 }
 
 export interface DriverResult {
@@ -162,18 +184,23 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
   let createdSecret: string | undefined;
 
   if (!flowId) {
-    const created = await opts.transport.create(
-      {
-        contract_version: FLOW_CONTRACT_VERSION,
-        auth_mode: opts.authMode ?? 'interactive_oauth',
-        repo_key: opts.repoKey ?? opts.targetDir,
-        plan: opts.plan,
-        compat: opts.compat,
-        client_pubkey: opts.clientPubkey,
-        machine_name: opts.machineName,
-      },
-      opts.token,
-    );
+    const createBody: CreateFlowRequest = {
+      contract_version: FLOW_CONTRACT_VERSION,
+      auth_mode: opts.authMode ?? 'interactive_oauth',
+      repo_key: opts.repoKey ?? opts.targetDir,
+      plan: opts.plan,
+      compat: opts.compat,
+      client_pubkey: opts.clientPubkey,
+      machine_name: opts.machineName,
+    };
+    let created = await opts.transport.create(createBody, opts.token);
+
+    // CAP-484 `--reset` — see DriverOptions.resetStuckFlow's doc.
+    if (opts.resetStuckFlow && opts.token && isConcurrentFlowBlock(created.step)) {
+      await opts.transport.cancel(created.step.flow_id, { token: opts.token });
+      created = await opts.transport.create(createBody, opts.token);
+    }
+
     flowId = created.flow_id;
     resumed = created.resumed === true;
     createdSecret = created.flow_secret;
