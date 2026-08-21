@@ -40,6 +40,19 @@ function encrypt(value: string, key: string, varName: string = 'SECRET'): string
 }
 
 /**
+ * CAP-487: `capy run` with a plaintext .env now requires the directory to be
+ * onboarded (keep.lock present) before it passes the values through — the
+ * check is file EXISTENCE only (a stable local signal), so a minimal file is
+ * enough for the passthrough tests that are not about onboarding at all.
+ */
+function writeKeepLock(): void {
+  writeFileSync(
+    join(TEST_DIR, 'keep.lock'),
+    JSON.stringify({ org_id: 'org-test', project_id: 'proj-test' }),
+  );
+}
+
+/**
  * Run `capy run` via the built CLI entry point in a subprocess.
  *
  * Async (Promise-based) rather than spawnSync because deployed-mode tests run
@@ -95,6 +108,9 @@ afterEach(() => {
 
 describe('capy run', () => {
   test('passes plaintext env vars through unchanged', async () => {
+    // CAP-487 CHANGED EXPECTATION: an onboarded dir (keep.lock present) is
+    // now required for the plaintext passthrough — without it the run refuses.
+    writeKeepLock();
     writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello-world\n');
 
     const result = await capy(['--', 'node', '-e', 'console.log(process.env.PLAIN_VAR)']);
@@ -137,6 +153,8 @@ describe('capy run', () => {
   });
 
   test('.env with zero encrypted values needs no key', async () => {
+    // CAP-487 CHANGED EXPECTATION: plaintext passthrough now needs keep.lock.
+    writeKeepLock();
     writeFileSync(join(TEST_DIR, '.env'), 'DB_HOST=localhost\nDB_PORT=5432\n');
 
     const result = await capy([
@@ -146,6 +164,40 @@ describe('capy run', () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe('localhost:5432');
+  });
+
+  // CAP-487: the false-green. A plaintext .env in a directory that was never
+  // onboarded used to be passed through with exit 0 — `capy run` LOOKED like
+  // it decrypted when it decrypted nothing. It now refuses with a stable code.
+  describe('plaintext .env without onboarding (CAP-487)', () => {
+    test('refuses with NOT_ONBOARDED when .env has values and no keep.lock exists', async () => {
+      writeFileSync(join(TEST_DIR, '.env'), 'API_KEY=plaintext-secret\n');
+
+      const result = await capy(['--', 'node', '-e', 'console.log("reached")']);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('NOT_ONBOARDED');
+      expect(result.stdout).not.toContain('reached');
+    });
+
+    test('an onboarded dir with an all-plaintext .env still runs, with a warning on stderr', async () => {
+      writeKeepLock();
+      writeFileSync(join(TEST_DIR, '.env'), 'API_KEY=plaintext-value\n');
+
+      const result = await capy(['--', 'node', '-e', 'console.log(process.env.API_KEY)']);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('plaintext-value');
+      expect(result.stderr).toContain('warning');
+    });
+
+    test('no .env at all is untouched: still runs with no refusal and no warning', async () => {
+      const result = await capy(['--', 'node', '-e', 'console.log("ok")']);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('ok');
+      expect(result.stderr).not.toContain('NOT_ONBOARDED');
+    });
   });
 });
 
@@ -480,6 +532,8 @@ describe('capy run (deploy credential selection: both generations / cross-genera
   });
 
   test('neither pair present → local mode, not an error', async () => {
+    // CAP-487 CHANGED EXPECTATION: plaintext passthrough now needs keep.lock.
+    writeKeepLock();
     writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello\n');
     const result = await capy(['--', 'node', '-e', 'console.log(process.env.PLAIN_VAR)']);
     expect(result.exitCode).toBe(0);
@@ -578,6 +632,8 @@ describe('capy run (reserved runtime variables)', () => {
   });
 
   test('local mode strips them too', async () => {
+    // CAP-487 CHANGED EXPECTATION: plaintext passthrough now needs keep.lock.
+    writeKeepLock();
     writeFileSync(join(TEST_DIR, '.env'), 'PLAIN_VAR=hello\n');
 
     // No blob/key pair, so this is the plaintext local path — but a machine
@@ -623,6 +679,8 @@ describe('capy run (reserved runtime variables)', () => {
     // from users, and tests/sync/spliceKeepBranch.test.ts already uses
     // DEPLOY_KEY as an ordinary variable. The real credential is
     // _CAPY_DEPLOY_KEY, which the prefix rule covers.
+    // CAP-487 CHANGED EXPECTATION: plaintext passthrough now needs keep.lock.
+    writeKeepLock();
     writeFileSync(join(TEST_DIR, '.env'), 'DEPLOY_KEY=my-own-app-value\n');
 
     const result = await capy(['--', 'node', '-e', 'console.log(process.env.DEPLOY_KEY)']);
