@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -105,4 +106,56 @@ test('capy-staging runs the production codepath, not the mock-auth dev build', (
   // Not a bare 'index-dev' search: the file's own header explains why it does
   // NOT use index-dev.js, so only the require target is meaningful here.
   expect(SOURCE).not.toContain("require('../dist/index-dev.js')");
+});
+
+// ---------------------------------------------------------------------------
+// The pin lives in the resolvers, not in the shim's env assignments.
+// ---------------------------------------------------------------------------
+
+/**
+ * A bare entrypoint that sets NO environment at all — the filename is the only
+ * signal. If the pin still holds through this, it is `isStagingEntrypoint()`'s
+ * early return doing the work and not bin/capy-staging's env writes.
+ */
+const bareEntrypoint = (name: string) => {
+  const dir = mkdtempSync(join(tmpdir(), 'capy-pin-'));
+  const file = join(dir, name);
+  const dist = resolve(import.meta.dir, '../../dist/index.js');
+
+  writeFileSync(file, `#!/usr/bin/env node\nrequire(${JSON.stringify(dist)});\n`);
+  return file;
+};
+
+const doctorFrom = (entrypoint: string, hostile: Record<string, string>) => {
+  const result = spawnSync(process.execPath, [entrypoint, 'doctor', '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, ...hostile, CAPY_NO_AUTOCOMMIT: '1' },
+  });
+
+  if (result.status !== 0) {
+    throw new Error(`doctor exited ${result.status}: ${result.stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+};
+
+test('the pin holds with no env assignments — the resolver, not the shim', () => {
+  const report = doctorFrom(bareEntrypoint('capy-staging'), {
+    CAPY_API_URL: 'https://api.capy.sc',
+    CAPY_KEEP_ORIGIN: 'https://keep.capy.sc',
+    CAPY_GLOBAL_DIR_NAME: '.capy',
+  });
+
+  expect(report.origins.api).toBe(STAGING_API);
+  expect(report.origins.keep).toBe(STAGING_KEEP);
+  expect(report.stateDir).toBe(EXPECTED_STATE_DIR);
+});
+
+test('the pin does NOT leak into the production entrypoint', () => {
+  // The same bytes under a different name must resolve normally. Without this,
+  // the early return could silently pin prod too.
+  const report = doctorFrom(bareEntrypoint('capy'), { CAPY_API_URL: 'https://api.capy.sc' });
+
+  expect(report.origins.api).toBe('https://api.capy.sc');
+  expect(report.stateDir).not.toBe(EXPECTED_STATE_DIR);
 });
