@@ -31,8 +31,9 @@ export interface OnboardObservations {
   sessionLive: boolean;
   /**
    * The org named by keep.lock (or the .env header when keep.lock is absent)
-   * has its master key on this device. VACUOUSLY TRUE when no org is named
-   * locally, or when there is no session yet — see `orgKeyOnDevice` below.
+   * has its master key confirmed on this device. VACUOUSLY TRUE only when no
+   * org is named locally; with an org named, unconfirmed reports FALSE — see
+   * `orgKeyOnDevice` below.
    */
   orgKeyOnDevice: boolean;
 }
@@ -96,18 +97,19 @@ function commandsWrapped(targetDir: string): boolean {
  * CAP-382 Case C, as an observation: does THIS device hold the master key for
  * the org named locally?
  *
- * VACUOUSLY TRUE in both cases the definition names, and in that order:
- *   - no org is named locally at all (no keep.lock, no .env header) — there is
- *     nothing to check `hasOrgKey` against;
- *   - `sessionLive` is false — `hasOrgKey` needs a userId, and there is no
- *     identity yet to check it with.
- * Both are exactly what the contract's `orgKeyOnDevice` predicate requires an
- * honest client to report, and what makes the corresponding rows of the
- * onboard table unreachable (`U4`/`U5` in `scripts/gen-onboard-table.ts`).
+ * VACUOUSLY TRUE only when no org is named locally at all (no keep.lock, no
+ * .env header) — there is nothing to check `hasOrgKey` against. That is the
+ * one vacuous arm the contract keeps (`U4` in `scripts/gen-onboard-table.ts`).
+ *
+ * When an org IS named, an unconfirmed key is a MISSING key: no session yet,
+ * no recorded userId yet, or `hasOrgKey` false all report FALSE. The old
+ * vacuous-true arms here (CAP-485) were exactly what let a second device
+ * declare an already-onboarded repo `done` without ever signing in or
+ * unlocking — with no session the table's own priority order routes to
+ * `authenticate` first, and `unlock_org_key` (which resolves the userId from
+ * the live session and records it in sync-state) follows once one exists.
  */
 function orgKeyOnDevice(pm: ProjectManager, fm: FileManager, sessionLive: boolean, envPath?: string): boolean {
-  if (!sessionLive) return true;
-
   let keep: KeepFile | null = null;
   try {
     keep = pm.readKeepFile();
@@ -117,8 +119,10 @@ function orgKeyOnDevice(pm: ProjectManager, fm: FileManager, sessionLive: boolea
   const orgId = keep?.org_id ?? fm.readEnvMeta(envPath).org_id ?? null;
   if (!orgId) return true;
 
+  if (!sessionLive) return false;
+
   const userId = pm.readSyncState()?.user_id;
-  if (!userId) return true;
+  if (!userId) return false;
 
   const { hasOrgKey } = require('../../crypto/keyResolver') as typeof import('../../crypto/keyResolver');
   return hasOrgKey(orgId, userId);

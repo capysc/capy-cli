@@ -394,6 +394,12 @@ export const unlockOrgKey: Executor = async (step, ctx) => {
     return { outcome: 'failed', code: codeForSilentAuthFailure(session.error_code) };
   }
   const userId = session.user_id;
+  // CAP-485: record the identity on this directory, the same write
+  // `authenticate`'s publish does. The `orgKeyOnDevice` observation resolves
+  // its userId from sync-state, so without this a successful unlock on a
+  // directory whose `authenticate` was skipped (session already live) could
+  // never flip the predicate, and the flow would re-issue this verb forever.
+  pm.writeSyncStateUserId(userId);
 
   const { hasOrgKey } = await import('../../../crypto/keyResolver');
   if (hasOrgKey(orgId, userId)) return { outcome: 'ok' };
