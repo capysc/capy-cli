@@ -214,9 +214,10 @@ describe('observeOnboard', () => {
  *
  * The live E2E's second-machine run had a keep.lock naming an org this device
  * never received the master key for, and the table routed straight past it to
- * write_capy_dir -> done. These pin the predicate itself: vacuously true with
- * no org named locally and with no session, and the real filesystem check
- * otherwise.
+ * write_capy_dir -> done. These pin the predicate itself: vacuously true ONLY
+ * with no org named locally (CAP-485 revised the contract — an org named with
+ * no session, or no recorded userId, is an UNCONFIRMED key and reports false),
+ * and the real filesystem check otherwise.
  */
 describe('observeOnboard: orgKeyOnDevice (CAP-382 Case C)', () => {
   function writeOrgKey(orgId: string, userId: string): void {
@@ -226,11 +227,14 @@ describe('observeOnboard: orgKeyOnDevice (CAP-382 Case C)', () => {
     writeFileSync(path, JSON.stringify({ encrypted_master_key: 'ct' }));
   }
 
-  test('vacuously true with no session, even with an org named locally by keep.lock', () => {
+  test('CAP-485: FALSE with no session when an org IS named locally by keep.lock — the second-device shape', () => {
+    // The old vacuous-true here is what let a fresh device declare an
+    // already-onboarded repo done without ever signing in: every write
+    // predicate was satisfied, and this one lied the unlock row away.
     writeFileSync(join(dir, 'keep.lock'), keepLock());
     const obs = observeOnboard({ targetDir: dir, sessionLive: false });
     expect(obs.hasKeepLock).toBe(true);
-    expect(obs.orgKeyOnDevice).toBe(true);
+    expect(obs.orgKeyOnDevice).toBe(false);
   });
 
   test('vacuously true with a session but no org named locally — no keep.lock, no .env header', () => {
@@ -267,11 +271,14 @@ describe('observeOnboard: orgKeyOnDevice (CAP-382 Case C)', () => {
     expect(observeOnboard({ targetDir: dir, sessionLive: true }).orgKeyOnDevice).toBe(true);
   });
 
-  test('a session with no sync-state user id yet is vacuously true — nothing to check hasOrgKey against', () => {
+  test('CAP-485: a session with no sync-state user id yet reports FALSE — an unconfirmed key is a missing key', () => {
     writeFileSync(join(dir, 'keep.lock'), keepLock());
-    // No writeSyncStateUserId call: sync-state has no user_id.
+    // No writeSyncStateUserId call: sync-state has no user_id. The
+    // unlock_org_key executor resolves the id from the live session and
+    // records it (writeSyncStateUserId), which is what lets this observation
+    // flip after a successful unlock.
     const obs = observeOnboard({ targetDir: dir, sessionLive: true });
-    expect(obs.orgKeyOnDevice).toBe(true);
+    expect(obs.orgKeyOnDevice).toBe(false);
   });
 });
 
