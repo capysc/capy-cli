@@ -239,26 +239,41 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
   }
 
   const keepPath = join(process.cwd(), 'keep.lock');
-  if (!existsSync(keepPath)) {
-    console.error(
-      'capy run: no keep.lock in the current directory. Run `capy` here first to sync.',
-    );
-    return 1;
-  }
-
   let orgId: string | undefined;
   let projectId: string | undefined;
-  try {
-    const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
-    orgId = keep?.org_id;
-    projectId = keep?.project_id;
-  } catch {
-    console.error('capy run: keep.lock is malformed. Run `capy` to re-sync.');
-    return 1;
-  }
-  if (!orgId || !projectId) {
-    console.error('capy run: keep.lock missing org_id/project_id. Run `capy` to re-sync.');
-    return 1;
+  if (existsSync(keepPath)) {
+    try {
+      const keep = JSON.parse(readFileSync(keepPath, 'utf-8'));
+      orgId = keep?.org_id;
+      projectId = keep?.project_id;
+    } catch {
+      console.error('capy run: keep.lock is malformed. Run `capy` to re-sync.');
+      return 1;
+    }
+    if (!orgId || !projectId) {
+      console.error('capy run: keep.lock missing org_id/project_id. Run `capy` to re-sync.');
+      return 1;
+    }
+  } else {
+    // CAP-304 lock-less mode: no keep.lock in this directory. Identity comes
+    // from the `.env` header a previous lock-less `capy add`/`capy edit` run
+    // wrote (`# capy:org_id=…` / `# capy:project_id=…`) — the same header
+    // `resolveContext()` reads in connectors/shared.ts. Key resolution below
+    // (resolveProjectKey / co-decrypt / local-only passphrase) is completely
+    // unchanged either way, including its own pre-existing offline
+    // project-key cache fallback (keyResolver.ts's readProjectKeyCache /
+    // isNetworkError) — lock-less mode needs no separate content cache here
+    // because the encrypted secret content itself is already local, in this
+    // `.env` file; only the key to decrypt it can require the network.
+    const meta = fm.readEnvMeta();
+    orgId = meta.org_id;
+    projectId = meta.project_id;
+    if (!orgId || !projectId) {
+      console.error(
+        'capy run: no keep.lock and no Capy identity in .env. Run `capy add` here first.',
+      );
+      return 1;
+    }
   }
 
   // Definite-assignment: every non-throwing path through the try block below

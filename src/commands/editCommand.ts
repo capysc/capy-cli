@@ -12,8 +12,9 @@ import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScre
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
-import { setSyncKeepHash } from '../types/index';
+import { setSyncKeepHash, getSyncKeepHash, KeepFile } from '../types/index';
 import { isReservedRuntimeVar } from '../core/reservedVars';
+import { pushKeepWithRetry } from './connectors/shared';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -61,85 +62,123 @@ export class EditCommand {
   async execute(opts: EditOpts = {}): Promise<void> {
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
-
-    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-      console.error(`No keep.lock found. Run ${B('capy')} to initialize.`);
-      process.exit(1);
-    }
-    const orgId = projectState.organizationId;
-    const projectId = projectState.projectId;
-
-    const keep = pm.readKeepFile();
-    if (!keep) {
-      console.error('Could not read keep.lock');
-      process.exit(1);
-    }
-
-    const branch = projectState.activeBranch;
-    if (!branch) {
-      console.error(`No active branch. Run ${B('capy')} to select a branch.`);
-      process.exit(1);
-    }
     const fileManager = new FileManager();
+
+    // No keep.lock: CAP-304 lock-less mode. `resolveContext()` already does
+    // everything this block does below (identity, branch, auth, key
+    // resolution) against the server's latest keep.json for the branch, so
+    // the lock-less branch just adopts its result wholesale rather than
+    // duplicating it. A dir WITH keep.lock keeps every line in the `else`
+    // below byte-for-byte unchanged.
+    const lockless = !projectState.initialized || !projectState.organizationId || !projectState.projectId;
+
+    let orgId: string;
+    let projectId: string;
+    let keep: KeepFile;
+    let branch: string;
+    let localMode: boolean;
+    let authService: AuthService | undefined;
+    let serviceClient: ServiceClient | undefined;
+    let userId: string;
+    let projectKey: string;
+    let locklessBaseHash: string | undefined;
+
+    if (lockless) {
+      const { resolveContext } = await import('./connectors/shared');
+      const ctx = await resolveContext({ apiUrl: this.apiUrl, devMode: this.devMode });
+      orgId = ctx.orgId;
+      projectId = ctx.projectId;
+      keep = ctx.keep;
+      branch = ctx.branch;
+      // Local-only mode (isLocalOnly()) is a separate, mutually exclusive
+      // feature — it has no server identity at all, so it can never be the
+      // reason a directory lacks keep.lock under CAP-304's lock-less path.
+      localMode = false;
+      authService = ctx.authService;
+      serviceClient = ctx.serviceClient;
+      userId = ctx.userId;
+      projectKey = ctx.projectKey;
+      locklessBaseHash = ctx.base_keep_hash;
+    } else {
+      orgId = projectState.organizationId!;
+      projectId = projectState.projectId!;
+
+      const foundKeep = pm.readKeepFile();
+      if (!foundKeep) {
+        console.error('Could not read keep.lock');
+        process.exit(1);
+      }
+      keep = foundKeep;
+
+      const activeBranch = projectState.activeBranch;
+      if (!activeBranch) {
+        console.error(`No active branch. Run ${B('capy')} to select a branch.`);
+        process.exit(1);
+      }
+      branch = activeBranch;
+
+      // Local-only mode: no auth, no server. Identity is synthetic; the key is
+      // unwrapped from the passphrase session. No AuthService/ServiceClient is
+      // constructed (avoids the dev-mode "[dev] AuthService → …" log and any
+      // accidental server use).
+      localMode = isLocalOnly();
+
+      if (localMode) {
+        userId = LOCAL_USER_ID;
+      } else {
+        // Auth — silent first, then interactive (mirrors usersCommand pattern)
+        authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
+        serviceClient = new ServiceClient(this.apiUrl, this.devMode);
+        serviceClient.setTokenProvider(() => authService!.getValidToken());
+        let authResult = await authService.authenticateSilent(orgId);
+        if (!authResult.success) authResult = await authService.authenticateSilent();
+        if (!authResult.success) authResult = await authService.authenticate(orgId);
+        if (!authResult.success || !authResult.user_id) {
+          console.error('Authentication failed');
+          process.exit(1);
+        }
+        userId = authResult.user_id;
+      }
+
+      try {
+        if (localMode) {
+          projectKey = await resolveLocalProjectKey(projectId);
+        } else {
+          const { resolveProjectKey } = await import('../crypto/keyResolver');
+          const keyOps = {
+            coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
+            wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+          };
+          projectKey = await resolveProjectKey(
+            orgId,
+            projectId,
+            userId,
+            keyOps,
+          );
+        }
+      } catch (err: any) {
+        const { displayErrorAndExit } = await import('../ui/errorScreen');
+        await displayErrorAndExit(err, {
+          projectName: keep.project_name,
+          projectId: keep.project_id,
+          branch,
+        });
+        return;
+      }
+    }
+
+    // CAS precondition for the eventual save's push — the branch's keep_hash
+    // this command started from. Lock-less mode always has one (resolved
+    // above, real or the well-known empty-state hash); lock-full mode has one
+    // when sync-state recorded it and `undefined` otherwise, in which case
+    // the eventual push omits base_keep_hash entirely (legacy behavior).
+    const baseKeepHash: string | undefined = lockless ? locklessBaseHash : getSyncKeepHash(pm.readSyncState(), branch);
 
     // Pinned hashes for the active branch
     const pinned: Record<string, string> = {};
     for (const [varName, entries] of Object.entries(keep.variables)) {
       const entry = entries.find((e) => e.branch === branch);
       if (entry) pinned[varName] = entry.value_hash;
-    }
-
-    // Local-only mode: no auth, no server. Identity is synthetic; the key is
-    // unwrapped from the passphrase session. No AuthService/ServiceClient is
-    // constructed (avoids the dev-mode "[dev] AuthService → …" log and any
-    // accidental server use).
-    const localMode = isLocalOnly();
-
-    let authService: AuthService | undefined;
-    let serviceClient: ServiceClient | undefined;
-    let userId: string;
-    if (localMode) {
-      userId = LOCAL_USER_ID;
-    } else {
-      // Auth — silent first, then interactive (mirrors usersCommand pattern)
-      authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
-      serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-      serviceClient.setTokenProvider(() => authService!.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
-      if (!authResult.success || !authResult.user_id) {
-        console.error('Authentication failed');
-        process.exit(1);
-      }
-      userId = authResult.user_id;
-    }
-
-    let projectKey: string;
-    try {
-      if (localMode) {
-        projectKey = await resolveLocalProjectKey(projectId);
-      } else {
-        const { resolveProjectKey } = await import('../crypto/keyResolver');
-        const keyOps = {
-          coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
-          wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-        };
-        projectKey = await resolveProjectKey(
-          orgId,
-          projectId,
-          userId,
-          keyOps,
-        );
-      }
-    } catch (err: any) {
-      const { displayErrorAndExit } = await import('../ui/errorScreen');
-      await displayErrorAndExit(err, {
-        projectName: keep.project_name,
-        projectId: keep.project_id,
-        branch,
-      });
-      return;
     }
 
     // Decrypt local .env values
@@ -293,36 +332,64 @@ export class EditCommand {
         }
 
         const syncEngine = new SyncEngine();
-        const finalKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
-
-        // Drop branch entries for variables no longer in finalEnv.
-        for (const varName of Object.keys(finalKeep.variables)) {
-          if (!(varName in finalEnv)) {
-            const entries = finalKeep.variables[varName].filter((e) => e.branch !== branch);
-            if (entries.length > 0) finalKeep.variables[varName] = entries;
-            else delete finalKeep.variables[varName];
+        const buildFinalKeep = (base: KeepFile): KeepFile => {
+          const fk = syncEngine.mergeWithKeep(base, pushedVars, branch);
+          // Drop branch entries for variables no longer in finalEnv.
+          // Prune against `keep` (this command's original local basis), not
+          // `base` (which a CAS retry replaces with a rebase onto the
+          // server's current state) — a var missing from `finalEnv` that
+          // `keep` never had either is someone else's concurrent addition,
+          // visible only because of the rebase, not something the user
+          // deleted in this screen. Pruning it would be a data-loss bug on
+          // exactly the retry path meant to avoid one.
+          for (const varName of Object.keys(fk.variables)) {
+            if (varName in finalEnv) continue;
+            const wasInLocalBasis = keep.variables[varName]?.some((e) => e.branch === branch);
+            if (!wasInLocalBasis) continue;
+            const entries = fk.variables[varName].filter((e) => e.branch !== branch);
+            if (entries.length > 0) fk.variables[varName] = entries;
+            else delete fk.variables[varName];
           }
-        }
+          return fk;
+        };
 
-        // keep_hash is computed locally; the server returns the same value on
-        // push. In local-only mode there is no push — the local writes below
-        // ARE the commit.
-        const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
+        // In local-only mode there is no push — the local writes below ARE
+        // the commit, against the merge computed straight off `keep`. In
+        // server mode, a stale base is rebased and retried (CAP-304 CAS) —
+        // this screen has no established overwrite-gate surface to reuse the
+        // way `addCommand`'s inquirer confirm does, so a same-key conflict
+        // refuses rather than silently clobbering a concurrent edit; a richer
+        // conflict UX here is a follow-up.
+        let finalKeep = buildFinalKeep(keep);
         const pushResult = localMode
           ? null
-          : await serviceClient!.pushSecrets(
+          : await pushKeepWithRetry({
+              serviceClient: serviceClient!,
               projectId,
-              JSON.stringify(finalKeep),
-              envBlob,
               branch,
-            );
+              baseKeep: keep,
+              baseHash: baseKeepHash,
+              envBlob,
+              buildFinalKeep,
+              primaryVarNames: Object.keys(edits),
+            }).then((r) => {
+              finalKeep = r.finalKeep;
+              return r;
+            });
+
+        // keep_hash is computed locally from what was actually pushed (after
+        // any CAS rebase); the server returns the same value on push.
+        const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
         const keepHashForCache = pushResult ? pushResult.keep_hash : localKeepHash;
 
         writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
-        // Prefer the server's copy — it carries server-assigned changed_at
+        // Prefer the server's copy — it carries server-assigned changed_at.
+        // Lock-less mode never writes keep.lock — there is none for this dir.
         const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);
-        fileManager.writeKeepFile(adoptedKeep);
-        keepDirty = true;
+        if (!lockless) {
+          fileManager.writeKeepFile(adoptedKeep);
+          keepDirty = true;
+        }
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
         const existingSyncState = pm.readSyncState();

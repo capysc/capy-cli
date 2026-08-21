@@ -79,12 +79,37 @@ export class AddCommand {
       }
     }
 
+    // The push-time counterpart of the "already exists locally" confirm
+    // above: a lock-less push discovers, via a 409 STALE_KEEP_HASH, that one
+    // of these exact names changed on the server since `ctx` was resolved —
+    // someone (or another machine) beat this write there. Same refusal
+    // convention as everywhere else in this command: `--force` always says
+    // yes, `--web`/`--nonTty` have no secondary confirm surface to ask on so
+    // they refuse (the intake form's only "yes" is Save, already spent), and
+    // a real TTY gets the same inquirer confirm shape as the local gate
+    // above — same sentence, "changed on the server" instead of "already
+    // exist(s)" because it's a different fact.
+    const confirmOverwrite = async (changedNames: string[]): Promise<boolean> => {
+      if (opts.force) return true;
+      if (opts.web || opts.nonTty) return false;
+      const inquirer = (await import('inquirer')).default;
+      const { ok } = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'ok',
+          message: `${changedNames.join(', ')} changed on the server while you were editing. Overwrite?`,
+          default: false,
+        },
+      ]);
+      return ok;
+    };
+
     // Write all pairs, pushing once at the end (each write accumulates into the
     // local env so the final push carries every variable).
     const writeMany = async (pairs: SecretPair[]): Promise<void> => {
       for (let i = 0; i < pairs.length; i++) {
         const { name, value } = pairs[i];
-        await writeAndSync(ctx, name, value, { push: push && i === pairs.length - 1 });
+        await writeAndSync(ctx, name, value, { push: push && i === pairs.length - 1, confirmOverwrite });
         ctx.localPlaintext[name] = value;
       }
     };

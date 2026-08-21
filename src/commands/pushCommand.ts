@@ -10,12 +10,15 @@ import {
   CapyError,
   ERROR_CODES,
   setSyncKeepHash,
+  getSyncKeepHash,
+  KeepFile,
 } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
+import { pushKeepWithRetry } from './connectors/shared';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -191,27 +194,41 @@ export class PushCommand {
     this.debug('pushedVars', pushedVars);
 
     const syncEngine = new SyncEngine();
-    const updatedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
+    const buildUpdatedKeep = (base: KeepFile): KeepFile => syncEngine.mergeWithKeep(base, pushedVars, branch);
 
-    // Push to Keep
-    const keepFileContent = JSON.stringify(updatedKeep);
+    // Push to Keep. `baseKeepHash` is this branch's last-known keep_hash
+    // (sync-state, when this machine has recorded one) — the CAS
+    // precondition (CAP-304). On a 409 STALE_KEEP_HASH the retry rebases
+    // onto the server's current keep_file and pushes again; `capy push` has
+    // no interactive overwrite gate to reuse (unlike `capy add`), so a
+    // same-key conflict — one of THIS push's own vars changed server-side
+    // since sync-state was last updated — refuses rather than clobbering it.
     this.debug('pushSecrets request', {
       projectId: projectState.projectId,
       branch,
-      keepFileLength: keepFileContent.length,
       envBlobLength: envBlob.length,
     });
-    // keep_hash is computed locally; the server returns the same value on a
-    // push. In local-only mode there is no push.
-    const localKeepHash = SyncEngine.computeKeepHash(updatedKeep, branch);
+    const baseKeepHash = getSyncKeepHash(this.projectManager.readSyncState(), branch);
+    let finalKeep: KeepFile = buildUpdatedKeep(keep);
     const pushResult = localMode
       ? null
-      : await this.serviceClient.pushSecrets(
-          projectState.projectId!,
-          keepFileContent,
-          envBlob,
+      : await pushKeepWithRetry({
+          serviceClient: this.serviceClient,
+          projectId: projectState.projectId!,
           branch,
-        );
+          baseKeep: keep,
+          baseHash: baseKeepHash,
+          envBlob,
+          buildFinalKeep: buildUpdatedKeep,
+          primaryVarNames: Object.keys(rawLocal),
+        }).then((r) => {
+          finalKeep = r.finalKeep;
+          return r;
+        });
+    // keep_hash is computed locally from what was actually pushed (after any
+    // CAS rebase); the server returns the same value on a push. In
+    // local-only mode there is no push.
+    const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
     const cacheKeepHash = pushResult ? pushResult.keep_hash : localKeepHash;
     this.debug('push complete', { localMode, cacheKeepHash });
 
@@ -226,7 +243,7 @@ export class PushCommand {
 
     // Update keep.lock with new state, preferring the server's copy (it
     // carries server-assigned changed_at timestamps)
-    this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult?.keep_file, updatedKeep, branch));
+    this.fileManager.writeKeepFile(SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch));
     this.debug('keep.lock written to disk');
 
     // Update sync state with keep_hash so direction detection works
