@@ -126,7 +126,10 @@ export function computeRunWrapEdits(targetDir: string): Edit[] {
 /** Read env var NAMES from any env files in the directory. Never reads values. */
 export function readEnvKeys(targetDir: string): string[] {
   const keys = new Set<string>();
-  for (const f of ['.env.example', '.env', '.env.local', '.env.sample']) {
+  // The dotless `env.example` / `env.sample` spellings are common (capysc's
+  // own test-project ships one) and were previously invisible here, so a repo
+  // that documents its variables that way read as "uses no env vars at all".
+  for (const f of ['.env.example', '.env', '.env.local', '.env.sample', 'env.example', 'env.sample']) {
     const p = join(targetDir, f);
     if (!existsSync(p)) continue;
     for (const line of readFileSync(p, 'utf8').split('\n')) {

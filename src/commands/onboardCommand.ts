@@ -24,6 +24,8 @@ import { FLOW_CONTRACT_VERSION, FlowContractError, FlowStep, validateStep } from
 import { runOnboardFlow, confirmOnboardPlan } from '../flows/onboard/driver';
 import { buildPlan } from '../flows/onboard/plan';
 import { readEnvKeys } from '../flows/onboard/edits';
+import { existsSync } from 'fs';
+import { join as joinPath } from 'path';
 import { FileManager } from '../files/fileManager';
 
 export interface OnboardOptions extends CliOptions {
@@ -98,6 +100,27 @@ interface OnboardJson {
   step: FlowStep;
   executed: Array<{ step_id: string; verb: string; outcome: string; code?: string }>;
   flow_secret?: string;
+}
+
+/**
+ * Does this directory read its configuration from environment variables?
+ *
+ * `keep.lock` SHORT-CIRCUITS the question. That file is only ever written by a
+ * completed onboard, and it enumerates the very variables Capy already manages
+ * here — so a directory holding one has demonstrably adopted Capy, and the
+ * compat gate (a FIRST-ADOPTION question: "is Capy a fit for this project?")
+ * must not be asked of it at all.
+ *
+ * Without this, a fresh clone of an onboarded repo was refused outright with
+ * `blocked: incompatible_project`: `.env` is gitignored by design, so nothing
+ * on disk looked like env usage even though keep.lock listed six variables.
+ * That is the second-device path — precisely the case onboarding exists to
+ * serve.
+ */
+function usesEnvVars(targetDir: string, hint?: boolean): boolean {
+  if (existsSync(joinPath(targetDir, 'keep.lock'))) return true;
+  if (hint === true) return true;
+  return readEnvKeys(targetDir).length > 0;
 }
 
 export async function runOnboardCommand(options: OnboardOptions = {}, devMode = false): Promise<void> {
@@ -224,7 +247,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
           repo_key: targetDir,
           plan: planPayload(targetDir, options.projectName),
           compat: {
-            usesEnvVars: readEnvKeys(targetDir).length > 0 || options.usesEnvVars === true,
+            usesEnvVars: usesEnvVars(targetDir, options.usesEnvVars),
             framework: options.framework,
             externalSecretManager: options.externalSecretManager,
           },
@@ -318,7 +341,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
         // Local file detection OR's with the caller's own hint — a directory
         // with a real .env/.env.example/etc is ALWAYS usesEnvVars:true,
         // never overridden down by a caller that did not pass the hint.
-        usesEnvVars: envKeys.length > 0 || options.usesEnvVars === true,
+        usesEnvVars: usesEnvVars(targetDir, options.usesEnvVars),
         framework: options.framework ?? plan.framework,
         externalSecretManager: options.externalSecretManager,
       },
