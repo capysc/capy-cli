@@ -73,14 +73,11 @@ describe('parseSandboxSessionAnswer', () => {
     }
   });
 
-  test('create_org with no PRF pair parses cleanly', () => {
+  test('CHANGED EXPECTATION: create_org with no PRF pair is REFUSED — signup requires a door', () => {
     const result = parseSandboxSessionAnswer(
       envelope({ first_run: { kind: 'create_org', name: 'Acme', phrase: 'w'.repeat(1) } }),
     );
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.answer.firstRun).toEqual({ kind: 'create_org', name: 'Acme', phrase: 'w' });
-    }
+    expect(result.ok).toBe(false);
   });
 
   test('create_org with a complete PRF pair parses with defaults for missing backup flags', () => {

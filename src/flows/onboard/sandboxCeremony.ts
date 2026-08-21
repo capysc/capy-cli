@@ -240,10 +240,12 @@ export type SandboxSessionFirstRun =
       kind: 'create_org';
       name: string;
       phrase: string;
-      credentialId?: string;
-      prfOutput?: string;
-      backupEligible?: boolean;
-      backupState?: boolean;
+      // REQUIRED: signup requires a door — a passkey's PRF pair, or the
+      // passphrase fallback's derived equivalent (`capy:passphrase`).
+      credentialId: string;
+      prfOutput: string;
+      backupEligible: boolean;
+      backupState: boolean;
     }
   | { kind: 'select_org'; orgId: string }
   | { kind: 'unlock'; credentialId: string; prfOutput: string }
@@ -271,24 +273,22 @@ function parseFirstRun(raw: unknown): SandboxSessionFirstRun | null {
   if (raw.kind === 'create_org') {
     if (typeof raw.name !== 'string' || raw.name.trim().length === 0) return null;
     if (typeof raw.phrase !== 'string' || raw.phrase.trim().length === 0) return null;
-    const hasCredentialId = typeof raw.credential_id === 'string';
-    const hasPrfOutput = typeof raw.prf_output === 'string';
-    // Strict pair: both or neither, never half.
-    if (hasCredentialId !== hasPrfOutput) return null;
+    // Signup REQUIRES a door: a create_org without the credential/PRF pair
+    // (a passkey's, or the passphrase fallback's derived equivalent under
+    // the `capy:passphrase` sentinel) is refused outright — a doorless
+    // organization can no longer be minted through this ceremony.
+    if (typeof raw.credential_id !== 'string' || raw.credential_id.length === 0) return null;
+    if (typeof raw.prf_output !== 'string' || raw.prf_output.length === 0) return null;
     if (raw.backup_eligible !== undefined && typeof raw.backup_eligible !== 'boolean') return null;
     if (raw.backup_state !== undefined && typeof raw.backup_state !== 'boolean') return null;
     return {
       kind: 'create_org',
       name: raw.name,
       phrase: raw.phrase,
-      ...(hasCredentialId && hasPrfOutput
-        ? {
-            credentialId: raw.credential_id as string,
-            prfOutput: raw.prf_output as string,
-            backupEligible: (raw.backup_eligible as boolean | undefined) ?? false,
-            backupState: (raw.backup_state as boolean | undefined) ?? false,
-          }
-        : {}),
+      credentialId: raw.credential_id,
+      prfOutput: raw.prf_output,
+      backupEligible: (raw.backup_eligible as boolean | undefined) ?? false,
+      backupState: (raw.backup_state as boolean | undefined) ?? false,
     };
   }
 
@@ -446,16 +446,16 @@ async function applyFirstRun(opts: {
         userEmail: opts.answer.user.email,
         name: fr.name,
         phrase: fr.phrase,
-        prf:
-          fr.credentialId && fr.prfOutput
-            ? {
-                credentialId: fr.credentialId,
-                prfOutput: fr.prfOutput,
-                backupEligible: fr.backupEligible ?? false,
-                backupState: fr.backupState ?? false,
-                prfSalt: opts.prfSalt,
-              }
-            : undefined,
+        // Always present now — the parse refuses a doorless create_org
+        // (signup requires a door), so this never falls back to the old
+        // enroll-nothing path.
+        prf: {
+          credentialId: fr.credentialId,
+          prfOutput: fr.prfOutput,
+          backupEligible: fr.backupEligible,
+          backupState: fr.backupState,
+          prfSalt: opts.prfSalt,
+        },
       });
       orgId = org.id;
     } catch (err) {
