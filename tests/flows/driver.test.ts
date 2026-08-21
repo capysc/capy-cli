@@ -326,6 +326,137 @@ describe('driver: creation', () => {
   });
 });
 
+describe('CAP-484 — `resetStuckFlow` cancels a stuck lock holder and retries create once', () => {
+  const STUCK_FLOW_ID = 'flow-stuck';
+
+  /**
+   * Scripts a repo lock held by ANOTHER instance: the first `create()` comes
+   * back `blocked: concurrent_flow` naming `STUCK_FLOW_ID`; every call
+   * AFTER a `cancel()` on that id returns a fresh instance instead. Records
+   * both, so tests can assert exactly one cancel and exactly one retry.
+   */
+  function fakeStuckTransport(afterCancelReason: string | null = null) {
+    const cancelled: Array<{ flowId: string; creds: unknown }> = [];
+    const createCalls: unknown[] = [];
+    let released = false;
+    const transport: FlowTransport = {
+      async create(body) {
+        createCalls.push(body);
+        if (!released) {
+          return {
+            flow_id: STUCK_FLOW_ID,
+            flow_type: 'onboard',
+            contract_version: FLOW_CONTRACT_VERSION,
+            binding: 'anonymous',
+            step: envelope({
+              flow_id: STUCK_FLOW_ID,
+              kind: 'blocked',
+              reason: 'concurrent_flow',
+              step_id: 'blocked:concurrent_flow',
+              params: {},
+            }),
+          };
+        }
+        return {
+          flow_id: 'flow-fresh',
+          flow_type: 'onboard',
+          contract_version: FLOW_CONTRACT_VERSION,
+          binding: 'anonymous',
+          flow_secret: 'fresh-sekrit',
+          step: afterCancelReason
+            ? envelope({
+                flow_id: 'flow-fresh',
+                kind: 'blocked',
+                reason: afterCancelReason,
+                step_id: `blocked:${afterCancelReason}`,
+                params: {},
+              })
+            : null,
+        };
+      },
+      async next() {
+        return { step: envelope({ flow_id: 'flow-fresh', kind: 'done', params: {} }) };
+      },
+      async confirm() {
+        return { recorded: true };
+      },
+      async cancel(flowId, creds) {
+        cancelled.push({ flowId, creds });
+        released = true;
+      },
+    };
+    return { transport, cancelled, createCalls };
+  }
+
+  test('cancels the stuck holder and retries create exactly once', async () => {
+    const { transport, cancelled, createCalls } = fakeStuckTransport();
+    const result = await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: recordingExecutors().map,
+      observe: observeStub(),
+      token: 'owner-jwt',
+      resetStuckFlow: true,
+    });
+
+    expect(cancelled).toEqual([{ flowId: STUCK_FLOW_ID, creds: { token: 'owner-jwt' } }]);
+    expect(createCalls.length).toBe(2);
+    expect(result.flowId).toBe('flow-fresh');
+    expect(result.flowSecret).toBe('fresh-sekrit');
+    expect(result.step.kind).toBe('done');
+  });
+
+  test('does nothing when resetStuckFlow is not set — reports the block as usual', async () => {
+    const { transport, cancelled, createCalls } = fakeStuckTransport();
+    const result = await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: recordingExecutors().map,
+      observe: observeStub(),
+      token: 'owner-jwt',
+    });
+
+    expect(cancelled).toEqual([]);
+    expect(createCalls.length).toBe(1);
+    expect(result.step.kind).toBe('blocked');
+    expect(result.step.reason).toBe('concurrent_flow');
+  });
+
+  test('does nothing for an anonymous caller — no identity to authorize a cancel with', async () => {
+    const { transport, cancelled, createCalls } = fakeStuckTransport();
+    const result = await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: recordingExecutors().map,
+      observe: observeStub(),
+      resetStuckFlow: true,
+      // no token
+    });
+
+    expect(cancelled).toEqual([]);
+    expect(createCalls.length).toBe(1);
+    expect(result.step.kind).toBe('blocked');
+    expect(result.step.reason).toBe('concurrent_flow');
+  });
+
+  test('never loops: a SECOND concurrent_flow after the cancel is reported, not retried again', async () => {
+    const { transport, cancelled, createCalls } = fakeStuckTransport('concurrent_flow');
+    const result = await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: recordingExecutors().map,
+      observe: observeStub(),
+      token: 'owner-jwt',
+      resetStuckFlow: true,
+    });
+
+    expect(cancelled.length).toBe(1);
+    expect(createCalls.length).toBe(2);
+    expect(result.step.kind).toBe('blocked');
+    expect(result.step.reason).toBe('concurrent_flow');
+  });
+});
+
 describe('G1 — a token minted mid-flow travels on the next request', () => {
   test('the request AFTER a successful authenticate carries it; the one before does not', async () => {
     const seen: Array<string | undefined> = [];

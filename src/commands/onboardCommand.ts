@@ -68,6 +68,15 @@ export interface OnboardOptions extends CliOptions {
   framework?: string;
   /** Compat hint: name of an external secret manager already in use, e.g. "vault". */
   externalSecretManager?: string;
+  /**
+   * CAP-484: the DB-free owner escape hatch. When this repo's flow is stuck
+   * on someone else's instance — a wrong sign-in, a dead ceremony that
+   * hasn't self-healed for whatever reason — this cancels it (authorized by
+   * org ownership, not by holding its secret or identity) and mints a fresh
+   * one in the same run. See `DriverOptions.resetStuckFlow`'s doc in
+   * `../flows/onboard/driver.ts`.
+   */
+  reset?: boolean;
 }
 
 /** Same rule the TTY project-name prompt validates (`../ui/promptEngine.ts`). */
@@ -242,6 +251,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       buildPlan: () => planPayload(targetDir, options.projectName),
       flowId: options.flowId,
       flowSecret: options.flowSecret,
+      resetStuckFlow: options.reset === true,
       authMode: clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
       clientPubkey,
       brokerCeremonyKeypair,
