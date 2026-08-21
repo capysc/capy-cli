@@ -16,7 +16,7 @@
  * genuine failure (a refused step, an unreachable service) exits non-zero.
  */
 import { isLocalOnly } from '../config/profileConfig';
-import { CapyError, ERROR_CODES, CliOptions } from '../types/index';
+import { CapyError, ERROR_CODES, CliOptions, KeepFile } from '../types/index';
 import { debug } from '../ui/debug';
 import { FlowClient, FlowHttpError } from '../flows/client';
 import { ProjectManager } from '../core/projectManager';
@@ -24,6 +24,7 @@ import { FLOW_CONTRACT_VERSION, FlowContractError, FlowStep, validateStep } from
 import { runOnboardFlow, confirmOnboardPlan } from '../flows/onboard/driver';
 import { buildPlan } from '../flows/onboard/plan';
 import { readEnvKeys } from '../flows/onboard/edits';
+import { FileManager } from '../files/fileManager';
 
 export interface OnboardOptions extends CliOptions {
   json?: boolean;
@@ -117,6 +118,21 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
 
   const targetDir = options.targetDir ?? process.cwd();
   const transport = new FlowClient(undefined, devMode);
+
+  // CAP-484: the org this repo already names locally, if any — same readers
+  // the observation uses (keep.lock first, then the .env header). Sent at
+  // flow creation so the ceremony connection is member-gated: a
+  // wrong-account sign-in on the Keep page is refused without consuming the
+  // single-use ceremony. A hint, never authority.
+  const localOrgHint = ((): string | undefined => {
+    let keep: KeepFile | null = null;
+    try {
+      keep = new ProjectManager(targetDir).readKeepFile();
+    } catch {
+      keep = null;
+    }
+    return keep?.org_id ?? new FileManager(targetDir).readEnvMeta(options.envPath).org_id ?? undefined;
+  })();
 
   // CAP-451: `--broker-ceremony` mints its OWN ephemeral keypair — its
   // pubkey becomes `client_pubkey` at flow creation (the existing plumbing
@@ -213,6 +229,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
             externalSecretManager: options.externalSecretManager,
           },
           client_pubkey: clientPubkey,
+          local_org_hint: localOrgHint,
         },
         token,
       );
@@ -291,6 +308,7 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
       buildPlan: () => planPayload(targetDir, options.projectName),
       flowId: options.flowId,
       flowSecret: options.flowSecret,
+      localOrgHint,
       resetStuckFlow: options.reset === true,
       authMode: clientPubkey ? 'broker_ceremony' : 'interactive_oauth',
       clientPubkey,
