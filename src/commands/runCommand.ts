@@ -255,7 +255,7 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
       return 1;
     }
   } else {
-    // CAP-304 lock-less mode: no keep.lock in this directory. Identity comes
+    // Single-user lock-less mode: no keep.lock in this directory. Identity comes
     // from the `.env` header a previous lock-less `capy add`/`capy edit` run
     // wrote (`# capy:org_id=…` / `# capy:project_id=…`) — the same header
     // `resolveContext()` reads in connectors/shared.ts. Key resolution below

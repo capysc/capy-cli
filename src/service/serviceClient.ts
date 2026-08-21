@@ -459,8 +459,8 @@ export class ServiceClient {
    * adopt it as the local keep.lock (SyncEngine.adoptServerKeep).
    *
    * `baseKeepHash` is the branch's keep_hash this write was based on — the
-   * CAS precondition (CAP-304 lock-less mode, also honored in lock-full mode
-   * when the caller knows its base). Omitted entirely (not sent as
+   * CAS precondition (single-user lock-less mode, also honored in lock-full
+   * mode when the caller knows its base). Omitted entirely (not sent as
    * undefined/null) when the caller can't determine one, so an older server
    * that doesn't understand `base_keep_hash` sees exactly the request shape
    * it always has. A server that DOES understand it and finds the branch has

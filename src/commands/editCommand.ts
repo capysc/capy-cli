@@ -64,7 +64,7 @@ export class EditCommand {
     const projectState = await pm.detectProjectState();
     const fileManager = new FileManager();
 
-    // No keep.lock: CAP-304 lock-less mode. `resolveContext()` already does
+    // No keep.lock: single-user lock-less mode. `resolveContext()` already does
     // everything this block does below (identity, branch, auth, key
     // resolution) against the server's latest keep.json for the branch, so
     // the lock-less branch just adopts its result wholesale rather than
@@ -82,6 +82,12 @@ export class EditCommand {
     let userId: string;
     let projectKey: string;
     let locklessBaseHash: string | undefined;
+    // Server-seeded + local-`.env`-overlaid plaintext from resolveContext's
+    // lock-less path (see its own doc comment) — used below INSTEAD OF a raw
+    // local-`.env`-only read, which in a fresh directory (the normal case for
+    // a personal env that follows the user across repos) would be empty and
+    // make every existing branch variable look locally deleted.
+    let locklessLocalPlaintext: Record<string, string> | undefined;
 
     if (lockless) {
       const { resolveContext } = await import('./connectors/shared');
@@ -92,13 +98,14 @@ export class EditCommand {
       branch = ctx.branch;
       // Local-only mode (isLocalOnly()) is a separate, mutually exclusive
       // feature — it has no server identity at all, so it can never be the
-      // reason a directory lacks keep.lock under CAP-304's lock-less path.
+      // reason a directory lacks keep.lock under single-user lock-less mode.
       localMode = false;
       authService = ctx.authService;
       serviceClient = ctx.serviceClient;
       userId = ctx.userId;
       projectKey = ctx.projectKey;
       locklessBaseHash = ctx.base_keep_hash;
+      locklessLocalPlaintext = ctx.localPlaintext;
     } else {
       orgId = projectState.organizationId!;
       projectId = projectState.projectId!;
@@ -187,21 +194,49 @@ export class EditCommand {
     // these on the floor and says nothing, and the next commit then deletes
     // their pins — so the browser table names them.
     const undecryptableKeys: string[] = [];
-    const rawLocal = fileManager.readEnvFile();
-    for (const [key, value] of Object.entries(rawLocal)) {
-      // Reserved runtime variables are not editable secrets (CAP-424). They
-      // are long opaque blobs that crowd out the real list, and editing one
-      // silently breaks that machine's boot while deleting one is worse.
-      if (isReservedRuntimeVar(key)) continue;
-      if (value.startsWith('capy:')) {
+    if (lockless) {
+      // Lock-less mode: `resolveContext()` already built the correct
+      // working set — the server's latest values for the branch, with this
+      // directory's local `.env` (if any) overlaid on top for uncommitted
+      // edits. Re-deriving it here from a raw local `.env` read alone would
+      // reintroduce the exact bug that seeding fixes: a fresh directory's
+      // `.env` is normal and empty, and `saveLocalEdits`'s prune step would
+      // read "every branch variable" as locally deleted.
+      for (const [key, value] of Object.entries(locklessLocalPlaintext!)) {
+        if (isReservedRuntimeVar(key)) continue;
+        localPlaintext[key] = value;
+      }
+      // `undecryptableKeys` is a display-only hint (see above); resolveContext
+      // already swallowed decrypt failures silently while building the merged
+      // set, so recompute just the LOCAL half here for the same warning this
+      // screen has always shown, without changing what's actually editable.
+      const rawLocalForWarning = fileManager.readEnvFile();
+      for (const [key, value] of Object.entries(rawLocalForWarning)) {
+        if (isReservedRuntimeVar(key)) continue;
+        if (!value.startsWith('capy:')) continue;
         try {
-          localPlaintext[key] = fileManager.decryptValue(value, projectKey);
+          fileManager.decryptValue(value, projectKey);
         } catch {
-          // Skip values we can't decrypt
           undecryptableKeys.push(key);
         }
-      } else {
-        localPlaintext[key] = value;
+      }
+    } else {
+      const rawLocal = fileManager.readEnvFile();
+      for (const [key, value] of Object.entries(rawLocal)) {
+        // Reserved runtime variables are not editable secrets (CAP-424). They
+        // are long opaque blobs that crowd out the real list, and editing one
+        // silently breaks that machine's boot while deleting one is worse.
+        if (isReservedRuntimeVar(key)) continue;
+        if (value.startsWith('capy:')) {
+          try {
+            localPlaintext[key] = fileManager.decryptValue(value, projectKey);
+          } catch {
+            // Skip values we can't decrypt
+            undecryptableKeys.push(key);
+          }
+        } else {
+          localPlaintext[key] = value;
+        }
       }
     }
 
@@ -355,12 +390,13 @@ export class EditCommand {
 
         // In local-only mode there is no push — the local writes below ARE
         // the commit, against the merge computed straight off `keep`. In
-        // server mode, a stale base is rebased and retried (CAP-304 CAS) —
-        // this screen has no established overwrite-gate surface to reuse the
-        // way `addCommand`'s inquirer confirm does, so a same-key conflict
-        // refuses rather than silently clobbering a concurrent edit; a richer
-        // conflict UX here is a follow-up.
+        // server mode, a stale base is rebased and retried (single-user
+        // lock-less CAS) — this screen has no established overwrite-gate
+        // surface to reuse the way `addCommand`'s inquirer confirm does, so a
+        // same-key conflict refuses rather than silently clobbering a
+        // concurrent edit; a richer conflict UX here is a follow-up.
         let finalKeep = buildFinalKeep(keep);
+        let pushedEnvBlob = envBlob;
         const pushResult = localMode
           ? null
           : await pushKeepWithRetry({
@@ -369,11 +405,13 @@ export class EditCommand {
               branch,
               baseKeep: keep,
               baseHash: baseKeepHash,
-              envBlob,
+              buildEnvBlob: (extraLines) => (extraLines.length > 0 ? [envBlob, ...extraLines].join('\n') : envBlob),
+              localVarNames: Object.keys(finalEnv),
               buildFinalKeep,
               primaryVarNames: Object.keys(edits),
             }).then((r) => {
               finalKeep = r.finalKeep;
+              pushedEnvBlob = r.envBlob;
               return r;
             });
 
@@ -382,7 +420,7 @@ export class EditCommand {
         const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
         const keepHashForCache = pushResult ? pushResult.keep_hash : localKeepHash;
 
-        writeKeepCache(orgId, projectId, keepHashForCache, envBlob);
+        writeKeepCache(orgId, projectId, keepHashForCache, pushedEnvBlob);
         // Prefer the server's copy — it carries server-assigned changed_at.
         // Lock-less mode never writes keep.lock — there is none for this dir.
         const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);

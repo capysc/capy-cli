@@ -41,10 +41,10 @@ export interface ResolvedContext {
   keep: KeepFile;
   localPlaintext: Record<string, string>;
   /**
-   * True when this directory has no keep.lock — CAP-304 single-user
-   * "lock-less" mode. The server's latest/keep.json for org/project/branch is
-   * the only source of truth; `writeAndSync` never writes keep.lock or
-   * auto-commits it in this mode.
+   * True when this directory has no keep.lock — single-user "lock-less"
+   * mode. The server's latest/keep.json for org/project/branch is the only
+   * source of truth; `writeAndSync` never writes keep.lock or auto-commits
+   * it in this mode.
    */
   lockless: boolean;
   /**
@@ -68,7 +68,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
   const pm = new ProjectManager();
   const projectState = await pm.detectProjectState();
 
-  // No keep.lock: CAP-304 lock-less mode against the user's personal
+  // No keep.lock: single-user lock-less mode against the user's personal
   // ("default") project, rather than the old hard exit. A dir WITH
   // keep.lock keeps every line below byte-for-byte unchanged.
   if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
@@ -155,7 +155,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
 }
 
 /**
- * CAP-304: identity + secrets resolution for a directory with no keep.lock —
+ * Identity + secrets resolution for a directory with no keep.lock —
  * single-user "lock-less" mode. The server's latest/keep.json for the
  * org/project/branch is the only source of truth; nothing here writes
  * keep.lock (see `writeAndSync`'s lock-less branch, which skips it too).
@@ -263,7 +263,27 @@ async function resolveLocklessContext(
     baseKeepHash = EMPTY_KEEP_HASH;
   }
 
+  // Seed from the server's blob FIRST. A fresh directory with no local `.env`
+  // is the NORMAL case in single-user mode — the personal env follows the
+  // user across repos rather than living in any one checkout — so starting
+  // `localPlaintext` from local `.env` alone would make it empty here even
+  // though the branch already has vars on the server. `writeAndSync`'s prune
+  // step treats anything in `keep` (the server's keep, in lock-less mode)
+  // but missing from `finalEnv` as an explicit local delete; an empty
+  // `localPlaintext` would make the very first write in a new directory
+  // silently wipe every existing variable on the branch. Local `.env`
+  // entries are layered on top afterward so uncommitted local edits win.
   const localPlaintext: Record<string, string> = {};
+  if (decryptResult.env_content) {
+    const encrypted = fileManager.parseEnvContent(decryptResult.env_content);
+    for (const [k, v] of Object.entries(encrypted)) {
+      try {
+        localPlaintext[k] = fileManager.decryptValue(v, projectKey);
+      } catch {
+        // Skip values this project key can't open.
+      }
+    }
+  }
   const rawLocal = fileManager.readEnvFile();
   for (const [k, v] of Object.entries(rawLocal)) {
     if (v.startsWith('capy:')) {
@@ -402,19 +422,25 @@ export async function writeAndSync(
     return fk;
   };
 
-  const { keep_hash, keep_file, finalKeep } = await pushKeepWithRetry({
+  const {
+    keep_hash,
+    keep_file,
+    finalKeep,
+    envBlob: pushedEnvBlob,
+  } = await pushKeepWithRetry({
     serviceClient,
     projectId,
     branch,
     baseKeep: keep,
     baseHash: ctx.base_keep_hash,
-    envBlob,
+    buildEnvBlob: (extraLines) => (extraLines.length > 0 ? [envBlob, ...extraLines].join('\n') : envBlob),
+    localVarNames: Object.keys(finalEnv),
     buildFinalKeep,
     primaryVarNames: [varName],
     confirmOverwrite: opts.confirmOverwrite,
   });
 
-  writeKeepCache(orgId, projectId, keep_hash, envBlob);
+  writeKeepCache(orgId, projectId, keep_hash, pushedEnvBlob);
   // Prefer the server's copy — it carries server-assigned changed_at. Never
   // written in lock-less mode: there is no keep.lock file for this directory.
   if (!lockless) {
@@ -467,8 +493,24 @@ export interface PushKeepWithRetryOpts {
   baseKeep: KeepFile;
   /** CAS precondition for the first attempt. `undefined` omits `base_keep_hash` (legacy/unknown-base push). */
   baseHash: string | undefined;
-  /** Pre-encrypted env blob to push — independent of which keep base is currently in play, so it's built once. */
-  envBlob: string;
+  /**
+   * Build the env blob to push, given extra ciphertext LINES (already
+   * `KEY=capy:resourceId:...` formatted) for keys a rebase pulled into the
+   * keep that this call never had a value for. Called once up front with an
+   * empty array — which MUST return exactly the same content a caller would
+   * have sent before this hook existed, so the no-conflict path stays
+   * byte-for-byte unchanged — and again after every rebase that introduces a
+   * "foreign" key (see `localVarNames`).
+   */
+  buildEnvBlob: (extraLines: string[]) => string;
+  /**
+   * Every key `buildEnvBlob`'s own content already covers. A key that ends
+   * up in the rebased keep but is NOT in this set is a concurrent write this
+   * call knows nothing about — its ciphertext line has to be pulled from the
+   * server's blob for the rebased `keep_hash`, or the pushed keep and the
+   * pushed blob would disagree about which keys exist on this branch.
+   */
+  localVarNames: string[];
   /** Rebuild the keep to push (merge + prune + any per-caller extras) from a given base — called once up front and again after every rebase. */
   buildFinalKeep: (base: KeepFile) => KeepFile;
   /** The variable name(s) this write is the author of — same-key conflict detection runs only against these. */
@@ -492,16 +534,32 @@ export interface PushKeepWithRetryOpts {
  * write refuses rather than silently clobbering someone else's newer value,
  * and throws a coded STALE_KEEP_HASH so the caller can surface it.
  *
+ * A rebase can pull a "foreign" key into the keep this call is about to push
+ * — one the caller's own `localVarNames` never covered. Left alone, the push
+ * would carry that key's KEEP entry (metadata: resource_id/value_hash) but
+ * not its ENV BLOB line (ciphertext) — the two are supposed to describe the
+ * same content, and a push that lists a key with no value for it corrupts
+ * the branch's stored snapshot for every reader from that point on. Before
+ * retrying, this fetches the server's blob at the rebased `keep_hash`
+ * (`ServiceClient.getSecrets`) and carries the foreign keys' ciphertext
+ * lines forward verbatim — never re-encrypted, since the resource_id and the
+ * ciphertext are the server's, not this call's, to mint.
+ *
  * Retries are capped (default 3): a server that keeps saying stale no matter
  * how many times this rebases is a loop, not a resolvable conflict.
  */
 export async function pushKeepWithRetry(
   opts: PushKeepWithRetryOpts,
-): Promise<{ keep_hash: string; keep_file?: string; finalKeep: KeepFile }> {
+): Promise<{ keep_hash: string; keep_file?: string; finalKeep: KeepFile; envBlob: string }> {
   const maxRetries = opts.maxRetries ?? 3;
+  const fileManager = new FileManager();
   let baseKeep = opts.baseKeep;
   let baseHash = opts.baseHash;
   let finalKeep = opts.buildFinalKeep(baseKeep);
+  const knownKeys = new Set(opts.localVarNames);
+  const extraLines: string[] = [];
+  const extraLineKeys = new Set<string>();
+  let envBlob = opts.buildEnvBlob(extraLines);
   let attempt = 0;
 
   for (;;) {
@@ -509,11 +567,11 @@ export async function pushKeepWithRetry(
       const result = await opts.serviceClient.pushSecrets(
         opts.projectId,
         JSON.stringify(finalKeep),
-        opts.envBlob,
+        envBlob,
         opts.branch,
         baseHash,
       );
-      return { ...result, finalKeep };
+      return { ...result, finalKeep, envBlob };
     } catch (err) {
       if (!(err instanceof CapyError) || err.code !== ERROR_CODES.STALE_KEEP_HASH) throw err;
 
@@ -546,9 +604,34 @@ export async function pushKeepWithRetry(
         }
       }
 
+      // Foreign keys: on the server for this branch, but not something this
+      // call's own blob has a line for. Pull their ciphertext forward so the
+      // keep this loop is about to push stays consistent with the blob.
+      if (serverKeepHash) {
+        const foreignKeys = Object.keys(serverKeep.variables).filter(
+          (name) =>
+            !knownKeys.has(name) &&
+            !extraLineKeys.has(name) &&
+            serverKeep.variables[name].some((e) => e.branch === opts.branch),
+        );
+        if (foreignKeys.length > 0) {
+          const serverBlob = await opts.serviceClient.getSecrets(opts.projectId, serverKeepHash);
+          if (serverBlob?.env_file) {
+            const parsed = fileManager.parseEnvContent(serverBlob.env_file);
+            for (const key of foreignKeys) {
+              if (key in parsed) {
+                extraLines.push(`${key}=${parsed[key]}`);
+                extraLineKeys.add(key);
+              }
+            }
+          }
+        }
+      }
+
       baseKeep = SyncEngine.spliceKeepBranch(baseKeep, serverKeep, opts.branch);
       baseHash = serverKeepHash;
       finalKeep = opts.buildFinalKeep(baseKeep);
+      envBlob = opts.buildEnvBlob(extraLines);
     }
   }
 }

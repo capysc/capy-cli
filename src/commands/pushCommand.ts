@@ -198,11 +198,12 @@ export class PushCommand {
 
     // Push to Keep. `baseKeepHash` is this branch's last-known keep_hash
     // (sync-state, when this machine has recorded one) — the CAS
-    // precondition (CAP-304). On a 409 STALE_KEEP_HASH the retry rebases
-    // onto the server's current keep_file and pushes again; `capy push` has
-    // no interactive overwrite gate to reuse (unlike `capy add`), so a
-    // same-key conflict — one of THIS push's own vars changed server-side
-    // since sync-state was last updated — refuses rather than clobbering it.
+    // precondition (single-user lock-less mode). On a 409 STALE_KEEP_HASH
+    // the retry rebases onto the server's current keep_file and pushes
+    // again; `capy push` has no interactive overwrite gate to reuse (unlike
+    // `capy add`), so a same-key conflict — one of THIS push's own vars
+    // changed server-side since sync-state was last updated — refuses
+    // rather than clobbering it.
     this.debug('pushSecrets request', {
       projectId: projectState.projectId,
       branch,
@@ -210,6 +211,7 @@ export class PushCommand {
     });
     const baseKeepHash = getSyncKeepHash(this.projectManager.readSyncState(), branch);
     let finalKeep: KeepFile = buildUpdatedKeep(keep);
+    let pushedEnvBlob = envBlob;
     const pushResult = localMode
       ? null
       : await pushKeepWithRetry({
@@ -218,11 +220,13 @@ export class PushCommand {
           branch,
           baseKeep: keep,
           baseHash: baseKeepHash,
-          envBlob,
+          buildEnvBlob: (extraLines) => (extraLines.length > 0 ? [envBlob, ...extraLines].join('\n') : envBlob),
+          localVarNames: Object.keys(rawLocal),
           buildFinalKeep: buildUpdatedKeep,
           primaryVarNames: Object.keys(rawLocal),
         }).then((r) => {
           finalKeep = r.finalKeep;
+          pushedEnvBlob = r.envBlob;
           return r;
         });
     // keep_hash is computed locally from what was actually pushed (after any
@@ -237,7 +241,7 @@ export class PushCommand {
       projectState.organizationId!,
       projectState.projectId!,
       cacheKeepHash,
-      envBlob,
+      pushedEnvBlob,
     );
     this.debug('keep cache written');
 

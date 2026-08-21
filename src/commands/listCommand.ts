@@ -10,11 +10,12 @@ const RESET = '\x1b[0m';
  * `capy list` — variable NAMES + connector metadata for the active branch.
  *
  * With a keep.lock present this reads it directly: no auth, no network, no
- * decryption, never emits values — unchanged from before CAP-304. Without
- * one (lock-less mode) there is no local file to read from, so this falls
- * back to `resolveContext()`, which does need auth + network to fetch the
- * server's latest keep.json for the branch — still never decrypts or emits
- * values, since KeepFile entries only ever carry resource_id/value_hash.
+ * decryption, never emits values — unchanged from before single-user
+ * lock-less mode existed. Without one (lock-less mode) there is no local
+ * file to read from, so this falls back to `resolveContext()`, which does
+ * need auth + network to fetch the server's latest keep.json for the
+ * branch — still never decrypts or emits values, since KeepFile entries
+ * only ever carry resource_id/value_hash.
  */
 export class ListCommand {
   constructor(private readonly devMode: boolean = false) {}

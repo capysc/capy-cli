@@ -101,9 +101,9 @@ ISOLATED_FILES=(
   tests/auth/authServiceKeepLoginBridge.test.ts
   # doctorCommand.test.ts mocks os.homedir() the same way (getGlobalCapyDir).
   tests/commands/doctorCommand.test.ts
-  # locklessContext.test.ts mocks authService/serviceClient/keyResolver (CAP-304
-  # lock-less resolveContext/writeAndSync) and os.homedir() (writeKeepCache
-  # lands in a throwaway home, not the developer's real ~/.capy).
+  # locklessContext.test.ts mocks authService/serviceClient/keyResolver
+  # (single-user lock-less resolveContext/writeAndSync) and os.homedir()
+  # (writeKeepCache lands in a throwaway home, not the developer's real ~/.capy).
   tests/commands/connectors/locklessContext.test.ts
 )
 
