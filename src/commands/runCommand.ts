@@ -243,8 +243,9 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
     // concluded the repo was set up. Branching is on stable local signals
     // only — file existence and the structural isEncrypted check, never
     // value content.
+    const keepLockPresent = existsSync(join(process.cwd(), 'keep.lock'));
     if (Object.keys(envFromFile).length > 0) {
-      if (!existsSync(join(process.cwd(), 'keep.lock'))) {
+      if (!keepLockPresent) {
         console.error(
           `capy run: [${ERROR_CODES.NOT_ONBOARDED}] the .env here is plaintext and this ` +
             'directory is not onboarded (no keep.lock) — nothing would be decrypted. ' +
@@ -257,6 +258,30 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
       // but say out loud that no decryption happened.
       console.error(
         'capy run: warning — .env has no encrypted values; passing plaintext through unchanged.',
+      );
+    } else if (keepLockPresent) {
+      // keep.lock with NO variables at all is the other false-green twin of
+      // the plaintext case above: a fresh clone before any branch is selected
+      // used to spawn the child silently with zero injection and exit 0, so a
+      // script believed secrets were delivered when none were. Same stable
+      // local signals as everywhere else — file existence and the derived
+      // branch state, never message text or value content.
+      const { ProjectManager } = await import('../core/projectManager');
+      const activeBranch = new ProjectManager().deriveActiveBranch();
+      if (!activeBranch) {
+        console.error(
+          `capy run: [${ERROR_CODES.NO_ACTIVE_BRANCH}] this directory is onboarded ` +
+            '(keep.lock present) but no secret branch is active and no .env is ' +
+            'materialized — nothing would be injected. Run `capy checkout <branch>` ' +
+            '(or `capy`) to select a branch first.',
+        );
+        return 1;
+      }
+      // A selected branch can legitimately hold zero variables; run, but say
+      // out loud that nothing was injected.
+      console.error(
+        `capy run: warning — branch "${activeBranch}" has no variables materialized in .env; ` +
+          'running with no injected secrets.',
       );
     }
     // Pure plaintext .env — no key required.
