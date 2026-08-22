@@ -185,7 +185,20 @@ export class CapyCommand {
       return this.reconcileBranchConflict(projectState, localMode, local.envBranch, local.fileBranch);
     }
 
-    // No .env header and no .capy/branch.
+    // No .env header and no .capy/branch — but keep.lock pins a branch for
+    // every variable it tracks, and a fresh clone HAS keep.lock (it is
+    // committed; only .env is gitignored). Consulting it here is what keeps a
+    // second device off the interactive branch picker, which under a
+    // broker-ceremony/--json run has no TTY to answer it: the flow would hang
+    // or refuse on a question already answered by a committed file.
+    // Only an unambiguous pin counts — a keep.lock spanning several branches
+    // is a real choice and still belongs to the human.
+    const pinned = branchesFromKeep(this.projectManager.readKeepFile());
+    if (pinned.length === 1) {
+      this.projectManager.writeActiveBranch(pinned[0]);
+      return pinned[0];
+    }
+
     if (localMode) {
       // Local-only projects operate on a single branch (see localGate); the
       // first run has no files yet, so the local-mode default applies.
@@ -2024,6 +2037,21 @@ export class CapyCommand {
       }
     }
 
+    // A menu with exactly one real action is not a decision.
+    //
+    // Onboarding a fresh clone is precisely this shape: `.env` is gitignored,
+    // so nothing is on disk to lose and "retrieve the pinned values" is the
+    // only thing that can happen. Asking a human — or refusing below for want
+    // of a TTY — turns a fully determined outcome into a stop the flow cannot
+    // pass, which is how a second device reached `done` with an empty
+    // directory. `skip` is excluded because "do nothing" is always on the menu
+    // and is never the action the user came for.
+    const soleAction = ((): string | null => {
+      if (!isOnboarding) return null;
+      const real = menuChoices.filter((c) => c.value !== 'skip');
+      return real.length === 1 ? real[0].value : null;
+    })();
+
     let action: string;
     // When the conflict is resolved in the browser we already hold the final env;
     // we tag the action 'individual' and skip the TTY ResolveTable below.
@@ -2035,13 +2063,15 @@ export class CapyCommand {
     // gate on `brokerCeremony` alone: a broker run without `--web` still has
     // neither a browser nor a TTY, so `this.options.web` is not a precondition
     // for the refusal.
-    if (this.options.brokerCeremony) {
+    if (!soleAction && this.options.brokerCeremony) {
       throw new CapyError(
         'This step needs a human decision the flow cannot make for it here.',
         ERROR_CODES.FLOW_STOP_UNREACHABLE,
       );
     }
-    if (this.options.web) {
+    if (soleAction) {
+      action = soleAction;
+    } else if (this.options.web) {
       // The browser now answers the same two-level question the terminal asks,
       // so the whole-run menu goes to it verbatim — same wording, same order,
       // and that order is the CLI's recommendation. It used to be discarded
