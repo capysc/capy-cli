@@ -199,6 +199,55 @@ describe('capy run', () => {
       expect(result.stderr).not.toContain('NOT_ONBOARDED');
     });
   });
+
+  // The false-green twin of the plaintext case: keep.lock present but NOTHING
+  // materialized (fresh clone before `capy checkout`). This used to spawn the
+  // child silently with zero injection and exit 0, so a script believed
+  // secrets were delivered when none were. The discriminator is the derived
+  // active-branch state — a stable local signal — never message text.
+  describe('keep.lock with nothing materialized', () => {
+    test('refuses with NO_ACTIVE_BRANCH when no .env exists and no branch can be derived', async () => {
+      writeKeepLock();
+
+      const result = await capy(['--', 'node', '-e', 'console.log("reached")']);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('NO_ACTIVE_BRANCH');
+      expect(result.stdout).not.toContain('reached');
+    });
+
+    test('a selected branch with zero variables still runs, with a warning on stderr', async () => {
+      writeKeepLock();
+      mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+      writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development\n');
+
+      const result = await capy(['--', 'node', '-e', 'console.log("ran")']);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('ran');
+      expect(result.stderr).toContain('no variables materialized');
+      expect(result.stderr).toContain('development');
+    });
+
+    test('a keep.lock naming exactly one branch derives it and runs with the warning', async () => {
+      writeFileSync(
+        join(TEST_DIR, 'keep.lock'),
+        JSON.stringify({
+          version: 1,
+          org_id: 'org-test',
+          project_id: 'proj-test',
+          project_name: 'proj-test',
+          variables: { API_KEY: [{ branch: 'development' }] },
+        }),
+      );
+
+      const result = await capy(['--', 'node', '-e', 'console.log("ran")']);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('ran');
+      expect(result.stderr).toContain('no variables materialized');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
