@@ -223,16 +223,29 @@ describe('awsSsm — deploy (no AWS calls)', () => {
   });
 
   test('a partially-missing declared set skips the missing vars (does not fail the filter)', async () => {
-    const r = await awsSsmAdapter.deploy(baseTarget(), {
-      env: { DATABASE_URL: 'postgres://x' }, // WORKOS_API_KEY absent
-      dryRun: false,
-      cwd: ROOT,
-    });
-    // Filter passes: deploys DATABASE_URL, skips WORKOS_API_KEY with a note.
-    // (The deploy then proceeds past the filter to the AWS calls.)
-    expect(r.steps[0].status).toBe('ok');
-    expect(r.steps[0].detail).toContain('skipped');
-    expect(r.steps[0].detail).toContain('WORKOS_API_KEY');
+    // This case is the one in the block that runs PAST the filter, into
+    // `aws sts get-caller-identity`. Against a real `aws` on PATH that is a
+    // live credential-resolution round trip -- which is why this test, alone
+    // in the file, intermittently blew the 5s limit under full-suite load
+    // while passing in isolation. The assertions below are about the filter
+    // step and nothing else, so emptying PATH removes the network entirely:
+    // the spawn fails ENOENT, sts reports a non-zero code, and the deploy
+    // stops one step later with steps[0] already settled.
+    const origPath = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      const r = await awsSsmAdapter.deploy(baseTarget(), {
+        env: { DATABASE_URL: 'postgres://x' }, // WORKOS_API_KEY absent
+        dryRun: false,
+        cwd: ROOT,
+      });
+      // Filter passes: deploys DATABASE_URL, skips WORKOS_API_KEY with a note.
+      expect(r.steps[0].status).toBe('ok');
+      expect(r.steps[0].detail).toContain('skipped');
+      expect(r.steps[0].detail).toContain('WORKOS_API_KEY');
+    } finally {
+      process.env.PATH = origPath;
+    }
   });
 });
 

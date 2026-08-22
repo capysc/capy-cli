@@ -97,18 +97,53 @@ export function detectAwsRegion(): string | null {
   return r.status === 0 ? r.stdout.trim() || null : null;
 }
 
+/**
+ * Ceiling on a single `aws` invocation. Deliberately generous — unlike the
+ * PROBE_TIMEOUT_MS probes, these calls do real network work and a slow-but-
+ * legitimate region or a large parameter set must not be cut off. It exists
+ * only so a call that is never coming back cannot wedge the process forever:
+ * `spawn` has no default timeout, so without this a deploy stuck in credential
+ * resolution (an SSO profile mid-refresh, an IMDS probe on a host with no
+ * metadata service) hangs with no output and no way out but ^C.
+ */
+const AWS_CALL_TIMEOUT_MS = 120_000;
+
 function spawnAsync(
   cmd: string,
   args: string[],
   stdin?: string,
+  timeoutMs: number = AWS_CALL_TIMEOUT_MS,
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    // Resolve at most once: a timeout kill also fires 'close', and the error
+    // path must win so the caller sees why it stopped rather than a bare
+    // non-zero exit.
+    const settle = (result: { stdout: string; stderr: string; code: number }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      settle({
+        stdout,
+        stderr: `${stderr}\n${cmd} timed out after ${Math.round(timeoutMs / 1000)}s`.trim(),
+        code: 1,
+      });
+    }, timeoutMs);
+    // Never let the timer alone hold the event loop open.
+    timer.unref?.();
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('close', (code) => resolve({ stdout, stderr, code: code ?? 1 }));
+    child.on('close', (code) => settle({ stdout, stderr, code: code ?? 1 }));
+    // A spawn that cannot start (binary vanished between `which` and here)
+    // emits 'error' and may never emit 'close'.
+    child.on('error', (err) => settle({ stdout, stderr: `${stderr}${err.message}`, code: 1 }));
     if (stdin !== undefined) {
       child.stdin.write(stdin);
       child.stdin.end();
