@@ -69,6 +69,18 @@ export class AddCommand {
 
     const existing = names.filter((n) => n in ctx.localPlaintext);
     if (existing.length > 0 && !opts.force && !opts.web && !opts.nonTty) {
+      // Context ABOVE the question, never folded into it — the question
+      // itself (`overwriteNotice`'s sentence, inlined here) is tested
+      // verbatim and stays byte-identical either way. Dynamic import, like
+      // `inquirer` below: a test drives this command's `--web` path against a
+      // `connectors/shared` replaced wholesale by `mock.module` (only
+      // `resolveContext`/`writeAndSync` provided) — a static named import of
+      // anything else from that module would fail to link before the test
+      // ever reaches this branch.
+      const { conflictContextLines } = await import('./connectors/shared');
+      for (const line of conflictContextLines(ctx.keep, existing, ctx.branch)) {
+        console.log(line);
+      }
       const inquirer = (await import('inquirer')).default;
       const { ok } = await inquirer.prompt([
         { type: 'confirm', name: 'ok', message: `${existing.join(', ')} already exist(s). Overwrite?`, default: false },
@@ -89,15 +101,17 @@ export class AddCommand {
     // a real TTY gets the same inquirer confirm shape as the local gate
     // above — same sentence, "changed on the server" instead of "already
     // exist(s)" because it's a different fact.
-    const confirmOverwrite = async (changedNames: string[]): Promise<boolean> => {
+    const confirmOverwrite = async (changedNames: string[], contextLines: string[]): Promise<boolean> => {
       if (opts.force) return true;
       if (opts.web || opts.nonTty) return false;
+      for (const line of contextLines) console.log(line);
+      const { conflictOverwriteQuestion } = await import('./connectors/shared');
       const inquirer = (await import('inquirer')).default;
       const { ok } = await inquirer.prompt([
         {
           type: 'confirm',
           name: 'ok',
-          message: `${changedNames.join(', ')} changed on the server while you were editing. Overwrite?`,
+          message: conflictOverwriteQuestion(changedNames),
           default: false,
         },
       ]);

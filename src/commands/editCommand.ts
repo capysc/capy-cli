@@ -14,7 +14,7 @@ import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { setSyncKeepHash, getSyncKeepHash, KeepFile } from '../types/index';
 import { isReservedRuntimeVar } from '../core/reservedVars';
-import { pushKeepWithRetry } from './connectors/shared';
+import { pushKeepWithRetry, maybeWarnPersonalEnv, conflictOverwriteQuestion } from './connectors/shared';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -88,6 +88,11 @@ export class EditCommand {
     // a personal env that follows the user across repos) would be empty and
     // make every existing branch variable look locally deleted.
     let locklessLocalPlaintext: Record<string, string> | undefined;
+    // The full lock-less `ResolvedContext`, kept around only so
+    // `maybeWarnPersonalEnv` can dedup its one-line note per command
+    // invocation (it keys off the object itself) — every other lock-less
+    // field above is already unpacked individually.
+    let locklessCtx: Awaited<ReturnType<typeof import('./connectors/shared').resolveContext>> | undefined;
 
     if (lockless) {
       const { resolveContext } = await import('./connectors/shared');
@@ -106,6 +111,7 @@ export class EditCommand {
       projectKey = ctx.projectKey;
       locklessBaseHash = ctx.base_keep_hash;
       locklessLocalPlaintext = ctx.localPlaintext;
+      locklessCtx = ctx;
     } else {
       orgId = projectState.organizationId!;
       projectId = projectState.projectId!;
@@ -341,11 +347,39 @@ export class EditCommand {
     // Set when a save rewrote keep.lock. The auto-commit runs after the TUI
     // exits — committing (and printing) mid-screen would corrupt the display.
     let keepDirty = false;
+
+    // The same-key CAS conflict confirm `addCommand` uses, adapted to this
+    // screen's terminal: `--web` has no secondary confirm surface (Save is
+    // already the only "yes" the browser flow has, same rule `addCommand`
+    // follows for `--web`/`--nonTty`), so it refuses by omitting the callback
+    // entirely. The TUI does have one, but it owns the terminal (alt-screen +
+    // raw mode) — `screen.suspendForPrompt` hands it back to inquirer for the
+    // one question, then restores the screen exactly as it was.
+    const confirmOverwrite = opts.web
+      ? undefined
+      : async (changedNames: string[], contextLines: string[]): Promise<boolean> => {
+          if (!process.stdin.isTTY) return false;
+          return screen.suspendForPrompt(async () => {
+            for (const line of contextLines) console.log(line);
+            const inquirer = (await import('inquirer')).default;
+            const { ok } = await inquirer.prompt([
+              {
+                type: 'confirm',
+                name: 'ok',
+                message: conflictOverwriteQuestion(changedNames),
+                default: false,
+              },
+            ]);
+            return ok;
+          });
+        };
+
     const editContext = {
       saveLocalEdits: async (edits: Record<string, string>) => {
         // Same flow as the conflict-resolution "commit local" action and
         // PushCommand: encrypt the merged local state, mergeWithKeep, push
         // to the server, then cache + write keep.lock + .env + sync state.
+        if (lockless && locklessCtx) maybeWarnPersonalEnv(locklessCtx);
         const finalEnv: Record<string, string> = { ...localPlaintext, ...edits };
 
         const encrypted: Record<string, string> = {};
@@ -391,10 +425,9 @@ export class EditCommand {
         // In local-only mode there is no push — the local writes below ARE
         // the commit, against the merge computed straight off `keep`. In
         // server mode, a stale base is rebased and retried (single-user
-        // lock-less CAS) — this screen has no established overwrite-gate
-        // surface to reuse the way `addCommand`'s inquirer confirm does, so a
-        // same-key conflict refuses rather than silently clobbering a
-        // concurrent edit; a richer conflict UX here is a follow-up.
+        // lock-less CAS); a same-key conflict now offers the same
+        // `confirmOverwrite` gate `addCommand` uses (see above) instead of
+        // refusing unconditionally.
         let finalKeep = buildFinalKeep(keep);
         let pushedEnvBlob = envBlob;
         const pushResult = localMode
@@ -409,6 +442,7 @@ export class EditCommand {
               localVarNames: Object.keys(finalEnv),
               buildFinalKeep,
               primaryVarNames: Object.keys(edits),
+              confirmOverwrite,
             }).then((r) => {
               finalKeep = r.finalKeep;
               pushedEnvBlob = r.envBlob;
