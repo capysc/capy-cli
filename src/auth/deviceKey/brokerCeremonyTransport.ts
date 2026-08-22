@@ -45,6 +45,7 @@ import { keepOrigin } from '../../ui/screens/keepScreens';
 import { openScreen } from '../../ui/openScreen';
 import { isInteractive } from '../../ui/interactive';
 import { emitHandoffUrlEvent, type HandoffFlow } from '../../ui/handoffEvent';
+import { PRF_OUTPUT_LENGTH } from './crypto';
 import type {
   CeremonyFailure,
   CeremonyFailureCode,
@@ -335,12 +336,28 @@ export class BrokerCeremonyTransport implements CeremonyTransport {
     ) {
       return null;
     }
+    if (!isWellFormedPrfOutput(prfOutput)) return null;
     return { ok: true, credentialId, prfOutput, backupEligible, backupState };
   }
 
   private toUnlockResult(payload: Record<string, unknown>): UnlockSuccess | null {
     const { credentialId, prfOutput } = payload;
     if (typeof credentialId !== 'string' || typeof prfOutput !== 'string') return null;
+    if (!isWellFormedPrfOutput(prfOutput)) return null;
     return { ok: true, credentialId, prfOutput };
   }
+}
+
+/**
+ * A ceremony answer is only a success if it actually carries a usable PRF
+ * evaluation. `typeof === 'string'` alone admits `''` — which a page that
+ * mistook a zero-length PRF buffer for a real one will happily send — and an
+ * empty output then travels all the way to `deriveDeviceKeyKek`, which throws
+ * an opaque "malformed PRF result" that `attemptCaseCUnlock` discards. Reject
+ * it at the trust boundary instead, so the caller sees a coded ceremony
+ * failure rather than a swallowed exception.
+ */
+function isWellFormedPrfOutput(prfOutput: string): boolean {
+  if (prfOutput.length === 0) return false;
+  return Buffer.from(prfOutput, 'base64').length === PRF_OUTPUT_LENGTH;
 }

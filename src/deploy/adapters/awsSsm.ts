@@ -74,8 +74,17 @@ export function parameterNameFor(varName: string, opts: AwsSsmOptions): string {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+// Both probes below only seed picker defaults / gate a binary check. Neither
+// is worth blocking on: an `aws` configured against an SSO profile can sit in
+// credential resolution (or an IMDS probe) for far longer than a prompt should
+// ever wait, and `detect()` runs on the interactive path. spawnSync has no
+// default timeout, so an unbounded call here hangs the CLI outright. Bound
+// them and treat a timeout exactly like "not configured" — status is non-zero
+// (or null) when the child is killed, which both callers already handle.
+const PROBE_TIMEOUT_MS = 2_000;
+
 function which(bin: string): string | null {
-  const r = spawnSync('which', [bin], { encoding: 'utf-8' });
+  const r = spawnSync('which', [bin], { encoding: 'utf-8', timeout: PROBE_TIMEOUT_MS });
   return r.status === 0 ? r.stdout.trim() || null : null;
 }
 
@@ -83,6 +92,7 @@ function which(bin: string): string | null {
 export function detectAwsRegion(): string | null {
   const r = spawnSync('aws', ['configure', 'get', 'region'], {
     encoding: 'utf-8',
+    timeout: PROBE_TIMEOUT_MS,
   });
   return r.status === 0 ? r.stdout.trim() || null : null;
 }

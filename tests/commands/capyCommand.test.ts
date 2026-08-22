@@ -977,7 +977,7 @@ describe('CapyCommand', () => {
       mockFileManager.decryptValue.mockImplementation((v: string) => v);
     });
 
-    test('should only show retrieve option when pinned matches remote and .env is foreign', async () => {
+    test('takes the sole real action without prompting when pinned matches remote and .env is foreign', async () => {
       // Pinned matches remote
       mockProjectManager.readKeepFile.mockReturnValue(makeKeep(remoteHashes));
       // .env has no metadata (not initialized to this project)
@@ -992,35 +992,33 @@ describe('CapyCommand', () => {
       };
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
+      // Cleanup lives in `finally`: this test replaces two process-global
+      // things (console.log and inquirer.prompt). Restoring them only on the
+      // happy path means one failed assertion here silently corrupts every
+      // test after it — which is exactly how the two sibling menu cases below
+      // went red while still passing in isolation.
       try {
-        await (capyCommand as any).syncProject(mockProjectState);
-      } catch {
-        // May throw after skip — we only care about the menu choices
+        try {
+          await (capyCommand as any).syncProject(mockProjectState);
+        } catch {
+          // The retrieve may throw against these mocks; the contract under
+          // test is only that nothing was asked.
+        }
+
+        // Onboarding a fresh clone offers exactly one real action
+        // ('retrieve_pinned' — 'skip' is never what the user came for), and a
+        // one-option menu is not a decision, so it is taken directly. Asking
+        // here is what left a second device at `done` with an empty directory
+        // under a --json/broker-ceremony run with no TTY to answer with.
+        const actionPrompt = promptCalls.find((q: any) => {
+          const question = Array.isArray(q) ? q[0] : q;
+          return question?.name === 'action';
+        });
+        expect(actionPrompt).toBeUndefined();
+      } finally {
+        consoleSpy.mockRestore();
+        (inquirer as any).prompt = origPrompt;
       }
-
-      // Find the action prompt
-      const actionPrompt = promptCalls.find((q: any) => {
-        const question = Array.isArray(q) ? q[0] : q;
-        return question.name === 'action';
-      });
-      const question = Array.isArray(actionPrompt) ? actionPrompt[0] : actionPrompt;
-      const choiceValues = question?.choices?.map((c: any) => c.value);
-
-      // Should only have retrieve_pinned + skip (no commit_local, no individual)
-      expect(choiceValues).toContain('retrieve_pinned');
-      expect(choiceValues).not.toContain('commit_local');
-      expect(choiceValues).not.toContain('individual');
-      expect(choiceValues).toContain('skip');
-
-      // Local column should be hidden (onboarding — all dashes is noise)
-      const logCalls = consoleSpy.mock.calls.map((c: any) => c[0]).join('\n');
-      const headerLine = logCalls.split('\n').find((l: string) => l.includes('Variable'));
-      expect(headerLine).not.toContain('Local');
-      // Remote column should be hidden (pinned matches remote)
-      expect(headerLine).not.toContain('Remote');
-
-      consoleSpy.mockRestore();
-      (inquirer as any).prompt = origPrompt;
     });
 
     test('should show both retrieve options when pinned differs from remote and .env is foreign', async () => {
