@@ -14,6 +14,7 @@
  * Booleans and names only ever leave here. No value, no snippet of one.
  */
 import { existsSync, statSync } from 'fs';
+import { join } from 'path';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { resolveBranchFromLocalState, branchesFromKeep, syncedBranchNames } from '../../core/branchResolver';
@@ -128,6 +129,26 @@ function orgKeyOnDevice(pm: ProjectManager, fm: FileManager, sessionLive: boolea
   return hasOrgKey(orgId, userId);
 }
 
+/**
+ * Is there env work for this directory?
+ *
+ * Plaintext values are the classic case. The second case is a FRESH CLONE of
+ * an onboarded repo: keep.lock is present but `.env` does not exist at all,
+ * because `.env` is gitignored by design. `hasPlaintextValues` answers false
+ * there — nothing is plaintext when nothing is on disk — so the flow treated
+ * `encrypt_env` as already satisfied, skipped it, and reached `done` having
+ * never run the sync that MATERIALISES the variables. The user got a
+ * successful onboard and an empty directory.
+ *
+ * `encrypt_env` is the ordinary sync path (see its executor), so "the .env is
+ * not here yet" is env work exactly like "the .env is still plaintext".
+ */
+function envWorkPending(pm: ProjectManager, fm: FileManager, targetDir: string, envPath?: string): boolean {
+  if (fm.hasPlaintextValues(envPath)) return true;
+  if (!existsSync(pm.getKeepPath())) return false;
+  return !existsSync(envPath ?? join(targetDir, '.env'));
+}
+
 export function observeOnboard(opts: ObserveOptions): OnboardObservations {
   const { targetDir } = opts;
 
@@ -164,7 +185,7 @@ export function observeOnboard(opts: ObserveOptions): OnboardObservations {
     // the exact predicate `backupPlaintextEnv` uses to decide whether there is
     // anything to protect, so a quoted or exported value classifies here the
     // way it classifies where it matters.
-    envStillPlaintext: fm.hasPlaintextValues(opts.envPath),
+    envStillPlaintext: envWorkPending(pm, fm, targetDir, opts.envPath),
     commandsWrapped: commandsWrapped(targetDir),
     branchConflict: branchConflict(pm, fm, opts.envPath),
     sessionLive: opts.sessionLive,
