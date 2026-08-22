@@ -17,6 +17,18 @@ export CAPY_NO_AUTOCOMMIT=1
 # where the flag is not theirs to pass.
 export CAPY_WEB_NO_OPEN=1
 
+# The suite asserts default targeting (~/.capy, the cloud API URL, the
+# capy-staging pin). A developer shell that exports CAPY_API_URL /
+# CAPY_GLOBAL_DIR_NAME -- which the capy-dev and capy-staging workflows
+# routinely do -- silently redirects those defaults and fails a dozen files
+# that are testing the very thing the env var overrode. Tests must depend on
+# the tree, never on the shell that launched them: scrub every targeting var
+# here so a local run matches CI exactly. Anything a test needs, it sets
+# itself.
+unset CAPY_API_URL CAPY_KEEP_ORIGIN CAPY_GLOBAL_DIR_NAME CAPY_BIN_NAME
+unset CAPY_TEST_EMAIL CAPY_TEST_PASSWORD
+unset CAPY_DEVICE_KEYS CAPY_FLOW_ONBOARD CAPY_KEEP_SCREENS CAPY_KEEP_LOGIN_BRIDGE
+
 FAIL=0
 
 # The vendored flow contract must match what it was vendored from. Gate 1 (the
@@ -93,6 +105,14 @@ ISOLATED_FILES=(
   tests/auth/deviceKey/security.e2e.test.ts
   tests/auth/deviceKey/grantE2E.e2e.test.ts
   tests/auth/pairing/installPairedSession.test.ts
+  # The capy-staging pin tests assert behaviour that is BY DEFINITION a
+  # function of process.env (CAPY_API_URL / CAPY_KEEP_ORIGIN /
+  # CAPY_GLOBAL_DIR_NAME). Batched, they inherit whatever a sibling left
+  # behind -- deviceKeyOnboarding, doctorCommand, capyRunEquivalence,
+  # grantE2E and pairE2E all assign CAPY_GLOBAL_DIR_NAME -- so the pin
+  # appears to fail when it is the leak that failed. They pass in isolation.
+  tests/commands/stagingDefaults.test.ts
+  tests/commands/stagingPinExhaustive.test.ts
   tests/commands/pairCommand.test.ts
   tests/auth/pairing/pairE2E.e2e.test.ts
   tests/files/reservedVarsWrite.test.ts
