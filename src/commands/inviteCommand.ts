@@ -14,6 +14,7 @@ import { emitHandoffUrlEvent } from '../ui/handoffEvent';
 import {
   invitePlan,
   unansweredInviteStops,
+  heldProjects,
   grantedProjects,
   parseTtl,
   formatTtl,
@@ -234,9 +235,12 @@ export class InviteCommand {
       let roleSource: string | undefined;
       let projectSource: string | undefined;
       const reissuing = !!existingMember;
-      const existingProjectIds = existingMember
-        ? (existingMember.projects || []).map((p) => p.id)
-        : [];
+      // Only projects this member actually holds a role on. `member.projects`
+      // is the whole organization annotated with their role-or-nothing, so
+      // mapping it wholesale would re-grant every project in the org on a
+      // re-issue — access the caller never asked to hand out.
+      const existingHeldProjects = heldProjects(existingMember);
+      const existingProjectIds = existingHeldProjects.map((p) => p.id);
 
       // The whole route, declared before anything opens. Built from argv and
       // from the membership this address already has — the two things that can
@@ -246,7 +250,7 @@ export class InviteCommand {
       // a terminal run's expiry is settled before the command starts.
       const inheritedRole = existingMember && !opts.role ? existingMember.role : undefined;
       const inheritedProjectNames =
-        existingMember && !opts.role ? (existingMember.projects || []).map((p) => p.name) : [];
+        existingMember && !opts.role ? existingHeldProjects.map((p) => p.name) : [];
       const planInput: InvitePlanInput = {
         role: settledRole(opts, inheritedRole),
         projects:
@@ -268,8 +272,14 @@ export class InviteCommand {
       let webParams: WebInviteParams | undefined;
 
       if (opts.web) {
+        // Narrowed to projects they HOLD before the screen ever sees it: the
+        // page renders this as their current access, and `projects` there has
+        // no role field left to filter on.
+        const existingForScreen = existingMember
+          ? { ...existingMember, projects: existingHeldProjects.map((p) => ({ id: p.id, name: p.name })) }
+          : undefined;
         webParams = await this.gatherWebParams(
-          email, orgId, me, invitable, existingMember, planInput, authService, serviceClient, userEmail,
+          email, orgId, me, invitable, existingForScreen, planInput, authService, serviceClient, userEmail,
         );
       }
 
@@ -690,6 +700,9 @@ export class InviteCommand {
             existing: {
               role: existingMember.role,
               status: existingMember.status,
+              // Already narrowed by the caller to projects they HOLD — this
+              // shape has no role field left to filter on, and the screen
+              // presents it as their current access.
               projects: (existingMember.projects || []).map((p) => ({ id: p.id, name: p.name })),
             },
           }

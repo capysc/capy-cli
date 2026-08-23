@@ -99,6 +99,13 @@ export interface MemberProjectBranch {
   hasAccess: boolean;
 }
 
+/**
+ * A project as it appears on a member's row — which is EVERY project in the
+ * organization, annotated with what this member holds on it. `role` is absent
+ * when the member has no grant: the project is merely visible to them, not
+ * theirs. Listed is not granted, and code that conflates the two hands out
+ * access nobody asked for.
+ */
 export interface MemberProject {
   id: string;
   name: string;
