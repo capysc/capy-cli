@@ -12,7 +12,7 @@ import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScre
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
-import { setSyncKeepHash } from '../types/index';
+import { CapyError, ERROR_CODES, setSyncKeepHash } from '../types/index';
 import { isReservedRuntimeVar } from '../core/reservedVars';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -40,13 +40,33 @@ export interface EditOpts {
    * Render the variable table and the value editor as compiled screens in a
    * local browser instead of the alternate-screen TUI.
    *
-   * Agent-only, and the reason it exists: the TUI has no TTY guard. Run it
-   * headlessly and it writes an entire ANSI screen into the agent's captured
-   * stdout and then blocks forever on a stdin that never delivers a key.
+   * Agent-only: the terminal TUI is refused outright with no real TTY on
+   * both ends (see `editSurfaceIsSafe`), so this is the only way a headless
+   * caller can inspect or edit secrets.
    */
   web?: boolean;
   /** false when --no-open was passed: print the URL, do not open a browser. */
   open?: boolean;
+}
+
+/**
+ * Whether this invocation has a surface that can safely show the editor.
+ *
+ * `--web` is the sanctioned non-interactive surface (a browser, not a
+ * captured terminal). Everything else needs a real terminal on BOTH ends:
+ * the leak this guards is on stdout — the drawn alt-screen with every
+ * secret's plaintext — not just stdin, so a run with a live keyboard but a
+ * redirected stdout is exactly as unsafe as a fully piped one. Pure on
+ * purpose: `execute()` reads the real process's streams once and passes
+ * them in, so the decision table is testable with no process surgery.
+ */
+export function editSurfaceIsSafe(
+  web: boolean | undefined,
+  stdinIsTty: boolean | undefined,
+  stdoutIsTty: boolean | undefined,
+): boolean {
+  if (web === true) return true;
+  return stdinIsTty === true && stdoutIsTty === true;
 }
 
 export class EditCommand {
@@ -59,6 +79,20 @@ export class EditCommand {
   }
 
   async execute(opts: EditOpts = {}): Promise<void> {
+    // Decide before doing ANY work, let alone rendering: `EditScreen.run()`
+    // enters the alternate screen and draws the whole variable table —
+    // secret plaintext included — unconditionally, with no TTY check of its
+    // own. The real process's streams are read HERE, once, and handed to the
+    // pure predicate — tests exercise the decision table without touching
+    // process state.
+    if (!editSurfaceIsSafe(opts.web, process.stdin.isTTY, process.stdout.isTTY)) {
+      throw new CapyError(
+        'This would draw a full-screen editor with every secret value on screen, and there is no real terminal to show it safely.\n\n' +
+          `Run ${B('capy edit --web')} instead.`,
+        ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE,
+      );
+    }
+
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
 

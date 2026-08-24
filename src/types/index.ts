@@ -460,6 +460,19 @@ export const ERROR_CODES = {
    */
   TRANSPORT_CODE_UNSAFE_SURFACE: 'TRANSPORT_CODE_UNSAFE_SURFACE',
   /**
+   * `capy edit`'s terminal TUI tried to enter the alternate screen and draw
+   * secret values with no real TTY on both ends. Same failure class as
+   * RECOVERY_PHRASE_UNSAFE_SURFACE / TRANSPORT_CODE_UNSAFE_SURFACE, kept
+   * separate because the unsafe artifact here is the whole rendered screen
+   * (every variable's plaintext, not one credential) and the safe
+   * alternative is a flag on this same command (`--web`), not a different
+   * command. Checked BEFORE the alt-screen escape sequence is ever written —
+   * `editScreen.ts`'s `run()` used to draw first and only ever discovered
+   * "no TTY" via `ExitPromptError` at the first keypress read, by which
+   * point the plaintext screen had already gone out over stdout.
+   */
+  EDIT_SCREEN_UNSAFE_SURFACE: 'EDIT_SCREEN_UNSAFE_SURFACE',
+  /**
    * Case A's mint→ceremony→upload sequence did not complete in an
    * ephemeral environment (CAPY_DEVICE_KEY_GRANT_SOCKET set — see
    * ephemeral.ts). Any local.key/key.enc this call minted has already been
