@@ -26,6 +26,7 @@ describe('local-only command gating', () => {
       'info',
       'branch',
       'checkout',
+      'flow',
     ].sort();
     expect([...LOCAL_ONLY_DISABLED_COMMANDS].sort()).toEqual(expected);
   });

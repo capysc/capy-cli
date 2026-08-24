@@ -43,6 +43,27 @@ export function generatePrfSalt(): Buffer {
 }
 
 /**
+ * Is this base64 string a usable PRF evaluation?
+ *
+ * A ceremony answer only counts as a success if it carries one. `typeof ===
+ * 'string'` admits `''`, which a page that mistook a zero-length PRF buffer
+ * for a real one will happily send — and an empty output then travels all the
+ * way to `deriveDeviceKeyKek` below, which throws an opaque "malformed PRF
+ * result" from three layers away, where the Case-C wrapper discards it and
+ * every distinct failure collapses into a generic `key_not_on_device`.
+ *
+ * Lives here, beside the length it enforces, because BOTH transports must
+ * apply it: the relayed browser answer (`brokerCeremonyTransport`) and the
+ * pre-obtained one bundled into a sealed sandbox_session
+ * (`cannedCeremony`) — the `--broker-ceremony` rail, which is the only path
+ * some callers ever take.
+ */
+export function isWellFormedPrfOutput(prfOutput: string): boolean {
+  if (prfOutput.length === 0) return false;
+  return Buffer.from(prfOutput, 'base64').length === PRF_OUTPUT_LENGTH;
+}
+
+/**
  * KEK = HKDF-SHA256(ikm = PRF output, salt = prf_salt, info = versioned).
  * Reusing the enrollment salt as the HKDF salt binds the KEK to that
  * enrollment; the info string versions the whole derivation.

@@ -29,6 +29,35 @@
  * regression."
  */
 import type { InviteTeammateStop } from '../ui/screens/contract';
+import type { MemberProject } from '../service/serviceClient';
+
+/**
+ * A project a member actually holds a role on. Narrower than `MemberProject`
+ * so a merely-visible project cannot reach anything that grants access —
+ * `heldProjects` is the only way to obtain one.
+ */
+export interface HeldMemberProject extends MemberProject {
+  role: NonNullable<MemberProject['role']>;
+}
+
+/**
+ * The subset of a member's projects they genuinely have access to.
+ *
+ * `member.projects` is EVERY project in the organization, annotated with this
+ * member's role — or with no role at all, meaning the project is merely
+ * visible to them, not theirs. Reading that array directly in order to
+ * reproduce someone's existing access therefore inherits the whole org, which
+ * is how a plain re-issue came to grant projects nobody asked to hand over.
+ * Everything that reproduces or describes existing access goes through here.
+ *
+ * Sibling of `grantedProjects` below, and deliberately not the same question:
+ * this reads what a member HOLDS; that decides what an invite will GRANT.
+ */
+export function heldProjects(
+  member: { projects?: MemberProject[] } | null | undefined,
+): readonly HeldMemberProject[] {
+  return (member?.projects ?? []).filter((p): p is HeldMemberProject => p.role != null);
+}
 
 /**
  * Roles that reach every project in the organization.

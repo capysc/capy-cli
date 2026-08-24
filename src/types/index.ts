@@ -460,6 +460,19 @@ export const ERROR_CODES = {
    */
   TRANSPORT_CODE_UNSAFE_SURFACE: 'TRANSPORT_CODE_UNSAFE_SURFACE',
   /**
+   * `capy edit`'s terminal TUI tried to enter the alternate screen and draw
+   * secret values with no real TTY on both ends. Same failure class as
+   * RECOVERY_PHRASE_UNSAFE_SURFACE / TRANSPORT_CODE_UNSAFE_SURFACE, kept
+   * separate because the unsafe artifact here is the whole rendered screen
+   * (every variable's plaintext, not one credential) and the safe
+   * alternative is a flag on this same command (`--web`), not a different
+   * command. Checked BEFORE the alt-screen escape sequence is ever written —
+   * `editScreen.ts`'s `run()` used to draw first and only ever discovered
+   * "no TTY" via `ExitPromptError` at the first keypress read, by which
+   * point the plaintext screen had already gone out over stdout.
+   */
+  EDIT_SCREEN_UNSAFE_SURFACE: 'EDIT_SCREEN_UNSAFE_SURFACE',
+  /**
    * Case A's mint→ceremony→upload sequence did not complete in an
    * ephemeral environment (CAPY_DEVICE_KEY_GRANT_SOCKET set — see
    * ephemeral.ts). Any local.key/key.enc this call minted has already been
@@ -519,6 +532,35 @@ export const ERROR_CODES = {
    * service/src/errorCodes.ts, same convention as the codes above.
    */
   STALE_KEEP_HASH: 'STALE_KEEP_HASH',
+  // `capy flow cancel` (client-side reclassification of the server's 404).
+  /**
+   * `POST /flows/:id/cancel` answers 404 for two different facts wearing one
+   * status: the flow does not exist, or it exists but this caller is neither
+   * its bound identity/secret holder nor an owner of whatever it pinned. The
+   * server does not (and, by the endpoint's own design, cannot) tell those
+   * apart in its response — doing so would let an unauthorized caller probe
+   * for the existence of a flow it has no claim to. So this code collapses
+   * both into ONE honest answer rather than inventing an authorization
+   * distinction the server never gave. Minted client-side in ServiceClient
+   * (mirrors the DOORS_NOT_SUPPORTED reclassification below) from the
+   * server's own PROJECT_NOT_FOUND code, which the flows route reuses
+   * verbatim for this 404 — never derived from response prose.
+   */
+  FLOW_NOT_FOUND: 'FLOW_NOT_FOUND',
+  /**
+   * `capy flow cancel` refused off a TTY with no `--yes`: cancelling a flow
+   * is irreversible (it releases the flow's repo lock and marks it dead), so
+   * the command never silently no-ops when it cannot ask. Client-side only —
+   * decided before any request is sent.
+   */
+  FLOW_CANCEL_CONFIRMATION_REQUIRED: 'FLOW_CANCEL_CONFIRMATION_REQUIRED',
+  /**
+   * `capy flow cancel` asked at an interactive terminal and the human said
+   * no. Not an error — the confirmation gate worked exactly as intended —
+   * but `--json` callers still need a coded, non-zero-`ok` answer rather than
+   * a bare human sentence to tell "declined" apart from "cancelled".
+   */
+  FLOW_CANCEL_DECLINED: 'FLOW_CANCEL_DECLINED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

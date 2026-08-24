@@ -382,7 +382,11 @@ describe('InviteCommand', () => {
             email: 'bob@example.com',
             role: 'member',
             status: 'active',
-            projects: [{ id: 'p1', name: 'storefront' }],
+            // `role` is what makes storefront a project bob HOLDS rather than
+            // one he can merely see. The fixture omitted it while nothing read
+            // it; `heldProjects` reads it now, and the wire always carries it
+            // for a project a member actually has. Assertions below unchanged.
+            projects: [{ id: 'p1', name: 'storefront', role: 'member' }],
           },
         ],
       });
@@ -404,6 +408,80 @@ describe('InviteCommand', () => {
       ]);
       // And it names what settled the lifetime nobody was asked about.
       expect(stops.find((s: any) => s.id === 'expiry').flag).toBe('default');
+    });
+
+    // A member's `projects` array is EVERY project in the org, annotated with
+    // their role — or with none, meaning they can see it but do not have it.
+    // Re-issuing used to map that array wholesale, so "resend bob's invite"
+    // silently handed bob every project in the organization.
+    describe('a re-issue reproduces existing access and grants nothing new', () => {
+      const memberWithOneHeldProject = {
+        members: [
+          {
+            membershipId: 'mem-bob',
+            userId: 'u-bob',
+            email: 'bob@example.com',
+            role: 'member',
+            status: 'active',
+            projects: [
+              { id: 'p1', name: 'storefront', role: 'member' },
+              // Visible to bob, not granted to him — the whole point.
+              { id: 'p2', name: 'billing' },
+              { id: 'p3', name: 'internal-tools' },
+            ],
+          },
+        ],
+      };
+
+      test('projects held with no role are never fanned out as grants', async () => {
+        mockListMemberDetails.mockResolvedValue(memberWithOneHeldProject);
+
+        const cap = captureOutput();
+        try {
+          await new InviteCommand().execute('bob@example.com', { json: true, nonTty: true });
+        } finally {
+          cap.restore();
+        }
+
+        // The one project bob holds may be re-sent; the two he could merely
+        // see must not reach the grant call at all.
+        const fannedOut = mockInviteToProject.mock.calls.map((c: any[]) => c[1]);
+        expect(fannedOut).not.toContain('p2');
+        expect(fannedOut).not.toContain('p3');
+
+        // And the run reports granting exactly what bob already held.
+        const { projectIds } = JSON.parse(cap.out());
+        expect(projectIds).toEqual(['p1']);
+      });
+
+      test('a member who holds nothing inherits nothing', async () => {
+        mockListMemberDetails.mockResolvedValue({
+          members: [
+            {
+              membershipId: 'mem-carol',
+              userId: 'u-carol',
+              email: 'carol@example.com',
+              role: 'member',
+              status: 'active',
+              projects: [
+                { id: 'p1', name: 'storefront' },
+                { id: 'p2', name: 'billing' },
+              ],
+            },
+          ],
+        });
+
+        const cap = captureOutput();
+        try {
+          await new InviteCommand().execute('carol@example.com', { json: true, nonTty: true });
+        } finally {
+          cap.restore();
+        }
+
+        // Nothing inherited means nothing to fan out — the run must not
+        // invent access from a list carol merely appears on.
+        expect(mockInviteToProject.mock.calls.map((c: any[]) => c[1])).not.toContain('p2');
+      });
     });
 
     test('a project the service refused is not reported as one this invite granted', async () => {

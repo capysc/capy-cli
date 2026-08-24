@@ -68,6 +68,7 @@ ISOLATED_FILES=(
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
   tests/commands/inviteCommand.test.ts
+  tests/commands/deployTokenCommand.test.ts
   tests/config/globalConfig.test.ts
   tests/core/projectManager.test.ts
   tests/crypto/keyResolver.test.ts
@@ -130,6 +131,9 @@ ISOLATED_FILES=(
   # context lines, the edit/push CAS confirm wiring, and the personal-env
   # soft warning.
   tests/commands/connectors/conflictUx.test.ts
+  # flowCancelCommand.test.ts mocks authService/serviceClient/projectManager
+  # (kickCommand.test.ts's shape) plus ui/interactive's isInteractive().
+  tests/commands/flowCancelCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

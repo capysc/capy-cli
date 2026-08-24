@@ -42,6 +42,7 @@ import { SessionStorageBackend } from '../../auth/session/backend';
 import { FileSessionStorageBackend } from '../../auth/session/fileBackend';
 import { generatePrfSalt } from '../../auth/deviceKey/crypto';
 import { emitHandoffUrlEvent } from '../../ui/handoffEvent';
+import { debug } from '../../ui/debug';
 import { isOnboardJsonMode } from '../../ui/webMode';
 import { codeFor, codeForSilentAuthFailure, StepResult } from './executors';
 import { FlowStep } from '../validate';
@@ -509,11 +510,23 @@ async function applyFirstRun(opts: {
         ops,
         opsForOrg,
       });
-    } catch {
+    } catch (err) {
       // Best-effort: a failed unlock (ceremony refusal, org-pin failure, a
       // genuine service error) leaves the org exactly as unreachable as it
       // was — the next step's own key check (`unlock_org_key`) reports
       // KEY_NOT_ON_DEVICE, same as any other Case C failure.
+      //
+      // Staying best-effort is right; staying SILENT was not. Every distinct
+      // cause above collapses into one generic downstream message, and a bare
+      // `catch {}` left no trace of which one it was — the whole reason an
+      // empty PRF output in the sealed answer read as "key not on device" for
+      // as long as it did. The outcome is unchanged; only the diagnosis is
+      // now recoverable, and only under --verbose.
+      debug(
+        `[sandbox-ceremony] unlock failed, org stays unreachable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
   } else {
     // 'none' — key already on this device. Same internal-consistency

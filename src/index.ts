@@ -404,14 +404,21 @@ const deploy = program
   .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
+  .option('--json', 'describe the route as JSON instead of running it; no side effects (agents/CI)')
+  .option('--non-tty', 'never prompt; resolve platform/mode from flags or fail fast (agents/CI)')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     assertNotLocalOnly('deploy');
     // Top-level program also defines --dry-run; merge globals so either
     // `capy --dry-run deploy ...` or `capy deploy ... --dry-run` works.
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
+    const json = options.json === true;
 
-    // CI/explicit connector path — go straight to the adapter flow.
-    if (options.target || options.connect || target) {
+    // CI/explicit connector path — go straight to the adapter flow. `--json`
+    // routes here too, even with no target/--connect: `describeDeployRoute()`
+    // is the only place this command knows how to describe a plan without
+    // running it, and a headless preflight needs that door open regardless
+    // of which mode the run would otherwise pick.
+    if (options.target || options.connect || target || json) {
       const { deployCommand } = await import('./commands/deployCommand');
       const code = await deployCommand(target, {
         target: options.target,
@@ -424,6 +431,8 @@ const deploy = program
         // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
         // a different thing, so it must NOT be merged in here.
         force: options.force,
+        json,
+        nonTty: options.nonTty === true,
       });
       process.exit(code);
     }
@@ -438,6 +447,7 @@ const deploy = program
       envName: options.envName,
       yes: !!options.yes,
       force: !!options.force,
+      nonTty: options.nonTty === true,
     });
     await c.execute();
   });
@@ -670,6 +680,27 @@ program
     const { KickCommand } = await import('./commands/kickCommand');
     const cmd = new KickCommand();
     await cmd.execute(email, { web: command.optsWithGlobals().web === true });
+  });
+
+const flow = program
+  .command('flow')
+  .description('Flow-service instance management');
+
+flow
+  .command('cancel <id>')
+  .description('Cancel a stuck flow (org-owner escape hatch — releases any repo lock it holds)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI, on success AND failure')
+  .option('--yes', 'skip the confirmation prompt')
+  .option('--non-tty', 'treat stdin as non-interactive even if it is a TTY (agents/CI)')
+  .action(async (id: string, options: { json?: boolean; yes?: boolean; nonTty?: boolean }) => {
+    assertNotLocalOnly('flow cancel');
+    const { FlowCancelCommand } = await import('./commands/flowCancelCommand');
+    const cmd = new FlowCancelCommand();
+    await cmd.execute(id, {
+      json: options.json === true,
+      yes: options.yes === true,
+      nonTty: options.nonTty === true,
+    });
   });
 
 program

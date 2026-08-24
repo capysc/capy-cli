@@ -207,6 +207,71 @@ describe('capy deploy --dry-run', () => {
   });
 });
 
+// ── --non-tty: the confirm step refuses instead of silently cancelling ─────
+
+describe('capy deploy --non-tty', () => {
+  test.if(HAS_WRANGLER)(
+    'connector confirm step off-TTY refuses (EXIT_NEEDS_INPUT), no prompt, nothing deployed',
+    () => {
+      writeKeep(ROOT);
+      writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
+      writeFileSync(
+        join(ROOT, '.env'),
+        'SUPABASE_URL=https://x.supabase.co\nSTRIPE_SECRET_KEY=sk_test\nVITE_API_URL=y\n',
+      );
+      writeDeployConfig(ROOT, [
+        {
+          name: 'worker-prod',
+          kind: 'cf-worker',
+          branch: 'production',
+          vars: ['SUPABASE_URL', 'STRIPE_SECRET_KEY', 'VITE_API_URL'],
+          options: { workerName: 'my-worker', workerDir: 'worker' },
+        },
+      ]);
+
+      // No --yes, no --dry-run: this run would otherwise reach the
+      // keypress confirm with no TTY to read from. `--non-tty` must make it
+      // refuse loudly (3 = EXIT_NEEDS_INPUT) rather than reproduce the old
+      // silent `keypressConfirm()` EOF default of "cancel" (exit 0, nothing
+      // deployed, no signal to the caller that anything went wrong).
+      const r = capy(['deploy', 'worker-prod', '--non-tty']);
+      expect(r.code).toBe(3);
+      expect(r.stderr).toContain('non-interactive');
+      expect(r.stderr).toContain('--yes');
+      // The keypress prompt's own summary line never got drawn.
+      expect(r.stdout + r.stderr).not.toContain('Deploy now (commit keep.lock');
+      // Nothing shipped: deploy.json still holds only the saved target,
+      // nothing changed by an actual deploy run.
+      expect(r.stdout + r.stderr).not.toContain('Deployed');
+    },
+  );
+
+  test.if(HAS_WRANGLER)('--non-tty + --yes still deploys without prompting (unaffected)', () => {
+    writeKeep(ROOT);
+    writeWranglerToml(join(ROOT, 'worker'), 'my-worker');
+    writeFileSync(
+      join(ROOT, '.env'),
+      'SUPABASE_URL=https://x.supabase.co\nSTRIPE_SECRET_KEY=sk_test\nVITE_API_URL=y\n',
+    );
+    writeDeployConfig(ROOT, [
+      {
+        name: 'worker-prod',
+        kind: 'cf-worker',
+        branch: 'production',
+        vars: ['SUPABASE_URL', 'STRIPE_SECRET_KEY', 'VITE_API_URL'],
+        options: { workerName: 'my-worker', workerDir: 'worker' },
+      },
+    ]);
+
+    // --yes already skips the confirm loop entirely — --non-tty must not
+    // introduce a new refusal on a run that was already non-interactive by
+    // the pre-existing contract.
+    const r = capy(['deploy', 'worker-prod', '--non-tty', '--dry-run', '--yes']);
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain('non-interactive');
+  });
+});
+
 // ── Rename: `capy deploy token …` is the legacy token flow ──────────────────
 
 describe('capy deploy — coexistence: token+docs flow + connector flow', () => {
