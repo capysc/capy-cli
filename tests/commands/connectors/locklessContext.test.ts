@@ -508,7 +508,17 @@ describe('EditCommand — lock-less save', () => {
     editSaveEdits = { C: 'value-c' };
 
     const { EditCommand } = await import('../../../src/commands/editCommand');
-    await new EditCommand(undefined, true).execute({});
+    // The edit-surface gate requires stdin+stdout TTYs before the TUI renders.
+    const savedIn = process.stdin.isTTY;
+    const savedOut = process.stdout.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    try {
+      await new EditCommand(undefined, true).execute({});
+    } finally {
+      Object.defineProperty(process.stdin, 'isTTY', { value: savedIn, configurable: true });
+      Object.defineProperty(process.stdout, 'isTTY', { value: savedOut, configurable: true });
+    }
 
     expect(editScreenRunCalls.length).toBe(1);
     // The rows the screen was handed already include the server's vars —

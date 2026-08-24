@@ -196,12 +196,17 @@ function writeEnvHeader(): void {
 }
 
 async function withTTY<T>(fn: () => Promise<T>): Promise<T> {
-  const saved = process.stdin.isTTY;
+  // The edit-surface gate (editSurfaceIsSafe) requires BOTH stdin and stdout
+  // to be a TTY before the full-screen editor may render — fake both.
+  const savedIn = process.stdin.isTTY;
+  const savedOut = process.stdout.isTTY;
   Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+  Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
   try {
     return await fn();
   } finally {
-    Object.defineProperty(process.stdin, 'isTTY', { value: saved, configurable: true });
+    Object.defineProperty(process.stdin, 'isTTY', { value: savedIn, configurable: true });
+    Object.defineProperty(process.stdout, 'isTTY', { value: savedOut, configurable: true });
   }
 }
 
@@ -615,10 +620,15 @@ describe('editCommand — same-key CAS conflict now offers the addCommand-style 
       Object.defineProperty(process.stdin, 'isTTY', { value: saved, configurable: true });
     }
 
+    // Since the edit-surface gate landed (editSurfaceIsSafe), a non-TTY
+    // non-web `capy edit` never reaches saveLocalEdits at all — the gate
+    // refuses up front, so no prompt and no push can ever happen. The
+    // web-surface refusal (confirmOverwrite omitted -> coded STALE_KEEP_HASH
+    // from pushKeepWithRetry) stays covered by the retry-loop tests.
     expect(thrown).toBeInstanceOf(CapyError);
-    expect(thrown.code).toBe(ERROR_CODES.STALE_KEEP_HASH);
+    expect(thrown.code).toBe('EDIT_SCREEN_UNSAFE_SURFACE');
     expect(promptCalls.length).toBe(0);
-    expect(serviceCalls.filter((c) => c[0] === 'pushSecrets').length).toBe(1);
+    expect(serviceCalls.filter((c) => c[0] === 'pushSecrets').length).toBe(0);
   });
 });
 

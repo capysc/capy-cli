@@ -92,14 +92,16 @@ describe('capy edit spawned headless (piped stdio — deterministically no TTY)'
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
 
-    // No keep.lock in the directory, so a run that clears the surface guard
-    // must hit the unchanged pre-existing refusal — proving --web still
-    // works headless and the new guard added no behavior on that rail.
+    // No keep.lock in the directory. Single-user lock-less mode means this is
+    // no longer a refusal ("No keep.lock" is gone): a run that clears the
+    // surface guard proceeds into lock-less identity resolution, which in
+    // this headless spawn fails further along (auth/project lookup). The
+    // guard-passed evidence is the ABSENCE of the gate's code and of any
+    // alt-screen write — asserted the same as before.
     const r = capyEdit(['--web'], dir);
 
     expect(r.code).not.toBe(0);
     expect(r.stderr).not.toContain(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
-    expect(r.stderr).toContain('No keep.lock');
     expect(r.stdout).not.toContain(ALT_SCREEN_ENTER);
 
     rmSync(dir, { recursive: true, force: true });
