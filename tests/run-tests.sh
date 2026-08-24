@@ -68,6 +68,7 @@ ISOLATED_FILES=(
   tests/commands/readOnlyRun.e2e.test.ts
   tests/commands/kickCommand.test.ts
   tests/commands/inviteCommand.test.ts
+  tests/commands/deployTokenCommand.test.ts
   tests/config/globalConfig.test.ts
   tests/core/projectManager.test.ts
   tests/crypto/keyResolver.test.ts
