@@ -121,6 +121,15 @@ ISOLATED_FILES=(
   tests/auth/authServiceKeepLoginBridge.test.ts
   # doctorCommand.test.ts mocks os.homedir() the same way (getGlobalCapyDir).
   tests/commands/doctorCommand.test.ts
+  # locklessContext.test.ts mocks authService/serviceClient/keyResolver
+  # (single-user lock-less resolveContext/writeAndSync) and os.homedir()
+  # (writeKeepCache lands in a throwaway home, not the developer's real ~/.capy).
+  tests/commands/connectors/locklessContext.test.ts
+  # conflictUx.test.ts mocks authService/serviceClient/keyResolver/inquirer/
+  # ui/editScreen.ts and os.homedir() the same way, for the conflict-gate
+  # context lines, the edit/push CAS confirm wiring, and the personal-env
+  # soft warning.
+  tests/commands/connectors/conflictUx.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run
