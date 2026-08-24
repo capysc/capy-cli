@@ -432,6 +432,7 @@ const deploy = program
         // a different thing, so it must NOT be merged in here.
         force: options.force,
         json,
+        nonTty: options.nonTty === true,
       });
       process.exit(code);
     }
