@@ -30,6 +30,9 @@ export const LOCAL_ONLY_DISABLED_COMMANDS = [
   // 'development'); multi-branch support is deferred.
   'branch',
   'checkout',
+  // The flow service is server-owned end to end — local-only mode has no
+  // flow instances to cancel.
+  'flow',
 ] as const;
 
 /**

@@ -682,6 +682,27 @@ program
     await cmd.execute(email, { web: command.optsWithGlobals().web === true });
   });
 
+const flow = program
+  .command('flow')
+  .description('Flow-service instance management');
+
+flow
+  .command('cancel <id>')
+  .description('Cancel a stuck flow (org-owner escape hatch — releases any repo lock it holds)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI, on success AND failure')
+  .option('--yes', 'skip the confirmation prompt')
+  .option('--non-tty', 'treat stdin as non-interactive even if it is a TTY (agents/CI)')
+  .action(async (id: string, options: { json?: boolean; yes?: boolean; nonTty?: boolean }) => {
+    assertNotLocalOnly('flow cancel');
+    const { FlowCancelCommand } = await import('./commands/flowCancelCommand');
+    const cmd = new FlowCancelCommand();
+    await cmd.execute(id, {
+      json: options.json === true,
+      yes: options.yes === true,
+      nonTty: options.nonTty === true,
+    });
+  });
+
 program
   .command('org')
   .description('Switch organization')

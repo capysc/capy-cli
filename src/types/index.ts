@@ -521,6 +521,35 @@ export const ERROR_CODES = {
    * for a different one.
    */
   ORG_NAME_SUFFIX_EXHAUSTED: 'ORG_NAME_SUFFIX_EXHAUSTED',
+  // `capy flow cancel` (client-side reclassification of the server's 404).
+  /**
+   * `POST /flows/:id/cancel` answers 404 for two different facts wearing one
+   * status: the flow does not exist, or it exists but this caller is neither
+   * its bound identity/secret holder nor an owner of whatever it pinned. The
+   * server does not (and, by the endpoint's own design, cannot) tell those
+   * apart in its response — doing so would let an unauthorized caller probe
+   * for the existence of a flow it has no claim to. So this code collapses
+   * both into ONE honest answer rather than inventing an authorization
+   * distinction the server never gave. Minted client-side in ServiceClient
+   * (mirrors the DOORS_NOT_SUPPORTED reclassification below) from the
+   * server's own PROJECT_NOT_FOUND code, which the flows route reuses
+   * verbatim for this 404 — never derived from response prose.
+   */
+  FLOW_NOT_FOUND: 'FLOW_NOT_FOUND',
+  /**
+   * `capy flow cancel` refused off a TTY with no `--yes`: cancelling a flow
+   * is irreversible (it releases the flow's repo lock and marks it dead), so
+   * the command never silently no-ops when it cannot ask. Client-side only —
+   * decided before any request is sent.
+   */
+  FLOW_CANCEL_CONFIRMATION_REQUIRED: 'FLOW_CANCEL_CONFIRMATION_REQUIRED',
+  /**
+   * `capy flow cancel` asked at an interactive terminal and the human said
+   * no. Not an error — the confirmation gate worked exactly as intended —
+   * but `--json` callers still need a coded, non-zero-`ok` answer rather than
+   * a bare human sentence to tell "declined" apart from "cancelled".
+   */
+  FLOW_CANCEL_DECLINED: 'FLOW_CANCEL_DECLINED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

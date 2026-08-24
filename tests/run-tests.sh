@@ -122,6 +122,9 @@ ISOLATED_FILES=(
   tests/auth/authServiceKeepLoginBridge.test.ts
   # doctorCommand.test.ts mocks os.homedir() the same way (getGlobalCapyDir).
   tests/commands/doctorCommand.test.ts
+  # flowCancelCommand.test.ts mocks authService/serviceClient/projectManager
+  # (kickCommand.test.ts's shape) plus ui/interactive's isInteractive().
+  tests/commands/flowCancelCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run
