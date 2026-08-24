@@ -21,7 +21,7 @@
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { ProjectManager } from '../core/projectManager';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { AuthResult, CapyError, ERROR_CODES } from '../types/index';
 import { isInteractive, refuseNonInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -93,8 +93,14 @@ export class FlowCancelCommand {
     const projectState = await pm.detectProjectState();
     const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
 
-    let authResult = await authService.authenticateSilent();
-    if (!authResult.success) authResult = await authService.authenticate();
+    // Silent (cached session) first, falling back to the interactive/browser
+    // flow only when that comes back empty — one finished value, never a
+    // reassigned binding (matches deployTokenCommand.ts's identical shape).
+    const resolveAuth = async (): Promise<AuthResult> => {
+      const silent = await authService.authenticateSilent();
+      return silent.success ? silent : authService.authenticate();
+    };
+    const authResult = await resolveAuth();
     if (!authResult.success) {
       const detail = authResult.error || 'unknown error';
       if (opts.json) {

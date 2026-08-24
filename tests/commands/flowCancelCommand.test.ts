@@ -11,12 +11,21 @@
  * FlowCancelCommand's own branching, not the real network path (that's
  * ServiceClient.cancelFlow's own unit tests in tests/service/serviceClient.test.ts).
  *
- * `isInteractive` (src/ui/interactive.ts) is ALSO mocked, with a controllable
- * return value — never by assigning to `process.stdin.isTTY`, which is
- * readonly in some runtimes and leaks a changed property descriptor into
- * sibling test files. This is what lets both the off-TTY refusal AND the
- * interactive-prompt paths be exercised deterministically in the same
- * process, regardless of whether the test runner itself has a real TTY.
+ * `isInteractive` (src/ui/interactive.ts) is ALSO mocked, as a `jest.fn()`
+ * configured per test via `.mockImplementation(...)` — never by assigning to
+ * `process.stdin.isTTY` (readonly in some runtimes, and a changed property
+ * descriptor leaks into sibling test files either way) and never via a
+ * shared, reassigned module-scope flag. This is what lets both the off-TTY
+ * refusal AND the interactive-prompt paths be exercised deterministically in
+ * the same process, regardless of whether the test runner itself has a real
+ * TTY — and it is the same per-test-configurable-mock idiom this file already
+ * uses for `mockCancelFlow` / `mockPromptFn` below, not a new pattern.
+ *
+ * Console output is captured per call by `captured()`, which builds a fresh
+ * pair of arrays inside its own closure for the duration of one `execute()`
+ * call and hands back the joined strings — never a module-scope buffer
+ * reassigned between tests, which is exactly the kind of shared state that
+ * leaks between them.
  *
  * The real end-to-end wiring (index.ts → argv → this refusal, against a
  * genuinely non-TTY stdin) is proven separately by spawning the built CLI in
@@ -24,7 +33,7 @@
  *
  * ISOLATED (mock.module): registered in run-tests.sh.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, jest, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, test } from 'bun:test';
 
 const mockDetectProjectState = jest.fn();
 const mockAuthenticate = jest.fn();
@@ -32,6 +41,8 @@ const mockAuthenticateSilent = jest.fn();
 const mockGetValidToken = jest.fn();
 const mockSetTokenProvider = jest.fn();
 const mockCancelFlow = jest.fn();
+const mockIsInteractive = jest.fn();
+const mockPromptFn = jest.fn();
 
 mock.module('../../src/core/projectManager', () => ({
   ProjectManager: jest.fn().mockImplementation(() => ({
@@ -54,20 +65,18 @@ mock.module('../../src/service/serviceClient', () => ({
   })),
 }));
 
-const mockPromptFn = jest.fn();
 mock.module('inquirer', () => ({
   __esModule: true,
   default: { prompt: mockPromptFn },
   prompt: mockPromptFn,
 }));
 
-// Defaults to non-interactive (`false`), matching the deterministic-no-TTY
-// shape every other test in this file relies on. Individual tests flip it to
-// exercise the interactive-prompt branch — never by touching
-// `process.stdin.isTTY`.
-let mockIsInteractiveReturn = false;
+// The real `isInteractive(nonTty?)` returns `false` whenever `nonTty` is
+// truthy, and otherwise reads the real TTY. The mock's default keeps that
+// same "nonTty always wins" shape rather than dropping it — see the
+// "nonTty:true forces the refusal" test below, which relies on it.
 mock.module('../../src/ui/interactive', () => ({
-  isInteractive: (nonTty?: boolean) => (nonTty ? false : mockIsInteractiveReturn),
+  isInteractive: mockIsInteractive,
   EXIT_NEEDS_INPUT: 3,
   refuseNonInteractive: (reason: string, hint: string): never => {
     console.error(`\n  non-interactive: ${reason}`);
@@ -92,23 +101,18 @@ afterAll(() => {
   (process as any).exit = originalExit;
 });
 
-let FlowCancelCommand: any;
-let ERROR_CODES: any;
-let CapyError: any;
-
-beforeAll(async () => {
-  ({ FlowCancelCommand } = await import('../../src/commands/flowCancelCommand'));
-  ({ ERROR_CODES, CapyError } = await import('../../src/types/index'));
-});
-
-let logs: string[] = [];
-let errs: string[] = [];
-const originalLog = console.log;
-const originalErr = console.error;
+// Top-level await, not `let X: any; beforeAll(() => { ({X} = await import...) })`
+// — a single `const` populated once at module evaluation, after the
+// `mock.module()` calls above (which run synchronously first).
+const { FlowCancelCommand } = await import('../../src/commands/flowCancelCommand');
+const { ERROR_CODES, CapyError } = await import('../../src/types/index');
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockIsInteractiveReturn = false;
+  // Default: non-interactive regardless of the `nonTty` argument, matching
+  // the deterministic-no-TTY shape every test in this file relies on unless
+  // it opts into the interactive branch below.
+  mockIsInteractive.mockImplementation(() => false);
   mockDetectProjectState.mockResolvedValue({ initialized: true, organizationId: 'org-123' });
   mockAuthenticateSilent.mockResolvedValue({ success: true });
   mockAuthenticate.mockResolvedValue({ success: true });
@@ -118,32 +122,47 @@ beforeEach(() => {
   // `process.exitCode = undefined` as clearing a prior nonzero value, so `0`
   // (not `undefined`) is the only reset that actually takes.
   process.exitCode = 0;
-  logs = [];
-  errs = [];
-  console.log = (...args: unknown[]) => {
-    logs.push(args.map(String).join(' '));
-  };
-  console.error = (...args: unknown[]) => {
-    errs.push(args.map(String).join(' '));
-  };
 });
 
 afterEach(() => {
-  console.log = originalLog;
-  console.error = originalErr;
   process.exitCode = 0;
 });
 
-function jsonOut(): any {
-  return JSON.parse(logs.join('\n'));
+/**
+ * Run one `execute()` call with console output captured rather than printed,
+ * and any thrown/rejected value handed back instead of failing the test.
+ *
+ * `logLines`/`errLines` are freshly constructed inside this call and never
+ * escape it except as the joined strings returned below — there is no
+ * shared buffer for one test's output to bleed into another's.
+ */
+async function captured(run: () => Promise<void>): Promise<{ error: unknown; log: string; err: string }> {
+  const logLines: string[] = [];
+  const errLines: string[] = [];
+  const originalLog = console.log;
+  const originalErr = console.error;
+  console.log = (...args: unknown[]) => {
+    logLines.push(args.map(String).join(' '));
+  };
+  console.error = (...args: unknown[]) => {
+    errLines.push(args.map(String).join(' '));
+  };
+  const error = await run().then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  console.log = originalLog;
+  console.error = originalErr;
+  return { error, log: logLines.join('\n'), err: errLines.join('\n') };
 }
 
 describe('FlowCancelCommand — success', () => {
   test('--yes skips the confirmation prompt and calls cancelFlow directly', async () => {
     mockCancelFlow.mockResolvedValue({ flow_id: 'flow-abc', state: 'cancelled' });
 
-    await new FlowCancelCommand().execute('flow-abc', { yes: true });
+    const { error } = await captured(() => new FlowCancelCommand().execute('flow-abc', { yes: true }));
 
+    expect(error).toBeUndefined();
     expect(mockPromptFn).not.toHaveBeenCalled();
     expect(mockCancelFlow).toHaveBeenCalledWith('flow-abc');
     expect(process.exitCode).toBe(0);
@@ -152,44 +171,44 @@ describe('FlowCancelCommand — success', () => {
   test('--json emits {ok:true, flow_id, state} on success', async () => {
     mockCancelFlow.mockResolvedValue({ flow_id: 'flow-abc', state: 'cancelled' });
 
-    await new FlowCancelCommand().execute('flow-abc', { yes: true, json: true });
+    const { log } = await captured(() => new FlowCancelCommand().execute('flow-abc', { yes: true, json: true }));
 
-    const out = jsonOut();
-    expect(out).toEqual({ ok: true, flow_id: 'flow-abc', state: 'cancelled' });
+    expect(JSON.parse(log)).toEqual({ ok: true, flow_id: 'flow-abc', state: 'cancelled' });
   });
 
   test('an interactive "yes" proceeds to cancel', async () => {
-    mockIsInteractiveReturn = true;
+    mockIsInteractive.mockImplementation((nonTty?: boolean) => (nonTty ? false : true));
     mockPromptFn.mockResolvedValue({ confirm: true });
     mockCancelFlow.mockResolvedValue({ flow_id: 'flow-abc', state: 'cancelled' });
 
-    await new FlowCancelCommand().execute('flow-abc', {});
+    const { error } = await captured(() => new FlowCancelCommand().execute('flow-abc', {}));
 
+    expect(error).toBeUndefined();
     expect(mockPromptFn).toHaveBeenCalledTimes(1);
     expect(mockCancelFlow).toHaveBeenCalledWith('flow-abc');
   });
 
   test('an interactive decline cancels nothing (non-json: plain "Cancelled.", exit stays 0)', async () => {
-    mockIsInteractiveReturn = true;
+    mockIsInteractive.mockImplementation((nonTty?: boolean) => (nonTty ? false : true));
     mockPromptFn.mockResolvedValue({ confirm: false });
 
-    await new FlowCancelCommand().execute('flow-abc', {});
+    const { error, log } = await captured(() => new FlowCancelCommand().execute('flow-abc', {}));
 
+    expect(error).toBeUndefined();
     expect(mockPromptFn).toHaveBeenCalledTimes(1);
     expect(mockCancelFlow).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(0);
-    expect(logs.join('\n')).toContain('Cancelled.');
+    expect(log).toContain('Cancelled.');
   });
 
   test('an interactive decline honours --json: {ok:false, code: FLOW_CANCEL_DECLINED}', async () => {
-    mockIsInteractiveReturn = true;
+    mockIsInteractive.mockImplementation((nonTty?: boolean) => (nonTty ? false : true));
     mockPromptFn.mockResolvedValue({ confirm: false });
 
-    await new FlowCancelCommand().execute('flow-abc', { json: true });
+    const { log } = await captured(() => new FlowCancelCommand().execute('flow-abc', { json: true }));
 
     expect(mockCancelFlow).not.toHaveBeenCalled();
-    const out = jsonOut();
-    expect(out).toEqual({ ok: false, code: ERROR_CODES.FLOW_CANCEL_DECLINED, flow_id: 'flow-abc' });
+    expect(JSON.parse(log)).toEqual({ ok: false, code: ERROR_CODES.FLOW_CANCEL_DECLINED, flow_id: 'flow-abc' });
   });
 });
 
@@ -204,22 +223,22 @@ describe('FlowCancelCommand — 404 (not found or not authorized)', () => {
   });
 
   test('non-json: prints the honest "does not exist, or is not yours" message and sets exitCode 1', async () => {
-    await new FlowCancelCommand().execute('flow-missing', { yes: true });
+    const { error, err } = await captured(() => new FlowCancelCommand().execute('flow-missing', { yes: true }));
 
+    expect(error).toBeUndefined();
     expect(process.exitCode).toBe(1);
-    const combined = errs.join('\n');
-    expect(combined).toContain('flow-missing');
-    expect(combined).toContain('does not exist, or is not yours to cancel');
+    expect(err).toContain('flow-missing');
+    expect(err).toContain('does not exist, or is not yours to cancel');
     // No invented authorization distinction — the message must not claim to
     // know WHICH of the two it is.
-    expect(combined.toLowerCase()).not.toContain('you are not the owner');
+    expect(err.toLowerCase()).not.toContain('you are not the owner');
   });
 
   test('--json honoured on failure: {ok:false, code: FLOW_NOT_FOUND, flow_id, detail}', async () => {
-    await new FlowCancelCommand().execute('flow-missing', { yes: true, json: true });
+    const { log } = await captured(() => new FlowCancelCommand().execute('flow-missing', { yes: true, json: true }));
 
     expect(process.exitCode).toBe(1);
-    const out = jsonOut();
+    const out = JSON.parse(log);
     expect(out.ok).toBe(false);
     expect(out.code).toBe(ERROR_CODES.FLOW_NOT_FOUND);
     expect(out.flow_id).toBe('flow-missing');
@@ -229,8 +248,9 @@ describe('FlowCancelCommand — 404 (not found or not authorized)', () => {
 
 describe('FlowCancelCommand — off-TTY confirmation gate', () => {
   test('off-TTY (no --yes) refuses with EXIT_NEEDS_INPUT (3) and never calls cancelFlow', async () => {
-    await expect(new FlowCancelCommand().execute('flow-abc', {})).rejects.toBeInstanceOf(ExitError);
+    const { error } = await captured(() => new FlowCancelCommand().execute('flow-abc', {}));
 
+    expect(error).toBeInstanceOf(ExitError);
     expect(mockCancelFlow).not.toHaveBeenCalled();
     expect(mockPromptFn).not.toHaveBeenCalled();
     // No auth/service bootstrap either — the gate is checked before any work.
@@ -238,24 +258,18 @@ describe('FlowCancelCommand — off-TTY confirmation gate', () => {
   });
 
   test('the refusal exits with code 3 specifically, not a generic 1', async () => {
-    try {
-      await new FlowCancelCommand().execute('flow-abc', {});
-      throw new Error('expected execute() to throw via process.exit');
-    } catch (err) {
-      expect(err).toBeInstanceOf(ExitError);
-      expect((err as ExitError).code).toBe(3);
-    }
+    const { error } = await captured(() => new FlowCancelCommand().execute('flow-abc', {}));
+
+    expect(error).toBeInstanceOf(ExitError);
+    expect((error as ExitError).code).toBe(3);
   });
 
   test('--json honoured on the off-TTY refusal too: {ok:false, code: FLOW_CANCEL_CONFIRMATION_REQUIRED}', async () => {
-    try {
-      await new FlowCancelCommand().execute('flow-abc', { json: true });
-      throw new Error('expected execute() to throw via process.exit');
-    } catch (err) {
-      expect(err).toBeInstanceOf(ExitError);
-      expect((err as ExitError).code).toBe(3);
-    }
-    const out = jsonOut();
+    const { error, log } = await captured(() => new FlowCancelCommand().execute('flow-abc', { json: true }));
+
+    expect(error).toBeInstanceOf(ExitError);
+    expect((error as ExitError).code).toBe(3);
+    const out = JSON.parse(log);
     expect(out.ok).toBe(false);
     expect(out.code).toBe(ERROR_CODES.FLOW_CANCEL_CONFIRMATION_REQUIRED);
     expect(out.flow_id).toBe('flow-abc');
@@ -263,10 +277,11 @@ describe('FlowCancelCommand — off-TTY confirmation gate', () => {
   });
 
   test('nonTty:true forces the refusal even when isInteractive would otherwise say yes', async () => {
-    mockIsInteractiveReturn = true;
+    mockIsInteractive.mockImplementation((nonTty?: boolean) => (nonTty ? false : true));
 
-    await expect(new FlowCancelCommand().execute('flow-abc', { nonTty: true })).rejects.toBeInstanceOf(ExitError);
+    const { error } = await captured(() => new FlowCancelCommand().execute('flow-abc', { nonTty: true }));
 
+    expect(error).toBeInstanceOf(ExitError);
     expect(mockCancelFlow).not.toHaveBeenCalled();
     expect(mockPromptFn).not.toHaveBeenCalled();
   });
@@ -274,8 +289,9 @@ describe('FlowCancelCommand — off-TTY confirmation gate', () => {
   test('--yes overrides the off-TTY refusal — an agent can still cancel non-interactively', async () => {
     mockCancelFlow.mockResolvedValue({ flow_id: 'flow-abc', state: 'cancelled' });
 
-    await new FlowCancelCommand().execute('flow-abc', { yes: true });
+    const { error } = await captured(() => new FlowCancelCommand().execute('flow-abc', { yes: true }));
 
+    expect(error).toBeUndefined();
     expect(mockCancelFlow).toHaveBeenCalledWith('flow-abc');
     expect(process.exitCode).toBe(0);
   });
