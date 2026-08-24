@@ -33,20 +33,30 @@ const withTty = (stdin: boolean | undefined, stdout: boolean | undefined) => {
 
 /** Everything the command wrote, in order — same helper shape as the other command-level tests. */
 function captureOutput(): { out: () => string; restore: () => void } {
-  let buf = '';
+  const chunks: string[] = [];
   const log = spyOn(console, 'log').mockImplementation(((...a: unknown[]) => {
-    buf += a.join(' ') + '\n';
+    chunks.push(a.join(' ') + '\n');
   }) as any);
   const err = spyOn(console, 'error').mockImplementation(((...a: unknown[]) => {
-    buf += a.join(' ') + '\n';
+    chunks.push(a.join(' ') + '\n');
   }) as any);
   return {
-    out: () => buf,
+    out: () => chunks.join(''),
     restore: () => {
       log.mockRestore();
       err.mockRestore();
     },
   };
+}
+
+/** The error `fn` threw, or undefined — never throws itself, so callers need no try/catch. */
+async function thrownBy(fn: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await fn();
+    return undefined;
+  } catch (err) {
+    return err;
+  }
 }
 
 afterEach(() => {
@@ -58,14 +68,8 @@ describe('EditCommand — no real terminal, no --web', () => {
   test('refuses with a coded error before touching the project; nothing printed', async () => {
     withTty(false, false);
     const cap = captureOutput();
-    let caught: unknown;
-    try {
-      await new EditCommand().execute({});
-    } catch (err) {
-      caught = err;
-    } finally {
-      cap.restore();
-    }
+    const caught = await thrownBy(() => new EditCommand().execute({}));
+    cap.restore();
 
     expect(caught).toBeInstanceOf(CapyError);
     expect((caught as CapyError).code).toBe(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
@@ -78,14 +82,8 @@ describe('EditCommand — no real terminal, no --web', () => {
   test('refuses when stdin is a TTY but stdout is not (redirected output)', async () => {
     withTty(true, false);
     const cap = captureOutput();
-    let caught: unknown;
-    try {
-      await new EditCommand().execute({});
-    } catch (err) {
-      caught = err;
-    } finally {
-      cap.restore();
-    }
+    const caught = await thrownBy(() => new EditCommand().execute({}));
+    cap.restore();
     expect((caught as CapyError)?.code).toBe(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
     expect(cap.out()).toBe('');
   });
@@ -93,14 +91,8 @@ describe('EditCommand — no real terminal, no --web', () => {
   test('refuses when stdout is a TTY but stdin is not (piped input)', async () => {
     withTty(false, true);
     const cap = captureOutput();
-    let caught: unknown;
-    try {
-      await new EditCommand().execute({});
-    } catch (err) {
-      caught = err;
-    } finally {
-      cap.restore();
-    }
+    const caught = await thrownBy(() => new EditCommand().execute({}));
+    cap.restore();
     expect((caught as CapyError)?.code).toBe(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
     expect(cap.out()).toBe('');
   });
@@ -108,13 +100,12 @@ describe('EditCommand — no real terminal, no --web', () => {
   test('the refusal names the --web escape hatch', async () => {
     withTty(false, false);
     const cap = captureOutput();
-    try {
-      await new EditCommand().execute({});
-    } catch (err) {
-      expect((err as CapyError).message).toContain('capy edit --web');
-    } finally {
-      cap.restore();
-    }
+    const caught = await thrownBy(() => new EditCommand().execute({}));
+    cap.restore();
+    // Assert the throw itself, not just the message: were the guard ever
+    // removed, a catch-only assertion would pass vacuously.
+    expect(caught).toBeInstanceOf(CapyError);
+    expect((caught as CapyError).message).toContain('capy edit --web');
   });
 });
 
