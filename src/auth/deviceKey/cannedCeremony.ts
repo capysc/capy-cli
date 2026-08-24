@@ -25,6 +25,7 @@ import type {
   UnlockRequest,
   UnlockSuccess,
 } from './ceremonyTransport';
+import { isWellFormedPrfOutput } from './crypto';
 
 /** The PRF pair carried in a `create_org` first_run answer, plus the credential's backup flags. */
 export interface CannedEnrollmentResult {
@@ -38,6 +39,8 @@ export interface CannedEnrollmentResult {
 export function cannedEnrollmentTransport(result: CannedEnrollmentResult): CeremonyTransport {
   return {
     async requestEnrollment(_req: EnrollmentRequest): Promise<EnrollmentSuccess | CeremonyFailure> {
+      // Pre-obtained does not mean well-formed — see requestUnlock below.
+      if (!isWellFormedPrfOutput(result.prfOutput)) return { ok: false, code: 'transport_error' };
       return {
         ok: true,
         credentialId: result.credentialId,
@@ -72,6 +75,18 @@ export function cannedUnlockTransport(result: CannedUnlockResult): CeremonyTrans
       throw new Error('cannedUnlockTransport.requestEnrollment is not implemented');
     },
     async requestUnlock(_req: UnlockRequest): Promise<UnlockSuccess | CeremonyFailure> {
+      // The result arriving pre-obtained says nothing about it being usable:
+      // it was produced by the same page, over the same PRF extension, as a
+      // relayed answer — it just travelled inside the sealed sandbox_session
+      // rather than over a second round trip. An empty or short prfOutput
+      // here reaches deriveDeviceKeyKek exactly as it would there, and on
+      // THIS rail the throw is swallowed by sandboxCeremony's best-effort
+      // catch, so it surfaces as an unexplained key_not_on_device with no
+      // trace of the cause. `transport_error` because a malformed payload in
+      // an otherwise-valid envelope is a delivery fault, not the
+      // authenticator declining to evaluate (`prf_unsupported`), which the
+      // page reports for itself.
+      if (!isWellFormedPrfOutput(result.prfOutput)) return { ok: false, code: 'transport_error' };
       return { ok: true, credentialId: result.credentialId, prfOutput: result.prfOutput };
     },
     async requestGrant(_req: GrantRequest): Promise<GrantSuccess | CeremonyFailure> {
