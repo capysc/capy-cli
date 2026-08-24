@@ -181,6 +181,14 @@ describe('createOrganizationFromEnvelope — 409 suffix loop', () => {
   });
 });
 
+/**
+ * A PRF evaluation the KDF would accept: 32 bytes, base64. The canned
+ * transports now reject anything else as `transport_error` — an empty or short
+ * output reaching deriveDeviceKeyKek is the bug that guard exists for — so a
+ * "complete PRF pair" fixture has to be a plausible one.
+ */
+const PRF_OUTPUT = Buffer.alloc(32, 9).toString('base64');
+
 describe('createOrganizationFromEnvelope — canned Case A enrollment', () => {
   test('a complete PRF pair runs Case A through a canned transport with the pre-obtained result', async () => {
     const authService = fakeAuthService(async (name: string) => ({ id: 'org_1', workos_org_id: 'w1', name }));
@@ -193,7 +201,7 @@ describe('createOrganizationFromEnvelope — canned Case A enrollment', () => {
       userId: 'user_1',
       name: 'Acme',
       phrase: 'valid phrase words here',
-      prf: { credentialId: 'cred-1', prfOutput: 'prf-1', backupEligible: true, backupState: false, prfSalt },
+      prf: { credentialId: 'cred-1', prfOutput: PRF_OUTPUT, backupEligible: true, backupState: false, prfSalt },
     });
 
     expect(runNewUserEnrollment).toHaveBeenCalledTimes(1);
@@ -205,7 +213,7 @@ describe('createOrganizationFromEnvelope — canned Case A enrollment', () => {
     expect(ceremonyResult).toEqual({
       ok: true,
       credentialId: 'cred-1',
-      prfOutput: 'prf-1',
+      prfOutput: PRF_OUTPUT,
       backupEligible: true,
       backupState: false,
     });
