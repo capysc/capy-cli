@@ -134,6 +134,14 @@ ISOLATED_FILES=(
   # flowCancelCommand.test.ts mocks authService/serviceClient/projectManager
   # (kickCommand.test.ts's shape) plus ui/interactive's isInteractive().
   tests/commands/flowCancelCommand.test.ts
+  # masterKeyMint.test.ts mocks keyManager/keyResolver/ui/recoveryPhrase/
+  # ui/interactive (master-key first-mint ceremony, unit-level).
+  tests/auth/masterKeyMint.test.ts
+  # locklessMintFallback.test.ts mocks authService/serviceClient/keyResolver/
+  # keyManager/ui/recoveryPhrase/ui/interactive and os.homedir() the same way
+  # as locklessContext.test.ts, for the mint-chokepoint integration through
+  # resolveContext's lock-less path.
+  tests/commands/connectors/locklessMintFallback.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

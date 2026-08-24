@@ -36,6 +36,7 @@ import {
   hasOrgKey,
   KeyServiceOps,
 } from '../crypto/keyResolver';
+import { shouldAttemptMint } from '../auth/masterKeyMint';
 import { writeKeepCache, fetchSecretsWithCache, readSecretsLocal, LOCAL_ORG_ID, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
@@ -735,6 +736,31 @@ export class CapyCommand {
       const unlock = await attemptCaseCUnlock(this.deviceKeyWiringContext(authResult, selectedOrg.id));
       if (unlock.ok) {
         orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+      }
+    }
+
+    // Master-key mint chokepoint: an auto-provisioned personal org has no
+    // key for ANY device until an owner first mints one — still true after
+    // the Case C unlock attempt above, since there is nothing to unlock. If
+    // this org's own key_state (from the auth-response org list already in
+    // hand) says nobody has minted M yet, and this run can safely show a
+    // recovery phrase, mint it here instead of falling straight to the
+    // invite-code remedy below.
+    if (!orgKeyPresent && shouldAttemptMint(orgs.find(o => o.id === selectedOrg.id)?.key_state, this.options.web)) {
+      const { mintMasterKeyForOrg } = await import('../auth/masterKeyMint');
+      try {
+        await mintMasterKeyForOrg({
+          orgId: selectedOrg.id,
+          userId: authResult.user_id!,
+          serviceClient: this.serviceClient,
+          keyServiceOps: this.keyServiceOps(),
+          web: this.options.web,
+        });
+        orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+      } catch {
+        // KEY_ALREADY_MINTED / KEY_MINT_IN_PROGRESS / unsafe-surface — fall
+        // through to the existing "no key on this device" remedy below,
+        // unchanged.
       }
     }
 

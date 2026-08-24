@@ -172,6 +172,17 @@ export class EditCommand {
 
       if (localMode) {
         userId = LOCAL_USER_ID;
+        try {
+          projectKey = await resolveLocalProjectKey(projectId);
+        } catch (err: any) {
+          const { displayErrorAndExit } = await import('../ui/errorScreen');
+          await displayErrorAndExit(err, {
+            projectName: keep.project_name,
+            projectId: keep.project_id,
+            branch,
+          });
+          return;
+        }
       } else {
         // Auth — silent first, then interactive (mirrors usersCommand pattern)
         authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
@@ -185,32 +196,29 @@ export class EditCommand {
           process.exit(1);
         }
         userId = authResult.user_id;
-      }
 
-      try {
-        if (localMode) {
-          projectKey = await resolveLocalProjectKey(projectId);
-        } else {
-          const { resolveProjectKey } = await import('../crypto/keyResolver');
-          const keyOps = {
-            coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
-            wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-          };
-          projectKey = await resolveProjectKey(
+        try {
+          const { resolveProjectKeyWithMintFallback } = await import('../auth/masterKeyMint');
+          projectKey = await resolveProjectKeyWithMintFallback({
             orgId,
             projectId,
             userId,
-            keyOps,
-          );
+            serviceClient: serviceClient!,
+            keyServiceOps: {
+              coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
+              wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+            },
+            orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
+          });
+        } catch (err: any) {
+          const { displayErrorAndExit } = await import('../ui/errorScreen');
+          await displayErrorAndExit(err, {
+            projectName: keep.project_name,
+            projectId: keep.project_id,
+            branch,
+          });
+          return;
         }
-      } catch (err: any) {
-        const { displayErrorAndExit } = await import('../ui/errorScreen');
-        await displayErrorAndExit(err, {
-          projectName: keep.project_name,
-          projectId: keep.project_id,
-          branch,
-        });
-        return;
       }
     }
 

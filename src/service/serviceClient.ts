@@ -264,6 +264,32 @@ export class ServiceClient {
         );
       }
 
+      // Master-key mint arbitration (`POST /orgs/:orgId/key-mint/claim`).
+      // `expires_at` hoisted to top-level `details` (mirrors STALE_KEEP_HASH's
+      // keep_hash/keep_file above) so callers read it without re-parsing
+      // `details.data`.
+      if (res.status === 409 && data.code === 'KEY_ALREADY_MINTED') {
+        throw new CapyError(
+          data.error || 'This organization\'s master key has already been minted.',
+          ERROR_CODES.KEY_ALREADY_MINTED,
+          { status: 409 },
+        );
+      }
+      if (res.status === 409 && data.code === 'KEY_MINT_IN_PROGRESS') {
+        throw new CapyError(
+          data.error || 'Another device is currently minting this organization\'s master key.',
+          ERROR_CODES.KEY_MINT_IN_PROGRESS,
+          { status: 409, expires_at: data.expires_at },
+        );
+      }
+      if (res.status === 409 && data.code === 'KEY_MINT_NOT_CLAIMED') {
+        throw new CapyError(
+          data.error || 'This device does not hold the mint lease for this organization.',
+          ERROR_CODES.KEY_MINT_NOT_CLAIMED,
+          { status: 409 },
+        );
+      }
+
       const serverMessage = data.error || data.message || 'Service request failed';
       throw new CapyError(
         serverMessage,
@@ -591,6 +617,27 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
+  /**
+   * Claim the 15-minute first-mint lease on an auto-provisioned org's master
+   * key (Owner only). This device's own re-claim extends the lease; an
+   * expired foreign lease is taken over. 409s (`KEY_ALREADY_MINTED`,
+   * `KEY_MINT_IN_PROGRESS`) and 403/404 arrive as typed `CapyError`s via
+   * `request()`'s classification above — never parsed from prose here.
+   */
+  async claimKeyMint(orgId: string): Promise<{ key_state: 'minting'; expires_at: string }> {
+    return this.request('POST', `/orgs/${orgId}/key-mint/claim`);
+  }
+
+  /**
+   * Mark an org's master key minted, once this device has claimed the lease,
+   * generated M, and saved key.enc locally. Idempotent: a second call after
+   * the org is already `minted` answers `{ already: true }` rather than
+   * `KEY_MINT_NOT_CLAIMED` — the caller (this device, the one that just
+   * minted) already holds the key either way.
+   */
+  async finalizeKeyMint(orgId: string): Promise<{ key_state: 'minted' } | { already: true }> {
+    return this.request('POST', `/orgs/${orgId}/key-mint/finalize`);
+  }
 
   async listMembers(orgId: string): Promise<{ members: any[] }> {
     return this.request('GET', `/orgs/${orgId}/members`);

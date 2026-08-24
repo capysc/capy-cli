@@ -117,22 +117,33 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
     process.exit(1);
   }
 
-  const { resolveProjectKey } = await import('../../crypto/keyResolver');
-  let projectKey: string;
-  try {
-    projectKey = await resolveProjectKey(orgId, projectId, authResult.user_id, {
-      coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
-      wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-    });
-  } catch (err: any) {
-    const { displayErrorAndExit } = await import('../../ui/errorScreen');
-    await displayErrorAndExit(err, {
-      projectName: keep.project_name,
-      projectId: keep.project_id,
-      branch,
-    });
-    throw err;
-  }
+  const { resolveProjectKeyWithMintFallback } = await import('../../auth/masterKeyMint');
+  const projectKey = await (async (): Promise<string> => {
+    try {
+      return await resolveProjectKeyWithMintFallback({
+        orgId,
+        projectId,
+        userId: authResult.user_id!,
+        serviceClient,
+        keyServiceOps: {
+          coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+          wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+        },
+        // The key_state for THIS org from the auth-response org list, when
+        // known — absent (undefined) makes the mint chokepoint use the
+        // claim's own 409 as its probe instead. See resolveProjectKeyWithMintFallback.
+        orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
+      });
+    } catch (err: any) {
+      const { displayErrorAndExit } = await import('../../ui/errorScreen');
+      await displayErrorAndExit(err, {
+        projectName: keep.project_name,
+        projectId: keep.project_id,
+        branch,
+      });
+      throw err;
+    }
+  })();
 
   const localPlaintext: Record<string, string> = {};
   const rawLocal = fileManager.readEnvFile();
@@ -249,18 +260,26 @@ async function resolveLocklessContext(
 
   const branch = pm.deriveActiveBranch() || SyncEngine.DEFAULT_BRANCH;
 
-  const { resolveProjectKey } = await import('../../crypto/keyResolver');
-  let projectKey: string;
-  try {
-    projectKey = await resolveProjectKey(orgId, projectId, userId, {
-      coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
-      wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-    });
-  } catch (err: any) {
-    const { displayErrorAndExit } = await import('../../ui/errorScreen');
-    await displayErrorAndExit(err, { projectName, projectId, branch });
-    throw err;
-  }
+  const { resolveProjectKeyWithMintFallback } = await import('../../auth/masterKeyMint');
+  const projectKey = await (async (): Promise<string> => {
+    try {
+      return await resolveProjectKeyWithMintFallback({
+        orgId,
+        projectId,
+        userId,
+        serviceClient,
+        keyServiceOps: {
+          coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
+          wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
+        },
+        orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
+      });
+    } catch (err: any) {
+      const { displayErrorAndExit } = await import('../../ui/errorScreen');
+      await displayErrorAndExit(err, { projectName, projectId, branch });
+      throw err;
+    }
+  })();
 
   // Latest state from the server for this branch — the lock-less source of
   // truth. `keepHash` omitted is the CLI's existing "give me latest"

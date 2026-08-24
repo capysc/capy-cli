@@ -154,10 +154,22 @@ export interface UserDecisions {
   deleteRemote: string[]; // Variables to delete from remote (push deletion)
 }
 
+/**
+ * Where this organization's master key M stands. Absent (undefined) means
+ * "the server hasn't told us" — old service builds, or any response shape
+ * that predates the mint fix — and every caller that reads it must treat
+ * that the same as `'minted'` (the pre-existing "recover/transport" remedy),
+ * never as `'unminted'`: guessing "not minted yet" from silence would send an
+ * account that already has a key down the mint path instead of recovery.
+ */
+export type OrgKeyState = 'unminted' | 'minting' | 'minted';
+
 export interface Organization {
   id: string;
   workos_org_id: string;
   name: string;
+  /** See `OrgKeyState`'s own doc — optional, additive, absent on older service responses. */
+  key_state?: OrgKeyState;
 }
 
 /**
@@ -561,6 +573,30 @@ export const ERROR_CODES = {
    * a bare human sentence to tell "declined" apart from "cancelled".
    */
   FLOW_CANCEL_DECLINED: 'FLOW_CANCEL_DECLINED',
+  // Master-key mint (auto-provisioned personal orgs have no key until an
+  // owner first mints one). Mirrored from service/src/errorCodes.ts, same
+  // convention as STALE_KEEP_HASH above — the server is the source of truth
+  // for these three, this is just the client-side vocabulary for them.
+  /**
+   * `POST /orgs/:orgId/key-mint/claim` 409: this org's master key was already
+   * minted by some device (this one or another). Recovery/transport is the
+   * right remedy now, not another mint attempt — callers rethrow the
+   * ORIGINAL "no key on this device" error so today's remedy text (invite
+   * code / seed-phrase recovery) is unchanged.
+   */
+  KEY_ALREADY_MINTED: 'KEY_ALREADY_MINTED',
+  /**
+   * `POST /orgs/:orgId/key-mint/claim` 409: another device holds the
+   * 15-minute mint lease right now. `details.expires_at` carries when it
+   * lapses. Not this device's turn — try again shortly, or finish the mint
+   * on the device already holding the lease.
+   */
+  KEY_MINT_IN_PROGRESS: 'KEY_MINT_IN_PROGRESS',
+  /**
+   * `POST /orgs/:orgId/key-mint/finalize` 409: finalize was called without
+   * (or after losing) a claim on this org's mint lease.
+   */
+  KEY_MINT_NOT_CLAIMED: 'KEY_MINT_NOT_CLAIMED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
