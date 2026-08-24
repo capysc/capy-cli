@@ -1,166 +1,107 @@
 /**
  * `capy edit`'s terminal TUI (`EditScreen.run()`) enters the alternate
  * screen and draws every variable's plaintext unconditionally, with no TTY
- * check of its own — `editScreen.ts`'s only non-interactive handling is
- * `ExitPromptError` at the first keypress read, which fires AFTER the
- * plaintext screen has already gone out over stdout. `--web` exists
- * specifically because of this gap (see EditOpts' own docblock), but
- * nothing stopped a caller from omitting it.
+ * check of its own — its only non-interactive handling is `ExitPromptError`
+ * at the first keypress read, which fires AFTER the plaintext screen has
+ * already gone out over stdout. `--web` exists specifically because of this
+ * gap (see EditOpts' own docblock), but nothing stopped a caller from
+ * omitting it.
  *
- * The fix this pins: `EditCommand.execute()` now decides BEFORE doing any
- * work at all — before `ProjectManager`, before decrypting anything —
- * refusing with a coded error when neither stdin nor stdout is a real TTY
- * and `--web` wasn't passed. These tests prove: (1) the refusal fires for
- * every combination of a missing TTY on either stream, with nothing at all
- * printed; (2) `--web` bypasses it, same as before; (3) a real terminal on
- * both ends is unaffected — the run proceeds to the same pre-existing
- * checks it always has.
+ * The fix this pins: `EditCommand.execute()` decides BEFORE doing any work
+ * at all — before `ProjectManager`, before decrypting anything — via the
+ * pure `editSurfaceIsSafe()` predicate, refusing with a coded error when
+ * neither `--web` nor a real TTY on both streams is present.
+ *
+ * Test shape, deliberately: the decision table is unit-tested on the pure
+ * predicate (no process state touched — assigning to or redefining
+ * `process.std*.isTTY` is readonly in some runtimes and leaks a changed
+ * property descriptor into sibling test files either way), and the wiring
+ * is proven end-to-end by spawning the built CLI with piped stdio, which is
+ * deterministically non-TTY on both streams in every environment.
  */
-import { describe, test, expect, afterEach, beforeEach, spyOn } from 'bun:test';
+import { describe, test, expect } from 'bun:test';
 import { mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { spawnSync } from 'child_process';
 
-import { EditCommand } from '../../src/commands/editCommand';
-import { CapyError, ERROR_CODES } from '../../src/types/index';
+import { editSurfaceIsSafe } from '../../src/commands/editCommand';
+import { ERROR_CODES } from '../../src/types/index';
 
-const savedStdinTTY = process.stdin.isTTY;
-const savedStdoutTTY = process.stdout.isTTY;
-const withTty = (stdin: boolean | undefined, stdout: boolean | undefined) => {
-  Object.defineProperty(process.stdin, 'isTTY', { value: stdin, configurable: true });
-  Object.defineProperty(process.stdout, 'isTTY', { value: stdout, configurable: true });
-};
+const CLI = join(__dirname, '../../dist/index.js');
 
-/** Everything the command wrote, in order — same helper shape as the other command-level tests. */
-function captureOutput(): { out: () => string; restore: () => void } {
-  const chunks: string[] = [];
-  const log = spyOn(console, 'log').mockImplementation(((...a: unknown[]) => {
-    chunks.push(a.join(' ') + '\n');
-  }) as any);
-  const err = spyOn(console, 'error').mockImplementation(((...a: unknown[]) => {
-    chunks.push(a.join(' ') + '\n');
-  }) as any);
-  return {
-    out: () => chunks.join(''),
-    restore: () => {
-      log.mockRestore();
-      err.mockRestore();
-    },
-  };
+/** The alt-screen escape `EditScreen.run()` opens with — its presence on a
+ * captured stdout is the leak this whole fix exists to prevent. */
+const ALT_SCREEN_ENTER = '\x1b[?1049h';
+
+function capyEdit(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
+  const r = spawnSync('node', [CLI, 'edit', ...args], { cwd, encoding: 'utf-8' });
+  return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
 }
 
-/** The error `fn` threw, or undefined — never throws itself, so callers need no try/catch. */
-async function thrownBy(fn: () => Promise<unknown>): Promise<unknown> {
-  try {
-    await fn();
-    return undefined;
-  } catch (err) {
-    return err;
-  }
-}
-
-afterEach(() => {
-  Object.defineProperty(process.stdin, 'isTTY', { value: savedStdinTTY, configurable: true });
-  Object.defineProperty(process.stdout, 'isTTY', { value: savedStdoutTTY, configurable: true });
-});
-
-describe('EditCommand — no real terminal, no --web', () => {
-  test('refuses with a coded error before touching the project; nothing printed', async () => {
-    withTty(false, false);
-    const cap = captureOutput();
-    const caught = await thrownBy(() => new EditCommand().execute({}));
-    cap.restore();
-
-    expect(caught).toBeInstanceOf(CapyError);
-    expect((caught as CapyError).code).toBe(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
-    // No secret value can leak because nothing — not even a status line —
-    // was written. The guard fires before `ProjectManager` is ever
-    // constructed, so there is no project state to have decrypted yet.
-    expect(cap.out()).toBe('');
+describe('editSurfaceIsSafe — the decision table', () => {
+  test('--web is safe regardless of TTY state', () => {
+    expect(editSurfaceIsSafe(true, false, false)).toBe(true);
+    expect(editSurfaceIsSafe(true, undefined, undefined)).toBe(true);
+    expect(editSurfaceIsSafe(true, true, true)).toBe(true);
   });
 
-  test('refuses when stdin is a TTY but stdout is not (redirected output)', async () => {
-    withTty(true, false);
-    const cap = captureOutput();
-    const caught = await thrownBy(() => new EditCommand().execute({}));
-    cap.restore();
-    expect((caught as CapyError)?.code).toBe(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
-    expect(cap.out()).toBe('');
+  test('a real terminal on both ends is safe', () => {
+    expect(editSurfaceIsSafe(undefined, true, true)).toBe(true);
+    expect(editSurfaceIsSafe(false, true, true)).toBe(true);
   });
 
-  test('refuses when stdout is a TTY but stdin is not (piped input)', async () => {
-    withTty(false, true);
-    const cap = captureOutput();
-    const caught = await thrownBy(() => new EditCommand().execute({}));
-    cap.restore();
-    expect((caught as CapyError)?.code).toBe(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
-    expect(cap.out()).toBe('');
+  test('a missing TTY on either stream is unsafe (the leak is on stdout, not just stdin)', () => {
+    expect(editSurfaceIsSafe(undefined, false, false)).toBe(false);
+    expect(editSurfaceIsSafe(undefined, true, false)).toBe(false); // redirected stdout
+    expect(editSurfaceIsSafe(undefined, false, true)).toBe(false); // piped stdin
   });
 
-  test('the refusal names the --web escape hatch', async () => {
-    withTty(false, false);
-    const cap = captureOutput();
-    const caught = await thrownBy(() => new EditCommand().execute({}));
-    cap.restore();
-    // Assert the throw itself, not just the message: were the guard ever
-    // removed, a catch-only assertion would pass vacuously.
-    expect(caught).toBeInstanceOf(CapyError);
-    expect((caught as CapyError).message).toContain('capy edit --web');
+  test('the spawned-process shape (isTTY undefined) is unsafe', () => {
+    expect(editSurfaceIsSafe(undefined, undefined, undefined)).toBe(false);
+    expect(editSurfaceIsSafe(undefined, true, undefined)).toBe(false);
+    expect(editSurfaceIsSafe(undefined, undefined, true)).toBe(false);
   });
 });
 
-// ── Past the guard: same pre-existing checks, unaffected ───────────────────
-//
-// Both scenarios below chdir into a fresh directory with no keep.lock, so
-// `EditCommand.execute()` — once it clears the new TTY guard — hits the same
-// "No keep.lock found" refusal it always has. That refusal calls
-// `process.exit(1)` directly rather than throwing, so it's mocked the same
-// way the rest of this suite mocks a hard process.exit.
+describe('capy edit spawned headless (piped stdio — deterministically no TTY)', () => {
+  const dir = join(tmpdir(), `capy-edit-cmd-${process.pid}-${Date.now()}`);
 
-const TEST_DIR = join(tmpdir(), `capy-edit-cmd-${process.pid}`);
-const ORIGINAL_CWD = process.cwd();
+  test('refuses with the coded error before any work; no alt-screen, no prompt, non-zero exit', () => {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
 
-describe('EditCommand — past the guard', () => {
-  const mockExit = spyOn(process, 'exit').mockImplementation((() => {
-    throw new Error('process.exit');
-  }) as any);
+    const r = capyEdit([], dir);
 
-  beforeEach(() => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.chdir(TEST_DIR);
-    mockExit.mockClear();
+    expect(r.code).not.toBe(0);
+    // The stable code travels with the thrown CapyError and appears in the
+    // process's error output — the machine-visible signal of THIS refusal,
+    // as opposed to any later one.
+    expect(r.stderr).toContain(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
+    // The refusal names the sanctioned alternative.
+    expect(r.stderr).toContain('capy edit --web');
+    // And the leak itself cannot have happened: the alternate screen was
+    // never entered and stdout carries nothing at all.
+    expect(r.stdout).not.toContain(ALT_SCREEN_ENTER);
+    expect(r.stdout).toBe('');
+
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  afterEach(() => {
-    process.chdir(ORIGINAL_CWD);
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
-  });
+  test('--web passes the guard and reaches the same pre-existing keep.lock check as always', () => {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true });
 
-  test('--web bypasses the terminal-only refusal even with no TTY at all', async () => {
-    withTty(false, false);
-    const cap = captureOutput();
-    try {
-      await expect(new EditCommand().execute({ web: true })).rejects.toThrow('process.exit');
-    } finally {
-      cap.restore();
-    }
-    expect(mockExit).toHaveBeenCalledWith(1);
-    // Reached the pre-existing "no keep.lock" refusal, not the new one.
-    expect(cap.out()).toContain('No keep.lock');
-    expect(cap.out()).not.toContain('draw a full-screen editor');
-  });
+    // No keep.lock in the directory, so a run that clears the surface guard
+    // must hit the unchanged pre-existing refusal — proving --web still
+    // works headless and the new guard added no behavior on that rail.
+    const r = capyEdit(['--web'], dir);
 
-  test('a real terminal on both ends is unaffected: same pre-existing checks run', async () => {
-    withTty(true, true);
-    const cap = captureOutput();
-    try {
-      await expect(new EditCommand().execute({})).rejects.toThrow('process.exit');
-    } finally {
-      cap.restore();
-    }
-    expect(mockExit).toHaveBeenCalledWith(1);
-    expect(cap.out()).toContain('No keep.lock');
-    expect(cap.out()).not.toContain('draw a full-screen editor');
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).not.toContain(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
+    expect(r.stderr).toContain('No keep.lock');
+    expect(r.stdout).not.toContain(ALT_SCREEN_ENTER);
+
+    rmSync(dir, { recursive: true, force: true });
   });
 });
