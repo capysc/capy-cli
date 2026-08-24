@@ -777,6 +777,42 @@ export class ServiceClient {
       throw err;
     }
   }
+
+  /**
+   * `capy flow cancel <id>` — abandon a flow instance and release whatever
+   * repo lock it holds. Authorized server-side either by the normal
+   * secret/bound-identity gate every other flow verb uses, or (the reason
+   * this command exists) by ORG OWNERSHIP of whatever the flow pinned so
+   * far — the escape hatch for a ceremony stranded on a machine that has no
+   * identity of its own to authorize a cancel with. See
+   * service/src/routes/flows.ts's `/:id/cancel` doc comment.
+   *
+   * The server answers 404 for both "no such flow" and "not yours to
+   * cancel" — deliberately: telling them apart would let an unauthorized
+   * caller probe for a flow's existence. `request()` already turns that into
+   * a CapyError coded PROJECT_NOT_FOUND (the flows route reuses that server
+   * code verbatim for this 404); reclassified here to FLOW_NOT_FOUND so a
+   * caller of THIS method never has to know it shares a wire code with an
+   * unrelated project lookup (same reclassification shape as listDoors()
+   * above, from PROJECT_NOT_FOUND rather than a bare 404).
+   */
+  async cancelFlow(flowId: string): Promise<{ flow_id: string; state: string }> {
+    try {
+      return await this.request<{ flow_id: string; state: string }>(
+        'POST',
+        `/flows/${encodeURIComponent(flowId)}/cancel`,
+      );
+    } catch (err) {
+      if (err instanceof CapyError && err.code === ERROR_CODES.PROJECT_NOT_FOUND) {
+        throw new CapyError(
+          `Flow ${flowId} does not exist, or is not yours to cancel.`,
+          ERROR_CODES.FLOW_NOT_FOUND,
+          { status: 404, flowId },
+        );
+      }
+      throw err;
+    }
+  }
 }
 
 /** Wrapper row metadata (service KeyWrapperMetadata schema) — never carries ciphertext. */

@@ -326,4 +326,72 @@ describe('ServiceClient', () => {
     });
   });
 
+  describe('cancelFlow (capy flow cancel — the org-owner escape hatch)', () => {
+    test('POSTs to /flows/:id/cancel and returns the server payload on success', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ flow_id: 'flow-abc', state: 'cancelled' }, true, 200));
+
+      const result = await serviceClient.cancelFlow('flow-abc');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/flows/flow-abc/cancel`,
+        expect.objectContaining({ method: 'POST' }),
+      );
+      expect(result).toEqual({ flow_id: 'flow-abc', state: 'cancelled' });
+    });
+
+    test('includes the authorization header from the token provider', async () => {
+      const token: ServiceToken = {
+        access_token: 'owner_token',
+        expires_at: Date.now() + 3600000,
+        organization_id: 'org_123',
+        user_id: 'user_456',
+      };
+      serviceClient.setTokenProvider(async () => token);
+      mockFetch.mockResolvedValue(mockFetchResponse({ flow_id: 'flow-abc', state: 'cancelled' }, true, 200));
+
+      await serviceClient.cancelFlow('flow-abc');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/flows/flow-abc/cancel`,
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer owner_token' }),
+        }),
+      );
+    });
+
+    // The server answers 404 for "no such flow" and "not yours to cancel"
+    // identically (by design — see the flows route's own doc comment: telling
+    // them apart would let an unauthorized caller probe for a flow's
+    // existence). It reuses the PROJECT_NOT_FOUND server code verbatim for
+    // this 404; cancelFlow reclassifies that ONE honest answer to
+    // FLOW_NOT_FOUND rather than inventing a distinction the wire never gave.
+    test('a 404 (not found OR not authorized) is reclassified to FLOW_NOT_FOUND', async () => {
+      mockFetch.mockResolvedValue(
+        mockFetchResponse({ error: 'Flow not found', code: 'PROJECT_NOT_FOUND' }, false, 404),
+      );
+
+      try {
+        await serviceClient.cancelFlow('flow-missing');
+        throw new Error('expected request to throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).toBe(ERROR_CODES.FLOW_NOT_FOUND);
+        expect(err.details?.status).toBe(404);
+      }
+    });
+
+    test('a non-404 failure (e.g. 500) is left as the ordinary classified error, not FLOW_NOT_FOUND', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ error: 'boom' }, false, 500));
+
+      try {
+        await serviceClient.cancelFlow('flow-abc');
+        throw new Error('expected request to throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).not.toBe(ERROR_CODES.FLOW_NOT_FOUND);
+        expect(err.code).toBe(ERROR_CODES.SERVICE_ERROR);
+      }
+    });
+  });
+
 });
