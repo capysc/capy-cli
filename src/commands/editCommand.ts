@@ -12,8 +12,9 @@ import { EditScreen, EditRow, EditState, classifyLocalRow } from '../ui/editScre
 import { formatRelativeTime } from '../ui/relativeTime';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
-import { setSyncKeepHash } from '../types/index';
+import { CapyError, ERROR_CODES, setSyncKeepHash } from '../types/index';
 import { isReservedRuntimeVar } from '../core/reservedVars';
+import { isInteractive } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -40,9 +41,9 @@ export interface EditOpts {
    * Render the variable table and the value editor as compiled screens in a
    * local browser instead of the alternate-screen TUI.
    *
-   * Agent-only, and the reason it exists: the TUI has no TTY guard. Run it
-   * headlessly and it writes an entire ANSI screen into the agent's captured
-   * stdout and then blocks forever on a stdin that never delivers a key.
+   * Agent-only: the terminal TUI is refused outright with no real TTY on
+   * both ends (see the isInteractive() check at the top of `execute()`), so
+   * this is the only way a headless caller can inspect or edit secrets.
    */
   web?: boolean;
   /** false when --no-open was passed: print the URL, do not open a browser. */
@@ -59,6 +60,21 @@ export class EditCommand {
   }
 
   async execute(opts: EditOpts = {}): Promise<void> {
+    // Decide before doing ANY work, let alone rendering: `EditScreen.run()`
+    // enters the alternate screen and draws the whole variable table —
+    // secret plaintext included — unconditionally, with no TTY check of its
+    // own. `--web` is the sanctioned non-interactive surface (a browser, not
+    // a captured terminal); everything else needs a real terminal on BOTH
+    // ends, because the leak this refuses is on stdout (the drawn screen),
+    // not just stdin (the keypress reader `isInteractive()` alone checks).
+    if (!opts.web && !(isInteractive() && process.stdout.isTTY === true)) {
+      throw new CapyError(
+        'This would draw a full-screen editor with every secret value on screen, and there is no real terminal to show it safely.\n\n' +
+          `Run ${B('capy edit --web')} instead.`,
+        ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE,
+      );
+    }
+
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
 
