@@ -62,6 +62,7 @@ import type {
 } from '../ui/screens/contract';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
 import { keypressConfirm } from '../ui/keypressConfirm';
+import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import {
   deployConfigPath,
   getTarget,
@@ -125,6 +126,15 @@ export interface DeployCliOptions {
   platformAnswer?: string;
   /** The mode answer, when that question was really asked. */
   modeAnswer?: string;
+  /**
+   * Never prompt; resolve every choice from flags or fail fast (agents/CI).
+   *
+   * Threaded into `isInteractive()` alongside the real TTY check, so a run
+   * that would otherwise reach the confirm step off-TTY refuses loudly
+   * instead of `keypressConfirm()`'s silent EOF-default to "cancel" — the
+   * silent-no-op class this flag exists to prevent.
+   */
+  nonTty?: boolean;
 }
 
 /** Whether a question is asked in a browser, and what the rail already holds. */
@@ -1831,6 +1841,18 @@ export async function deployCommand(
   // can fix a saved target inline instead of having to abort, run
   // `capy deploy --edit`, then re-run.
   if (!options.yes && !options.dryRun) {
+    // Off the browser rail, this loop's only way to answer is a raw
+    // keypress on stdin — and `keypressConfirm()` silently resolves a
+    // non-TTY read to "cancel" rather than hanging. Left unchecked, that
+    // turns `capy deploy --non-tty` (or any agent/CI run with no real
+    // terminal and no --yes) into a run that exits 0 having deployed
+    // nothing. Refuse loudly instead, before the prompt is even drawn.
+    if (!web.web && !isInteractive(options.nonTty)) {
+      refuseNonInteractive(
+        'capy deploy needs a yes/no confirmation before it pushes, and there is no interactive session to ask.',
+        'Pass --yes to confirm non-interactively, or --dry-run to preview without deploying.',
+      );
+    }
     while (true) {
       const summary =
         mode === 'ci'
