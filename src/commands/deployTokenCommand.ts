@@ -23,6 +23,8 @@ import {
   CURRENT_SECRETS_BLOB_VAR,
   CURRENT_DEPLOY_KEY_VAR,
 } from '../core/reservedVars';
+import { AuthResult } from '../types/index';
+import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -302,6 +304,8 @@ export interface DeployCommandOptions {
    * minted, written to `.capy/config`, or handed to the connector moves.
    */
   web?: boolean;
+  /** Never prompt; resolve platform/mode from flags or fail fast (agents/CI). */
+  nonTty?: boolean;
 }
 
 export class DeployCommand {
@@ -334,13 +338,17 @@ export class DeployCommand {
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
-      if (!authResult.success) {
+      const resolveAuth = async (): Promise<AuthResult> => {
+        const silentWithOrg = await authService.authenticateSilent(orgId);
+        if (silentWithOrg.success) return silentWithOrg;
+        const silentNoOrg = await authService.authenticateSilent();
+        if (silentNoOrg.success) return silentNoOrg;
+        const interactive = await authService.authenticate(orgId);
+        if (interactive.success) return interactive;
         console.error('Authentication failed');
         process.exit(1);
-      }
+      };
+      const authResult = await resolveAuth();
 
       const userId = authResult.user_id!;
 
@@ -354,12 +362,6 @@ export class DeployCommand {
       const badPlatformFlag =
         flagPlatform !== undefined && !PLATFORMS.some(p => p.value === flagPlatform);
 
-      let platform: string;
-      // A mode the browser answered, so the rail on the NEXT screen can say the
-      // question happened. Undefined means nobody was asked.
-      let modeAnswer: string | undefined;
-      let webMode: 'connector' | 'token' | null | undefined;
-
       // Under `--web` the browser is opened only when a question is actually
       // left. `--platform heroku` settles the whole route on its own — that
       // platform has no connector, so the mode question does not exist for it
@@ -372,45 +374,63 @@ export class DeployCommand {
           !flagRow ||
           (flagRow.hasConnector && this.options.mode === undefined));
 
-      if (webAsks) {
-        if (badPlatformFlag) {
-          // The terminal answers a bad --platform by printing all thirty-one
-          // ids and exiting: six lines of machine text, and redundant with the
-          // picker it refuses to show. The screen carries the refusal and asks
-          // the question underneath it.
-          console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
+      // A mode the browser answered, so the rail on the NEXT screen can say the
+      // question happened. Undefined means nobody was asked.
+      const resolvePlatformChoice = async (): Promise<{
+        platform: string;
+        modeAnswer?: string;
+        webMode?: 'connector' | 'token' | null;
+      }> => {
+        if (webAsks) {
+          if (badPlatformFlag) {
+            // The terminal answers a bad --platform by printing all thirty-one
+            // ids and exiting: six lines of machine text, and redundant with the
+            // picker it refuses to show. The screen carries the refusal and asks
+            // the question underneath it.
+            console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
+          }
+          const { chooseDeployDestinationInBrowser } = await import('../ui/deployScreens');
+          const picked = await chooseDeployDestinationInBrowser({
+            platforms: rows,
+            lastPlatform: defaultPlatform,
+            platform: badPlatformFlag ? undefined : flagPlatform,
+            mode: this.options.mode,
+            rejected: badPlatformFlag
+              ? {
+                  argv: `--platform ${flagPlatform}`,
+                  message: 'is not a platform Capy knows. Pick one below — the answer is remembered for this project.',
+                }
+              : undefined,
+            open: !process.env.CAPY_WEB_NO_OPEN,
+            authService,
+          });
+          if (picked.cancelled) {
+            console.log('Cancelled.');
+            process.exit(0);
+          }
+          return {
+            platform: picked.platform,
+            webMode: picked.mode,
+            modeAnswer: picked.mode ? (picked.mode === 'connector' ? 'Connector' : 'Deploy token') : undefined,
+          };
         }
-        const { chooseDeployDestinationInBrowser } = await import('../ui/deployScreens');
-        const picked = await chooseDeployDestinationInBrowser({
-          platforms: rows,
-          lastPlatform: defaultPlatform,
-          platform: badPlatformFlag ? undefined : flagPlatform,
-          mode: this.options.mode,
-          rejected: badPlatformFlag
-            ? {
-                argv: `--platform ${flagPlatform}`,
-                message: 'is not a platform Capy knows. Pick one below — the answer is remembered for this project.',
-              }
-            : undefined,
-          open: !process.env.CAPY_WEB_NO_OPEN,
-          authService,
-        });
-        if (picked.cancelled) {
-          console.log('Cancelled.');
-          process.exit(0);
+        if (flagPlatform !== undefined) {
+          if (badPlatformFlag) {
+            console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
+            process.exit(1);
+          }
+          return { platform: flagPlatform };
         }
-        platform = picked.platform;
-        webMode = picked.mode;
-        if (picked.mode) {
-          modeAnswer = picked.mode === 'connector' ? 'Connector' : 'Deploy token';
+        // Bare `capy deploy` with no --platform: the picker below needs a
+        // real prompt. Off a TTY (or with --non-tty) that prompt would EOF
+        // silently and this command would exit 0 having saved nothing — so
+        // refuse instead of ever reaching inquirer.
+        if (!isInteractive(this.options.nonTty)) {
+          refuseNonInteractive(
+            'no platform specified and the picker needs a prompt',
+            `Pass --platform <id> (available: ${PLATFORMS.map(p => p.value).join(', ')}).`,
+          );
         }
-      } else if (flagPlatform !== undefined) {
-        if (badPlatformFlag) {
-          console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
-          process.exit(1);
-        }
-        platform = flagPlatform;
-      } else {
         // Show "Other..." at the top as a ready-made escape hatch, with a
         // non-selectable Separator between it and the alphabetical list so
         // it doesn't read as "just another platform".
@@ -427,11 +447,11 @@ export class DeployCommand {
           default: defaultPlatform,
           pageSize: 20,
         }]);
-        platform = answer.platform;
-      }
+        return { platform: answer.platform };
+      };
+      const { platform, modeAnswer, webMode } = await resolvePlatformChoice();
       if (platform !== config.platform) {
-        config.platform = platform;
-        writeConfig(projectRoot, config);
+        writeConfig(projectRoot, { ...config, platform });
       }
 
       // Connector branch: when the picked platform has a real adapter,
@@ -448,13 +468,16 @@ export class DeployCommand {
         // dispatch goes to a dedicated connector instead of through
         // DeployAdapter.deploy().
         const isGhActions = connectorId === 'gh-actions';
-        let mode: 'connector' | 'token';
-        if (this.options.mode) {
-          mode = this.options.mode;
-        } else if (webMode) {
+        const resolveMode = async (): Promise<'connector' | 'token'> => {
+          if (this.options.mode) return this.options.mode;
           // Already answered on the second stop of the destination route.
-          mode = webMode;
-        } else {
+          if (webMode) return webMode;
+          if (!isInteractive(this.options.nonTty)) {
+            refuseNonInteractive(
+              'no mode specified and the picker needs a prompt',
+              `Pass --mode connector or --mode token.`,
+            );
+          }
           const connectorChoice = isGhActions
             ? 'Push SECRETS_BLOB + PROJECT_KEY to GitHub secrets via gh'
             : 'Deploy now via connector (push secrets + ship code)';
@@ -472,8 +495,9 @@ export class DeployCommand {
             ],
             default: 'connector',
           }]);
-          mode = r.mode;
-        }
+          return r.mode;
+        };
+        const mode = await resolveMode();
         if (mode === 'connector') {
           if (isGhActions) {
             const { runGithubActionsConnector } = await import('./githubActionsConnector');
@@ -510,13 +534,15 @@ export class DeployCommand {
 
       // Step 2: Generate credentials
       const spinner = ora('Generating deploy credentials...').start();
-      let minted: MintedDeployToken;
-      try {
-        minted = await mintDeployToken({ serviceClient, fm, orgId, projectId, userId });
-      } catch (err: any) {
-        spinner.fail(err?.message ?? 'Failed to generate deploy credentials');
-        process.exit(1);
-      }
+      const mintOrExit = async (): Promise<MintedDeployToken> => {
+        try {
+          return await mintDeployToken({ serviceClient, fm, orgId, projectId, userId });
+        } catch (err: any) {
+          spinner.fail(err?.message ?? 'Failed to generate deploy credentials');
+          process.exit(1);
+        }
+      };
+      const minted = await mintOrExit();
       const { secretsBlob, deployKey, secretCount, blobBytes } = minted;
       if (blobBytes > BLOB_SIZE_WARN_THRESHOLD) {
         spinner.warn(`${CURRENT_SECRETS_BLOB_VAR} is ${Math.round(blobBytes / 1024)}KB — some platforms have 32-64KB env var limits. Consider splitting into multiple projects.`);
@@ -529,20 +555,21 @@ export class DeployCommand {
       const html = generateDeployHtml(secretsBlob, deployKey, platformLabel, platform!, markdown);
 
       // Try to serve via localhost (needed for clipboard API)
-      let serverStarted = false;
-      try {
-        const server = createServer((_req, res) => {
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(html);
-        });
+      const serveLocallyOrFallback = async (): Promise<boolean> => {
+        try {
+          const server = createServer((_req, res) => {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(html);
+          });
 
-        await new Promise<void>((resolve, reject) => {
-          server.listen(0, '127.0.0.1', () => resolve());
-          server.on('error', reject);
-        });
+          await new Promise<void>((resolve, reject) => {
+            server.listen(0, '127.0.0.1', () => resolve());
+            server.on('error', reject);
+          });
 
-        const addr = server.address();
-        if (addr && typeof addr === 'object') {
+          const addr = server.address();
+          if (!(addr && typeof addr === 'object')) return false;
+
           // Use 127.0.0.1 explicitly: `localhost` resolves to ::1 (IPv6) first
           // on macOS/modern Linux, but the server above binds to 127.0.0.1 only,
           // so default browsers opened via the printed terminal URL would hit
@@ -555,7 +582,6 @@ export class DeployCommand {
           emitHandoffUrlEvent(url, 'deploy-token');
 
           await openInBrowser(url);
-          serverStarted = true;
 
           // Auto-shutdown after 5 minutes
           const shutdownTimer = setTimeout(() => {
@@ -576,10 +602,13 @@ export class DeployCommand {
 
           // Keep process alive
           await new Promise(() => {});
+          return true;
+        } catch {
+          // Fall through to terminal output
+          return false;
         }
-      } catch {
-        // Fall through to terminal output
-      }
+      };
+      const serverStarted = await serveLocallyOrFallback();
 
       if (!serverStarted) {
         // Fallback: print values to terminal
@@ -696,47 +725,54 @@ export class DeployRevokeCommand {
       const pm = new ProjectManager();
       const projectState = await pm.detectProjectState();
 
-      if (!projectState.initialized || !projectState.organizationId) {
+      if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
         console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
         process.exit(1);
       }
 
       const orgId = projectState.organizationId;
+      const projectId = projectState.projectId;
 
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
-      if (!authResult.success) {
+      const resolveAuth = async (): Promise<AuthResult> => {
+        const silentWithOrg = await authService.authenticateSilent(orgId);
+        if (silentWithOrg.success) return silentWithOrg;
+        const silentNoOrg = await authService.authenticateSilent();
+        if (silentNoOrg.success) return silentNoOrg;
+        const interactive = await authService.authenticate(orgId);
+        if (interactive.success) return interactive;
         console.error('Authentication failed');
         process.exit(1);
-      }
+      };
+      await resolveAuth();
 
-      if (this.web && projectState.projectId) {
-        // The terminal fires the DELETE the moment you press enter, with no
-        // summary of what is about to lose access — and a mistyped prefix and
-        // a permission failure come back looking the same. The browser draws
-        // the token being cut off and wants its id typed back first.
-        const { tokens } = await serviceClient.listDeployTokens(orgId, projectState.projectId);
-        const rows = tokenRows(tokens);
-        // Branch on the code, not on anything printed. Resolving an ambiguous
-        // prefix to whichever row sorts first is how the wrong pipeline loses
-        // access, and revoking cannot be undone.
-        const match = resolveTokenPrefix(rows, deployIdPrefix);
-        if (match.code === 'none') {
-          console.error(`  No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`);
-          process.exit(1);
-        }
-        if (match.code === 'ambiguous') {
-          console.error(
-            `  ${match.matches.length} deploy tokens start with ${deployIdPrefix} — ` +
-              `pass more of the id. Run ${B('capy deploy list')} to see them in full.`,
-          );
-          process.exit(1);
-        }
-        const subject = match.token;
+      // The terminal fires the DELETE the moment you press enter, with no
+      // summary of what is about to lose access — and a mistyped prefix and
+      // a permission failure come back looking the same. Resolving the
+      // prefix here, in both the terminal and `--web` paths, is what makes
+      // the id `capy deploy list` prints the same id that revokes: handing
+      // an unresolved prefix straight to the service let the wrong pipeline
+      // lose access, and revoking cannot be undone.
+      const { tokens } = await serviceClient.listDeployTokens(orgId, projectId);
+      const rows = tokenRows(tokens);
+      // Branch on the code, not on anything printed.
+      const match = resolveTokenPrefix(rows, deployIdPrefix);
+      if (match.code === 'none') {
+        console.error(`  No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`);
+        process.exit(1);
+      }
+      if (match.code === 'ambiguous') {
+        console.error(
+          `  ${match.matches.length} deploy tokens start with ${deployIdPrefix} — ` +
+            `pass more of the id. Run ${B('capy deploy list')} to see them in full.`,
+        );
+        process.exit(1);
+      }
+      const subject = match.token;
+
+      if (this.web) {
         const { showDeployTokensInBrowser } = await import('../ui/deployScreens');
         const picked = await showDeployTokensInBrowser({
           projectName: projectState.projectName ?? null,
@@ -758,9 +794,9 @@ export class DeployRevokeCommand {
         return;
       }
 
-      await serviceClient.revokeDeployToken(deployIdPrefix);
+      await serviceClient.revokeDeployToken(subject.deployId);
 
-      console.log(`  Deploy token ${deployIdPrefix.slice(0, 12)}... revoked.`);
+      console.log(`  Deploy token ${subject.deployId.slice(0, 12)}... revoked.`);
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
