@@ -51,6 +51,21 @@ mock.module('../../../src/auth/deviceKey/brokerCeremonyTransport', () => ({
   BrokerCeremonyTransport: FakeCeremonyTransport,
 }));
 
+// attemptPickupConsumption's own logic (consumeInvitePickup itself) is
+// exhaustively tested against fakes in tests/auth/invitePickup/consume.test.ts —
+// here it's stubbed so this file tests only wiring.ts's glue: does it call
+// through with the right user id, translate the result, and never throw.
+const pickupCalls: unknown[] = [];
+let pickupOutcome: { ok: true; noPendingPickup: true } | { ok: true; keyAlreadyPresent: boolean; orgId: string; inviteId: string; credentialId: string } | { throw: unknown } =
+  { ok: true, noPendingPickup: true };
+mock.module('../../../src/auth/invitePickup/consume', () => ({
+  consumeInvitePickup: mock(async (userId: string, ceremony: unknown, ops: unknown) => {
+    pickupCalls.push({ userId, ceremony, ops });
+    if ('throw' in pickupOutcome) throw pickupOutcome.throw;
+    return pickupOutcome;
+  }),
+}));
+
 // In-memory wrapper "server" — mirrors deviceKeyOnboarding.test.ts's fake.
 interface FakeWrapperRow {
   id: string;
@@ -190,6 +205,8 @@ beforeEach(() => {
     unlock: { ok: true, credentialId: 'cred-1', prfOutput: Buffer.alloc(32, 9).toString('base64') },
   };
   rmSync(join(tempHome, '.capy'), { recursive: true, force: true });
+  pickupCalls.length = 0;
+  pickupOutcome = { ok: true, noPendingPickup: true };
   interactive = true;
   confirmAnswer = true;
   promptShouldThrow = false;
@@ -278,6 +295,33 @@ describe('attemptCaseCUnlock', () => {
     expect(ceremonyCalls.unlock).toBe(1);
     expect(result.ok).toBe(true);
     expect(result.installedCurrentOrg).toBe(true);
+  });
+});
+
+describe('attemptPickupConsumption', () => {
+  test('no pending pickup → { ok: false }, still reaches consumeInvitePickup with the caller\'s user id', async () => {
+    pickupOutcome = { ok: true, noPendingPickup: true };
+    const result = await wiring.attemptPickupConsumption(ctx());
+    expect(result).toEqual({ ok: false });
+    expect(pickupCalls).toHaveLength(1);
+    expect((pickupCalls[0] as any).userId).toBe(USER);
+  });
+
+  test('a pending pickup is consumed successfully → { ok: true }', async () => {
+    pickupOutcome = { ok: true, keyAlreadyPresent: false, orgId: ORG_A, inviteId: 'inv-1', credentialId: 'cred-1' };
+    const result = await wiring.attemptPickupConsumption(ctx());
+    expect(result).toEqual({ ok: true });
+  });
+
+  test('a coded failure from consumeInvitePickup never throws outward — degrades to { ok: false }', async () => {
+    const { CapyError, ERROR_CODES } = await import('../../../src/types/index');
+    pickupOutcome = { throw: new CapyError('ceremony failed', ERROR_CODES.DEVICE_KEY_CEREMONY_FAILED, {}) };
+    await expect(wiring.attemptPickupConsumption(ctx())).resolves.toEqual({ ok: false });
+  });
+
+  test('an unexpected non-CapyError throw also degrades to { ok: false }, never propagates', async () => {
+    pickupOutcome = { throw: new Error('boom') };
+    await expect(wiring.attemptPickupConsumption(ctx())).resolves.toEqual({ ok: false });
   });
 });
 

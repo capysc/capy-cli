@@ -531,6 +531,60 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/invite`, { email, role, project_id: projectId });
   }
 
+  // --- v3 invite blob + pickup (docs/invite-pickup-flow.md §4, §6c, §7) ---
+  //
+  // Distinct from createInvite() above (the WorkOS membership invite,
+  // `/orgs/:orgId/invite`, singular): these hit the new stored-blob routes
+  // (`/orgs/:orgId/invites`, plural) that back the v3 short code. Both are
+  // called by a v3 mint; neither replaces the other.
+
+  /**
+   * Uploads the outer-wrapped blob for a v3 invite (§4 step 1). `inviteId` is
+   * `deriveInviteId(T)` — the server never sees T itself.
+   */
+  async uploadInviteBlob(
+    orgId: string,
+    body: { invite_id: string; email: string; blob: string; not_after: number },
+  ): Promise<{ invite_id: string }> {
+    return this.request('POST', `/orgs/${orgId}/invites`, body);
+  }
+
+  /**
+   * Fetches the stored outer-wrapped blob for a v3 invite (§4 step 3 / §7.1).
+   * CLI-scope gated server-side (§6.2) — a browser-kind token is refused.
+   * `email` is the invite row's own bound address, which the caller MUST use
+   * for `innerUnwrap` instead of the session's email (§7.3).
+   */
+  async fetchInviteBlob(orgId: string, inviteId: string): Promise<{ blob: string; email: string }> {
+    return this.request('GET', `/orgs/${orgId}/invites/${encodeURIComponent(inviteId)}/blob`);
+  }
+
+  /**
+   * The caller's own pending pickup row, if any (§4 step 1 of the first-use
+   * flow / §7.2). `null` when there is nothing to consume — not an error.
+   *
+   * The server responds with `{ pickups: [...] }` (plural — a user can hold
+   * more than one live pickup at once, e.g. invited to two orgs; see
+   * `listPendingPickups` in service/src/invites/store.ts and its caller in
+   * routes/invites.ts's `GET /invites/pending`). This CLI's first-attach
+   * flow only consumes one pickup per invocation (`consumeInvitePickup`),
+   * so it takes the first — a later `capy` invocation picks up the rest,
+   * same steady-state loop as any other single pickup.
+   */
+  async getPendingInvitePickup(): Promise<PendingInvitePickup | null> {
+    const data = await this.request<{ pickups: PendingInvitePickup[] }>('GET', '/invites/pending');
+    return data.pickups?.[0] ?? null;
+  }
+
+  /**
+   * Retires T and hard-deletes the blob server-side (§4 step 9). Idempotent
+   * by contract on the server side; callers should still only call this once
+   * consumption has actually completed.
+   */
+  async deleteInvitePickup(inviteId: string): Promise<void> {
+    await this.request('DELETE', `/invites/${encodeURIComponent(inviteId)}/pickup`);
+  }
+
   async inviteToProject(orgId: string, projectId: string, email: string, role: 'project-admin' | 'member'): Promise<{ user_id: string; email: string; project_id: string; role: string }> {
     return this.request('POST', `/orgs/${orgId}/projects/${projectId}/members`, { email, role });
   }
@@ -813,6 +867,32 @@ export class ServiceClient {
       throw err;
     }
   }
+}
+
+/**
+ * A caller's own pending pickup row (§7.2 of docs/invite-pickup-flow.md), as
+ * returned by one entry of `GET /invites/pending`'s `pickups` array.
+ * `organization_id` is not a column on `invite_pickups` itself, but the
+ * endpoint resolves and returns it (joined from `invite_blobs`) — the CLI
+ * needs an org id to call the org-scoped blob-fetch and co-decrypt routes
+ * downstream. Fields mirror exactly what `routes/invites.ts`'s
+ * `GET /invites/pending` maps per row — no `id`/`user_id`/`created_at`/
+ * `expires_at` (those are DB-internal to `invite_pickups` and never
+ * serialized), and `email` IS present but unused here — `fetchInviteBlob`'s
+ * own response is the one `email` value `innerUnwrap` may use (§7.3).
+ */
+export interface PendingInvitePickup {
+  invite_id: string;
+  organization_id: string;
+  email: string;
+  /** base64(ciphertext||tag) — T wrapped under KEK_pickup. */
+  wrapped_t: string;
+  /** base64, 12 bytes. */
+  iv: string;
+  /** base64. */
+  prf_salt: string;
+  credential_id: string;
+  kdf_version: number;
 }
 
 /** Wrapper row metadata (service KeyWrapperMetadata schema) — never carries ciphertext. */

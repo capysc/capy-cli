@@ -625,6 +625,7 @@ program
   .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--v3', 'mint a short v3 (stored-blob) code instead of the v2 blob-in-code format')
   .action(async (email, options, command) => {
     assertNotLocalOnly('invite');
     const { InviteCommand } = await import('./commands/inviteCommand');
@@ -637,17 +638,22 @@ program
       expires: options.expires,
       json: options.json,
       nonTty: options.nonTty,
+      v3: options.v3,
     });
   });
 
 program
-  .command('redeem <code>')
-  .description('Redeem an invite code to join an organization')
+  .command('redeem [code]')
+  .description('Redeem an invite code to join an organization, or (with no code) complete a pending Keep-pasted invite pickup')
   .action(async (code) => {
     assertNotLocalOnly('redeem');
     const { RedeemCommand } = await import('./commands/redeemCommand');
     const cmd = new RedeemCommand();
-    await cmd.execute(code);
+    if (code) {
+      await cmd.execute(code);
+    } else {
+      await cmd.executePickup();
+    }
   });
 
 program

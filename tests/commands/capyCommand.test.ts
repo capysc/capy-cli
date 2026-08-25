@@ -56,8 +56,9 @@ mock.module('../../src/ui/clipboard', () => ({
 // already covers its actual decision logic against a fake wrapper server).
 // Every test in this file leaves CAPY_DEVICE_KEYS unset, so none of these
 // are ever called except by the tests that explicitly opt in below.
-const deviceKeyWiringCalls: { attemptCaseCUnlock: unknown[]; runPendingSyncBestEffort: unknown[]; syncOrgOntoDeviceKeyIfEnrolled: unknown[]; maybeNudgeDeviceKeyEnrollment: unknown[] } = {
+const deviceKeyWiringCalls: { attemptCaseCUnlock: unknown[]; attemptPickupConsumption: unknown[]; runPendingSyncBestEffort: unknown[]; syncOrgOntoDeviceKeyIfEnrolled: unknown[]; maybeNudgeDeviceKeyEnrollment: unknown[] } = {
   attemptCaseCUnlock: [],
+  attemptPickupConsumption: [],
   runPendingSyncBestEffort: [],
   syncOrgOntoDeviceKeyIfEnrolled: [],
   maybeNudgeDeviceKeyEnrollment: [],
@@ -66,6 +67,15 @@ mock.module('../../src/auth/deviceKey/wiring', () => ({
   attemptCaseCUnlock: mock(async (ctx: unknown) => {
     deviceKeyWiringCalls.attemptCaseCUnlock.push(ctx);
     return { ok: false, installedCurrentOrg: false };
+  }),
+  // Same "thin spy, real decision logic covered elsewhere" contract
+  // as attemptCaseCUnlock above — tests/auth/deviceKey/wiring.test.ts covers
+  // attemptPickupConsumption's actual behavior against fakes. Always
+  // `{ ok: false }` here (no pending pickup) so every existing test in this
+  // file keeps taking exactly the path it took before this export existed.
+  attemptPickupConsumption: mock(async (ctx: unknown) => {
+    deviceKeyWiringCalls.attemptPickupConsumption.push(ctx);
+    return { ok: false };
   }),
   runPendingSyncBestEffort: mock(async (ctx: unknown) => {
     deviceKeyWiringCalls.runPendingSyncBestEffort.push(ctx);
@@ -1755,6 +1765,66 @@ describe('CapyCommand', () => {
       // Should NOT have called createOrganization or initializeProject on service
       expect(mockServiceClient.initializeProject).not.toHaveBeenCalled();
     });
+
+    describe('attemptPickupConsumption reachability + additive-safety', () => {
+      let ORIGINAL_FLAG: string | undefined;
+
+      beforeEach(() => {
+        ORIGINAL_FLAG = process.env.CAPY_DEVICE_KEYS;
+        process.env.CAPY_DEVICE_KEYS = '1';
+        deviceKeyWiringCalls.attemptPickupConsumption.length = 0;
+      });
+
+      afterEach(() => {
+        if (ORIGINAL_FLAG === undefined) delete process.env.CAPY_DEVICE_KEYS;
+        else process.env.CAPY_DEVICE_KEYS = ORIGINAL_FLAG;
+      });
+
+      test('is invoked once the flag is on and no org key is present (reachability)', async () => {
+        const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+        (hasOrgKey as any).mockReturnValue(false);
+
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await (capyCommand as any).initializeProject().catch(() => {});
+        } finally {
+          (hasOrgKey as any).mockReturnValue(true);
+          consoleSpy.mockRestore();
+        }
+
+        expect(deviceKeyWiringCalls.attemptPickupConsumption.length).toBeGreaterThan(0);
+      });
+
+      test('with no pending pickup ({ ok: false }, the mocked default), the run still throws the SAME KEY_NOT_ON_DEVICE error as before this wiring existed — additive-only, byte-identical', async () => {
+        const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+        (hasOrgKey as any).mockReturnValue(false);
+
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await expect((capyCommand as any).initializeProject()).rejects.toThrow('no encryption key');
+          await expect((capyCommand as any).initializeProject()).rejects.toThrow('capy redeem');
+        } finally {
+          (hasOrgKey as any).mockReturnValue(true);
+          consoleSpy.mockRestore();
+        }
+      });
+
+      test('flag OFF: attemptPickupConsumption is never called, matching attemptCaseCUnlock\'s existing off-by-default contract', async () => {
+        delete process.env.CAPY_DEVICE_KEYS;
+        const { hasOrgKey } = await import('../../src/crypto/keyResolver');
+        (hasOrgKey as any).mockReturnValue(false);
+
+        const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          await (capyCommand as any).initializeProject().catch(() => {});
+        } finally {
+          (hasOrgKey as any).mockReturnValue(true);
+          consoleSpy.mockRestore();
+        }
+
+        expect(deviceKeyWiringCalls.attemptPickupConsumption.length).toBe(0);
+      });
+    });
   });
 
   describe('initializeProject — new org creation is atomic with seed phrase', () => {
@@ -1881,6 +1951,7 @@ describe('CapyCommand', () => {
     beforeEach(() => {
       Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
       deviceKeyWiringCalls.attemptCaseCUnlock.length = 0;
+      deviceKeyWiringCalls.attemptPickupConsumption.length = 0;
       deviceKeyWiringCalls.runPendingSyncBestEffort.length = 0;
       deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled.length = 0;
       deviceKeyWiringCalls.maybeNudgeDeviceKeyEnrollment.length = 0;

@@ -199,6 +199,51 @@ export async function attemptCaseCUnlock(
   }
 }
 
+/**
+ * A brand-new invitee who already completed the Keep-page pickup
+ * paste (docs/invite-pickup-flow.md §4 step 3) — this machine has no local
+ * key material and no live doors, but there IS a pending pickup row server
+ * side. Consumes it automatically so a fresh `capy` run completes the key
+ * handoff silently, riding the same passkey ceremony a brand-new user owes
+ * regardless (docs/invite-pickup-flow.md §4 is explicit that "silently"
+ * means no re-entered code and no terminal ceremony, not that the passkey
+ * touch itself is skipped — it still happens).
+ *
+ * Mirrors `attemptCaseCUnlock` exactly in shape: never throws outward — any
+ * ceremony decline, missing pickup, or server failure degrades to
+ * `{ ok: false }` and a debug log, leaving the caller's fallback (today's
+ * `KEY_NOT_ON_DEVICE` message) completely unchanged. `ctx.activeOrgId` is
+ * NOT consulted for which org to act on — the pending pickup row names its
+ * own organization_id, exactly like `GET /invites/pending` is not org-scoped
+ * (see auth/invitePickup/serviceOps.ts's docblock) — so this call is safe to
+ * make even when the caller's active org differs from the invite's org; the
+ * caller re-checks `hasOrgKey(activeOrgId, ...)` itself afterward, same
+ * pattern as Case C.
+ */
+export async function attemptPickupConsumption(
+  ctx: DeviceKeyWiringContext,
+): Promise<{ ok: boolean }> {
+  try {
+    const { consumeInvitePickup } = await import('../invitePickup/consume');
+    const { createInvitePickupOps } = await import('../invitePickup/serviceOps');
+    const ops = createInvitePickupOps(ctx.serviceClient, ctx.authService);
+    const ceremony: CeremonyTransport = new BrokerCeremonyTransport({
+      serviceUrl: resolveActiveUrl(ctx.devMode),
+      getToken: currentOrgToken(ctx),
+      machineName: hostname(),
+    });
+    const result = await consumeInvitePickup(ctx.userId, ceremony, ops);
+    if ('noPendingPickup' in result) return { ok: false };
+    console.log('');
+    console.log('  Invite pickup completed — this machine now holds the organization key.');
+    console.log('');
+    return { ok: true };
+  } catch (err) {
+    debug(`[invite-pickup] consumption skipped: ${describeError(err)}`);
+    return { ok: false };
+  }
+}
+
 export type EnrollmentAttemptOutcome =
   | { kind: 'enrolled'; result: EnrollmentSummary }
   | { kind: 'declined'; ceremonyCode: CeremonyFailureCode }
