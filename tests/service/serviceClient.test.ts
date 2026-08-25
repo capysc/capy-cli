@@ -424,21 +424,24 @@ describe('ServiceClient', () => {
       expect(init.method).toBe('GET');
     });
 
-    test('getPendingInvitePickup GETs /invites/pending and passes the row through', async () => {
+    test('getPendingInvitePickup GETs /invites/pending and returns the first row of the `pickups` array', async () => {
+      // The server's actual wire shape (service/src/routes/invites.ts's
+      // GET /invites/pending, backed by invites/store.ts's
+      // listPendingPickups) is `{ pickups: [...] }` — PLURAL, an array — a
+      // user can hold more than one live pickup at once (invited to two
+      // orgs). It never sends `id`/`user_id`/`created_at`/`expires_at`
+      // (those are DB-internal to invite_pickups); it DOES send `email`.
       const pickup = {
-        id: 'pk-1',
         invite_id: 'abc123',
         organization_id: 'org-1',
-        user_id: 'u-1',
+        email: 'bob@example.com',
         wrapped_t: 'ct',
         iv: 'iv',
         prf_salt: 'salt',
         credential_id: 'cred-1',
         kdf_version: 1,
-        created_at: '2026-01-01T00:00:00Z',
-        expires_at: '2026-01-02T00:00:00Z',
       };
-      mockFetch.mockResolvedValue(mockFetchResponse({ pickup }));
+      mockFetch.mockResolvedValue(mockFetchResponse({ pickups: [pickup] }));
       const result = await serviceClient.getPendingInvitePickup();
       expect(result).toEqual(pickup);
       const [url, init] = mockFetch.mock.calls[0];
@@ -447,7 +450,7 @@ describe('ServiceClient', () => {
     });
 
     test('getPendingInvitePickup returns null when there is nothing pending', async () => {
-      mockFetch.mockResolvedValue(mockFetchResponse({ pickup: null }));
+      mockFetch.mockResolvedValue(mockFetchResponse({ pickups: [] }));
       const result = await serviceClient.getPendingInvitePickup();
       expect(result).toBeNull();
     });

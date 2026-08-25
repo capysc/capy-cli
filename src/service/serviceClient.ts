@@ -562,10 +562,18 @@ export class ServiceClient {
   /**
    * The caller's own pending pickup row, if any (§4 step 1 of the first-use
    * flow / §7.2). `null` when there is nothing to consume — not an error.
+   *
+   * The server responds with `{ pickups: [...] }` (plural — a user can hold
+   * more than one live pickup at once, e.g. invited to two orgs; see
+   * `listPendingPickups` in service/src/invites/store.ts and its caller in
+   * routes/invites.ts's `GET /invites/pending`). This CLI's first-attach
+   * flow only consumes one pickup per invocation (`consumeInvitePickup`),
+   * so it takes the first — a later `capy` invocation picks up the rest,
+   * same steady-state loop as any other single pickup.
    */
   async getPendingInvitePickup(): Promise<PendingInvitePickup | null> {
-    const data = await this.request<{ pickup: PendingInvitePickup | null }>('GET', '/invites/pending');
-    return data.pickup;
+    const data = await this.request<{ pickups: PendingInvitePickup[] }>('GET', '/invites/pending');
+    return data.pickups?.[0] ?? null;
   }
 
   /**
@@ -863,16 +871,20 @@ export class ServiceClient {
 
 /**
  * A caller's own pending pickup row (§7.2 of docs/invite-pickup-flow.md), as
- * returned by `GET /invites/pending`. `organization_id` is not a column on
- * `invite_pickups` itself, but the endpoint must resolve and return it
- * (joined from `invite_blobs`) — the CLI needs an org id to call the
- * org-scoped blob-fetch and co-decrypt routes downstream.
+ * returned by one entry of `GET /invites/pending`'s `pickups` array.
+ * `organization_id` is not a column on `invite_pickups` itself, but the
+ * endpoint resolves and returns it (joined from `invite_blobs`) — the CLI
+ * needs an org id to call the org-scoped blob-fetch and co-decrypt routes
+ * downstream. Fields mirror exactly what `routes/invites.ts`'s
+ * `GET /invites/pending` maps per row — no `id`/`user_id`/`created_at`/
+ * `expires_at` (those are DB-internal to `invite_pickups` and never
+ * serialized), and `email` IS present but unused here — `fetchInviteBlob`'s
+ * own response is the one `email` value `innerUnwrap` may use (§7.3).
  */
 export interface PendingInvitePickup {
-  id: string;
   invite_id: string;
   organization_id: string;
-  user_id: string;
+  email: string;
   /** base64(ciphertext||tag) — T wrapped under KEK_pickup. */
   wrapped_t: string;
   /** base64, 12 bytes. */
@@ -881,8 +893,6 @@ export interface PendingInvitePickup {
   prf_salt: string;
   credential_id: string;
   kdf_version: number;
-  created_at: string;
-  expires_at: string;
 }
 
 /** Wrapper row metadata (service KeyWrapperMetadata schema) — never carries ciphertext. */

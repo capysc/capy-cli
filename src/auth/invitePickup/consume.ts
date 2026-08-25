@@ -27,7 +27,6 @@ import { deriveKekPickup, pickupWrapAAD, unwrapPickupT } from './crypto';
 export interface PendingPickupRow {
   invite_id: string;
   organization_id: string;
-  user_id: string;
   wrapped_t: string;
   iv: string;
   prf_salt: string;
