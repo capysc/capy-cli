@@ -16,7 +16,7 @@
  * ServiceClient's token provider reads its current org on every request.
  */
 import type { ServiceClient } from '../../service/serviceClient';
-import type { AuthService } from '../authService';
+import { silentAuthFailureMessage, type AuthService } from '../authService';
 import { CapyError, ERROR_CODES } from '../../types/index';
 import type { InvitePickupOps } from './consume';
 
@@ -25,12 +25,17 @@ export function createInvitePickupOps(
   authService: AuthService,
 ): InvitePickupOps {
   const ensureOrg = async (orgId: string): Promise<void> => {
+    // This is a TERMINAL silent-auth attempt (no interactive fallback follows
+    // — the pickup flow is already mid-consumption), so its failure must
+    // report WHY, keyed off the result's error_code, not a bare sentence.
+    // silentAuthFailureMessage picks the remedy from the code (cardinal
+    // Rule 5: never branch on the prose).
     const pinned = await authService.authenticateSilent(orgId);
     if (!pinned.success) {
       throw new CapyError(
-        'Could not obtain credentials for the invited organization.',
+        `Could not obtain credentials for the invited organization. ${silentAuthFailureMessage(pinned)}`,
         ERROR_CODES.AUTH_FAILED,
-        { orgId },
+        { orgId, silentAuthErrorCode: pinned.error_code },
       );
     }
   };
