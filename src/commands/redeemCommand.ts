@@ -37,6 +37,29 @@ export class RedeemCommand {
     try {
       ({ token, orgId: targetOrgId, ciphertext, notAfter } = parseRedeemCode(code));
     } catch (err: any) {
+      // CAP-529 guard 2: a v3 code (20-char Crockford, minted by
+      // `capy invite --v3`) pasted into this v2-only command gets its own
+      // coded message — it is redeemed at Keep, not here — instead of the
+      // generic v2 parse error below. Only fires when the ABOVE v2 parse
+      // already failed, so the v2 success path (guard 1) is untouched.
+      // `process.exit` is deliberately called OUTSIDE the inner try/catch:
+      // in a test harness that mocks `process.exit` to throw (so it can
+      // assert control stopped here), that throw must not be swallowed by
+      // this function's own catch.
+      const { parseInviteCode } = await import('../crypto/inviteCrypto');
+      const isV3Shaped = ((): boolean => {
+        try {
+          return parseInviteCode(code).version === 3;
+        } catch {
+          // Not v3-shaped either (e.g. UPGRADE_REQUIRED, or genuinely
+          // unparseable) — fall through to the original v2 error below.
+          return false;
+        }
+      })();
+      if (isV3Shaped) {
+        console.error(`\n  This code must be redeemed at ${B('keep.capy.sc')} — 'capy redeem' only accepts the older long code format.\n`);
+        process.exit(1);
+      }
       console.error(`Invalid redeem code: ${err.message}`);
       process.exit(1);
     }

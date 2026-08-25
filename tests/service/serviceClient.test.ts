@@ -394,4 +394,91 @@ describe('ServiceClient', () => {
     });
   });
 
+  describe('v3 invite blob + pickup wire methods (CAP-529)', () => {
+    test('uploadInviteBlob POSTs to /orgs/:orgId/invites with the body verbatim', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ invite_id: 'abc123' }));
+      const result = await serviceClient.uploadInviteBlob('org-1', {
+        invite_id: 'abc123',
+        email: 'bob@example.com',
+        blob: 'outer-blob',
+        not_after: 1700000000000,
+      });
+      expect(result).toEqual({ invite_id: 'abc123' });
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/orgs/org-1/invites`);
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual({
+        invite_id: 'abc123',
+        email: 'bob@example.com',
+        blob: 'outer-blob',
+        not_after: 1700000000000,
+      });
+    });
+
+    test('fetchInviteBlob GETs /orgs/:orgId/invites/:inviteId/blob', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ blob: 'outer-blob', email: 'bob@example.com' }));
+      const result = await serviceClient.fetchInviteBlob('org-1', 'abc123');
+      expect(result).toEqual({ blob: 'outer-blob', email: 'bob@example.com' });
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/orgs/org-1/invites/abc123/blob`);
+      expect(init.method).toBe('GET');
+    });
+
+    test('getPendingInvitePickup GETs /invites/pending and passes the row through', async () => {
+      const pickup = {
+        id: 'pk-1',
+        invite_id: 'abc123',
+        organization_id: 'org-1',
+        user_id: 'u-1',
+        wrapped_t: 'ct',
+        iv: 'iv',
+        prf_salt: 'salt',
+        credential_id: 'cred-1',
+        kdf_version: 1,
+        created_at: '2026-01-01T00:00:00Z',
+        expires_at: '2026-01-02T00:00:00Z',
+      };
+      mockFetch.mockResolvedValue(mockFetchResponse({ pickup }));
+      const result = await serviceClient.getPendingInvitePickup();
+      expect(result).toEqual(pickup);
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/invites/pending`);
+      expect(init.method).toBe('GET');
+    });
+
+    test('getPendingInvitePickup returns null when there is nothing pending', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ pickup: null }));
+      const result = await serviceClient.getPendingInvitePickup();
+      expect(result).toBeNull();
+    });
+
+    test('deleteInvitePickup DELETEs /invites/:inviteId/pickup', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({}, true, 204));
+      await serviceClient.deleteInvitePickup('abc123');
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/invites/abc123/pickup`);
+      expect(init.method).toBe('DELETE');
+    });
+
+    test('a 409 WRAPPER_CONFLICT from the door-upload wire shape classifies as the existing typed code', async () => {
+      // Exercises the SAME classifyResponse path uploadDoorWrapper already
+      // relies on (SERVER_CODES allowlist) — nothing new to the wire
+      // contract, just confirming the invite-pickup call sites inherit it.
+      mockFetch.mockResolvedValue(mockFetchResponse({ code: 'WRAPPER_CONFLICT', error: 'conflict' }, false, 409));
+      try {
+        await serviceClient.uploadDoorWrapper({
+          wrapped_k_local: 'x',
+          iv: 'y',
+          prf_salt: 'z',
+          credential_id: 'cred-1',
+          kdf_version: 1,
+        });
+        throw new Error('expected throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).toBe(ERROR_CODES.WRAPPER_CONFLICT);
+      }
+    });
+  });
+
 });

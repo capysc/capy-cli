@@ -625,6 +625,7 @@ program
   .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--v3', 'mint a short v3 (stored-blob) code instead of the v2 blob-in-code format [CAP-529]')
   .action(async (email, options, command) => {
     assertNotLocalOnly('invite');
     const { InviteCommand } = await import('./commands/inviteCommand');
@@ -637,6 +638,7 @@ program
       expires: options.expires,
       json: options.json,
       nonTty: options.nonTty,
+      v3: options.v3,
     });
   });
 

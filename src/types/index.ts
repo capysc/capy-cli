@@ -550,6 +550,16 @@ export const ERROR_CODES = {
    * a bare human sentence to tell "declined" apart from "cancelled".
    */
   FLOW_CANCEL_DECLINED: 'FLOW_CANCEL_DECLINED',
+  /**
+   * CAP-529: an invite code decoded to a SHAPE this build's parser doesn't
+   * understand — neither the 20-char Crockford v3 format nor a base64 blob
+   * whose first byte is the known v2 version byte (0x02). Minted by
+   * `parseInviteCode` in `crypto/inviteCrypto.ts` purely from decoded shape,
+   * never from message text (cardinal Rule 5) — this is the "v3 code on an
+   * old CLI" and "code from an even-newer format" case: a coded failure
+   * instead of a parse exception or silent garbage.
+   */
+  UPGRADE_REQUIRED: 'UPGRADE_REQUIRED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
