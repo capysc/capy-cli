@@ -85,10 +85,19 @@ mock.module('../../src/auth/deviceKey/flag', () => ({
 
 let unlockResult: { ok: boolean; installedCurrentOrg: boolean } = { ok: false, installedCurrentOrg: false };
 const unlockCalls: unknown[] = [];
+// Same never-throws, safe-no-op contract as attemptCaseCUnlock —
+// defaults to "no pending pickup" so every EXISTING test in this file keeps
+// taking exactly the path it took before this export existed.
+let pickupResult: { ok: boolean } = { ok: false };
+const pickupCalls: unknown[] = [];
 mock.module('../../src/auth/deviceKey/wiring', () => ({
   attemptCaseCUnlock: mock(async (ctx: unknown) => {
     unlockCalls.push(ctx);
     return unlockResult;
+  }),
+  attemptPickupConsumption: mock(async (ctx: unknown) => {
+    pickupCalls.push(ctx);
+    return pickupResult;
   }),
 }));
 
@@ -130,6 +139,8 @@ beforeEach(async () => {
   deviceKeysOn = false;
   unlockResult = { ok: false, installedCurrentOrg: false };
   unlockCalls.length = 0;
+  pickupResult = { ok: false };
+  pickupCalls.length = 0;
   silentAuthResult = {
     success: true,
     user_id: USER_ID,
@@ -207,5 +218,51 @@ describe('capy run — device-key fallback on a missing/invalid key.enc (BLOCKER
     expect(unlockCalls).toHaveLength(0);
     expect(resolveCallCount).toBe(1);
     expect(errs.join('\n')).toContain('network blip');
+  });
+});
+
+describe('capy run — pending-pickup fallback (tried after attemptCaseCUnlock)', () => {
+  test('flag on, case-C unlock declines, no pending pickup: pickup IS tried, still fails with the same remediation', async () => {
+    deviceKeysOn = true;
+    unlockResult = { ok: false, installedCurrentOrg: false };
+    pickupResult = { ok: false };
+
+    const { code, errs } = await captureLogs(() => runCommand(['echo', 'unreached']));
+    expect(code).toBe(1);
+    expect(unlockCalls).toHaveLength(1);
+    expect(pickupCalls).toHaveLength(1);
+    // Neither attempt unlocked anything — no retry beyond the initial call.
+    expect(resolveCallCount).toBe(1);
+    expect(errs.join('\n').toLowerCase()).toContain('device key');
+  });
+
+  test('flag on, case-C unlock declines, pickup succeeds: resolveProjectKey is retried and the run proceeds', async () => {
+    deviceKeysOn = true;
+    unlockResult = { ok: false, installedCurrentOrg: false };
+    pickupResult = { ok: true };
+    resolveFailuresBeforeSuccess = 1; // first call fails, retry (2nd call) succeeds
+
+    const { code, errs } = await captureLogs(() => runCommand(['echo', 'ok']));
+    expect(code).toBe(0);
+    expect(unlockCalls).toHaveLength(1);
+    expect(pickupCalls).toHaveLength(1);
+    expect(resolveCallCount).toBe(2);
+    expect(errs).toHaveLength(0);
+  });
+
+  test('flag on, case-C unlock succeeds outright: pickup is never tried (unlocked already true)', async () => {
+    deviceKeysOn = true;
+    unlockResult = { ok: true, installedCurrentOrg: true };
+    resolveFailuresBeforeSuccess = 1;
+
+    const { code } = await captureLogs(() => runCommand(['echo', 'ok']));
+    expect(code).toBe(0);
+    expect(pickupCalls).toHaveLength(0);
+  });
+
+  test('flag off: pickup is never touched, same as the unlock path', async () => {
+    deviceKeysOn = false;
+    await captureLogs(() => runCommand(['echo', 'unreached']));
+    expect(pickupCalls).toHaveLength(0);
   });
 });

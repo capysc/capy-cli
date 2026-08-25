@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
+import { hostname } from 'os';
 import inquirer from 'inquirer';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
@@ -10,6 +11,10 @@ import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { isInteractive } from '../ui/interactive';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
+import { CapyError, ERROR_CODES } from '../types/index';
+import { resolveActiveUrl } from '../config/profileConfig';
+import { BrokerCeremonyTransport } from '../auth/deviceKey/brokerCeremonyTransport';
+import { createInvitePickupOps } from '../auth/invitePickup/serviceOps';
 import {
   runDeviceKeyEnrollment,
   reportEnrollmentOutcome,
@@ -28,6 +33,95 @@ export class RedeemCommand {
     this.devMode = devMode;
   }
 
+  /**
+   * `capy redeem` with NO code (§4 step 3, first-attach pickup
+   * consumption). This is the explicit entry point for the flow described
+   * in docs/invite-pickup-flow.md: find the caller's own pending pickup row
+   * (left by a Keep visit), run the WebAuthn ceremony once, and complete
+   * steps 1-9 of the spec via `consumeInvitePickup` (auth/invitePickup/consume.ts) —
+   * the SAME internals `capy invite`/`capy redeem <code>` already use
+   * (innerUnwrap, loadOrMintLocalRoot, wrapAndSaveMasterKey, hasOrgKey), fed
+   * from the pickup row instead of a parsed code.
+   *
+   * Additive: this method is only reached when `code` is omitted from the
+   * `redeem` command (see src/index.ts) — `execute(code)` above is
+   * untouched and unaffected by anything below.
+   */
+  async executePickup(): Promise<void> {
+    const authService = new AuthService(this.apiUrl, this.devMode);
+    let authResult = await authService.authenticateSilent();
+    if (!authResult.success) {
+      authResult = await authService.authenticate();
+    }
+    if (!authResult.success || !authResult.user_id) {
+      console.error(`\n  Sign-in failed: ${authResult.error || 'unknown error'}.\n`);
+      process.exit(1);
+    }
+
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+
+    const ceremony = new BrokerCeremonyTransport({
+      serviceUrl: resolveActiveUrl(this.devMode),
+      getToken: async () => (await authService.getValidToken())?.access_token ?? null,
+      machineName: hostname(),
+    });
+
+    const ops = createInvitePickupOps(serviceClient, authService);
+
+    const { consumeInvitePickup } = await import('../auth/invitePickup/consume');
+    let result: Awaited<ReturnType<typeof consumeInvitePickup>>;
+    try {
+      result = await consumeInvitePickup(authResult.user_id, ceremony, ops);
+    } catch (err) {
+      this.reportPickupFailure(err);
+      return; // unreachable — reportPickupFailure always exits — kept for TS control-flow clarity.
+    }
+
+    if ('noPendingPickup' in result) {
+      console.error('\n  No pending invite to redeem for this account.\n');
+      process.exit(1);
+      return;
+    }
+
+    console.log('');
+    console.log('  \x1b[32mInvite redeemed successfully!\x1b[0m');
+    console.log('');
+    if (result.keyAlreadyPresent) {
+      console.log(`  You already had access to this organization — nothing was overwritten.`);
+    } else {
+      console.log(`  You now have access to this organization.`);
+    }
+    console.log(`  Run ${B('capy')} to sync secrets.`);
+    console.log('');
+  }
+
+  /**
+   * One place that turns whatever `consumeInvitePickup` threw into a coded
+   * exit — never branching on message text (cardinal Rule 5). Always exits
+   * the process; callers rely on this never returning.
+   */
+  private reportPickupFailure(err: unknown): never {
+    if (err instanceof CapyError) {
+      switch (err.code) {
+        case ERROR_CODES.DEVICE_KEY_CEREMONY_FAILED:
+          console.error(`\n  The passkey ceremony did not complete (${err.details?.ceremonyCode ?? 'unknown'}). Nothing was changed.\n`);
+          break;
+        case ERROR_CODES.DEVICE_KEY_UNWRAP_FAILED:
+          console.error('\n  This invite pickup could not be unlocked on this device.\n');
+          break;
+        case ERROR_CODES.WRAPPER_CONFLICT:
+          console.error('\n  A device key already exists under a different credential for this account.\n');
+          break;
+        default:
+          console.error(`\n  Could not complete the invite (${err.code}): ${err.message}\n`);
+      }
+    } else {
+      console.error(`\n  Could not complete the invite: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+    process.exit(1);
+  }
+
   async execute(code: string): Promise<void> {
     // 1. Parse redeem code → T + target org + double-wrapped ciphertext + expiry
     let token: Buffer;
@@ -37,6 +131,29 @@ export class RedeemCommand {
     try {
       ({ token, orgId: targetOrgId, ciphertext, notAfter } = parseRedeemCode(code));
     } catch (err: any) {
+      // Guard 2: a v3 code (20-char Crockford, minted by
+      // `capy invite --v3`) pasted into this v2-only command gets its own
+      // coded message — it is redeemed at Keep, not here — instead of the
+      // generic v2 parse error below. Only fires when the ABOVE v2 parse
+      // already failed, so the v2 success path (guard 1) is untouched.
+      // `process.exit` is deliberately called OUTSIDE the inner try/catch:
+      // in a test harness that mocks `process.exit` to throw (so it can
+      // assert control stopped here), that throw must not be swallowed by
+      // this function's own catch.
+      const { parseInviteCode } = await import('../crypto/inviteCrypto');
+      const isV3Shaped = ((): boolean => {
+        try {
+          return parseInviteCode(code).version === 3;
+        } catch {
+          // Not v3-shaped either (e.g. UPGRADE_REQUIRED, or genuinely
+          // unparseable) — fall through to the original v2 error below.
+          return false;
+        }
+      })();
+      if (isV3Shaped) {
+        console.error(`\n  This code must be redeemed at ${B('keep.capy.sc')} — 'capy redeem' only accepts the older long code format.\n`);
+        process.exit(1);
+      }
       console.error(`Invalid redeem code: ${err.message}`);
       process.exit(1);
     }

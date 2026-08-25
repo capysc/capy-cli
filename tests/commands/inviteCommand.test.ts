@@ -49,6 +49,7 @@ const mockWrapOuterLayer = jest.fn();
 const mockCreateInvite = jest.fn();
 const mockInviteToProject = jest.fn();
 const mockCoDecrypt = jest.fn();
+const mockUploadInviteBlob = jest.fn();
 
 mock.module('../../src/core/projectManager', () => ({
   ProjectManager: jest.fn().mockImplementation(() => ({
@@ -75,6 +76,7 @@ mock.module('../../src/service/serviceClient', () => ({
     createInvite: mockCreateInvite,
     inviteToProject: mockInviteToProject,
     coDecrypt: mockCoDecrypt,
+    uploadInviteBlob: mockUploadInviteBlob,
   })),
 }));
 
@@ -167,6 +169,7 @@ describe('InviteCommand', () => {
     mockWrapOuterLayer.mockResolvedValue({ ciphertext: 'outer-blob' });
     mockCreateInvite.mockResolvedValue({ id: 'inv-1' });
     mockInviteToProject.mockResolvedValue(undefined);
+    mockUploadInviteBlob.mockResolvedValue({ invite_id: 'unused-in-mock' });
   });
 
   describe('--web keeps the redeem code off stdout', () => {
@@ -567,5 +570,53 @@ describe('InviteCommand', () => {
     expect(mockExit).toHaveBeenCalledWith(1);
     expect(mockAskInBrowser).not.toHaveBeenCalled();
     expect(mockCreateInvite).not.toHaveBeenCalled();
+  });
+
+  describe('--v3 (additive)', () => {
+    test('mints a 20-character Crockford code and uploads the blob, instead of packing it into the code', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', {
+          json: true,
+          role: 'admin',
+          nonTty: true,
+          v3: true,
+        });
+      } finally {
+        cap.restore();
+      }
+
+      expect(mockUploadInviteBlob).toHaveBeenCalledTimes(1);
+      const [orgId, body] = mockUploadInviteBlob.mock.calls[0];
+      expect(orgId).toBe('org-123');
+      expect(body.email).toBe('bob@example.com');
+      expect(body.blob).toBe('outer-blob');
+      expect(typeof body.invite_id).toBe('string');
+      expect(body.invite_id).toMatch(/^[0-9a-f]{32}$/);
+
+      const parsed = JSON.parse(cap.out());
+      const rawCode = parsed.redeemCode.replace('capy redeem ', '');
+      expect(rawCode.replace(/-/g, '')).toMatch(/^[0-9A-Z]{20}$/);
+      expect(parsed.redeemCommand).toBe(`capy redeem ${rawCode}`);
+    });
+
+    test('without --v3, the v2 path is unchanged: no blob upload, and the code is the long blob-in-code format', async () => {
+      const cap = captureOutput();
+      try {
+        await new InviteCommand().execute('bob@example.com', {
+          json: true,
+          role: 'admin',
+          nonTty: true,
+        });
+      } finally {
+        cap.restore();
+      }
+
+      expect(mockUploadInviteBlob).not.toHaveBeenCalled();
+      const parsed = JSON.parse(cap.out());
+      const rawCode = parsed.redeemCode;
+      // v2 codes are base64 of a much longer structure; nowhere near 20 chars.
+      expect(rawCode.length).toBeGreaterThan(40);
+    });
   });
 });

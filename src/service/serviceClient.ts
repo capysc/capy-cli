@@ -531,6 +531,52 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/invite`, { email, role, project_id: projectId });
   }
 
+  // --- v3 invite blob + pickup (docs/invite-pickup-flow.md §4, §6c, §7) ---
+  //
+  // Distinct from createInvite() above (the WorkOS membership invite,
+  // `/orgs/:orgId/invite`, singular): these hit the new stored-blob routes
+  // (`/orgs/:orgId/invites`, plural) that back the v3 short code. Both are
+  // called by a v3 mint; neither replaces the other.
+
+  /**
+   * Uploads the outer-wrapped blob for a v3 invite (§4 step 1). `inviteId` is
+   * `deriveInviteId(T)` — the server never sees T itself.
+   */
+  async uploadInviteBlob(
+    orgId: string,
+    body: { invite_id: string; email: string; blob: string; not_after: number },
+  ): Promise<{ invite_id: string }> {
+    return this.request('POST', `/orgs/${orgId}/invites`, body);
+  }
+
+  /**
+   * Fetches the stored outer-wrapped blob for a v3 invite (§4 step 3 / §7.1).
+   * CLI-scope gated server-side (§6.2) — a browser-kind token is refused.
+   * `email` is the invite row's own bound address, which the caller MUST use
+   * for `innerUnwrap` instead of the session's email (§7.3).
+   */
+  async fetchInviteBlob(orgId: string, inviteId: string): Promise<{ blob: string; email: string }> {
+    return this.request('GET', `/orgs/${orgId}/invites/${encodeURIComponent(inviteId)}/blob`);
+  }
+
+  /**
+   * The caller's own pending pickup row, if any (§4 step 1 of the first-use
+   * flow / §7.2). `null` when there is nothing to consume — not an error.
+   */
+  async getPendingInvitePickup(): Promise<PendingInvitePickup | null> {
+    const data = await this.request<{ pickup: PendingInvitePickup | null }>('GET', '/invites/pending');
+    return data.pickup;
+  }
+
+  /**
+   * Retires T and hard-deletes the blob server-side (§4 step 9). Idempotent
+   * by contract on the server side; callers should still only call this once
+   * consumption has actually completed.
+   */
+  async deleteInvitePickup(inviteId: string): Promise<void> {
+    await this.request('DELETE', `/invites/${encodeURIComponent(inviteId)}/pickup`);
+  }
+
   async inviteToProject(orgId: string, projectId: string, email: string, role: 'project-admin' | 'member'): Promise<{ user_id: string; email: string; project_id: string; role: string }> {
     return this.request('POST', `/orgs/${orgId}/projects/${projectId}/members`, { email, role });
   }
@@ -813,6 +859,30 @@ export class ServiceClient {
       throw err;
     }
   }
+}
+
+/**
+ * A caller's own pending pickup row (§7.2 of docs/invite-pickup-flow.md), as
+ * returned by `GET /invites/pending`. `organization_id` is not a column on
+ * `invite_pickups` itself, but the endpoint must resolve and return it
+ * (joined from `invite_blobs`) — the CLI needs an org id to call the
+ * org-scoped blob-fetch and co-decrypt routes downstream.
+ */
+export interface PendingInvitePickup {
+  id: string;
+  invite_id: string;
+  organization_id: string;
+  user_id: string;
+  /** base64(ciphertext||tag) — T wrapped under KEK_pickup. */
+  wrapped_t: string;
+  /** base64, 12 bytes. */
+  iv: string;
+  /** base64. */
+  prf_salt: string;
+  credential_id: string;
+  kdf_version: number;
+  created_at: string;
+  expires_at: string;
 }
 
 /** Wrapper row metadata (service KeyWrapperMetadata schema) — never carries ciphertext. */

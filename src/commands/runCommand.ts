@@ -398,8 +398,8 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
             // doors" detection internally (via detectOnboardingCase) — it is
             // a safe no-op, never a throw, when there is nothing to unlock
             // with.
-            const { attemptCaseCUnlock } = await import('../auth/deviceKey/wiring');
-            const unlock = await attemptCaseCUnlock({
+            const { attemptCaseCUnlock, attemptPickupConsumption } = await import('../auth/deviceKey/wiring');
+            const wiringCtx = {
               authService: auth,
               serviceClient: svc,
               devMode,
@@ -407,7 +407,8 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
               userEmail: result.user_email,
               organizations: result.organizations || [],
               activeOrgId: orgId,
-            });
+            };
+            const unlock = await attemptCaseCUnlock(wiringCtx);
             if (unlock.ok) {
               try {
                 // Retry once now that the unlock ceremony may have installed
@@ -416,6 +417,23 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
                 unlocked = true;
               } catch {
                 unlocked = false;
+              }
+            }
+            // attemptCaseCUnlock above is a no-op for a brand-new
+            // invitee (no live doors yet) — exactly the account state a Keep
+            // pickup paste leaves them in. Try consuming any pending pickup
+            // before falling through to missingKeyRemediation below. Additive
+            // and side-effect-free when there is nothing pending: same
+            // never-throws contract as attemptCaseCUnlock (see wiring.ts).
+            if (!unlocked) {
+              const pickup = await attemptPickupConsumption(wiringCtx);
+              if (pickup.ok) {
+                try {
+                  projectKeyHex = await resolveProjectKey(orgId, projectId, result.user_id, keyServiceOps);
+                  unlocked = true;
+                } catch {
+                  unlocked = false;
+                }
               }
             }
           }
