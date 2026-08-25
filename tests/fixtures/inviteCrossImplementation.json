@@ -1,13 +1,13 @@
 {
-  "_comment": "CAP-529 cross-implementation known-answer vector. An identical copy is committed in capy-cli (tests/fixtures/inviteCrossImplementation.json) and keep-app (tests/fixtures/inviteCrossImplementation.json) -- do not edit one without the other. wrapped_t_b64/iv_b64 were produced ONCE by keep-app's real production wrapPickup() (src/lib/flow/redeemInviteCrypto.ts) on the fixed inputs below, then pinned here verbatim (the iv was whatever wrapPickup's own crypto.getRandomValues happened to generate that run -- not chosen). capy-cli's cross-impl test decrypts these exact bytes with its own independent node:crypto implementation and asserts it recovers t_hex byte-for-byte: a genuine cross-repo proof, not two tests that independently happen to agree. See docs/invite-pickup-flow.md sections 3.3 and 3.6.",
+  "_comment": "Cross-implementation known-answer vector for the invite-pickup crypto (see docs/invite-pickup-flow.md sections 3.3 and 3.6). An identical copy is committed in capy-cli (tests/fixtures/inviteCrossImplementation.json) and keep-app (tests/fixtures/inviteCrossImplementation.json) -- do not edit one without the other; the two files must stay byte-identical, which is what makes this a cross-implementation pin rather than two tests that coincidentally agree. This vector pins three things: the invite-id derivation from t_hex, the pickup KEK derived from prf_output_hex/prf_salt_hex, and a wrapped_t produced by one implementation's real production wrap function and decrypted by the other's independent implementation. wrapped_t_b64/iv_b64 were produced ONCE by keep-app's real production wrapPickup() (src/lib/flow/redeemInviteCrypto.ts) on the fixed inputs below and pinned here verbatim (the iv was whatever wrapPickup's own crypto.getRandomValues happened to generate that run -- not chosen). capy-cli's cross-impl test decrypts these exact bytes with its own independent node:crypto implementation and asserts it recovers t_hex byte-for-byte.",
   "t_hex": "000102030405060708090a0b",
   "prf_output_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
   "prf_salt_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
   "prf_salt_b64": "QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=",
-  "user_id": "user_cap529_fixture",
-  "credential_id": "cred_cap529_fixture",
+  "user_id": "user_invite_pickup_fixture",
+  "credential_id": "cred_invite_pickup_fixture",
   "invite_id_hex": "35cdd99ac087bf440f84083db2535a69",
   "kek_pickup_hex": "49b31dcd0435a15112f70532e824efaf5a99b4a7197cf8c3dd5588ee7a591d98",
-  "wrapped_t_b64": "cm1C2SZKFAyPj2uzAgcq//Fe9R9jXItyCNk1gw==",
-  "iv_b64": "RG4ITjJ8zDvDXVG0"
+  "wrapped_t_b64": "q3VkdSWNvgX7m9X2MSumpF9fCrkdxn9V4WiIiA==",
+  "iv_b64": "PAGbA+Ke2PE05ZlN"
 }
