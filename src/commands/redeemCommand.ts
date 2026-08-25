@@ -14,7 +14,10 @@ import { deviceKeysEnabled } from '../auth/deviceKey/flag';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { BrokerCeremonyTransport } from '../auth/deviceKey/brokerCeremonyTransport';
-import { createInvitePickupOps } from '../auth/invitePickup/serviceOps';
+// createInvitePickupOps is imported dynamically inside executePickup (below),
+// not at module top level: it transitively pulls in the invite-pickup service
+// ops, and the v2 `execute(code)` path must not load that graph at all. This
+// mirrors the file's existing lazy `import('../auth/invitePickup/consume')`.
 import {
   runDeviceKeyEnrollment,
   reportEnrollmentOutcome,
@@ -49,14 +52,18 @@ export class RedeemCommand {
    */
   async executePickup(): Promise<void> {
     const authService = new AuthService(this.apiUrl, this.devMode);
-    let authResult = await authService.authenticateSilent();
-    if (!authResult.success) {
-      authResult = await authService.authenticate();
-    }
+    // No-let (CLAUDE.md Rule 1): probe silently, fall back to interactive, in
+    // a single const rather than a reassigned binding.
+    const silent = await authService.authenticateSilent();
+    const authResult = silent.success ? silent : await authService.authenticate();
     if (!authResult.success || !authResult.user_id) {
       console.error(`\n  Sign-in failed: ${authResult.error || 'unknown error'}.\n`);
       process.exit(1);
     }
+    // Bound after the guard so its non-undefined-ness survives into the
+    // runConsume closure below (control-flow narrowing does not cross the
+    // function boundary).
+    const userId = authResult.user_id;
 
     const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
     serviceClient.setTokenProvider(() => authService.getValidToken());
@@ -67,16 +74,21 @@ export class RedeemCommand {
       machineName: hostname(),
     });
 
+    const { createInvitePickupOps } = await import('../auth/invitePickup/serviceOps');
     const ops = createInvitePickupOps(serviceClient, authService);
 
     const { consumeInvitePickup } = await import('../auth/invitePickup/consume');
-    let result: Awaited<ReturnType<typeof consumeInvitePickup>>;
-    try {
-      result = await consumeInvitePickup(authResult.user_id, ceremony, ops);
-    } catch (err) {
-      this.reportPickupFailure(err);
-      return; // unreachable — reportPickupFailure always exits — kept for TS control-flow clarity.
-    }
+    // No-let: the try/catch assignment is wrapped in a function that returns
+    // the value (CLAUDE.md Rule 1). reportPickupFailure always exits, so the
+    // catch branch never returns to the caller.
+    const runConsume = async (): Promise<Awaited<ReturnType<typeof consumeInvitePickup>>> => {
+      try {
+        return await consumeInvitePickup(userId, ceremony, ops);
+      } catch (err) {
+        this.reportPickupFailure(err); // never returns — always process.exit(1)
+      }
+    };
+    const result = await runConsume();
 
     if ('noPendingPickup' in result) {
       console.error('\n  No pending invite to redeem for this account.\n');
