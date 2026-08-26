@@ -867,6 +867,67 @@ export class ServiceClient {
       throw err;
     }
   }
+
+  /**
+   * `GET /flows/mine` — this caller's own OPEN flow instances, found by
+   * identity alone (no flow id, no `X-Flow-Secret`). Used by `capy flow run`
+   * (flowRunCommand.ts) to find a hosted-minted `checkout` instance to
+   * attach to and drive, without the caller ever having been handed the
+   * instance's id directly.
+   *
+   * `step` on each row is the SANITIZED projection the service renders for a
+   * second renderer (see `sanitizeStepForMine` in service/src/routes/flows.ts)
+   * — display-only, with high-entropy fields (`plan_hash`) stripped. It is
+   * NEVER passed to `validateStep`: the full, validatable envelope for an
+   * instance comes only from `getFlowStep`/`reportFlowObservations` below.
+   */
+  async listMyFlows(): Promise<FlowSummary[]> {
+    const data = await this.request<{ flows: FlowSummary[] }>('GET', '/flows/mine');
+    return data.flows;
+  }
+
+  /**
+   * `GET /flows/:id/next` — re-read the step this instance is currently on,
+   * without reporting observations or advancing anything. Deliberately
+   * allowed to be stale (`derived_at` says how): this is a peek, not a
+   * report. `step` here IS the full envelope — validate it with
+   * `validateStep` before acting on it, same as the response from
+   * `reportFlowObservations`.
+   */
+  async getFlowStep(flowId: string): Promise<{ step: unknown; derived_at: string | null; state: string }> {
+    return this.request('GET', `/flows/${encodeURIComponent(flowId)}/next`);
+  }
+
+  /**
+   * `POST /flows/:id/next` — report this run's freshly re-observed
+   * predicates (and, when the previous step was a local_action, its
+   * outcome) and get back the next full step envelope. The one call
+   * `capy flow run`'s drive loop repeats until it reaches a stop step.
+   */
+  async reportFlowObservations(flowId: string, body: FlowNextReportBody): Promise<{ step: unknown }> {
+    return this.request('POST', `/flows/${encodeURIComponent(flowId)}/next`, body);
+  }
+}
+
+/** One row of `GET /flows/mine` — see `listMyFlows`'s doc for what `step` is (and is not). */
+export interface FlowSummary {
+  flow_id: string;
+  flow_type: string;
+  contract_version: string;
+  repo_key: string;
+  status: string;
+  step: Record<string, unknown> | null;
+}
+
+/** Body for `POST /flows/:id/next`, shaped for `checkout`'s own (smaller) report schema. */
+export interface FlowNextReportBody {
+  contract_version: string;
+  observations: Record<string, boolean>;
+  last_step?: {
+    step_id: string;
+    outcome: 'ok' | 'failed';
+    code?: string;
+  };
 }
 
 /**
