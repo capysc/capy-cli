@@ -35,7 +35,22 @@ const CLI = join(__dirname, '../../dist/index.js');
 const ALT_SCREEN_ENTER = '\x1b[?1049h';
 
 function capyEdit(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
-  const r = spawnSync('node', [CLI, 'edit', ...args], { cwd, encoding: 'utf-8' });
+  const r = spawnSync('node', [CLI, 'edit', ...args], {
+    cwd,
+    encoding: 'utf-8',
+    timeout: 10_000,
+    env: {
+      ...process.env,
+      // Hermetic in every environment (CI has no auth state and may stall on
+      // real network): past the guard, lock-less identity resolution must
+      // fail FAST and OFFLINE — a discard-port origin refuses instantly, and
+      // an isolated HOME keeps the developer's real ~/.capy-dev out of the
+      // spawned process entirely. Neither affects the pre-network guard
+      // refusal these tests pin.
+      CAPY_API_URL: 'http://127.0.0.1:9',
+      HOME: cwd,
+    },
+  });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
 }
 
