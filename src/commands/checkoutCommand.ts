@@ -4,7 +4,7 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import inquirer from 'inquirer';
-import { Branch, CapyError, ERROR_CODES, getSyncKeepHash, KeepFile } from '../types/index';
+import { AuthResult, Branch, CapyError, ERROR_CODES, getSyncKeepHash, KeepFile, setSyncKeepHash } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { SyncEngine } from '../sync/syncEngine';
 import { hashValue } from './statusCommand';
@@ -201,6 +201,17 @@ export interface CheckoutOptions {
    * what is written to keep.lock or .env moves.
    */
   web?: boolean;
+  /**
+   * Skip the pre-switch dirty guards (CAP-549) and, after switching, rebuild
+   * .env and the sync-state keep_hash from the CURRENT keep.lock for the
+   * target branch. The explicit escape hatch for keep.lock having moved
+   * outside capy (e.g. `git pull`) — where the guards' usual remedies
+   * ("commit", "push") would push stale local values over the newer keep —
+   * and for a deliberate "discard my local .env edits" on an unmoved keep.
+   * Valid on a same-branch checkout too: `capy checkout <activeBranch>
+   * --refresh` re-runs the .env + sync-state write in place.
+   */
+  refresh?: boolean;
 }
 
 export class CheckoutCommand {
@@ -250,11 +261,18 @@ export class CheckoutCommand {
       this.authService.setSessionUserId(projectState.userId);
     }
 
-    // Authenticate
+    // Authenticate — cached-org silent, then no-org silent, then interactive,
+    // stopping at the first success. Extracted into an IIFE (no reassignment)
+    // per the immutable-TypeScript house rule; mirrors the try/catch IIFE
+    // pattern already used below in `syncAndWriteBranch`.
     const spinner = ora('Authenticating...').start();
-    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
-    if (!authResult.success) authResult = await this.authService.authenticateSilent();
-    if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
+    const authResult = await (async (): Promise<AuthResult> => {
+      const viaOrg = await this.authService.authenticateSilent(projectState.organizationId);
+      if (viaOrg.success) return viaOrg;
+      const viaSilent = await this.authService.authenticateSilent();
+      if (viaSilent.success) return viaSilent;
+      return this.authService.authenticate(projectState.organizationId);
+    })();
     if (!authResult.success) {
       spinner.fail('Authentication failed');
       throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
@@ -288,8 +306,36 @@ export class CheckoutCommand {
       const envHeaderBranch = this.fileManager.readEnvMeta().branch;
       const dirtyBranch = envHeaderBranch || currentBranch;
 
-      if (keep && dirtyBranch) {
-        // Check A: uncommitted changes (.env differs from keep.lock)
+      // `--refresh` (CAP-549) is an explicit "rebuild from the current keep,
+      // discard local .env edits" consent — it skips both guards below
+      // entirely, whether or not keep.lock has moved externally.
+      if (keep && dirtyBranch && !options.refresh) {
+        // Discriminator computed BEFORE either check: does keep.lock's hash
+        // for this branch disagree with the last hash sync-state remembers?
+        // That disagreement is the ORIGINAL condition for check B below, but
+        // it has two possible causes that look identical from local state
+        // alone: (a) a local keep.lock change never pushed, or (b) keep.lock
+        // was rewritten by something other than capy (git pull is the normal
+        // GitOps case) since the last sync. Both send stale assumptions —
+        // check A can ALSO misfire in case (b), diffing .env against pins
+        // that just changed out from under it and reporting a phantom
+        // "uncommitted" edit. Reclassifying up front, before either check
+        // runs, means an externally-moved keep gets one accurate message
+        // instead of either guard's (wrong, for that case) remedy.
+        const syncState = this.projectManager.readSyncState();
+        const savedHash = getSyncKeepHash(syncState, dirtyBranch);
+        const currentKeepHash = SyncEngine.computeKeepHash(keep, dirtyBranch);
+        const keepMovedExternally = savedHash != null && savedHash !== currentKeepHash;
+
+        if (keepMovedExternally) {
+          console.error(`keep.lock on "${dirtyBranch}" changed outside capy since your last sync (for example a git pull).`);
+          console.error(`Your local .env may be stale. Re-run with --refresh to rebuild .env and sync state from the current keep — this discards any local .env edits.`);
+          process.exit(1);
+        }
+
+        // Check A: uncommitted changes (.env differs from keep.lock). Only
+        // reached once keep.lock is known NOT to have moved externally, so a
+        // hit here is a genuine local edit — not a stale pin.
         try {
           const localPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
           const uncommitted = findUncommittedEnvChange(localPlaintext, keep.variables, dirtyBranch);
@@ -303,16 +349,11 @@ export class CheckoutCommand {
           // If .env doesn't exist or can't be read, no uncommitted changes to worry about
         }
 
-        // Check B: unpushed changes (keep.lock differs from last sync)
-        const syncState = this.projectManager.readSyncState();
-        const savedHash = getSyncKeepHash(syncState, dirtyBranch);
-        const currentKeepHash = SyncEngine.computeKeepHash(keep, dirtyBranch);
-
-        if (savedHash != null && savedHash !== currentKeepHash) {
-          console.error(`You have unpushed changes on "${dirtyBranch}".`);
-          console.error(`Run ${B('capy push')} before switching branches.`);
-          process.exit(1);
-        }
+        // The old "unpushed changes" check (comparing savedHash against
+        // currentKeepHash) lived here. Its condition is now computed ABOVE,
+        // before check A, as `keepMovedExternally` — when true we already
+        // exited with the accurate message; when false (this point), it can
+        // never fire, so there is nothing left for it to do here.
       }
     }
 
@@ -403,6 +444,25 @@ export class CheckoutCommand {
     if (outcome.kind === 'sync_error') {
       console.error(`Failed to sync secrets: ${outcome.errorMessage}`);
       process.exit(1);
+    }
+
+    // `--refresh` (CAP-549): `syncAndWriteBranch` above already rebuilt .env
+    // and keep.lock for `branchName` from the current keep — this is the one
+    // piece it never does (checkout has never written sync-state), so the
+    // hash sync-state remembers for this branch matches what was just
+    // written and the "unpushed"/"moved externally" guards agree with
+    // reality on the next checkout.
+    if (options.refresh) {
+      const refreshedKeep = this.projectManager.readKeepFile();
+      if (refreshedKeep) {
+        const existingSyncState = this.projectManager.readSyncState();
+        this.fileManager.writeSyncState({
+          ...existingSyncState,
+          last_sync: new Date().toISOString(),
+          synced_variables: existingSyncState?.synced_variables ?? [],
+          keep_hash: setSyncKeepHash(existingSyncState, branchName, SyncEngine.computeKeepHash(refreshedKeep, branchName)),
+        });
+      }
     }
 
     if (outcome.seededFromCurrent) {

@@ -150,6 +150,11 @@ ISOLATED_FILES=(
   # flowRunCommand.test.ts mocks authService/serviceClient (flowCancelCommand.test.ts's
   # shape) plus crypto/keyResolver's resolveProjectKey.
   tests/commands/flowRunCommand.test.ts
+  # checkoutRefresh.test.ts (CAP-549) mocks authService/serviceClient/keyResolver/
+  # config/globalConfig — real ProjectManager/FileManager/SyncEngine against a
+  # throwaway temp dir, so it must not batch with branchKeepFile.test.ts's
+  # fully-mocked SyncEngine.
+  tests/commands/checkoutRefresh.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

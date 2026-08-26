@@ -346,6 +346,7 @@ program
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--protected', 'Mark as a protected branch (invite-only)')
+  .option('--refresh', 'rebuild .env and sync state from the current keep (discards local .env edits)')
   .action(async (branch, options, command) => {
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
@@ -353,6 +354,7 @@ program
       create: options.create,
       protected: options.protected,
       web: command.optsWithGlobals().web === true,
+      refresh: options.refresh === true,
     });
   });
 

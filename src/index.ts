@@ -350,6 +350,7 @@ program
   .option('--protected', 'Mark as a protected branch (invite-only)')
   .option('--no-protected', 'Create it open to the project')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--refresh', 'rebuild .env and sync state from the current keep (discards local .env edits)')
   .action(async (branch, options, command) => {
     assertNotLocalOnly('checkout');
 
@@ -374,6 +375,7 @@ program
       create: options.create,
       protected: options.protected,
       web: command.optsWithGlobals().web === true,
+      refresh: options.refresh === true,
     });
   });
 

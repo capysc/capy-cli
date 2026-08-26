@@ -305,16 +305,27 @@ describe('Checkout — blocks on uncommitted changes', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Issue 2: Checkout blocks on unpushed changes
+// Issue 2 → CAP-549 reclassification: this fixture (keep.lock's hash
+// disagreeing with what sync-state remembers) is EXACTLY the "keep.lock
+// changed outside capy" condition — indistinguishable, from local state
+// alone, from a genuine unpushed local edit. CAP-549 found the old
+// "unpushed changes" / `capy push` remedy backwards for this fixture: a
+// `git pull` that updates keep.lock (the normal GitOps flow) produces this
+// exact signature, and pushing would overwrite the newer keep with stale
+// local values. The guard was reordered so this scenario gets one accurate
+// message instead; the "unpushed changes" message this test used to pin is
+// gone (its condition was identical to this one and is now handled here,
+// pre-empting it). Full CAP-549 guard-reorder + --refresh coverage lives in
+// checkoutRefresh.test.ts.
 // ---------------------------------------------------------------------------
-describe('Checkout — blocks on unpushed changes', () => {
+describe('Checkout — keep.lock changed outside capy (CAP-549)', () => {
   let exitSpy: any;
 
   beforeEach(() => {
     exitSpy = spyOn(process, 'exit').mockImplementation(() => undefined as never);
   });
 
-  test('blocks when keep.lock hash differs from sync-state', async () => {
+  test('blocks with the "changed outside capy" message, not the old "unpushed changes" one', async () => {
     const mocks = createCheckoutMocks({
       syncState: {
         keep_hash: { development: 'old-stale-hash' },  // doesn't match current keep.lock
@@ -331,8 +342,11 @@ describe('Checkout — blocks on unpushed changes', () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(consoleSpy.mock.calls.some((c: any) =>
-      c[0]?.includes('unpushed changes')
+      c[0]?.includes('changed outside capy')
     )).toBe(true);
+    expect(consoleSpy.mock.calls.some((c: any) =>
+      c[0]?.includes('unpushed changes')
+    )).toBe(false);
 
     consoleSpy.mockRestore();
   });
