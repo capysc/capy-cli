@@ -50,6 +50,7 @@ import {
   type SecretEditPrfCandidate,
   type SecretEditRequest,
   type SecretEditSaveResult,
+  type SecretEditSealedValue,
   type SecretEditSealedValues,
   SECRET_EDIT_SCREEN,
 } from './secretEditWire';
@@ -169,6 +170,66 @@ async function cancelQuietly(broker: BrokerClient, connectionId: string): Promis
   }
 }
 
+interface EditConnections {
+  unlock: BrokerConnection;
+  values: BrokerConnection;
+  result: BrokerConnection;
+}
+
+/** Mints the three chained connections this flow needs (see the module doc
+ *  on why a single connection cannot carry this exchange). Null means the
+ *  broker itself could not be reached — nothing to fall back to but the
+ *  loopback editor. */
+async function createEditConnections(broker: BrokerClient, machineName: string): Promise<EditConnections | null> {
+  try {
+    const [unlock, values, result] = await Promise.all([
+      broker.createConnection({ purpose: SECRET_EDIT_SCREEN, machineName, ttlSeconds: 900 }),
+      broker.createConnection({ purpose: SECRET_EDIT_SCREEN, machineName, ttlSeconds: 900 }),
+      broker.createConnection({ purpose: SECRET_EDIT_SCREEN, machineName, ttlSeconds: 900 }),
+    ]);
+    return { unlock, values, result };
+  } catch {
+    return null;
+  }
+}
+
+/** `JSON.parse`, never throwing. Null means invalid JSON — the broker
+ *  answers in this flow are never legitimately the bare JSON literal
+ *  `null`, so collapsing "parse failed" into the same sentinel is safe for
+ *  every message this wire contract actually sends. */
+function parseJsonSafe(text: string): unknown | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Open every sealed edit, or fail closed. Names are validated against the
+ * known set (unknown name, or a duplicate within this same save) BEFORE any
+ * decrypt is attempted; `openEditValue` is pure and never throws, so
+ * decrypting every entry unconditionally and checking for a `null` after
+ * changes nothing about which saves succeed — only the order the two checks
+ * happen in. Null on any invalid name, duplicate, or failed decrypt.
+ */
+function openEdits(
+  sessionKey: Buffer,
+  sealedEdits: SecretEditSealedValue[],
+  knownNames: Set<string>,
+): Record<string, string> | null {
+  const seen = new Set<string>();
+  for (const sealed of sealedEdits) {
+    if (!knownNames.has(sealed.name) || seen.has(sealed.name)) return null;
+    seen.add(sealed.name);
+  }
+  const opened = sealedEdits.map(
+    (sealed) => [sealed.name, openEditValue(sessionKey, { iv: sealed.iv, ct: sealed.ct })] as const,
+  );
+  if (opened.some(([, value]) => value === null)) return null;
+  return Object.fromEntries(opened as Array<readonly [string, string]>);
+}
+
 export async function runSecretEditViaKeep(
   params: SecretEditKeepParams,
 ): Promise<SecretEditKeepOutcome> {
@@ -178,19 +239,12 @@ export async function runSecretEditViaKeep(
   const broker = new BrokerClient(params.serviceApiUrl, params.getToken);
   const deadlineMs = params.deadlineMs ?? DEFAULT_DEADLINE_MS;
 
-  let unlockConn: BrokerConnection;
-  let valuesConn: BrokerConnection;
-  let resultConn: BrokerConnection;
-  try {
-    [unlockConn, valuesConn, resultConn] = await Promise.all([
-      broker.createConnection({ purpose: SECRET_EDIT_SCREEN, machineName: params.machineName ?? hostname(), ttlSeconds: 900 }),
-      broker.createConnection({ purpose: SECRET_EDIT_SCREEN, machineName: params.machineName ?? hostname(), ttlSeconds: 900 }),
-      broker.createConnection({ purpose: SECRET_EDIT_SCREEN, machineName: params.machineName ?? hostname(), ttlSeconds: 900 }),
-    ]);
-  } catch {
+  const conns = await createEditConnections(broker, params.machineName ?? hostname());
+  if (!conns) {
     debug('[keep-screens] secret-edit: broker unavailable, falling back to loopback');
     return { kind: 'unavailable' };
   }
+  const { unlock: unlockConn, values: valuesConn, result: resultConn } = conns;
 
   const url = keepFlowUrl(SECRET_EDIT_SCREEN, unlockConn.connectionId);
   relayUrl('Edit secrets in your browser (values never touch this terminal or the AI):', url, 'edit');
@@ -234,10 +288,8 @@ export async function runSecretEditViaKeep(
     return { kind: 'declined', code: unlockAnswer.kind };
   }
 
-  let courierPayload: unknown;
-  try {
-    courierPayload = JSON.parse(unlockAnswer.plaintext);
-  } catch {
+  const courierPayload = parseJsonSafe(unlockAnswer.plaintext);
+  if (courierPayload === null) {
     return { kind: 'declined', code: 'invalid_message' };
   }
   if (!isSecretEditPrfCourier(courierPayload)) {
@@ -262,9 +314,15 @@ export async function runSecretEditViaKeep(
   }
 
   if (!verified) {
-    await broker.sendRequest(valuesConn, valuesPageKey.pagePubkeyB64, JSON.stringify(errorPayload('wrong_passphrase')));
+    // Pick the code from the credential actually offered — a failed PASSKEY
+    // tap is not a wrong passphrase, and the screen maps `wrong_passphrase`
+    // to passphrase-specific copy. `bad_session` is the generic unlock-
+    // failure code in the frozen vocabulary (secretEditWire.ts).
+    const unlockFailureCode: SecretEditErrorCode =
+      courierPayload.credential_id === PASSPHRASE_CREDENTIAL_ID ? 'wrong_passphrase' : 'bad_session';
+    await broker.sendRequest(valuesConn, valuesPageKey.pagePubkeyB64, JSON.stringify(errorPayload(unlockFailureCode)));
     await cancelQuietly(broker, resultConn.connectionId);
-    return { kind: 'declined', code: 'wrong_passphrase' };
+    return { kind: 'declined', code: unlockFailureCode };
   }
 
   const sessionKey = deriveEditSessionKey(
@@ -293,10 +351,8 @@ export async function runSecretEditViaKeep(
     return { kind: 'declined', code: saveAnswer.kind };
   }
 
-  let savePayload: unknown;
-  try {
-    savePayload = JSON.parse(saveAnswer.plaintext);
-  } catch {
+  const savePayload = parseJsonSafe(saveAnswer.plaintext);
+  if (savePayload === null) {
     await cancelQuietly(broker, resultConn.connectionId);
     return { kind: 'declined', code: 'invalid_message' };
   }
@@ -306,20 +362,7 @@ export async function runSecretEditViaKeep(
   }
 
   const knownNames = new Set(params.vars.map((v) => v.name));
-  const edits: Record<string, string> = {};
-  let sessionBroken = false;
-  for (const sealed of savePayload.edits) {
-    if (!knownNames.has(sealed.name) || sealed.name in edits) {
-      sessionBroken = true;
-      break;
-    }
-    const opened = openEditValue(sessionKey, { iv: sealed.iv, ct: sealed.ct });
-    if (opened === null) {
-      sessionBroken = true;
-      break;
-    }
-    edits[sealed.name] = opened;
-  }
+  const edits = openEdits(sessionKey, savePayload.edits, knownNames);
 
   // --- result leg ---
   const resultPageKey = await broker.awaitPagePubkey(resultConn, { deadlineMs });
@@ -328,7 +371,7 @@ export async function runSecretEditViaKeep(
     return { kind: 'declined', code: resultPageKey.kind };
   }
 
-  if (sessionBroken || Object.keys(edits).length === 0) {
+  if (edits === null || Object.keys(edits).length === 0) {
     await broker.sendRequest(resultConn, resultPageKey.pagePubkeyB64, JSON.stringify(errorPayload('bad_session')));
     return { kind: 'declined', code: 'bad_session' };
   }

@@ -17,7 +17,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { randomBytes } from 'crypto';
 
-import { runSecretEditViaKeep, type EditSessionOps } from '../../src/ui/secretEditScreen';
+import { runSecretEditViaKeep, PASSPHRASE_CREDENTIAL_ID, type EditSessionOps } from '../../src/ui/secretEditScreen';
 import { deriveDeviceKeyKek, deviceKeyWrapAAD, wrapKLocal } from '../../src/auth/deviceKey/crypto';
 import { deriveEditSessionKey, openEditValue } from '../../src/service/editSessionCrypto';
 import type { KeyWrapperMetadata, KeyWrapperPayload } from '../../src/service/serviceClient';
@@ -271,7 +271,10 @@ describe('runSecretEditViaKeep', () => {
     expect(allStdout).not.toContain(secretValue);
   });
 
-  test('a courier that does not unwrap the named wrapper is refused before any value is sealed', async () => {
+  test('a courier that does not unwrap the named wrapper is refused before any value is sealed (passkey door: bad_session)', async () => {
+    // CREDENTIAL_ID ('cred-abc') is not the passphrase sentinel, so this
+    // wrapper is a passkey door — a failed unwrap here is coded
+    // `bad_session`, not `wrong_passphrase` (that copy is passphrase-only).
     const prfSalt = randomBytes(32);
     const realPrfOutput = randomBytes(32);
     const wrapper = makeWrapper(realPrfOutput, prfSalt);
@@ -305,6 +308,85 @@ describe('runSecretEditViaKeep', () => {
         v: 1,
         prf_output: wrongPrfOutput.toString('base64'),
         credential_id: CREDENTIAL_ID,
+      }),
+      connectionId: unlockId,
+      clientPubkeyB64: conns.get(unlockId)!.createBody.client_pubkey as string,
+    });
+
+    const valuesPage = await mintPageKeypairPageSide();
+    conns.get(valuesId)!.pagePubkeyB64 = valuesPage.pagePubkeyB64;
+    await waitUntil(() => conns.get(valuesId)!.requestCiphertext !== null);
+
+    const valuesMessage = JSON.parse(
+      await openRequestEnvelopePageSide({
+        ciphertextB64: conns.get(valuesId)!.requestCiphertext!,
+        connectionId: valuesId,
+        clientPubkeyB64: conns.get(valuesId)!.createBody.client_pubkey as string,
+        pagePrivateKey: valuesPage.privateKey,
+      }),
+    );
+    sealedAnyValues = valuesMessage.kind === 'sealed_values';
+    expect(valuesMessage).toEqual({ kind: 'error', v: 1, code: 'bad_session' });
+
+    const outcome = await outcomePromise;
+    expect(outcome).toEqual({ kind: 'declined', code: 'bad_session' });
+    expect(sealedAnyValues).toBe(false);
+  });
+
+  test('a courier that does not unwrap the named wrapper is refused before any value is sealed (passphrase door: wrong_passphrase)', async () => {
+    // Same refusal, but the offered credential IS the passphrase sentinel —
+    // the screen's passphrase-specific copy is correct here, so the coded
+    // error stays `wrong_passphrase`.
+    const prfSalt = randomBytes(32);
+    const realPrfOutput = randomBytes(32);
+    const kek = deriveDeviceKeyKek(realPrfOutput, prfSalt);
+    const kLocal = randomBytes(32);
+    const wrapped = wrapKLocal(kLocal, kek, deviceKeyWrapAAD(USER_ID, PASSPHRASE_CREDENTIAL_ID));
+    const wrapper: KeyWrapperPayload = {
+      id: 'wrapper-1',
+      type: 'wrapped_k_local',
+      credential_id: PASSPHRASE_CREDENTIAL_ID,
+      kdf_version: 1,
+      is_seed: true,
+      verified_at: new Date().toISOString(),
+      organization_id: null,
+      created_at: new Date().toISOString(),
+      deleted_at: null,
+      mirror_state: 'mirrored',
+      wrapped_k_local: wrapped.wrappedKLocal,
+      iv: wrapped.iv,
+      prf_salt: prfSalt.toString('base64'),
+    };
+    const wrongPrfOutput = randomBytes(32); // does NOT unwrap `wrapper`
+
+    let sealedAnyValues = false;
+
+    const outcomePromise = runSecretEditViaKeep({
+      serviceApiUrl: SVC,
+      getToken: async () => TOKEN,
+      userId: USER_ID,
+      projectName: 'proj',
+      branchName: 'main',
+      vars: [{ name: 'API_KEY', value: 'irrelevant' }],
+      keepHash: 'hash-v1',
+      ops: fakeOps(wrapper),
+      applyEdits: async () => ({ ok: true, keepHash: 'hash-v2' }),
+      deadlineMs: 10_000,
+    });
+
+    await waitUntil(() => creationOrder.length === 3);
+    const [unlockId, valuesId] = creationOrder;
+
+    const unlockPage = await mintPageKeypairPageSide();
+    conns.get(unlockId)!.pagePubkeyB64 = unlockPage.pagePubkeyB64;
+    await waitUntil(() => conns.get(unlockId)!.requestCiphertext !== null);
+
+    conns.get(unlockId)!.answerCiphertext = await sealEnvelopePageSide({
+      plaintext: JSON.stringify({
+        kind: 'prf_courier',
+        v: 1,
+        prf_output: wrongPrfOutput.toString('base64'),
+        credential_id: PASSPHRASE_CREDENTIAL_ID,
       }),
       connectionId: unlockId,
       clientPubkeyB64: conns.get(unlockId)!.createBody.client_pubkey as string,

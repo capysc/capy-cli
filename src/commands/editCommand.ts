@@ -395,8 +395,8 @@ export class EditCommand {
       // screen — but NEVER silently: CAP-539 flagged `capy add`'s silent
       // fallback as a bug, so this prints a visible line (not just `debug()`)
       // explaining why the local editor opened instead.
-      let keepHandled = false;
-      if (!localMode && authService && serviceClient && keepScreensEnabled()) {
+      const attemptKeepEdit = async (): Promise<boolean> => {
+        if (localMode || !authService || !serviceClient || !keepScreensEnabled()) return false;
         const { runSecretEditViaKeep } = await import('../ui/secretEditScreen');
         const { createDeviceKeyServiceOps } = await import('../auth/deviceKey/serviceOps');
         const { ops } = createDeviceKeyServiceOps(serviceClient, authService);
@@ -425,15 +425,14 @@ export class EditCommand {
             return { ok: true, keepHash: newHash };
           },
         });
-        if (outcome.kind === 'saved') {
-          keepHandled = true;
-        } else {
-          console.error(
-            `Could not edit secrets in your browser via Capy's hosted transport (${outcome.kind === 'unavailable' ? 'no device key enrolled on this account, or the connection broker is unreachable' : outcome.code}).\n` +
-              `Opening the local browser editor on this machine instead.`,
-          );
-        }
-      }
+        if (outcome.kind === 'saved') return true;
+        console.error(
+          `Could not edit secrets in your browser via Capy's hosted transport (${outcome.kind === 'unavailable' ? 'no device key enrolled on this account, or the connection broker is unreachable' : outcome.code}).\n` +
+            `Opening the local browser editor on this machine instead.`,
+        );
+        return false;
+      };
+      const keepHandled = await attemptKeepEdit();
 
       if (!keepHandled) {
         const { runSecretEditorInBrowser } = await import('../ui/secretTableScreen');
