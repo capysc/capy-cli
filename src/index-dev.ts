@@ -553,6 +553,17 @@ flow
     });
   });
 
+// Parity with the production entry point is asserted by entrypointParity.test.ts.
+flow
+  .command('run')
+  .description('Attach to a hosted-minted checkout flow instance and drive it to completion')
+  .option('--json', 'print the step-by-step outcome as JSON instead of the human UI')
+  .option('--target-dir <path>', 'directory to drive the switch in (defaults to the current one)')
+  .action(async (options: { json?: boolean; targetDir?: string }) => {
+    const { runFlowRunCommand } = await import('./commands/flowRunCommand');
+    await runFlowRunCommand({ json: options.json === true, targetDir: options.targetDir }, true);
+  });
+
 program
   .command('auth-decrypt')
   .description('Decrypt .env file back to plaintext using auth (dev only)')

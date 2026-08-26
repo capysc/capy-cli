@@ -709,6 +709,22 @@ flow
     });
   });
 
+// Undocumented, additive: attach to a hosted-minted `checkout` flow instance
+// (POST /flows/checkout, minted server-side) and drive it to completion.
+// Authenticates SILENTLY only — never a ceremony, never a browser — and
+// never answers the flow's own consent dialog; a human approves that in the
+// hosted chat this run polls briefly for.
+flow
+  .command('run')
+  .description('Attach to a hosted-minted checkout flow instance and drive it to completion')
+  .option('--json', 'print the step-by-step outcome as JSON instead of the human UI')
+  .option('--target-dir <path>', 'directory to drive the switch in (defaults to the current one)')
+  .action(async (options: { json?: boolean; targetDir?: string }) => {
+    assertNotLocalOnly('flow run');
+    const { runFlowRunCommand } = await import('./commands/flowRunCommand');
+    await runFlowRunCommand({ json: options.json === true, targetDir: options.targetDir });
+  });
+
 program
   .command('org')
   .description('Switch organization')

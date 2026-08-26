@@ -69,6 +69,126 @@ export function findUncommittedEnvChange(
   return null;
 }
 
+/**
+ * The pure "sync + write" tail of a branch switch — everything `_execute`
+ * does once it already knows which branch it is switching to (found, or just
+ * created), extracted so `capy flow run`'s `switch_branch` executor
+ * (flowRunCommand.ts) can perform the SAME switch without this class's own
+ * spinner/console/process.exit UI. `_execute` below calls this and renders
+ * its own byte-identical output from the returned outcome — a pure refactor,
+ * no behavior change for the existing `capy checkout` command.
+ *
+ * Never prints, never calls `process.exit`: every branch that used to do
+ * either is instead a `BranchSyncOutcome` variant for the caller to render.
+ */
+export interface BranchSyncOutcome {
+  kind: 'forbidden' | 'sync_error' | 'ok';
+  /** Only on `sync_error` — the original error's message, for the TTY caller's existing print. */
+  errorMessage?: string;
+  varCount: number;
+  seededFromCurrent: boolean;
+}
+
+export interface BranchSyncDeps {
+  serviceClient: ServiceClient;
+  projectManager: ProjectManager;
+  fileManager: FileManager;
+}
+
+export async function syncAndWriteBranch(
+  deps: BranchSyncDeps,
+  projectId: string,
+  branchName: string,
+  encryptionKey: string,
+  isCreate: boolean,
+): Promise<BranchSyncOutcome> {
+  const fetched = await (async (): Promise<
+    { ok: true; data: Awaited<ReturnType<ServiceClient['getDecryptData']>> } | { ok: false; outcome: BranchSyncOutcome }
+  > => {
+    try {
+      return { ok: true, data: await deps.serviceClient.getDecryptData(projectId, branchName, undefined, true) };
+    } catch (error: any) {
+      const status = error?.details?.status;
+      if (status === 403) {
+        return { ok: false, outcome: { kind: 'forbidden', varCount: 0, seededFromCurrent: false } };
+      }
+      if (status === 404) {
+        // No snapshot yet for this branch — treat as empty and proceed to switch.
+        return {
+          ok: true,
+          data: { env_content: '', decrypt_key: '', expires_at: new Date().toISOString() },
+        };
+      }
+      return {
+        ok: false,
+        outcome: { kind: 'sync_error', errorMessage: error.message, varCount: 0, seededFromCurrent: false },
+      };
+    }
+  })();
+  if (!fetched.ok) return fetched.outcome;
+  const decryptData = fetched.data;
+
+  // Checkout is an explicit sync of the TARGET branch, so update that
+  // branch's pins from the server — but only that branch's (CAP-303).
+  // keep.lock holds all branches' metadata and is git-owned; the server's
+  // copy is whatever the last pusher had and must not rewrite branches this
+  // checkout didn't touch.
+  const keepForWrite = ((): KeepFile => {
+    const base = deps.projectManager.readKeepFile()!;
+    if (!decryptData.keep_file) return base;
+    const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
+    const spliced = SyncEngine.spliceKeepBranch(base, serverKeep, branchName);
+    deps.fileManager.writeKeepFile(spliced);
+    return spliced;
+  })();
+
+  // Write .env BEFORE switching .capy/branch. The .env header records which
+  // branch its contents belong to, so if we fail between these writes we must
+  // never leave .capy/branch pointing to a branch whose secrets aren't in
+  // .env yet. Writing .env first means a crash here leaves us on the old
+  // branch with .env already updated — detectable on next run via
+  // capy-branch-header mismatch self-heal.
+  const written = ((): { varCount: number; seededFromCurrent: boolean } => {
+    if (decryptData.env_content) {
+      const remoteEnv = deps.fileManager.parseEnvContent(decryptData.env_content);
+      const decrypted: Record<string, string> = {};
+      for (const [key, value] of Object.entries(remoteEnv)) {
+        try {
+          decrypted[key] = deps.fileManager.decryptValue(value, encryptionKey);
+        } catch {
+          // Skip undecryptable
+        }
+      }
+      deps.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
+      return { varCount: Object.keys(decrypted).length, seededFromCurrent: false };
+    }
+    if (isCreate) {
+      // `capy checkout -b <new>` with no remote snapshot: seed the new branch
+      // from the current .env. Preserve the plaintext values and re-write them
+      // under the new branch header (new resource_ids per (branch, key)), so
+      // `capy` sees them as unpinned and offers to push them to <new>.
+      const seed = ((): Record<string, string> => {
+        try {
+          return deps.fileManager.readEncryptedEnvFile(encryptionKey);
+        } catch {
+          // Unreadable current .env — fall through to empty-stamped file.
+          return {};
+        }
+      })();
+      deps.fileManager.writeEncryptedEnvFile(seed, encryptionKey, undefined, keepForWrite, branchName);
+      const varCount = Object.keys(seed).length;
+      return { varCount, seededFromCurrent: varCount > 0 };
+    }
+    // Switching to an existing empty branch: overwrite .env with an empty
+    // (but branch-stamped) file so the header matches the active branch.
+    deps.fileManager.writeEncryptedEnvFile({}, encryptionKey, undefined, keepForWrite, branchName);
+    return { varCount: 0, seededFromCurrent: false };
+  })();
+
+  deps.projectManager.writeActiveBranch(branchName);
+  return { kind: 'ok', varCount: written.varCount, seededFromCurrent: written.seededFromCurrent };
+}
+
 export interface CheckoutOptions {
   create?: boolean;
   /** Settled by `--protected` / `--no-protected`; undefined means ask. */
@@ -261,90 +381,34 @@ export class CheckoutCommand {
     // on their current branch with their current .env intact.
     const syncSpinner = ora(`Syncing secrets for ${branchName}...`).start();
 
-    let decryptData: Awaited<ReturnType<typeof this.serviceClient.getDecryptData>>;
-    try {
-      decryptData = await this.serviceClient.getDecryptData(
-        projectId,
-        branchName,
-        undefined, // ask for latest
-        true,
-      );
-    } catch (error: any) {
-      syncSpinner.stop();
-      const status = error?.details?.status;
-      if (status === 403) {
-        console.error(`You do not have access to branch "${branchName}".`);
-        console.error(`Protected branches are invite-only — ask a project admin to grant access.`);
-        process.exit(1);
-      }
-      if (status === 404) {
-        // No snapshot yet for this branch — treat as empty and proceed to switch.
-        decryptData = { env_content: '', decrypt_key: '', expires_at: new Date().toISOString() };
-      } else {
-        console.error(`Failed to sync secrets: ${error.message}`);
-        process.exit(1);
-      }
-    }
-
-    // Checkout is an explicit sync of the TARGET branch, so update that
-    // branch's pins from the server — but only that branch's (CAP-303).
-    // keep.lock holds all branches' metadata and is git-owned; the server's
-    // copy is whatever the last pusher had and must not rewrite branches this
-    // checkout didn't touch.
-    let keepForWrite = this.projectManager.readKeepFile()!;
-    if (decryptData.keep_file) {
-      const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
-      keepForWrite = SyncEngine.spliceKeepBranch(keepForWrite, serverKeep, branchName);
-      this.fileManager.writeKeepFile(keepForWrite);
-    }
-
-    // Write .env BEFORE switching .capy/branch. The .env header records which
-    // branch its contents belong to, so if we fail between these writes we must
-    // never leave .capy/branch pointing to a branch whose secrets aren't in
-    // .env yet. Writing .env first means a crash here leaves us on the old
-    // branch with .env already updated — detectable on next run via
-    // capy-branch-header mismatch self-heal.
-    let varCount = 0;
-    let seededFromCurrent = false;
-    if (decryptData.env_content) {
-      const remoteEnv = this.fileManager.parseEnvContent(decryptData.env_content);
-      const decrypted: Record<string, string> = {};
-      for (const [key, value] of Object.entries(remoteEnv)) {
-        try {
-          decrypted[key] = this.fileManager.decryptValue(value, encryptionKey);
-        } catch {
-          // Skip undecryptable
-        }
-      }
-      this.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
-      varCount = Object.keys(decrypted).length;
-    } else if (options.create) {
-      // `capy checkout -b <new>` with no remote snapshot: seed the new branch
-      // from the current .env. Preserve the plaintext values and re-write them
-      // under the new branch header (new resource_ids per (branch, key)), so
-      // `capy` sees them as unpinned and offers to push them to <new>.
-      let seed: Record<string, string> = {};
-      try {
-        seed = this.fileManager.readEncryptedEnvFile(encryptionKey);
-      } catch {
-        // Unreadable current .env — fall through to empty-stamped file.
-      }
-      this.fileManager.writeEncryptedEnvFile(seed, encryptionKey, undefined, keepForWrite, branchName);
-      varCount = Object.keys(seed).length;
-      seededFromCurrent = varCount > 0;
-    } else {
-      // Switching to an existing empty branch: overwrite .env with an empty
-      // (but branch-stamped) file so the header matches the active branch.
-      this.fileManager.writeEncryptedEnvFile({}, encryptionKey, undefined, keepForWrite, branchName);
-    }
-
-    this.projectManager.writeActiveBranch(branchName);
+    // The sync + write tail, extracted to `syncAndWriteBranch` (this file)
+    // so `capy flow run`'s switch_branch executor can reuse it verbatim.
+    // Pure refactor: the branching below reproduces the exact same
+    // console/exit behavior this method always had, from the returned
+    // outcome instead of inline try/catch.
+    const outcome = await syncAndWriteBranch(
+      { serviceClient: this.serviceClient, projectManager: this.projectManager, fileManager: this.fileManager },
+      projectId,
+      branchName,
+      encryptionKey,
+      options.create === true,
+    );
     syncSpinner.stop();
 
-    if (seededFromCurrent) {
-      console.log(`Seeded ${varCount} variable(s) from current branch into ${branchName} (unpushed — run ${B('capy')} to push)`);
-    } else if (varCount > 0) {
-      console.log(`Synced ${varCount} variable(s) for ${branchName}`);
+    if (outcome.kind === 'forbidden') {
+      console.error(`You do not have access to branch "${branchName}".`);
+      console.error(`Protected branches are invite-only — ask a project admin to grant access.`);
+      process.exit(1);
+    }
+    if (outcome.kind === 'sync_error') {
+      console.error(`Failed to sync secrets: ${outcome.errorMessage}`);
+      process.exit(1);
+    }
+
+    if (outcome.seededFromCurrent) {
+      console.log(`Seeded ${outcome.varCount} variable(s) from current branch into ${branchName} (unpushed — run ${B('capy')} to push)`);
+    } else if (outcome.varCount > 0) {
+      console.log(`Synced ${outcome.varCount} variable(s) for ${branchName}`);
     } else {
       console.log(`No secrets yet for ${branchName}`);
     }

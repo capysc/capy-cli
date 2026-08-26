@@ -306,6 +306,93 @@
           }
         }
       }
+    },
+    "checkout": {
+      "order": [
+        "repoMatchesProject",
+        "switchCompleted"
+      ],
+      "predicates": {
+        "repoMatchesProject": {
+          "type": "boolean",
+          "ownership": "local-fact",
+          "definition": "The attached directory's keep.lock names the project this flow instance was minted for (the plan's pinned project_id).",
+          "why": "BASE. checkout is minted server-side against a named project/branch (POST /flows/checkout resolves both at creation), but the CLI reporting observations may be running in ANY directory — this is the check that the directory it is actually sitting in is the one the plan is about, before it ever attempts a local branch switch. A mismatch is never silently proceeded through: see blocked_reasons.wrong_repo.",
+          "source": "the checkout flow's own plan (checkoutEngine.ts); the CLI's local keep.lock read, the same file hasKeepLock/orgKeyOnDevice already read for onboard"
+        },
+        "switchCompleted": {
+          "type": "boolean",
+          "ownership": "local-fact",
+          "definition": "The CLI's local `switch_branch` executor has already put the working copy on the plan's pinned branch, for the plan this flow instance holds.",
+          "why": "BASE. The single fact this flow exists to prove: once true, the flow is done. Gates the one local_action verb this flow ever issues (switch_branch), the same convergence guarantee every onboard verb's flip predicate gives — a level-triggered re-ask converges once the switch has actually happened.",
+          "source": "the CLI's checkout flow executor (capy-cli) — see steps.json local_action_verbs.switch_branch"
+        }
+      },
+      "report_schema": {
+        "doc": "The body of POST /flows/:id/next for a checkout instance. The client re-observes and re-reports EVERY predicate on every call; nothing is remembered client-side, same discipline as onboard.",
+        "forbidden_observations": [],
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contract_version",
+            "observations"
+          ],
+          "properties": {
+            "contract_version": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            },
+            "observations": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "repoMatchesProject",
+                "switchCompleted"
+              ],
+              "properties": {
+                "repoMatchesProject": {
+                  "type": "boolean"
+                },
+                "switchCompleted": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "last_step": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "step_id",
+                "outcome"
+              ],
+              "properties": {
+                "step_id": {
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "failed"
+                  ]
+                },
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "BRANCH_SWITCH_FAILED",
+                    "NETWORK_ERROR",
+                    "SERVICE_ERROR"
+                  ],
+                  "description": "Closed set for checkout's own report envelope. BRANCH_SWITCH_FAILED is minted for this flow (steps.json blocked_reasons.branch_switch_failed); NETWORK_ERROR/SERVICE_ERROR are the same existing codes onboard's own report schema already carries, reused rather than re-minted."
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

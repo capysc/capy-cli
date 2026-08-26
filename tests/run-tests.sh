@@ -130,6 +130,9 @@ ISOLATED_FILES=(
   # flowCancelCommand.test.ts mocks authService/serviceClient/projectManager
   # (kickCommand.test.ts's shape) plus ui/interactive's isInteractive().
   tests/commands/flowCancelCommand.test.ts
+  # flowRunCommand.test.ts mocks authService/serviceClient (flowCancelCommand.test.ts's
+  # shape) plus crypto/keyResolver's resolveProjectKey.
+  tests/commands/flowRunCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run
