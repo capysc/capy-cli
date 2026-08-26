@@ -252,6 +252,18 @@ export class ServiceClient {
         );
       }
 
+      // Lock-less push CAS conflict: this write's `base_keep_hash` no longer
+      // matches the branch's current server hash. `keep_hash`/`keep_file`
+      // hoisted to top-level `details` (mirrors the 402 QUOTA_EXCEEDED shape
+      // above) so callers rebase without re-parsing `details.data`.
+      if (res.status === 409 && data.code === 'STALE_KEEP_HASH') {
+        throw new CapyError(
+          data.error || 'Keep changed on the server since this write was based on it.',
+          ERROR_CODES.STALE_KEEP_HASH,
+          { status: 409, keep_hash: data.keep_hash, keep_file: data.keep_file },
+        );
+      }
+
       const serverMessage = data.error || data.message || 'Service request failed';
       throw new CapyError(
         serverMessage,
@@ -452,17 +464,27 @@ export class ServiceClient {
    * The response's keep_file (when the server sends one) is the pushed
    * keep.lock with server-assigned changed_at timestamps — callers should
    * adopt it as the local keep.lock (SyncEngine.adoptServerKeep).
+   *
+   * `baseKeepHash` is the branch's keep_hash this write was based on — the
+   * CAS precondition (single-user lock-less mode, also honored in lock-full
+   * mode when the caller knows its base). Omitted entirely (not sent as
+   * undefined/null) when the caller can't determine one, so an older server
+   * that doesn't understand `base_keep_hash` sees exactly the request shape
+   * it always has. A server that DOES understand it and finds the branch has
+   * moved on responds 409 STALE_KEEP_HASH (see `request()`'s 409 handling).
    */
   async pushSecrets(
     projectId: string,
     keepFile: string,
     envBlob: string,
     branch: string,
+    baseKeepHash?: string,
   ): Promise<{ keep_hash: string; keep_file?: string }> {
     return this.request('POST', `/secrets/${projectId}`, {
       keep_file: keepFile,
       env_blob: envBlob,
       branch,
+      ...(baseKeepHash !== undefined ? { base_keep_hash: baseKeepHash } : {}),
     });
   }
 

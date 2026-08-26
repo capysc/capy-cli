@@ -35,7 +35,22 @@ const CLI = join(__dirname, '../../dist/index.js');
 const ALT_SCREEN_ENTER = '\x1b[?1049h';
 
 function capyEdit(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
-  const r = spawnSync('node', [CLI, 'edit', ...args], { cwd, encoding: 'utf-8' });
+  const r = spawnSync('node', [CLI, 'edit', ...args], {
+    cwd,
+    encoding: 'utf-8',
+    timeout: 10_000,
+    env: {
+      ...process.env,
+      // Hermetic in every environment (CI has no auth state and may stall on
+      // real network): past the guard, lock-less identity resolution must
+      // fail FAST and OFFLINE — a discard-port origin refuses instantly, and
+      // an isolated HOME keeps the developer's real ~/.capy-dev out of the
+      // spawned process entirely. Neither affects the pre-network guard
+      // refusal these tests pin.
+      CAPY_API_URL: 'http://127.0.0.1:9',
+      HOME: cwd,
+    },
+  });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', code: r.status ?? 1 };
 }
 
@@ -92,14 +107,16 @@ describe('capy edit spawned headless (piped stdio — deterministically no TTY)'
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
 
-    // No keep.lock in the directory, so a run that clears the surface guard
-    // must hit the unchanged pre-existing refusal — proving --web still
-    // works headless and the new guard added no behavior on that rail.
+    // No keep.lock in the directory. Single-user lock-less mode means this is
+    // no longer a refusal ("No keep.lock" is gone): a run that clears the
+    // surface guard proceeds into lock-less identity resolution, which in
+    // this headless spawn fails further along (auth/project lookup). The
+    // guard-passed evidence is the ABSENCE of the gate's code and of any
+    // alt-screen write — asserted the same as before.
     const r = capyEdit(['--web'], dir);
 
     expect(r.code).not.toBe(0);
     expect(r.stderr).not.toContain(ERROR_CODES.EDIT_SCREEN_UNSAFE_SURFACE);
-    expect(r.stderr).toContain('No keep.lock');
     expect(r.stdout).not.toContain(ALT_SCREEN_ENTER);
 
     rmSync(dir, { recursive: true, force: true });

@@ -1,11 +1,11 @@
 name: CI
 
 on:
+  # EVERY pull request, whatever branch it targets. The old [main,
+  # feat/portability] filter meant build+test never ran for PRs into other
+  # long-lived program branches (only the security scan reported back) —
+  # same gap, same fix as the monorepo's ci.yml.
   pull_request:
-    # feat/portability is a long-lived integration branch that PRs land into
-    # before it reaches main. Without it here, build+test never runs on those
-    # PRs and only the security scan reports back.
-    branches: [main, feat/portability]
   push:
     branches: [main]
   workflow_dispatch:

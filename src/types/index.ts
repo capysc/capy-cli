@@ -521,6 +521,17 @@ export const ERROR_CODES = {
    * for a different one.
    */
   ORG_NAME_SUFFIX_EXHAUSTED: 'ORG_NAME_SUFFIX_EXHAUSTED',
+  /**
+   * Single-user "lock-less" mode (no local keep.lock — the server's
+   * latest/keep.json for the branch is the only source of truth). A push's
+   * `base_keep_hash` no longer matches the branch's current server hash —
+   * someone else (or another machine) pushed since this write's context was
+   * resolved. The 409 body carries the current `keep_hash` and, when
+   * anything has been pushed before, the stored `keep_file` — callers rebase
+   * their write onto it and retry rather than clobbering it. Mirrored from
+   * service/src/errorCodes.ts, same convention as the codes above.
+   */
+  STALE_KEEP_HASH: 'STALE_KEEP_HASH',
   // `capy flow cancel` (client-side reclassification of the server's 404).
   /**
    * `POST /flows/:id/cancel` answers 404 for two different facts wearing one
