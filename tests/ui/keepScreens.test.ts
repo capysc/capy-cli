@@ -26,6 +26,8 @@ describe('KEEP_SCREENS registry', () => {
       { name: 'secret-intake', kind: 'payload-both' },
       { name: 'connect-live-gate', kind: 'payload-both' },
       { name: 'org-members', kind: 'payload-both' },
+      // CAP-540: `capy edit`'s keep-hosted transport.
+      { name: 'secret-edit', kind: 'payload-both' },
       // W2-B: the seven no-submit "ending" screens — real CLI->page payload,
       // no answer at all (see `keepPayloadRelay.ts`'s `runKeepInfoScreen`).
       { name: 'command-error', kind: 'payload-in' },
