@@ -579,6 +579,60 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/invite`, { email, role, project_id: projectId });
   }
 
+  // --- v3 invite blob + pickup (docs/invite-pickup-flow.md §4, §6c, §7) ---
+  //
+  // Distinct from createInvite() above (the WorkOS membership invite,
+  // `/orgs/:orgId/invite`, singular): these hit the new stored-blob routes
+  // (`/orgs/:orgId/invites`, plural) that back the v3 short code. Both are
+  // called by a v3 mint; neither replaces the other.
+
+  /**
+   * Uploads the outer-wrapped blob for a v3 invite (§4 step 1). `inviteId` is
+   * `deriveInviteId(T)` — the server never sees T itself.
+   */
+  async uploadInviteBlob(
+    orgId: string,
+    body: { invite_id: string; email: string; blob: string; not_after: number },
+  ): Promise<{ invite_id: string }> {
+    return this.request('POST', `/orgs/${orgId}/invites`, body);
+  }
+
+  /**
+   * Fetches the stored outer-wrapped blob for a v3 invite (§4 step 3 / §7.1).
+   * CLI-scope gated server-side (§6.2) — a browser-kind token is refused.
+   * `email` is the invite row's own bound address, which the caller MUST use
+   * for `innerUnwrap` instead of the session's email (§7.3).
+   */
+  async fetchInviteBlob(orgId: string, inviteId: string): Promise<{ blob: string; email: string }> {
+    return this.request('GET', `/orgs/${orgId}/invites/${encodeURIComponent(inviteId)}/blob`);
+  }
+
+  /**
+   * The caller's own pending pickup row, if any (§4 step 1 of the first-use
+   * flow / §7.2). `null` when there is nothing to consume — not an error.
+   *
+   * The server responds with `{ pickups: [...] }` (plural — a user can hold
+   * more than one live pickup at once, e.g. invited to two orgs; see
+   * `listPendingPickups` in service/src/invites/store.ts and its caller in
+   * routes/invites.ts's `GET /invites/pending`). This CLI's first-attach
+   * flow only consumes one pickup per invocation (`consumeInvitePickup`),
+   * so it takes the first — a later `capy` invocation picks up the rest,
+   * same steady-state loop as any other single pickup.
+   */
+  async getPendingInvitePickup(): Promise<PendingInvitePickup | null> {
+    const data = await this.request<{ pickups: PendingInvitePickup[] }>('GET', '/invites/pending');
+    return data.pickups?.[0] ?? null;
+  }
+
+  /**
+   * Retires T and hard-deletes the blob server-side (§4 step 9). Idempotent
+   * by contract on the server side; callers should still only call this once
+   * consumption has actually completed.
+   */
+  async deleteInvitePickup(inviteId: string): Promise<void> {
+    await this.request('DELETE', `/invites/${encodeURIComponent(inviteId)}/pickup`);
+  }
+
   async inviteToProject(orgId: string, projectId: string, email: string, role: 'project-admin' | 'member'): Promise<{ user_id: string; email: string; project_id: string; role: string }> {
     return this.request('POST', `/orgs/${orgId}/projects/${projectId}/members`, { email, role });
   }
@@ -882,6 +936,93 @@ export class ServiceClient {
       throw err;
     }
   }
+
+  /**
+   * `GET /flows/mine` — this caller's own OPEN flow instances, found by
+   * identity alone (no flow id, no `X-Flow-Secret`). Used by `capy flow run`
+   * (flowRunCommand.ts) to find a hosted-minted `checkout` instance to
+   * attach to and drive, without the caller ever having been handed the
+   * instance's id directly.
+   *
+   * `step` on each row is the SANITIZED projection the service renders for a
+   * second renderer (see `sanitizeStepForMine` in service/src/routes/flows.ts)
+   * — display-only, with high-entropy fields (`plan_hash`) stripped. It is
+   * NEVER passed to `validateStep`: the full, validatable envelope for an
+   * instance comes only from `getFlowStep`/`reportFlowObservations` below.
+   */
+  async listMyFlows(): Promise<FlowSummary[]> {
+    const data = await this.request<{ flows: FlowSummary[] }>('GET', '/flows/mine');
+    return data.flows;
+  }
+
+  /**
+   * `GET /flows/:id/next` — re-read the step this instance is currently on,
+   * without reporting observations or advancing anything. Deliberately
+   * allowed to be stale (`derived_at` says how): this is a peek, not a
+   * report. `step` here IS the full envelope — validate it with
+   * `validateStep` before acting on it, same as the response from
+   * `reportFlowObservations`.
+   */
+  async getFlowStep(flowId: string): Promise<{ step: unknown; derived_at: string | null; state: string }> {
+    return this.request('GET', `/flows/${encodeURIComponent(flowId)}/next`);
+  }
+
+  /**
+   * `POST /flows/:id/next` — report this run's freshly re-observed
+   * predicates (and, when the previous step was a local_action, its
+   * outcome) and get back the next full step envelope. The one call
+   * `capy flow run`'s drive loop repeats until it reaches a stop step.
+   */
+  async reportFlowObservations(flowId: string, body: FlowNextReportBody): Promise<{ step: unknown }> {
+    return this.request('POST', `/flows/${encodeURIComponent(flowId)}/next`, body);
+  }
+}
+
+/** One row of `GET /flows/mine` — see `listMyFlows`'s doc for what `step` is (and is not). */
+export interface FlowSummary {
+  flow_id: string;
+  flow_type: string;
+  contract_version: string;
+  repo_key: string;
+  status: string;
+  step: Record<string, unknown> | null;
+}
+
+/** Body for `POST /flows/:id/next`, shaped for `checkout`'s own (smaller) report schema. */
+export interface FlowNextReportBody {
+  contract_version: string;
+  observations: Record<string, boolean>;
+  last_step?: {
+    step_id: string;
+    outcome: 'ok' | 'failed';
+    code?: string;
+  };
+}
+
+/**
+ * A caller's own pending pickup row (§7.2 of docs/invite-pickup-flow.md), as
+ * returned by one entry of `GET /invites/pending`'s `pickups` array.
+ * `organization_id` is not a column on `invite_pickups` itself, but the
+ * endpoint resolves and returns it (joined from `invite_blobs`) — the CLI
+ * needs an org id to call the org-scoped blob-fetch and co-decrypt routes
+ * downstream. Fields mirror exactly what `routes/invites.ts`'s
+ * `GET /invites/pending` maps per row — no `id`/`user_id`/`created_at`/
+ * `expires_at` (those are DB-internal to `invite_pickups` and never
+ * serialized), and `email` IS present but unused here — `fetchInviteBlob`'s
+ * own response is the one `email` value `innerUnwrap` may use (§7.3).
+ */
+export interface PendingInvitePickup {
+  invite_id: string;
+  organization_id: string;
+  email: string;
+  /** base64(ciphertext||tag) — T wrapped under KEK_pickup. */
+  wrapped_t: string;
+  /** base64, 12 bytes. */
+  iv: string;
+  /** base64. */
+  prf_salt: string;
+  credential_id: string;
+  kdf_version: number;
 }
 
 /** Wrapper row metadata (service KeyWrapperMetadata schema) — never carries ciphertext. */

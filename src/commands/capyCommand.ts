@@ -46,6 +46,7 @@ import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
 import {
   attemptCaseCUnlock,
+  attemptPickupConsumption,
   runPendingSyncBestEffort,
   syncOrgOntoDeviceKeyIfEnrolled,
   maybeNudgeDeviceKeyEnrollment,
@@ -735,6 +736,21 @@ export class CapyCommand {
     if (!orgKeyPresent && deviceKeysEnabled()) {
       const unlock = await attemptCaseCUnlock(this.deviceKeyWiringContext(authResult, selectedOrg.id));
       if (unlock.ok) {
+        orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+      }
+    }
+
+    // A brand-new invitee who already pasted their code into Keep
+    // has a pending pickup row waiting server-side. Case C above no-ops for
+    // them (no live doors yet, so detectOnboardingCase never reaches
+    // 'unlock') and would otherwise dead-end into the KEY_NOT_ON_DEVICE
+    // message below. Additive and side-effect-free on every other user:
+    // attemptPickupConsumption never throws, and a caller with no pending
+    // pickup (the overwhelming common case) gets `{ ok: false }` and this
+    // run continues exactly as it does today.
+    if (!orgKeyPresent && deviceKeysEnabled()) {
+      const pickup = await attemptPickupConsumption(this.deviceKeyWiringContext(authResult, selectedOrg.id));
+      if (pickup.ok) {
         orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
       }
     }

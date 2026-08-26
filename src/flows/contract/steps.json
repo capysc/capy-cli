@@ -2,7 +2,8 @@
   "contract_version": "1",
   "doc": "Step vocabulary for the service-owned flow layer. CLOSED sets: a client MUST fail closed on any kind, verb, screen id, dialog id or blocked reason not listed here for the contract version pinned on its flow instance. Params carry NAMES, IDS, COUNTS and BOOLEANS only \u2014 never a secret value, never a value snippet. Prose is never sent for a client to trust: `confirm` and `blocked` carry an id/reason and the client renders its OWN copy for it.",
   "flows": [
-    "onboard"
+    "onboard",
+    "checkout"
   ],
   "envelope": {
     "doc": "Every step, of every kind, is wrapped in this envelope. `contract_version` is pinned on the flow instance at creation and repeated on every step so a client can refuse a step minted under a version it does not implement.",
@@ -31,7 +32,8 @@
         "flow_type": {
           "type": "string",
           "enum": [
-            "onboard"
+            "onboard",
+            "checkout"
           ]
         },
         "step_id": {
@@ -340,6 +342,38 @@
           }
         }
       }
+    },
+    "switch_branch": {
+      "flips": "switchCompleted",
+      "requires_consent": {
+        "default": true,
+        "why": "checkout has exactly ONE consent gate, the checkout_plan dialog (SPEC: one consent per flow, not one per hop) — the same design onboard_plan uses. Approving the plan is approving the branch switch it names; this verb is only ever issued once that single approval is on record, so it is gated the same way onboard's writes are."
+      },
+      "executor": "The CLI's checkout flow executor (capy-cli): switches the local working copy to the plan's pinned project/branch. This is the CLI-side counterpart the checkout flow contract defines; capy-cli implements it against this verb, not the other way around.",
+      "idempotent_because": "Gated by switchCompleted. A working copy already on the plan's pinned branch reports the predicate true and this verb is never reissued.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project_name",
+          "branch_name",
+          "consent_recorded"
+        ],
+        "properties": {
+          "project_name": {
+            "type": "string",
+            "description": "NAME only — the pinned project's display name."
+          },
+          "branch_name": {
+            "type": "string",
+            "description": "NAME only — the pinned branch's display name."
+          },
+          "consent_recorded": {
+            "type": "boolean",
+            "description": "True when the instance already holds a recorded answer to the checkout_plan dialog covering this plan (checkoutEngine.ts). This verb is always consent-gated, so this local_action is only ever issued once that answer is on record — the executor reads this rather than re-asking."
+          }
+        }
+      }
     }
   },
   "screens": {
@@ -462,6 +496,31 @@
               "null"
             ],
             "description": "OPTIONAL (CAP-451). The project NAME the plan targets, when known. Unlike org_id, this is free to change: it rides the client's own plan (plan_hash), so a client that folds project_name into that hash gets a rename to re-open this dialog (blocked_reasons.plan_changed) the same way any other plan edit does — the service enforces nothing about what plan_hash covers."
+          }
+        }
+      }
+    },
+    "checkout_plan": {
+      "doc": "The ONE consent gate of the checkout flow (SPEC: one consent per flow, not one per hop) — same design as onboard_plan. Covers the branch switch this flow instance is proving; a client renders its own copy for this dialog id from NAMES only. plan_hash binds this exact answer to this exact plan, the same way onboard_plan's does.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plan_hash",
+          "project_name",
+          "branch_name"
+        ],
+        "properties": {
+          "plan_hash": {
+            "type": "string"
+          },
+          "project_name": {
+            "type": "string",
+            "description": "NAME only — never the project id."
+          },
+          "branch_name": {
+            "type": "string",
+            "description": "NAME only — never the branch id."
           }
         }
       }
@@ -603,9 +662,31 @@
         "BOOTSTRAP_NETWORK_ERROR"
       ],
       "doc": "The client could not reach the service or the push failed in transit (capyCommand.ts:953)."
+    },
+    "checkout_declined": {
+      "source": "consent",
+      "terminal": true,
+      "terminal_why": "The human said no to the checkout plan itself, the same posture as onboard's consent_declined. Nothing has been written; a NEW instance starts the flow again if the caller still wants to prove this branch switch.",
+      "doc": "The human answered the checkout_plan dialog with no. Terminal and unremarkable — the branch was never switched."
+    },
+    "wrong_repo": {
+      "source": "observation",
+      "terminal": false,
+      "terminal_why": "Level-triggered: the caller can point the CLI at the correct directory and ask again. Nothing was written, and the instance keeps its pins.",
+      "doc": "repoMatchesProject is false — the CLI attached in a directory whose keep.lock names a different project than the one this flow instance was minted for. The human runs the CLI from the right directory (or re-mints against the directory they meant) and the next report shows repoMatchesProject true."
+    },
+    "branch_switch_failed": {
+      "source": "step_outcome",
+      "terminal": false,
+      "terminal_why": "The human can retry the switch (a dirty working tree, a lock file, a transient git failure) and the next report re-derives with the pinned project/branch untouched.",
+      "from_codes": [
+        "BRANCH_SWITCH_FAILED"
+      ],
+      "doc": "The CLI's local switch_branch executor reported failure — the coded outcome of an attempted `switch_branch` local_action, never a parsed message."
     }
   },
   "done_params_schema": {
+    "doc": "Shared across every flow's `done` step. Each flow only ever populates the subset of these fields it defined at design time (onboard: project_id/branch/variable_count; checkout: project_name/branch_name) — additionalProperties:false still closes the set as a whole.",
     "type": "object",
     "additionalProperties": false,
     "required": [],
@@ -625,6 +706,20 @@
       "variable_count": {
         "type": "integer",
         "minimum": 0
+      },
+      "project_name": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "checkout only — the pinned project's NAME."
+      },
+      "branch_name": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "checkout only — the pinned branch's NAME."
       }
     }
   },
