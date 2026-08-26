@@ -561,6 +561,28 @@ export const ERROR_CODES = {
    * a bare human sentence to tell "declined" apart from "cancelled".
    */
   FLOW_CANCEL_DECLINED: 'FLOW_CANCEL_DECLINED',
+  /**
+   * `capy flow run`'s local `switch_branch` executor could not put the
+   * working copy on the plan's pinned branch (branch not found locally,
+   * sync/decrypt failure, a dirty write). Reported as `last_step.code` on
+   * the checkout flow's own report envelope — `shared/flows/steps.json`
+   * pins this exact string as the one code its `blocked_reasons.branch_switch_failed`
+   * maps from (`observations.json`'s `report_schema` closes `last_step.code`
+   * to this string plus the existing NETWORK_ERROR/SERVICE_ERROR). Non-terminal:
+   * the human can retry the switch and the next report re-derives with the
+   * pinned project/branch untouched.
+   */
+  BRANCH_SWITCH_FAILED: 'BRANCH_SWITCH_FAILED',
+  /**
+   * An invite code decoded to a SHAPE this build's parser doesn't
+   * understand — neither the 20-char Crockford v3 format nor a base64 blob
+   * whose first byte is the known v2 version byte (0x02). Minted by
+   * `parseInviteCode` in `crypto/inviteCrypto.ts` purely from decoded shape,
+   * never from message text (cardinal Rule 5) — this is the "v3 code on an
+   * old CLI" and "code from an even-newer format" case: a coded failure
+   * instead of a parse exception or silent garbage.
+   */
+  UPGRADE_REQUIRED: 'UPGRADE_REQUIRED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

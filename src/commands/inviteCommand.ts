@@ -8,6 +8,9 @@ import {
   innerWrap,
   buildRedeemCode,
   resolveInviteTtlMs,
+  generateInviteTokenV3,
+  buildInviteCodeV3,
+  deriveInviteId,
 } from '../crypto/inviteCrypto';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
@@ -54,6 +57,13 @@ export interface InviteOpts {
    * through — the same seam `capy checkout` is waiting on.
    */
   web?: boolean;
+  /**
+   * Additive and off by default: mint a v3 (stored-blob) short code
+   * instead of the shipped v2 blob-in-code format. Byte-identical v2
+   * behaviour is preserved whenever this is unset — see
+   * docs/invite-pickup-flow.md.
+   */
+  v3?: boolean;
 }
 
 /** Parse "30s"/"10m"/"24h"/"7d" or bare seconds → ms. Exits on invalid input. */
@@ -428,8 +438,13 @@ export class InviteCommand {
         }
       }
 
-      // 1. Generate invite token T
-      const inviteToken = generateInviteToken();
+      // 1. Generate invite token T.
+      //    v3 (additive — gated on opts.v3): T shrinks to 12 bytes
+      //    and the blob is uploaded rather than packed into the code (see
+      //    step 4a below). The v2 path is otherwise untouched: same
+      //    `generateInviteToken`, same inner/outer wrap, same
+      //    `buildRedeemCode` when opts.v3 is not set.
+      const inviteToken = opts.v3 ? generateInviteTokenV3() : generateInviteToken();
 
       // 2. Inner wrap M with HKDF(T, salt=orgId:email)
       //    The recipient email is bound into the HKDF salt so only they can unwrap.
@@ -447,20 +462,40 @@ export class InviteCommand {
       // 4. Create invite record on service
       const inviteResult = await serviceClient.createInvite(orgId, email, role, projectId);
 
-      // 4b. Fan out any additional project assignments picked in the checkbox.
-      // Abort noisily only if every extra assignment fails.
-      const failures: Array<{ projectId: string; error: string }> = [];
-      for (const extraId of extraProjectIds) {
-        try {
-          await serviceClient.inviteToProject(orgId, extraId, email, role as 'project-admin' | 'member');
-        } catch (err: any) {
-          failures.push({ projectId: extraId, error: err?.message ?? String(err) });
-        }
+      // 4a. v3 only: upload the outer-wrapped blob under invite_id = H(T).
+      // The server never receives T itself — only its hash.
+      if (opts.v3) {
+        await serviceClient.uploadInviteBlob(orgId, {
+          invite_id: deriveInviteId(inviteToken),
+          email: email.toLowerCase(),
+          blob: outerBlob,
+          not_after: notAfter,
+        });
       }
+
+      // 4b. Fan out any additional project assignments picked in the checkbox.
+      // Sequential and accumulated immutably so a failure's position in the
+      // result always matches its position in extraProjectIds, exactly as
+      // the prior sequential-loop version produced.
+      const failures = await extraProjectIds.reduce(
+        async (accPromise, extraId) => {
+          const acc = await accPromise;
+          try {
+            await serviceClient.inviteToProject(orgId, extraId, email, role as 'project-admin' | 'member');
+            return acc;
+          } catch (err: any) {
+            return [...acc, { projectId: extraId, error: err?.message ?? String(err) }];
+          }
+        },
+        Promise.resolve([] as ReadonlyArray<{ projectId: string; error: string }>),
+      );
       void inviteResult;
 
-      // 5. Build redeem code (carries the same notAfter the wrap was bound to).
-      const redeemCode = buildRedeemCode(inviteToken, outerBlob, orgId, notAfter);
+      // 5. Build the redeem code (carries the same notAfter the wrap was
+      // bound to). v3's code IS T, Crockford-rendered — no blob inside it.
+      const redeemCode = opts.v3
+        ? buildInviteCodeV3(inviteToken)
+        : buildRedeemCode(inviteToken, outerBlob, orgId, notAfter);
 
       const roleName = ROLES.find(r => r.value === role)?.name ?? role;
       const redeemCommand = `capy redeem ${redeemCode}`;
@@ -595,8 +630,18 @@ export class InviteCommand {
         console.log('');
         console.log(`    ${B('capy')} redeem ${redeemCode}`);
         console.log('');
-        console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
-        console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
+        // v3: the code is bare T, not a blob-in-code — the prior
+        // sentence describing "a double-wrapped copy of the org key" inside
+        // the code is no longer accurate for this format. NEEDS VINCE
+        // APPROVAL (see report) — kept minimal/neutral, no crypto framing,
+        // rather than reusing wording that would misdescribe what the v3
+        // code carries.
+        if (opts.v3) {
+          console.log('  \x1b[90mThis code cannot be used without your account signing in.\x1b[0m');
+        } else {
+          console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
+          console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
+        }
         console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
         console.log('');
       }

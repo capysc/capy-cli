@@ -394,4 +394,94 @@ describe('ServiceClient', () => {
     });
   });
 
+  describe('v3 invite blob + pickup wire methods', () => {
+    test('uploadInviteBlob POSTs to /orgs/:orgId/invites with the body verbatim', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ invite_id: 'abc123' }));
+      const result = await serviceClient.uploadInviteBlob('org-1', {
+        invite_id: 'abc123',
+        email: 'bob@example.com',
+        blob: 'outer-blob',
+        not_after: 1700000000000,
+      });
+      expect(result).toEqual({ invite_id: 'abc123' });
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/orgs/org-1/invites`);
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual({
+        invite_id: 'abc123',
+        email: 'bob@example.com',
+        blob: 'outer-blob',
+        not_after: 1700000000000,
+      });
+    });
+
+    test('fetchInviteBlob GETs /orgs/:orgId/invites/:inviteId/blob', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ blob: 'outer-blob', email: 'bob@example.com' }));
+      const result = await serviceClient.fetchInviteBlob('org-1', 'abc123');
+      expect(result).toEqual({ blob: 'outer-blob', email: 'bob@example.com' });
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/orgs/org-1/invites/abc123/blob`);
+      expect(init.method).toBe('GET');
+    });
+
+    test('getPendingInvitePickup GETs /invites/pending and returns the first row of the `pickups` array', async () => {
+      // The server's actual wire shape (service/src/routes/invites.ts's
+      // GET /invites/pending, backed by invites/store.ts's
+      // listPendingPickups) is `{ pickups: [...] }` — PLURAL, an array — a
+      // user can hold more than one live pickup at once (invited to two
+      // orgs). It never sends `id`/`user_id`/`created_at`/`expires_at`
+      // (those are DB-internal to invite_pickups); it DOES send `email`.
+      const pickup = {
+        invite_id: 'abc123',
+        organization_id: 'org-1',
+        email: 'bob@example.com',
+        wrapped_t: 'ct',
+        iv: 'iv',
+        prf_salt: 'salt',
+        credential_id: 'cred-1',
+        kdf_version: 1,
+      };
+      mockFetch.mockResolvedValue(mockFetchResponse({ pickups: [pickup] }));
+      const result = await serviceClient.getPendingInvitePickup();
+      expect(result).toEqual(pickup);
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/invites/pending`);
+      expect(init.method).toBe('GET');
+    });
+
+    test('getPendingInvitePickup returns null when there is nothing pending', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ pickups: [] }));
+      const result = await serviceClient.getPendingInvitePickup();
+      expect(result).toBeNull();
+    });
+
+    test('deleteInvitePickup DELETEs /invites/:inviteId/pickup', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({}, true, 204));
+      await serviceClient.deleteInvitePickup('abc123');
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(`${defaultServiceUrl}/invites/abc123/pickup`);
+      expect(init.method).toBe('DELETE');
+    });
+
+    test('a 409 WRAPPER_CONFLICT from the door-upload wire shape classifies as the existing typed code', async () => {
+      // Exercises the SAME classifyResponse path uploadDoorWrapper already
+      // relies on (SERVER_CODES allowlist) — nothing new to the wire
+      // contract, just confirming the invite-pickup call sites inherit it.
+      mockFetch.mockResolvedValue(mockFetchResponse({ code: 'WRAPPER_CONFLICT', error: 'conflict' }, false, 409));
+      try {
+        await serviceClient.uploadDoorWrapper({
+          wrapped_k_local: 'x',
+          iv: 'y',
+          prf_salt: 'z',
+          credential_id: 'cred-1',
+          kdf_version: 1,
+        });
+        throw new Error('expected throw');
+      } catch (err: any) {
+        expect(err).toBeInstanceOf(CapyError);
+        expect(err.code).toBe(ERROR_CODES.WRAPPER_CONFLICT);
+      }
+    });
+  });
+
 });

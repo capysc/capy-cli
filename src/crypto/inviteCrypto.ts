@@ -2,8 +2,10 @@ import {
   randomBytes,
   createCipheriv,
   createDecipheriv,
+  createHash,
   hkdfSync,
 } from 'crypto';
+import { CapyError, ERROR_CODES } from '../types/index';
 
 const AES_ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
@@ -172,4 +174,153 @@ export function parseRedeemCode(redeemCode: string): {
   const orgId = buf.subarray(orgIdOffset, orgIdOffset + orgIdLen).toString('utf8');
   const ciphertext = buf.subarray(orgIdOffset + orgIdLen).toString('base64');
   return { token, orgId, ciphertext, notAfter };
+}
+
+// ---------------------------------------------------------------------------
+// v3 code format (additive — the v2 path above is untouched).
+//
+// T shrinks to 12 bytes (96 bits) and travels as the code itself: no version
+// byte, no id, no blob. See docs/invite-pickup-flow.md §3.1-§3.3.
+// ---------------------------------------------------------------------------
+
+/** T length for the v3 (stored-blob) invite format. See §3.1. */
+export const TOKEN_LENGTH_V3 = 12;
+
+/** Generates a random 12-byte v3 invite token T. */
+export function generateInviteTokenV3(): Buffer {
+  return randomBytes(TOKEN_LENGTH_V3);
+}
+
+/** Crockford base32 — `0123456789ABCDEFGHJKMNPQRSTVWXYZ`. I/L/O/U absent. */
+const CROCKFORD_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const CROCKFORD_VALUE_BY_CHAR: ReadonlyMap<string, number> = new Map(
+  [...CROCKFORD_ALPHABET].map((c, i) => [c, i] as const),
+);
+
+/** v3 codes are exactly 20 Crockford characters (100 padded bits for 96-bit T). */
+const V3_CODE_CHAR_LENGTH = 20;
+
+/**
+ * Upper-cases, strips dashes, and folds I/L → 1, O → 0 (§3.2). Does not fold
+ * or reject U — Crockford's alphabet omits it without a fold rule, so a
+ * post-fold string containing U simply fails the alphabet membership check
+ * downstream and the code is treated as not-v3-shaped.
+ */
+function normalizeCrockfordInput(raw: string): string {
+  return raw
+    .toUpperCase()
+    .replace(/-/g, '')
+    .replace(/[IL]/g, '1')
+    .replace(/O/g, '0');
+}
+
+function isCrockfordAlphabet(s: string): boolean {
+  return [...s].every((c) => CROCKFORD_VALUE_BY_CHAR.has(c));
+}
+
+/** Big-endian bit packing, zero-padded on the right to 100 bits (§3.2). */
+function crockfordEncode(token: Buffer): string {
+  const padded = BigInt(`0x${token.toString('hex')}`) << 4n; // 96 -> 100 bits
+  return Array.from({ length: V3_CODE_CHAR_LENGTH }, (_, idx) => {
+    const shift = BigInt((V3_CODE_CHAR_LENGTH - 1 - idx) * 5);
+    const value = Number((padded >> shift) & 0x1fn);
+    return CROCKFORD_ALPHABET[value];
+  }).join('');
+}
+
+interface CrockfordDecodeResult {
+  bytes: Buffer;
+  paddingNonZero: boolean;
+}
+
+/**
+ * Decodes exactly 20 already-normalized Crockford characters into the 12-byte
+ * T plus whether the trailing 4 padding bits were non-zero (a conforming
+ * decoder MUST reject that — §3.2). Returns null if the input isn't 20
+ * characters of the Crockford alphabet at all (not v3-shaped).
+ */
+function crockfordDecodeRaw(chars: string): CrockfordDecodeResult | null {
+  if (chars.length !== V3_CODE_CHAR_LENGTH || !isCrockfordAlphabet(chars)) return null;
+  const values = [...chars].map((c) => CROCKFORD_VALUE_BY_CHAR.get(c) as number);
+  const bits = values.reduce((acc, v) => (acc << 5n) | BigInt(v), 0n);
+  const paddingNonZero = (bits & 0xfn) !== 0n;
+  const hex = (bits >> 4n).toString(16).padStart(TOKEN_LENGTH_V3 * 2, '0');
+  return { bytes: Buffer.from(hex, 'hex'), paddingNonZero };
+}
+
+/** Renders T as the presentation code `XXXXX-XXXXX-XXXXX-XXXXX` (§3.2). Dashes are cosmetic only. */
+export function buildInviteCodeV3(token: Buffer): string {
+  if (token.length !== TOKEN_LENGTH_V3) {
+    throw new Error(`v3 invite token must be ${TOKEN_LENGTH_V3} bytes, got ${token.length}`);
+  }
+  const raw = crockfordEncode(token);
+  return [raw.slice(0, 5), raw.slice(5, 10), raw.slice(10, 15), raw.slice(15, 20)].join('-');
+}
+
+/**
+ * `invite_id = hex(SHA-256("capy:invite-id:v1" || T)[0..15])` — 32 lower-case
+ * hex chars (§3.3). Derived by both the minter and the redeemer; the server
+ * never receives T.
+ */
+export function deriveInviteId(token: Buffer): string {
+  const digest = createHash('sha256')
+    .update(Buffer.concat([Buffer.from('capy:invite-id:v1', 'utf8'), token]))
+    .digest();
+  return digest.subarray(0, 16).toString('hex');
+}
+
+export type ParsedInviteCode =
+  | { version: 3; token: Buffer }
+  | { version: 2; token: Buffer; orgId: string; ciphertext: string; notAfter: number };
+
+/**
+ * Reads the version byte of a base64 blob without validating the rest of its
+ * shape — used only to decide which parser to hand the code to. Never throws;
+ * an unparseable input reads as "no version byte available".
+ */
+function peekBase64VersionByte(code: string): number | null {
+  const buf = Buffer.from(code, 'base64');
+  if (buf.length < 1) return null;
+  return buf.readUInt8(0);
+}
+
+/**
+ * Version dispatch on decoded SHAPE, never on message text (§3.2, cardinal
+ * Rule 5):
+ *
+ * 1. Dash-stripped, upper-cased, I/L/O-folded input of exactly 20 Crockford
+ *    characters decoding to 12 bytes with all-zero padding bits → v3.
+ * 2. Otherwise, a base64 blob whose first byte is the existing v2 version
+ *    byte (0x02) → delegated to the untouched `parseRedeemCode` (byte-for-byte
+ *    the same behaviour, including its own error shapes for a malformed v2
+ *    code — those are NOT reclassified as UPGRADE_REQUIRED).
+ * 3. Anything else → `UPGRADE_REQUIRED`: a format this build's decoder does
+ *    not recognise, structurally, not textually.
+ */
+export function parseInviteCode(code: string): ParsedInviteCode {
+  const normalized = normalizeCrockfordInput(code);
+  if (normalized.length === V3_CODE_CHAR_LENGTH) {
+    const decoded = crockfordDecodeRaw(normalized);
+    if (decoded) {
+      if (decoded.paddingNonZero) {
+        throw new CapyError(
+          'Invalid invite code.',
+          ERROR_CODES.INVALID_FORMAT,
+          { reason: 'v3_padding_nonzero' },
+        );
+      }
+      return { version: 3, token: decoded.bytes };
+    }
+  }
+
+  if (peekBase64VersionByte(code) === REDEEM_CODE_VERSION) {
+    const parsed = parseRedeemCode(code);
+    return { version: 2, ...parsed };
+  }
+
+  throw new CapyError(
+    'This invite code was minted by a newer version of capy. Update capy and try again.',
+    ERROR_CODES.UPGRADE_REQUIRED,
+    {},
+  );
 }

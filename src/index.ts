@@ -625,6 +625,7 @@ program
   .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
+  .option('--v3', 'mint a short v3 (stored-blob) code instead of the v2 blob-in-code format')
   .action(async (email, options, command) => {
     assertNotLocalOnly('invite');
     const { InviteCommand } = await import('./commands/inviteCommand');
@@ -637,17 +638,22 @@ program
       expires: options.expires,
       json: options.json,
       nonTty: options.nonTty,
+      v3: options.v3,
     });
   });
 
 program
-  .command('redeem <code>')
-  .description('Redeem an invite code to join an organization')
+  .command('redeem [code]')
+  .description('Redeem an invite code to join an organization, or (with no code) complete a pending Keep-pasted invite pickup')
   .action(async (code) => {
     assertNotLocalOnly('redeem');
     const { RedeemCommand } = await import('./commands/redeemCommand');
     const cmd = new RedeemCommand();
-    await cmd.execute(code);
+    if (code) {
+      await cmd.execute(code);
+    } else {
+      await cmd.executePickup();
+    }
   });
 
 program
@@ -701,6 +707,22 @@ flow
       yes: options.yes === true,
       nonTty: options.nonTty === true,
     });
+  });
+
+// Undocumented, additive: attach to a hosted-minted `checkout` flow instance
+// (POST /flows/checkout, minted server-side) and drive it to completion.
+// Authenticates SILENTLY only — never a ceremony, never a browser — and
+// never answers the flow's own consent dialog; a human approves that in the
+// hosted chat this run polls briefly for.
+flow
+  .command('run')
+  .description('Attach to a hosted-minted checkout flow instance and drive it to completion')
+  .option('--json', 'print the step-by-step outcome as JSON instead of the human UI')
+  .option('--target-dir <path>', 'directory to drive the switch in (defaults to the current one)')
+  .action(async (options: { json?: boolean; targetDir?: string }) => {
+    assertNotLocalOnly('flow run');
+    const { runFlowRunCommand } = await import('./commands/flowRunCommand');
+    await runFlowRunCommand({ json: options.json === true, targetDir: options.targetDir });
   });
 
 program

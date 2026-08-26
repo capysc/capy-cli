@@ -92,11 +92,16 @@ ISOLATED_FILES=(
   tests/ui/deployDeadline.test.ts
   tests/commands/rotatePromotesThenRotates.test.ts
   tests/auth/deviceKeyOnboarding.test.ts
+  # consume.test.ts mocks os.homedir() the same way (writes real local.key/key.enc
+  # under a temp home via keyResolver/globalConfig).
+  tests/auth/invitePickup/consume.test.ts
   tests/crypto/keyResolverSyncHook.test.ts
   tests/service/wrapperEndpoints.test.ts
   tests/auth/deviceKey/wiring.test.ts
   tests/commands/deviceKeyCommand.test.ts
   tests/commands/redeemCommand.test.ts
+  # redeemCommandPickup.test.ts mocks authService/serviceClient/invitePickup/consume the same way.
+  tests/commands/redeemCommandPickup.test.ts
   tests/commands/doorsCommand.test.ts
   tests/commands/runCommandDeviceKeyFallback.test.ts
   tests/auth/deviceKey/brokerCeremonyTransportAutoOpen.test.ts
@@ -134,6 +139,9 @@ ISOLATED_FILES=(
   # flowCancelCommand.test.ts mocks authService/serviceClient/projectManager
   # (kickCommand.test.ts's shape) plus ui/interactive's isInteractive().
   tests/commands/flowCancelCommand.test.ts
+  # flowRunCommand.test.ts mocks authService/serviceClient (flowCancelCommand.test.ts's
+  # shape) plus crypto/keyResolver's resolveProjectKey.
+  tests/commands/flowRunCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run
