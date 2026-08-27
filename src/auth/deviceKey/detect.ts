@@ -20,7 +20,14 @@
  * - C vs C′ is not decided here: whether the credential lives in a local
  *   authenticator or arrives via QR/hybrid transport is the ceremony's own
  *   discovery (CAP-381 page), invisible to the CLI. Both are `unlock`.
+ * - Master-key mint fix: "orgs exist" alone no longer always means Case B′.
+ *   An auto-provisioned personal org can exist with NO key ever minted
+ *   anywhere — recovery/transport is a dead end for it. When the caller
+ *   supplies `ownedOrgKeyStates` and every owned org is `'unminted'`, this
+ *   row routes to Case A (mint) instead. See `DetectionInputs.ownedOrgKeyStates`.
  */
+
+import type { OrgKeyState } from '../../types/index';
 
 /** What the fork decided this machine+account is. */
 export type OnboardingCaseKind =
@@ -44,11 +51,37 @@ export interface DetectionInputs {
   hasLocalRoot: boolean;
   /** Organizations in the authenticated session. */
   organizationCount: number;
+  /**
+   * Master-key mint fix: `key_state` for each organization this user OWNS,
+   * from the auth-response org list — NOT every org in `organizationCount`
+   * (a member-only org's key_state is irrelevant here: this user cannot
+   * claim its mint lease regardless of what it says).
+   *
+   * `undefined` (the default, and every caller before this field existed)
+   * makes this function byte-identical to before — the mandatory
+   * case-matrix test pins that. When supplied AND non-empty AND every
+   * element is `'unminted'`, Case B′'s "route to recovery/transport" is the
+   * wrong answer: there is no key anywhere yet to recover, only one to
+   * mint. That world routes to Case A instead. An EMPTY array (owns no
+   * org — every org.organizationCount fact comes from orgs this user is
+   * merely a member of) does NOT route to Case A: vacuously "every element
+   * unminted" would be true of nothing, and this user has no claim to mint
+   * anything.
+   */
+  ownedOrgKeyStates?: ReadonlyArray<OrgKeyState>;
+}
+
+/** Every owned org this user could claim is unminted — nothing to recover, only something to mint. */
+function allOwnedOrgsUnminted(states: ReadonlyArray<OrgKeyState> | undefined): boolean {
+  if (!states || states.length === 0) return false;
+  return states.every((s) => s === 'unminted');
 }
 
 export function decideOnboardingCase(inputs: DetectionInputs): OnboardingCaseKind {
   if (inputs.liveDoorCount > 0) return 'unlock';
   if (inputs.hasLocalRoot) return 'enroll_existing';
-  if (inputs.organizationCount > 0) return 'recovery_or_transport';
+  if (inputs.organizationCount > 0) {
+    return allOwnedOrgsUnminted(inputs.ownedOrgKeyStates) ? 'brand_new' : 'recovery_or_transport';
+  }
   return 'brand_new';
 }

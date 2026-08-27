@@ -215,6 +215,38 @@ export class EditScreen {
     if (this.onResizeHandler) process.removeListener('SIGWINCH', this.onResizeHandler);
   }
 
+  /**
+   * Hands the terminal to `fn` for the duration of a single prompt — the
+   * same-key conflict confirm a commit can now hit mid-edit
+   * (`editCommand.ts`'s `saveLocalEdits`, wired through `pushKeepWithRetry`'s
+   * `confirmOverwrite`). Detaches this screen's own stdin listener and drops
+   * out of the alt-screen buffer + raw mode so an inquirer prompt renders —
+   * and reads keystrokes — the normal way instead of racing this screen's own
+   * key handling, restores both exactly as `run()` set them up once `fn`
+   * settles (even on throw), and redraws so the screen looks untouched.
+   *
+   * A no-op passthrough (still runs `fn`, just without the terminal dance) if
+   * called before `run()` or after this screen already cleaned up — there is
+   * nothing to suspend.
+   */
+  async suspendForPrompt<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.cleanedUp) return fn();
+    const handler = this.onDataHandler;
+    if (handler) process.stdin.removeListener('data', handler);
+    process.stdout.write(DISABLE_BRACKETED_PASTE + SHOW_CURSOR + EXIT_ALT_SCREEN);
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    try {
+      return await fn();
+    } finally {
+      if (!this.cleanedUp) {
+        process.stdout.write(ENTER_ALT_SCREEN + HIDE_CURSOR + ENABLE_BRACKETED_PASTE);
+        if (process.stdin.isTTY) process.stdin.setRawMode(true);
+        if (handler) process.stdin.on('data', handler);
+        this.draw();
+      }
+    }
+  }
+
   private handleKeypress(data: Buffer, resolve: () => void): void {
     const key = data.toString();
 

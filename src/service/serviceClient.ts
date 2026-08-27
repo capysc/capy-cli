@@ -252,6 +252,44 @@ export class ServiceClient {
         );
       }
 
+      // Lock-less push CAS conflict: this write's `base_keep_hash` no longer
+      // matches the branch's current server hash. `keep_hash`/`keep_file`
+      // hoisted to top-level `details` (mirrors the 402 QUOTA_EXCEEDED shape
+      // above) so callers rebase without re-parsing `details.data`.
+      if (res.status === 409 && data.code === 'STALE_KEEP_HASH') {
+        throw new CapyError(
+          data.error || 'Keep changed on the server since this write was based on it.',
+          ERROR_CODES.STALE_KEEP_HASH,
+          { status: 409, keep_hash: data.keep_hash, keep_file: data.keep_file },
+        );
+      }
+
+      // Master-key mint arbitration (`POST /orgs/:orgId/key-mint/claim`).
+      // `expires_at` hoisted to top-level `details` (mirrors STALE_KEEP_HASH's
+      // keep_hash/keep_file above) so callers read it without re-parsing
+      // `details.data`.
+      if (res.status === 409 && data.code === 'KEY_ALREADY_MINTED') {
+        throw new CapyError(
+          data.error || 'This organization\'s master key has already been minted.',
+          ERROR_CODES.KEY_ALREADY_MINTED,
+          { status: 409 },
+        );
+      }
+      if (res.status === 409 && data.code === 'KEY_MINT_IN_PROGRESS') {
+        throw new CapyError(
+          data.error || 'Another device is currently minting this organization\'s master key.',
+          ERROR_CODES.KEY_MINT_IN_PROGRESS,
+          { status: 409, expires_at: data.expires_at },
+        );
+      }
+      if (res.status === 409 && data.code === 'KEY_MINT_NOT_CLAIMED') {
+        throw new CapyError(
+          data.error || 'This device does not hold the mint lease for this organization.',
+          ERROR_CODES.KEY_MINT_NOT_CLAIMED,
+          { status: 409 },
+        );
+      }
+
       const serverMessage = data.error || data.message || 'Service request failed';
       throw new CapyError(
         serverMessage,
@@ -452,17 +490,27 @@ export class ServiceClient {
    * The response's keep_file (when the server sends one) is the pushed
    * keep.lock with server-assigned changed_at timestamps — callers should
    * adopt it as the local keep.lock (SyncEngine.adoptServerKeep).
+   *
+   * `baseKeepHash` is the branch's keep_hash this write was based on — the
+   * CAS precondition (single-user lock-less mode, also honored in lock-full
+   * mode when the caller knows its base). Omitted entirely (not sent as
+   * undefined/null) when the caller can't determine one, so an older server
+   * that doesn't understand `base_keep_hash` sees exactly the request shape
+   * it always has. A server that DOES understand it and finds the branch has
+   * moved on responds 409 STALE_KEEP_HASH (see `request()`'s 409 handling).
    */
   async pushSecrets(
     projectId: string,
     keepFile: string,
     envBlob: string,
     branch: string,
+    baseKeepHash?: string,
   ): Promise<{ keep_hash: string; keep_file?: string }> {
     return this.request('POST', `/secrets/${projectId}`, {
       keep_file: keepFile,
       env_blob: envBlob,
       branch,
+      ...(baseKeepHash !== undefined ? { base_keep_hash: baseKeepHash } : {}),
     });
   }
 
@@ -623,6 +671,27 @@ export class ServiceClient {
     return this.request('POST', `/orgs/${orgId}/co-decrypt`, { ciphertext, ...(notAfter !== undefined ? { not_after: notAfter } : {}) });
   }
 
+  /**
+   * Claim the 15-minute first-mint lease on an auto-provisioned org's master
+   * key (Owner only). This device's own re-claim extends the lease; an
+   * expired foreign lease is taken over. 409s (`KEY_ALREADY_MINTED`,
+   * `KEY_MINT_IN_PROGRESS`) and 403/404 arrive as typed `CapyError`s via
+   * `request()`'s classification above — never parsed from prose here.
+   */
+  async claimKeyMint(orgId: string): Promise<{ key_state: 'minting'; expires_at: string }> {
+    return this.request('POST', `/orgs/${orgId}/key-mint/claim`);
+  }
+
+  /**
+   * Mark an org's master key minted, once this device has claimed the lease,
+   * generated M, and saved key.enc locally. Idempotent: a second call after
+   * the org is already `minted` answers `{ already: true }` rather than
+   * `KEY_MINT_NOT_CLAIMED` — the caller (this device, the one that just
+   * minted) already holds the key either way.
+   */
+  async finalizeKeyMint(orgId: string): Promise<{ key_state: 'minted' } | { already: true }> {
+    return this.request('POST', `/orgs/${orgId}/key-mint/finalize`);
+  }
 
   async listMembers(orgId: string): Promise<{ members: any[] }> {
     return this.request('GET', `/orgs/${orgId}/members`);

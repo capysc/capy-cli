@@ -127,9 +127,26 @@ ISOLATED_FILES=(
   tests/auth/authServiceKeepLoginBridge.test.ts
   # doctorCommand.test.ts mocks os.homedir() the same way (getGlobalCapyDir).
   tests/commands/doctorCommand.test.ts
+  # locklessContext.test.ts mocks authService/serviceClient/keyResolver
+  # (single-user lock-less resolveContext/writeAndSync) and os.homedir()
+  # (writeKeepCache lands in a throwaway home, not the developer's real ~/.capy).
+  tests/commands/connectors/locklessContext.test.ts
+  # conflictUx.test.ts mocks authService/serviceClient/keyResolver/inquirer/
+  # ui/editScreen.ts and os.homedir() the same way, for the conflict-gate
+  # context lines, the edit/push CAS confirm wiring, and the personal-env
+  # soft warning.
+  tests/commands/connectors/conflictUx.test.ts
   # flowCancelCommand.test.ts mocks authService/serviceClient/projectManager
   # (kickCommand.test.ts's shape) plus ui/interactive's isInteractive().
   tests/commands/flowCancelCommand.test.ts
+  # masterKeyMint.test.ts mocks keyManager/keyResolver/ui/recoveryPhrase/
+  # ui/interactive (master-key first-mint ceremony, unit-level).
+  tests/auth/masterKeyMint.test.ts
+  # locklessMintFallback.test.ts mocks authService/serviceClient/keyResolver/
+  # keyManager/ui/recoveryPhrase/ui/interactive and os.homedir() the same way
+  # as locklessContext.test.ts, for the mint-chokepoint integration through
+  # resolveContext's lock-less path.
+  tests/commands/connectors/locklessMintFallback.test.ts
   # flowRunCommand.test.ts mocks authService/serviceClient (flowCancelCommand.test.ts's
   # shape) plus crypto/keyResolver's resolveProjectKey.
   tests/commands/flowRunCommand.test.ts

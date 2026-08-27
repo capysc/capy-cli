@@ -87,4 +87,47 @@ describe('device-key onboarding detection fork', () => {
       expect(decideOnboardingCase(world(0, 0, true, 3))).toBe('enroll_existing');
     });
   });
+
+  /**
+   * Master-key mint fix: `ownedOrgKeyStates` is additive and optional.
+   * Every row above calls `decideOnboardingCase` with no such field at all —
+   * this block is the ONLY place the new field is ever set, and it must
+   * change nothing about the rows above (asserted again here explicitly, not
+   * just implied by the untouched rows staying green).
+   */
+  describe('ownedOrgKeyStates (additive, mint fix)', () => {
+    it('absent: byte-identical to before this field existed, for every named case', () => {
+      expect(decideOnboardingCase(world(0, 0, false, 0))).toBe('brand_new');
+      expect(decideOnboardingCase(world(0, 0, true, 1))).toBe('enroll_existing');
+      expect(decideOnboardingCase(world(0, 0, false, 2))).toBe('recovery_or_transport');
+      expect(decideOnboardingCase(world(1, 1, false, 1))).toBe('unlock');
+    });
+
+    it('present but only relevant when the fork would otherwise say recovery_or_transport', () => {
+      // liveDoorCount > 0 still wins outright — unminted-owned-orgs is not checked.
+      expect(decideOnboardingCase({ ...world(1, 0, false, 1), ownedOrgKeyStates: ['unminted'] })).toBe('unlock');
+      // hasLocalRoot still wins outright.
+      expect(decideOnboardingCase({ ...world(0, 0, true, 1), ownedOrgKeyStates: ['unminted'] })).toBe('enroll_existing');
+    });
+
+    it('every owned org unminted, on the recovery_or_transport row → routes to brand_new (Case A) instead', () => {
+      expect(decideOnboardingCase({ ...world(0, 0, false, 1), ownedOrgKeyStates: ['unminted'] })).toBe('brand_new');
+      expect(decideOnboardingCase({ ...world(0, 0, false, 3), ownedOrgKeyStates: ['unminted', 'unminted'] })).toBe('brand_new');
+    });
+
+    it('any owned org minted or minting → the row is untouched (recovery/transport is correct: a key exists, or one is being minted, somewhere)', () => {
+      expect(decideOnboardingCase({ ...world(0, 0, false, 1), ownedOrgKeyStates: ['minted'] })).toBe('recovery_or_transport');
+      expect(decideOnboardingCase({ ...world(0, 0, false, 1), ownedOrgKeyStates: ['minting'] })).toBe('recovery_or_transport');
+      expect(decideOnboardingCase({ ...world(0, 0, false, 2), ownedOrgKeyStates: ['unminted', 'minted'] })).toBe('recovery_or_transport');
+    });
+
+    it('empty array (owns none of the visible orgs) does NOT vacuously route to brand_new', () => {
+      expect(decideOnboardingCase({ ...world(0, 0, false, 1), ownedOrgKeyStates: [] })).toBe('recovery_or_transport');
+    });
+
+    it('zero-org world is unaffected either way — that row never reaches the owned-org check', () => {
+      expect(decideOnboardingCase({ ...world(0, 0, false, 0), ownedOrgKeyStates: [] })).toBe('brand_new');
+      expect(decideOnboardingCase({ ...world(0, 0, false, 0), ownedOrgKeyStates: ['unminted'] })).toBe('brand_new');
+    });
+  });
 });
