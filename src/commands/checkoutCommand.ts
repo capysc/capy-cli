@@ -4,7 +4,7 @@ import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import inquirer from 'inquirer';
-import { Branch, CapyError, ERROR_CODES, getSyncKeepHash, KeepFile } from '../types/index';
+import { Branch, CapyError, ERROR_CODES, getSyncKeepHash, KeepFile, setSyncKeepHash } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { SyncEngine } from '../sync/syncEngine';
 import { hashValue } from './statusCommand';
@@ -101,18 +101,33 @@ export async function syncAndWriteBranch(
   branchName: string,
   encryptionKey: string,
   isCreate: boolean,
+  pinnedKeepHash?: string,
 ): Promise<BranchSyncOutcome> {
   const fetched = await (async (): Promise<
     { ok: true; data: Awaited<ReturnType<ServiceClient['getDecryptData']>> } | { ok: false; outcome: BranchSyncOutcome }
   > => {
     try {
-      return { ok: true, data: await deps.serviceClient.getDecryptData(projectId, branchName, undefined, true) };
+      return {
+        ok: true,
+        data: await deps.serviceClient.getDecryptData(projectId, branchName, pinnedKeepHash, true),
+      };
     } catch (error: any) {
       const status = error?.details?.status;
       if (status === 403) {
         return { ok: false, outcome: { kind: 'forbidden', varCount: 0, seededFromCurrent: false } };
       }
       if (status === 404) {
+        if (pinnedKeepHash) {
+          return {
+            ok: false,
+            outcome: {
+              kind: 'sync_error',
+              errorMessage: 'The snapshot pinned by the current keep.lock is unavailable.',
+              varCount: 0,
+              seededFromCurrent: false,
+            },
+          };
+        }
         // No snapshot yet for this branch — treat as empty and proceed to switch.
         return {
           ok: true,
@@ -191,6 +206,8 @@ export async function syncAndWriteBranch(
 
 export interface CheckoutOptions {
   create?: boolean;
+  /** Replace the local .env and sync-state from the current keep.lock. */
+  refresh?: boolean;
   /** Settled by `--protected` / `--no-protected`; undefined means ask. */
   protected?: boolean;
   /**
@@ -252,9 +269,13 @@ export class CheckoutCommand {
 
     // Authenticate
     const spinner = ora('Authenticating...').start();
-    let authResult = await this.authService.authenticateSilent(projectState.organizationId);
-    if (!authResult.success) authResult = await this.authService.authenticateSilent();
-    if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
+    const authResult = await (async () => {
+      const organizationResult = await this.authService.authenticateSilent(projectState.organizationId);
+      if (organizationResult.success) return organizationResult;
+      const silentResult = await this.authService.authenticateSilent();
+      if (silentResult.success) return silentResult;
+      return this.authService.authenticate(projectState.organizationId);
+    })();
     if (!authResult.success) {
       spinner.fail('Authentication failed');
       throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
@@ -273,7 +294,7 @@ export class CheckoutCommand {
     const encryptionKey = await resolveProjectKey(orgId, projectId, authResult.user_id!, keyOps);
 
     // Guard: block checkout if working tree is dirty (skip for branch creation)
-    if (!options.create) {
+    if (!options.create && !options.refresh) {
       const keep = this.projectManager.readKeepFile();
       const currentBranch = this.projectManager.readActiveBranch();
 
@@ -289,6 +310,22 @@ export class CheckoutCommand {
       const dirtyBranch = envHeaderBranch || currentBranch;
 
       if (keep && dirtyBranch) {
+        // A git pull/reset can move keep.lock without touching .env or
+        // sync-state. Detect that discriminator before diffing .env: the old
+        // guards would otherwise call the resulting stale values
+        // "uncommitted" or "unpushed" and recommend overwriting the newer
+        // lockfile. Refresh is the explicit, destructive recovery path.
+        const syncState = this.projectManager.readSyncState();
+        const savedHash = getSyncKeepHash(syncState, dirtyBranch);
+        const currentKeepHash = SyncEngine.computeKeepHash(keep, dirtyBranch);
+        if (savedHash != null && savedHash !== currentKeepHash) {
+          console.error(`keep.lock changed outside capy (for example, via git pull).`);
+          console.error(`Your local .env for "${dirtyBranch}" may be stale.`);
+          console.error(`Run ${B(`capy checkout ${dirtyBranch} --refresh`)} to replace it from the current keep.lock.`);
+          process.exit(1);
+          return;
+        }
+
         // Check A: uncommitted changes (.env differs from keep.lock)
         try {
           const localPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
@@ -301,17 +338,6 @@ export class CheckoutCommand {
           }
         } catch {
           // If .env doesn't exist or can't be read, no uncommitted changes to worry about
-        }
-
-        // Check B: unpushed changes (keep.lock differs from last sync)
-        const syncState = this.projectManager.readSyncState();
-        const savedHash = getSyncKeepHash(syncState, dirtyBranch);
-        const currentKeepHash = SyncEngine.computeKeepHash(keep, dirtyBranch);
-
-        if (savedHash != null && savedHash !== currentKeepHash) {
-          console.error(`You have unpushed changes on "${dirtyBranch}".`);
-          console.error(`Run ${B('capy push')} before switching branches.`);
-          process.exit(1);
         }
       }
     }
@@ -392,6 +418,9 @@ export class CheckoutCommand {
       branchName,
       encryptionKey,
       options.create === true,
+      options.refresh
+        ? SyncEngine.computeKeepHash(this.projectManager.readKeepFile()!, branchName)
+        : undefined,
     );
     syncSpinner.stop();
 
@@ -403,6 +432,24 @@ export class CheckoutCommand {
     if (outcome.kind === 'sync_error') {
       console.error(`Failed to sync secrets: ${outcome.errorMessage}`);
       process.exit(1);
+    }
+
+    if (options.refresh) {
+      const refreshedKeep = this.projectManager.readKeepFile()!;
+      const refreshedPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
+      const existingSyncState = this.projectManager.readSyncState();
+      this.fileManager.writeSyncState({
+        ...existingSyncState,
+        last_sync: new Date().toISOString(),
+        synced_variables: Object.keys(refreshedPlaintext),
+        user_id: authResult.user_id,
+        org_id: orgId,
+        keep_hash: setSyncKeepHash(
+          existingSyncState,
+          branchName,
+          SyncEngine.computeKeepHash(refreshedKeep, branchName),
+        ),
+      });
     }
 
     if (outcome.seededFromCurrent) {

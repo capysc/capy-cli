@@ -657,6 +657,32 @@ export class CapyCommand {
         }
         orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
       } else {
+        // CAP-567. The org picker is a human-only stop, and until now it was
+        // the ONLY one on this path with no non-interactive guard. With stdin
+        // piped — which is how every agent runs this, including the hosted MCP
+        // whose instruction is a bare `capy onboard` — inquirer opened the
+        // list, hit EOF, and raised `ExitPromptError`. That is the same
+        // exception a human's Ctrl-C raises, and `ui/errorScreen.ts` rightly
+        // treats Ctrl-C as `process.exit(0)`.
+        //
+        // So `capy onboard` over a pipe EXITED 0 having done nothing: no
+        // keep.lock, no AGENTS.md, the .env still plaintext. Silent, and
+        // indistinguishable from success to the only caller that can't see the
+        // picker it stopped at.
+        //
+        // `ui/interactive.ts` already forbids exactly this — "never render a
+        // picker that EOFs to a silent cancel" — and already provides the
+        // refusal and the reserved exit code. This stop simply never adopted
+        // them. Checked BEFORE the prompt is constructed, the same ordering
+        // EDIT_SCREEN_UNSAFE_SURFACE's comment argues for: discovering "no
+        // TTY" from ExitPromptError at the first keypress read is too late.
+        const { isInteractive, refuseNonInteractive } = await import('../ui/interactive');
+        if (!isInteractive()) {
+          refuseNonInteractive(
+            'choosing an organization is a decision this command cannot make for you, and stdin is not a terminal',
+            'Re-run with --web to answer it in a browser — the same picker, on a page you can open from any device.',
+          );
+        }
         ({ orgId } = await inquirer.prompt([{
           type: 'list',
           name: 'orgId',

@@ -347,6 +347,7 @@ program
   .command('checkout <branch>')
   .description('Switch to a secret branch')
   .option('-b, --create', 'Create the branch if it does not exist')
+  .option('--refresh', 'Replace local .env and sync-state from the current keep.lock')
   .option('--protected', 'Mark as a protected branch (invite-only)')
   .option('--no-protected', 'Create it open to the project')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
@@ -372,6 +373,7 @@ program
     const cmd = new CheckoutCommand();
     await cmd.execute(branch, {
       create: options.create,
+      refresh: options.refresh,
       protected: options.protected,
       web: command.optsWithGlobals().web === true,
     });
