@@ -80,8 +80,16 @@ export class OrgCommand {
     if (!authResult.success) authResult = await this.authService.authenticateSilent();
     if (!authResult.success) authResult = await this.authService.authenticate(currentOrgId);
     if (!authResult.success) {
-      console.error('Authentication failed. Run `capy` to re-authenticate.');
-      process.exit(1);
+      // THROW, never console.error + process.exit. The catch in `execute()`
+      // routes to `displayErrorAndExit`, which serves the command-error page
+      // under `--web` and holds the process open until the browser has fetched
+      // it. Exiting here never throws, so that catch never ran and a --web
+      // caller — who has no terminal, that being the whole point of the flag —
+      // got a refusal on a stream with nobody on the other end.
+      throw new CapyError(
+        'Authentication failed. Run `capy` to re-authenticate.',
+        ERROR_CODES.AUTH_FAILED,
+      );
     }
 
     const orgs = authResult.organizations || [];
@@ -118,8 +126,16 @@ export class OrgCommand {
 
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
     if (!refreshToken) {
-      console.error('No refresh token available. Run `capy` to re-authenticate.');
-      process.exit(1);
+      // THROW, never console.error + process.exit. The catch in `execute()`
+      // routes to `displayErrorAndExit`, which serves the command-error page
+      // under `--web` and holds the process open until the browser has fetched
+      // it. Exiting here never throws, so that catch never ran and a --web
+      // caller — who has no terminal, that being the whole point of the flag —
+      // got a refusal on a stream with nobody on the other end.
+      throw new CapyError(
+        'No refresh token available. Run `capy` to re-authenticate.',
+        ERROR_CODES.FRESH_AUTH_REQUIRED,
+      );
     }
 
     let selectedOrg: Organization;
@@ -251,8 +267,16 @@ export class OrgCommand {
     const userId = authResult.user_id!;
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
     if (!refreshToken) {
-      console.error('No refresh token available. Run `capy` to re-authenticate.');
-      process.exit(1);
+      // THROW, never console.error + process.exit. The catch in `execute()`
+      // routes to `displayErrorAndExit`, which serves the command-error page
+      // under `--web` and holds the process open until the browser has fetched
+      // it. Exiting here never throws, so that catch never ran and a --web
+      // caller — who has no terminal, that being the whole point of the flag —
+      // got a refusal on a stream with nobody on the other end.
+      throw new CapyError(
+        'No refresh token available. Run `capy` to re-authenticate.',
+        ERROR_CODES.FRESH_AUTH_REQUIRED,
+      );
     }
 
     const { switchOrganizationInBrowser, nameFirstProjectInBrowser } = await import('../ui/selectWeb');
