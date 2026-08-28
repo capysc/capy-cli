@@ -46,9 +46,9 @@ export function createInvitePickupOps(
       await ensureOrg(orgId);
       return serviceClient.fetchInviteBlob(orgId, inviteId);
     },
-    coDecrypt: async (orgId, ciphertext) => {
+    coDecrypt: async (orgId, ciphertext, notAfter) => {
       await ensureOrg(orgId);
-      return serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext);
+      return serviceClient.coDecrypt(orgId, ciphertext, notAfter).then(r => r.plaintext);
     },
     wrapOuterLayer: async (orgId, plaintext) => {
       await ensureOrg(orgId);
