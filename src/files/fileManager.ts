@@ -279,24 +279,17 @@ export class FileManager {
     }
   }
 
-  updateGitignore(entries: string[]): void {
+  updateGitignore(entries: readonly string[]): void {
     const gitignorePath = join(this.projectRoot, '.gitignore');
-    let existingContent = '';
-
-    if (existsSync(gitignorePath)) {
-      existingContent = readFileSync(gitignorePath, 'utf-8');
-    }
+    const existingContent = existsSync(gitignorePath)
+      ? readFileSync(gitignorePath, 'utf-8')
+      : '';
 
     const existingLines = new Set(
       existingContent.split('\n').map(line => line.trim()).filter(Boolean)
     );
 
-    const newEntries: string[] = [];
-    for (const entry of entries) {
-      if (!existingLines.has(entry)) {
-        newEntries.push(entry);
-      }
-    }
+    const newEntries = entries.filter((entry) => !existingLines.has(entry));
 
     if (newEntries.length === 0) {
       return;
@@ -308,10 +301,8 @@ export class FileManager {
         appendFileSync(gitignorePath, '\n', 'utf-8');
       }
 
-      if (newEntries.length > 0) {
-        appendFileSync(gitignorePath, '\n# Capy\n', 'utf-8');
-        appendFileSync(gitignorePath, contentToAppend + '\n', 'utf-8');
-      }
+      appendFileSync(gitignorePath, '\n# Capy\n', 'utf-8');
+      appendFileSync(gitignorePath, contentToAppend + '\n', 'utf-8');
     } catch (error) {
       throw new CapyError(
         'Failed to update .gitignore',
@@ -365,10 +356,12 @@ export class FileManager {
   ensureCapyGitignore(): void {
     const requiredEntries = [
       '.env',
-      '.capy',
+      '!/.capy/',
+      '/.capy/*',
+      '!/.capy/deploy.json',
       '.env.pre-capy.old',
       '.env.*.decrypted',
-    ];
+    ] as const;
     this.updateGitignore(requiredEntries);
   }
 
