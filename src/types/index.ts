@@ -354,6 +354,13 @@ export const ERROR_CODES = {
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
   // not-found family — replaces server-prose string matching in serviceClient
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
+  // `capy connect <name>` names a provider this build does not have. A
+  // not-found condition, not a malformed one: the remedy is to pick from the
+  // list, where a syntax error's remedy is to correct the input. Minted rather
+  // than folded into INVALID_FORMAT for the reason KEY_NOT_ON_DEVICE gives —
+  // the remedies differ, and nothing may distinguish them by reading the
+  // message.
+  PROVIDER_NOT_FOUND: 'PROVIDER_NOT_FOUND',
   // The signed-in account belongs to no organization at all. Distinct from
   // PROJECT_NOT_FOUND and from a permission refusal: there is nothing to pick
   // from, so no amount of re-authenticating or re-scoping helps.

@@ -191,7 +191,7 @@ export class ConnectCommand {
       await displayErrorAndExit(
         new CapyError(
           `${(err as Error).message}\nRun \`capy connect\` to see available providers.`,
-          ERROR_CODES.INVALID_FORMAT,
+          ERROR_CODES.PROVIDER_NOT_FOUND,
         ),
       );
       return { linked: false };

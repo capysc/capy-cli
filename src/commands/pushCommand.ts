@@ -81,8 +81,15 @@ export class PushCommand {
       userId: projectState.userId,
     });
     if (!projectState.initialized) {
-      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-      process.exit(1);
+      // THROW, never console.error + process.exit. `execute()`'s catch routes to
+      // `displayErrorAndExit`, which serves the command-error page under `--web`.
+      // `push` takes no `web` option and needs none: that function reads web mode
+      // itself. Exiting here never threw, so the catch never ran and a --web
+      // caller got a refusal on a stream with nobody on the other end.
+      throw new CapyError(
+        `No keep.lock file found. Run ${B('capy')} first to initialize.`,
+        ERROR_CODES.PROJECT_NOT_INITIALIZED,
+      );
     }
 
     // Local-only mode: no auth, no server push. `capy push` becomes a local
@@ -140,8 +147,12 @@ export class PushCommand {
       variables: Object.keys(keep.variables),
     } : 'NOT FOUND');
     if (!keep) {
-      console.error('No keep.lock file found.');
-      process.exit(1);
+      // THROW, never console.error + process.exit. `execute()`'s catch routes to
+      // `displayErrorAndExit`, which serves the command-error page under `--web`.
+      // `push` takes no `web` option and needs none: that function reads web mode
+      // itself. Exiting here never threw, so the catch never ran and a --web
+      // caller got a refusal on a stream with nobody on the other end.
+      throw new CapyError('No keep.lock file found.', ERROR_CODES.NO_KEEP_FILE);
     }
 
     const branch = projectState.activeBranch;
