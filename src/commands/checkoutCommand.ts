@@ -395,6 +395,26 @@ export class CheckoutCommand {
           }
           branchName = picked;
         } else {
+          // Under `--web` with nothing switchable, this used to print the listing
+          // to a terminal nobody is watching and exit — the flag exists precisely
+          // because the caller has none. The comment above is right that a PICKER
+          // with no rows is a page with no way out of it; an informational ending
+          // is not a picker, and it is what the caller is owed.
+          //
+          // The sentences are the terminal's own, carried whole rather than
+          // rewritten, so the two surfaces say the same thing and no new copy is
+          // invented for a state that already has words.
+          const listing = branches
+            .map((b) => `  ${b.name}${b.is_protected ? ' (protected)' : ''}`)
+            .join('\n');
+          if (options.web) {
+            throw new CapyError(
+              `Branch "${branchName}" not found\n\nAvailable branches:\n${listing}\n\n` +
+                `Create it with: capy checkout -b ${branchName}`,
+              ERROR_CODES.BRANCH_NOT_FOUND,
+            );
+          }
+          // Terminal path unchanged, deliberately byte-for-byte.
           console.log(`Branch "${branchName}" not found\n`);
           console.log('Available branches:');
           for (const b of branches) {
