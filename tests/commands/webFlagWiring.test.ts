@@ -167,3 +167,67 @@ describe('--web reaches the commands that can serve a screen', () => {
     ).toEqual([]);
   });
 });
+
+/**
+ * THE BLIND SPOT IN THE TEST ABOVE.
+ *
+ * `readsWebFromGlobals` scans the WHOLE command block for `merged.web`. That is
+ * enough when a block has one route to its implementation. `deploy` has two:
+ * a connector branch that passes `web: merged.web === true`, and a default
+ * branch — no `--target`, no `--connect`, no `--json`, i.e. the most natural
+ * invocation — that constructs `DeployCommand` without it.
+ *
+ * The connector branch supplies the string the scan looks for, so the scan is
+ * satisfied by a sibling of the broken code. `capy deploy --web` parses, is
+ * accepted, and silently runs the terminal path; the whole browser branch of a
+ * fully `--web`-aware class is unreachable from argv.
+ *
+ * A guard that cannot see the thing it guards is worth more attention than the
+ * bug it missed, which is why this asserts a different property: not "the block
+ * mentions the flag somewhere" but "every command instance in the block is
+ * actually handed it" — at construction or at the call that runs it.
+ *
+ * Both spellings count, because both are in real use here: `connect`, `edit`,
+ * `decrypt`, `rotate` and `checkout` all construct with no arguments and pass
+ * `web` to `execute()`. Only requiring it in the constructor would flag all
+ * five falsely, and a guard that cries wolf gets deleted.
+ */
+interface Instance {
+  readonly cls: string;
+  readonly wired: boolean;
+}
+
+function commandInstances(block: string): readonly Instance[] {
+  return [...block.matchAll(/const\s+(\w+)\s*=\s*new\s+([A-Za-z]+Command)\s*\(([\s\S]*?)\);\n/g)].map(
+    (m) => {
+      const [, binding, cls, ctorArgs] = m;
+      const after = block.slice((m.index ?? 0) + m[0].length);
+      const calls = [...after.matchAll(new RegExp(`\\b${binding}\\.(?:\\w+)\\(([\\s\\S]*?)\\)`, 'g'))];
+      return {
+        cls,
+        wired: /\bweb\s*:/.test(ctorArgs) || calls.some((c) => /\bweb\b/.test(c[1])),
+      };
+    },
+  );
+}
+
+const INSTANCE_CASES: Array<[string, string]> = ENTRYPOINTS.flatMap((entry) =>
+  commandsNeedingWeb(entry).map((name) => [entry, name] as [string, string]),
+);
+
+describe('every command instance is handed --web, not just its block', () => {
+  test.each(INSTANCE_CASES)('%s: %s hands the flag to every instance it builds', (entry, name) => {
+    const unwired = commandInstances(commandBlock(entry, name))
+      .filter((i) => !i.wired)
+      .map((i) => i.cls);
+
+    expect(
+      unwired,
+      `in ${entry}, \`${name}\` constructs ${unwired.join(', ')} without ever handing it ` +
+        `\`web\` — not in the constructor and not in the call that runs it. The flag parses ` +
+        `and is then dropped on this route, so the browser branch is unreachable from argv ` +
+        `and the command answers in a terminal nobody is watching. Another branch of the same ` +
+        `block passing \`web\` is what hid this.`,
+    ).toEqual([]);
+  });
+});
