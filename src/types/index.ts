@@ -354,6 +354,10 @@ export const ERROR_CODES = {
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
   // not-found family — replaces server-prose string matching in serviceClient
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
+  // The email given to `capy kick` matches no member of this organization.
+  // Distinct from PERMISSION_DENIED: the caller may well be allowed to remove
+  // members, there is simply nobody here by that address.
+  MEMBER_NOT_FOUND: 'MEMBER_NOT_FOUND',
   // No keep.lock in this directory: the project was never initialized here.
   // Distinct from PROJECT_NOT_FOUND, which means the server does not know the
   // project — this one means this working copy does not.

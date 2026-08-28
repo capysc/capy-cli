@@ -1,14 +1,17 @@
 import { resolveOrgContext } from '../core/orgContext';
+import { CapyError, ERROR_CODES } from '../types/index';
 
 export interface KickOpts {
   /**
    * Render the confirmation as a compiled screen in a local browser instead of
    * inquirer's one-line confirm.
    *
-   * `--web` is a global option on the root program. `src/index.ts` does not
-   * read it for `kick` yet, so this path is live and tested but not reachable
-   * from argv until whoever owns that file threads `optsWithGlobals().web`
-   * through — the same seam `capy checkout` is waiting on.
+   * `--web` is a global option on the root program, and `src/index.ts` DOES
+   * thread it for `kick` today:
+   *     await cmd.execute(email, { web: command.optsWithGlobals().web === true })
+   * This comment previously said the opposite, and said it long enough to be
+   * believed — it understated the exposure of every refusal below, which are
+   * reachable under `--web` right now.
    */
   web?: boolean;
 }
@@ -22,7 +25,29 @@ export class KickCommand {
     this.devMode = devMode;
   }
 
+  /**
+   * The wrapper that makes a refusal reachable.
+   *
+   * Every ending below used to be `console.error(...)` + `process.exit(1)`,
+   * which is right in a terminal and empty under `--web`: the flag exists
+   * because the caller is an agent or is on another device, so the one
+   * sentence saying what went wrong went to a stream with nobody on it.
+   * `displayErrorAndExit` serves the command-error page, holds the process
+   * open until the browser has fetched it, still prints to the terminal, and
+   * exits 1 either way — so the terminal behaviour is unchanged and the web
+   * caller stops getting nothing.
+   */
   async execute(email: string, opts: KickOpts = {}): Promise<void> {
+    try {
+      await this._execute(email, opts);
+    } catch (error: any) {
+      if (error?.name === 'ExitPromptError') throw error;
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      await displayErrorAndExit(error);
+    }
+  }
+
+  private async _execute(email: string, opts: KickOpts = {}): Promise<void> {
     const { orgId, authService, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
     // Find the membership by email
@@ -37,8 +62,7 @@ export class KickCommand {
         m.email.toLowerCase() === email.toLowerCase()
       );
       if (!match) {
-        console.error(`No member found matching "${email}".`);
-        process.exit(1);
+        throw new CapyError(`No member found matching "${email}".`, ERROR_CODES.MEMBER_NOT_FOUND);
       }
       membershipId = match.membershipId;
       member = match;
@@ -68,8 +92,7 @@ export class KickCommand {
         }
       }
     } catch (err: any) {
-      console.error(`Failed to list members: ${err.message}`);
-      process.exit(1);
+      throw new CapyError(`Failed to list members: ${err.message}`, ERROR_CODES.SERVICE_ERROR);
     }
 
     // Confirm.
@@ -130,8 +153,7 @@ export class KickCommand {
     try {
       await serviceClient.kickMember(orgId, membershipId);
     } catch (err: any) {
-      console.error(`Failed to remove member: ${err.message}`);
-      process.exit(1);
+      throw new CapyError(`Failed to remove member: ${err.message}`, ERROR_CODES.SERVICE_ERROR);
     }
 
     console.log('');
