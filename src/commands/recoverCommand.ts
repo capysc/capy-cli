@@ -16,6 +16,7 @@ import {
 } from '../crypto/keyManager';
 import { readLocalRoot } from '../config/globalConfig';
 import { isInteractive } from '../ui/interactive';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
 import {
   runDeviceKeyEnrollment,
@@ -182,15 +183,37 @@ export class RecoverCommand {
       authResult = await authService.authenticate();
     }
     if (!authResult.success) {
-      console.error(`\n  Sign-in failed: ${authResult.error || 'unknown error'}. Re-run ${B('capy recover')} after authenticating.\n`);
-      process.exit(1);
+      // `displayErrorAndExit` rather than console.error + process.exit. Both of
+      // these run BEFORE the `if (options.web)` branch below, so they are
+      // reachable under `--web` — and exiting here left that caller, who has no
+      // terminal, with nothing at all. Called directly rather than thrown:
+      // there is no enclosing try in this method.
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      await displayErrorAndExit(
+        new CapyError(
+          `Sign-in failed: ${authResult.error || 'unknown error'}. Re-run ${B('capy recover')} after authenticating.`,
+          ERROR_CODES.AUTH_FAILED,
+        ),
+      );
+      return;
     }
 
     const userId = authResult.user_id!;
     const orgs = authResult.organizations || [];
     if (orgs.length === 0) {
-      console.error(`\n  No organizations found for ${B(authResult.user_email || 'this user')}.\n`);
-      process.exit(1);
+      // `displayErrorAndExit` rather than console.error + process.exit. Both of
+      // these run BEFORE the `if (options.web)` branch below, so they are
+      // reachable under `--web` — and exiting here left that caller, who has no
+      // terminal, with nothing at all. Called directly rather than thrown:
+      // there is no enclosing try in this method.
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      await displayErrorAndExit(
+        new CapyError(
+          `No organizations found for ${B(authResult.user_email || 'this user')}.`,
+          ERROR_CODES.NO_ORGANIZATIONS,
+        ),
+      );
+      return;
     }
 
     if (options.web) {

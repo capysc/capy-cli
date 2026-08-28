@@ -354,6 +354,10 @@ export const ERROR_CODES = {
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
   // not-found family — replaces server-prose string matching in serviceClient
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
+  // The signed-in account belongs to no organization at all. Distinct from
+  // PROJECT_NOT_FOUND and from a permission refusal: there is nothing to pick
+  // from, so no amount of re-authenticating or re-scoping helps.
+  NO_ORGANIZATIONS: 'NO_ORGANIZATIONS',
   // The email given to `capy kick` matches no member of this organization.
   // Distinct from PERMISSION_DENIED: the caller may well be allowed to remove
   // members, there is simply nobody here by that address.
