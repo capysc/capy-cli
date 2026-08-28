@@ -299,6 +299,28 @@ export class CapyCommand {
       return envBranch;
     }
 
+    // This conflict is a dead end that used to end on stderr and nothing else.
+    // Under `--web` the caller has no terminal by definition, so the one
+    // explanation of what broke — and the two commands that fix it — reached
+    // nobody. `this.options.web` is already on the instance and `execute()`'s
+    // catch ends in `displayErrorAndExit`, so no plumbing is needed: the
+    // conflict just has to be thrown rather than printed.
+    //
+    // The sentences are the terminal's own, carried whole. This state already
+    // has words and they are good ones; a second set written for the browser
+    // would be two things to keep in step.
+    if (this.options.web) {
+      throw new CapyError(
+        `Local state is inconsistent:\n` +
+          `  .capy/branch says ${fileBranch}\n` +
+          `  .env was encrypted for ${envBranch}\n\n` +
+          `This usually means a previous checkout was interrupted.\n` +
+          `Recover with: capy checkout ${envBranch} (re-sync to the branch .env actually holds)\n` +
+          `           or: capy checkout ${fileBranch} (finish switching to the branch .capy/branch claims)`,
+        ERROR_CODES.CONFLICT_RESOLUTION,
+      );
+    }
+    // Terminal path unchanged, deliberately byte-for-byte.
     console.error(`\nLocal state is inconsistent:`);
     console.error(`  .capy/branch says ${B(fileBranch)}`);
     console.error(`  .env was encrypted for ${B(envBranch)}`);
