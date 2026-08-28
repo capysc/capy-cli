@@ -354,8 +354,11 @@ export class DeployCommand {
         if (silentNoOrg.success) return silentNoOrg;
         const interactive = await authService.authenticate(orgId);
         if (interactive.success) return interactive;
-        console.error('Authentication failed');
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError('Authentication failed', ERROR_CODES.AUTH_FAILED);
       };
       const authResult = await resolveAuth();
 
@@ -425,8 +428,14 @@ export class DeployCommand {
         }
         if (flagPlatform !== undefined) {
           if (badPlatformFlag) {
-            console.error(`  --platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`);
-            process.exit(1);
+            // THROW, never console.error + process.exit. `execute()`'s catch routes to
+            // `displayErrorAndExit`, which serves the command-error page under `--web`
+            // and holds the process open until the browser has fetched it. Exiting
+            // here never throws, so that catch never ran.
+            throw new CapyError(
+              `--platform must be one of: ${PLATFORMS.map(p => p.value).join(', ')}`,
+              ERROR_CODES.INVALID_FORMAT,
+            );
           }
           return { platform: flagPlatform };
         }
@@ -735,8 +744,14 @@ export class DeployRevokeCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError(
+          `No keep.lock file found. Run ${B('capy')} first to initialize.`,
+          ERROR_CODES.PROJECT_NOT_INITIALIZED,
+        );
       }
 
       const orgId = projectState.organizationId;
@@ -752,8 +767,11 @@ export class DeployRevokeCommand {
         if (silentNoOrg.success) return silentNoOrg;
         const interactive = await authService.authenticate(orgId);
         if (interactive.success) return interactive;
-        console.error('Authentication failed');
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError('Authentication failed', ERROR_CODES.AUTH_FAILED);
       };
       await resolveAuth();
 
@@ -769,8 +787,14 @@ export class DeployRevokeCommand {
       // Branch on the code, not on anything printed.
       const match = resolveTokenPrefix(rows, deployIdPrefix);
       if (match.code === 'none') {
-        console.error(`  No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`);
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError(
+          `No deploy token starting with ${deployIdPrefix.slice(0, 12)} in this project.`,
+          ERROR_CODES.DEPLOY_TOKEN_NOT_FOUND,
+        );
       }
       if (match.code === 'ambiguous') {
         console.error(
@@ -830,8 +854,14 @@ export class DeployListCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError(
+          `No keep.lock file found. Run ${B('capy')} first to initialize.`,
+          ERROR_CODES.PROJECT_NOT_INITIALIZED,
+        );
       }
 
       const orgId = projectState.organizationId;
@@ -844,8 +874,11 @@ export class DeployListCommand {
       if (!authResult.success) authResult = await authService.authenticateSilent();
       if (!authResult.success) authResult = await authService.authenticate(orgId);
       if (!authResult.success) {
-        console.error('Authentication failed');
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError('Authentication failed', ERROR_CODES.AUTH_FAILED);
       }
 
       const { tokens } = await serviceClient.listDeployTokens(orgId, projectId);
