@@ -11,6 +11,7 @@ import type {
   ConnectResultData,
 } from '../ui/screens/contract';
 import type { AuthService } from '../auth/authService';
+import { CapyError, ERROR_CODES } from '../types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -141,9 +142,20 @@ export class ConnectCommand {
   async execute(provider: string, opts: ConnectOpts): Promise<{ linked: boolean }> {
     // Live-mode firewall: capy-dev never touches a live key.
     if (this.devMode && opts.live) {
-      console.error('\n  Live mode is not allowed in dev mode.');
-      console.error('  Use the production `capy` binary against your real Capy service.\n');
-      process.exit(1);
+      // `await displayErrorAndExit(...); return ...` — the pattern rotateCommand
+      // documents. It serves the command-error page under `--web`, holds the
+      // process open until the browser has fetched it, still prints to the
+      // terminal, and exits 1. The `return` is not decoration: the function is
+      // Promise<{ linked: boolean }> and TypeScript does not narrow across an
+      // awaited never, so it is what keeps the signature honest.
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      await displayErrorAndExit(
+        new CapyError(
+          'Live mode is not allowed in dev mode.\nUse the production `capy` binary against your real Capy service.',
+          ERROR_CODES.PERMISSION_DENIED,
+        ),
+      );
+      return { linked: false };
     }
 
     // The mode question needs to know it is running under capy-dev so it can
@@ -169,9 +181,20 @@ export class ConnectCommand {
           return await this.execute(picked, opts);
         }
       }
-      console.error(`\n  ${(err as Error).message}`);
-      console.error('  Run `capy connect` to see available providers.\n');
-      process.exit(1);
+      // `await displayErrorAndExit(...); return ...` — the pattern rotateCommand
+      // documents. It serves the command-error page under `--web`, holds the
+      // process open until the browser has fetched it, still prints to the
+      // terminal, and exits 1. The `return` is not decoration: the function is
+      // Promise<{ linked: boolean }> and TypeScript does not narrow across an
+      // awaited never, so it is what keeps the signature honest.
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      await displayErrorAndExit(
+        new CapyError(
+          `${(err as Error).message}\nRun \`capy connect\` to see available providers.`,
+          ERROR_CODES.INVALID_FORMAT,
+        ),
+      );
+      return { linked: false };
     }
 
     if (mod.precheck) mod.precheck();
@@ -182,9 +205,20 @@ export class ConnectCommand {
     // Belt-and-suspenders: if a provider returned mode:'live' (e.g. via an
     // interactive prompt rather than --live), still refuse in dev mode.
     if (this.devMode && entry.mode === 'live') {
-      console.error('\n  Live mode is not allowed in dev mode.');
-      console.error('  Use the production `capy` binary against your real Capy service.\n');
-      process.exit(1);
+      // `await displayErrorAndExit(...); return ...` — the pattern rotateCommand
+      // documents. It serves the command-error page under `--web`, holds the
+      // process open until the browser has fetched it, still prints to the
+      // terminal, and exits 1. The `return` is not decoration: the function is
+      // Promise<{ linked: boolean }> and TypeScript does not narrow across an
+      // awaited never, so it is what keeps the signature honest.
+      const { displayErrorAndExit } = await import('../ui/errorScreen');
+      await displayErrorAndExit(
+        new CapyError(
+          'Live mode is not allowed in dev mode.\nUse the production `capy` binary against your real Capy service.',
+          ERROR_CODES.PERMISSION_DENIED,
+        ),
+      );
+      return { linked: false };
     }
 
     // Confirmation gate for live mode in prod: a human typing the account ID.
