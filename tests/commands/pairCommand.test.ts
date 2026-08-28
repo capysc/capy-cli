@@ -236,19 +236,44 @@ describe('PairCommand — answered', () => {
     await new PairCommand().execute({});
     expect(installCalls.length).toBe(1);
     expect(resolveKeyMaterialCalls.length).toBe(1);
-    expect(resolveKeyMaterialCalls[0].answer).toEqual(VALID_ANSWER);
+    // CHANGED EXPECTATION (CAP-566): key material is no longer sourced from
+    // the approver's sealed answer, because there is no sealed answer — that
+    // payload carried the approver's own session, which is the defect this
+    // ticket removes. The grant now runs over the machine's OWN authenticated
+    // session, so there is nothing to pass in.
+    //
+    // The invariant this test exists for is UNCHANGED and still asserted
+    // below: the session must be installed BEFORE key material is resolved,
+    // because the grant authenticates with it. That ordering is arguably more
+    // load-bearing now, not less.
+    expect(resolveKeyMaterialCalls[0].answer).toBeNull();
     // installImpl (above) resolves { orgId: 'org_1', ... } — that's the org
     // pairKeyMaterial.ts should authenticate the wrapper fetch against.
     expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBe('org_1');
   });
 
-  test('a non-interactive multi-org install (orgId: null) still authenticates the key-material fetch, against answer.keyMaterial.orgId', async () => {
+  test("a non-interactive multi-org install (orgId: null) still authenticates the key-material fetch, against the session's own org", async () => {
+    // CHANGED EXPECTATION (CAP-566): the fallback source, not the behaviour.
+    //
+    // This asserted the fallback came from `answer.keyMaterial.orgId` — the
+    // org the APPROVER's browser had active when it sealed the payload. There
+    // is no sealed answer any more, so that source is gone.
+    //
+    // The behaviour it protects is unchanged and still asserted: when
+    // `install.orgId` is null (the non-interactive multi-org case, where
+    // installPairedSession deliberately pins nothing), the key-material fetch
+    // must STILL be authenticated against some org rather than silently
+    // skipped. It now falls back to an org from the machine's own session,
+    // which is a strictly better source — doors are org-less server-side, so
+    // any org this account belongs to authenticates the fetch, and taking it
+    // from our own session removes a dependency on what the approver happened
+    // to have selected.
     installImpl = async () => ({ orgId: null, orgTokenReady: false });
     ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
 
     await new PairCommand().execute({});
     expect(resolveKeyMaterialCalls.length).toBe(1);
-    // VALID_ANSWER's keyMaterial.orgId is 'org_1' — the fallback when
+    // VALID_ANSWER.session's first organization — the fallback when
     // install.orgId is null (see pairCommand.ts's finish()).
     expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBe('org_1');
   });
@@ -355,7 +380,23 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
 
     const all = logs.join('\n');
     expect(all).toContain('ABCD-1234');
-    expect(all).toContain('keep.capy.sc/pair');
+    // CHANGED EXPECTATION (CAP-566): the pairing URL is no longer Keep's
+    // /pair page. The machine now authenticates itself through the identity
+    // provider's own RFC 8628 device page, so the URL printed here is the
+    // `verification_uri` the authorize response returned.
+    //
+    // This is a TRUST-SURFACE change, not only a UX one, and it is the single
+    // most important thing to look at in this diff: a user who has been taught
+    // that pairing happens on a capy.sc domain is now sent somewhere that is
+    // not ours. "The pairing link goes somewhere else now" is precisely the
+    // shape a phishing attempt takes. That may well be the right trade for a
+    // real device grant — the machine getting its own credentials is the whole
+    // point — but it is a product decision, and it strengthens the case for
+    // putting the device page on a Capy-owned domain.
+    //
+    // Asserted from the authorize response rather than hardcoded, so moving to
+    // a custom domain changes config and not this test.
+    expect(all).toContain(AUTHORIZATION.verification_uri);
     expect(HALF_BLOCK.test(all)).toBe(true);
   });
 
@@ -373,7 +414,23 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
 
     const all = logs.join('\n');
     expect(all).toContain('ABCD-1234');
-    expect(all).toContain('keep.capy.sc/pair');
+    // CHANGED EXPECTATION (CAP-566): the pairing URL is no longer Keep's
+    // /pair page. The machine now authenticates itself through the identity
+    // provider's own RFC 8628 device page, so the URL printed here is the
+    // `verification_uri` the authorize response returned.
+    //
+    // This is a TRUST-SURFACE change, not only a UX one, and it is the single
+    // most important thing to look at in this diff: a user who has been taught
+    // that pairing happens on a capy.sc domain is now sent somewhere that is
+    // not ours. "The pairing link goes somewhere else now" is precisely the
+    // shape a phishing attempt takes. That may well be the right trade for a
+    // real device grant — the machine getting its own credentials is the whole
+    // point — but it is a product decision, and it strengthens the case for
+    // putting the device page on a Capy-owned domain.
+    //
+    // Asserted from the authorize response rather than hardcoded, so moving to
+    // a custom domain changes config and not this test.
+    expect(all).toContain(AUTHORIZATION.verification_uri);
     expect(HALF_BLOCK.test(all)).toBe(false);
   });
 
@@ -391,7 +448,23 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
 
     const all = logs.join('\n');
     expect(all).toContain('ABCD-1234');
-    expect(all).toContain('keep.capy.sc/pair');
+    // CHANGED EXPECTATION (CAP-566): the pairing URL is no longer Keep's
+    // /pair page. The machine now authenticates itself through the identity
+    // provider's own RFC 8628 device page, so the URL printed here is the
+    // `verification_uri` the authorize response returned.
+    //
+    // This is a TRUST-SURFACE change, not only a UX one, and it is the single
+    // most important thing to look at in this diff: a user who has been taught
+    // that pairing happens on a capy.sc domain is now sent somewhere that is
+    // not ours. "The pairing link goes somewhere else now" is precisely the
+    // shape a phishing attempt takes. That may well be the right trade for a
+    // real device grant — the machine getting its own credentials is the whole
+    // point — but it is a product decision, and it strengthens the case for
+    // putting the device page on a Capy-owned domain.
+    //
+    // Asserted from the authorize response rather than hardcoded, so moving to
+    // a custom domain changes config and not this test.
+    expect(all).toContain(AUTHORIZATION.verification_uri);
     expect(HALF_BLOCK.test(all)).toBe(false);
   });
 
