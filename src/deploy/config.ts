@@ -1,11 +1,13 @@
 /**
  * `.capy/deploy.json` — per-project deploy targets.
  *
- * Lives next to keep.lock so it ships with the repo. No secrets, just
- * adapter ids, worker names, branch coupling, and var lists. Safe to commit.
+ * The CLI explicitly leaves this file visible to Git while ignoring every
+ * other project-local `.capy` entry. It contains no secrets: only adapter ids,
+ * worker names, branch coupling, and variable names. Safe to commit.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { FileManager } from '../files/fileManager';
 import { TargetConfig } from './adapter';
 
 export interface DeployConfigFile {
@@ -40,6 +42,10 @@ export class UnsupportedDeployConfigVersion extends Error {
 export function readDeployConfig(cwd: string): DeployConfigFile | null {
   const p = deployConfigPath(cwd);
   if (!existsSync(p)) return null;
+  // Existing projects used to ignore `.capy` wholesale. Repair that managed
+  // ignore block on first access so a saved deploy spec becomes visible to
+  // Git without requiring the user to recreate or edit the target.
+  new FileManager(cwd).ensureCapyGitignore();
   try {
     const raw = JSON.parse(readFileSync(p, 'utf-8'));
     if (!raw || typeof raw !== 'object') return null;
@@ -58,6 +64,7 @@ export function readDeployConfig(cwd: string): DeployConfigFile | null {
 
 export function writeDeployConfig(cwd: string, cfg: DeployConfigFile): void {
   const p = deployConfigPath(cwd);
+  new FileManager(cwd).ensureCapyGitignore();
   mkdirSync(join(cwd, '.capy'), { recursive: true });
   writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n', 'utf-8');
 }
@@ -66,9 +73,12 @@ export function upsertTarget(
   cwd: string,
   target: TargetConfig,
 ): DeployConfigFile {
-  const cfg: DeployConfigFile =
+  const previous: DeployConfigFile =
     readDeployConfig(cwd) ?? { version: FILE_VERSION, targets: {} };
-  cfg.targets[target.name] = target;
+  const cfg: DeployConfigFile = {
+    ...previous,
+    targets: { ...previous.targets, [target.name]: target },
+  };
   writeDeployConfig(cwd, cfg);
   return cfg;
 }
@@ -76,8 +86,10 @@ export function upsertTarget(
 export function removeTarget(cwd: string, name: string): boolean {
   const cfg = readDeployConfig(cwd);
   if (!cfg || !(name in cfg.targets)) return false;
-  delete cfg.targets[name];
-  writeDeployConfig(cwd, cfg);
+  const targets = Object.fromEntries(
+    Object.entries(cfg.targets).filter(([targetName]) => targetName !== name),
+  );
+  writeDeployConfig(cwd, { ...cfg, targets });
   return true;
 }
 
