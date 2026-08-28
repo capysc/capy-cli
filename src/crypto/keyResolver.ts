@@ -74,7 +74,13 @@ function isNetworkError(err: unknown): boolean {
  */
 export interface KeyServiceOps {
   /** Strip the KMS outer layer via POST /orgs/:orgId/co-decrypt */
-  coDecrypt(orgId: string, ciphertext: string): Promise<string>;
+  /**
+   * `notAfter` is OPTIONAL and additive: every existing caller omits it and is
+   * unchanged. The invite-pickup path must pass the blob's own `not_after`,
+   * because enrollment re-wraps under a fresh (orgId, notAfter) KMS
+   * EncryptionContext and the decrypt has to present the same tuple.
+   */
+  coDecrypt(orgId: string, ciphertext: string, notAfter?: number): Promise<string>;
   /** Add the KMS outer layer via POST /orgs/:orgId/wrap */
   wrapOuterLayer(orgId: string, plaintext: string): Promise<string>;
   /**

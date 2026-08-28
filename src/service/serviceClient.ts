@@ -603,7 +603,10 @@ export class ServiceClient {
    * `email` is the invite row's own bound address, which the caller MUST use
    * for `innerUnwrap` instead of the session's email (§7.3).
    */
-  async fetchInviteBlob(orgId: string, inviteId: string): Promise<{ blob: string; email: string }> {
+  async fetchInviteBlob(
+    orgId: string,
+    inviteId: string,
+  ): Promise<{ blob: string; email: string; not_after: string | null }> {
     return this.request('GET', `/orgs/${orgId}/invites/${encodeURIComponent(inviteId)}/blob`);
   }
 

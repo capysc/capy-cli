@@ -45,7 +45,10 @@ export interface InvitePickupOps extends KeyServiceOps {
   /** GET /invites/pending — this caller's own pending pickup, or null. */
   getPendingPickup(): Promise<PendingPickupRow | null>;
   /** GET /orgs/:orgId/invites/:inviteId/blob — CLI-scope gated. */
-  fetchInviteBlob(orgId: string, inviteId: string): Promise<{ blob: string; email: string }>;
+  fetchInviteBlob(
+    orgId: string,
+    inviteId: string,
+  ): Promise<{ blob: string; email: string; not_after: string | null }>;
   /**
    * POST /wrappers { type: 'wrapped_k_local', ... } — the anchor door.
    * MUST throw a `CapyError` coded `WRAPPER_CONFLICT` on a 409, never swallow
@@ -119,11 +122,29 @@ export async function consumeInvitePickup(
   const pickupAad = pickupWrapAAD(userId, inviteId, unlock.credentialId);
   const token = unwrapPickupT(pickup.wrapped_t, pickup.iv, kekPickup, pickupAad);
 
-  // Step 3 — the stored blob.
-  const { blob, email: inviteEmail } = await ops.fetchInviteBlob(orgId, inviteId);
+  // Step 3 — the stored blob. `not_after` comes back with it and is REQUIRED
+  // by the next step; the service has always returned it.
+  const { blob, email: inviteEmail, not_after: blobNotAfter } = await ops.fetchInviteBlob(orgId, inviteId);
 
-  // Step 4 — co-decrypt (no notAfter: shed at enrollment, §3.5).
-  const innerBlob = await ops.coDecrypt(orgId, blob);
+  // Step 4 — co-decrypt under the SAME (orgId, notAfter) the blob is wrapped
+  // with.
+  //
+  // This used to pass no notAfter at all, on the reading that §3.5 sheds the
+  // TTL at enrollment. The service reads §3.5 the other way and its comment
+  // says so plainly: enrollment strips the ORIGINAL (orgId, notAfter) context
+  // and re-wraps under a FRESH, FINITE (orgId, newNotAfter) one, "never
+  // omitted, so no blob is ever permanently live". That is a deliberate
+  // security property — a blob wrapped with no expiry binding would stay
+  // decryptable forever.
+  //
+  // So the two sides bound the same ciphertext to different KMS
+  // EncryptionContexts and the AEAD check failed, surfacing as
+  // "Co-decrypt failed: UnknownError" at the last step of the pickup — after
+  // the redeem, the passkey and the unlock had all succeeded.
+  //
+  // The value was never missing, only dropped: the blob response carries
+  // `not_after` and three type signatures on this path omitted it.
+  const innerBlob = await ops.coDecrypt(orgId, blob, blobNotAfter ? Date.parse(blobNotAfter) : undefined);
 
   // Step 5 — M, in CLI memory only. `inviteEmail` is the invite row's own
   // bound address (§7.3) — using the session email here would fail silently
