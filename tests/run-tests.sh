@@ -65,7 +65,7 @@ ISOLATED_FILES=(
   tests/auth/sessionLifecycle.test.ts
   tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts
-  tests/commands/readOnlyRun.e2e.test.ts
+  tests/commands/readOnlyRun.int.test.ts
   tests/commands/kickCommand.test.ts
   tests/commands/inviteCommand.test.ts
   tests/commands/deployTokenCommand.test.ts
@@ -105,11 +105,11 @@ ISOLATED_FILES=(
   tests/commands/doorsCommand.test.ts
   tests/commands/runCommandDeviceKeyFallback.test.ts
   tests/auth/deviceKey/brokerCeremonyTransportAutoOpen.test.ts
-  tests/auth/deviceKey/capyRunEquivalence.e2e.test.ts
-  tests/auth/deviceKey/syncInvariants.e2e.test.ts
-  tests/auth/deviceKey/onboardingCaseMatrix.e2e.test.ts
-  tests/auth/deviceKey/security.e2e.test.ts
-  tests/auth/deviceKey/grantE2E.e2e.test.ts
+  tests/auth/deviceKey/capyRunEquivalence.int.test.ts
+  tests/auth/deviceKey/syncInvariants.int.test.ts
+  tests/auth/deviceKey/onboardingCaseMatrix.int.test.ts
+  tests/auth/deviceKey/security.int.test.ts
+  tests/auth/deviceKey/grantE2E.int.test.ts
   tests/auth/pairing/installPairedSession.test.ts
   # The capy-staging pin tests assert behaviour that is BY DEFINITION a
   # function of process.env (CAPY_API_URL / CAPY_KEEP_ORIGIN /
@@ -120,7 +120,7 @@ ISOLATED_FILES=(
   tests/commands/stagingDefaults.test.ts
   tests/commands/stagingPinExhaustive.test.ts
   tests/commands/pairCommand.test.ts
-  tests/auth/pairing/pairE2E.e2e.test.ts
+  tests/auth/pairing/pairE2E.int.test.ts
   tests/files/reservedVarsWrite.test.ts
   # <<< isolated test files (mock.module): append below >>>
   tests/ui/recoveryPhrase.test.ts
