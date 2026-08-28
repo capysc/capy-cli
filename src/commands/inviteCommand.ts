@@ -55,6 +55,14 @@ export interface InviteOpts {
    * `--web` is a global option on the root program. `src/index.ts` does not
    * read it for `invite` yet, so this path is live and tested but not reachable
    * from argv until whoever owns that file threads `optsWithGlobals().web`
+   *
+   * CORRECTION (verified against both entrypoints): this is NO LONGER TRUE and
+   * has not been for a while. `src/index.ts` and `src/index-dev.ts` both pass
+   * `web: command.optsWithGlobals().web === true` into `execute`. Every refusal
+   * in this file is reachable under `--web` today. Left in place with this note
+   * rather than deleted, because the same false claim was found in `kick` and
+   * `org` on the same evening — three files where a comment told the next
+   * reader not to bother looking.
    * through — the same seam `capy checkout` is waiting on.
    */
   web?: boolean;
@@ -194,12 +202,24 @@ export class InviteCommand {
       const me = await serviceClient.getOrgMe(orgId);
       const invitable = INVITABLE_BY_ROLE[me.role];
       if (!invitable) {
-        console.error(`Your role (${me.role}) does not permit inviting users.`);
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError(
+          `Your role (${me.role}) does not permit inviting users.`,
+          ERROR_CODES.PERMISSION_DENIED,
+        );
       }
       if (me.role === 'project-admin' && me.admin_projects.length === 0) {
-        console.error('You do not administer any projects in this organization.');
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError(
+          'You do not administer any projects in this organization.',
+          ERROR_CODES.PERMISSION_DENIED,
+        );
       }
 
 
@@ -258,8 +278,14 @@ export class InviteCommand {
         };
         masterKey = await unwrapMasterKey(orgId, userId, keyOps);
       } catch {
-        console.error('Failed to unwrap master key. Re-authenticate and try again.');
-        process.exit(1);
+        // THROW, never console.error + process.exit. `execute()`'s catch routes to
+        // `displayErrorAndExit`, which serves the command-error page under `--web`
+        // and holds the process open until the browser has fetched it. Exiting
+        // here never throws, so that catch never ran.
+        throw new CapyError(
+          'Failed to unwrap master key. Re-authenticate and try again.',
+          ERROR_CODES.KEY_NOT_ON_DEVICE,
+        );
       }
 
       // If this email already belongs to an org member, reuse their role and
@@ -416,8 +442,11 @@ export class InviteCommand {
         if (role === 'project-admin' || role === 'member') {
           const projects = await serviceClient.listProjects();
           if (projects.length === 0) {
-            console.error('No projects in this organization. Create one with `capy` first.');
-            process.exit(1);
+            // THROW, never console.error + process.exit. `execute()`'s catch routes to
+            // `displayErrorAndExit`, which serves the command-error page under `--web`
+            // and holds the process open until the browser has fetched it. Exiting
+            // here never throws, so that catch never ran.
+            throw new CapyError('No projects in this organization. Create one with `capy` first.', ERROR_CODES.PROJECT_NOT_FOUND);
           }
           // The cwd project sorts first (it's the most likely intent) and is
           // the non-interactive default when --project is omitted.
