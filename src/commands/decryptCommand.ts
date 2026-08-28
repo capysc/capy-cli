@@ -14,7 +14,7 @@ import {
   readRecoverySession,
   saveRecoverySession,
 } from '../config/globalConfig';
-import { ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { formatRelativeTime } from '../ui/relativeTime';
 
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -55,8 +55,16 @@ export class DecryptCommand {
       // Require keep.lock
       const keep = pm.readKeepFile();
       if (!keep) {
-        console.error(`\n  No keep.lock file found. Run ${bold('capy')} first to initialize.\n`);
-        process.exit(1);
+        // THROW, never console.error + process.exit. This sits inside the try
+        // whose catch routes to `displayErrorAndExit` — the one thing that serves
+        // the command-error page under `--web` and holds the process open until
+        // the browser has fetched it. Exiting here never throws, so that catch
+        // never ran and a --web caller, who has no terminal by definition, got
+        // a refusal on a stream with nobody on the other end.
+        throw new CapyError(
+          `No keep.lock file found. Run ${bold('capy')} first to initialize.`,
+          ERROR_CODES.PROJECT_NOT_INITIALIZED,
+        );
       }
 
       const orgId = keep.org_id;

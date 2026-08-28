@@ -188,3 +188,80 @@ describe('under --web, a refusal still reaches the caller', () => {
     expect(ANY_URL.test(r.combined)).toBe(true);
   }, 40_000);
 });
+
+/**
+ * THE SYSTEMIC CLASS, one case per command.
+ *
+ * `console.error(...); process.exit(1)` in a guard clause never throws, so the
+ * surrounding catch never runs, so `displayErrorAndExit` never serves its page.
+ * `rotateCommand.ts` documents this exact class and its own fix; the fix was
+ * never applied anywhere else.
+ *
+ * Every command below was RUN under `--web` in a clean HOME before this test
+ * was written, and each was observed emitting its refusal with no URL at all.
+ * The set is what running them found, not what a grep predicted: `branch` is
+ * here because a run surfaced it, and `transport`/`edit`/`org` are absent
+ * because their runs got past the guard into the auth path and did hand back a
+ * URL — a source sweep would have listed all of them.
+ *
+ * Framed against the invariant (a URL reaches the caller), never against
+ * loopback, so the move to Keep as the sole renderer does not rewrite them.
+ */
+const REFUSAL_CASES: ReadonlyArray<{ readonly argv: readonly string[]; readonly control: string }> = [
+  // control = a fragment of the refusal itself, proving the command reached
+  // its guard. Without it, "no URL" is satisfied by a command that never ran.
+  //
+  // ARGUMENTS MATTER HERE. `checkout --web` with no branch name never reaches
+  // its guard at all: Commander rejects it first with `missing required
+  // argument 'branch'`. The first draft of this file ran exactly that, saw
+  // output with no URL, and would have reported a violation that does not
+  // exist — the control is what caught it, failing on "did it reach its
+  // refusal" rather than on "was there a URL".
+  { argv: ['checkout', 'somebranch'], control: 'keep.lock' },
+  { argv: ['decrypt'], control: 'keep.lock' },
+  { argv: ['branch'], control: 'keep.lock' },
+];
+
+// DELIBERATELY ABSENT, and worth recording so nobody re-adds them:
+//
+//   kick      `kick --web` with no argument never reaches a guard at all —
+//             Commander rejects it first with `missing required argument
+//             'email'`. It was in the first draft of this list and the CONTROL
+//             caught it: the case failed on "did it reach its refusal", not on
+//             "was there a URL". Listing it as a URL violation would have been
+//             a fabricated finding. Reaching kick's real guard needs a session
+//             and a member lookup, which is a different test.
+//
+//   transport, edit, org
+//             their runs get PAST the guard into the auth path and do hand
+//             back a URL. A source sweep lists them; running them clears them.
+
+
+describe('the systemic class: every --web refusal hands back a URL', () => {
+  test.each(REFUSAL_CASES.map((c) => [c.argv.join(' '), c.argv, c.control] as const))(
+    '%s --web refuses with a URL, not just a dead stream',
+    async (cmd, argv, control) => {
+      const r = await runWeb(argv);
+
+      expect(
+        r.combined.length,
+        `\`${cmd} --web\` produced NO output at all, so it cannot be shown to have ` +
+          `reached its guard. Inconclusive, not passing.`,
+      ).toBeGreaterThan(0);
+      expect(
+        r.combined,
+        `expected \`${cmd} --web\` to reach its refusal (the control for this case).\n` +
+          `stdout:\n${r.out}\nstderr:\n${r.err}`,
+      ).toContain(control);
+
+      expect(
+        ANY_URL.test(r.combined),
+        `\`${cmd} --web\` refused with no URL anywhere. Under --web the caller has no ` +
+          `terminal, so this refusal reached nobody. The guard exits via console.error ` +
+          `+ process.exit(1), which never throws, so the catch never runs and ` +
+          `displayErrorAndExit never serves its page.\nstdout:\n${r.out}\nstderr:\n${r.err}`,
+      ).toBe(true);
+    },
+    45_000,
+  );
+});
