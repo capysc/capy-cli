@@ -24,6 +24,15 @@ export interface OrgCommandOptions {
   /**
    * Serve the three questions as browser screens instead of inquirer prompts.
    *
+   * CORRECTION (verified against both entrypoints): the claim below is STALE.
+   * `src/index.ts` and `src/index-dev.ts` both construct this command with
+   * `{ web: command.optsWithGlobals().web === true }`, so every refusal in this
+   * file is reachable under `--web` today. The original note is kept beneath
+   * for its explanation of the inherited-global seam, which is still accurate;
+   * only its conclusion is wrong. The same false claim was found in `kick` and
+   * `invite` on the same evening — three files where a comment told the next
+   * reader not to bother looking.
+   *
    * Agent-only, and NOT REACHABLE FROM ARGV YET. `src/index.ts` declares
    * `--web` once, on the root program; a subcommand has to read the inherited
    * global for itself, which `byoc` does in two lines:
