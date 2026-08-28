@@ -35,7 +35,7 @@ afterAll(() => {
 import { runOnboardFlow } from '../../src/flows/onboard/driver';
 import { FLOW_CONTRACT_VERSION, FlowContractError, FLOW_ERROR_CODES } from '../../src/flows/validate';
 import { ExecutorMap, StepResult } from '../../src/flows/onboard/executors';
-import { CreateFlowRequest, FlowTransport, NextRequest } from '../../src/flows/client';
+import { CreateFlowRequest, FlowHttpError, FlowTransport, NextRequest } from '../../src/flows/client';
 import { OnboardObservations } from '../../src/flows/onboard/observe';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
 import { keepOrigin } from '../../src/ui/screens/keepScreens';
@@ -933,6 +933,135 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     expect(result.step.kind).toBe('screen');
     expect(result.step.params.connection_id).toBe('conn-1');
     expect(calls).toEqual([]);
+  });
+});
+
+describe('the flow-owned pubkey registration: `client_pubkey` on `next` while a broker-ceremony keypair is held', () => {
+  // A `--flow-id`/`--flow-secret` RESUME never calls `create` at all — the
+  // only place this process's own ephemeral keypair (minted BEFORE this run,
+  // by `capy onboard --broker-ceremony`) could ever reach the service is on
+  // a `next` report. Without this, a resumed process's key never arrives and
+  // a ceremony sealed to it is unusable.
+  test('a RESUME sends client_pubkey on every next report, with no create call at all', async () => {
+    const keypair = mintConnectionKeypair();
+    const { transport, reports, created } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      brokerCeremonyKeypair: keypair,
+    });
+
+    expect(created).toEqual([]);
+    expect(reports.length).toBe(2);
+    expect(reports[0].client_pubkey).toBe(keypair.publicKeyB64);
+    expect(reports[1].client_pubkey).toBe(keypair.publicKeyB64);
+  });
+
+  // The self-mint (CREATE) case already registers this same key at create —
+  // unchanged. Re-sending it on `next` too is the documented idempotent
+  // no-op on the service side; this asserts the create body itself is
+  // untouched by this change.
+  test('a CREATE with a broker-ceremony keypair still carries client_pubkey at create exactly as before, and now also on next', async () => {
+    const keypair = mintConnectionKeypair();
+    const { transport, reports, created } = fakeTransport([envelope({ kind: 'done', params: {} })]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      authMode: 'broker_ceremony',
+      clientPubkey: keypair.publicKeyB64,
+      brokerCeremonyKeypair: keypair,
+    });
+
+    expect(created.length).toBe(1);
+    expect(created[0].client_pubkey).toBe(keypair.publicKeyB64);
+    expect(reports.length).toBe(1);
+    expect(reports[0].client_pubkey).toBe(keypair.publicKeyB64);
+  });
+
+  // Every other caller — TTY, `--web`, the existing explicit `--client-pubkey`
+  // caller with no keypair of its own — leaves `brokerCeremonyKeypair` unset.
+  // `next` must carry no `client_pubkey` at all for them: additive-only.
+  test('with no brokerCeremonyKeypair, next never carries client_pubkey', async () => {
+    const { transport, reports } = fakeTransport([envelope({ kind: 'done', params: {} })]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+    });
+
+    expect(reports.length).toBe(1);
+    expect(reports[0].client_pubkey).toBeUndefined();
+  });
+
+  // The service refuses a `next` report offering a DIFFERENT client_pubkey
+  // than the one already registered for this instance with a coded 409. That
+  // is fatal for this process — there is nothing to retry into, since the
+  // ceremony is sealed to a key this process cannot change — so it must
+  // propagate as-is (the service's own code intact) rather than being
+  // swallowed or retried.
+  test('a 409 CLIENT_PUBKEY_CONFLICT on next propagates as-is, coded, with no retry', async () => {
+    const keypair = mintConnectionKeypair();
+    let attempts = 0;
+    const transport: FlowTransport = {
+      async create() {
+        return {
+          flow_id: FLOW_ID,
+          flow_type: 'onboard',
+          contract_version: FLOW_CONTRACT_VERSION,
+          binding: 'anonymous',
+          step: null,
+        };
+      },
+      async next() {
+        attempts += 1;
+        throw new FlowHttpError(409, 'CLIENT_PUBKEY_CONFLICT');
+      },
+      async confirm() {
+        return { recorded: true };
+      },
+      async cancel() {
+        /* nothing */
+      },
+    };
+    const { map } = recordingExecutors();
+
+    let caught: unknown;
+    try {
+      await runOnboardFlow({
+        targetDir: '/tmp/x',
+        transport,
+        executors: map,
+        observe: observeStub(),
+        flowId: FLOW_ID,
+        flowSecret: 'resumed-secret',
+        brokerCeremonyKeypair: keypair,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FlowHttpError);
+    expect((caught as FlowHttpError).status).toBe(409);
+    expect((caught as FlowHttpError).code).toBe('CLIENT_PUBKEY_CONFLICT');
+    // Exactly one attempt — the loop does not retry into a conflict it
+    // cannot resolve itself.
+    expect(attempts).toBe(1);
   });
 });
 

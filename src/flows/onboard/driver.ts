@@ -236,7 +236,19 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
 
     const answer = await opts.transport.next(
       flowId,
-      { contract_version: FLOW_CONTRACT_VERSION, observations, last_step: lastStep, plan },
+      {
+        contract_version: FLOW_CONTRACT_VERSION,
+        observations,
+        last_step: lastStep,
+        plan,
+        // Sent on every `next` report while this process holds a
+        // broker-ceremony keypair — see NextRequest.client_pubkey's doc. The
+        // self-mint (create) case already registered this same key at
+        // create, so this is the documented idempotent no-op there; a
+        // RESUME (`--flow-id`/`--flow-secret`, no create call this run) is
+        // the case this actually lands the key for the first time.
+        client_pubkey: opts.brokerCeremonyKeypair?.publicKeyB64,
+      },
       creds,
     );
 

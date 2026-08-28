@@ -627,6 +627,17 @@ export const ERROR_CODES = {
    * instead of a parse exception or silent garbage.
    */
   UPGRADE_REQUIRED: 'UPGRADE_REQUIRED',
+  /**
+   * `POST /flows/:id/next` 409: this instance already registered a
+   * `client_pubkey` (at create, or on an earlier `next`) and this report
+   * offered a DIFFERENT one. One-shot server-side — the first key wins;
+   * resending the identical key is an idempotent no-op, never this code.
+   * Fatal for the caller that hit it: a ceremony sealed to a missing or
+   * other key is unusable by this process, and there is nothing to retry
+   * into. Mirrored from the service's own code, same convention as
+   * STALE_KEEP_HASH/KEY_ALREADY_MINTED above.
+   */
+  CLIENT_PUBKEY_CONFLICT: 'CLIENT_PUBKEY_CONFLICT',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

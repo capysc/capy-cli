@@ -42,6 +42,16 @@ let createCalls: Array<Record<string, unknown>> = [];
 let createBehavior: () => unknown = () => {
   throw new StopAfterConfirm('stop: create() reached after confirm');
 };
+/**
+ * Default preserves every pre-existing test in this file (none of them
+ * legitimately reach `next()`: they exercise the `--accepted`/confirm
+ * handling above, which returns or re-drives before `runOnboardFlow`'s own
+ * loop ever calls it). Overridable the same way `confirmBehavior`/
+ * `createBehavior` are, for the broker-ceremony coded-failure tests below.
+ */
+let nextBehavior: () => unknown = () => {
+  throw new StopAfterConfirm('stop: next() reached after confirm');
+};
 /** Thrown by the fake transport's other methods — these tests only care about `confirm`'s own call, not what the driver does afterward. */
 class StopAfterConfirm extends Error {}
 
@@ -57,7 +67,7 @@ mock.module('../../src/flows/client', () => {
       return Promise.resolve(createBehavior());
     }
     next() {
-      throw new StopAfterConfirm('stop: next() reached after confirm');
+      return Promise.resolve(nextBehavior());
     }
     cancel() {
       return Promise.resolve();
@@ -84,6 +94,9 @@ beforeEach(() => {
   createCalls = [];
   createBehavior = () => {
     throw new StopAfterConfirm('stop: create() reached after confirm');
+  };
+  nextBehavior = () => {
+    throw new StopAfterConfirm('stop: next() reached after confirm');
   };
   targetDir = mkdtempSync(join(tmpdir(), 'capy-onboardcmd-target-'));
   writeFileSync(join(targetDir, 'package.json'), JSON.stringify({ name: 'onboardcmd-fixture', scripts: {} }));
@@ -279,5 +292,58 @@ describe('runOnboardCommand: a 409 on confirm is a coded, parseable JSON result 
     }
     expect(threw).toBe(true);
     expect(logs).toEqual([]);
+  });
+});
+
+describe('runOnboardCommand: --broker-ceremony --json surfaces a coded flow-service failure off `next`', () => {
+  // The service refuses a `next` report offering a client_pubkey different
+  // from the one already registered for this instance with a 409 coded
+  // CLIENT_PUBKEY_CONFLICT — fatal for a broker-ceremony run (a ceremony
+  // sealed to a missing/other key is unusable). Before this fix, an escaped
+  // `FlowHttpError` on this belt-and-suspenders path always collapsed to the
+  // generic SERVICE_ERROR (the catch only ever read a `CapyError`'s code) —
+  // this asserts the service's own code now survives, same as it already did
+  // on the TTY path (`ui/errorScreen.ts`'s `FlowHttpError` handling).
+  it('a 409 CLIENT_PUBKEY_CONFLICT is reported with the SERVICE\'s own code, not the generic fallback', async () => {
+    const { FlowHttpError } = await import('../../src/flows/client');
+    nextBehavior = () => {
+      throw new FlowHttpError(409, 'CLIENT_PUBKEY_CONFLICT');
+    };
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    try {
+      await runOnboardCommand(
+        { json: true, flowId: 'flow-broker-1', flowSecret: 'sekrit', brokerCeremony: true, targetDir },
+        false,
+      );
+    } finally {
+      restore();
+    }
+    // Exactly one coded object on stderr — never a step shape, never the raw
+    // "Flow request failed: ..." prose.
+    expect(errs.length).toBe(1);
+    const parsed = JSON.parse(errs[0]);
+    expect(parsed.error).toBe('onboard_failed');
+    expect(parsed.code).toBe('CLIENT_PUBKEY_CONFLICT');
+    expect(process.exitCode).toBe(1);
+    expect(logs).toEqual([]);
+  });
+
+  it('an unrecognised FlowHttpError code still falls back to the generic service error (unchanged)', async () => {
+    const { FlowHttpError } = await import('../../src/flows/client');
+    nextBehavior = () => {
+      throw new FlowHttpError(409, 'SOME_FUTURE_CODE_THIS_BUILD_DOES_NOT_KNOW');
+    };
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    try {
+      await runOnboardCommand(
+        { json: true, flowId: 'flow-broker-2', flowSecret: 'sekrit', brokerCeremony: true, targetDir },
+        false,
+      );
+    } finally {
+      restore();
+    }
+    expect(errs.length).toBe(1);
+    const parsed = JSON.parse(errs[0]);
+    expect(parsed.code).toBe('SERVICE_ERROR');
   });
 });
