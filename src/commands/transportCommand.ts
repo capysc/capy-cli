@@ -48,13 +48,29 @@ export class TransportCommand {
       const { orgId, userId, userEmail, authService, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
 
       if (!userEmail) {
-        console.error('Could not determine your email address. Re-authenticate and try again.');
-        process.exit(1);
+        // THROW, never console.error + process.exit. The catch in `execute()`
+        // routes to `displayErrorAndExit`, which serves the command-error page
+        // under `--web` and holds the process open until the browser has fetched
+        // it. Exiting here never throws, so that catch never ran and a --web
+        // caller — who has no terminal, that being the whole point of the flag —
+        // got a refusal on a stream with nobody on the other end.
+        throw new CapyError(
+          'Could not determine your email address. Re-authenticate and try again.',
+          ERROR_CODES.AUTH_FAILED,
+        );
       }
 
       if (!hasOrgKey(orgId, userId)) {
-        console.error('No master key found for this organization on this machine.');
-        process.exit(1);
+        // THROW, never console.error + process.exit. The catch in `execute()`
+        // routes to `displayErrorAndExit`, which serves the command-error page
+        // under `--web` and holds the process open until the browser has fetched
+        // it. Exiting here never throws, so that catch never ran and a --web
+        // caller — who has no terminal, that being the whole point of the flag —
+        // got a refusal on a stream with nobody on the other end.
+        throw new CapyError(
+          'No master key found for this organization on this machine.',
+          ERROR_CODES.KEY_NOT_ON_DEVICE,
+        );
       }
 
       // Unwrap M (double-wrapped: KMS outer + K_local inner). unwrapMasterKey
@@ -67,8 +83,16 @@ export class TransportCommand {
         };
         masterKey = await unwrapMasterKey(orgId, userId, keyOps);
       } catch {
-        console.error('Failed to unwrap master key. Re-authenticate and try again.');
-        process.exit(1);
+        // THROW, never console.error + process.exit. The catch in `execute()`
+        // routes to `displayErrorAndExit`, which serves the command-error page
+        // under `--web` and holds the process open until the browser has fetched
+        // it. Exiting here never throws, so that catch never ran and a --web
+        // caller — who has no terminal, that being the whole point of the flag —
+        // got a refusal on a stream with nobody on the other end.
+        throw new CapyError(
+          'Failed to unwrap master key. Re-authenticate and try again.',
+          ERROR_CODES.KEY_NOT_ON_DEVICE,
+        );
       }
 
       // Bind the inner key to the user's own email so only the same WorkOS
