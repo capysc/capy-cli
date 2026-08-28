@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 
-// capy-staging — the production CLI codepath pointed at the staging backend.
+// capy-staging — the CLI pointed at the staging backend.
 //
-// Staging runs the *real* service (against the test WorkOS tenant), so this is
-// real auth — it requires dist/index.js (prod), NOT index-dev.js (mock auth).
+// Runs on dist/index-dev.js, not dist/index.js. The prod entrypoint pins
+// itself to api.capy.sc and ~/.capy and ignores every variable set below
+// (see src/config/prodPins.ts); the dev entrypoint is the one that still
+// honors them. Despite the name, that entrypoint does not mock auth — dev
+// mode only *unlocks* a password login, and that path additionally requires
+// CAPY_TEST_EMAIL/CAPY_TEST_PASSWORD. With those unset, staging goes through
+// the same real OAuth flow as prod, against the test WorkOS tenant.
 //
 // Isolated home at ~/.capy-staging so it can never touch prod ~/.capy (which
-// holds recovery-equivalent wrapped keys) or dev ~/.capy-dev. Both env vars are
-// set only when unset, so `CAPY_API_URL=... capy-staging ...` still overrides.
+// holds recovery-equivalent wrapped keys) or dev ~/.capy-dev. Every var is set
+// only when unset, so `CAPY_API_URL=... capy-staging ...` still overrides.
 if (!process.env.CAPY_GLOBAL_DIR_NAME) {
   process.env.CAPY_GLOBAL_DIR_NAME = '.capy-staging';
 }
@@ -17,4 +22,4 @@ if (!process.env.CAPY_API_URL) {
 if (!process.env.CAPY_BIN_NAME) {
   process.env.CAPY_BIN_NAME = 'capy-staging';
 }
-require('../dist/index.js');
+require('../dist/index-dev.js');
