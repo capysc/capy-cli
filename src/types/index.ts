@@ -354,6 +354,10 @@ export const ERROR_CODES = {
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
   // not-found family — replaces server-prose string matching in serviceClient
   PROJECT_NOT_FOUND: 'PROJECT_NOT_FOUND',
+  // No keep.lock in this directory: the project was never initialized here.
+  // Distinct from PROJECT_NOT_FOUND, which means the server does not know the
+  // project — this one means this working copy does not.
+  PROJECT_NOT_INITIALIZED: 'PROJECT_NOT_INITIALIZED',
   BRANCH_NOT_FOUND: 'BRANCH_NOT_FOUND',
   // No .env header, no .capy/branch, and no unambiguous local fallback.
   NO_ACTIVE_BRANCH: 'NO_ACTIVE_BRANCH',

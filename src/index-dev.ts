@@ -421,6 +421,11 @@ const deploy = program
     // when the user picks a connector-enabled platform; that route is devMode).
     const { DeployCommand } = await import('./commands/deployTokenCommand');
     const c = new DeployCommand(process.env.CAPY_API_URL, true, {
+      // Same inherited-global rule as the connector branch above: `--web` is
+      // declared once on the root program, so it arrives in merged opts. Without
+      // this the flag parsed, was accepted, and was dropped — leaving the whole
+      // browser branch of a --web-aware class unreachable from argv.
+      web: merged.web === true,
       platform: options.platform,
       mode: options.mode,
       scope: options.scope,

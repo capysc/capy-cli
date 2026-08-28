@@ -13,6 +13,7 @@ import {
   encryptEnvBlob,
   buildSecretsBlob,
 } from '../crypto/deployCrypto';
+import { CapyError, ERROR_CODES } from '../types/index';
 import ora from '../ui/spinner';
 import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
@@ -326,8 +327,16 @@ export class DeployCommand {
       const projectState = await pm.detectProjectState();
 
       if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-        console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-        process.exit(1);
+        // THROW, never console.error + process.exit. This guard sits inside the
+        // try whose catch routes to `displayErrorAndExit`, which is what serves
+        // the `command-error` page under `--web` and holds the process open
+        // until the browser has fetched it. Exiting here never throws, so that
+        // catch never ran and a `--web` caller — an agent, or a person on
+        // another device with no terminal to read — got nothing at all.
+        throw new CapyError(
+          `No keep.lock file found. Run ${B('capy')} first to initialize.`,
+          ERROR_CODES.PROJECT_NOT_INITIALIZED,
+        );
       }
 
       const orgId = projectState.organizationId;
