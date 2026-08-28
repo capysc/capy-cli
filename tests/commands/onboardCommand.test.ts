@@ -18,6 +18,20 @@ import { mock, describe, it, expect, beforeAll, afterAll, beforeEach } from 'bun
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+// Real module, never mocked here. `runOnboardCommand` sets these as a
+// process-global side effect (`../ui/webMode` — see that module's own doc:
+// "Process-global, and legitimately so") whenever a test passes
+// `brokerCeremony`/`json`, and NEVER unsets them itself — a real CLI
+// invocation is one process per run, so there is nothing to reset FOR. A
+// `bun test` run sharing one process across every file in this batch is
+// exactly the case that doc didn't anticipate: left set, `isBrokerCeremonyMode()`
+// stays true for every OTHER file's tests in the same process afterward,
+// which is what `ui/errorScreen.ts`'s `isWebMode() && !isBrokerCeremonyMode()`
+// gate reads to decide whether to serve a `--web` loopback page at all — a
+// leak here silently starves totally unrelated `--web` refusal tests
+// (`rotateRefusals.test.ts`) elsewhere in the same run. Reset unconditionally
+// in `restore()` below, which every test in this file already calls.
+import { setBrokerCeremonyMode, setOnboardJsonMode } from '../../src/ui/webMode';
 
 // Mock homedir to an empty temp dir BEFORE importing anything that reads
 // os.homedir() — same convention as tests/flows/driver.test.ts. An empty
@@ -119,6 +133,11 @@ function restore(): void {
   console.error = realErr;
   rmSync(targetDir, { recursive: true, force: true });
   process.exitCode = exitCode;
+  // See the import comment above: unconditional, every test, so a leaked
+  // `true` from THIS file's `brokerCeremony`/`json` tests can never survive
+  // into another file sharing this same `bun test` process.
+  setBrokerCeremonyMode(false);
+  setOnboardJsonMode(false);
 }
 
 describe('runOnboardCommand: --confirm is optional (Bug A)', () => {
