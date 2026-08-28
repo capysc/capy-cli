@@ -14,6 +14,7 @@ import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { CapyError, ERROR_CODES, setSyncKeepHash, getSyncKeepHash, KeepFile } from '../types/index';
 import { isReservedRuntimeVar } from '../core/reservedVars';
+import { keepScreensEnabled } from '../ui/screens/keepScreens';
 import { pushKeepWithRetry, maybeWarnPersonalEnv, conflictOverwriteQuestion } from './connectors/shared';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -532,23 +533,73 @@ export class EditCommand {
     // rewrite and the auto-commit are one code path with one browser-shaped
     // front end and one terminal-shaped one.
     if (opts.web) {
-      const { runSecretEditorInBrowser } = await import('../ui/secretTableScreen');
-      await runSecretEditorInBrowser(
-        {
+      // Keep-hosted transport (CAP-540), additive beside the untouched
+      // loopback browser editor below: a person away from this machine can
+      // edit secrets from ANY browser, gated by their own passkey/passphrase
+      // rather than possession of this terminal. Any keep-path outcome short
+      // of a validated, CAS-verified save degrades to the loopback editor —
+      // same posture CAP-376 established for every other keep-migrated
+      // screen — but NEVER silently: CAP-539 flagged `capy add`'s silent
+      // fallback as a bug, so this prints a visible line (not just `debug()`)
+      // explaining why the local editor opened instead.
+      const attemptKeepEdit = async (): Promise<boolean> => {
+        if (localMode || !authService || !serviceClient || !keepScreensEnabled()) return false;
+        const { runSecretEditViaKeep } = await import('../ui/secretEditScreen');
+        const { createDeviceKeyServiceOps } = await import('../auth/deviceKey/serviceOps');
+        const { ops } = createDeviceKeyServiceOps(serviceClient, authService);
+        const outcome = await runSecretEditViaKeep({
+          serviceApiUrl: authService.getServiceApiUrl(),
+          getToken: async () => (await authService!.getValidToken())?.access_token ?? null,
+          userId,
           projectName: keep.project_name,
-          branch,
-          mode: localMode ? 'local' : 'server',
-          rows,
-          remoteAvailable,
-          remoteGap,
-          remoteFromCache,
-          undecryptableKeys,
-          // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
-          // headless runs drive the loopback without hijacking a real browser.
-          open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN,
-        },
-        editContext,
-      );
+          branchName: branch,
+          vars: rows.map((r) => ({ name: r.key, value: r.localValue ?? r.remoteValue ?? '' })),
+          keepHash: SyncEngine.computeKeepHash(keep, branch),
+          ops,
+          applyEdits: async (edits, expectedKeepHash) => {
+            // CAS, re-checked against a FRESH on-disk read immediately before
+            // writing — catches a concurrent `capy push`/`capy pull` that
+            // landed while this browser session was open, closing the
+            // last-write-wins gap CAP-515 named for this specific path.
+            const fresh = pm.readKeepFile();
+            const currentHash = fresh ? SyncEngine.computeKeepHash(fresh, branch) : null;
+            if (currentHash !== expectedKeepHash) {
+              return { ok: false, code: 'stale_version' };
+            }
+            await editContext.saveLocalEdits(edits);
+            const written = pm.readKeepFile();
+            const newHash = written ? SyncEngine.computeKeepHash(written, branch) : expectedKeepHash;
+            return { ok: true, keepHash: newHash };
+          },
+        });
+        if (outcome.kind === 'saved') return true;
+        console.error(
+          `Could not edit secrets in your browser via Capy's hosted transport (${outcome.kind === 'unavailable' ? 'no device key enrolled on this account, or the connection broker is unreachable' : outcome.code}).\n` +
+            `Opening the local browser editor on this machine instead.`,
+        );
+        return false;
+      };
+      const keepHandled = await attemptKeepEdit();
+
+      if (!keepHandled) {
+        const { runSecretEditorInBrowser } = await import('../ui/secretTableScreen');
+        await runSecretEditorInBrowser(
+          {
+            projectName: keep.project_name,
+            branch,
+            mode: localMode ? 'local' : 'server',
+            rows,
+            remoteAvailable,
+            remoteGap,
+            remoteFromCache,
+            undecryptableKeys,
+            // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
+            // headless runs drive the loopback without hijacking a real browser.
+            open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN,
+          },
+          editContext,
+        );
+      }
     } else {
       await screen.run(state, editContext);
     }

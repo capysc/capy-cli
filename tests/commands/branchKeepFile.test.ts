@@ -178,6 +178,7 @@ function createCheckoutMocks(overrides: {
     // No torn state in these cases: the .env header matches .capy/branch, so the
     // dirty guard compares against the active branch (empty header → fallback).
     readEnvMeta: mock(() => ({})),
+    writeSyncState: mock(() => undefined),
   };
 
   const mockAuthService = {
@@ -325,10 +326,14 @@ describe('Checkout — keep.lock changed outside capy (CAP-549)', () => {
     exitSpy = spyOn(process, 'exit').mockImplementation(() => undefined as never);
   });
 
-  test('blocks with the "changed outside capy" message, not the old "unpushed changes" one', async () => {
+  test('reports an externally changed keep before stale .env and never suggests commit or push', async () => {
     const mocks = createCheckoutMocks({
       syncState: {
         keep_hash: { development: 'old-stale-hash' },  // doesn't match current keep.lock
+      },
+      localPlaintext: {
+        API_KEY: 'stale-local-value',
+        DB_URL: 'postgres://stale-local-value',
       },
     });
     MockProjectManager.mockImplementation(() => mocks.mockProjectManager);
@@ -341,14 +346,66 @@ describe('Checkout — keep.lock changed outside capy (CAP-549)', () => {
     await cmd.execute('staging');
 
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(consoleSpy.mock.calls.some((c: any) =>
-      c[0]?.includes('changed outside capy')
-    )).toBe(true);
-    expect(consoleSpy.mock.calls.some((c: any) =>
-      c[0]?.includes('unpushed changes')
-    )).toBe(false);
+    const stderr = consoleSpy.mock.calls.map((c: any) => c.join(' ')).join('\n');
+    expect(stderr).toContain('keep.lock changed outside capy');
+    expect(stderr).toContain('capy checkout development --refresh');
+    expect(stderr).not.toContain('uncommitted changes');
+    expect(stderr).not.toContain('unpushed changes');
+    expect(stderr).not.toContain('capy push');
 
     consoleSpy.mockRestore();
+  });
+});
+
+describe('Checkout — refresh after keep.lock changed externally', () => {
+  test('same-branch refresh replaces .env and records the current keep hash', async () => {
+    const keep = makeKeep({ API_KEY: [{ branch: 'development', value: 'new-from-git' }] });
+    const mocks = createCheckoutMocks({
+      keep,
+      currentBranch: 'development',
+      syncState: { keep_hash: { development: 'old-stale-hash' }, user_id: 'user-456' },
+      localPlaintext: { API_KEY: 'stale-local-value' },
+    });
+    mocks.mockServiceClient.getDecryptData = mock(() => Promise.resolve({
+      env_content: 'API_KEY=encrypted-new-value',
+      keep_hash: 'server-hash',
+      keep_file: JSON.stringify(keep),
+    }));
+    mocks.mockFileManager.parseEnvContent = mock(() => ({ API_KEY: 'encrypted-new-value' }));
+    mocks.mockFileManager.decryptValue = mock(() => 'new-from-git');
+    mocks.mockFileManager.readEncryptedEnvFile = mock(() => ({ API_KEY: 'new-from-git' }));
+
+    MockProjectManager.mockImplementation(() => mocks.mockProjectManager);
+    MockFileManager.mockImplementation(() => mocks.mockFileManager);
+    MockAuthService.mockImplementation(() => mocks.mockAuthService);
+    MockServiceClient.mockImplementation(() => mocks.mockServiceClient);
+
+    const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+    const cmd = new CheckoutCommand();
+    await cmd.execute('development', { refresh: true });
+
+    expect(errorSpy.mock.calls.flat().join('\n')).not.toContain('keep.lock changed outside capy');
+    expect(mocks.mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
+      { API_KEY: 'new-from-git' },
+      expect.any(String),
+      undefined,
+      keep,
+      'development',
+    );
+    expect(mocks.mockServiceClient.getDecryptData).toHaveBeenCalledWith(
+      'proj-123',
+      'development',
+      (SyncEngine as any).computeKeepHash(keep, 'development'),
+      true,
+    );
+    expect(mocks.mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
+      synced_variables: ['API_KEY'],
+      keep_hash: { development: (SyncEngine as any).computeKeepHash(keep, 'development') },
+    }));
+
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });
 

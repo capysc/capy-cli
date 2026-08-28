@@ -101,18 +101,33 @@ export async function syncAndWriteBranch(
   branchName: string,
   encryptionKey: string,
   isCreate: boolean,
+  pinnedKeepHash?: string,
 ): Promise<BranchSyncOutcome> {
   const fetched = await (async (): Promise<
     { ok: true; data: Awaited<ReturnType<ServiceClient['getDecryptData']>> } | { ok: false; outcome: BranchSyncOutcome }
   > => {
     try {
-      return { ok: true, data: await deps.serviceClient.getDecryptData(projectId, branchName, undefined, true) };
+      return {
+        ok: true,
+        data: await deps.serviceClient.getDecryptData(projectId, branchName, pinnedKeepHash, true),
+      };
     } catch (error: any) {
       const status = error?.details?.status;
       if (status === 403) {
         return { ok: false, outcome: { kind: 'forbidden', varCount: 0, seededFromCurrent: false } };
       }
       if (status === 404) {
+        if (pinnedKeepHash) {
+          return {
+            ok: false,
+            outcome: {
+              kind: 'sync_error',
+              errorMessage: 'The snapshot pinned by the current keep.lock is unavailable.',
+              varCount: 0,
+              seededFromCurrent: false,
+            },
+          };
+        }
         // No snapshot yet for this branch — treat as empty and proceed to switch.
         return {
           ok: true,
@@ -191,16 +206,6 @@ export async function syncAndWriteBranch(
 
 export interface CheckoutOptions {
   create?: boolean;
-  /** Settled by `--protected` / `--no-protected`; undefined means ask. */
-  protected?: boolean;
-  /**
-   * Ask this run's questions in a browser instead of at the TTY.
-   *
-   * Changes only where a question is RENDERED. The same plan decides which
-   * questions exist, the same answers reach the same code, and nothing about
-   * what is written to keep.lock or .env moves.
-   */
-  web?: boolean;
   /**
    * Skip the pre-switch dirty guards (CAP-549) and, after switching, rebuild
    * .env and the sync-state keep_hash from the CURRENT keep.lock for the
@@ -212,6 +217,16 @@ export interface CheckoutOptions {
    * --refresh` re-runs the .env + sync-state write in place.
    */
   refresh?: boolean;
+  /** Settled by `--protected` / `--no-protected`; undefined means ask. */
+  protected?: boolean;
+  /**
+   * Ask this run's questions in a browser instead of at the TTY.
+   *
+   * Changes only where a question is RENDERED. The same plan decides which
+   * questions exist, the same answers reach the same code, and nothing about
+   * what is written to keep.lock or .env moves.
+   */
+  web?: boolean;
 }
 
 export class CheckoutCommand {
@@ -291,7 +306,7 @@ export class CheckoutCommand {
     const encryptionKey = await resolveProjectKey(orgId, projectId, authResult.user_id!, keyOps);
 
     // Guard: block checkout if working tree is dirty (skip for branch creation)
-    if (!options.create) {
+    if (!options.create && !options.refresh) {
       const keep = this.projectManager.readKeepFile();
       const currentBranch = this.projectManager.readActiveBranch();
 
@@ -328,8 +343,9 @@ export class CheckoutCommand {
         const keepMovedExternally = savedHash != null && savedHash !== currentKeepHash;
 
         if (keepMovedExternally) {
-          console.error(`keep.lock on "${dirtyBranch}" changed outside capy since your last sync (for example a git pull).`);
-          console.error(`Your local .env may be stale. Re-run with --refresh to rebuild .env and sync state from the current keep — this discards any local .env edits.`);
+          console.error(`keep.lock changed outside capy (for example, via git pull).`);
+          console.error(`Your local .env for "${dirtyBranch}" may be stale.`);
+          console.error(`Run ${B(`capy checkout ${dirtyBranch} --refresh`)} to replace it from the current keep.lock.`);
           process.exit(1);
         }
 
@@ -433,6 +449,9 @@ export class CheckoutCommand {
       branchName,
       encryptionKey,
       options.create === true,
+      options.refresh
+        ? SyncEngine.computeKeepHash(this.projectManager.readKeepFile()!, branchName)
+        : undefined,
     );
     syncSpinner.stop();
 
@@ -453,16 +472,21 @@ export class CheckoutCommand {
     // written and the "unpushed"/"moved externally" guards agree with
     // reality on the next checkout.
     if (options.refresh) {
-      const refreshedKeep = this.projectManager.readKeepFile();
-      if (refreshedKeep) {
-        const existingSyncState = this.projectManager.readSyncState();
-        this.fileManager.writeSyncState({
-          ...existingSyncState,
-          last_sync: new Date().toISOString(),
-          synced_variables: existingSyncState?.synced_variables ?? [],
-          keep_hash: setSyncKeepHash(existingSyncState, branchName, SyncEngine.computeKeepHash(refreshedKeep, branchName)),
-        });
-      }
+      const refreshedKeep = this.projectManager.readKeepFile()!;
+      const refreshedPlaintext = this.fileManager.readEncryptedEnvFile(encryptionKey);
+      const existingSyncState = this.projectManager.readSyncState();
+      this.fileManager.writeSyncState({
+        ...existingSyncState,
+        last_sync: new Date().toISOString(),
+        synced_variables: Object.keys(refreshedPlaintext),
+        user_id: authResult.user_id,
+        org_id: orgId,
+        keep_hash: setSyncKeepHash(
+          existingSyncState,
+          branchName,
+          SyncEngine.computeKeepHash(refreshedKeep, branchName),
+        ),
+      });
     }
 
     if (outcome.seededFromCurrent) {

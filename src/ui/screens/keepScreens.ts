@@ -86,6 +86,12 @@ export const KEEP_SCREENS: readonly KeepScreenDefinition[] = [
   { name: 'secret-intake', kind: 'payload-both' },
   { name: 'connect-live-gate', kind: 'payload-both' },
   { name: 'org-members', kind: 'payload-both' },
+  // CAP-540: `capy edit`'s keep-hosted transport. Registered as
+  // 'payload-both' for route/purpose vocabulary purposes even though its
+  // actual relay is bespoke (secretEditScreen.ts uses 3 chained broker
+  // connections, not the generic runKeepPayloadScreen single-connection
+  // helper) — see secretEditWire.ts's module doc for why.
+  { name: 'secret-edit', kind: 'payload-both' },
   // <<< keep-migrated screens: append below >>>
   { name: 'command-error', kind: 'payload-in' },
   { name: 'connect-result', kind: 'payload-in' },
