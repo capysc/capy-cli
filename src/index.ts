@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
-import { CliOptions } from './types/index';
+import { CapyError, CliOptions, ERROR_CODES } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
@@ -222,8 +222,20 @@ program
     const pm = new ProjectManager();
     const projectState = await pm.detectProjectState();
     if (!projectState.initialized) {
-      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize.`);
-      process.exit(1);
+      // Not inside a try here, so there is no catch to throw into — call the
+      // error screen directly. `displayErrorAndExit` reads web mode itself
+      // (`isWebMode()`), serves the command-error page under `--web`, holds the
+      // process open until the browser has fetched it, and exits 1 either way.
+      // `console.error` + `process.exit(1)` did none of that: under --web the
+      // caller has no terminal, so the refusal reached nobody.
+      const { displayErrorAndExit } = await import('./ui/errorScreen');
+      await displayErrorAndExit(
+        new CapyError(
+          `No keep.lock file found. Run ${B('capy')} first to initialize.`,
+          ERROR_CODES.PROJECT_NOT_INITIALIZED,
+        ),
+      );
+      return;
     }
 
     const authService = new AuthService(undefined, false, projectState.userId);
@@ -443,6 +455,11 @@ const deploy = program
     // connector flow when the user picks a connector-enabled platform.
     const { DeployCommand } = await import('./commands/deployTokenCommand');
     const c = new DeployCommand(undefined, false, {
+      // Same inherited-global rule as the connector branch above: `--web` is
+      // declared once on the root program, so it arrives in merged opts. Without
+      // this the flag parsed, was accepted, and was dropped — leaving the whole
+      // browser branch of a --web-aware class unreachable from argv.
+      web: merged.web === true,
       platform: options.platform,
       mode: options.mode,
       scope: options.scope,

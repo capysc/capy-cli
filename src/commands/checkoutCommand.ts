@@ -258,8 +258,16 @@ export class CheckoutCommand {
     // Read keep.lock — must be initialized
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
-      console.error(`No keep.lock file found. Run ${B('capy')} first to initialize the project.`);
-      process.exit(1);
+      // THROW, never console.error + process.exit. This sits inside the try
+      // whose catch routes to `displayErrorAndExit` — the one thing that serves
+      // the command-error page under `--web` and holds the process open until
+      // the browser has fetched it. Exiting here never throws, so that catch
+      // never ran and a --web caller, who has no terminal by definition, got
+      // a refusal on a stream with nobody on the other end.
+      throw new CapyError(
+        `No keep.lock file found. Run ${B('capy')} first to initialize the project.`,
+        ERROR_CODES.PROJECT_NOT_INITIALIZED,
+      );
     }
 
     // Load user-scoped session

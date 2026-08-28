@@ -2,6 +2,7 @@ import inquirer from 'inquirer';
 import { resolveOrgContext } from '../core/orgContext';
 import { ProjectManager } from '../core/projectManager';
 import { hasOrgKey } from '../config/globalConfig';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { unwrapMasterKey } from '../crypto/keyResolver';
 import {
   generateInviteToken,
@@ -204,9 +205,49 @@ export class InviteCommand {
 
       // Read and unwrap master key (double-wrapped: KMS outer + K_local inner).
       // unwrapMasterKey handles legacy blobs and transparently re-wraps them.
+      //
+      // A missing key here does NOT mean the caller lacks authority — the role
+      // check above already passed. It means THIS MACHINE has no copy of a key
+      // the account may well hold elsewhere, which is the ordinary state of a
+      // machine someone has just started using. `capyCommand.ts` and
+      // `runCommand.ts` both attempt the device-key unlock ceremony in exactly
+      // this situation; this command used to hard-exit before any fallback
+      // could run, and told an org owner that only the org owner may invite.
+      //
+      // attemptCaseCUnlock does its own "does this account have live doors"
+      // detection internally and is a safe no-op — never a throw — when there
+      // is nothing to unlock with, so an account that genuinely has no key
+      // still lands on the refusal below.
       if (!hasOrgKey(orgId, userId)) {
-        console.error('No master key found for this organization. Only the org owner can invite.');
-        process.exit(1);
+        const { attemptCaseCUnlock } = await import('../auth/deviceKey/wiring');
+        const { deviceKeysEnabled } = await import('../auth/deviceKey/flag');
+        if (deviceKeysEnabled()) {
+          // `organizations` is read from the auth result rather than passed as
+          // an empty list: the unlock walks the account's orgs, and handing it
+          // a list that merely looks valid is the kind of assumption that
+          // fails quietly.
+          const authResult = await authService.authenticateSilent(orgId);
+          await attemptCaseCUnlock({
+            authService,
+            serviceClient,
+            devMode: this.devMode,
+            userId,
+            userEmail,
+            organizations: authResult.organizations || [],
+            activeOrgId: orgId,
+          });
+        }
+      }
+      if (!hasOrgKey(orgId, userId)) {
+        // Coded, so a caller can branch on it. `isNoKeyOnDeviceError` already
+        // treats KEY_NOT_ON_DEVICE as the canonical signal for this exact
+        // condition; this was the one refusal on the path carrying no code at
+        // all, leaving an agent nothing to read but the sentence.
+        throw new CapyError(
+          `This device does not have the key for this organization yet, so it cannot mint an invite.\n` +
+            `  Unlock this machine with your device key by running ${B('capy')} here, then try again.`,
+          ERROR_CODES.KEY_NOT_ON_DEVICE,
+        );
       }
 
       let masterKey: Buffer;

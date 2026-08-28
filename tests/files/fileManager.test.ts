@@ -23,13 +23,12 @@ import { join, dirname } from 'path';
 import { FileManager, serializeKeep } from '../../src/files/fileManager';
 import { KeepFile, CapyError, ERROR_CODES } from '../../src/types/index';
 
-describe('FileManager', () => {
-  let fileManager: FileManager;
-  const testRoot = '/test/project';
+const testRoot = '/test/project';
+const fileManager = new FileManager(testRoot);
 
+describe('FileManager', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    fileManager = new FileManager(testRoot);
 
     // Setup default mock behaviors
     mockExistsSync.mockReturnValue(false);
@@ -491,9 +490,41 @@ describe('FileManager', () => {
       );
       expect(mockAppendFileSync).toHaveBeenCalledWith(
         join(testRoot, '.gitignore'),
-        '.env\n.capy\n.env.pre-capy.old\n.env.*.decrypted\n',
+        '.env\n!/.capy/\n/.capy/*\n!/.capy/deploy.json\n.env.pre-capy.old\n.env.*.decrypted\n',
         'utf-8'
       );
+    });
+
+    test('should override a legacy whole-directory ignore without removing it', () => {
+      const existingContent = '.env\n.capy\n.env.pre-capy.old\n.env.*.decrypted\n';
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(existingContent);
+
+      fileManager.ensureCapyGitignore();
+
+      expect(mockAppendFileSync).toHaveBeenCalledWith(
+        join(testRoot, '.gitignore'),
+        '!/.capy/\n/.capy/*\n!/.capy/deploy.json\n',
+        'utf-8'
+      );
+    });
+
+    test('should not duplicate an existing portable Capy block', () => {
+      const existingContent = [
+        '.env',
+        '!/.capy/',
+        '/.capy/*',
+        '!/.capy/deploy.json',
+        '.env.pre-capy.old',
+        '.env.*.decrypted',
+        '',
+      ].join('\n');
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(existingContent);
+
+      fileManager.ensureCapyGitignore();
+
+      expect(mockAppendFileSync).not.toHaveBeenCalled();
     });
   });
 
