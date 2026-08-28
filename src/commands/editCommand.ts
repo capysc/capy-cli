@@ -153,15 +153,31 @@ export class EditCommand {
 
       const foundKeep = pm.readKeepFile();
       if (!foundKeep) {
-        console.error('Could not read keep.lock');
-        process.exit(1);
+        // `displayErrorAndExit` rather than console.error + process.exit: it is
+        // what serves the command-error page under `--web` and holds the process
+        // open until the browser has fetched it, and it still prints to the
+        // terminal and still exits 1. Called directly rather than thrown because
+        // there is no enclosing try here — the same shape this file already uses
+        // for the local-key failure a few lines down.
+        const { displayErrorAndExit } = await import('../ui/errorScreen');
+        await displayErrorAndExit(new CapyError('Could not read keep.lock', ERROR_CODES.NO_KEEP_FILE));
+        return;
       }
       keep = foundKeep;
 
       const activeBranch = projectState.activeBranch;
       if (!activeBranch) {
-        console.error(`No active branch. Run ${B('capy')} to select a branch.`);
-        process.exit(1);
+        // `displayErrorAndExit` rather than console.error + process.exit: it is
+        // what serves the command-error page under `--web` and holds the process
+        // open until the browser has fetched it, and it still prints to the
+        // terminal and still exits 1. Called directly rather than thrown because
+        // there is no enclosing try here — the same shape this file already uses
+        // for the local-key failure a few lines down.
+        const { displayErrorAndExit } = await import('../ui/errorScreen');
+        await displayErrorAndExit(
+          new CapyError(`No active branch. Run ${B('capy')} to select a branch.`, ERROR_CODES.NO_ACTIVE_BRANCH),
+        );
+        return;
       }
       branch = activeBranch;
 
@@ -193,8 +209,19 @@ export class EditCommand {
         if (!authResult.success) authResult = await authService.authenticateSilent();
         if (!authResult.success) authResult = await authService.authenticate(orgId);
         if (!authResult.success || !authResult.user_id) {
-          console.error('Authentication failed');
-          process.exit(1);
+          // `displayErrorAndExit` rather than console.error + process.exit: it is
+          // what serves the command-error page under `--web` and holds the process
+          // open until the browser has fetched it, and it still prints to the
+          // terminal and still exits 1. Called directly rather than thrown because
+          // there is no enclosing try here — the same shape this file already uses
+          // for the local-key failure a few lines down.
+          const { displayErrorAndExit } = await import('../ui/errorScreen');
+          await displayErrorAndExit(new CapyError('Authentication failed', ERROR_CODES.AUTH_FAILED), {
+            projectName: keep.project_name,
+            projectId: keep.project_id,
+            branch,
+          });
+          return;
         }
         userId = authResult.user_id;
 
