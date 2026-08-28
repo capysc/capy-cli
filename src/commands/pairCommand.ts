@@ -52,10 +52,10 @@ import { ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
-import { runPairCeremony } from '../auth/pairing/pairCeremony';
+import { startDeviceAuthorization, awaitDeviceApproval, type DeviceAuthorization, type DevicePollResult } from '../auth/pairing/deviceAuth';
 import { installPairedSession } from '../auth/pairing/installPairedSession';
-import { resolvePairedKeyMaterial } from '../auth/pairing/pairKeyMaterial';
-import type { PairMachineAnswer } from '../auth/pairing/pairContract';
+import { grantKeyMaterialForPairedMachine } from '../auth/pairing/pairDeviceGrant';
+import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
 import { keepOrigin } from '../ui/screens/keepScreens';
 import { renderTerminalQr } from '../ui/terminalQr';
@@ -94,14 +94,24 @@ export class PairCommand {
 
     const serviceUrl = resolveActiveUrl(this.devMode);
 
-    let outcome;
-    try {
-      outcome = await runPairCeremony({
-        serviceUrl,
-        machineName: `sandbox:${hostname()}`,
-        onCodeReady: (userCode) => this.printPairingBlock(userCode),
-      });
-    } catch (err) {
+    // Extracted so the outcome is a single const rather than a reassigned
+    // binding (codebase immutability rule).
+    const runDeviceFlow = async (): Promise<{ authorization: DeviceAuthorization; result: DevicePollResult }> => {
+      const authorization = await startDeviceAuthorization(serviceUrl);
+      this.printPairingBlock(authorization);
+      return { authorization, result: await awaitDeviceApproval(serviceUrl, authorization) };
+    };
+
+    const flow = await (async () => {
+      try {
+        return { ok: true as const, value: await runDeviceFlow() };
+      } catch (err) {
+        return { ok: false as const, err };
+      }
+    })();
+
+    if (!flow.ok) {
+      const err = flow.err;
       // Bootstrap itself failed (network/service) before any code was ever
       // shown — nothing to walk back, just report and exit.
       const message = err instanceof Error ? err.message : String(err);
@@ -116,35 +126,40 @@ export class PairCommand {
       return;
     }
 
-    switch (outcome.kind) {
-      case 'expired': {
-        if (options.json) {
-          console.log(JSON.stringify({ ok: false, code: ERROR_CODES.PAIR_CODE_EXPIRED, userCode: outcome.userCode }, null, 2));
-        } else {
-          console.error('');
-          console.error('  This pairing code has expired.');
-          console.error(`  Run ${B('capy pair')} again.`);
-          console.error('');
-        }
-        process.exit(EXIT_NEEDS_INPUT);
+    const { authorization, result } = flow.value;
+    const userCode = authorization.user_code;
+
+    switch (result.status) {
+      case 'complete':
+        await this.finish(result.session, userCode, options);
         return;
-      }
-      case 'failure': {
-        const message = CEREMONY_FAILURE_MESSAGES[outcome.code] ?? 'The pairing ceremony did not complete.';
+      case 'denied': {
+        // `expired_token` keeps its own exit code and remedy: the code simply
+        // ran out, which is a retry, not a refusal.
+        if (result.error === 'expired_token') {
+          if (options.json) {
+            console.log(JSON.stringify({ ok: false, code: ERROR_CODES.PAIR_CODE_EXPIRED, userCode }, null, 2));
+          } else {
+            console.error('');
+            console.error('  This pairing code has expired.');
+            console.error(`  Run ${B('capy pair')} again.`);
+            console.error('');
+          }
+          process.exit(EXIT_NEEDS_INPUT);
+          return;
+        }
+        const message = CEREMONY_FAILURE_MESSAGES[result.error] ?? 'The pairing request was not approved.';
         if (options.json) {
-          console.log(JSON.stringify({ ok: false, code: outcome.code, userCode: outcome.userCode }, null, 2));
+          console.log(JSON.stringify({ ok: false, code: result.error, userCode }, null, 2));
         } else {
           console.error('');
-          console.error(`  ${message} (${outcome.code})`);
+          console.error(`  ${message} (${result.error})`);
           console.error('  No session or key material was installed.');
           console.error('');
         }
         process.exitCode = 1;
         return;
       }
-      case 'answered':
-        await this.finish(outcome.answer, outcome.userCode, options);
-        return;
     }
   }
 
@@ -166,11 +181,16 @@ export class PairCommand {
    * query-param-prefill contract today, only a manually-typed code field,
    * so a `?code=` URL would silently do nothing on the other end.
    */
-  private printPairingBlock(userCode: string): void {
-    const url = `${keepOrigin()}/pair`;
+  private printPairingBlock(authorization: DeviceAuthorization): void {
+    // The verification URI comes from the AUTHORIZE response — it is WorkOS's
+    // page now, not Keep's /pair, because the machine authenticates itself
+    // rather than being handed a session (CAP-566). Never hardcoded: the IdP
+    // owns that URL and is entitled to change it.
+    const url = authorization.verification_uri;
+    const userCode = authorization.user_code;
     console.log('');
     console.log(`  To sign this machine in, go to ${B(url)}`);
-    console.log(`  on a device where you're signed in, and enter:  ${B(userCode)}`);
+    console.log(`  and enter:  ${B(userCode)}`);
     const qr = renderTerminalQr(url);
     if (qr) {
       console.log('');
@@ -180,11 +200,18 @@ export class PairCommand {
     console.log('  Waiting…');
   }
 
-  private async finish(answer: PairMachineAnswer, userCode: string, options: PairCommandOptions): Promise<void> {
-    let install;
-    try {
-      install = await installPairedSession(answer.session, { apiUrl: this.apiUrl, devMode: this.devMode });
-    } catch (err) {
+  private async finish(session: PairMachineAnswerSession, userCode: string, options: PairCommandOptions): Promise<void> {
+    // Single const rather than a reassigned binding (immutability rule).
+    const installed = await (async () => {
+      try {
+        return { ok: true as const, value: await installPairedSession(session, { apiUrl: this.apiUrl, devMode: this.devMode }) };
+      } catch (err) {
+        return { ok: false as const, err };
+      }
+    })();
+
+    if (!installed.ok) {
+      const err = installed.err;
       // The session half failed to install — do not proceed to grant a key
       // for a session that isn't actually usable. No key material daemon is
       // spawned; nothing partial is left running.
@@ -208,11 +235,19 @@ export class PairCommand {
     // (the org the browser had active at approval time) for the
     // non-interactive multi-org case where install.orgId is deliberately
     // null (installPairedSession.ts's own doc explains why).
-    const authOrgId = install.orgId ?? answer.keyMaterial.orgId;
-    const resolved = await resolvePairedKeyMaterial(answer, {
+    // The session belongs to THIS machine now, so the key-material half runs
+    // the ordinary CAP-384 grant ceremony over it rather than unwrapping a
+    // PRF output sealed by the approver. The PRF itself still happens on the
+    // human's own device, reached through the broker transport — nothing
+    // WebAuthn-shaped is attempted on this headless box.
+    const install = installed.value;
+    const authOrgId = install.orgId ?? session.organizations[0]?.id ?? null;
+    const resolved = await grantKeyMaterialForPairedMachine({
       apiUrl: this.apiUrl,
       devMode: this.devMode,
       authOrgId,
+      userId: session.user.id,
+      serviceUrl: resolveActiveUrl(this.devMode),
     });
     if (!resolved.ok) {
       if (options.json) {
@@ -236,8 +271,8 @@ export class PairCommand {
           {
             ok: true,
             userCode,
-            userId: answer.session.user.id,
-            userEmail: answer.session.user.email,
+            userId: session.user.id,
+            userEmail: session.user.email,
             orgId: install.orgId,
             orgName: install.orgName ?? null,
             orgTokenReady: install.orgTokenReady,
@@ -253,10 +288,10 @@ export class PairCommand {
     }
 
     console.log('');
-    console.log(`  \x1b[32mPaired as ${B(answer.session.user.email)}.\x1b[0m`);
+    console.log(`  \x1b[32mPaired as ${B(session.user.email)}.\x1b[0m`);
     if (install.orgId) {
       console.log(`  Active organization: ${B(install.orgName || install.orgId)}`);
-    } else if (answer.session.organizations.length === 0) {
+    } else if (session.organizations.length === 0) {
       console.log(`  No organizations yet — run ${B('capy')} to create one.`);
     } else {
       console.log(`  Multiple organizations available — run ${B('capy org')} to pick one.`);
