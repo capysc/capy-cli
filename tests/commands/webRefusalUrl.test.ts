@@ -42,6 +42,26 @@ const ENTRY = join(CLI_ROOT, 'src/index.ts');
 /** Any URL the caller could act on — the loopback page, or a Keep page. */
 const ANY_URL = /https?:\/\/[^\s"'`]+/;
 
+/**
+ * WHAT THIS FILE ASSERTS, AND WHY IT IS NOT "prints a 127.0.0.1 URL".
+ *
+ * The invariant is that a URL REACHES THE CALLER. Loopback is merely today's
+ * answer to it, and a poor one: `--web` exists because the caller has no
+ * terminal — an agent, or a person on another device — and `127.0.0.1` is
+ * precisely the address such a caller cannot open. A page served on the
+ * machine that failed is not a page the person who needs it can see.
+ *
+ * So the assertions below are written against the invariant, and this helper
+ * classifies the answer separately. When the renderer moves to Keep, the
+ * invariant assertions keep passing unchanged and this classification is where
+ * the tightening happens — one line, not a rewrite. A test pinned to loopback
+ * would have to be rewritten by the same change that fixes the problem, which
+ * is how suites end up being edited to match whatever the code now does.
+ */
+function isRemotelyReachable(url: string): boolean {
+  return !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(url);
+}
+
 interface Run {
   readonly out: string;
   readonly err: string;
@@ -144,5 +164,27 @@ describe('under --web, a refusal still reaches the caller', () => {
         `known to serve one. Every absence this file reports is therefore ` +
         `meaningless until this passes.\nstdout:\n${r.out}\nstderr:\n${r.err}`,
     ).toBe(true);
+  }, 40_000);
+
+  /**
+   * Not an assertion — a RECORD, deliberately.
+   *
+   * Today every `--web` ending is a loopback page, so asserting remote
+   * reachability here would paint the whole suite red for a decision that has
+   * been made but not yet built. What this does instead is print what the
+   * caller actually got, so the day the rail moves to Keep the change shows up
+   * in the log rather than having to be remembered.
+   */
+  test('RECORD: what kind of URL does a --web refusal hand back today?', async () => {
+    const r = await runWeb(['deploy']);
+    const url = r.combined.match(ANY_URL)?.[0] ?? null;
+
+    expect(url, `no URL at all — see the assertions above; this record is meaningless without one.`).not.toBeNull();
+    console.log(
+      `[record] deploy --web refusal URL is ${isRemotelyReachable(url!) ? 'REMOTELY REACHABLE' : 'LOOPBACK-ONLY'}: ${url}`,
+    );
+    // The invariant, restated: something was handed back. Reachability is
+    // recorded above rather than asserted, until Keep is the renderer.
+    expect(ANY_URL.test(r.combined)).toBe(true);
   }, 40_000);
 });
