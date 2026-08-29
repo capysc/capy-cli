@@ -15,16 +15,32 @@ mock.module('../../src/config/profileConfig', () => ({
   resolveActiveUrl: () => 'https://api.test.invalid',
 }));
 
+// CAP-566 moved the SEAM, not the branching: the command drives the device
+// grant (deviceAuth.ts) instead of runPairCeremony. Everything these tests
+// assert about the command — the printed block, exit codes, --json shape, the
+// QR rules — is unchanged behaviour and is asserted unchanged below; only the
+// module being faked here is different.
 let ceremonyImpl: (opts: any) => Promise<any> = async () => {
   throw new Error('ceremonyImpl not configured for this test');
 };
 const ceremonyCalls: any[] = [];
-mock.module('../../src/auth/pairing/pairCeremony', () => ({
-  runPairCeremony: async (opts: any) => {
-    ceremonyCalls.push(opts);
-    return ceremonyImpl(opts);
+const AUTHORIZATION = {
+  device_code: 'dc_test',
+  user_code: 'ABCD-1234',
+  verification_uri: 'https://auth.test.invalid/device',
+  expires_in: 300,
+  interval: 5,
+};
+// Bootstrap failure now means the AUTHORIZE leg failing — that is the point
+// before which no code exists to print. A poll failure is a different case:
+// the code has necessarily been shown by then.
+let authorizeImpl: () => Promise<any> = async () => AUTHORIZATION;
+mock.module('../../src/auth/pairing/deviceAuth', () => ({
+  startDeviceAuthorization: async () => authorizeImpl(),
+  awaitDeviceApproval: async (_url: string, authorization: any) => {
+    ceremonyCalls.push({ authorization });
+    return ceremonyImpl({ authorization });
   },
-  PAIR_TTL_SECONDS: 900,
 }));
 
 let installImpl: (session: any, opts: any) => Promise<any> = async () => ({ orgId: null, orgTokenReady: false });
@@ -46,10 +62,10 @@ let resolveKeyMaterialImpl: (answer: any, opts: any) => Promise<any> = async () 
   material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) },
 });
 const resolveKeyMaterialCalls: any[] = [];
-mock.module('../../src/auth/pairing/pairKeyMaterial', () => ({
-  resolvePairedKeyMaterial: async (answer: any, opts: any) => {
-    resolveKeyMaterialCalls.push({ answer, opts });
-    return resolveKeyMaterialImpl(answer, opts);
+mock.module('../../src/auth/pairing/pairDeviceGrant', () => ({
+  grantKeyMaterialForPairedMachine: async (opts: any) => {
+    resolveKeyMaterialCalls.push({ answer: null, opts });
+    return resolveKeyMaterialImpl(null, opts);
   },
 }));
 
@@ -114,6 +130,7 @@ beforeEach(async () => {
   installCalls.length = 0;
   resolveKeyMaterialCalls.length = 0;
   spawnCalls.length = 0;
+  authorizeImpl = async () => AUTHORIZATION;
   installImpl = async () => ({ orgId: 'org_1', orgName: 'Org One', orgTokenReady: true });
   resolveKeyMaterialImpl = async () => ({
     ok: true,
@@ -167,10 +184,7 @@ describe('PairCommand — flag off', () => {
 
 describe('PairCommand — answered', () => {
   test('installs the session and spawns the grant daemon with the right key material', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
-    };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
 
     await new PairCommand().execute({});
 
@@ -186,10 +200,7 @@ describe('PairCommand — answered', () => {
   });
 
   test('--json prints exactly one machine-readable object with the socket path and org', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
-    };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
 
     await new PairCommand().execute({ json: true });
 
@@ -204,20 +215,14 @@ describe('PairCommand — answered', () => {
   });
 
   test('--ttl-minutes is passed through to the grant daemon spawn', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
-    };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
 
     await new PairCommand().execute({ ttlMinutes: 5 });
     expect(spawnCalls[0].opts.ttlMs).toBe(5 * 60_000);
   });
 
   test('a coded key-material resolution failure (e.g. malformed PRF output) is rejected before spawning a daemon', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
-    };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
     resolveKeyMaterialImpl = async () => ({ ok: false, code: ERROR_CODES.DEVICE_KEY_UNWRAP_FAILED });
 
     await new PairCommand().execute({});
@@ -226,30 +231,49 @@ describe('PairCommand — answered', () => {
   });
 
   test('the session installs BEFORE key material is resolved — the fetch authenticates with the just-installed session', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
-    };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
 
     await new PairCommand().execute({});
     expect(installCalls.length).toBe(1);
     expect(resolveKeyMaterialCalls.length).toBe(1);
-    expect(resolveKeyMaterialCalls[0].answer).toEqual(VALID_ANSWER);
+    // CHANGED EXPECTATION (CAP-566): key material is no longer sourced from
+    // the approver's sealed answer, because there is no sealed answer — that
+    // payload carried the approver's own session, which is the defect this
+    // ticket removes. The grant now runs over the machine's OWN authenticated
+    // session, so there is nothing to pass in.
+    //
+    // The invariant this test exists for is UNCHANGED and still asserted
+    // below: the session must be installed BEFORE key material is resolved,
+    // because the grant authenticates with it. That ordering is arguably more
+    // load-bearing now, not less.
+    expect(resolveKeyMaterialCalls[0].answer).toBeNull();
     // installImpl (above) resolves { orgId: 'org_1', ... } — that's the org
     // pairKeyMaterial.ts should authenticate the wrapper fetch against.
     expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBe('org_1');
   });
 
-  test('a non-interactive multi-org install (orgId: null) still authenticates the key-material fetch, against answer.keyMaterial.orgId', async () => {
+  test("a non-interactive multi-org install (orgId: null) still authenticates the key-material fetch, against the session's own org", async () => {
+    // CHANGED EXPECTATION (CAP-566): the fallback source, not the behaviour.
+    //
+    // This asserted the fallback came from `answer.keyMaterial.orgId` — the
+    // org the APPROVER's browser had active when it sealed the payload. There
+    // is no sealed answer any more, so that source is gone.
+    //
+    // The behaviour it protects is unchanged and still asserted: when
+    // `install.orgId` is null (the non-interactive multi-org case, where
+    // installPairedSession deliberately pins nothing), the key-material fetch
+    // must STILL be authenticated against some org rather than silently
+    // skipped. It now falls back to an org from the machine's own session,
+    // which is a strictly better source — doors are org-less server-side, so
+    // any org this account belongs to authenticates the fetch, and taking it
+    // from our own session removes a dependency on what the approver happened
+    // to have selected.
     installImpl = async () => ({ orgId: null, orgTokenReady: false });
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
-    };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
 
     await new PairCommand().execute({});
     expect(resolveKeyMaterialCalls.length).toBe(1);
-    // VALID_ANSWER's keyMaterial.orgId is 'org_1' — the fallback when
+    // VALID_ANSWER.session's first organization — the fallback when
     // install.orgId is null (see pairCommand.ts's finish()).
     expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBe('org_1');
   });
@@ -257,10 +281,7 @@ describe('PairCommand — answered', () => {
 
 describe('PairCommand — expired', () => {
   test('exits EXIT_NEEDS_INPUT (3), coded, and installs nothing', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ZZZZ-9999');
-      return { kind: 'expired', userCode: 'ZZZZ-9999' };
-    };
+    ceremonyImpl = async () => ({ status: 'denied', error: 'expired_token' });
 
     await expect(new PairCommand().execute({})).rejects.toMatchObject({ code: 3 });
     expect(installCalls.length).toBe(0);
@@ -269,24 +290,18 @@ describe('PairCommand — expired', () => {
   });
 
   test('--json emits the PAIR_CODE_EXPIRED code', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ZZZZ-9999');
-      return { kind: 'expired', userCode: 'ZZZZ-9999' };
-    };
+    ceremonyImpl = async () => ({ status: 'denied', error: 'expired_token' });
 
     await expect(new PairCommand().execute({ json: true })).rejects.toBeInstanceOf(ExitError);
     const jsonStart = logs.findIndex((l) => l.trim().startsWith('{'));
     const parsed = JSON.parse(logs.slice(jsonStart).join('\n'));
-    expect(parsed).toEqual({ ok: false, code: ERROR_CODES.PAIR_CODE_EXPIRED, userCode: 'ZZZZ-9999' });
+    expect(parsed).toEqual({ ok: false, code: ERROR_CODES.PAIR_CODE_EXPIRED, userCode: 'ABCD-1234' });
   });
 });
 
 describe('PairCommand — declined/cancelled/error', () => {
   test('a CeremonyFailure code exits 1 and installs nothing', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('CCCC-1111');
-      return { kind: 'failure', code: 'cancelled', userCode: 'CCCC-1111' };
-    };
+    ceremonyImpl = async () => ({ status: 'denied', error: 'cancelled' });
 
     await new PairCommand().execute({});
     expect((process as any).exitCode).toBe(1);
@@ -297,7 +312,7 @@ describe('PairCommand — declined/cancelled/error', () => {
 
 describe('PairCommand — bootstrap failure before any code is ever shown', () => {
   test('a thrown bootstrap error exits 1, prints no pairing code, installs nothing', async () => {
-    ceremonyImpl = async () => {
+    authorizeImpl = async () => {
       throw new Error('network is down');
     };
 
@@ -311,10 +326,7 @@ describe('PairCommand — bootstrap failure before any code is ever shown', () =
 
 describe('PairCommand — install failure', () => {
   test('a session-install throw does not spawn a grant daemon', async () => {
-    ceremonyImpl = async (opts: any) => {
-      opts.onCodeReady('ABCD-1234');
-      return { kind: 'answered', answer: VALID_ANSWER, userCode: 'ABCD-1234' };
-    };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
     installImpl = async () => {
       throw new Error('disk full');
     };
@@ -348,13 +360,12 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
   function pending() {
     // Never resolves within a test's lifetime — these tests only care about
     // what `onCodeReady` prints synchronously, not about a ceremony outcome.
-    ceremonyImpl = (opts: any) =>
-      new Promise(() => {
-        opts.onCodeReady('QR12-3456');
-      });
+    // The command prints the block itself now, then waits — so this just
+    // never resolves. Callers await a tick so the print has happened.
+    ceremonyImpl = () => new Promise(() => {});
   }
 
-  test('a wide real TTY gets the QR alongside the unconditional plain text', () => {
+  test('a wide real TTY gets the QR alongside the unconditional plain text', async () => {
     process.stdout.isTTY = true;
     process.stdout.columns = 80;
     process.stdout.rows = 24;
@@ -362,42 +373,102 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
     pending();
 
     void new PairCommand().execute({});
+    // The block is printed after an awaited authorize call, so let the event
+    // loop turn before asserting. Harness timing only — the contract, that the
+    // code and URL are printed before the wait begins, is unchanged.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const all = logs.join('\n');
-    expect(all).toContain('QR12-3456');
-    expect(all).toContain('keep.capy.sc/pair');
+    expect(all).toContain('ABCD-1234');
+    // CHANGED EXPECTATION (CAP-566): the pairing URL is no longer Keep's
+    // /pair page. The machine now authenticates itself through the identity
+    // provider's own RFC 8628 device page, so the URL printed here is the
+    // `verification_uri` the authorize response returned.
+    //
+    // This is a TRUST-SURFACE change, not only a UX one, and it is the single
+    // most important thing to look at in this diff: a user who has been taught
+    // that pairing happens on a capy.sc domain is now sent somewhere that is
+    // not ours. "The pairing link goes somewhere else now" is precisely the
+    // shape a phishing attempt takes. That may well be the right trade for a
+    // real device grant — the machine getting its own credentials is the whole
+    // point — but it is a product decision, and it strengthens the case for
+    // putting the device page on a Capy-owned domain.
+    //
+    // Asserted from the authorize response rather than hardcoded, so moving to
+    // a custom domain changes config and not this test.
+    expect(all).toContain(AUTHORIZATION.verification_uri);
     expect(HALF_BLOCK.test(all)).toBe(true);
   });
 
-  test('a piped, non-TTY stdout gets the plain text but never the QR', () => {
+  test('a piped, non-TTY stdout gets the plain text but never the QR', async () => {
     process.stdout.isTTY = undefined as unknown as true; // spawned-process shape
     process.stdout.columns = 80;
     process.stdout.rows = 24;
     pending();
 
     void new PairCommand().execute({});
+    // The block is printed after an awaited authorize call, so let the event
+    // loop turn before asserting. Harness timing only — the contract, that the
+    // code and URL are printed before the wait begins, is unchanged.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const all = logs.join('\n');
-    expect(all).toContain('QR12-3456');
-    expect(all).toContain('keep.capy.sc/pair');
+    expect(all).toContain('ABCD-1234');
+    // CHANGED EXPECTATION (CAP-566): the pairing URL is no longer Keep's
+    // /pair page. The machine now authenticates itself through the identity
+    // provider's own RFC 8628 device page, so the URL printed here is the
+    // `verification_uri` the authorize response returned.
+    //
+    // This is a TRUST-SURFACE change, not only a UX one, and it is the single
+    // most important thing to look at in this diff: a user who has been taught
+    // that pairing happens on a capy.sc domain is now sent somewhere that is
+    // not ours. "The pairing link goes somewhere else now" is precisely the
+    // shape a phishing attempt takes. That may well be the right trade for a
+    // real device grant — the machine getting its own credentials is the whole
+    // point — but it is a product decision, and it strengthens the case for
+    // putting the device page on a Capy-owned domain.
+    //
+    // Asserted from the authorize response rather than hardcoded, so moving to
+    // a custom domain changes config and not this test.
+    expect(all).toContain(AUTHORIZATION.verification_uri);
     expect(HALF_BLOCK.test(all)).toBe(false);
   });
 
-  test('a narrow real TTY falls back to plain text only — no QR, no crash', () => {
+  test('a narrow real TTY falls back to plain text only — no QR, no crash', async () => {
     process.stdout.isTTY = true;
     process.stdout.columns = 10;
     process.stdout.rows = 24;
     pending();
 
     void new PairCommand().execute({});
+    // The block is printed after an awaited authorize call, so let the event
+    // loop turn before asserting. Harness timing only — the contract, that the
+    // code and URL are printed before the wait begins, is unchanged.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const all = logs.join('\n');
-    expect(all).toContain('QR12-3456');
-    expect(all).toContain('keep.capy.sc/pair');
+    expect(all).toContain('ABCD-1234');
+    // CHANGED EXPECTATION (CAP-566): the pairing URL is no longer Keep's
+    // /pair page. The machine now authenticates itself through the identity
+    // provider's own RFC 8628 device page, so the URL printed here is the
+    // `verification_uri` the authorize response returned.
+    //
+    // This is a TRUST-SURFACE change, not only a UX one, and it is the single
+    // most important thing to look at in this diff: a user who has been taught
+    // that pairing happens on a capy.sc domain is now sent somewhere that is
+    // not ours. "The pairing link goes somewhere else now" is precisely the
+    // shape a phishing attempt takes. That may well be the right trade for a
+    // real device grant — the machine getting its own credentials is the whole
+    // point — but it is a product decision, and it strengthens the case for
+    // putting the device page on a Capy-owned domain.
+    //
+    // Asserted from the authorize response rather than hardcoded, so moving to
+    // a custom domain changes config and not this test.
+    expect(all).toContain(AUTHORIZATION.verification_uri);
     expect(HALF_BLOCK.test(all)).toBe(false);
   });
 
-  test('NO_COLOR suppresses the QR even on a wide real TTY, text stays', () => {
+  test('NO_COLOR suppresses the QR even on a wide real TTY, text stays', async () => {
     process.stdout.isTTY = true;
     process.stdout.columns = 80;
     process.stdout.rows = 24;
@@ -405,9 +476,13 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
     pending();
 
     void new PairCommand().execute({});
+    // The block is printed after an awaited authorize call, so let the event
+    // loop turn before asserting. Harness timing only — the contract, that the
+    // code and URL are printed before the wait begins, is unchanged.
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const all = logs.join('\n');
-    expect(all).toContain('QR12-3456');
+    expect(all).toContain('ABCD-1234');
     expect(HALF_BLOCK.test(all)).toBe(false);
   });
 

@@ -59,6 +59,7 @@ ISOLATED_FILES=(
   tests/ui/errorScreenBrokerCeremony.test.ts
   tests/flows/observe.test.ts
   tests/auth/authService.test.ts
+  tests/auth/deviceAuth.test.ts
   tests/auth/authServiceKeepScreens.test.ts
   tests/auth/oauthServer.test.ts
   tests/auth/sessionFileBackend.test.ts
