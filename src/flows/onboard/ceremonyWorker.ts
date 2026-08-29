@@ -82,6 +82,13 @@ export interface CeremonyMarker {
   targetDir?: string;
   /** Set only when state is 'done' and the ceremony resolved an org. Not a secret. */
   orgId?: string;
+  /**
+   * Set only when state is 'done' and the ceremony CREATED a project (the
+   * `default` project the create_org mint provisions). Not a secret. Rides
+   * to `driver.ts`'s step report as `result.project_id` so the service pins
+   * the project the mint already made — see `FirstRunOutcome.projectId`.
+   */
+  projectId?: string;
   /** Set only when state is 'failed'. A code, never prose. */
   code?: string;
 }
@@ -216,7 +223,7 @@ export interface PrepareCeremonyScreenOptions {
 
 export type PrepareCeremonyScreenResult =
   | { kind: 'screen'; step: FlowStep }
-  | { kind: 'settled'; outcome: 'ok'; orgId?: string }
+  | { kind: 'settled'; outcome: 'ok'; orgId?: string; projectId?: string }
   | { kind: 'settled'; outcome: 'failed'; code: string };
 
 /**
@@ -299,9 +306,12 @@ export async function prepareCeremonyScreen(
     // the instance on.
     deleteCeremonyMarker(opts.targetDir, connectionId);
     if (existing.state === 'done') {
-      return existing.orgId
-        ? { kind: 'settled', outcome: 'ok', orgId: existing.orgId }
-        : { kind: 'settled', outcome: 'ok' };
+      return {
+        kind: 'settled',
+        outcome: 'ok',
+        ...(existing.orgId ? { orgId: existing.orgId } : {}),
+        ...(existing.projectId ? { projectId: existing.projectId } : {}),
+      };
     }
     if (existing.state === 'failed') {
       return { kind: 'settled', outcome: 'failed', code: existing.code ?? CEREMONY_CODES.SERVICE_ERROR };
@@ -437,39 +447,51 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
     },
   };
 
-  let outcomeCode: string | undefined;
-  // Not a secret — the org id the ceremony resolved, so `driver.ts` can
-  // report `result:{org_id}` back to the service on the NEXT `prepareCeremonyScreen`
-  // encounter of this connection, the same way any other 'ok' local_action
-  // already does. See `runSandboxCeremony`'s own `result.result.org_id`.
-  let orgId: string | undefined;
-  let ok = false;
-  try {
-    const outcome = await runSandboxCeremony({
-      step,
-      keypair,
-      flowSecret: payload.flowSecret,
-      serviceUrl: payload.serviceUrl,
-      devMode: payload.devMode,
-      machineName: payload.machineName,
-      targetDir: payload.targetDir,
-      presetPrfSalt: Buffer.from(payload.prfSaltB64, 'base64'),
-    });
-    ok = outcome.result.outcome === 'ok';
-    outcomeCode = outcome.result.code;
-    orgId = outcome.result.result?.org_id;
-  } catch {
-    ok = false;
-    outcomeCode = CEREMONY_CODES.SERVICE_ERROR;
-  }
+  // Not secrets — the org/project ids the ceremony resolved, so `driver.ts`
+  // can report `result:{org_id, project_id}` back to the service on the NEXT
+  // `prepareCeremonyScreen` encounter of this connection, the same way any
+  // other 'ok' local_action already does. See `runSandboxCeremony`'s own
+  // `result.result.org_id`.
+  const settled = await (async (): Promise<{
+    ok: boolean;
+    code?: string;
+    orgId?: string;
+    projectId?: string;
+  }> => {
+    try {
+      const outcome = await runSandboxCeremony({
+        step,
+        keypair,
+        flowSecret: payload.flowSecret,
+        serviceUrl: payload.serviceUrl,
+        devMode: payload.devMode,
+        machineName: payload.machineName,
+        targetDir: payload.targetDir,
+        presetPrfSalt: Buffer.from(payload.prfSaltB64, 'base64'),
+      });
+      return {
+        ok: outcome.result.outcome === 'ok',
+        code: outcome.result.code,
+        orgId: outcome.result.result?.org_id,
+        projectId: outcome.result.result?.project_id,
+      };
+    } catch {
+      return { ok: false, code: CEREMONY_CODES.SERVICE_ERROR };
+    }
+  })();
 
   writeCeremonyMarker(payload.targetDir, {
-    state: ok ? 'done' : 'failed',
+    state: settled.ok ? 'done' : 'failed',
     url: payload.baseUrl,
     userCode: payload.userCode,
     connectionId: payload.connectionId,
     createdAt: Date.now(),
     targetDir: payload.targetDir,
-    ...(ok ? (orgId ? { orgId } : {}) : { code: outcomeCode ?? CEREMONY_CODES.SERVICE_ERROR }),
+    ...(settled.ok
+      ? {
+          ...(settled.orgId ? { orgId: settled.orgId } : {}),
+          ...(settled.projectId ? { projectId: settled.projectId } : {}),
+        }
+      : { code: settled.code ?? CEREMONY_CODES.SERVICE_ERROR }),
   });
 }

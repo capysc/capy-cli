@@ -349,7 +349,7 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         spawnImpl: opts.ceremonySpawnImpl,
         resolveCommand: opts.ceremonyResolveCommand,
       };
-      let prepared = await prepareCeremonyScreen(ceremonyOpts);
+      const firstPrepared = await prepareCeremonyScreen(ceremonyOpts);
 
       // Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): a ceremony can
       // settle 'ok' with NO org — the human signed in, but org-create on the
@@ -368,9 +368,10 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
       // step finished. The service still believes it is waiting on the
       // original `sandbox_session` step, which is exactly right: it isn't
       // done.
-      if (prepared.kind === 'settled' && prepared.outcome === 'ok' && !prepared.orgId) {
-        prepared = await prepareCeremonyScreen(ceremonyOpts);
-      }
+      const prepared =
+        firstPrepared.kind === 'settled' && firstPrepared.outcome === 'ok' && !firstPrepared.orgId
+          ? await prepareCeremonyScreen(ceremonyOpts)
+          : firstPrepared;
 
       if (prepared.kind === 'screen') {
         // Stops here, same as any other screen — the URL (now carrying the
@@ -386,17 +387,25 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         outcome: prepared.outcome,
         code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
       });
-      // `result.org_id`, when the ceremony resolved one, so the service pins
-      // the org off THIS step exactly as it would off any other 'ok'
-      // local_action's result — without this the service never learns which
-      // org a broker-ceremony run landed on.
-      const ceremonyOrgId =
-        prepared.kind === 'settled' && prepared.outcome === 'ok' ? prepared.orgId : undefined;
+      // `result.org_id` (and `result.project_id`, when create_org minted
+      // one), when the ceremony resolved them, so the service pins BOTH off
+      // THIS step exactly as it would off any other 'ok' local_action's
+      // result — without this the service never learns which org/project a
+      // broker-ceremony run landed on, and `write_keep_lock` later hits the
+      // adopt-vs-create project picker on a decision the mint already made.
+      const ceremonySettledOk = prepared.kind === 'settled' && prepared.outcome === 'ok';
+      const ceremonyOrgId = ceremonySettledOk ? prepared.orgId : undefined;
+      const ceremonyProjectId = ceremonySettledOk ? prepared.projectId : undefined;
       lastStep = {
         step_id: step.step_id,
         outcome: prepared.outcome,
         code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
-        result: ceremonyOrgId ? { org_id: ceremonyOrgId } : undefined,
+        result: ceremonyOrgId
+          ? {
+              org_id: ceremonyOrgId,
+              ...(ceremonyProjectId ? { project_id: ceremonyProjectId } : {}),
+            }
+          : undefined,
       };
       if (prepared.outcome === 'ok') {
         // The worker wrote its own session store directly (same writer a

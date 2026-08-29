@@ -987,7 +987,10 @@ describe('runSandboxCeremony — create_org hits mint-ceremony, re-scopes, and f
     });
 
     expect(outcome.result.outcome).toBe('ok');
-    expect(outcome.result.result).toEqual({ org_id: 'org_new_1' });
+    // `project_id` rides the report so the service pins the project the
+    // mint-ceremony provisioned — `write_keep_lock` must never hit the
+    // adopt-vs-create picker on a decision the mint already made.
+    expect(outcome.result.result).toEqual({ org_id: 'org_new_1', project_id: 'proj_new_1' });
 
     // Derive the ordered log of "which logical step" each fetch call was,
     // from bun's own call record — never accumulated as a side effect.

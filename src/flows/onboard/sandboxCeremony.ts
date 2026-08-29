@@ -456,6 +456,15 @@ interface FirstRunOutcome {
   ok: boolean;
   code?: string;
   orgId?: string;
+  /**
+   * Set only by `create_org`: the `default` project the mint-ceremony
+   * provisioned with the org. Reported as `result.project_id` so the service
+   * pins it (the same pin any 'ok' local_action's result drives) — otherwise
+   * the flow reaches `write_keep_lock` with an org pinned but no project,
+   * and the adopt-vs-create picker (a wizard stop) fires on a decision the
+   * mint already made.
+   */
+  projectId?: string;
   token?: string;
 }
 
@@ -486,35 +495,66 @@ async function applyFirstRun(opts: {
   serviceClient.setTokenProvider(() => authService.getValidToken());
 
   const fr = opts.answer.firstRun;
-  let orgId: string | undefined;
+
+  // Settle a REAL, org-scoped bearer for the org a branch below resolved —
+  // never report success with an org-less or absent token standing in for
+  // it. A failure here (e.g. a moment of WorkOS role-propagation lag right
+  // after `create_org`) is surfaced as a coded failure rather than silently
+  // handed back as `ok:true` with `token:undefined`: the caller (driver.ts)
+  // would otherwise carry on with no bearer update at all, so `write_keep_lock`
+  // — reached next — would run its encrypt-and-push under whatever STALE
+  // bearer it can scrounge up (org-less, or none), and 403 on the push AFTER
+  // already having encrypted .env. No sleep/retry here — see this function's
+  // module doc; a caller that wants one drives it by re-asking the flow.
+  const settleOutcome = async (orgId: string, projectId?: string): Promise<FirstRunOutcome> => {
+    const settled = await authService.authenticateSilent(orgId);
+    if (!settled.success) {
+      return { ok: false, code: codeForSilentAuthFailure(settled.error_code) };
+    }
+    const token = (await authService.getValidToken())?.access_token ?? settled._orgless_access_token;
+    if (!token) {
+      return { ok: false, code: ERROR_CODES.SERVICE_ERROR };
+    }
+    return { ok: true, orgId, ...(projectId ? { projectId } : {}), token };
+  };
 
   if (fr.kind === 'create_org') {
-    try {
-      const { createOrganizationFromEnvelope } = await import('../../commands/orgCreation');
-      const org = await createOrganizationFromEnvelope({
-        authService,
-        serviceClient,
-        refreshToken: opts.answer.refreshToken,
-        userId: opts.answer.user.id,
-        userEmail: opts.answer.user.email,
-        name: fr.name,
-        phrase: fr.phrase,
-        // Always present now — the parse refuses a doorless create_org
-        // (signup requires a door), so this never falls back to the old
-        // enroll-nothing path.
-        prf: {
-          credentialId: fr.credentialId,
-          prfOutput: fr.prfOutput,
-          backupEligible: fr.backupEligible,
-          backupState: fr.backupState,
-          prfSalt: opts.prfSalt,
-        },
-      });
-      orgId = org.id;
-    } catch (err) {
-      return { ok: false, code: codeFor(err) };
+    const created = await (async (): Promise<
+      { ok: true; org: { id: string }; projectId: string } | { ok: false; code?: string }
+    > => {
+      try {
+        const { createOrganizationFromEnvelope } = await import('../../commands/orgCreation');
+        const minted = await createOrganizationFromEnvelope({
+          authService,
+          serviceClient,
+          refreshToken: opts.answer.refreshToken,
+          userId: opts.answer.user.id,
+          userEmail: opts.answer.user.email,
+          name: fr.name,
+          phrase: fr.phrase,
+          // Always present now — the parse refuses a doorless create_org
+          // (signup requires a door), so this never falls back to the old
+          // enroll-nothing path.
+          prf: {
+            credentialId: fr.credentialId,
+            prfOutput: fr.prfOutput,
+            backupEligible: fr.backupEligible,
+            backupState: fr.backupState,
+            prfSalt: opts.prfSalt,
+          },
+        });
+        return { ok: true, ...minted };
+      } catch (err) {
+        return { ok: false, code: codeFor(err) };
+      }
+    })();
+    if (!created.ok) {
+      return { ok: false, code: created.code };
     }
-  } else if (fr.kind === 'select_org') {
+    return settleOutcome(created.org.id, created.projectId);
+  }
+
+  if (fr.kind === 'select_org') {
     // The picked org MUST be one the envelope itself named — a foreign
     // org_id (typo, stale answer, tampering) is refused rather than
     // silently pinning something the rest of the answer never vouched for.
@@ -522,8 +562,10 @@ async function applyFirstRun(opts: {
     if (!target) {
       return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
     }
-    orgId = target.id;
-  } else if (fr.kind === 'unlock') {
+    return settleOutcome(target.id);
+  }
+
+  if (fr.kind === 'unlock') {
     // `unlock` only makes sense for the "1 org, key not on device" row of
     // the gate table — an envelope claiming it with zero or several orgs is
     // internally inconsistent (which one would the ceremony have run
@@ -531,7 +573,7 @@ async function applyFirstRun(opts: {
     if (opts.answer.organizations.length !== 1) {
       return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
     }
-    orgId = opts.answer.organizations[0].id;
+    const orgId = opts.answer.organizations[0].id;
     try {
       // Pin the org BEFORE any service call this branch makes. `authService`
       // is a BRAND NEW instance (constructed a few lines up) whose
@@ -580,7 +622,10 @@ async function applyFirstRun(opts: {
         }`,
       );
     }
-  } else if (fr.kind === 'mint_key') {
+    return settleOutcome(orgId);
+  }
+
+  if (fr.kind === 'mint_key') {
     // CAP-542: an org that exists but never had a master key minted — the
     // FLOW-driven counterpart of `masterKeyMint.ts`'s TTY `mintMasterKeyForOrg`
     // ceremony. Unlike `unlock`, a failure here is NOT best-effort: the
@@ -594,7 +639,7 @@ async function applyFirstRun(opts: {
     if (!target) {
       return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
     }
-    orgId = target.id;
+    const orgId = target.id;
     try {
       const { validateSeedPhrase, seedPhraseToMasterKey, CURRENT_KDF_VERSION } = await import(
         '../../crypto/keyManager'
@@ -652,36 +697,16 @@ async function applyFirstRun(opts: {
     } catch (err) {
       return { ok: false, code: codeFor(err) };
     }
-  } else {
-    // 'none' — key already on this device. Same internal-consistency
-    // requirement as `unlock`: exactly one org, or there is nothing this
-    // kind can legitimately mean.
-    if (opts.answer.organizations.length !== 1) {
-      return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
-    }
-    orgId = opts.answer.organizations[0].id;
+    return settleOutcome(orgId);
   }
 
-  // Settle a REAL, org-scoped bearer for the org this branch just resolved —
-  // never report success with an org-less or absent token standing in for
-  // it. A failure here (e.g. a moment of WorkOS role-propagation lag right
-  // after `create_org`) is surfaced as a coded failure rather than silently
-  // handed back as `ok:true` with `token:undefined`: the caller (driver.ts)
-  // would otherwise carry on with no bearer update at all, so `write_keep_lock`
-  // — reached next — would run its encrypt-and-push under whatever STALE
-  // bearer it can scrounge up (org-less, or none), and 403 on the push AFTER
-  // already having encrypted .env. No sleep/retry here — see this function's
-  // module doc; a caller that wants one drives it by re-asking the flow.
-  const settled = await authService.authenticateSilent(orgId);
-  if (!settled.success) {
-    return { ok: false, code: codeForSilentAuthFailure(settled.error_code) };
+  // 'none' — key already on this device. Same internal-consistency
+  // requirement as `unlock`: exactly one org, or there is nothing this
+  // kind can legitimately mean.
+  if (opts.answer.organizations.length !== 1) {
+    return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
   }
-  const token = (await authService.getValidToken())?.access_token ?? settled._orgless_access_token;
-  if (!token) {
-    return { ok: false, code: ERROR_CODES.SERVICE_ERROR };
-  }
-
-  return { ok: true, orgId, token };
+  return settleOutcome(opts.answer.organizations[0].id);
 }
 
 // ---------------------------------------------------------------------------
@@ -826,7 +851,15 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
   }
 
   return {
-    result: { outcome: 'ok', result: firstRun.orgId ? { org_id: firstRun.orgId } : undefined },
+    result: {
+      outcome: 'ok',
+      result: firstRun.orgId
+        ? {
+            org_id: firstRun.orgId,
+            ...(firstRun.projectId ? { project_id: firstRun.projectId } : {}),
+          }
+        : undefined,
+    },
     session: firstRun.token ? { token: firstRun.token, userId: answer.user.id } : undefined,
   };
 }

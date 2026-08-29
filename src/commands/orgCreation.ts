@@ -340,7 +340,7 @@ function codeForAuthFailure(errorCode: string | undefined): string {
 
 export async function createOrganizationFromEnvelope(
   args: CreateOrgFromEnvelopeArgs,
-): Promise<Organization> {
+): Promise<{ org: Organization; projectId: string }> {
   if (!validateSeedPhrase(args.phrase)) {
     throw new CapyError(
       'The recovery phrase in the sealed answer did not pass BIP39 validation.',
@@ -384,7 +384,12 @@ export async function createOrganizationFromEnvelope(
   const { finalizeKeyMintOrThrow } = await import('../auth/masterKeyMint');
   await finalizeKeyMintOrThrow(args.serviceClient, org.id, args.userId);
 
-  return org;
+  // The `default` project mint-ceremony provisioned alongside the org rides
+  // back with it: the caller's step report carries it as `result.project_id`
+  // so the service pins the project this ceremony ALREADY created — without
+  // it, the later `write_keep_lock` step hits the adopt-vs-create project
+  // picker (a wizard stop) on a decision the mint made long ago.
+  return { org, projectId: minted.project_id };
 }
 
 /**

@@ -144,7 +144,7 @@ describe('createOrganizationFromEnvelope — mint-ceremony sequence', () => {
     const authService = fakeAuthService();
     const serviceClient = fakeServiceClient();
 
-    const org = await createOrganizationFromEnvelope({
+    const { org, projectId } = await createOrganizationFromEnvelope({
       authService,
       serviceClient,
       refreshToken: 'rt',
@@ -154,6 +154,9 @@ describe('createOrganizationFromEnvelope — mint-ceremony sequence', () => {
     });
 
     expect(org.id).toBe('org_1');
+    // The default project the mint provisioned rides back with the org — the
+    // ceremony's step report pins it service-side (no adopt-vs-create stop).
+    expect(projectId).toBe('proj_1');
     expect(wrapAndSaveMasterKey).toHaveBeenCalledTimes(1);
     expect(seedPhraseToMasterKey).toHaveBeenCalledWith('valid phrase words here', 2);
     // No PRF pair supplied — Case A never runs.
@@ -361,7 +364,7 @@ describe('createOrganizationFromEnvelope — canned Case A enrollment', () => {
     const authService = fakeAuthService();
     const serviceClient = fakeServiceClient();
 
-    const org = await createOrganizationFromEnvelope({
+    const { org } = await createOrganizationFromEnvelope({
       authService,
       serviceClient,
       refreshToken: 'rt',

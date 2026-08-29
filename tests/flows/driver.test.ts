@@ -964,6 +964,10 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
       createdAt: Date.now(),
       targetDir: ceremonyDir,
       orgId: 'org-from-marker',
+      // create_org mints a default project alongside the org — the marker
+      // carries it so the report pins BOTH (the write phase must never hit
+      // the adopt-vs-create project picker on a decision the mint made).
+      projectId: 'proj-from-marker',
     });
 
     const sandboxStep = envelope({
@@ -993,11 +997,15 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     }
 
     // The SECOND /next call is the one that reports back on the settled
-    // ceremony step — its last_step.result must carry the org the marker
-    // resolved, the same shape any other 'ok' local_action reports.
+    // ceremony step — its last_step.result must carry the org AND project
+    // the marker resolved, the same shape any other 'ok' local_action
+    // reports (the project id is what drives the service's project pin).
     expect(reports.length).toBe(2);
     expect(reports[1].last_step?.outcome).toBe('ok');
-    expect(reports[1].last_step?.result).toEqual({ org_id: 'org-from-marker' });
+    expect(reports[1].last_step?.result).toEqual({
+      org_id: 'org-from-marker',
+      project_id: 'proj-from-marker',
+    });
   });
 
   // Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): org-create failing on

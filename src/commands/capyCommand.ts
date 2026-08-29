@@ -458,6 +458,22 @@ export class CapyCommand {
     orgId: string,
     userId: string,
   ): Promise<void> {
+    // The ordinary init path settles THIS command's own auth service
+    // (`authenticate` at the top of initializeProject) before anything uses
+    // `this.serviceClient` — this flow entry point jumped straight past it,
+    // so `resolveProjectKey`'s co-decrypt went out with no Authorization
+    // header at all (observed live: 401 on the first pinned-project adopt).
+    // The executor authenticates its OWN AuthService instance; that never
+    // wires this one. Silent settle only — an adopt has a live session by
+    // construction, so a refusal here is a coded failure, never a prompt.
+    this.authService.setSessionUserId(userId);
+    const session = await this.authService.authenticateSilent(orgId);
+    if (!session.success) {
+      throw new CapyError(
+        session.error || 'Could not authenticate to adopt the pinned project.',
+        ERROR_CODES.AUTH_FAILED,
+      );
+    }
     await this.bootstrapExistingProject(project, orgId, userId);
   }
 
@@ -1358,8 +1374,11 @@ export class CapyCommand {
         this.fileManager.writeKeepFile(stub);
         this.projectManager.writeActiveBranch(branch);
         this.fileManager.ensureCapyGitignore();
-        console.log(`\n${B(project.name)} has no secrets yet.`);
-        console.log(`Add secrets to .env, then run ${B('capy push')}.`);
+        // human(), not console.log: this path is reachable under
+        // `--broker-ceremony --json` (pinned-project adopt), where stdout
+        // must stay exactly one JSON envelope.
+        human(`\n${B(project.name)} has no secrets yet.`);
+        human(`Add secrets to .env, then run ${B('capy push')}.`);
         this.installGitHooks();
         return;
       }
@@ -1381,8 +1400,9 @@ export class CapyCommand {
       this.fileManager.writeKeepFile(stub);
       this.projectManager.writeActiveBranch(branch);
       this.fileManager.ensureCapyGitignore();
-      console.log(`\n${B(project.name)} has no secrets yet.`);
-      console.log(`Add secrets to .env, then run ${B('capy push')}.`);
+      // Same routing rule as the 404-stub branch above.
+      human(`\n${B(project.name)} has no secrets yet.`);
+      human(`Add secrets to .env, then run ${B('capy push')}.`);
       this.installGitHooks();
       return;
     }
@@ -2115,9 +2135,18 @@ export class CapyCommand {
     // directory. `skip` is excluded because "do nothing" is always on the menu
     // and is never the action the user came for.
     const soleAction = ((): string | null => {
-      if (!isOnboarding) return null;
       const real = menuChoices.filter((c) => c.value !== 'skip');
-      return real.length === 1 ? real[0].value : null;
+      if (real.length !== 1) return null;
+      if (isOnboarding) return real[0].value;
+      // Broker-ceremony first push (State 6: nothing pinned, nothing remote,
+      // menu = [commit_local]) is the same fully-determined shape: the flow's
+      // consent dialog already named every variable and `will_encrypt`, so
+      // the one real action is not a decision either — refusing it below
+      // dead-ends `encrypt_env` on a stop no human can reach. TTY and --web
+      // runs are deliberately NOT changed: they keep the prompt (the
+      // hardening rule — interactive behavior stays byte-identical).
+      if (this.options.brokerCeremony) return real[0].value;
+      return null;
     })();
 
     let action: string;
