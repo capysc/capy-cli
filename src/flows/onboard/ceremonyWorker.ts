@@ -41,7 +41,7 @@
  * sometimes logged by supervisors).
  */
 import { spawn, type ChildProcess } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   ConnectionKeypair,
@@ -245,9 +245,22 @@ export function spawnCeremonyWorker(
 ): ChildProcess {
   const spawnImpl = opts.spawnImpl ?? spawn;
   const { command, args } = (opts.resolveCommand ?? defaultResolveCommand)();
+  // Diagnostic aid: CAPY_CEREMONY_LOG (a file path) routes the DETACHED
+  // worker's otherwise-discarded stderr to a file, so `debug()` breadcrumbs
+  // (CAPY_VERBOSE=1) survive the parent's exit. Dev/E2E only — unset, the
+  // original ['pipe','ignore','ignore'] wiring is byte-identical.
+  const stderrTarget = ((): 'ignore' | number => {
+    const logPath = process.env.CAPY_CEREMONY_LOG;
+    if (!logPath) return 'ignore';
+    try {
+      return openSync(logPath, 'a');
+    } catch {
+      return 'ignore';
+    }
+  })();
   const child = spawnImpl(command, args, {
     detached: true,
-    stdio: ['pipe', 'ignore', 'ignore'],
+    stdio: ['pipe', 'ignore', stderrTarget],
   });
   child.stdin?.write(JSON.stringify(payload));
   child.stdin?.end();

@@ -418,7 +418,18 @@ export function parseSandboxSessionAnswer(plaintext: string): ParsedAnswer {
   }
 
   const firstRun = parseFirstRun(parsed.first_run);
-  if (firstRun === null) return { ok: false, code: INVALID };
+  if (firstRun === null) {
+    // Diagnostic breadcrumb only — SHAPE, never content: top-level keys of
+    // the first_run object and its claimed kind. The phrase/tokens the
+    // envelope carries must never reach any log (debug() included).
+    const fr = parsed.first_run;
+    debug('sandbox answer rejected at first_run parse', {
+      first_run_type: fr === undefined ? 'undefined' : fr === null ? 'null' : typeof fr,
+      first_run_keys: isRecord(fr) ? Object.keys(fr).sort() : undefined,
+      first_run_kind: isRecord(fr) && typeof fr.kind === 'string' ? fr.kind : undefined,
+    });
+    return { ok: false, code: INVALID };
+  }
 
   return {
     ok: true,
