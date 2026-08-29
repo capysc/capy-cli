@@ -49,8 +49,9 @@ import {
   importConnectionKeypair,
 } from '../../service/brokerEnvelope';
 import { getGlobalCapyDir } from '../../config/globalConfig';
+import { debug } from '../../ui/debug';
 import { generatePrfSalt } from '../../auth/deviceKey/crypto';
-import { FlowStep } from '../validate';
+import { FLOW_CONTRACT_VERSION, FlowStep } from '../validate';
 import {
   buildCeremonyUrl,
   CEREMONY_CODES,
@@ -174,6 +175,15 @@ export interface CeremonyWorkerPayload {
   serviceUrl: string;
   devMode: boolean;
   machineName?: string;
+  /**
+   * The REAL ids of the flow and its sandbox_session step, so the worker can
+   * report the settled outcome to the service itself (see the settle-report
+   * block in runCeremonyWorker — the marker alone is unreachable in organic
+   * sequencing). Optional for payload back-compat: absent, the worker skips
+   * the report and the marker path stands alone, exactly as before.
+   */
+  flowId?: string;
+  stepId?: string;
   /**
    * CAP-542: the `sandbox_session` step's own `mint_org_id` param, when the
    * service sent one (jumping straight to the mint rail for an
@@ -357,6 +367,8 @@ export async function prepareCeremonyScreen(
         serviceUrl: opts.serviceUrl,
         devMode: opts.devMode,
         machineName: opts.machineName,
+        flowId: opts.step.flow_id,
+        stepId: opts.step.step_id,
         mintOrgId,
       },
       { spawnImpl: opts.spawnImpl, resolveCommand: opts.resolveCommand },
@@ -447,16 +459,16 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
     },
   };
 
-  // Not secrets — the org/project ids the ceremony resolved, so `driver.ts`
-  // can report `result:{org_id, project_id}` back to the service on the NEXT
-  // `prepareCeremonyScreen` encounter of this connection, the same way any
-  // other 'ok' local_action already does. See `runSandboxCeremony`'s own
+  // Not secrets — the org/project ids the ceremony resolved, so this step's
+  // outcome can be reported as `result:{org_id, project_id}` the same way
+  // any other 'ok' local_action's is. See `runSandboxCeremony`'s own
   // `result.result.org_id`.
   const settled = await (async (): Promise<{
     ok: boolean;
     code?: string;
     orgId?: string;
     projectId?: string;
+    token?: string;
   }> => {
     try {
       const outcome = await runSandboxCeremony({
@@ -474,6 +486,7 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
         code: outcome.result.code,
         orgId: outcome.result.result?.org_id,
         projectId: outcome.result.result?.project_id,
+        token: outcome.session?.token,
       };
     } catch {
       return { ok: false, code: CEREMONY_CODES.SERVICE_ERROR };
@@ -494,4 +507,50 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
         }
       : { code: settled.code ?? CEREMONY_CODES.SERVICE_ERROR }),
   });
+
+  // Report the settled step to the service RIGHT NOW, from this worker —
+  // never only via the marker. The marker path depends on a later driver
+  // re-encountering the SAME sandbox_session step, and organically it never
+  // does: this worker's own session-store write flips the next derivation's
+  // `sessionLive` observation to true, the service (correctly) skips
+  // authenticate AND derives past the satisfied ceremony screen, and the
+  // settled marker is never consumed — so the service pins the org off the
+  // bearer's claim but never learns the `project_id` the create_org mint
+  // provisioned, and `write_keep_lock` dead-ends on the adopt-vs-create
+  // picker (observed live: headless journey runs 6 and 7). The org-scoped
+  // bearer this ceremony just settled is exactly the credential the service's
+  // pin verification (`projectPinnableBy`) requires. Best-effort by design:
+  // on any failure the marker remains, and the driver's consume-and-report
+  // path (still intact above) covers every sequencing where the step IS
+  // re-encountered.
+  if (settled.ok && settled.orgId && payload.flowId && payload.stepId) {
+    try {
+      const { FlowClient } = await import('../client');
+      const { observeOnboard } = await import('./observe');
+      const client = new FlowClient(payload.serviceUrl, payload.devMode);
+      await client.next(
+        payload.flowId,
+        {
+          contract_version: FLOW_CONTRACT_VERSION,
+          observations: observeOnboard({ targetDir: payload.targetDir, sessionLive: true }),
+          last_step: {
+            step_id: payload.stepId,
+            outcome: 'ok',
+            result: {
+              org_id: settled.orgId,
+              ...(settled.projectId ? { project_id: settled.projectId } : {}),
+            },
+          },
+          client_pubkey: payload.publicKeyB64,
+        },
+        { secret: payload.flowSecret, token: settled.token },
+      );
+    } catch (err) {
+      debug(
+        `[ceremony-worker] settle report failed, marker remains the fallback: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 }

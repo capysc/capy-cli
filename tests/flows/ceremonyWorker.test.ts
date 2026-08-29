@@ -509,10 +509,27 @@ describe('runCeremonyWorker — reuses the existing runSandboxCeremony/applyFirs
       clientPubkeyB64: keypair.publicKeyB64,
     });
 
+    // Captures the worker's OWN settle report — the wire leg that makes the
+    // service pin org/project without ever depending on a later driver
+    // re-encountering this step (organically it never does: the worker's
+    // session write flips sessionLive and the service derives past it).
+    const reportCalls: Array<{ url: string; body: any; headers: Record<string, string> }> = [];
+
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (url: unknown) => {
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
       if (String(url).includes('/connections/')) {
         return new Response(JSON.stringify({ status: 'answered', ciphertext }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (String(url).includes('/flows/flow-worker-1/next')) {
+        reportCalls.push({
+          url: String(url),
+          body: JSON.parse(String(init?.body)),
+          headers: (init?.headers ?? {}) as Record<string, string>,
+        });
+        return new Response(JSON.stringify({ step: null }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -532,6 +549,8 @@ describe('runCeremonyWorker — reuses the existing runSandboxCeremony/applyFirs
       targetDir,
       serviceUrl: 'https://api.test.invalid',
       devMode: false,
+      flowId: 'flow-worker-1',
+      stepId: 'step-worker-1',
     };
 
     try {
@@ -552,6 +571,19 @@ describe('runCeremonyWorker — reuses the existing runSandboxCeremony/applyFirs
       // needed now that its FILE location no longer says so (it lives under
       // the global `~/.capy/ceremonies/`, keyed only by connection id).
       expect(marker?.targetDir).toBe(targetDir);
+
+      // The worker reported the settled step ITSELF, with the real flow and
+      // step ids, the flow secret, AND the org-scoped bearer it just settled
+      // — the credential the service's projectPinnableBy check requires.
+      expect(reportCalls.length).toBe(1);
+      expect(reportCalls[0].body.last_step).toEqual({
+        step_id: 'step-worker-1',
+        outcome: 'ok',
+        result: { org_id: 'org_1' },
+      });
+      expect(reportCalls[0].body.client_pubkey).toBe(keypair.publicKeyB64);
+      expect(reportCalls[0].headers['X-Flow-Secret']).toBe('flow-secret-worker-1');
+      expect(reportCalls[0].headers.Authorization).toMatch(/^Bearer /);
 
       // A LATER `prepareCeremonyScreen` encounter of the same connection
       // (the driver's own resume path — CAP-451 S1) reads this same marker
