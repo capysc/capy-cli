@@ -91,7 +91,16 @@ export interface DriverOptions {
   repoKey?: string;
   /** CAP-484: the org this repo names locally, if any — becomes the ceremony's member gate. See CreateFlowRequest.local_org_hint. */
   localOrgHint?: string;
-  /** Plan + compat findings, computed locally at creation. */
+  /**
+   * Plan + compat findings, computed locally by the caller BEFORE this run
+   * starts. Sent in the create body for a self-mint (see the `!flowId`
+   * branch below), and — see `resumingExistingFlow` in the loop — sent once
+   * more on this run's first `next` report when `flowId` was supplied
+   * instead: a remote-minted flow (minted by the hosted MCP) carries no plan
+   * on its row at all until some driver reports one, so a RESUME that never
+   * sent this would leave the confirm/onboard_plan dialog's params empty
+   * forever. The same value both times — never recomputed here.
+   */
   plan?: unknown;
   compat?: CreateFlowRequest['compat'];
   /** Safety valve against a service that keeps handing back work. */
@@ -138,6 +147,40 @@ function isStopStep(step: FlowStep): boolean {
   return step.kind === 'confirm' || step.kind === 'screen' || step.kind === 'blocked' || step.kind === 'done';
 }
 
+/**
+ * What plan (if any) to attach to this iteration's `next` report.
+ *
+ *  - A PLAN_CHANGED outcome on the previous step means the service found the
+ *    plan it holds stale under this human's directory and wants the fresh
+ *    one — same as before this function existed.
+ *  - Otherwise, the FIRST report of a run that RESUMED an existing instance
+ *    (`flowId` supplied by the caller, so the `!flowId` create branch above
+ *    never ran) gets the run's own already-computed plan exactly once: a
+ *    remote-minted flow's row carries no plan at all by construction (it was
+ *    minted by the hosted MCP with `minted_for: 'remote'`, which has no local
+ *    directory to compute one from), so without this the service never has
+ *    plan facts to hand back on the confirm/onboard_plan dialog. `opts.plan`
+ *    is the exact value the self-mint branch above already sends in the
+ *    create body — reused here, never recomputed — falling back to
+ *    `opts.buildPlan?.()` for a caller that only wired that one.
+ *  - Every later report on a resumed run (`isFirstReport` false) sends
+ *    nothing: one report is enough, and the service treats a resend of the
+ *    same `plan_hash` as a no-op in any case (`withReplacedPlan` in
+ *    service/src/routes/flows.ts), so this is a belt-and-suspenders "once"
+ *    rather than something correctness depends on.
+ */
+function resolveNextPlan(args: {
+  lastStep: { code?: string } | undefined;
+  isFirstReport: boolean;
+  resumingExistingFlow: boolean;
+  plan: unknown;
+  buildPlan: (() => unknown) | undefined;
+}): unknown {
+  if (args.lastStep?.code === ERROR_CODES.PLAN_CHANGED) return args.buildPlan?.();
+  if (args.isFirstReport && args.resumingExistingFlow) return args.plan ?? args.buildPlan?.();
+  return undefined;
+}
+
 export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult> {
   if (isLocalOnly()) {
     // Local-only is an offline path with a synthetic org and no server of any
@@ -175,6 +218,11 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
   let sessionLive = opts.sessionLive ?? false;
 
   let flowId = opts.flowId;
+  // Read BEFORE the `!flowId` branch below can assign into `flowId` — this is
+  // specifically "did the CALLER hand us an instance to resume", never "does
+  // `flowId` currently hold a value" (true after that branch runs regardless
+  // of how this instance came to exist). See `resolveNextPlan`'s doc.
+  const resumingExistingFlow = opts.flowId !== undefined;
   let creds: FlowCreds = { secret: opts.flowSecret, token: opts.token };
   // The service decides `resumed` ONCE per instance and echoes it on every
   // step (engine.ts resolveResumed) — so the value from the FIRST envelope
@@ -231,12 +279,33 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
     });
 
     // A plan that moved under the human is resent so the service can replace it
-    // and ask for consent again. Only then: an unchanged plan is not resent.
-    const plan = lastStep?.code === ERROR_CODES.PLAN_CHANGED ? opts.buildPlan?.() : undefined;
+    // and ask for consent again — and a run that RESUMED an existing instance
+    // sends its own computed plan once, on this very first report, because a
+    // remote-minted flow's row otherwise never gets one at all. See
+    // `resolveNextPlan`'s doc.
+    const plan = resolveNextPlan({
+      lastStep,
+      isFirstReport: i === 0,
+      resumingExistingFlow,
+      plan: opts.plan,
+      buildPlan: opts.buildPlan,
+    });
 
     const answer = await opts.transport.next(
       flowId,
-      { contract_version: FLOW_CONTRACT_VERSION, observations, last_step: lastStep, plan },
+      {
+        contract_version: FLOW_CONTRACT_VERSION,
+        observations,
+        last_step: lastStep,
+        plan,
+        // Sent on every `next` report while this process holds a
+        // broker-ceremony keypair — see NextRequest.client_pubkey's doc. The
+        // self-mint (create) case already registered this same key at
+        // create, so this is the documented idempotent no-op there; a
+        // RESUME (`--flow-id`/`--flow-secret`, no create call this run) is
+        // the case this actually lands the key for the first time.
+        client_pubkey: opts.brokerCeremonyKeypair?.publicKeyB64,
+      },
       creds,
     );
 
@@ -280,7 +349,7 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         spawnImpl: opts.ceremonySpawnImpl,
         resolveCommand: opts.ceremonyResolveCommand,
       };
-      let prepared = await prepareCeremonyScreen(ceremonyOpts);
+      const firstPrepared = await prepareCeremonyScreen(ceremonyOpts);
 
       // Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): a ceremony can
       // settle 'ok' with NO org — the human signed in, but org-create on the
@@ -299,9 +368,10 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
       // step finished. The service still believes it is waiting on the
       // original `sandbox_session` step, which is exactly right: it isn't
       // done.
-      if (prepared.kind === 'settled' && prepared.outcome === 'ok' && !prepared.orgId) {
-        prepared = await prepareCeremonyScreen(ceremonyOpts);
-      }
+      const prepared =
+        firstPrepared.kind === 'settled' && firstPrepared.outcome === 'ok' && !firstPrepared.orgId
+          ? await prepareCeremonyScreen(ceremonyOpts)
+          : firstPrepared;
 
       if (prepared.kind === 'screen') {
         // Stops here, same as any other screen — the URL (now carrying the
@@ -317,17 +387,25 @@ export async function runOnboardFlow(opts: DriverOptions): Promise<DriverResult>
         outcome: prepared.outcome,
         code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
       });
-      // `result.org_id`, when the ceremony resolved one, so the service pins
-      // the org off THIS step exactly as it would off any other 'ok'
-      // local_action's result — without this the service never learns which
-      // org a broker-ceremony run landed on.
-      const ceremonyOrgId =
-        prepared.kind === 'settled' && prepared.outcome === 'ok' ? prepared.orgId : undefined;
+      // `result.org_id` (and `result.project_id`, when create_org minted
+      // one), when the ceremony resolved them, so the service pins BOTH off
+      // THIS step exactly as it would off any other 'ok' local_action's
+      // result — without this the service never learns which org/project a
+      // broker-ceremony run landed on, and `write_keep_lock` later hits the
+      // adopt-vs-create project picker on a decision the mint already made.
+      const ceremonySettledOk = prepared.kind === 'settled' && prepared.outcome === 'ok';
+      const ceremonyOrgId = ceremonySettledOk ? prepared.orgId : undefined;
+      const ceremonyProjectId = ceremonySettledOk ? prepared.projectId : undefined;
       lastStep = {
         step_id: step.step_id,
         outcome: prepared.outcome,
         code: prepared.kind === 'settled' && prepared.outcome === 'failed' ? prepared.code : undefined,
-        result: ceremonyOrgId ? { org_id: ceremonyOrgId } : undefined,
+        result: ceremonyOrgId
+          ? {
+              org_id: ceremonyOrgId,
+              ...(ceremonyProjectId ? { project_id: ceremonyProjectId } : {}),
+            }
+          : undefined,
       };
       if (prepared.outcome === 'ok') {
         // The worker wrote its own session store directly (same writer a

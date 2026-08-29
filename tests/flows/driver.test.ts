@@ -35,7 +35,7 @@ afterAll(() => {
 import { runOnboardFlow } from '../../src/flows/onboard/driver';
 import { FLOW_CONTRACT_VERSION, FlowContractError, FLOW_ERROR_CODES } from '../../src/flows/validate';
 import { ExecutorMap, StepResult } from '../../src/flows/onboard/executors';
-import { CreateFlowRequest, FlowTransport, NextRequest } from '../../src/flows/client';
+import { CreateFlowRequest, FlowHttpError, FlowTransport, NextRequest } from '../../src/flows/client';
 import { OnboardObservations } from '../../src/flows/onboard/observe';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
 import { keepOrigin } from '../../src/ui/screens/keepScreens';
@@ -719,6 +719,112 @@ describe('G5 — a plan that moved under the human is resent', () => {
   });
 });
 
+describe('G6 — a RESUMED run reports its own computed plan once, since a remote-minted flow carries none', () => {
+  // A flow minted by the hosted MCP (`minted_for: 'remote'`) has no plan on
+  // its row at all: the service only ever gets one from a client-reported
+  // `body.plan`, either at create or via this same `next` field, and a
+  // remote mint's create body has no local directory to compute one from.
+  // `--flow-id`/`--flow-secret` skips `create` entirely (the `!flowId`
+  // branch above never runs), so without this the confirm/onboard_plan
+  // dialog's params (target_dir, variable_count, plan_hash, will_encrypt)
+  // stayed empty forever — this is the dev-rig bug this fixes.
+  test('a RESUME (flowId + flowSecret, no create call) sends the computed plan on its first next report', async () => {
+    const { transport, reports, created } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+    const plan = { plan_hash: 'h-resume', target_dir: '/tmp/x', variable_count: 1 };
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      plan,
+    });
+
+    // No create call at all — this is a resume, not a self-mint.
+    expect(created).toEqual([]);
+    expect(reports.length).toBe(2);
+    expect(reports[0].plan).toEqual(plan);
+  });
+
+  test('falls back to buildPlan() on resume when no pre-computed plan was wired', async () => {
+    const { transport, reports } = fakeTransport([envelope({ kind: 'done', params: {} })]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      buildPlan: () => ({ plan_hash: 'h-built', target_dir: '/tmp/x' }),
+    });
+
+    expect(reports[0].plan).toEqual({ plan_hash: 'h-built', target_dir: '/tmp/x' });
+  });
+
+  test('the self-mint path is unchanged: the plan travels in the create body, byte-identical, and never on next', async () => {
+    const { transport, reports, created } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+    const plan = { plan_hash: 'h-create', target_dir: '/tmp/x', variable_count: 2 };
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      plan,
+      compat: { usesEnvVars: true },
+    });
+
+    expect(created.length).toBe(1);
+    // The exact same reference the caller passed — never rebuilt or cloned.
+    expect(created[0].plan).toBe(plan);
+    // A self-mint is not a resume: the first `next` report carries no plan.
+    expect(reports[0].plan).toBeUndefined();
+  });
+
+  test('no double-send: only the FIRST next report of a resumed run carries the plan', async () => {
+    const { transport, reports } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({
+        kind: 'local_action',
+        verb: 'wrap_run_commands',
+        params: { plan_hash: 'h-resume', kinds: ['run-wrap'], consent_recorded: true },
+      }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      plan: { plan_hash: 'h-resume', target_dir: '/tmp/x' },
+    });
+
+    expect(reports.length).toBe(3);
+    expect(reports[0].plan).toEqual({ plan_hash: 'h-resume', target_dir: '/tmp/x' });
+    // Later reports on the SAME resumed run send nothing more — one report
+    // is enough, and the service treats a resend of the same plan_hash as a
+    // no-op in any case (`withReplacedPlan`, service/src/routes/flows.ts).
+    expect(reports[1].plan).toBeUndefined();
+    expect(reports[2].plan).toBeUndefined();
+  });
+});
+
 describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --broker-ceremony', () => {
   // BEHAVIOR CHANGED BY DESIGN from the old in-process ceremony: the driver
   // used to run `runSandboxCeremony` inline and block on its poll (up to 15
@@ -792,6 +898,58 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     expect(spawnCalls[0].args).toContain('cli-entry.js');
   });
 
+  // CAP-542: proves the FULL real path — a genuine `validateStep` pass
+  // against the vendored contract (so this also proves the contract schema
+  // itself accepts the param) through `prepareCeremonyScreen`'s real
+  // `buildCeremonyUrl` call — with no driver.ts code change: the step object
+  // (params included) already flows through `driver.ts` unmodified into
+  // `prepareCeremonyScreen`'s options.
+  test('CAP-542: a mint_org_id step param survives contract validation and lands in the returned URL fragment', async () => {
+    const keypair = mintConnectionKeypair();
+    const ceremonyDir = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-target-'));
+
+    const sandboxStep = envelope({
+      kind: 'screen',
+      screen: 'sandbox_session',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-mint-org-1`,
+      params: { connection_id: 'conn-mint-org-1', user_code: 'BCDF-GHJK', mint_org_id: 'org_xyz' },
+    });
+    const { transport } = fakeTransport([sandboxStep]);
+    const { map } = recordingExecutors();
+
+    const fakeSpawnImpl = ((command: string, args: string[]) => {
+      return {
+        stdin: { write: () => true, end: () => undefined },
+        unref: () => undefined,
+      } as unknown as ReturnType<typeof import('child_process').spawn>;
+    }) as typeof import('child_process').spawn;
+
+    const result = await (async () => {
+      try {
+        return await runOnboardFlow({
+          targetDir: ceremonyDir,
+          transport,
+          executors: map,
+          observe: observeStub(),
+          authMode: 'broker_ceremony',
+          clientPubkey: keypair.publicKeyB64,
+          brokerCeremonyKeypair: keypair,
+          serviceUrl: 'https://api.test.invalid',
+          flowSecret: 'flow-secret-mint-org-1',
+          ceremonySpawnImpl: fakeSpawnImpl,
+          ceremonyResolveCommand: () => ({ command: 'node', args: ['cli-entry.js'] }),
+        });
+      } finally {
+        rmSync(ceremonyDir, { recursive: true, force: true });
+      }
+    })();
+
+    expect(result.step.kind).toBe('screen');
+    const b64 = result.step.url.split('#r=')[1];
+    const fragment = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+    expect(fragment.first_run.mint_org_id).toBe('org_xyz');
+  });
+
   test('a settled "done" marker carrying an orgId is reported to the service as this step\'s result.org_id on the NEXT /next call', async () => {
     const keypair = mintConnectionKeypair();
     const ceremonyDir = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-target-'));
@@ -806,6 +964,10 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
       createdAt: Date.now(),
       targetDir: ceremonyDir,
       orgId: 'org-from-marker',
+      // create_org mints a default project alongside the org — the marker
+      // carries it so the report pins BOTH (the write phase must never hit
+      // the adopt-vs-create project picker on a decision the mint made).
+      projectId: 'proj-from-marker',
     });
 
     const sandboxStep = envelope({
@@ -835,11 +997,15 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     }
 
     // The SECOND /next call is the one that reports back on the settled
-    // ceremony step — its last_step.result must carry the org the marker
-    // resolved, the same shape any other 'ok' local_action reports.
+    // ceremony step — its last_step.result must carry the org AND project
+    // the marker resolved, the same shape any other 'ok' local_action
+    // reports (the project id is what drives the service's project pin).
     expect(reports.length).toBe(2);
     expect(reports[1].last_step?.outcome).toBe('ok');
-    expect(reports[1].last_step?.result).toEqual({ org_id: 'org-from-marker' });
+    expect(reports[1].last_step?.result).toEqual({
+      org_id: 'org-from-marker',
+      project_id: 'proj-from-marker',
+    });
   });
 
   // Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): org-create failing on
@@ -933,6 +1099,135 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     expect(result.step.kind).toBe('screen');
     expect(result.step.params.connection_id).toBe('conn-1');
     expect(calls).toEqual([]);
+  });
+});
+
+describe('the flow-owned pubkey registration: `client_pubkey` on `next` while a broker-ceremony keypair is held', () => {
+  // A `--flow-id`/`--flow-secret` RESUME never calls `create` at all — the
+  // only place this process's own ephemeral keypair (minted BEFORE this run,
+  // by `capy onboard --broker-ceremony`) could ever reach the service is on
+  // a `next` report. Without this, a resumed process's key never arrives and
+  // a ceremony sealed to it is unusable.
+  test('a RESUME sends client_pubkey on every next report, with no create call at all', async () => {
+    const keypair = mintConnectionKeypair();
+    const { transport, reports, created } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      brokerCeremonyKeypair: keypair,
+    });
+
+    expect(created).toEqual([]);
+    expect(reports.length).toBe(2);
+    expect(reports[0].client_pubkey).toBe(keypair.publicKeyB64);
+    expect(reports[1].client_pubkey).toBe(keypair.publicKeyB64);
+  });
+
+  // The self-mint (CREATE) case already registers this same key at create —
+  // unchanged. Re-sending it on `next` too is the documented idempotent
+  // no-op on the service side; this asserts the create body itself is
+  // untouched by this change.
+  test('a CREATE with a broker-ceremony keypair still carries client_pubkey at create exactly as before, and now also on next', async () => {
+    const keypair = mintConnectionKeypair();
+    const { transport, reports, created } = fakeTransport([envelope({ kind: 'done', params: {} })]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      authMode: 'broker_ceremony',
+      clientPubkey: keypair.publicKeyB64,
+      brokerCeremonyKeypair: keypair,
+    });
+
+    expect(created.length).toBe(1);
+    expect(created[0].client_pubkey).toBe(keypair.publicKeyB64);
+    expect(reports.length).toBe(1);
+    expect(reports[0].client_pubkey).toBe(keypair.publicKeyB64);
+  });
+
+  // Every other caller — TTY, `--web`, the existing explicit `--client-pubkey`
+  // caller with no keypair of its own — leaves `brokerCeremonyKeypair` unset.
+  // `next` must carry no `client_pubkey` at all for them: additive-only.
+  test('with no brokerCeremonyKeypair, next never carries client_pubkey', async () => {
+    const { transport, reports } = fakeTransport([envelope({ kind: 'done', params: {} })]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+    });
+
+    expect(reports.length).toBe(1);
+    expect(reports[0].client_pubkey).toBeUndefined();
+  });
+
+  // The service refuses a `next` report offering a DIFFERENT client_pubkey
+  // than the one already registered for this instance with a coded 409. That
+  // is fatal for this process — there is nothing to retry into, since the
+  // ceremony is sealed to a key this process cannot change — so it must
+  // propagate as-is (the service's own code intact) rather than being
+  // swallowed or retried.
+  test('a 409 CLIENT_PUBKEY_CONFLICT on next propagates as-is, coded, with no retry', async () => {
+    const keypair = mintConnectionKeypair();
+    let attempts = 0;
+    const transport: FlowTransport = {
+      async create() {
+        return {
+          flow_id: FLOW_ID,
+          flow_type: 'onboard',
+          contract_version: FLOW_CONTRACT_VERSION,
+          binding: 'anonymous',
+          step: null,
+        };
+      },
+      async next() {
+        attempts += 1;
+        throw new FlowHttpError(409, 'CLIENT_PUBKEY_CONFLICT');
+      },
+      async confirm() {
+        return { recorded: true };
+      },
+      async cancel() {
+        /* nothing */
+      },
+    };
+    const { map } = recordingExecutors();
+
+    let caught: unknown;
+    try {
+      await runOnboardFlow({
+        targetDir: '/tmp/x',
+        transport,
+        executors: map,
+        observe: observeStub(),
+        flowId: FLOW_ID,
+        flowSecret: 'resumed-secret',
+        brokerCeremonyKeypair: keypair,
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FlowHttpError);
+    expect((caught as FlowHttpError).status).toBe(409);
+    expect((caught as FlowHttpError).code).toBe('CLIENT_PUBKEY_CONFLICT');
+    // Exactly one attempt — the loop does not retry into a conflict it
+    // cannot resolve itself.
+    expect(attempts).toBe(1);
   });
 });
 

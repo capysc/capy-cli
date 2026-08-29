@@ -114,6 +114,20 @@ export class SessionLifecycle {
     this.sessionUserId = sessionUserId;
   }
 
+  /**
+   * The refresh token as of the last load/adopt. Rotation-clobber guard
+   * (CAP-542 wave 2 follow-on): WorkOS refresh tokens are SINGLE-USE, so the
+   * file's token may only ever move FORWARD. Only the instance that actually
+   * rotated (its in-memory token now differs from this baseline) may write a
+   * new one; every other `save()` — org-list updates, session-token caches —
+   * must preserve whatever the file holds NOW, because a concurrent (or
+   * merely later-running) instance may have rotated since this one loaded.
+   * Observed twice live before this guard: a worker chain's non-rotating
+   * save wrote its stale loaded token back over the rotation, and the next
+   * CLI invocation died on `invalid_grant` with no recovery path.
+   */
+  private loadedRefreshToken: string | null = null;
+
   load(): void {
     try {
       const data = this.storage.load(this.sessionUserId);
@@ -127,6 +141,7 @@ export class SessionLifecycle {
           }
         }
         this.session = data;
+        this.loadedRefreshToken = data.refresh_token ?? null;
         return;
       }
     } catch {
@@ -141,6 +156,7 @@ export class SessionLifecycle {
         if (found) {
           this.session = found.session;
           this.sessionUserId = found.userId;
+          this.loadedRefreshToken = found.session.refresh_token ?? null;
         }
       } catch {
         // Discovery unavailable — stay signed out
@@ -153,7 +169,26 @@ export class SessionLifecycle {
     try {
       // Save to user-scoped path once we know the user ID
       const userId = this.sessionUserId || this.session.user_id;
-      this.storage.save(this.session, userId);
+      const rotatedHere = this.session.refresh_token !== this.loadedRefreshToken;
+      const diskToken = ((): string | null => {
+        if (rotatedHere) return null; // this instance owns the newest token
+        try {
+          const onDisk = this.storage.load(userId);
+          return onDisk?.version === 2 ? onDisk.refresh_token ?? null : null;
+        } catch {
+          return null;
+        }
+      })();
+      const tokenToWrite =
+        rotatedHere || diskToken === null ? this.session.refresh_token : diskToken;
+      const toSave = { ...this.session, refresh_token: tokenToWrite };
+      this.storage.save(toSave, userId);
+      // The write IS this instance's new baseline either way: after a
+      // rotating save its own token is the newest; after a preserving save
+      // it adopted the disk's — so a later save from this same instance
+      // stays non-rotating unless it genuinely rotates again.
+      this.session.refresh_token = tokenToWrite;
+      this.loadedRefreshToken = tokenToWrite;
     } catch {
       // Failed to save session
     }

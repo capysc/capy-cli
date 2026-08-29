@@ -36,7 +36,7 @@ import { existsSync, readdirSync } from 'fs';
 import { hostname } from 'os';
 import { join } from 'path';
 import { getGlobalCapyDir } from '../../config/globalConfig';
-import { ERROR_CODES, SessionStore } from '../../types/index';
+import { CapyError, ERROR_CODES, SessionStore } from '../../types/index';
 import { ConnectionKeypair, openEnvelope } from '../../service/brokerEnvelope';
 import { SessionStorageBackend } from '../../auth/session/backend';
 import { FileSessionStorageBackend } from '../../auth/session/fileBackend';
@@ -133,8 +133,17 @@ function encodeFragment(payload: unknown): string {
  * `enrollDoor`'s doc in `../../auth/deviceKey/onboarding.ts` for the bug
  * this closes). Optional and defaults to a fresh mint so every existing
  * caller — this function's own unit test included — is unaffected.
+ *
+ * CAP-542: when the step itself carries a `mint_org_id` param (the service
+ * jumping straight to the mint rail for an already-known org — the
+ * `mint_key` first_run source, as distinct from a fresh `create_org`), it is
+ * read off `step.params` and included in the fragment as OPTIONAL
+ * `first_run.mint_org_id`. Absent whenever the step doesn't carry it, which
+ * is every step this binary built before CAP-542 — the fragment is
+ * byte-identical to before in that case.
  */
 export function buildCeremonyUrl(step: FlowStep, machineName?: string, presetPrfSalt?: Buffer): string {
+  const mintOrgId = typeof step.params.mint_org_id === 'string' ? step.params.mint_org_id : undefined;
   const fragment = encodeFragment({
     v: 1,
     flow: 'sandbox-session',
@@ -142,6 +151,7 @@ export function buildCeremonyUrl(step: FlowStep, machineName?: string, presetPrf
       prf_salt: (presetPrfSalt ?? generatePrfSalt()).toString('base64'),
       no_local_key_material: !hasAnyLocalKeyMaterial(),
       machine_name: machineName ?? hostname(),
+      ...(mintOrgId ? { mint_org_id: mintOrgId } : {}),
     },
   });
   return `${step.url}${fragment}`;
@@ -250,6 +260,18 @@ export type SandboxSessionFirstRun =
     }
   | { kind: 'select_org'; orgId: string }
   | { kind: 'unlock'; credentialId: string; prfOutput: string }
+  | {
+      kind: 'mint_key';
+      orgId: string;
+      phrase: string;
+      // REQUIRED, exactly like create_org's rule: minting an org's FIRST key
+      // requires a door — a doorless mint can no longer be minted through
+      // this ceremony either.
+      credentialId: string;
+      prfOutput: string;
+      backupEligible: boolean;
+      backupState: boolean;
+    }
   | { kind: 'none' };
 
 export interface SandboxSessionAnswer {
@@ -302,6 +324,25 @@ function parseFirstRun(raw: unknown): SandboxSessionFirstRun | null {
     if (typeof raw.credential_id !== 'string' || raw.credential_id.length === 0) return null;
     if (typeof raw.prf_output !== 'string' || raw.prf_output.length === 0) return null;
     return { kind: 'unlock', credentialId: raw.credential_id, prfOutput: raw.prf_output };
+  }
+
+  if (raw.kind === 'mint_key') {
+    if (typeof raw.org_id !== 'string' || raw.org_id.length === 0) return null;
+    if (typeof raw.phrase !== 'string' || raw.phrase.trim().length === 0) return null;
+    // REQUIRED door, both-or-neither, exactly like create_org's rule.
+    if (typeof raw.credential_id !== 'string' || raw.credential_id.length === 0) return null;
+    if (typeof raw.prf_output !== 'string' || raw.prf_output.length === 0) return null;
+    if (raw.backup_eligible !== undefined && typeof raw.backup_eligible !== 'boolean') return null;
+    if (raw.backup_state !== undefined && typeof raw.backup_state !== 'boolean') return null;
+    return {
+      kind: 'mint_key',
+      orgId: raw.org_id,
+      phrase: raw.phrase,
+      credentialId: raw.credential_id,
+      prfOutput: raw.prf_output,
+      backupEligible: (raw.backup_eligible as boolean | undefined) ?? false,
+      backupState: (raw.backup_state as boolean | undefined) ?? false,
+    };
   }
 
   if (raw.kind === 'none') return { kind: 'none' };
@@ -377,7 +418,18 @@ export function parseSandboxSessionAnswer(plaintext: string): ParsedAnswer {
   }
 
   const firstRun = parseFirstRun(parsed.first_run);
-  if (firstRun === null) return { ok: false, code: INVALID };
+  if (firstRun === null) {
+    // Diagnostic breadcrumb only — SHAPE, never content: top-level keys of
+    // the first_run object and its claimed kind. The phrase/tokens the
+    // envelope carries must never reach any log (debug() included).
+    const fr = parsed.first_run;
+    debug('sandbox answer rejected at first_run parse', {
+      first_run_type: fr === undefined ? 'undefined' : fr === null ? 'null' : typeof fr,
+      first_run_keys: isRecord(fr) ? Object.keys(fr).sort() : undefined,
+      first_run_kind: isRecord(fr) && typeof fr.kind === 'string' ? fr.kind : undefined,
+    });
+    return { ok: false, code: INVALID };
+  }
 
   return {
     ok: true,
@@ -404,6 +456,15 @@ interface FirstRunOutcome {
   ok: boolean;
   code?: string;
   orgId?: string;
+  /**
+   * Set only by `create_org`: the `default` project the mint-ceremony
+   * provisioned with the org. Reported as `result.project_id` so the service
+   * pins it (the same pin any 'ok' local_action's result drives) — otherwise
+   * the flow reaches `write_keep_lock` with an org pinned but no project,
+   * and the adopt-vs-create picker (a wizard stop) fires on a decision the
+   * mint already made.
+   */
+  projectId?: string;
   token?: string;
 }
 
@@ -434,35 +495,66 @@ async function applyFirstRun(opts: {
   serviceClient.setTokenProvider(() => authService.getValidToken());
 
   const fr = opts.answer.firstRun;
-  let orgId: string | undefined;
+
+  // Settle a REAL, org-scoped bearer for the org a branch below resolved —
+  // never report success with an org-less or absent token standing in for
+  // it. A failure here (e.g. a moment of WorkOS role-propagation lag right
+  // after `create_org`) is surfaced as a coded failure rather than silently
+  // handed back as `ok:true` with `token:undefined`: the caller (driver.ts)
+  // would otherwise carry on with no bearer update at all, so `write_keep_lock`
+  // — reached next — would run its encrypt-and-push under whatever STALE
+  // bearer it can scrounge up (org-less, or none), and 403 on the push AFTER
+  // already having encrypted .env. No sleep/retry here — see this function's
+  // module doc; a caller that wants one drives it by re-asking the flow.
+  const settleOutcome = async (orgId: string, projectId?: string): Promise<FirstRunOutcome> => {
+    const settled = await authService.authenticateSilent(orgId);
+    if (!settled.success) {
+      return { ok: false, code: codeForSilentAuthFailure(settled.error_code) };
+    }
+    const token = (await authService.getValidToken())?.access_token ?? settled._orgless_access_token;
+    if (!token) {
+      return { ok: false, code: ERROR_CODES.SERVICE_ERROR };
+    }
+    return { ok: true, orgId, ...(projectId ? { projectId } : {}), token };
+  };
 
   if (fr.kind === 'create_org') {
-    try {
-      const { createOrganizationFromEnvelope } = await import('../../commands/orgCreation');
-      const org = await createOrganizationFromEnvelope({
-        authService,
-        serviceClient,
-        refreshToken: opts.answer.refreshToken,
-        userId: opts.answer.user.id,
-        userEmail: opts.answer.user.email,
-        name: fr.name,
-        phrase: fr.phrase,
-        // Always present now — the parse refuses a doorless create_org
-        // (signup requires a door), so this never falls back to the old
-        // enroll-nothing path.
-        prf: {
-          credentialId: fr.credentialId,
-          prfOutput: fr.prfOutput,
-          backupEligible: fr.backupEligible,
-          backupState: fr.backupState,
-          prfSalt: opts.prfSalt,
-        },
-      });
-      orgId = org.id;
-    } catch (err) {
-      return { ok: false, code: codeFor(err) };
+    const created = await (async (): Promise<
+      { ok: true; org: { id: string }; projectId: string } | { ok: false; code?: string }
+    > => {
+      try {
+        const { createOrganizationFromEnvelope } = await import('../../commands/orgCreation');
+        const minted = await createOrganizationFromEnvelope({
+          authService,
+          serviceClient,
+          refreshToken: opts.answer.refreshToken,
+          userId: opts.answer.user.id,
+          userEmail: opts.answer.user.email,
+          name: fr.name,
+          phrase: fr.phrase,
+          // Always present now — the parse refuses a doorless create_org
+          // (signup requires a door), so this never falls back to the old
+          // enroll-nothing path.
+          prf: {
+            credentialId: fr.credentialId,
+            prfOutput: fr.prfOutput,
+            backupEligible: fr.backupEligible,
+            backupState: fr.backupState,
+            prfSalt: opts.prfSalt,
+          },
+        });
+        return { ok: true, ...minted };
+      } catch (err) {
+        return { ok: false, code: codeFor(err) };
+      }
+    })();
+    if (!created.ok) {
+      return { ok: false, code: created.code };
     }
-  } else if (fr.kind === 'select_org') {
+    return settleOutcome(created.org.id, created.projectId);
+  }
+
+  if (fr.kind === 'select_org') {
     // The picked org MUST be one the envelope itself named — a foreign
     // org_id (typo, stale answer, tampering) is refused rather than
     // silently pinning something the rest of the answer never vouched for.
@@ -470,8 +562,10 @@ async function applyFirstRun(opts: {
     if (!target) {
       return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
     }
-    orgId = target.id;
-  } else if (fr.kind === 'unlock') {
+    return settleOutcome(target.id);
+  }
+
+  if (fr.kind === 'unlock') {
     // `unlock` only makes sense for the "1 org, key not on device" row of
     // the gate table — an envelope claiming it with zero or several orgs is
     // internally inconsistent (which one would the ceremony have run
@@ -479,7 +573,7 @@ async function applyFirstRun(opts: {
     if (opts.answer.organizations.length !== 1) {
       return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
     }
-    orgId = opts.answer.organizations[0].id;
+    const orgId = opts.answer.organizations[0].id;
     try {
       // Pin the org BEFORE any service call this branch makes. `authService`
       // is a BRAND NEW instance (constructed a few lines up) whose
@@ -528,36 +622,91 @@ async function applyFirstRun(opts: {
         }`,
       );
     }
-  } else {
-    // 'none' — key already on this device. Same internal-consistency
-    // requirement as `unlock`: exactly one org, or there is nothing this
-    // kind can legitimately mean.
-    if (opts.answer.organizations.length !== 1) {
+    return settleOutcome(orgId);
+  }
+
+  if (fr.kind === 'mint_key') {
+    // CAP-542: an org that exists but never had a master key minted — the
+    // FLOW-driven counterpart of `masterKeyMint.ts`'s TTY `mintMasterKeyForOrg`
+    // ceremony. Unlike `unlock`, a failure here is NOT best-effort: the
+    // phrase is a fresh recovery phrase the human just wrote down, so a
+    // failed claim/finalize has to be reported as a coded step failure
+    // rather than silently leaving the org unreachable.
+    //
+    // The picked org MUST be one the envelope itself named — same
+    // foreign-org_id refusal as `select_org` above.
+    const target = opts.answer.organizations.find((o) => o.id === fr.orgId);
+    if (!target) {
       return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
     }
-    orgId = opts.answer.organizations[0].id;
+    const orgId = target.id;
+    try {
+      const { validateSeedPhrase, seedPhraseToMasterKey, CURRENT_KDF_VERSION } = await import(
+        '../../crypto/keyManager'
+      );
+      // Phrase validated BEFORE any network call — same rule create_org
+      // follows (a malformed phrase must not claim a lease nobody can ever
+      // recover the key from).
+      if (!validateSeedPhrase(fr.phrase)) {
+        return { ok: false, code: ERROR_CODES.INVALID_RECOVERY_PHRASE };
+      }
+
+      // Pin the org BEFORE any service call this branch makes — identical
+      // 401-ordering reasoning as the `unlock` branch above, but a pin
+      // failure here is a hard, coded failure rather than a best-effort
+      // catch: there is a real phrase behind this attempt.
+      const pinned = await authService.authenticateSilent(orgId);
+      if (!pinned.success) {
+        throw new CapyError(
+          pinned.error || `could not pin org before mint: ${pinned.error_code ?? 'unknown'}`,
+          codeForSilentAuthFailure(pinned.error_code),
+        );
+      }
+
+      // Claim (or reclaim) this device's lease on the org's first-mint.
+      // KEY_ALREADY_MINTED / KEY_MINT_IN_PROGRESS arrive as typed CapyErrors
+      // from ServiceClient and propagate as this step's coded failure — the
+      // phrase the human just wrote down is void either way.
+      await serviceClient.claimKeyMint(orgId);
+
+      const masterKey = seedPhraseToMasterKey(fr.phrase, CURRENT_KDF_VERSION);
+      const { wrapAndSaveMasterKey } = await import('../../crypto/keyResolver');
+      const { keyServiceOpsFromClient, runCannedCaseAEnrollment } = await import('../../commands/orgCreation');
+      await wrapAndSaveMasterKey(masterKey, orgId, opts.answer.user.id, keyServiceOpsFromClient(serviceClient));
+
+      // Device-key enrollment against the SAME canned-transport tail
+      // create_org uses — never duplicated.
+      await runCannedCaseAEnrollment({
+        authService,
+        serviceClient,
+        userId: opts.answer.user.id,
+        userEmail: opts.answer.user.email,
+        org: target,
+        masterKey,
+        prf: {
+          credentialId: fr.credentialId,
+          prfOutput: fr.prfOutput,
+          backupEligible: fr.backupEligible,
+          backupState: fr.backupState,
+          prfSalt: opts.prfSalt,
+        },
+      });
+
+      const { finalizeKeyMintOrThrow } = await import('../../auth/masterKeyMint');
+      await finalizeKeyMintOrThrow(serviceClient, orgId, opts.answer.user.id);
+    } catch (err) {
+      return { ok: false, code: codeFor(err) };
+    }
+    return settleOutcome(orgId);
   }
 
-  // Settle a REAL, org-scoped bearer for the org this branch just resolved —
-  // never report success with an org-less or absent token standing in for
-  // it. A failure here (e.g. a moment of WorkOS role-propagation lag right
-  // after `create_org`) is surfaced as a coded failure rather than silently
-  // handed back as `ok:true` with `token:undefined`: the caller (driver.ts)
-  // would otherwise carry on with no bearer update at all, so `write_keep_lock`
-  // — reached next — would run its encrypt-and-push under whatever STALE
-  // bearer it can scrounge up (org-less, or none), and 403 on the push AFTER
-  // already having encrypted .env. No sleep/retry here — see this function's
-  // module doc; a caller that wants one drives it by re-asking the flow.
-  const settled = await authService.authenticateSilent(orgId);
-  if (!settled.success) {
-    return { ok: false, code: codeForSilentAuthFailure(settled.error_code) };
+  // 'none' — key already on this device. Same internal-consistency
+  // requirement as `unlock`: exactly one org, or there is nothing this
+  // kind can legitimately mean.
+  if (opts.answer.organizations.length !== 1) {
+    return { ok: false, code: ERROR_CODES.FLOW_ENVELOPE_INVALID };
   }
-  const token = (await authService.getValidToken())?.access_token ?? settled._orgless_access_token;
-  if (!token) {
-    return { ok: false, code: ERROR_CODES.SERVICE_ERROR };
-  }
-
-  return { ok: true, orgId, token };
+  return settleOutcome(opts.answer.organizations[0].id);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,7 +851,15 @@ export async function runSandboxCeremony(opts: SandboxCeremonyOptions): Promise<
   }
 
   return {
-    result: { outcome: 'ok', result: firstRun.orgId ? { org_id: firstRun.orgId } : undefined },
+    result: {
+      outcome: 'ok',
+      result: firstRun.orgId
+        ? {
+            org_id: firstRun.orgId,
+            ...(firstRun.projectId ? { project_id: firstRun.projectId } : {}),
+          }
+        : undefined,
+    },
     session: firstRun.token ? { token: firstRun.token, userId: answer.user.id } : undefined,
   };
 }

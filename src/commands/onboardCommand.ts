@@ -390,10 +390,9 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     // gated off for this mode too, in errorScreen.ts — this is belt and
     // suspenders: the caller gets a parseable object either way).
     if (options.brokerCeremony && options.json) {
-      const code = err instanceof CapyError ? err.code : ERROR_CODES.SERVICE_ERROR;
       console.error(JSON.stringify({
         error: 'onboard_failed',
-        code,
+        code: resolveOnboardFailureCode(err),
         detail: err instanceof Error ? err.message : String(err),
       }, null, 2));
       process.exitCode = 1;
@@ -401,6 +400,27 @@ export async function runOnboardCommand(options: OnboardOptions = {}, devMode = 
     }
     throw err;
   }
+}
+
+/**
+ * The `code` to report on the `--broker-ceremony --json` belt-and-suspenders
+ * path above: a `CapyError`'s own code, or — for a raw `FlowHttpError`
+ * escaping `runOnboardFlow` uncaught (e.g. a 409 `CLIENT_PUBKEY_CONFLICT` off
+ * a `next` report that offered a different key than the one already
+ * registered for this instance) — its own `.code`, when the service sent one
+ * this build recognises. Same known-code guard `errorScreen.ts`'s
+ * `renderError` already applies to the TTY path, so a coded flow-service
+ * failure surfaces identically on both. Falls back to the generic service
+ * error otherwise. Never reads `err.message` to decide anything (Rule 5) —
+ * `detail` below is for display only.
+ */
+function resolveOnboardFailureCode(err: unknown): string {
+  if (err instanceof CapyError) return err.code;
+  if (err instanceof FlowHttpError) {
+    const known = (Object.values(ERROR_CODES) as string[]).includes(err.code ?? '');
+    if (known) return err.code as string;
+  }
+  return ERROR_CODES.SERVICE_ERROR;
 }
 
 /**

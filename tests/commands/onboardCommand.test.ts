@@ -18,6 +18,20 @@ import { mock, describe, it, expect, beforeAll, afterAll, beforeEach } from 'bun
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+// Real module, never mocked here. `runOnboardCommand` sets these as a
+// process-global side effect (`../ui/webMode` — see that module's own doc:
+// "Process-global, and legitimately so") whenever a test passes
+// `brokerCeremony`/`json`, and NEVER unsets them itself — a real CLI
+// invocation is one process per run, so there is nothing to reset FOR. A
+// `bun test` run sharing one process across every file in this batch is
+// exactly the case that doc didn't anticipate: left set, `isBrokerCeremonyMode()`
+// stays true for every OTHER file's tests in the same process afterward,
+// which is what `ui/errorScreen.ts`'s `isWebMode() && !isBrokerCeremonyMode()`
+// gate reads to decide whether to serve a `--web` loopback page at all — a
+// leak here silently starves totally unrelated `--web` refusal tests
+// (`rotateRefusals.test.ts`) elsewhere in the same run. Reset unconditionally
+// in `restore()` below, which every test in this file already calls.
+import { setBrokerCeremonyMode, setOnboardJsonMode } from '../../src/ui/webMode';
 
 // Mock homedir to an empty temp dir BEFORE importing anything that reads
 // os.homedir() — same convention as tests/flows/driver.test.ts. An empty
@@ -42,6 +56,18 @@ let createCalls: Array<Record<string, unknown>> = [];
 let createBehavior: () => unknown = () => {
   throw new StopAfterConfirm('stop: create() reached after confirm');
 };
+/**
+ * Default preserves every pre-existing test in this file (none of them
+ * legitimately reach `next()`: they exercise the `--accepted`/confirm
+ * handling above, which returns or re-drives before `runOnboardFlow`'s own
+ * loop ever calls it). Overridable the same way `confirmBehavior`/
+ * `createBehavior` are, for the broker-ceremony coded-failure tests below.
+ */
+let nextBehavior: () => unknown = () => {
+  throw new StopAfterConfirm('stop: next() reached after confirm');
+};
+/** Every `next()` call's own request body — additive: only read by the RESUME-plan tests below, which need to see what the driver actually sent. */
+let nextCalls: Array<Record<string, unknown>> = [];
 /** Thrown by the fake transport's other methods — these tests only care about `confirm`'s own call, not what the driver does afterward. */
 class StopAfterConfirm extends Error {}
 
@@ -56,8 +82,9 @@ mock.module('../../src/flows/client', () => {
       createCalls.push(body);
       return Promise.resolve(createBehavior());
     }
-    next() {
-      throw new StopAfterConfirm('stop: next() reached after confirm');
+    next(_flowId: string, body: Record<string, unknown>) {
+      nextCalls.push(body);
+      return Promise.resolve(nextBehavior());
     }
     cancel() {
       return Promise.resolve();
@@ -85,6 +112,10 @@ beforeEach(() => {
   createBehavior = () => {
     throw new StopAfterConfirm('stop: create() reached after confirm');
   };
+  nextBehavior = () => {
+    throw new StopAfterConfirm('stop: next() reached after confirm');
+  };
+  nextCalls = [];
   targetDir = mkdtempSync(join(tmpdir(), 'capy-onboardcmd-target-'));
   writeFileSync(join(targetDir, 'package.json'), JSON.stringify({ name: 'onboardcmd-fixture', scripts: {} }));
   logs = [];
@@ -105,7 +136,35 @@ function restore(): void {
   console.log = realLog;
   console.error = realErr;
   rmSync(targetDir, { recursive: true, force: true });
-  process.exitCode = exitCode;
+  // Bun (unlike Node) does NOT treat `process.exitCode = undefined` as
+  // clearing a prior nonzero value — restoring a saved `undefined` over the
+  // exit 1 the broker-ceremony failure tests legitimately produce left that
+  // 1 in place, and the whole batch `bun test` process then exited 1 while
+  // reporting 0 failing tests (run-tests.sh's "FAIL: batch run"). `?? 0`
+  // keeps a genuinely saved nonzero and actually clears otherwise. Tests
+  // that assert on the command's exit code snapshot it BEFORE this runs —
+  // see `runCapturingExitCode`.
+  process.exitCode = exitCode ?? 0;
+  // See the import comment above: unconditional, every test, so a leaked
+  // `true` from THIS file's `brokerCeremony`/`json` tests can never survive
+  // into another file sharing this same `bun test` process.
+  setBrokerCeremonyMode(false);
+  setOnboardJsonMode(false);
+}
+
+/**
+ * Runs a command thunk, snapshots `process.exitCode` before `restore()`
+ * clears it (see restore's comment on Bun's `= undefined` no-op), and always
+ * restores. Assertions must use the returned snapshot, never the live
+ * `process.exitCode` after restore.
+ */
+async function runCapturingExitCode(run: () => Promise<unknown>): Promise<number | string | undefined> {
+  try {
+    await run();
+    return process.exitCode;
+  } finally {
+    restore();
+  }
 }
 
 describe('runOnboardCommand: --confirm is optional (Bug A)', () => {
@@ -244,11 +303,9 @@ describe('runOnboardCommand: a 409 on confirm is a coded, parseable JSON result 
       throw new FlowHttpError(409, 'CONFLICT_RESOLUTION');
     };
     const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
-    try {
-      await runOnboardCommand({ json: true, flowId: 'flow-3', accepted: true, targetDir }, false);
-    } finally {
-      restore();
-    }
+    const exitCodeAfterRun = await runCapturingExitCode(() =>
+      runOnboardCommand({ json: true, flowId: 'flow-3', accepted: true, targetDir }, false),
+    );
     // Exactly one console.log call, and it parses as ONE JSON object.
     expect(logs.length).toBe(1);
     const parsed = JSON.parse(logs[0]);
@@ -261,7 +318,7 @@ describe('runOnboardCommand: a 409 on confirm is a coded, parseable JSON result 
     // A blocked step in --json mode is a legitimate stop, not a crash: exit
     // code is never forced non-zero for it (module doc: only a genuine
     // failure exits non-zero).
-    expect(process.exitCode).not.toBe(1);
+    expect(exitCodeAfterRun).not.toBe(1);
   });
 
   it('a non-409 error is NOT swallowed — still propagates', async () => {
@@ -279,5 +336,99 @@ describe('runOnboardCommand: a 409 on confirm is a coded, parseable JSON result 
     }
     expect(threw).toBe(true);
     expect(logs).toEqual([]);
+  });
+});
+
+describe('runOnboardCommand: --broker-ceremony --json surfaces a coded flow-service failure off `next`', () => {
+  // The service refuses a `next` report offering a client_pubkey different
+  // from the one already registered for this instance with a 409 coded
+  // CLIENT_PUBKEY_CONFLICT — fatal for a broker-ceremony run (a ceremony
+  // sealed to a missing/other key is unusable). Before this fix, an escaped
+  // `FlowHttpError` on this belt-and-suspenders path always collapsed to the
+  // generic SERVICE_ERROR (the catch only ever read a `CapyError`'s code) —
+  // this asserts the service's own code now survives, same as it already did
+  // on the TTY path (`ui/errorScreen.ts`'s `FlowHttpError` handling).
+  it('a 409 CLIENT_PUBKEY_CONFLICT is reported with the SERVICE\'s own code, not the generic fallback', async () => {
+    const { FlowHttpError } = await import('../../src/flows/client');
+    nextBehavior = () => {
+      throw new FlowHttpError(409, 'CLIENT_PUBKEY_CONFLICT');
+    };
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    const exitCodeAfterRun = await runCapturingExitCode(() =>
+      runOnboardCommand(
+        { json: true, flowId: 'flow-broker-1', flowSecret: 'sekrit', brokerCeremony: true, targetDir },
+        false,
+      ),
+    );
+    // Exactly one coded object on stderr — never a step shape, never the raw
+    // "Flow request failed: ..." prose.
+    expect(errs.length).toBe(1);
+    const parsed = JSON.parse(errs[0]);
+    expect(parsed.error).toBe('onboard_failed');
+    expect(parsed.code).toBe('CLIENT_PUBKEY_CONFLICT');
+    expect(exitCodeAfterRun).toBe(1);
+    expect(logs).toEqual([]);
+  });
+
+  it('an unrecognised FlowHttpError code still falls back to the generic service error (unchanged)', async () => {
+    const { FlowHttpError } = await import('../../src/flows/client');
+    nextBehavior = () => {
+      throw new FlowHttpError(409, 'SOME_FUTURE_CODE_THIS_BUILD_DOES_NOT_KNOW');
+    };
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    try {
+      await runOnboardCommand(
+        { json: true, flowId: 'flow-broker-2', flowSecret: 'sekrit', brokerCeremony: true, targetDir },
+        false,
+      );
+    } finally {
+      restore();
+    }
+    expect(errs.length).toBe(1);
+    const parsed = JSON.parse(errs[0]);
+    expect(parsed.code).toBe('SERVICE_ERROR');
+  });
+});
+
+describe('runOnboardCommand: a RESUME reports its own computed plan on the first next() call', () => {
+  // Dev-rig bug: `capy onboard --flow-id X --flow-secret Y --json` against a
+  // flow minted by the hosted MCP (`minted_for: 'remote'`) reached the
+  // confirm/onboard_plan step with EMPTY plan facts — target_dir "",
+  // variable_count 0, plan_hash "" — even though the target dir held a real
+  // `.env` with one variable. The service only ever gets plan facts from a
+  // client-reported `body.plan`, and a remote mint's create body never had
+  // one to begin with (no local directory at mint time); the driver's `next`
+  // report is the only place left to carry it. No `--accepted` here: this is
+  // the plain resume path, not the confirm-answering one the tests above
+  // exercise.
+  it('sends target_dir/variable_count/plan_hash facts on next() when resuming, with no create call at all', async () => {
+    writeFileSync(join(targetDir, '.env'), 'API_KEY=shh\n');
+    const { FLOW_CONTRACT_VERSION } = await import('../../src/flows/validate');
+    nextBehavior = () => ({
+      step: {
+        contract_version: FLOW_CONTRACT_VERSION,
+        flow_id: 'flow-resume-1',
+        flow_type: 'onboard',
+        step_id: 'flow-resume-1-done',
+        kind: 'done',
+        resumed: true,
+        params: {},
+      },
+    });
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    const { buildPlan } = await import('../../src/flows/onboard/plan');
+    try {
+      await runOnboardCommand({ json: true, flowId: 'flow-resume-1', flowSecret: 'sekrit', targetDir }, false);
+    } finally {
+      restore();
+    }
+    // Resuming an existing instance never calls create — only next().
+    expect(createCalls).toEqual([]);
+    expect(nextCalls.length).toBe(1);
+    const sentPlan = nextCalls[0].plan as Record<string, unknown> | undefined;
+    expect(sentPlan).toBeDefined();
+    expect(sentPlan?.plan_hash).toBe(buildPlan({ targetDir }).planHash);
+    expect(sentPlan?.target_dir).toBe(targetDir);
+    expect(sentPlan?.variable_count).toBe(1);
   });
 });

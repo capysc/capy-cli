@@ -41,7 +41,7 @@
  * sometimes logged by supervisors).
  */
 import { spawn, type ChildProcess } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import {
   ConnectionKeypair,
@@ -49,8 +49,9 @@ import {
   importConnectionKeypair,
 } from '../../service/brokerEnvelope';
 import { getGlobalCapyDir } from '../../config/globalConfig';
+import { debug } from '../../ui/debug';
 import { generatePrfSalt } from '../../auth/deviceKey/crypto';
-import { FlowStep } from '../validate';
+import { FLOW_CONTRACT_VERSION, FlowStep } from '../validate';
 import {
   buildCeremonyUrl,
   CEREMONY_CODES,
@@ -82,6 +83,13 @@ export interface CeremonyMarker {
   targetDir?: string;
   /** Set only when state is 'done' and the ceremony resolved an org. Not a secret. */
   orgId?: string;
+  /**
+   * Set only when state is 'done' and the ceremony CREATED a project (the
+   * `default` project the create_org mint provisions). Not a secret. Rides
+   * to `driver.ts`'s step report as `result.project_id` so the service pins
+   * the project the mint already made — see `FirstRunOutcome.projectId`.
+   */
+  projectId?: string;
   /** Set only when state is 'failed'. A code, never prose. */
   code?: string;
 }
@@ -167,6 +175,25 @@ export interface CeremonyWorkerPayload {
   serviceUrl: string;
   devMode: boolean;
   machineName?: string;
+  /**
+   * The REAL ids of the flow and its sandbox_session step, so the worker can
+   * report the settled outcome to the service itself (see the settle-report
+   * block in runCeremonyWorker — the marker alone is unreachable in organic
+   * sequencing). Optional for payload back-compat: absent, the worker skips
+   * the report and the marker path stands alone, exactly as before.
+   */
+  flowId?: string;
+  stepId?: string;
+  /**
+   * CAP-542: the `sandbox_session` step's own `mint_org_id` param, when the
+   * service sent one (jumping straight to the mint rail for an
+   * already-known org). Threaded through so the worker's own
+   * `buildCeremonyUrl` call (inside `runSandboxCeremony`) reconstructs the
+   * IDENTICAL fragment `prepareCeremonyScreen` already showed the human —
+   * see `runCeremonyWorker`'s synthetic `step` below. Absent for every
+   * ceremony this binary built before CAP-542.
+   */
+  mintOrgId?: string;
 }
 
 function isWorkerPayload(v: unknown): v is CeremonyWorkerPayload {
@@ -206,7 +233,7 @@ export interface PrepareCeremonyScreenOptions {
 
 export type PrepareCeremonyScreenResult =
   | { kind: 'screen'; step: FlowStep }
-  | { kind: 'settled'; outcome: 'ok'; orgId?: string }
+  | { kind: 'settled'; outcome: 'ok'; orgId?: string; projectId?: string }
   | { kind: 'settled'; outcome: 'failed'; code: string };
 
 /**
@@ -235,9 +262,22 @@ export function spawnCeremonyWorker(
 ): ChildProcess {
   const spawnImpl = opts.spawnImpl ?? spawn;
   const { command, args } = (opts.resolveCommand ?? defaultResolveCommand)();
+  // Diagnostic aid: CAPY_CEREMONY_LOG (a file path) routes the DETACHED
+  // worker's otherwise-discarded stderr to a file, so `debug()` breadcrumbs
+  // (CAPY_VERBOSE=1) survive the parent's exit. Dev/E2E only — unset, the
+  // original ['pipe','ignore','ignore'] wiring is byte-identical.
+  const stderrTarget = ((): 'ignore' | number => {
+    const logPath = process.env.CAPY_CEREMONY_LOG;
+    if (!logPath) return 'ignore';
+    try {
+      return openSync(logPath, 'a');
+    } catch {
+      return 'ignore';
+    }
+  })();
   const child = spawnImpl(command, args, {
     detached: true,
-    stdio: ['pipe', 'ignore', 'ignore'],
+    stdio: ['pipe', 'ignore', stderrTarget],
   });
   child.stdin?.write(JSON.stringify(payload));
   child.stdin?.end();
@@ -259,6 +299,9 @@ export async function prepareCeremonyScreen(
   const connectionId = opts.step.params.connection_id as string;
   const userCode =
     typeof opts.step.params.user_code === 'string' ? (opts.step.params.user_code as string) : undefined;
+  // CAP-542: read straight off the validated step — see `CeremonyWorkerPayload.mintOrgId`'s doc for why this also has to ride the worker payload.
+  const mintOrgId =
+    typeof opts.step.params.mint_org_id === 'string' ? (opts.step.params.mint_org_id as string) : undefined;
 
   const existing = readCeremonyMarker(opts.targetDir, connectionId);
   if (existing) {
@@ -273,9 +316,12 @@ export async function prepareCeremonyScreen(
     // the instance on.
     deleteCeremonyMarker(opts.targetDir, connectionId);
     if (existing.state === 'done') {
-      return existing.orgId
-        ? { kind: 'settled', outcome: 'ok', orgId: existing.orgId }
-        : { kind: 'settled', outcome: 'ok' };
+      return {
+        kind: 'settled',
+        outcome: 'ok',
+        ...(existing.orgId ? { orgId: existing.orgId } : {}),
+        ...(existing.projectId ? { projectId: existing.projectId } : {}),
+      };
     }
     if (existing.state === 'failed') {
       return { kind: 'settled', outcome: 'failed', code: existing.code ?? CEREMONY_CODES.SERVICE_ERROR };
@@ -321,6 +367,9 @@ export async function prepareCeremonyScreen(
         serviceUrl: opts.serviceUrl,
         devMode: opts.devMode,
         machineName: opts.machineName,
+        flowId: opts.step.flow_id,
+        stepId: opts.step.step_id,
+        mintOrgId,
       },
       { spawnImpl: opts.spawnImpl, resolveCommand: opts.resolveCommand },
     );
@@ -399,42 +448,109 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
     resumed: false,
     screen: 'sandbox_session',
     url: payload.baseUrl,
-    params: { connection_id: payload.connectionId, user_code: payload.userCode },
+    params: {
+      connection_id: payload.connectionId,
+      user_code: payload.userCode,
+      // CAP-542: reconstructed from the payload so this worker's own
+      // `buildCeremonyUrl` call (inside `runSandboxCeremony` below) produces
+      // the fragment byte-identical to the one `prepareCeremonyScreen`
+      // already showed the human.
+      ...(payload.mintOrgId ? { mint_org_id: payload.mintOrgId } : {}),
+    },
   };
 
-  let outcomeCode: string | undefined;
-  // Not a secret — the org id the ceremony resolved, so `driver.ts` can
-  // report `result:{org_id}` back to the service on the NEXT `prepareCeremonyScreen`
-  // encounter of this connection, the same way any other 'ok' local_action
-  // already does. See `runSandboxCeremony`'s own `result.result.org_id`.
-  let orgId: string | undefined;
-  let ok = false;
-  try {
-    const outcome = await runSandboxCeremony({
-      step,
-      keypair,
-      flowSecret: payload.flowSecret,
-      serviceUrl: payload.serviceUrl,
-      devMode: payload.devMode,
-      machineName: payload.machineName,
-      targetDir: payload.targetDir,
-      presetPrfSalt: Buffer.from(payload.prfSaltB64, 'base64'),
-    });
-    ok = outcome.result.outcome === 'ok';
-    outcomeCode = outcome.result.code;
-    orgId = outcome.result.result?.org_id;
-  } catch {
-    ok = false;
-    outcomeCode = CEREMONY_CODES.SERVICE_ERROR;
-  }
+  // Not secrets — the org/project ids the ceremony resolved, so this step's
+  // outcome can be reported as `result:{org_id, project_id}` the same way
+  // any other 'ok' local_action's is. See `runSandboxCeremony`'s own
+  // `result.result.org_id`.
+  const settled = await (async (): Promise<{
+    ok: boolean;
+    code?: string;
+    orgId?: string;
+    projectId?: string;
+    token?: string;
+  }> => {
+    try {
+      const outcome = await runSandboxCeremony({
+        step,
+        keypair,
+        flowSecret: payload.flowSecret,
+        serviceUrl: payload.serviceUrl,
+        devMode: payload.devMode,
+        machineName: payload.machineName,
+        targetDir: payload.targetDir,
+        presetPrfSalt: Buffer.from(payload.prfSaltB64, 'base64'),
+      });
+      return {
+        ok: outcome.result.outcome === 'ok',
+        code: outcome.result.code,
+        orgId: outcome.result.result?.org_id,
+        projectId: outcome.result.result?.project_id,
+        token: outcome.session?.token,
+      };
+    } catch {
+      return { ok: false, code: CEREMONY_CODES.SERVICE_ERROR };
+    }
+  })();
 
   writeCeremonyMarker(payload.targetDir, {
-    state: ok ? 'done' : 'failed',
+    state: settled.ok ? 'done' : 'failed',
     url: payload.baseUrl,
     userCode: payload.userCode,
     connectionId: payload.connectionId,
     createdAt: Date.now(),
     targetDir: payload.targetDir,
-    ...(ok ? (orgId ? { orgId } : {}) : { code: outcomeCode ?? CEREMONY_CODES.SERVICE_ERROR }),
+    ...(settled.ok
+      ? {
+          ...(settled.orgId ? { orgId: settled.orgId } : {}),
+          ...(settled.projectId ? { projectId: settled.projectId } : {}),
+        }
+      : { code: settled.code ?? CEREMONY_CODES.SERVICE_ERROR }),
   });
+
+  // Report the settled step to the service RIGHT NOW, from this worker —
+  // never only via the marker. The marker path depends on a later driver
+  // re-encountering the SAME sandbox_session step, and organically it never
+  // does: this worker's own session-store write flips the next derivation's
+  // `sessionLive` observation to true, the service (correctly) skips
+  // authenticate AND derives past the satisfied ceremony screen, and the
+  // settled marker is never consumed — so the service pins the org off the
+  // bearer's claim but never learns the `project_id` the create_org mint
+  // provisioned, and `write_keep_lock` dead-ends on the adopt-vs-create
+  // picker (observed live: headless journey runs 6 and 7). The org-scoped
+  // bearer this ceremony just settled is exactly the credential the service's
+  // pin verification (`projectPinnableBy`) requires. Best-effort by design:
+  // on any failure the marker remains, and the driver's consume-and-report
+  // path (still intact above) covers every sequencing where the step IS
+  // re-encountered.
+  if (settled.ok && settled.orgId && payload.flowId && payload.stepId) {
+    try {
+      const { FlowClient } = await import('../client');
+      const { observeOnboard } = await import('./observe');
+      const client = new FlowClient(payload.serviceUrl, payload.devMode);
+      await client.next(
+        payload.flowId,
+        {
+          contract_version: FLOW_CONTRACT_VERSION,
+          observations: observeOnboard({ targetDir: payload.targetDir, sessionLive: true }),
+          last_step: {
+            step_id: payload.stepId,
+            outcome: 'ok',
+            result: {
+              org_id: settled.orgId,
+              ...(settled.projectId ? { project_id: settled.projectId } : {}),
+            },
+          },
+          client_pubkey: payload.publicKeyB64,
+        },
+        { secret: payload.flowSecret, token: settled.token },
+      );
+    } catch (err) {
+      debug(
+        `[ceremony-worker] settle report failed, marker remains the fallback: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 }

@@ -176,6 +176,50 @@ async function finalizeWithOneRetry(
   }
 }
 
+/**
+ * `finalizeKeyMint`, retried once on a network error — the same shape as
+ * `finalizeWithOneRetry` above (the TTY `mintMasterKeyForOrg` ceremony), with
+ * one deliberate difference: a FLOW step's outcome (CAP-542's sandbox-session
+ * `create_org`/`mint_key` first_run branches, `../flows/onboard/sandboxCeremony.ts`)
+ * is read machine-readably by the service, not by a human who can just
+ * re-run the command — so this NEVER downgrades a genuine conflict to a
+ * silent success. Every failure surviving the one retry, including
+ * `KEY_MINT_NOT_CLAIMED`, is rethrown for the caller's step outcome to
+ * report as a coded failure.
+ *
+ * A `KEY_MINT_NOT_CLAIMED` conflict additionally discards the just-written
+ * local key.enc — this device lost the race, and the phrase behind it is
+ * void; keeping the file would poison a later encrypt with a master key the
+ * org will never converge on (same reasoning as `finalizeWithOneRetry`'s own
+ * discard, just never swallowed here).
+ *
+ * `mintMasterKeyForOrg`'s own TTY path keeps its existing best-effort
+ * semantics unchanged — this is a separate, stricter function for the flow
+ * ceremony's use, not a behavior change to the interactive command.
+ */
+export async function finalizeKeyMintOrThrow(
+  serviceClient: ServiceClient,
+  orgId: string,
+  userId: string,
+): Promise<void> {
+  try {
+    await serviceClient.finalizeKeyMint(orgId);
+  } catch (err) {
+    if (err instanceof CapyError && err.code === ERROR_CODES.NETWORK_ERROR) {
+      await serviceClient.finalizeKeyMint(orgId);
+      return;
+    }
+    if (err instanceof CapyError && err.code === ERROR_CODES.KEY_MINT_NOT_CLAIMED) {
+      try {
+        rmSync(getOrgKeyPath(orgId, userId), { force: true });
+      } catch {
+        // Removal is best-effort; the rethrow below still stops the run.
+      }
+    }
+    throw err;
+  }
+}
+
 function warnFinalizeFailed(orgId: string): void {
   console.error(
     'Your recovery phrase and local key are saved, but capy could not confirm the mint with ' +

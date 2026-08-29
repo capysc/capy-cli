@@ -19,19 +19,11 @@ import type { OrgNameVerdict } from '../ui/onboardingWeb';
 /** The CLI's cap. One definition; the browser screen is handed this value. */
 export const MAX_ORG_NAME_LENGTH = 100;
 
-/**
- * `createOrganizationFromEnvelope`'s 409-suffix retry loop (CAP-451) has
- * nobody to ask for a different name on this source, so it cannot retry
- * forever against a service that keeps saying every suffix is taken —
- * capped at this many `/auth/create-org` attempts before refusing with
- * ORG_NAME_SUFFIX_EXHAUSTED.
- */
-export const MAX_NAME_SUFFIX_ATTEMPTS = 10;
-
 // (recovery-phrase display + confirm lives in ../ui/recoveryPhrase; the browser
 // half of both questions lives in ../ui/onboardingWeb)
 
-function keyServiceOpsFromClient(serviceClient: ServiceClient): KeyServiceOps {
+/** Exported so the sandbox-ceremony `mint_key` branch (`../flows/onboard/sandboxCeremony.ts`) can build the same `KeyServiceOps` without duplicating this two-line adapter. */
+export function keyServiceOpsFromClient(serviceClient: ServiceClient): KeyServiceOps {
   return {
     coDecrypt: (orgId, ciphertext) => serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
     wrapOuterLayer: (orgId, plaintext) => serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
@@ -232,19 +224,41 @@ async function nameAndConfirmInBrowser(
 }
 
 /**
- * CAP-451: org creation from a broker-ceremony `first_run.kind:'create_org'`
- * answer — the third source of a new organization, alongside the TTY prompt
- * and the `--web` wizard. The name and phrase were both already confirmed on
- * the Keep page in the same visit; this function's job is to reuse
- * `createNewOrganization`'s TAIL exactly (create → derive M → wrap → Case A),
- * with two differences that are specific to this source:
+ * CAP-451/CAP-542: org creation from a broker-ceremony `first_run.kind:
+ * 'create_org'` answer — the third source of a new organization, alongside
+ * the TTY prompt and the `--web` wizard. The name and phrase were both
+ * already confirmed on the Keep page in the same visit.
  *
- *  - the phrase is validated (BIP39, 24 words, checksum) BEFORE
- *    `/auth/create-org` ever runs — a malformed phrase must not mint an org
- *    nobody can ever recover;
- *  - a 409 name collision is resolved by appending a numeric suffix
- *    (`Acme` → `Acme 2` → `Acme 3` …) and retrying with the SAME phrase,
- *    rather than re-asking — there is nobody left to ask on this source.
+ * As of CAP-542 this goes through the mint-ceremony rail
+ * (`ServiceClient.mintPersonalOrgCeremony`), not the old `/auth/create-org`
+ * (`AuthService.createOrganization`) that `createNewOrganization`'s TTY/
+ * `--web` path still uses — the two differences that made this source
+ * special are now handled by the SERVICE instead of this function:
+ *
+ *  - name-collision suffixing (`Acme` → `Acme 2` → `Acme 3` …) is resolved
+ *    server-side, so there is no CLI-side retry loop here anymore;
+ *  - the mint-ceremony call claims this caller's own key-mint lease in the
+ *    same round trip that creates the org, so `finalizeKeyMintOrThrow`
+ *    below has a lease to finalize without a separate claim call.
+ *
+ * The phrase is still validated (BIP39, 24 words, checksum) BEFORE any
+ * network call — a malformed phrase must not mint an org nobody can ever
+ * recover. Sequence, and why the order is load-bearing (mirrors
+ * `masterKeyMint.ts`'s `mintMasterKeyForOrg` doc):
+ *   1. validate the phrase.
+ *   2. mint-ceremony — creates the org AND claims this device's lease.
+ *   3. re-scope auth to the new org (`authenticateSilent`, the same
+ *      `refreshForOrg` machinery `select_org`/`unlock` already use) — the
+ *      old `/auth/create-org` returned org-scoped tokens directly in its
+ *      response; mint-ceremony does not, so this step is now required.
+ *   4. derive M from the phrase and wrap+save it locally.
+ *   5. Case A device-key enrollment, when `prf` is present — best-effort,
+ *      same as before.
+ *   6. finalize the lease (`finalizeKeyMintOrThrow`) — a conflict here is a
+ *      coded failure, never swallowed to a false `ok` (unlike the TTY
+ *      `mintMasterKeyForOrg`'s best-effort finalize): a FLOW step's outcome
+ *      is read machine-readably by the service, not by a human who can
+ *      just re-run the command.
  *
  * When `prf` is present, Case A enrollment runs through a CANNED
  * `CeremonyTransport` (`../auth/deviceKey/cannedCeremony.ts`) that hands back
@@ -277,9 +291,56 @@ export interface CreateOrgFromEnvelopeArgs {
   };
 }
 
+/**
+ * The mint-ceremony call has no organization to scope a token into yet —
+ * this device's user is signed in but org-less. Reuses `AuthService`'s
+ * existing "zero known organizations" refresh (`acquireSilent`'s org-less
+ * branch, CAP-451 §7.1.1 / `SessionLifecycle.refreshOrgless`) for the bearer
+ * rather than inventing a second mechanism, and installs a `ServiceClient`
+ * token provider that prefers an org-scoped token the moment one exists (so
+ * every call AFTER re-scoping — finalize, wrap/co-decrypt — automatically
+ * picks up the real one) and falls back to this org-less bearer only until
+ * then. `getValidToken()` itself never surfaces the org-less token (it
+ * requires a pinned `currentOrgId`), which is why this fallback provider is
+ * necessary rather than just reusing the ordinary `() =>
+ * authService.getValidToken()` provider every other call site installs.
+ */
+async function installOrglessThenScopedTokenProvider(
+  authService: AuthService,
+  serviceClient: ServiceClient,
+  userId: string,
+): Promise<void> {
+  const orgless = await authService.authenticateSilent();
+  if (!orgless.success || !orgless._orgless_access_token) {
+    throw new CapyError(
+      orgless.error || 'Could not obtain a bearer to mint the organization.',
+      codeForAuthFailure(orgless.error_code),
+    );
+  }
+  const orglessToken = orgless._orgless_access_token;
+  serviceClient.setTokenProvider(async () => {
+    const scoped = await authService.getValidToken();
+    if (scoped) return scoped;
+    return {
+      access_token: orglessToken,
+      expires_at: Date.now() + 5 * 60_000,
+      organization_id: '',
+      user_id: userId,
+    };
+  });
+}
+
+/** Maps an `AuthResult.error_code` onto an `ERROR_CODES` value — same mapping `codeForSilentAuthFailure` (`../flows/onboard/executors`) uses, duplicated locally rather than importing the flow layer into `commands/`. */
+function codeForAuthFailure(errorCode: string | undefined): string {
+  if (errorCode === 'network') return ERROR_CODES.NETWORK_ERROR;
+  if (errorCode === 'server_error') return ERROR_CODES.SERVICE_ERROR;
+  if (errorCode === 'org_not_found') return ERROR_CODES.ORG_NOT_FOUND;
+  return ERROR_CODES.AUTH_FAILED;
+}
+
 export async function createOrganizationFromEnvelope(
   args: CreateOrgFromEnvelopeArgs,
-): Promise<Organization> {
+): Promise<{ org: Organization; projectId: string }> {
   if (!validateSeedPhrase(args.phrase)) {
     throw new CapyError(
       'The recovery phrase in the sealed answer did not pass BIP39 validation.',
@@ -287,46 +348,48 @@ export async function createOrganizationFromEnvelope(
     );
   }
 
-  let orgName = args.name;
-  let suffix = 1;
+  await installOrglessThenScopedTokenProvider(args.authService, args.serviceClient, args.userId);
 
-  while (true) {
-    try {
-      if (suffix > MAX_NAME_SUFFIX_ATTEMPTS) {
-        throw new CapyError(
-          `Could not find a free organization name after ${MAX_NAME_SUFFIX_ATTEMPTS} attempts starting from "${args.name}".`,
-          ERROR_CODES.ORG_NAME_SUFFIX_EXHAUSTED,
-          { name: args.name, attempts: MAX_NAME_SUFFIX_ATTEMPTS },
-        );
-      }
-      const org = await args.authService.createOrganization(orgName, args.refreshToken, args.userId);
+  const minted = await args.serviceClient.mintPersonalOrgCeremony(args.name);
+  const org = minted.organization;
 
-      // Same KDF/wrap tail as createNewOrganization — see its own comment.
-      const masterKey = seedPhraseToMasterKey(args.phrase, CURRENT_KDF_VERSION);
-      await wrapAndSaveMasterKey(masterKey, org.id, args.userId, keyServiceOpsFromClient(args.serviceClient));
-
-      if (args.prf) {
-        await runCannedCaseAEnrollment({
-          authService: args.authService,
-          serviceClient: args.serviceClient,
-          userId: args.userId,
-          userEmail: args.userEmail,
-          org,
-          masterKey,
-          prf: args.prf,
-        });
-      }
-
-      return org;
-    } catch (err: any) {
-      if (err && err.status === 409) {
-        suffix += 1;
-        orgName = `${args.name} ${suffix}`;
-        continue;
-      }
-      throw err;
-    }
+  // Re-scope auth to the org mint-ceremony just created — the old
+  // `/auth/create-org` returned org-scoped tokens directly in its response;
+  // this endpoint does not, so the ordinary refreshForOrg machinery
+  // (select_org/unlock's own tail) does the scoping here instead.
+  const pinned = await args.authService.authenticateSilent(org.id);
+  if (!pinned.success) {
+    throw new CapyError(
+      pinned.error || 'Could not scope auth to the newly minted organization.',
+      codeForAuthFailure(pinned.error_code),
+    );
   }
+
+  // Same KDF/wrap tail as createNewOrganization — see its own comment.
+  const masterKey = seedPhraseToMasterKey(args.phrase, CURRENT_KDF_VERSION);
+  await wrapAndSaveMasterKey(masterKey, org.id, args.userId, keyServiceOpsFromClient(args.serviceClient));
+
+  if (args.prf) {
+    await runCannedCaseAEnrollment({
+      authService: args.authService,
+      serviceClient: args.serviceClient,
+      userId: args.userId,
+      userEmail: args.userEmail,
+      org,
+      masterKey,
+      prf: args.prf,
+    });
+  }
+
+  const { finalizeKeyMintOrThrow } = await import('../auth/masterKeyMint');
+  await finalizeKeyMintOrThrow(args.serviceClient, org.id, args.userId);
+
+  // The `default` project mint-ceremony provisioned alongside the org rides
+  // back with it: the caller's step report carries it as `result.project_id`
+  // so the service pins the project this ceremony ALREADY created — without
+  // it, the later `write_keep_lock` step hits the adopt-vs-create project
+  // picker (a wizard stop) on a decision the mint made long ago.
+  return { org, projectId: minted.project_id };
 }
 
 /**
@@ -336,8 +399,12 @@ export async function createOrganizationFromEnvelope(
  * `BrokerCeremonyTransport`. Best-effort, same posture as
  * `attemptCaseAEnrollment`: a failure here leaves the org exactly as it
  * would be with no device key enrolled — never fails org creation itself.
+ *
+ * Exported so the sandbox-ceremony `mint_key` branch
+ * (`../flows/onboard/sandboxCeremony.ts`) reuses the SAME canned-enrollment
+ * tail instead of duplicating it.
  */
-async function runCannedCaseAEnrollment(opts: {
+export async function runCannedCaseAEnrollment(opts: {
   authService: AuthService;
   serviceClient: ServiceClient;
   userId: string;

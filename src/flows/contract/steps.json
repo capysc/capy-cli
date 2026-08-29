@@ -404,6 +404,10 @@
           "expires_at": {
             "type": "string",
             "description": "RFC 3339."
+          },
+          "mint_org_id": {
+            "type": "string",
+            "description": "CAP-542 wave 2. OPTIONAL — present only when this ceremony is the mint-org-key rail (engine.ts): the driving machine holds a live session but the PINNED org's key has never been minted at all, so there is no key anywhere to transport and the CAP-382 unlock ceremony (local_action unlock_org_key) would only fail with KEY_NOT_ON_DEVICE. Names which org this ceremony mints. Absent for every other sandbox_session use (the ordinary auth ceremony, S1/A1) — a client that sees it present is minting, not authenticating."
           }
         }
       }

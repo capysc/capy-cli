@@ -58,7 +58,13 @@ export interface CreateFlowResponse {
 export interface NextRequest {
   contract_version: string;
   observations: OnboardObservations;
-  /** Sent only when the client found the plan no longer matches the one the instance holds. */
+  /**
+   * Sent when the client found the plan no longer matches the one the
+   * instance holds (a rebuild after a PLAN_CHANGED outcome), and also once,
+   * on a resumed run's first report, to give a remote-minted flow — which
+   * carries no plan on its row at all until some driver reports one — its
+   * plan facts for the first time. See driver.ts's `resolveNextPlan`.
+   */
   plan?: unknown;
   last_step?: {
     step_id: string;
@@ -66,6 +72,18 @@ export interface NextRequest {
     code?: string;
     result?: { org_id?: string; project_id?: string; branch?: string };
   };
+  /**
+   * Same field as `CreateFlowRequest.client_pubkey`, sent again on every
+   * `next` report while this process holds a broker-ceremony keypair —
+   * needed because a `--flow-id`/`--flow-secret` RESUME never calls
+   * `create`, so its own mint (driver.ts's `brokerCeremonyKeypair`) would
+   * otherwise never reach the service at all. Registration is one-shot and
+   * idempotent server-side: the first key seen for the flow wins, resending
+   * that IDENTICAL key (the ordinary create-then-next case) is a no-op
+   * success, and a DIFFERENT key than the one already stored is refused with
+   * a 409 (`FlowHttpError.code === 'CLIENT_PUBKEY_CONFLICT'`).
+   */
+  client_pubkey?: string;
 }
 
 /** What the driver needs from the service. Injectable so the driver can be tested against a fake. */
