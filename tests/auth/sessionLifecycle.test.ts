@@ -466,4 +466,63 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(lifecycle.session?.organizations.length).toBe(1);
     });
   });
+
+  describe('rotation-clobber guard — the single-use refresh token only moves FORWARD', () => {
+    test('a non-rotating save preserves a newer rotation another instance persisted', () => {
+      const backend = new MemorySessionStorageBackend();
+      backend.save(makeSession({ refresh_token: 'rt-1' }), 'user-1');
+
+      const stale = new SessionLifecycle(backend, API, 'user-1');
+      stale.load(); // baseline rt-1
+
+      const rotator = new SessionLifecycle(backend, API, 'user-1');
+      rotator.load();
+      rotator.session!.refresh_token = 'rt-2'; // rotated (as refreshForOrg does)
+      rotator.save();
+      expect(backend.load('user-1')?.refresh_token).toBe('rt-2');
+
+      // The stale instance updates something unrelated and saves — before the
+      // guard this wrote rt-1 back over rt-2, and the next process died on
+      // invalid_grant (observed live, twice, in the mint ceremony worker).
+      stale.session!.sessions['org-1'] = { access_token: 'at-new', expires_at: Date.now() + 60_000 };
+      stale.save();
+
+      expect(backend.load('user-1')?.refresh_token).toBe('rt-2');
+      // ...but its non-token payload DID land.
+      expect(backend.load('user-1')?.sessions['org-1']?.access_token).toBe('at-new');
+    });
+
+    test('after a preserving save, the instance can still rotate forward later', () => {
+      const backend = new MemorySessionStorageBackend();
+      backend.save(makeSession({ refresh_token: 'rt-1' }), 'user-1');
+
+      const stale = new SessionLifecycle(backend, API, 'user-1');
+      stale.load();
+
+      const rotator = new SessionLifecycle(backend, API, 'user-1');
+      rotator.load();
+      rotator.session!.refresh_token = 'rt-2';
+      rotator.save();
+
+      stale.save(); // preserving save: adopts rt-2 as its own baseline
+      expect(backend.load('user-1')?.refresh_token).toBe('rt-2');
+
+      // A genuine rotation by the formerly-stale instance still advances.
+      stale.session!.refresh_token = 'rt-3';
+      stale.save();
+      expect(backend.load('user-1')?.refresh_token).toBe('rt-3');
+    });
+
+    test('a rotating save wins even when the disk still holds the older token', () => {
+      const backend = new MemorySessionStorageBackend();
+      backend.save(makeSession({ refresh_token: 'rt-1' }), 'user-1');
+
+      const lifecycle = new SessionLifecycle(backend, API, 'user-1');
+      lifecycle.load();
+      lifecycle.session!.refresh_token = 'rt-2';
+      lifecycle.save();
+
+      expect(backend.load('user-1')?.refresh_token).toBe('rt-2');
+    });
+  });
 });
