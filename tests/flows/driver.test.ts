@@ -719,6 +719,112 @@ describe('G5 — a plan that moved under the human is resent', () => {
   });
 });
 
+describe('G6 — a RESUMED run reports its own computed plan once, since a remote-minted flow carries none', () => {
+  // A flow minted by the hosted MCP (`minted_for: 'remote'`) has no plan on
+  // its row at all: the service only ever gets one from a client-reported
+  // `body.plan`, either at create or via this same `next` field, and a
+  // remote mint's create body has no local directory to compute one from.
+  // `--flow-id`/`--flow-secret` skips `create` entirely (the `!flowId`
+  // branch above never runs), so without this the confirm/onboard_plan
+  // dialog's params (target_dir, variable_count, plan_hash, will_encrypt)
+  // stayed empty forever — this is the dev-rig bug this fixes.
+  test('a RESUME (flowId + flowSecret, no create call) sends the computed plan on its first next report', async () => {
+    const { transport, reports, created } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+    const plan = { plan_hash: 'h-resume', target_dir: '/tmp/x', variable_count: 1 };
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      plan,
+    });
+
+    // No create call at all — this is a resume, not a self-mint.
+    expect(created).toEqual([]);
+    expect(reports.length).toBe(2);
+    expect(reports[0].plan).toEqual(plan);
+  });
+
+  test('falls back to buildPlan() on resume when no pre-computed plan was wired', async () => {
+    const { transport, reports } = fakeTransport([envelope({ kind: 'done', params: {} })]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      buildPlan: () => ({ plan_hash: 'h-built', target_dir: '/tmp/x' }),
+    });
+
+    expect(reports[0].plan).toEqual({ plan_hash: 'h-built', target_dir: '/tmp/x' });
+  });
+
+  test('the self-mint path is unchanged: the plan travels in the create body, byte-identical, and never on next', async () => {
+    const { transport, reports, created } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+    const plan = { plan_hash: 'h-create', target_dir: '/tmp/x', variable_count: 2 };
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      plan,
+      compat: { usesEnvVars: true },
+    });
+
+    expect(created.length).toBe(1);
+    // The exact same reference the caller passed — never rebuilt or cloned.
+    expect(created[0].plan).toBe(plan);
+    // A self-mint is not a resume: the first `next` report carries no plan.
+    expect(reports[0].plan).toBeUndefined();
+  });
+
+  test('no double-send: only the FIRST next report of a resumed run carries the plan', async () => {
+    const { transport, reports } = fakeTransport([
+      envelope({ kind: 'local_action', verb: 'write_capy_dir', params: { branch: 'development' } }),
+      envelope({
+        kind: 'local_action',
+        verb: 'wrap_run_commands',
+        params: { plan_hash: 'h-resume', kinds: ['run-wrap'], consent_recorded: true },
+      }),
+      envelope({ kind: 'done', params: {} }),
+    ]);
+    const { map } = recordingExecutors();
+
+    await runOnboardFlow({
+      targetDir: '/tmp/x',
+      transport,
+      executors: map,
+      observe: observeStub(),
+      flowId: FLOW_ID,
+      flowSecret: 'resumed-secret',
+      plan: { plan_hash: 'h-resume', target_dir: '/tmp/x' },
+    });
+
+    expect(reports.length).toBe(3);
+    expect(reports[0].plan).toEqual({ plan_hash: 'h-resume', target_dir: '/tmp/x' });
+    // Later reports on the SAME resumed run send nothing more — one report
+    // is enough, and the service treats a resend of the same plan_hash as a
+    // no-op in any case (`withReplacedPlan`, service/src/routes/flows.ts).
+    expect(reports[1].plan).toBeUndefined();
+    expect(reports[2].plan).toBeUndefined();
+  });
+});
+
 describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --broker-ceremony', () => {
   // BEHAVIOR CHANGED BY DESIGN from the old in-process ceremony: the driver
   // used to run `runSandboxCeremony` inline and block on its poll (up to 15

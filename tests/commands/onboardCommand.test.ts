@@ -66,6 +66,8 @@ let createBehavior: () => unknown = () => {
 let nextBehavior: () => unknown = () => {
   throw new StopAfterConfirm('stop: next() reached after confirm');
 };
+/** Every `next()` call's own request body — additive: only read by the RESUME-plan tests below, which need to see what the driver actually sent. */
+let nextCalls: Array<Record<string, unknown>> = [];
 /** Thrown by the fake transport's other methods — these tests only care about `confirm`'s own call, not what the driver does afterward. */
 class StopAfterConfirm extends Error {}
 
@@ -80,7 +82,8 @@ mock.module('../../src/flows/client', () => {
       createCalls.push(body);
       return Promise.resolve(createBehavior());
     }
-    next() {
+    next(_flowId: string, body: Record<string, unknown>) {
+      nextCalls.push(body);
       return Promise.resolve(nextBehavior());
     }
     cancel() {
@@ -112,6 +115,7 @@ beforeEach(() => {
   nextBehavior = () => {
     throw new StopAfterConfirm('stop: next() reached after confirm');
   };
+  nextCalls = [];
   targetDir = mkdtempSync(join(tmpdir(), 'capy-onboardcmd-target-'));
   writeFileSync(join(targetDir, 'package.json'), JSON.stringify({ name: 'onboardcmd-fixture', scripts: {} }));
   logs = [];
@@ -364,5 +368,48 @@ describe('runOnboardCommand: --broker-ceremony --json surfaces a coded flow-serv
     expect(errs.length).toBe(1);
     const parsed = JSON.parse(errs[0]);
     expect(parsed.code).toBe('SERVICE_ERROR');
+  });
+});
+
+describe('runOnboardCommand: a RESUME reports its own computed plan on the first next() call', () => {
+  // Dev-rig bug: `capy onboard --flow-id X --flow-secret Y --json` against a
+  // flow minted by the hosted MCP (`minted_for: 'remote'`) reached the
+  // confirm/onboard_plan step with EMPTY plan facts — target_dir "",
+  // variable_count 0, plan_hash "" — even though the target dir held a real
+  // `.env` with one variable. The service only ever gets plan facts from a
+  // client-reported `body.plan`, and a remote mint's create body never had
+  // one to begin with (no local directory at mint time); the driver's `next`
+  // report is the only place left to carry it. No `--accepted` here: this is
+  // the plain resume path, not the confirm-answering one the tests above
+  // exercise.
+  it('sends target_dir/variable_count/plan_hash facts on next() when resuming, with no create call at all', async () => {
+    writeFileSync(join(targetDir, '.env'), 'API_KEY=shh\n');
+    const { FLOW_CONTRACT_VERSION } = await import('../../src/flows/validate');
+    nextBehavior = () => ({
+      step: {
+        contract_version: FLOW_CONTRACT_VERSION,
+        flow_id: 'flow-resume-1',
+        flow_type: 'onboard',
+        step_id: 'flow-resume-1-done',
+        kind: 'done',
+        resumed: true,
+        params: {},
+      },
+    });
+    const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
+    const { buildPlan } = await import('../../src/flows/onboard/plan');
+    try {
+      await runOnboardCommand({ json: true, flowId: 'flow-resume-1', flowSecret: 'sekrit', targetDir }, false);
+    } finally {
+      restore();
+    }
+    // Resuming an existing instance never calls create — only next().
+    expect(createCalls).toEqual([]);
+    expect(nextCalls.length).toBe(1);
+    const sentPlan = nextCalls[0].plan as Record<string, unknown> | undefined;
+    expect(sentPlan).toBeDefined();
+    expect(sentPlan?.plan_hash).toBe(buildPlan({ targetDir }).planHash);
+    expect(sentPlan?.target_dir).toBe(targetDir);
+    expect(sentPlan?.variable_count).toBe(1);
   });
 });

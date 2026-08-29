@@ -58,7 +58,13 @@ export interface CreateFlowResponse {
 export interface NextRequest {
   contract_version: string;
   observations: OnboardObservations;
-  /** Sent only when the client found the plan no longer matches the one the instance holds. */
+  /**
+   * Sent when the client found the plan no longer matches the one the
+   * instance holds (a rebuild after a PLAN_CHANGED outcome), and also once,
+   * on a resumed run's first report, to give a remote-minted flow — which
+   * carries no plan on its row at all until some driver reports one — its
+   * plan facts for the first time. See driver.ts's `resolveNextPlan`.
+   */
   plan?: unknown;
   last_step?: {
     step_id: string;
