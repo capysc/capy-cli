@@ -61,10 +61,37 @@ export class FlowCancelCommand {
           });
           process.exit(EXIT_NEEDS_INPUT);
         }
-        refuseNonInteractive(
-          'cancelling a flow is irreversible, and there is no interactive session to confirm it',
-          `Pass --yes to confirm non-interactively: capy flow cancel ${flowId} --yes`,
-        );
+        // Under `--web` this refusal owes the caller a page, not just a stream
+        // they cannot read. `displayErrorAndExit` is not the tool here: it
+        // hardcodes exit 1, and this refusal's contract is EXIT_NEEDS_INPUT (3)
+        // — the code an agent branches on to learn a question needs answering.
+        // So the page is served directly and the exit code is preserved.
+        //
+        // The sentences are `refuseNonInteractive`'s own, carried whole, so the
+        // terminal and the browser say the same thing.
+        const reason = 'cancelling a flow is irreversible, and there is no interactive session to confirm it';
+        const hint = `Pass --yes to confirm non-interactively: capy flow cancel ${flowId} --yes`;
+        const { isWebMode } = await import('../ui/webMode');
+        if (isWebMode()) {
+          console.error(`\n  non-interactive: ${reason}`);
+          console.error(`  ${hint}\n`);
+          try {
+            const { buildCommandErrorData } = await import('../ui/commandErrorScreen');
+            const { serveEndingPage } = await import('../ui/endingPage');
+            await serveEndingPage(
+              'command-error',
+              buildCommandErrorData(
+                new CapyError(`${reason}\n${hint}`, ERROR_CODES.FLOW_CANCEL_CONFIRMATION_REQUIRED),
+                {},
+              ),
+              { lead: 'What went wrong is in your browser:', timeoutMs: 60_000, flow: 'error' },
+            );
+          } catch {
+            // A failure while reporting a failure is not worth a second one.
+          }
+          process.exit(EXIT_NEEDS_INPUT);
+        }
+        refuseNonInteractive(reason, hint);
       }
 
       const inquirer = (await import('inquirer')).default;
