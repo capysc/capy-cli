@@ -136,12 +136,35 @@ function restore(): void {
   console.log = realLog;
   console.error = realErr;
   rmSync(targetDir, { recursive: true, force: true });
-  process.exitCode = exitCode;
+  // Bun (unlike Node) does NOT treat `process.exitCode = undefined` as
+  // clearing a prior nonzero value — restoring a saved `undefined` over the
+  // exit 1 the broker-ceremony failure tests legitimately produce left that
+  // 1 in place, and the whole batch `bun test` process then exited 1 while
+  // reporting 0 failing tests (run-tests.sh's "FAIL: batch run"). `?? 0`
+  // keeps a genuinely saved nonzero and actually clears otherwise. Tests
+  // that assert on the command's exit code snapshot it BEFORE this runs —
+  // see `runCapturingExitCode`.
+  process.exitCode = exitCode ?? 0;
   // See the import comment above: unconditional, every test, so a leaked
   // `true` from THIS file's `brokerCeremony`/`json` tests can never survive
   // into another file sharing this same `bun test` process.
   setBrokerCeremonyMode(false);
   setOnboardJsonMode(false);
+}
+
+/**
+ * Runs a command thunk, snapshots `process.exitCode` before `restore()`
+ * clears it (see restore's comment on Bun's `= undefined` no-op), and always
+ * restores. Assertions must use the returned snapshot, never the live
+ * `process.exitCode` after restore.
+ */
+async function runCapturingExitCode(run: () => Promise<unknown>): Promise<number | string | undefined> {
+  try {
+    await run();
+    return process.exitCode;
+  } finally {
+    restore();
+  }
 }
 
 describe('runOnboardCommand: --confirm is optional (Bug A)', () => {
@@ -280,11 +303,9 @@ describe('runOnboardCommand: a 409 on confirm is a coded, parseable JSON result 
       throw new FlowHttpError(409, 'CONFLICT_RESOLUTION');
     };
     const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
-    try {
-      await runOnboardCommand({ json: true, flowId: 'flow-3', accepted: true, targetDir }, false);
-    } finally {
-      restore();
-    }
+    const exitCodeAfterRun = await runCapturingExitCode(() =>
+      runOnboardCommand({ json: true, flowId: 'flow-3', accepted: true, targetDir }, false),
+    );
     // Exactly one console.log call, and it parses as ONE JSON object.
     expect(logs.length).toBe(1);
     const parsed = JSON.parse(logs[0]);
@@ -297,7 +318,7 @@ describe('runOnboardCommand: a 409 on confirm is a coded, parseable JSON result 
     // A blocked step in --json mode is a legitimate stop, not a crash: exit
     // code is never forced non-zero for it (module doc: only a genuine
     // failure exits non-zero).
-    expect(process.exitCode).not.toBe(1);
+    expect(exitCodeAfterRun).not.toBe(1);
   });
 
   it('a non-409 error is NOT swallowed — still propagates', async () => {
@@ -333,21 +354,19 @@ describe('runOnboardCommand: --broker-ceremony --json surfaces a coded flow-serv
       throw new FlowHttpError(409, 'CLIENT_PUBKEY_CONFLICT');
     };
     const { runOnboardCommand } = await import('../../src/commands/onboardCommand');
-    try {
-      await runOnboardCommand(
+    const exitCodeAfterRun = await runCapturingExitCode(() =>
+      runOnboardCommand(
         { json: true, flowId: 'flow-broker-1', flowSecret: 'sekrit', brokerCeremony: true, targetDir },
         false,
-      );
-    } finally {
-      restore();
-    }
+      ),
+    );
     // Exactly one coded object on stderr — never a step shape, never the raw
     // "Flow request failed: ..." prose.
     expect(errs.length).toBe(1);
     const parsed = JSON.parse(errs[0]);
     expect(parsed.error).toBe('onboard_failed');
     expect(parsed.code).toBe('CLIENT_PUBKEY_CONFLICT');
-    expect(process.exitCode).toBe(1);
+    expect(exitCodeAfterRun).toBe(1);
     expect(logs).toEqual([]);
   });
 
