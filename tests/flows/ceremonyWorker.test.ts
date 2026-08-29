@@ -17,7 +17,7 @@
  *     end against a fake poll, proving the worker gets the real
  *     `applyFirstRun` tail for free rather than a reimplementation of it.
  */
-import { describe, test, expect, mock, afterAll } from 'bun:test';
+import { describe, test, expect, mock, afterAll, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { Readable } from 'stream';
@@ -51,6 +51,7 @@ import { generatePrfSalt } from '../../src/auth/deviceKey/crypto';
 import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
 import { keepOrigin } from '../../src/ui/screens/keepScreens';
 import { FlowStep } from '../../src/flows/validate';
+import { HANDOFF_EVENT_MARKER, type HandoffUrlEvent } from '../../src/ui/handoffEvent';
 
 type FakeSpawn = typeof import('child_process').spawn;
 
@@ -204,6 +205,69 @@ describe('prepareCeremonyScreen — returns the screen immediately, spawns exact
       expect(marker?.state).toBe('pending');
       expect(marker?.url).toBe(result.step.url);
       expect(marker?.userCode).toBe('BCDF-GHJK');
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  test('CAP-542: a mint_org_id step param carries into the URL fragment AND the worker payload', async () => {
+    const targetDir = mkdtempSync(join(require('os').tmpdir(), 'capy-ceremony-prepare-'));
+    const { spawnImpl, writes } = fakeSpawnRecorder();
+    const step = makeStep('conn-prep-mint-1');
+    const stepWithMintOrgId = { ...step, params: { ...step.params, mint_org_id: 'org_xyz' } };
+
+    try {
+      const result = await prepareCeremonyScreen({
+        step: stepWithMintOrgId,
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        targetDir,
+        spawnImpl,
+        resolveCommand: () => ({ command: 'node', args: ['x'] }),
+      });
+
+      expect(result.kind).toBe('screen');
+      if (result.kind !== 'screen') throw new Error('unreachable');
+      const b64 = result.step.url.split('#r=')[1];
+      const fragment = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+      expect(fragment.first_run.mint_org_id).toBe('org_xyz');
+
+      // The worker (a separate process) reconstructs its own synthetic step
+      // from the payload — mintOrgId has to ride it, or the worker's own
+      // buildCeremonyUrl call would produce a DIFFERENT fragment than the
+      // one just shown to the human.
+      const payload = JSON.parse(writes[0]) as CeremonyWorkerPayload;
+      expect(payload.mintOrgId).toBe('org_xyz');
+    } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  test('absent when the step carries no mint_org_id — byte-identical to before CAP-542', async () => {
+    const targetDir = mkdtempSync(join(require('os').tmpdir(), 'capy-ceremony-prepare-'));
+    const { spawnImpl, writes } = fakeSpawnRecorder();
+
+    try {
+      const result = await prepareCeremonyScreen({
+        step: makeStep('conn-prep-nomint-1'),
+        keypair: mintConnectionKeypair(),
+        flowSecret: 'flow-secret',
+        serviceUrl: 'https://api.test.invalid',
+        devMode: false,
+        targetDir,
+        spawnImpl,
+        resolveCommand: () => ({ command: 'node', args: ['x'] }),
+      });
+
+      if (result.kind !== 'screen') throw new Error('unreachable');
+      const b64 = result.step.url.split('#r=')[1];
+      const fragment = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+      expect('mint_org_id' in fragment.first_run).toBe(false);
+
+      const payload = JSON.parse(writes[0]) as CeremonyWorkerPayload;
+      expect(payload.mintOrgId).toBeUndefined();
     } finally {
       rmSync(targetDir, { recursive: true, force: true });
     }
@@ -504,6 +568,61 @@ describe('runCeremonyWorker — reuses the existing runSandboxCeremony/applyFirs
       });
       expect(prepared).toEqual({ kind: 'settled', outcome: 'ok', orgId: 'org_1' });
     } finally {
+      rmSync(targetDir, { recursive: true, force: true });
+    }
+  });
+
+  test('CAP-542: a mintOrgId on the payload is reconstructed into the worker\'s own synthetic step, so its buildCeremonyUrl call reproduces the SAME fragment the human was already shown', async () => {
+    const keypair = mintConnectionKeypair();
+    const targetDir = mkdtempSync(join(require('os').tmpdir(), 'capy-ceremony-worker-target-'));
+
+    // A 410 (expired) settles the poll on its FIRST request — the
+    // handoff-url event is emitted synchronously before the poll ever
+    // starts, so this still proves what the fragment carried without
+    // needing the promise to hang or a real answered envelope.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({}), { status: 410, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+
+    const originalIsTTY = process.stdout.isTTY;
+    process.stdout.isTTY = undefined as unknown as true;
+    // The spy is itself a mock — its own `.mock.calls` is the write log, so
+    // nothing here needs a hand-rolled array to accumulate into.
+    const writeSpy = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
+
+    const payload: CeremonyWorkerPayload = {
+      v: 1,
+      privateKeyB64: exportConnectionPrivateKeyB64(keypair),
+      publicKeyB64: keypair.publicKeyB64,
+      connectionId: 'conn-worker-mint-1',
+      userCode: 'BCDF-GHJK',
+      baseUrl: `${keepOrigin()}/flow/sandbox-session?c=conn-worker-mint-1`,
+      flowSecret: 'flow-secret-worker-mint-1',
+      prfSaltB64: generatePrfSalt().toString('base64'),
+      targetDir,
+      serviceUrl: 'https://api.test.invalid',
+      devMode: false,
+      mintOrgId: 'org_xyz',
+    };
+
+    try {
+      await runCeremonyWorker(Readable.from([JSON.stringify(payload)]));
+
+      const writes = writeSpy.mock.calls.map(([chunk]: [string]) => chunk);
+      const eventLine = writes.find((w) => w.startsWith(HANDOFF_EVENT_MARKER));
+      expect(eventLine).toBeDefined();
+      const parsed = JSON.parse(eventLine!.slice(HANDOFF_EVENT_MARKER.length).trimEnd()) as HandoffUrlEvent;
+      const b64 = parsed.url.split('#r=')[1];
+      const fragment = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+      expect(fragment.first_run.mint_org_id).toBe('org_xyz');
+
+      const marker = readCeremonyMarker(targetDir, 'conn-worker-mint-1');
+      expect(marker?.state).toBe('failed');
+      expect(marker?.code).toBe(CEREMONY_CODES.EXPIRED);
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.isTTY = originalIsTTY;
+      globalThis.fetch = originalFetch;
       rmSync(targetDir, { recursive: true, force: true });
     }
   });

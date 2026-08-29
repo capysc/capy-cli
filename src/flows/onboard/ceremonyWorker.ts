@@ -167,6 +167,16 @@ export interface CeremonyWorkerPayload {
   serviceUrl: string;
   devMode: boolean;
   machineName?: string;
+  /**
+   * CAP-542: the `sandbox_session` step's own `mint_org_id` param, when the
+   * service sent one (jumping straight to the mint rail for an
+   * already-known org). Threaded through so the worker's own
+   * `buildCeremonyUrl` call (inside `runSandboxCeremony`) reconstructs the
+   * IDENTICAL fragment `prepareCeremonyScreen` already showed the human —
+   * see `runCeremonyWorker`'s synthetic `step` below. Absent for every
+   * ceremony this binary built before CAP-542.
+   */
+  mintOrgId?: string;
 }
 
 function isWorkerPayload(v: unknown): v is CeremonyWorkerPayload {
@@ -259,6 +269,9 @@ export async function prepareCeremonyScreen(
   const connectionId = opts.step.params.connection_id as string;
   const userCode =
     typeof opts.step.params.user_code === 'string' ? (opts.step.params.user_code as string) : undefined;
+  // CAP-542: read straight off the validated step — see `CeremonyWorkerPayload.mintOrgId`'s doc for why this also has to ride the worker payload.
+  const mintOrgId =
+    typeof opts.step.params.mint_org_id === 'string' ? (opts.step.params.mint_org_id as string) : undefined;
 
   const existing = readCeremonyMarker(opts.targetDir, connectionId);
   if (existing) {
@@ -321,6 +334,7 @@ export async function prepareCeremonyScreen(
         serviceUrl: opts.serviceUrl,
         devMode: opts.devMode,
         machineName: opts.machineName,
+        mintOrgId,
       },
       { spawnImpl: opts.spawnImpl, resolveCommand: opts.resolveCommand },
     );
@@ -399,7 +413,15 @@ export async function runCeremonyWorker(input: NodeJS.ReadableStream = process.s
     resumed: false,
     screen: 'sandbox_session',
     url: payload.baseUrl,
-    params: { connection_id: payload.connectionId, user_code: payload.userCode },
+    params: {
+      connection_id: payload.connectionId,
+      user_code: payload.userCode,
+      // CAP-542: reconstructed from the payload so this worker's own
+      // `buildCeremonyUrl` call (inside `runSandboxCeremony` below) produces
+      // the fragment byte-identical to the one `prepareCeremonyScreen`
+      // already showed the human.
+      ...(payload.mintOrgId ? { mint_org_id: payload.mintOrgId } : {}),
+    },
   };
 
   let outcomeCode: string | undefined;

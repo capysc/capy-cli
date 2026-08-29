@@ -642,6 +642,16 @@ export const ERROR_CODES = {
    * STALE_KEEP_HASH/KEY_ALREADY_MINTED above.
    */
   CLIENT_PUBKEY_CONFLICT: 'CLIENT_PUBKEY_CONFLICT',
+  /**
+   * `POST /orgs/personal/mint-ceremony` 409: this caller already holds an
+   * active membership, so there is no fresh personal org left to mint —
+   * the `create_org` first_run branch is not the right ceremony for this
+   * identity anymore (a concurrent `capy onboard` run, or an invite
+   * redeemed between the sealed answer being sealed and this call landing).
+   * Mirrored from the service's own code, same convention as
+   * STALE_KEEP_HASH/KEY_ALREADY_MINTED above.
+   */
+  ALREADY_PROVISIONED: 'ALREADY_PROVISIONED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

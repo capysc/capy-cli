@@ -84,6 +84,7 @@ import {
   mintThenRetryOnNoKey,
   shouldAttemptMint,
   resolveProjectKeyWithMintFallback,
+  finalizeKeyMintOrThrow,
 } from '../../src/auth/masterKeyMint';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
@@ -203,16 +204,77 @@ describe('mintMasterKeyForOrg', () => {
   });
 
   test('finalize NETWORK_ERROR is retried exactly once, then swallowed', async () => {
-    let finalizeAttempts = 0;
     const serviceClient = fakeServiceClient({
-      finalize: () => {
-        finalizeAttempts += 1;
-        throw new CapyError('net blip', ERROR_CODES.NETWORK_ERROR);
-      },
+      finalize: () => { throw new CapyError('net blip', ERROR_CODES.NETWORK_ERROR); },
     });
 
     await mintMasterKeyForOrg({ orgId: 'org-1', userId: 'user-1', serviceClient, keyServiceOps });
-    expect(finalizeAttempts).toBe(2);
+    expect(calls.filter((c) => c === 'finalizeKeyMint').length).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CAP-542: `finalizeKeyMintOrThrow` — the sandbox-ceremony flow's own
+// finalize helper (`create_org`/`mint_key` first_run branches). Same
+// one-retry-on-network shape as `finalizeWithOneRetry` above, but NEVER
+// downgrades a conflict to a silent success — a FLOW step's outcome is read
+// machine-readably by the service, not by a human who can just re-run the
+// command.
+// ---------------------------------------------------------------------------
+describe('finalizeKeyMintOrThrow', () => {
+  test('happy path: finalizes once, resolves', async () => {
+    const serviceClient = fakeServiceClient();
+    await finalizeKeyMintOrThrow(serviceClient, 'org-1', 'user-1');
+    expect(calls).toEqual(['finalizeKeyMint']);
+  });
+
+  test('a network error is retried exactly once, then resolves on success', async () => {
+    // `fakeServiceClient`'s own `finalizeKeyMint` mock pushes 'finalizeKeyMint'
+    // onto the shared `calls` log BEFORE invoking this override, so reading
+    // that log's length (rather than a hand-rolled counter) tells the
+    // override which attempt it is currently on.
+    const serviceClient = fakeServiceClient({
+      finalize: () => {
+        const attempt = calls.filter((c) => c === 'finalizeKeyMint').length;
+        if (attempt === 1) throw new CapyError('net blip', ERROR_CODES.NETWORK_ERROR);
+        return { key_state: 'minted' };
+      },
+    });
+    await finalizeKeyMintOrThrow(serviceClient, 'org-1', 'user-1');
+    expect(calls.filter((c) => c === 'finalizeKeyMint').length).toBe(2);
+  });
+
+  test('a network error surviving the retry is thrown, NEVER swallowed to a silent success', async () => {
+    const serviceClient = fakeServiceClient({
+      finalize: () => { throw new CapyError('still down', ERROR_CODES.NETWORK_ERROR); },
+    });
+    const thrown = await finalizeKeyMintOrThrow(serviceClient, 'org-1', 'user-1').then(() => undefined, (e) => e);
+    expect(calls.filter((c) => c === 'finalizeKeyMint').length).toBe(2);
+    expect(thrown).toBeInstanceOf(CapyError);
+    expect((thrown as CapyError).code).toBe(ERROR_CODES.NETWORK_ERROR);
+  });
+
+  test('a generic finalize failure (not network, not a claim conflict) is thrown immediately — no retry, never swallowed', async () => {
+    const serviceClient = fakeServiceClient({
+      finalize: () => { throw new CapyError('boom', ERROR_CODES.SERVICE_ERROR); },
+    });
+    const thrown = await finalizeKeyMintOrThrow(serviceClient, 'org-1', 'user-1').then(() => undefined, (e) => e);
+    expect(calls.filter((c) => c === 'finalizeKeyMint').length).toBe(1);
+    expect((thrown as CapyError).code).toBe(ERROR_CODES.SERVICE_ERROR);
+  });
+
+  test('KEY_MINT_NOT_CLAIMED (lost the race): the local key.enc is discarded AND the coded error is thrown, never swallowed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'capy-finalize-strict-test-'));
+    orgKeyPathForTest = join(dir, 'key.enc');
+    writeFileSync(orgKeyPathForTest, 'fake-key-material');
+    const serviceClient = fakeServiceClient({
+      finalize: () => { throw new CapyError('not claimed', ERROR_CODES.KEY_MINT_NOT_CLAIMED, { status: 409 }); },
+    });
+
+    const thrown = await finalizeKeyMintOrThrow(serviceClient, 'org-1', 'user-1').then(() => undefined, (e) => e);
+    expect(thrown).toBeInstanceOf(CapyError);
+    expect((thrown as CapyError).code).toBe(ERROR_CODES.KEY_MINT_NOT_CLAIMED);
+    expect(existsSync(orgKeyPathForTest)).toBe(false);
   });
 });
 

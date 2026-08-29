@@ -898,6 +898,58 @@ describe('CAP-451 follow-up — the DETACHED-worker broker ceremony under --brok
     expect(spawnCalls[0].args).toContain('cli-entry.js');
   });
 
+  // CAP-542: proves the FULL real path — a genuine `validateStep` pass
+  // against the vendored contract (so this also proves the contract schema
+  // itself accepts the param) through `prepareCeremonyScreen`'s real
+  // `buildCeremonyUrl` call — with no driver.ts code change: the step object
+  // (params included) already flows through `driver.ts` unmodified into
+  // `prepareCeremonyScreen`'s options.
+  test('CAP-542: a mint_org_id step param survives contract validation and lands in the returned URL fragment', async () => {
+    const keypair = mintConnectionKeypair();
+    const ceremonyDir = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-target-'));
+
+    const sandboxStep = envelope({
+      kind: 'screen',
+      screen: 'sandbox_session',
+      url: `${keepOrigin()}/flow/sandbox-session?c=conn-mint-org-1`,
+      params: { connection_id: 'conn-mint-org-1', user_code: 'BCDF-GHJK', mint_org_id: 'org_xyz' },
+    });
+    const { transport } = fakeTransport([sandboxStep]);
+    const { map } = recordingExecutors();
+
+    const fakeSpawnImpl = ((command: string, args: string[]) => {
+      return {
+        stdin: { write: () => true, end: () => undefined },
+        unref: () => undefined,
+      } as unknown as ReturnType<typeof import('child_process').spawn>;
+    }) as typeof import('child_process').spawn;
+
+    const result = await (async () => {
+      try {
+        return await runOnboardFlow({
+          targetDir: ceremonyDir,
+          transport,
+          executors: map,
+          observe: observeStub(),
+          authMode: 'broker_ceremony',
+          clientPubkey: keypair.publicKeyB64,
+          brokerCeremonyKeypair: keypair,
+          serviceUrl: 'https://api.test.invalid',
+          flowSecret: 'flow-secret-mint-org-1',
+          ceremonySpawnImpl: fakeSpawnImpl,
+          ceremonyResolveCommand: () => ({ command: 'node', args: ['cli-entry.js'] }),
+        });
+      } finally {
+        rmSync(ceremonyDir, { recursive: true, force: true });
+      }
+    })();
+
+    expect(result.step.kind).toBe('screen');
+    const b64 = result.step.url.split('#r=')[1];
+    const fragment = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+    expect(fragment.first_run.mint_org_id).toBe('org_xyz');
+  });
+
   test('a settled "done" marker carrying an orgId is reported to the service as this step\'s result.org_id on the NEXT /next call', async () => {
     const keypair = mintConnectionKeypair();
     const ceremonyDir = mkdtempSync(join(require('os').tmpdir(), 'capy-driver-ceremony-target-'));

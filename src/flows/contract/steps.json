@@ -404,6 +404,10 @@
           "expires_at": {
             "type": "string",
             "description": "RFC 3339."
+          },
+          "mint_org_id": {
+            "type": "string",
+            "description": "CAP-542: when present, jump straight to the mint rail for this already-known org (the `mint_key` first_run source) instead of the fresh-signup rail. Optional — absent on the ordinary create_org/select_org/unlock/none path."
           }
         }
       }

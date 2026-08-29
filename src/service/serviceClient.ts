@@ -290,6 +290,17 @@ export class ServiceClient {
         );
       }
 
+      // `POST /orgs/personal/mint-ceremony` (CAP-542): this caller already
+      // has an active membership somewhere — there is no fresh personal org
+      // left to mint. Same convention as the key-mint 409s above.
+      if (res.status === 409 && data.code === 'ALREADY_PROVISIONED') {
+        throw new CapyError(
+          data.error || 'You already belong to an organization.',
+          ERROR_CODES.ALREADY_PROVISIONED,
+          { status: 409 },
+        );
+      }
+
       const serverMessage = data.error || data.message || 'Service request failed';
       throw new CapyError(
         serverMessage,
@@ -694,6 +705,28 @@ export class ServiceClient {
    */
   async finalizeKeyMint(orgId: string): Promise<{ key_state: 'minted' } | { already: true }> {
     return this.request('POST', `/orgs/${orgId}/key-mint/finalize`);
+  }
+
+  /**
+   * CAP-542: mint-ceremony for a fresh personal org — the sandbox-session
+   * ceremony's `first_run.kind:'create_org'` source. Creates the org AND
+   * claims THIS caller's own key-mint lease in one call: unlike
+   * `claimKeyMint`, there is no separate claim step on this path — the org
+   * is born `key_state:'minting'` with the lease already held by the
+   * caller. `name` is a BASE name only; a collision is resolved
+   * server-side with a numeric suffix, never retried client-side (see
+   * `orgCreation.ts`'s `createOrganizationFromEnvelope` for why the old
+   * CLI-side suffix-retry loop is gone). 409 `ALREADY_PROVISIONED` (this
+   * caller already holds an active membership) arrives as a typed
+   * `CapyError` via `request()`'s classification above.
+   */
+  async mintPersonalOrgCeremony(name?: string): Promise<{
+    org_id: string;
+    project_id: string;
+    mint_claim: { key_state: 'minting'; expires_at: string };
+    organization: { id: string; workos_org_id: string; name: string };
+  }> {
+    return this.request('POST', '/orgs/personal/mint-ceremony', name !== undefined ? { name } : undefined);
   }
 
   async listMembers(orgId: string): Promise<{ members: any[] }> {

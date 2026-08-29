@@ -36,6 +36,7 @@ import { sealEnvelopePageSide } from '../helpers/sealEnvelope';
 import { FlowStep } from '../../src/flows/validate';
 import { HANDOFF_EVENT_MARKER, type HandoffUrlEvent } from '../../src/ui/handoffEvent';
 import { setOnboardJsonMode } from '../../src/ui/webMode';
+import { generateSeedPhrase } from '../../src/crypto/keyManager';
 
 function envelope(over: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -147,6 +148,42 @@ describe('parseSandboxSessionAnswer', () => {
     });
   });
 
+  test('mint_key requires org_id, phrase, and BOTH credential_id and prf_output', () => {
+    expect(
+      parseSandboxSessionAnswer(envelope({ first_run: { kind: 'mint_key', phrase: 'w' } })),
+    ).toEqual({ ok: false, code: 'FLOW_ENVELOPE_INVALID' });
+    expect(
+      parseSandboxSessionAnswer(
+        envelope({ first_run: { kind: 'mint_key', org_id: 'org_1', phrase: 'w', credential_id: 'c' } }),
+      ),
+    ).toEqual({ ok: false, code: 'FLOW_ENVELOPE_INVALID' });
+    expect(
+      parseSandboxSessionAnswer(
+        envelope({ first_run: { kind: 'mint_key', org_id: 'org_1', phrase: 'w', prf_output: 'p' } }),
+      ),
+    ).toEqual({ ok: false, code: 'FLOW_ENVELOPE_INVALID' });
+
+    const ok = parseSandboxSessionAnswer(
+      envelope({
+        first_run: { kind: 'mint_key', org_id: 'org_1', phrase: 'w', credential_id: 'c', prf_output: 'p' },
+      }),
+    );
+    expect(ok).toEqual({
+      ok: true,
+      answer: expect.objectContaining({
+        firstRun: {
+          kind: 'mint_key',
+          orgId: 'org_1',
+          phrase: 'w',
+          credentialId: 'c',
+          prfOutput: 'p',
+          backupEligible: false,
+          backupState: false,
+        },
+      }),
+    });
+  });
+
   test('an explicit {ok:false, code:"declined"} maps to the ceremony_declined step code', () => {
     const result = parseSandboxSessionAnswer(
       JSON.stringify({ v: 1, flow: 'sandbox-session', ok: false, code: 'declined' }),
@@ -230,6 +267,21 @@ describe('buildCeremonyUrl', () => {
     expect(typeof payload.first_run.prf_salt).toBe('string');
     // 32 bytes, base64-encoded.
     expect(Buffer.from(payload.first_run.prf_salt, 'base64').length).toBe(32);
+  });
+
+  test('carries first_run.mint_org_id when the step param is present', () => {
+    const stepWithMintOrgId = { ...step, params: { ...step.params, mint_org_id: 'org_xyz' } };
+    const url = buildCeremonyUrl(stepWithMintOrgId, 'my-machine');
+    const b64 = url.split('#r=')[1];
+    const payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+    expect(payload.first_run.mint_org_id).toBe('org_xyz');
+  });
+
+  test('CAP-542: absent when the step carries no mint_org_id param — byte-identical to before', () => {
+    const url = buildCeremonyUrl(step, 'my-machine');
+    const b64 = url.split('#r=')[1];
+    const payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+    expect('mint_org_id' in payload.first_run).toBe(false);
   });
 });
 
@@ -390,6 +442,27 @@ describe('runSandboxCeremony — applyFirstRun refuses an internally-inconsisten
 
     expect(outcome.result.outcome).toBe('ok');
     expect(outcome.result.result).toEqual({ org_id: 'org_1' });
+  });
+
+  test('mint_key picking an org_id NOT in the envelope\'s own organizations list is refused (no claim/mint call ever made)', async () => {
+    const outcome = await runWithAnswer(JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_mint_unknown' },
+      refresh_token: 'rt-mint-unknown',
+      organizations: [{ id: 'org_1', workos_org_id: 'w1', name: 'Org One' }],
+      first_run: {
+        kind: 'mint_key',
+        org_id: 'org_NOT_LISTED',
+        phrase: 'irrelevant',
+        credential_id: 'cred-1',
+        prf_output: 'prf-1',
+      },
+    }));
+
+    expect(outcome.result).toEqual({ outcome: 'failed', code: 'FLOW_ENVELOPE_INVALID' });
+    expect(outcome.session).toBeUndefined();
   });
 
   test('unlock with ZERO organizations is refused rather than picking organizations[0]', async () => {
@@ -803,5 +876,421 @@ describe('runSandboxCeremony — surfaces the sandbox_session user_code', () => 
     }
 
     expect(logs.some((l) => l.includes('BCDF-GHJK'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CAP-542: create_org now goes through the mint-ceremony rail
+// (ServiceClient.mintPersonalOrgCeremony) instead of the old
+// POST /auth/create-org, re-scopes auth to the minted org, and finalizes the
+// key-mint lease afterward. NOT ISOLATED beyond this file's own os.homedir
+// mock — real crypto runs (wrapAndSaveMasterKey writes real local.key/key.enc
+// under the mocked-HOME tempHome), same convention as the "unlock pins the
+// org" describe block above.
+// ---------------------------------------------------------------------------
+describe('runSandboxCeremony — create_org hits mint-ceremony, re-scopes, and finalizes', () => {
+  const SVC = 'https://api.test.invalid';
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test('mint-ceremony -> re-scope -> wrap -> finalize, in that order', async () => {
+    const keypair = mintConnectionKeypair();
+    const step = {
+      contract_version: '1',
+      flow_id: 'flow-create-1',
+      flow_type: 'onboard',
+      step_id: 's-create-1',
+      kind: 'screen',
+      resumed: false,
+      screen: 'sandbox_session',
+      url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-create-1',
+      params: { connection_id: 'conn-create-1', user_code: 'BCDF-GHJK' },
+    } as unknown as FlowStep;
+
+    const phrase = generateSeedPhrase();
+    const plaintext = JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_create_1' },
+      refresh_token: 'rt-create-1',
+      // Zero orgs — a genuinely fresh identity, forcing the org-less refresh
+      // branch this ceremony's mint-ceremony call depends on.
+      organizations: [],
+      first_run: {
+        kind: 'create_org',
+        name: 'Acme',
+        phrase,
+        credential_id: 'cred-1',
+        prf_output: Buffer.alloc(32, 9).toString('base64'),
+      },
+    });
+    const ciphertext = await sealEnvelopePageSide({
+      plaintext,
+      connectionId: 'conn-create-1',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+
+    // The fetch handler is a pure function of its own inputs — it decides
+    // which response to return from the URL/method/body alone, with no
+    // state of its own to mutate. Wrapping it in `mock()` gets ordering for
+    // free: `.mock.calls` is bun's own already-populated, in-order log of
+    // every invocation, read AFTER the run rather than accumulated via a
+    // hand-rolled array during it.
+    const fetchMock = mock(async (url: any, init?: any) => {
+      const u = String(url);
+      if (!u.startsWith(SVC)) return realFetch(url, init);
+      const path = u.slice(SVC.length);
+      const method = init?.method ?? 'GET';
+
+      if (path.startsWith('/connections/conn-create-1/result')) {
+        return Response.json({ status: 'answered', ciphertext });
+      }
+      if (path === '/orgs/personal/mint-ceremony' && method === 'POST') {
+        return Response.json({
+          org_id: 'org_new_1',
+          project_id: 'proj_new_1',
+          mint_claim: { key_state: 'minting', expires_at: '2099-01-01T00:00:00Z' },
+          organization: { id: 'org_new_1', workos_org_id: 'w_new_1', name: 'Acme' },
+        });
+      }
+      if (path === '/auth/refresh' && method === 'POST') {
+        const body = JSON.parse(init.body);
+        if (body.organization_id) {
+          return Response.json({ access_token: fakeJwt('w_new_1'), refresh_token: 'rt-rotated-2', expires_in: 3600 });
+        }
+        return Response.json({ access_token: 'orgless-tok', refresh_token: 'rt-rotated-1' });
+      }
+      if (path === '/orgs/org_new_1/wrap' && method === 'POST') {
+        return Response.json({ ciphertext: 'fake-outer-blob' });
+      }
+      if (path === '/orgs/org_new_1/key-mint/finalize' && method === 'POST') {
+        return Response.json({ key_state: 'minted' });
+      }
+      // Device-key Case A enrollment's own endpoints — never mocked here.
+      // runCannedCaseAEnrollment is best-effort and swallows this, so it
+      // must not affect the outcome or ordering this test asserts.
+      throw new Error(`unmocked in test: ${method} ${path}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await runSandboxCeremony({
+      step,
+      keypair,
+      flowSecret: 'flow-secret',
+      serviceUrl: SVC,
+      devMode: false,
+      targetDir: tempHome,
+    });
+
+    expect(outcome.result.outcome).toBe('ok');
+    expect(outcome.result.result).toEqual({ org_id: 'org_new_1' });
+
+    // Derive the ordered log of "which logical step" each fetch call was,
+    // from bun's own call record — never accumulated as a side effect.
+    const order = fetchMock.mock.calls
+      .map(([url, init]: [any, any]) => {
+        const u = String(url);
+        if (!u.startsWith(SVC)) return null;
+        const path = u.slice(SVC.length);
+        const method = init?.method ?? 'GET';
+        if (path.startsWith('/connections/')) return null;
+        if (path === '/orgs/personal/mint-ceremony') return 'mint-ceremony';
+        if (path === '/auth/refresh') {
+          const body = JSON.parse(init.body);
+          return body.organization_id ? 'refresh:scoped' : 'refresh:orgless';
+        }
+        if (path === '/orgs/org_new_1/wrap') return 'wrap';
+        if (path === '/orgs/org_new_1/key-mint/finalize') return 'finalize';
+        return null;
+      })
+      .filter((step): step is string => step !== null);
+
+    // The prefix is exact: org-less bearer, mint, re-scope. What follows
+    // (the local KDF+wrap, then best-effort Case A device-key enrollment,
+    // which makes its own additional org-scoped refresh/wrap calls) is
+    // asserted by RELATIVE order rather than an exact sequence, so this
+    // test doesn't couple to device-key enrollment's own internal call
+    // pattern — only to the invariants this ceremony branch owns.
+    expect(order[0]).toBe('refresh:orgless');
+    expect(order[1]).toBe('mint-ceremony');
+    expect(order[2]).toBe('refresh:scoped');
+    const firstWrapIdx = order.indexOf('wrap');
+    const finalizeIdx = order.indexOf('finalize');
+    expect(firstWrapIdx).toBeGreaterThan(2);
+    // finalize happens strictly after the local master key was saved.
+    expect(finalizeIdx).toBeGreaterThan(firstWrapIdx);
+    expect(order.filter((c) => c === 'finalize')).toEqual(['finalize']);
+  });
+
+  test('mint-ceremony ALREADY_PROVISIONED (409) is a coded step failure, never finalized', async () => {
+    const keypair = mintConnectionKeypair();
+    const step = {
+      contract_version: '1',
+      flow_id: 'flow-create-2',
+      flow_type: 'onboard',
+      step_id: 's-create-2',
+      kind: 'screen',
+      resumed: false,
+      screen: 'sandbox_session',
+      url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-create-2',
+      params: { connection_id: 'conn-create-2', user_code: 'BCDF-GHJK' },
+    } as unknown as FlowStep;
+
+    const phrase = generateSeedPhrase();
+    const plaintext = JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_create_2' },
+      refresh_token: 'rt-create-2',
+      organizations: [],
+      first_run: {
+        kind: 'create_org',
+        name: 'Acme',
+        phrase,
+        credential_id: 'cred-1',
+        prf_output: Buffer.alloc(32, 9).toString('base64'),
+      },
+    });
+    const ciphertext = await sealEnvelopePageSide({
+      plaintext,
+      connectionId: 'conn-create-2',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+
+    globalThis.fetch = (async (url: any, init?: any) => {
+      const u = String(url);
+      if (!u.startsWith(SVC)) return realFetch(url, init);
+      const path = u.slice(SVC.length);
+      const method = init?.method ?? 'GET';
+
+      if (path.startsWith('/connections/conn-create-2/result')) {
+        return Response.json({ status: 'answered', ciphertext });
+      }
+      if (path === '/auth/refresh' && method === 'POST') {
+        return Response.json({ access_token: 'orgless-tok', refresh_token: 'rt-rotated' });
+      }
+      if (path === '/orgs/personal/mint-ceremony' && method === 'POST') {
+        return new Response(
+          JSON.stringify({ error: 'You already belong to an organization.', code: 'ALREADY_PROVISIONED' }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      throw new Error(`unmocked in test: ${method} ${path}`);
+    }) as typeof fetch;
+
+    const outcome = await runSandboxCeremony({
+      step,
+      keypair,
+      flowSecret: 'flow-secret',
+      serviceUrl: SVC,
+      devMode: false,
+      targetDir: tempHome,
+    });
+
+    expect(outcome.result).toEqual({ outcome: 'failed', code: 'ALREADY_PROVISIONED' });
+    expect(outcome.session).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CAP-542: mint_key — an org that exists but never had a master key minted.
+// The pin (authenticateSilent) happens before the claim, and the claim
+// happens before the local key is derived/wrapped; finalize is last.
+// ---------------------------------------------------------------------------
+describe('runSandboxCeremony — mint_key pins, claims, wraps, then finalizes', () => {
+  const SVC = 'https://api.test.invalid';
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  test('claim -> wrap -> finalize, in that order, after the org is pinned', async () => {
+    const keypair = mintConnectionKeypair();
+    const step = {
+      contract_version: '1',
+      flow_id: 'flow-mint-1',
+      flow_type: 'onboard',
+      step_id: 's-mint-1',
+      kind: 'screen',
+      resumed: false,
+      screen: 'sandbox_session',
+      url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-mint-1',
+      params: { connection_id: 'conn-mint-1', user_code: 'BCDF-GHJK' },
+    } as unknown as FlowStep;
+
+    const phrase = generateSeedPhrase();
+    const plaintext = JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_mint_1' },
+      refresh_token: 'rt-mint-1',
+      organizations: [{ id: 'org_2', workos_org_id: 'w2', name: 'Org Two' }],
+      first_run: {
+        kind: 'mint_key',
+        org_id: 'org_2',
+        phrase,
+        credential_id: 'cred-1',
+        prf_output: Buffer.alloc(32, 9).toString('base64'),
+      },
+    });
+    const ciphertext = await sealEnvelopePageSide({
+      plaintext,
+      connectionId: 'conn-mint-1',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+
+    // Same pure-function-plus-mock() pattern as the create_org test above —
+    // order is derived from bun's own call log, never accumulated.
+    const fetchMock = mock(async (url: any, init?: any) => {
+      const u = String(url);
+      if (!u.startsWith(SVC)) return realFetch(url, init);
+      const path = u.slice(SVC.length);
+      const method = init?.method ?? 'GET';
+
+      if (path.startsWith('/connections/conn-mint-1/result')) {
+        return Response.json({ status: 'answered', ciphertext });
+      }
+      if (path === '/auth/refresh' && method === 'POST') {
+        return Response.json({ access_token: fakeJwt('w2'), refresh_token: 'rt-rotated', expires_in: 3600 });
+      }
+      if (path === '/orgs/org_2/key-mint/claim' && method === 'POST') {
+        return Response.json({ key_state: 'minting', expires_at: '2099-01-01T00:00:00Z' });
+      }
+      if (path === '/orgs/org_2/wrap' && method === 'POST') {
+        return Response.json({ ciphertext: 'fake-outer-blob' });
+      }
+      if (path === '/orgs/org_2/key-mint/finalize' && method === 'POST') {
+        return Response.json({ key_state: 'minted' });
+      }
+      // Device-key Case A enrollment's own endpoints — best-effort, never
+      // mocked here; must not affect the outcome or ordering asserted below.
+      throw new Error(`unmocked in test: ${method} ${path}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await runSandboxCeremony({
+      step,
+      keypair,
+      flowSecret: 'flow-secret',
+      serviceUrl: SVC,
+      devMode: false,
+      targetDir: tempHome,
+    });
+
+    expect(outcome.result.outcome).toBe('ok');
+    expect(outcome.result.result).toEqual({ org_id: 'org_2' });
+
+    const order = fetchMock.mock.calls
+      .map(([url, init]: [any, any]) => {
+        const u = String(url);
+        if (!u.startsWith(SVC)) return null;
+        const path = u.slice(SVC.length);
+        const method = init?.method ?? 'GET';
+        if (path.startsWith('/connections/')) return null;
+        if (path === '/auth/refresh') return 'refresh:pin';
+        if (path === '/orgs/org_2/key-mint/claim' && method === 'POST') return 'claim';
+        if (path === '/orgs/org_2/wrap') return 'wrap';
+        if (path === '/orgs/org_2/key-mint/finalize') return 'finalize';
+        return null;
+      })
+      .filter((step): step is string => step !== null);
+
+    // Exact prefix: pin, then claim — the lease is claimed only once the org
+    // is pinned. What follows (KDF+wrap, then best-effort Case A device-key
+    // enrollment, which makes its own additional org-scoped refresh/wrap
+    // calls) is asserted by RELATIVE order, not an exact sequence — see the
+    // create_org test's own comment for why.
+    expect(order[0]).toBe('refresh:pin');
+    expect(order[1]).toBe('claim');
+    const firstWrapIdx = order.indexOf('wrap');
+    const finalizeIdx = order.indexOf('finalize');
+    expect(firstWrapIdx).toBeGreaterThan(1);
+    // finalize happens strictly after the local master key was saved.
+    expect(finalizeIdx).toBeGreaterThan(firstWrapIdx);
+    expect(order.filter((c) => c === 'finalize')).toEqual(['finalize']);
+  });
+
+  test('claim KEY_ALREADY_MINTED is a coded step failure — the phrase is void, never finalized', async () => {
+    const keypair = mintConnectionKeypair();
+    const step = {
+      contract_version: '1',
+      flow_id: 'flow-mint-2',
+      flow_type: 'onboard',
+      step_id: 's-mint-2',
+      kind: 'screen',
+      resumed: false,
+      screen: 'sandbox_session',
+      url: 'https://keep.capy.sc/flow/sandbox-session?c=conn-mint-2',
+      params: { connection_id: 'conn-mint-2', user_code: 'BCDF-GHJK' },
+    } as unknown as FlowStep;
+
+    const phrase = generateSeedPhrase();
+    const plaintext = JSON.stringify({
+      v: 1,
+      flow: 'sandbox-session',
+      ok: true,
+      user: { id: 'user_mint_2' },
+      refresh_token: 'rt-mint-2',
+      organizations: [{ id: 'org_3', workos_org_id: 'w3', name: 'Org Three' }],
+      first_run: {
+        kind: 'mint_key',
+        org_id: 'org_3',
+        phrase,
+        credential_id: 'cred-1',
+        prf_output: Buffer.alloc(32, 9).toString('base64'),
+      },
+    });
+    const ciphertext = await sealEnvelopePageSide({
+      plaintext,
+      connectionId: 'conn-mint-2',
+      clientPubkeyB64: keypair.publicKeyB64,
+    });
+
+    const fetchMock = mock(async (url: any, init?: any) => {
+      const u = String(url);
+      if (!u.startsWith(SVC)) return realFetch(url, init);
+      const path = u.slice(SVC.length);
+      const method = init?.method ?? 'GET';
+
+      if (path.startsWith('/connections/conn-mint-2/result')) {
+        return Response.json({ status: 'answered', ciphertext });
+      }
+      if (path === '/auth/refresh' && method === 'POST') {
+        return Response.json({ access_token: fakeJwt('w3'), refresh_token: 'rt-rotated', expires_in: 3600 });
+      }
+      if (path === '/orgs/org_3/key-mint/claim' && method === 'POST') {
+        return new Response(
+          JSON.stringify({ error: 'already minted', code: 'KEY_ALREADY_MINTED' }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (path === '/orgs/org_3/key-mint/finalize' && method === 'POST') {
+        return Response.json({ key_state: 'minted' });
+      }
+      throw new Error(`unmocked in test: ${method} ${path}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await runSandboxCeremony({
+      step,
+      keypair,
+      flowSecret: 'flow-secret',
+      serviceUrl: SVC,
+      devMode: false,
+      targetDir: tempHome,
+    });
+
+    expect(outcome.result).toEqual({ outcome: 'failed', code: 'KEY_ALREADY_MINTED' });
+    const finalizeCalled = fetchMock.mock.calls.some(
+      ([url]: [any]) => String(url) === `${SVC}/orgs/org_3/key-mint/finalize`,
+    );
+    expect(finalizeCalled).toBe(false);
   });
 });
