@@ -3,20 +3,38 @@
 // Dev-only CLI wrapper with mock auth enabled.
 // NOT included in production npm package.
 //
-// `capy-dev` IS the staging/dev entrypoint: it talks to the staging service
-// and staging Keep with the rollout flags on, and keeps its state in
-// ~/.capy-dev — with NO env, profile, or config from the caller. Anything the
-// caller does set in the environment still wins (explicit > default). The
-// production `bin/capy` is untouched by this.
-const STAGING_DEFAULTS = {
-  CAPY_API_URL: 'https://staging-api.capy.sc',
-  CAPY_KEEP_ORIGIN: 'https://staging-keep.capy.sc',
+// `capy-dev` IS the local-rig entrypoint: it talks to the capy service and
+// Keep running on the developer rig's tailnet host with the rollout flags on,
+// and keeps its state in ~/.capy-dev — with NO env, profile, or config from
+// the caller. Anything the caller does set in the environment still wins
+// (explicit > default). The production `bin/capy` is untouched by this.
+//
+// Tailnet rather than localhost, deliberately: Keep binds to the tailscale
+// interface only and serves a real cert for DEV_HOST, so the WebAuthn
+// ceremony runs from phones and remote browsers as well as this machine.
+//
+// CAPY_KEEP_ORIGIN's host must stay byte-identical to the RP ID Keep is
+// actually deployed with (keep/src/lib/security/rp.ts, fed by
+// NEXT_PUBLIC_CAPY_KEEP_DEV_RP_ID). A device key is minted against Keep's
+// WebAuthn RP ID, so pointing these at different hosts mints the credential
+// under the wrong RP ID and leaves a door row nothing can ever satisfy.
+//
+// Retarget another rig by exporting CAPY_DEV_HOST (and moving Keep's RP ID
+// with it), or override CAPY_API_URL / CAPY_KEEP_ORIGIN individually.
+const DEV_HOST = process.env.CAPY_DEV_HOST || 'mabels-mac-mini.tailcbfb49.ts.net';
+
+const DEV_DEFAULTS = {
+  // Plain http on the service port: nothing terminates TLS there, and the
+  // tailnet already encrypts in transit. Keep is https — it needs a secure
+  // context for WebAuthn.
+  CAPY_API_URL: `http://${DEV_HOST}:3001`,
+  CAPY_KEEP_ORIGIN: `https://${DEV_HOST}:3443`,
   CAPY_FLOW_ONBOARD: '1',
   CAPY_DEVICE_KEYS: '1',
   CAPY_KEEP_SCREENS: '1',
   CAPY_KEEP_LOGIN_BRIDGE: '1',
 };
-for (const [key, value] of Object.entries(STAGING_DEFAULTS)) {
+for (const [key, value] of Object.entries(DEV_DEFAULTS)) {
   if (process.env[key] === undefined || process.env[key] === '') process.env[key] = value;
 }
 
