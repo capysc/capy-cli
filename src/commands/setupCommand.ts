@@ -438,7 +438,10 @@ export class SetupCommand {
           keep_hash: setSyncKeepHash(null, branch, keepHash),
         });
 
-        this.fileManager.backupPlaintextEnv(this.cliOptions.envPath);
+        // quiet: this surface's stdout is EXACTLY one JSON document — the
+        // backup notice leaked ahead of it and tripped the purity law
+        // (journey run 15, 2026-08-30). The backup file itself still lands.
+        this.fileManager.backupPlaintextEnv(this.cliOptions.envPath, true);
         this.fileManager.writeEncryptedEnvFile(resolvedLocalEnv, encryptionKey, this.cliOptions.envPath, adoptedKeep, branch);
         return { ok: true };
       } catch (err) {

@@ -403,7 +403,9 @@ export class FileManager {
     return Object.values(parsed).some((value) => !value.startsWith('capy:'));
   }
 
-  backupPlaintextEnv(path?: string): boolean {
+  // `quiet` suppresses the stdout notice for --json surfaces (pure-JSON-
+  // stdout law); the TTY init path keeps printing it, byte-identical.
+  backupPlaintextEnv(path?: string, quiet: boolean = false): boolean {
     const envPath = path || join(this.projectRoot, '.env');
     if (!existsSync(envPath)) return false;
 
@@ -422,7 +424,7 @@ export class FileManager {
     const header = '# From Capy: These are your old secrets, which we have saved for you.\n# We recommend deleting this file or putting it somewhere safe because the values are unencrypted.\n\n';
     writeFileSync(oldPath, header + commented, { encoding: 'utf-8', mode: 0o600 });
     this.updateGitignore(['.env.pre-capy.old']);
-    console.log(`Saved plaintext backup to ${oldPath}`);
+    if (!quiet) console.log(`Saved plaintext backup to ${oldPath}`);
     return true;
   }
 
