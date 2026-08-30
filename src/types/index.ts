@@ -287,18 +287,6 @@ export interface CliOptions {
    *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
    *  interactive decision is actually reached (a clean sync stays terminal-only). */
   web?: boolean;
-  /**
-   * CAP-451 / Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): this instance
-   * is driven by `capy onboard --broker-ceremony` — a sandboxed caller with
-   * no local browser and no TTY. Threaded onto `CapyCommand`'s constructor
-   * options (distinct from `initializeProjectForFlow`'s own `noWizardStops`,
-   * which is scoped to ONE call and reset in a `finally`) so methods reached
-   * OUTSIDE that call — `syncProject`'s own interactive-auth fallback and its
-   * browser conflict-resolution wizard, both reachable from the `encrypt_env`
-   * executor via `syncForFlow` — can refuse a loopback stop instead of
-   * opening one nothing can answer. Never set outside the flow-driven path.
-   */
-  brokerCeremony?: boolean;
 }
 
 export interface ProjectInitResult {
@@ -519,31 +507,6 @@ export const ERROR_CODES = {
   // showing up in time). Mirrors DEVICE_KEY_GRANT_EXPIRED's shape: a coded,
   // non-string signal an orchestrator can branch on (Rule 4).
   PAIR_CODE_EXPIRED: 'PAIR_CODE_EXPIRED',
-  // "first-run in one sweep" (client-side only). The in-process broker
-  // ceremony `capy onboard --broker-ceremony` runs inside `authenticate`.
-  /**
-   * Under a flow-driven run with no wizard/inquirer stops allowed (a
-   * sandboxed broker-ceremony caller has no TTY and no browser to render
-   * one in), the ordinary init path would otherwise have shown an org
-   * picker, an org-create wizard, a project picker, or a project-name
-   * prompt. Reaching any of those under the flow is a refusal, never
-   * `openScreen`/inquirer — see capyCommand.ts's flow-driven init.
-   */
-  FLOW_STOP_UNREACHABLE: 'FLOW_STOP_UNREACHABLE',
-  /**
-   * The broker ceremony's sealed answer for `first_run.kind:'create_org'`
-   * carried a phrase that does not pass the same BIP39 (24-word, wordlist,
-   * checksum) validation the CLI applies to phrase entry everywhere else.
-   * The organization is NOT created — refused before `/auth/create-org`.
-   */
-  INVALID_RECOVERY_PHRASE: 'INVALID_RECOVERY_PHRASE',
-  /**
-   * The broker ceremony's sealed answer did not parse as the strict
-   * sandbox-session envelope: an unknown `first_run.kind`, a required field
-   * missing, or one half of a strict pair (`credential_id`/`prf_output`)
-   * present without the other. Nothing in the envelope is acted on.
-   */
-  FLOW_ENVELOPE_INVALID: 'FLOW_ENVELOPE_INVALID',
   /**
    * `createOrganizationFromEnvelope`'s 409-name-collision suffix loop
    * (`Acme` -> `Acme 2` -> `Acme 3` ...) hit its retry cap without landing a
@@ -659,6 +622,50 @@ export const ERROR_CODES = {
    * STALE_KEEP_HASH/KEY_ALREADY_MINTED above.
    */
   ALREADY_PROVISIONED: 'ALREADY_PROVISIONED',
+  // --- `capy setup --json` / `capy sync --json` (docs/cli-setup-json.md) ---
+  // No TTY, no `--web` browser — these refusals exist because a picker or a
+  // prompt is not an option under `--json`; each names a decision this JSON
+  // surface cannot make, never a message a caller could confuse with one of
+  // the others.
+  /** `capy setup --json` run in a directory that already holds a keep.lock. Remedy: `capy sync --json`. */
+  SETUP_ALREADY_INITIALIZED: 'SETUP_ALREADY_INITIALIZED',
+  /** `capy sync --json` run in a directory with no keep.lock yet. Remedy: `capy setup --json`. */
+  SYNC_NOT_INITIALIZED: 'SYNC_NOT_INITIALIZED',
+  /**
+   * `capy setup --json` authenticated into an account with more than one
+   * organization and no active one resolved on the session — the TTY/`--web`
+   * org picker's own scenario (`runInitialization`'s `askOrganization`
+   * step), with no TTY/browser to render it. Distinct from
+   * `NO_ORGANIZATIONS` (zero orgs — a different remedy entirely: there is
+   * nothing to pick). Expected to be rare in practice: `capy pair`'s device
+   * grant normally resolves and installs one active org already
+   * (`pairCommand.ts`'s own comment documents the one case where it
+   * doesn't — a pre-existing multi-org account paired non-interactively).
+   */
+  ORG_AMBIGUOUS: 'ORG_AMBIGUOUS',
+  /**
+   * `capy setup --json`'s plan step found the organization holds more than
+   * one project — there is no local/`.env` signal to pick one the way an
+   * already-initialized project's keep.lock does, and no TTY/browser to ask.
+   * Not reachable in today's single-user-mode default (one auto-provisioned
+   * project per org); kept as its own code, not folded into a generic
+   * "needs input", so a Team-tier org with several projects gets a refusal
+   * naming exactly what is ambiguous rather than a bare exit code.
+   */
+  AMBIGUOUS_PROJECT: 'AMBIGUOUS_PROJECT',
+  /**
+   * `capy sync --json` hit a state that has no existing coded refusal
+   * because the TTY/`--web` path always had a picker or a merge screen to
+   * resolve it, never a reason to refuse: no local branch signal AND
+   * keep.lock itself pins more than one branch (the TTY path's
+   * `selectBranchWithServer` prompt), or local `.env` holds plaintext drift
+   * a `--json` sync has no consent gate to push through blind. NOT used for
+   * a `.env`-header/`.capy/branch` disagreement — that already has its own
+   * code (`CONFLICT_RESOLUTION`, minted for exactly that state in
+   * `reconcileBranchConflict`) and reuses it verbatim rather than growing a
+   * second name for the same condition.
+   */
+  SYNC_CONFLICT: 'SYNC_CONFLICT',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

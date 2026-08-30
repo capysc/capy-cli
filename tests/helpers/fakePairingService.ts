@@ -1,24 +1,35 @@
 /**
- * CAP-409 — a real (loopback) HTTP stub of exactly the surface `capy pair`'s
- * e2e test needs: the CAP-403 anonymous bootstrap/poll/cancel verbs
- * (`POST /connections/bootstrap`, `GET /connections/:id/result` gated by
- * `X-Connection-Secret`, `DELETE /connections/:id`), plus the minimal
- * `wrapped_k_local` door + `key_enc` wrapper + KMS co-decrypt surface the
- * hardened pairing flow needs: `pairKeyMaterial.ts`'s `resolvePairedKeyMaterial`
- * fetches the paired-in door over `/wrappers*` (fresh-auth-gated, same as
- * every other device-key caller — see `serviceOps.ts`) using the session
- * `capy pair` just installed, and `grantResolver.ts`'s production ops
- * factory (`createGrantResolutionOps`) calls `/wrappers*` + `/orgs/:id/
- * co-decrypt` again when a later `capy run` resolves a project key from the
- * granted K_local.
+ * CAP-566 — a real (loopback) HTTP stub of exactly the surface `capy pair`'s
+ * e2e test needs, now that #328 rebuilt `capy pair` on the RFC 8628 device
+ * grant instead of the CAP-403 anonymous bootstrap/poll ceremony:
  *
- * Deliberately NOT an extension of `fakeWrapperService.ts` (which implements
- * the AUTHENTICATED `POST /connections` create — a different, owned-
- * connection surface this ticket's anonymous bootstrap is not) — a fresh,
- * narrow fixture keeps this file's contract legible and avoids widening a
- * fixture many other test files already depend on staying stable. The
- * `/wrappers*` row shape below mirrors `fakeWrapperService.ts`'s `WrapperRow`
- * field-for-field on purpose (same server contract, two independent stubs).
+ *   - `POST /auth/device/authorize` / `POST /auth/device/token` — the two
+ *     legs `src/auth/pairing/deviceAuth.ts` drives to authenticate the
+ *     MACHINE itself. See that file's header for the exact wire shapes;
+ *     `toAnswerSession()` there is the authoritative parser this stub's
+ *     completion bodies must satisfy.
+ *   - The AUTHENTICATED, owned connection-broker surface (`POST
+ *     /connections`, `GET /connections/:id/result`, `DELETE
+ *     /connections/:id`) that `src/auth/deviceKey/brokerCeremonyTransport.ts`
+ *     drives for the CAP-384 grant ceremony `pairDeviceGrant.ts` now runs
+ *     over the machine's own just-installed session. Handlers mirrored from
+ *     `tests/helpers/fakeWrapperService.ts` (copied, not imported — see that
+ *     file's own header on why this repo keeps two independent stubs rather
+ *     than widening one every other fixture already depends on staying
+ *     stable) — same server contract, same shape.
+ *   - The minimal `wrapped_k_local` door + `key_enc` wrapper + KMS co-decrypt
+ *     surface the ceremony's key-material half needs: `runGrantCeremony`
+ *     (`src/auth/deviceKey/grant.ts`) lists/fetches doors over `/wrappers*`
+ *     using the session `capy pair` just installed, and a later `capy run`
+ *     calls `/wrappers*` + `/orgs/:id/co-decrypt` again to resolve a project
+ *     key from the granted K_local.
+ *
+ * The OLD anonymous CAP-403 bootstrap surface (`/connections/bootstrap`,
+ * secret-gated result/cancel) is gone from this stub: nothing in `capy pair`
+ * calls it any more (deviceAuth.ts + pairDeviceGrant.ts replaced both halves
+ * of the old ceremony — see those files' headers), and its connection-id
+ * paths would otherwise collide with the AUTHENTICATED broker surface this
+ * file now serves at the same routes.
  *
  * Doors (`wrapped_k_local`) are org-less and per-credential server-side (see
  * `serviceClient.ts`'s own comment) — this stub's `GET /wrappers` therefore
@@ -32,12 +43,22 @@
  */
 import { randomUUID } from 'crypto';
 
-export interface FakePairingConnection {
-  id: string;
+/** One in-flight RFC 8628 device authorization. `completionQueue` is drained
+ *  oldest-first by `POST /auth/device/token`; an empty queue is the RFC's own
+ *  default ("still waiting") rather than an error. */
+export interface FakeDeviceAuthRow {
+  deviceCode: string;
   userCode: string;
+  completionQueue: Array<{ status: number; body: unknown }>;
+}
+
+/** An AUTHENTICATED, owned connection-broker row (CAP-375), used by the
+ *  CAP-384 grant ceremony `capy pair` now runs over the machine's session —
+ *  mirrors `fakeWrapperService.ts`'s `FakeConnection` field-for-field. */
+export interface FakeBrokerConnection {
+  id: string;
   clientPubkeyB64: string;
-  pollSecret: string;
-  expiresAtMs: number;
+  purpose: string;
   resultQueue: Array<{ status: number; body: unknown }>;
   cancelled: boolean;
 }
@@ -48,8 +69,8 @@ export interface FakeKeyEncRow {
 }
 
 /** A pre-enrolled `wrapped_k_local` door row — the account's own device-key
- *  wrapper the hardened `capy pair` now fetches AFTER installing the
- *  session, instead of receiving K_local directly in the sealed answer. */
+ *  wrapper the grant ceremony fetches over the authenticated `/wrappers`
+ *  surface after the machine's own session is installed. */
 export interface FakeDoorRow {
   credentialId: string;
   wrappedKLocal: string;
@@ -60,8 +81,12 @@ export interface FakeDoorRow {
 
 export interface FakePairingService {
   url: string;
-  connections: Map<string, FakePairingConnection>;
-  findByUserCode(userCode: string): FakePairingConnection | undefined;
+  /** Device-authorization rows minted by `POST /auth/device/authorize`. */
+  devices: Map<string, FakeDeviceAuthRow>;
+  findDeviceByUserCode(userCode: string): FakeDeviceAuthRow | undefined;
+  /** Broker connections minted by the AUTHENTICATED `POST /connections` — the
+   *  grant ceremony's transport, not the dead anonymous bootstrap. */
+  connections: Map<string, FakeBrokerConnection>;
   keyEncRows: FakeKeyEncRow[];
   doorRows: FakeDoorRow[];
   close(): void;
@@ -86,14 +111,16 @@ function orgFromAuth(auth: string | null): string | null {
   }
 }
 
-let userCodeCounter = 1000;
+/** A short human-typed code, `TEST-XXXX`. Random rather than counter-derived
+ *  — no module-level mutable state needed for uniqueness across a single
+ *  test process. */
 function mintUserCode(): string {
-  const n = (userCodeCounter++).toString().padStart(4, '0');
-  return `TEST-${n}`;
+  return `TEST-${randomUUID().replace(/-/g, '').slice(0, 4).toUpperCase()}`;
 }
 
 export function startFakePairingService(): FakePairingService {
-  const connections = new Map<string, FakePairingConnection>();
+  const devices = new Map<string, FakeDeviceAuthRow>();
+  const connections = new Map<string, FakeBrokerConnection>();
   const keyEncRows: FakeKeyEncRow[] = [];
   const doorRows: FakeDoorRow[] = [];
 
@@ -103,56 +130,78 @@ export function startFakePairingService(): FakePairingService {
       const url = new URL(req.url);
       const auth = req.headers.get('authorization');
 
-      // --- anonymous bootstrap (CAP-403) ---
-      if (req.method === 'POST' && url.pathname === '/connections/bootstrap') {
-        const body = (await req.json()) as any;
-        const id = randomUUID();
-        const conn: FakePairingConnection = {
-          id,
+      // --- RFC 8628 device authorization (CAP-566) ---
+      if (req.method === 'POST' && url.pathname === '/auth/device/authorize') {
+        const deviceCode = randomUUID();
+        const row: FakeDeviceAuthRow = {
+          deviceCode,
           userCode: mintUserCode(),
-          clientPubkeyB64: body.client_pubkey,
-          pollSecret: randomUUID(),
-          expiresAtMs: Date.now() + (body.ttl_seconds ?? 900) * 1000,
-          resultQueue: [],
-          cancelled: false,
+          completionQueue: [],
         };
-        connections.set(id, conn);
+        devices.set(deviceCode, row);
         return Response.json(
           {
-            connection_id: id,
-            status: 'pending',
-            expires_at: new Date(conn.expiresAtMs).toISOString(),
-            poll_secret: conn.pollSecret,
-            user_code: conn.userCode,
+            device_code: deviceCode,
+            user_code: row.userCode,
+            verification_uri: 'https://verify.example.invalid/device',
+            verification_uri_complete: `https://verify.example.invalid/device?user_code=${row.userCode}`,
+            expires_in: 300,
+            // Fast poll loop — the test drives completion directly rather
+            // than waiting out a realistic interval.
+            interval: 0,
           },
-          { status: 201 },
+          { status: 200 },
         );
       }
 
-      const resultMatch = url.pathname.match(/^\/connections\/([^/]+)\/result$/);
-      if (req.method === 'GET' && resultMatch) {
-        const conn = connections.get(decodeURIComponent(resultMatch[1]));
-        const secret = req.headers.get('x-connection-secret');
-        if (!conn || conn.pollSecret !== secret) {
-          return Response.json({ error: 'not found', code: 'CONNECTION_NOT_FOUND' }, { status: 404 });
+      if (req.method === 'POST' && url.pathname === '/auth/device/token') {
+        const body = (await req.json().catch(() => ({}))) as { device_code?: string };
+        const device = body.device_code ? devices.get(body.device_code) : undefined;
+        if (!device) {
+          return Response.json({ error: 'expired_token' }, { status: 400 });
         }
-        const next = conn.resultQueue.shift() ?? { status: 200, body: { status: 'pending' } };
+        const next = device.completionQueue.shift() ?? { status: 400, body: { error: 'authorization_pending' } };
         return Response.json(next.body as any, { status: next.status });
       }
 
-      const cancelMatch = url.pathname.match(/^\/connections\/([^/]+)$/);
-      if (req.method === 'DELETE' && cancelMatch) {
-        const conn = connections.get(decodeURIComponent(cancelMatch[1]));
-        const secret = req.headers.get('x-connection-secret');
-        if (conn && conn.pollSecret === secret) conn.cancelled = true;
+      // --- AUTHENTICATED owned connection broker (CAP-375), for the CAP-384
+      // grant ceremony pairDeviceGrant.ts now runs over the machine's own
+      // session. Mirrors fakeWrapperService.ts's handlers (see this file's
+      // header) — copied, not imported.
+      if (req.method === 'POST' && url.pathname === '/connections') {
+        const b = (await req.json().catch(() => ({}))) as any;
+        const id = randomUUID();
+        connections.set(id, {
+          id,
+          clientPubkeyB64: b.client_pubkey,
+          purpose: b.purpose,
+          resultQueue: [],
+          cancelled: false,
+        });
+        return Response.json(
+          { connection_id: id, status: 'pending', expires_at: new Date(Date.now() + (b.ttl_seconds ?? 600) * 1000).toISOString() },
+          { status: 201 },
+        );
+      }
+      const connResultMatch = url.pathname.match(/^\/connections\/([^/]+)\/result$/);
+      if (req.method === 'GET' && connResultMatch) {
+        const conn = connections.get(decodeURIComponent(connResultMatch[1]));
+        if (!conn) return Response.json({ error: 'not found', code: 'CONNECTION_NOT_FOUND' }, { status: 404 });
+        const next = conn.resultQueue.shift() ?? { status: 200, body: { status: 'pending' } };
+        return Response.json(next.body as any, { status: next.status });
+      }
+      const connDeleteMatch = url.pathname.match(/^\/connections\/([^/]+)$/);
+      if (req.method === 'DELETE' && connDeleteMatch) {
+        const conn = connections.get(decodeURIComponent(connDeleteMatch[1]));
+        if (conn) conn.cancelled = true;
         return Response.json({ status: 'cancelled' });
       }
 
       // --- wrapped_k_local doors + key_enc wrapper + KMS surface ---
-      // (pairKeyMaterial.ts's resolvePairedKeyMaterial, grantResolver.ts's
-      // production ops). Doors are org-less: listed/fetched regardless of
-      // the caller's org claim, matching the real service (see this file's
-      // header). key_enc rows stay org-filtered, as before.
+      // (grant.ts's runGrantCeremony via serviceOps.ts). Doors are org-less:
+      // listed/fetched regardless of the caller's org claim, matching the
+      // real service (see this file's header). key_enc rows stay
+      // org-filtered, as before.
       if (req.method === 'GET' && url.pathname === '/wrappers') {
         const orgId = orgFromAuth(auth);
         const doorMeta = doorRows.map((row, i) => ({
@@ -220,8 +269,9 @@ export function startFakePairingService(): FakePairingService {
 
   return {
     url: `http://127.0.0.1:${server.port}`,
+    devices,
+    findDeviceByUserCode: (userCode) => [...devices.values()].find((d) => d.userCode === userCode),
     connections,
-    findByUserCode: (userCode) => [...connections.values()].find((c) => c.userCode === userCode),
     keyEncRows,
     doorRows,
     close: () => server.stop(true),

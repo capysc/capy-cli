@@ -1,26 +1,32 @@
 /**
- * CAP-409 — THE acceptance-criterion proof for `capy pair`, now hardened per
- * CAP-372's restored invariant: the sealed answer carries only the raw PRF
- * output (never K_local — see `pairContract.ts`'s header). This test proves
- * the FULL two-step dance works end to end against real subprocesses and a
- * real (loopback) door fetch:
+ * CAP-409 — THE acceptance-criterion proof for `capy pair`, repointed at the
+ * CAP-566 device-grant seam (#328): `capy pair` no longer installs a session
+ * an approving browser seals and hands over. It authenticates the MACHINE
+ * itself via an RFC 8628 device grant, then runs the ordinary CAP-384 grant
+ * ceremony over that machine's own session. This test proves the FULL
+ * two-phase dance works end to end against real subprocesses and a real
+ * (loopback) door fetch:
  *
  * Spawns the REAL BUILT CLI as separate OS processes, mirroring
- * `grantE2E.e2e.test.ts`'s technique exactly:
+ * `grantE2E.int.test.ts`'s technique exactly:
  *
- *   1. `dist/index.js pair --json` — runs the real anonymous bootstrap +
- *      poll ceremony against a mocked broker (real envelope crypto via
- *      tests/helpers/sealEnvelope.ts). The sealed answer carries only
- *      {prfOutput, credentialId} (no prf_salt/kdf_version echoed on the
- *      wire) for a door this test pre-seeds into the fake service
+ *   1. `dist/index.js pair --json` — runs the real device authorization
+ *      (`POST /auth/device/authorize` then polling `POST
+ *      /auth/device/token`, `src/auth/pairing/deviceAuth.ts`) against a
+ *      mocked service, prints the user code, and installs the resulting
+ *      session through the CLI's one session writer
+ *      (`installPairedSession.ts`) the instant the poll reports `complete`.
+ *      With the session on disk, it runs the CAP-384 grant ceremony
+ *      (`pairDeviceGrant.ts` -> `runGrantCeremony` over a
+ *      `BrokerCeremonyTransport`) against the SAME mocked service's
+ *      AUTHENTICATED connection-broker surface (real envelope crypto via
+ *      `tests/helpers/sealEnvelope.ts`) for a door this test pre-seeds
  *      (`service.doorRows`), wrapped with the SAME production crypto
  *      (`deriveDeviceKeyKek`/`wrapKLocal`) a real enrollment would use.
- *      `pair` installs the session FIRST, then fetches that door's own
- *      prf_salt/kdf_version over `/wrappers*` using the just-installed
- *      session and unwraps K_local locally (`pairKeyMaterial.ts`) — exactly
- *      the CAP-384 grant ceremony's own door-fetch dance — before starting
- *      the in-memory grant daemon (a THIRD real, detached process) and
- *      printing `{socketPath, ...}`.
+ *      `pair` fetches that door's own prf_salt/kdf_version over
+ *      `/wrappers*` using the just-installed session and unwraps K_local
+ *      locally, then starts the in-memory grant daemon (a THIRD real,
+ *      detached process) and prints `{socketPath, ...}`.
  *   2. `dist/index.js run -- node -e '...'` — a SEPARATE process, with
  *      CAPY_DEVICE_KEY_GRANT_SOCKET pointed at that socket and no prior
  *      local.key/key.enc anywhere — decrypts a real secret using ONLY the
@@ -30,9 +36,9 @@
  * or `key.enc` exists anywhere under it — the literal proof that pairing a
  * headless machine never leaves recovery-equivalent material on disk.
  *
- * A second test proves an unanswered pairing code expires end to end: exit
- * EXIT_NEEDS_INPUT (3), coded PAIR_CODE_EXPIRED in stderr, and still writes
- * no session or key material anywhere.
+ * A second test proves an unanswered/expired device code expires end to end:
+ * exit EXIT_NEEDS_INPUT (3), coded PAIR_CODE_EXPIRED in the --json output,
+ * and still writes no session or key material anywhere.
  *
  * Needs `dist/index.js` built first (`bun run build`).
  */
@@ -44,7 +50,6 @@ import { join } from 'path';
 import { randomBytes } from 'crypto';
 import { startFakePairingService, kmsWrap, type FakePairingService } from '../../helpers/fakePairingService';
 import { sealEnvelopePageSide } from '../../helpers/sealEnvelope';
-import { PAIR_FLOW, PAIR_CEREMONY } from '../../../src/auth/pairing/pairContract';
 import { deriveDeviceKeyKek, deviceKeyWrapAAD, wrapKLocal, DEVICE_KEY_KDF_VERSION } from '../../../src/auth/deviceKey/crypto';
 import { encryptMasterKey, masterKeyAAD, deriveProjectKey } from '../../../src/crypto/keyManager';
 import { deriveLocalInnerKey } from '../../../src/crypto/localKeyRoot';
@@ -108,41 +113,97 @@ function spawnCli(
 }
 
 /**
- * Watches a spawned `pair`'s stdout for the printed bold user_code (the
- * exact spec §4.2 block: "... and enter:  <CODE>"), looks up the matching
- * connection in the fake service's registry (standing in for the real
- * service's attach-by-code lookup, which is out of this ticket's scope —
- * see fakePairingService.ts's header), seals a real answer to it, and
- * pushes it into that connection's result queue.
+ * PHASE 1 of the drive sequence. Watches a spawned `pair`'s stdout for the
+ * printed bold user_code (the exact spec §4.2 block, now sourced from the
+ * device-authorize response rather than Keep's own connection: "... and
+ * enter:  <CODE>" — `printPairingBlock` in pairCommand.ts), looks up the
+ * matching device-authorization row in the fake service's registry, and
+ * pushes a caller-supplied completion onto that device's poll queue —
+ * standing in for a human completing the identity provider's device page.
  */
-async function driveCeremonyOverSubprocess(
-  stdoutSoFar: () => string,
-  service: FakePairingService,
-  buildAnswerBody: (userCode: string) => unknown,
-): Promise<void> {
+async function waitForDeviceUserCode(stdoutSoFar: () => string): Promise<string> {
   const codeDeadline = Date.now() + 10_000;
-  let userCode: string | undefined;
   while (Date.now() < codeDeadline) {
     const match = stdoutSoFar().match(/enter:\s+\x1b\[1m([^\x1b]+)\x1b\[0m/);
-    if (match) {
-      userCode = match[1];
-      break;
-    }
+    if (match) return match[1];
     await Bun.sleep(20);
   }
-  if (!userCode) throw new Error(`driveCeremonyOverSubprocess: no user_code seen in stdout: ${stdoutSoFar()}`);
+  throw new Error(`waitForDeviceUserCode: no user_code seen in stdout: ${stdoutSoFar()}`);
+}
 
-  const connDeadline = Date.now() + 5_000;
-  let conn = service.findByUserCode(userCode);
-  while (!conn && Date.now() < connDeadline) {
+/** Polls `stdoutSoFar()` for the relayed ceremony URL until it appears or
+ *  `deadlineMs` elapses. Recursive rather than a mutable loop — no `let`,
+ *  nothing reassigned (codebase immutability rule). */
+async function waitForCeremonyUrl(stdoutSoFar: () => string, deadlineMs: number): Promise<string | undefined> {
+  const deadline = Date.now() + deadlineMs;
+  const poll = async (): Promise<string | undefined> => {
+    const match = stdoutSoFar().match(/https:\/\/keep\.capy\.sc\/flow\/device-key\?c=[^\s]+/);
+    if (match) return match[0];
+    if (Date.now() >= deadline) return undefined;
+    await Bun.sleep(20);
+    return poll();
+  };
+  return poll();
+}
+
+/** Polls the fake broker's connection registry for `connectionId` until it
+ *  appears or `deadlineMs` elapses. Recursive rather than a mutable loop —
+ *  same reasoning as {@link waitForCeremonyUrl}. */
+async function waitForBrokerConnection(
+  service: FakePairingService,
+  connectionId: string,
+  deadlineMs: number,
+): Promise<ReturnType<FakePairingService['connections']['get']>> {
+  const deadline = Date.now() + deadlineMs;
+  const poll = async (): Promise<ReturnType<FakePairingService['connections']['get']>> => {
+    const conn = service.connections.get(connectionId);
+    if (conn) return conn;
+    if (Date.now() >= deadline) return undefined;
     await Bun.sleep(10);
-    conn = service.findByUserCode(userCode);
-  }
-  if (!conn) throw new Error(`no connection registered for user_code ${userCode}`);
+    return poll();
+  };
+  return poll();
+}
 
+/**
+ * PHASE 2 of the drive sequence, once the device grant has installed the
+ * machine's own session. `runGrantCeremony` (src/auth/deviceKey/grant.ts)
+ * relays a ceremony URL over the AUTHENTICATED connection-broker surface
+ * exactly as CAP-384's own `device-key grant` does — this is the identical
+ * driving idiom `grantE2E.int.test.ts`'s `driveGrantCeremonyOverSubprocess`
+ * uses, adapted to this file's fake service.
+ */
+async function driveGrantCeremonyOverSubprocess(
+  stdoutSoFar: () => string,
+  service: FakePairingService,
+  answer: (candidates: { credentialId: string; prfSalt: string }[]) =>
+    | { ok: true; credentialId: string; prfOutput: string }
+    | { ok: false; code: string },
+): Promise<void> {
+  const url = await waitForCeremonyUrl(stdoutSoFar, 10_000);
+  if (!url) throw new Error(`driveGrantCeremonyOverSubprocess: no ceremony URL seen in stdout: ${stdoutSoFar()}`);
+
+  const u = new URL(url);
+  const connectionId = u.searchParams.get('c')!;
+  const hashIdx = url.indexOf('#r=');
+  const b64url = url.slice(hashIdx + 3);
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+  const request = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as {
+    v: 1;
+    ceremony: 'grant';
+    candidates: { credentialId: string; prfSalt: string }[];
+  };
+  expect(request.ceremony).toBe('grant');
+
+  const conn = await waitForBrokerConnection(service, connectionId, 5_000);
+  if (!conn) throw new Error(`connection ${connectionId} never registered with the fake broker`);
+
+  const result = answer(request.candidates);
+  const payload = { v: 1, flow: 'device-key', ceremony: 'grant', ...result };
   const sealed = await sealEnvelopePageSide({
-    plaintext: JSON.stringify(buildAnswerBody(userCode)),
-    connectionId: conn.id,
+    plaintext: JSON.stringify(payload),
+    connectionId,
     clientPubkeyB64: conn.clientPubkeyB64,
   });
   conn.resultQueue.push({ status: 200, body: { status: 'answered', ciphertext: sealed } });
@@ -217,11 +278,12 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
 
     // A pre-enrolled live door, as if enrolled from some OTHER,
     // already-unlocked machine — this test never runs an enroll ceremony.
-    // The sealed answer below carries only {prfOutput, credentialId} (never
-    // kLocal, never prf_salt/kdf_version — CAP-372, restored); `pair` must
-    // fetch THIS row itself, over the authenticated API, after installing
-    // the session, reading prf_salt/kdf_version from the fetched wrapper,
-    // and unwrap it locally to arrive at the same kLocal.
+    // The grant ceremony's sealed answer carries only {credentialId,
+    // prfOutput} (the same CAP-372 minimal contract every device-key
+    // ceremony uses); `pair` fetches THIS row itself, over the authenticated
+    // API, after installing its own device-grant session, reads
+    // prf_salt/kdf_version from the fetched wrapper, and unwraps it locally
+    // to arrive at the same kLocal.
     const prfSalt = randomBytes(32);
     const prfOutput = randomBytes(32);
     const kek = deriveDeviceKeyKek(prfOutput, prfSalt, DEVICE_KEY_KDF_VERSION);
@@ -235,22 +297,33 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     });
 
     const pair = spawnCli(['pair', '--json'], home, home, service.url);
-    await driveCeremonyOverSubprocess(pair.stdoutSoFar, service, (userCode) => ({
-      v: 1,
-      flow: PAIR_FLOW,
-      ceremony: PAIR_CEREMONY,
-      session: {
-        user: { id: USER_ID, email: USER_EMAIL },
-        refresh_token: 'refresh-e2e-1',
-        organizations: [{ id: ORG_ID, name: ORG_NAME, workos_org_id: WORKOS_ORG_ID }],
-        sessions: { [ORG_ID]: { access_token: fakeAccessToken(), expires_at: Date.now() + 3_600_000 } },
+
+    // PHASE 1: the machine authenticates itself via the device grant. Find
+    // the printed user_code, look up its device-authorization row, and
+    // complete it exactly as a human finishing the identity provider's
+    // device page would — issuing tokens to THIS machine, not copying a
+    // session from whoever approved it.
+    const userCode = await waitForDeviceUserCode(pair.stdoutSoFar);
+    const device = service.findDeviceByUserCode(userCode);
+    if (!device) throw new Error(`no device-authorization row for user_code ${userCode}`);
+    device.completionQueue.push({
+      status: 200,
+      body: {
+        status: 'complete',
+        token: { access_token: fakeAccessToken(), refresh_token: 'refresh-e2e-1', expires_in: 3600 },
+        user: { id: USER_ID, email: USER_EMAIL, first_name: null, last_name: null },
+        organizations: [{ id: ORG_ID, workos_org_id: WORKOS_ORG_ID, name: ORG_NAME }],
       },
-      keyMaterial: {
-        orgId: ORG_ID,
-        prfOutput: prfOutput.toString('base64'),
-        credentialId: CRED_ID,
-      },
-    }));
+    });
+
+    // PHASE 2: with the machine's own session installed, `pair` runs the
+    // ordinary CAP-384 grant ceremony over it — drive it exactly as
+    // grantE2E.int.test.ts's own subprocess variant does.
+    await driveGrantCeremonyOverSubprocess(pair.stdoutSoFar, service, (candidates) => {
+      const c = candidates.find((cand) => cand.credentialId === CRED_ID);
+      if (!c) return { ok: false as const, code: 'no_credential' };
+      return { ok: true as const, credentialId: CRED_ID, prfOutput: prfOutput.toString('base64') };
+    });
     const pairResult = await pair.done;
 
     expect(pairResult.exitCode).toBe(0);
@@ -294,38 +367,19 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     home = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-expiry-home-'));
     service = startFakePairingService();
 
-    // The CLI has no flag to shorten the connection TTL (deliberate — see
-    // pairCommand.ts's docblock), so this test drives expiry via the fake
-    // service answering 410 directly rather than waiting out the real
-    // PAIR_TTL_SECONDS default. The clock-driven path (no server signal at
-    // all, just the client's own deadline) is already proven with
-    // millisecond precision against a real HTTP stub in
-    // pairCeremony.test.ts; this test's job is narrower and complementary:
-    // prove that however `pair` learns about expiry, an incomplete
-    // ceremony NEVER leaves session or key material on disk.
+    // The device-authorize response's `expires_in` (300s) is the CLIENT's
+    // own clock deadline, already proven with millisecond precision against
+    // injected time in tests/auth/deviceAuth.test.ts — this test's job is
+    // narrower and complementary: drive expiry the way the SERVER itself
+    // signals it (RFC 8628's `expired_token` poll error) and prove that,
+    // however `pair` learns about it, an incomplete device grant NEVER
+    // leaves session or key material on disk.
     const pair = spawnCli(['pair', '--json'], home, home, service.url);
 
-    // Give the ceremony a moment to bootstrap and print the code, then kill
-    // it — the expiry *logic* (both server 410 and the client's own clock)
-    // is already proven with millisecond precision against a real HTTP
-    // stub in pairCeremony.test.ts; this test's job is narrower: prove that
-    // however `pair` ends up learning about expiry, an incomplete ceremony
-    // NEVER leaves session or key material on disk. Simulate a fast expiry
-    // by having the fake service answer with 410 immediately.
-    const codeDeadline = Date.now() + 10_000;
-    let userCode: string | undefined;
-    while (Date.now() < codeDeadline) {
-      const match = pair.stdoutSoFar().match(/enter:\s+\x1b\[1m([^\x1b]+)\x1b\[0m/);
-      if (match) {
-        userCode = match[1];
-        break;
-      }
-      await Bun.sleep(20);
-    }
-    expect(userCode).toBeTruthy();
-    const conn = service.findByUserCode(userCode!);
-    expect(conn).toBeTruthy();
-    conn!.resultQueue.push({ status: 410, body: { error: 'expired', code: 'CONNECTION_EXPIRED' } });
+    const userCode = await waitForDeviceUserCode(pair.stdoutSoFar);
+    const device = service.findDeviceByUserCode(userCode);
+    expect(device).toBeTruthy();
+    device!.completionQueue.push({ status: 400, body: { error: 'expired_token' } });
 
     const pairResult = await pair.done;
 

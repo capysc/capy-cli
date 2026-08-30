@@ -1,39 +1,36 @@
 /**
- * `capy pair` (CAP-409) — RFC 8628-style machine pairing for a headless
- * machine with no browser at all: SSH'd into a container, nothing to open a
- * browser tab with, no existing capy session on this box yet.
+ * `capy pair` (CAP-409, device-grant internals per CAP-566/#328) — RFC 8628
+ * machine pairing for a headless machine with no browser at all: SSH'd into
+ * a container, nothing to open a browser tab with, no existing capy session
+ * on this box yet.
  *
  * Unlike `capy transport`/`capy redeem` (which require an ALREADY
  * `capy`-initialized machine to mint the code), `capy pair` needs nothing but
- * network access on this end. It anonymously bootstraps a CAP-403 connection
- * (`purpose: 'machine-pair'`), prints a short human code, and long-polls for
- * a sealed answer from whichever already-signed-in device the human enters
- * that code on. See `../auth/pairing/pairCeremony.ts` for the poll loop and
- * `../auth/pairing/pairContract.ts` for the sealed payload's shape.
+ * network access on this end. It authenticates the MACHINE ITSELF via
+ * WorkOS's own device-authorization grant — never an already-signed-in
+ * device sealing and handing over ITS session — so this machine is CLI-kind
+ * by construction rather than by arrangement. See
+ * `../auth/pairing/deviceAuth.ts` for the authorize/poll loop (both legs go
+ * through the SERVICE, never `api.workos.com` directly) and
+ * `../auth/pairing/pairContract.ts` for the resulting session shape.
  *
  * Two halves land on success, mirroring the CAP-384 sandbox grant's split,
  * installed IN THIS ORDER (the second half depends on the first):
  *   - Session: written to ~/.capy through the CLI's one existing session
  *     writer (`installPairedSession.ts`) — every other command that reads
  *     ~/.capy afterward just works.
- *   - Key material: the sealed answer never carries K_local (CAP-372,
- *     restored — see `../auth/pairing/pairContract.ts`'s header), only the
- *     raw PRF output. `resolvePairedKeyMaterial` (`../auth/pairing/
- *     pairKeyMaterial.ts`) uses the session just installed above to fetch
- *     this account's own wrapped_k_local over the authenticated API and
- *     unwraps it locally — the identical ceremony CAP-384's grant already
- *     runs. K_local itself is still NEVER written to disk (this is a
- *     headless machine; the acceptance criterion is explicit that no
+ *   - Key material: with the session on disk, `grantKeyMaterialForPairedMachine`
+ *     (`../auth/pairing/pairDeviceGrant.ts`) runs the ORDINARY CAP-384 grant
+ *     ceremony over it (`runGrantCeremony` against a `BrokerCeremonyTransport`)
+ *     — the PRF still happens on the human's OWN device, reached through the
+ *     broker; nothing WebAuthn-shaped is attempted on this headless box.
+ *     K_local itself is still NEVER written to disk (this is a headless
+ *     machine; the acceptance criterion is explicit that no
  *     recovery-equivalent material is ever displayed or persisted anywhere)
  *     — it is handed to the exact same in-memory grant daemon `capy
  *     device-key grant` already uses (`spawnGrantDaemon`), so `capy run` and
  *     friends find a live `CAPY_DEVICE_KEY_GRANT_SOCKET` exactly as they
- *     would after a manual grant. The cost of this extra round trip over the
- *     old (page-unwraps) design is one accepted trade: it turns "read
- *     K_local out of page memory" into "make an authenticated,
- *     fresh-auth-gated, rate-limited, audit-logged API call" for an attacker
- *     who has only compromised the page (XSS, a malicious dependency), not
- *     the whole keep-app origin.
+ *     would after a manual grant.
  *
  * GATED BEHIND CAPY_DEVICE_KEYS, matching `capy device-key grant`'s own
  * `refuseFlagOff()` exactly — verified necessary, not assumed: `runCommand.ts`'s
