@@ -221,7 +221,7 @@ describe('RecoverCommand', () => {
     // The mocked ProjectManager returns keep.lock pointing at ORG_VINCENT,
     // but the user picks ORG_DEMOS in the prompt. The wrap must land on Demos.
     const phrase = generateSeedPhrase();
-    answers = { orgId: ORG_DEMOS, seedPhrase: phrase };
+    answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: false };
 
     const cmd = new RecoverCommand();
     await cmd.execute();
@@ -233,7 +233,7 @@ describe('RecoverCommand', () => {
   test('valid seed phrase → wrapAndSaveMasterKey called with M derived from the phrase', async () => {
     const phrase = generateSeedPhrase();
     const expectedM = seedPhraseToMasterKey(phrase);
-    answers = { orgId: ORG_DEMOS, seedPhrase: phrase };
+    answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: false };
 
     const cmd = new RecoverCommand();
     await cmd.execute();
@@ -248,7 +248,7 @@ describe('RecoverCommand', () => {
     // for the same org we're wrapping for, or the server 403s. Recover MUST
     // re-call authenticateSilent(orgId) after the picker.
     const phrase = generateSeedPhrase();
-    answers = { orgId: ORG_CAPY, seedPhrase: phrase };
+    answers = { orgId: ORG_CAPY, seedPhrase: phrase, confirmed: false };
 
     const cmd = new RecoverCommand();
     await cmd.execute();
@@ -310,7 +310,7 @@ describe('RecoverCommand', () => {
     writeFileSync(join(dir, 'key.enc'), 'pre-existing');
 
     const phrase = generateSeedPhrase();
-    answers = { orgId: ORG_DEMOS, proceed: true, seedPhrase: phrase };
+    answers = { orgId: ORG_DEMOS, proceed: true, seedPhrase: phrase, confirmed: false };
 
     const cmd = new RecoverCommand();
     await cmd.execute();
@@ -329,7 +329,7 @@ describe('RecoverCommand', () => {
 
     const phrase = generateSeedPhrase();
     // No `proceed` answer — if the gate fires, prompt() throws "unexpected prompt".
-    answers = { orgId: ORG_DEMOS, seedPhrase: phrase };
+    answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: false };
 
     const cmd = new RecoverCommand();
     await cmd.execute();
@@ -348,9 +348,11 @@ describe('RecoverCommand', () => {
   });
 
   describe('CAP-382 re-enroll-after-recovery nudge', () => {
-    test('flag off — no nudge prompt, no wrapper cleanup', async () => {
+    test('rail always on — the nudge prompts even with the legacy env flag unset; declining leaves no residue', async () => {
+      // Permanently ON as of onboarding v2 — the env var is no longer
+      // consulted (src/auth/deviceKey/flag.ts).
       const phrase = generateSeedPhrase();
-      answers = { orgId: ORG_DEMOS, seedPhrase: phrase };
+      answers = { orgId: ORG_DEMOS, seedPhrase: phrase, confirmed: false };
 
       const cmd = new RecoverCommand();
       await cmd.execute();
@@ -436,9 +438,12 @@ describe('RecoverCommand', () => {
   });
 
   describe('final-gate failure-signal #5 — `capy recover --web` reaches the same post-recovery nudge', () => {
-    test('flag off: --web completes normally, no nudge attempted (unchanged from before this fix)', async () => {
+    test('rail always on: --web reaches the nudge even with the legacy env flag unset; declining changes nothing else', async () => {
+      // Permanently ON as of onboarding v2 — the env var is no longer
+      // consulted (src/auth/deviceKey/flag.ts).
       webOrgId = ORG_DEMOS;
       webPhraseFn = () => generateSeedPhrase();
+      answers = { confirmed: false };
 
       const cmd = new RecoverCommand();
       await cmd.execute({ web: true });

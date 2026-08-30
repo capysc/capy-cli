@@ -1446,7 +1446,9 @@ describe('CapyCommand', () => {
         }
       });
 
-      test('flag OFF: attemptPickupConsumption is never called, matching attemptCaseCUnlock\'s existing off-by-default contract', async () => {
+      test('rail always on: attemptPickupConsumption is reached even with the legacy env flag unset', async () => {
+        // Permanently ON as of onboarding v2 — the env var is no longer
+        // consulted (src/auth/deviceKey/flag.ts).
         delete process.env.CAPY_DEVICE_KEYS;
         const { hasOrgKey } = await import('../../src/crypto/keyResolver');
         (hasOrgKey as any).mockReturnValue(false);
@@ -1459,7 +1461,7 @@ describe('CapyCommand', () => {
           consoleSpy.mockRestore();
         }
 
-        expect(deviceKeyWiringCalls.attemptPickupConsumption.length).toBe(0);
+        expect(deviceKeyWiringCalls.attemptPickupConsumption.length).toBeGreaterThan(0);
       });
     });
   });
@@ -1659,7 +1661,9 @@ describe('CapyCommand', () => {
       expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled[0].orgId).not.toBe('org-existing');
     });
 
-    test('flag off: neither the sync nor the enrollment nudge fire', async () => {
+    test('rail always on: the sync fires even with the legacy env flag unset', async () => {
+      // Permanently ON as of onboarding v2 — the env var is no longer
+      // consulted (src/auth/deviceKey/flag.ts).
       delete process.env.CAPY_DEVICE_KEYS;
       const inquirer = (await import('inquirer')).default;
       const origPrompt = inquirer.prompt;
@@ -1680,8 +1684,8 @@ describe('CapyCommand', () => {
         consoleSpy.mockRestore();
       }
 
-      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled).toHaveLength(0);
-      expect(deviceKeyWiringCalls.maybeNudgeDeviceKeyEnrollment).toHaveLength(0);
+      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled).toHaveLength(1);
+      expect(deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled[0].orgId).toBe('org-second');
     });
 
     test('the ordinary-flow enrollment nudge also fires once a project exists (MAJOR-5 wiring)', async () => {

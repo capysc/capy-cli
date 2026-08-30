@@ -150,12 +150,13 @@ afterEach(() => {
 });
 
 describe('post-redeem device-key nudge', () => {
-  test('flag off — the nudge never prompts, redeem completes exactly as before', async () => {
+  test('rail always on — env flag unset behaves identically to flag on (nudge path runs)', async () => {
+    // Permanently ON as of onboarding v2 — the env var is no longer
+    // consulted (src/auth/deviceKey/flag.ts).
     await new RedeemCommand().execute('CODE');
     expect(wrapCalls).toHaveLength(1);
-    expect(promptCalls).not.toContain('confirmed');
-    expect(runDeviceKeyEnrollmentCalls).toHaveLength(0);
-    expect(syncCalls).toHaveLength(0);
+    expect(syncCalls).toEqual([ORG_ID]);
+    expect(promptCalls).toContain('confirmed');
   });
 
   test('flag on, account already has a device key enrolled elsewhere — syncs this newly-joined org silently, no nudge', async () => {

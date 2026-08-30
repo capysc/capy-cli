@@ -172,13 +172,15 @@ afterEach(() => {
   process.exitCode = 0;
 });
 
-describe('PairCommand — flag off', () => {
-  test('refuses before ever contacting the ceremony engine', async () => {
+describe('PairCommand — rail always on', () => {
+  test('runs the ceremony even with the legacy env flag unset', async () => {
+    // Permanently ON as of onboarding v2 — the env var is no longer
+    // consulted (src/auth/deviceKey/flag.ts).
     delete process.env.CAPY_DEVICE_KEYS;
-    await expect(new PairCommand().execute({})).rejects.toBeInstanceOf(ExitError);
-    expect(ceremonyCalls.length).toBe(0);
-    expect(installCalls.length).toBe(0);
-    expect(spawnCalls.length).toBe(0);
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+    await new PairCommand().execute({});
+    expect(ceremonyCalls.length).toBeGreaterThan(0);
+    expect(installCalls.length).toBe(1);
   });
 });
 

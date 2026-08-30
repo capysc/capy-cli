@@ -107,17 +107,20 @@ afterEach(() => {
   else process.env.CAPY_DEVICE_KEYS = ORIGINAL_FLAG;
 });
 
-describe('flag off — every device-key command refuses, none reaches the network', () => {
-  test('enroll', async () => {
-    await expect(new DeviceKeyEnrollCommand().execute()).rejects.toBeInstanceOf(ExitError);
+describe('rail always on — device-key commands run even with the legacy env flag unset', () => {
+  // Permanently ON as of onboarding v2 — the env var is no longer
+  // consulted (src/auth/deviceKey/flag.ts). beforeEach deletes it; these
+  // assert the commands reach their normal paths anyway.
+  test('enroll proceeds into the ceremony (cancelled by the mock resolves cleanly)', async () => {
+    await new DeviceKeyEnrollCommand().execute();
   });
-  test('list', async () => {
-    await expect(new DeviceKeyListCommand().execute()).rejects.toBeInstanceOf(ExitError);
-    expect(serviceClientCalls.listWrappers.length).toBe(0);
+  test('list reaches the service', async () => {
+    await new DeviceKeyListCommand().execute();
+    expect(serviceClientCalls.listWrappers.length).toBe(1);
   });
-  test('remove', async () => {
-    await expect(new DeviceKeyRemoveCommand().execute('w1')).rejects.toBeInstanceOf(ExitError);
-    expect(serviceClientCalls.deleteWrapper.length).toBe(0);
+  test('remove reaches the service', async () => {
+    await new DeviceKeyRemoveCommand().execute('w1');
+    expect(serviceClientCalls.deleteWrapper.length).toBe(1);
   });
 });
 
