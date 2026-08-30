@@ -287,18 +287,6 @@ export interface CliOptions {
    *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
    *  interactive decision is actually reached (a clean sync stays terminal-only). */
   web?: boolean;
-  /**
-   * CAP-451 / Bug D residual (CAPY-ONBOARD-SESSION-DUMP.md §3): this instance
-   * is driven by `capy onboard --broker-ceremony` — a sandboxed caller with
-   * no local browser and no TTY. Threaded onto `CapyCommand`'s constructor
-   * options (distinct from `initializeProjectForFlow`'s own `noWizardStops`,
-   * which is scoped to ONE call and reset in a `finally`) so methods reached
-   * OUTSIDE that call — `syncProject`'s own interactive-auth fallback and its
-   * browser conflict-resolution wizard, both reachable from the `encrypt_env`
-   * executor via `syncForFlow` — can refuse a loopback stop instead of
-   * opening one nothing can answer. Never set outside the flow-driven path.
-   */
-  brokerCeremony?: boolean;
 }
 
 export interface ProjectInitResult {
@@ -519,31 +507,6 @@ export const ERROR_CODES = {
   // showing up in time). Mirrors DEVICE_KEY_GRANT_EXPIRED's shape: a coded,
   // non-string signal an orchestrator can branch on (Rule 4).
   PAIR_CODE_EXPIRED: 'PAIR_CODE_EXPIRED',
-  // "first-run in one sweep" (client-side only). The in-process broker
-  // ceremony `capy onboard --broker-ceremony` runs inside `authenticate`.
-  /**
-   * Under a flow-driven run with no wizard/inquirer stops allowed (a
-   * sandboxed broker-ceremony caller has no TTY and no browser to render
-   * one in), the ordinary init path would otherwise have shown an org
-   * picker, an org-create wizard, a project picker, or a project-name
-   * prompt. Reaching any of those under the flow is a refusal, never
-   * `openScreen`/inquirer — see capyCommand.ts's flow-driven init.
-   */
-  FLOW_STOP_UNREACHABLE: 'FLOW_STOP_UNREACHABLE',
-  /**
-   * The broker ceremony's sealed answer for `first_run.kind:'create_org'`
-   * carried a phrase that does not pass the same BIP39 (24-word, wordlist,
-   * checksum) validation the CLI applies to phrase entry everywhere else.
-   * The organization is NOT created — refused before `/auth/create-org`.
-   */
-  INVALID_RECOVERY_PHRASE: 'INVALID_RECOVERY_PHRASE',
-  /**
-   * The broker ceremony's sealed answer did not parse as the strict
-   * sandbox-session envelope: an unknown `first_run.kind`, a required field
-   * missing, or one half of a strict pair (`credential_id`/`prf_output`)
-   * present without the other. Nothing in the envelope is acted on.
-   */
-  FLOW_ENVELOPE_INVALID: 'FLOW_ENVELOPE_INVALID',
   /**
    * `createOrganizationFromEnvelope`'s 409-name-collision suffix loop
    * (`Acme` -> `Acme 2` -> `Acme 3` ...) hit its retry cap without landing a

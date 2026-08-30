@@ -212,13 +212,6 @@ export class CapyCommand {
       listBranches: () => this.serviceClient.listBranches(projectState.projectId!),
       syncedBranches: syncedBranchNames(this.projectManager.readSyncState()),
       promptPick: async (branches, defaultName) => {
-        // CAP-451: a broker-ceremony run has no TTY and no local browser —
-        // picking a branch is a human-only stop. Refuse before binding a
-        // loopback server or printing anything, same as every other
-        // wizard stop under noWizardStops.
-        if (this.noWizardStops) {
-          this.refuseWizardStop();
-        }
         const grey = (s: string) => `\x1b[90m${s}\x1b[0m`;
         human('\nNo branch is checked out in this directory yet.');
         if (this.options.web) {
@@ -377,177 +370,13 @@ export class CapyCommand {
    * through a failure, so a run that dies between two stops does not leave a
    * page claiming to still be working on it.
    */
-  /**
-   * First-run initialization, as a public entry point for the flow driver's
-   * `write_keep_lock(select_or_create)` executor (src/flows/onboard/executors).
-   *
-   * Deliberately the SAME method the ordinary `capy` path calls — the flow
-   * layer sequences the CLI's existing actuators, it does not re-implement
-   * them. `assumeEncryptConsent` is threaded through for the one question the
-   * flow has already asked in its own consent dialog; everything else behaves
-   * identically.
-   */
-  async initializeProjectForFlow(
-    opts: {
-      assumeEncryptConsent?: boolean;
-      /**
-       * Called the instant a project is chosen or created — BEFORE the intake
-       * that follows it. The flow records the ids there and then, so a run that
-       * dies between "project created" and "keep.lock written" still leaves the
-       * id pinned and the retry adopts it instead of creating a second project.
-       */
-      onProjectResolved?: (ids: { org_id: string; project_id: string; branch?: string }) => void;
-      /**
-       * CAP-451: the org the flow instance already pinned (from the
-       * `authenticate` step's own result, or an earlier `select_organization`
-       * screen). When set, the org picker this wizard-less path would
-       * otherwise show is skipped entirely — the ORG resolution below runs
-       * exactly as if that id had been chosen.
-       */
-      pinnedOrgId?: string;
-      /**
-       * CAP-451: the project name the plan dialog already carried
-       * (`write_keep_lock`'s optional `project_name` param, or `capy onboard
-       * --project-name`). When set, the project-name prompt is skipped.
-       */
-      projectName?: string;
-      /**
-       * CAP-451: true ONLY under `capy onboard --broker-ceremony` — a
-       * sandboxed caller with no browser and no TTY to prompt in. Any
-       * human-only stop (org picker, project picker, project-name prompt)
-       * NOT already resolved by pinnedOrgId/projectName above is refused
-       * (FLOW_STOP_UNREACHABLE) instead of falling through to inquirer,
-       * which would hang that process forever.
-       *
-       * Left false (the default) for every other flow-driven call —
-       * notably a plain, interactive `capy onboard` at a real terminal
-       * (auth_mode interactive_oauth, no --web): that run has a real TTY,
-       * so it keeps the SAME inquirer prompts the wizard-less path has
-       * always shown, byte-identical to before pinnedOrgId/projectName/this
-       * flag existed. A `--web` run is unaffected either way — the `wizard`
-       * check above always wins when one is present.
-       */
-      noWizardStops?: boolean;
-    } = {},
-  ): Promise<void> {
-    this.assumeEncryptConsent = opts.assumeEncryptConsent === true;
-    this.onProjectResolved = opts.onProjectResolved;
-    this.pinnedOrgId = opts.pinnedOrgId;
-    this.flowProjectName = opts.projectName;
-    this.noWizardStops = opts.noWizardStops === true;
-    try {
-      await this.initializeProject();
-    } finally {
-      this.assumeEncryptConsent = false;
-      this.onProjectResolved = undefined;
-      this.pinnedOrgId = undefined;
-      this.flowProjectName = undefined;
-      this.noWizardStops = false;
-    }
-  }
-
-  /**
-   * The ordinary sync, as an entry point for the flow driver's `encrypt_env`
-   * executor — with one difference that matters: it THROWS.
-   *
-   * `execute()` ends its catch in `displayErrorAndExit`, which calls
-   * process.exit. Under the driver that would kill the run instead of returning
-   * a failed outcome with a code, and the flow layer's whole contract is that a
-   * step reports what happened rather than ending the process.
-   */
-  async syncForFlow(): Promise<void> {
-    const projectState = await this.projectManager.detectProjectState();
-    if (!projectState.initialized) {
-      const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
-      if (!envMeta.org_id || !envMeta.project_id) {
-        throw new CapyError('No keep.lock in this directory', ERROR_CODES.NO_KEEP_FILE);
-      }
-      projectState.initialized = true;
-      projectState.organizationId = envMeta.org_id;
-      projectState.projectId = envMeta.project_id;
-      projectState.activeBranch = envMeta.branch ?? null;
-    }
-    await this.syncProject(projectState);
-  }
-
-  /**
-   * Adopt an existing project into this directory, as a public entry point for
-   * the flow driver's `write_keep_lock(env_header)` executor. Same method the
-   * ordinary path uses when the user picks an existing project.
-   */
-  async bootstrapProjectForFlow(
-    project: { id: string; name: string; organization_id: string },
-    orgId: string,
-    userId: string,
-  ): Promise<void> {
-    // The ordinary init path settles THIS command's own auth service
-    // (`authenticate` at the top of initializeProject) before anything uses
-    // `this.serviceClient` — this flow entry point jumped straight past it,
-    // so `resolveProjectKey`'s co-decrypt went out with no Authorization
-    // header at all (observed live: 401 on the first pinned-project adopt).
-    // The executor authenticates its OWN AuthService instance; that never
-    // wires this one. Silent settle only — an adopt has a live session by
-    // construction, so a refusal here is a coded failure, never a prompt.
-    this.authService.setSessionUserId(userId);
-    const session = await this.authService.authenticateSilent(orgId);
-    if (!session.success) {
-      throw new CapyError(
-        session.error || 'Could not authenticate to adopt the pinned project.',
-        ERROR_CODES.AUTH_FAILED,
-      );
-    }
-    await this.bootstrapExistingProject(project, orgId, userId);
-  }
-
-  /** Set for the duration of a flow-driven init: the plan dialog already carried this question. */
-  private assumeEncryptConsent = false;
-  /** Set for the duration of a flow-driven init — see initializeProjectForFlow. */
-  private onProjectResolved?: (ids: { org_id: string; project_id: string; branch?: string }) => void;
-  /** CAP-451: skips the org picker when set — see initializeProjectForFlow. */
-  private pinnedOrgId?: string;
-  /** CAP-451: skips the project-name prompt when set — see initializeProjectForFlow. */
-  private flowProjectName?: string;
-  /**
-   * CAP-451: true ONLY under `capy onboard --broker-ceremony` — see
-   * initializeProjectForFlow's own doc on this option. A plain flow-driven
-   * `capy onboard` at a real terminal, and any `--web` run, leave this
-   * false and keep their existing prompts.
-   */
-  private noWizardStops = false;
-
-  /**
-   * A broker-ceremony run has no TTY and no browser to prompt in — reaching
-   * a stop only a human can answer (org picker, org-create wizard, project
-   * picker, project-name prompt) would otherwise fall through to
-   * `inquirer.prompt`, which hangs that non-interactive process forever.
-   * Refused instead, with a code the flow layer's driver reports upward
-   * like any other step outcome — never `openScreen`/inquirer under
-   * `--broker-ceremony`. Only ever called when `this.noWizardStops` is
-   * true — see that field's own doc for why a plain TTY `capy onboard`
-   * never reaches this.
-   */
-  private refuseWizardStop(): never {
-    throw new CapyError(
-      'This step needs a human decision the flow cannot make for it here.',
-      ERROR_CODES.FLOW_STOP_UNREACHABLE,
-    );
-  }
-
   private async initializeProject(): Promise<void> {
     // Imported only on the `--web` path: the module pulls in every compiled
     // screen, and a terminal run has no use for them.
     //
     // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless
     // verification drive the loopback without hijacking a real browser.
-    //
-    // CAP-451: `noWizardStops` (only ever true under `capy onboard
-    // --broker-ceremony`) wins over `--web` here — a broker-ceremony caller
-    // is agent-driven with no LOCAL browser to send to, even when `--web`
-    // was also passed (the MCP path always used to imply loopback before
-    // this flag existed). No wizard is constructed at all in that case, so
-    // no loopback server is ever bound and no handoff URL is ever printed —
-    // every `if (wizard)` stop below simply has nothing to check.
-    const wizard = this.options.web && !this.noWizardStops
+    const wizard = this.options.web
       ? new (await import('../ui/initWizardScreen')).InitWizardSession({
           open: !process.env.CAPY_WEB_NO_OPEN,
         })
@@ -573,15 +402,7 @@ export class CapyCommand {
 
     // Check if sync-state has an org hint (e.g. from a recent `capy redeem`)
     const syncState = this.projectManager.readSyncState();
-    // CAP-451: the flow's own pinned org — settled moments ago by the
-    // sandbox-session ceremony (create_org/select_org/unlock) or a
-    // `select_organization` screen — wins over sync-state's org hint. Sync
-    // state is written for the SAME org in the ordinary case, but relying on
-    // it alone leaves a window (a org created THIS run, on a machine with a
-    // stale/ambiguous sync-state left from something else) where
-    // authenticate(undefined) would resolve organizations[0] instead of the
-    // org this process is actually supposed to be scoped to.
-    const orgHint = this.pinnedOrgId ?? syncState?.org_id;
+    const orgHint = syncState?.org_id;
 
     // Authenticate — pass org hint so session scopes to the right org
     const spinner = ora('Logging in...').start();
@@ -631,20 +452,6 @@ export class CapyCommand {
     const currentOrg = orgs.find(o => o.id === currentOrgId);
 
     if (orgs.length === 0) {
-      // CAP-451: a zero-org identity under `--broker-ceremony` hits this
-      // branch just as often as the org-picker branch below does (a fresh
-      // account with nothing to pick from at all), and it is the SAME class
-      // of human-only stop `refuseWizardStop`'s own doc already names ("an
-      // org-create wizard"). This branch used to call `createNewOrganization`
-      // unconditionally — no gate — which is exactly what let a sandboxed
-      // caller with no browser fall into the org-create wizard's loopback
-      // server (`this.options.web` was still true from the outer `--web`
-      // flag, `noWizardStops` notwithstanding). Checked BEFORE anything else
-      // in this branch, same as the `pinnedOrgId`-then-`noWizardStops`-then-
-      // `wizard` order below.
-      if (this.noWizardStops) {
-        this.refuseWizardStop();
-      }
       human('\nNo organization found. Let\'s create one.');
       // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
       // Wave-B org-less token — flag-gated, and a no-op (org creation is
@@ -663,26 +470,7 @@ export class CapyCommand {
 
     } else {
       let orgId: string;
-      if (this.pinnedOrgId) {
-        // CAP-451: the flow instance already pinned this org (the
-        // `authenticate` step's own result, or a `select_organization`
-        // screen upstream of this call) — no picker to show.
-        orgId = this.pinnedOrgId;
-      } else if (this.noWizardStops && orgs.length === 1) {
-        // CAP-469: with exactly one organization, there is no human decision
-        // to make. The free tier is single-org by construction, so this is the
-        // dominant broker-ceremony path: fetch the list from the service (the
-        // source of truth), then proceed with that sole org. This resolves a
-        // dead-end at the org picker even when the session is already scoped to
-        // the only organization.
-        orgId = orgs[0].id;
-      } else if (this.noWizardStops) {
-        // No default to fall back to: which org to use is a genuine human
-        // decision this source has no way to make. Checked BEFORE `wizard`
-        // — `wizard` is guaranteed null here anyway (see initializeProject),
-        // but the order itself is the contract: broker-ceremony always wins.
-        this.refuseWizardStop();
-      } else if (wizard) {
+      if (wizard) {
         // No TTY under --web (e.g. driven through the MCP): the picker is the
         // wizard's `organization` stop, which carries the same list and the
         // same "create new" row an inquirer prompt would have shown — and, on
@@ -914,12 +702,7 @@ export class CapyCommand {
     }
     wizard?.record({ projectCount: existingProjects.length, projectsUnavailable });
 
-    // CAP-451: a projectName the plan dialog already carried means the
-    // decision "create fresh with this name" was already made — the
-    // existing-project picker below is exactly the wizard stop that
-    // decision exists to skip, so it never runs in that case.
-    const skipProjectPicker = Boolean(this.flowProjectName);
-    if (existingProjects.length > 0 && !skipProjectPicker) {
+    if (existingProjects.length > 0) {
       const choices = [
         { name: 'New project', value: CREATE_NEW_PROJECT },
         ...existingProjects.map(p => ({
@@ -929,13 +712,7 @@ export class CapyCommand {
       ];
 
       let projectChoice: string;
-      if (this.noWizardStops) {
-        // Existing projects, no name pinned: adopt-vs-create is a genuine
-        // human decision this source cannot make — refuse rather than
-        // guess. Checked before `wizard` for the same reason as the org
-        // picker above.
-        this.refuseWizardStop();
-      } else if (wizard) {
+      if (wizard) {
         const chosen = await wizard.askProject(
           existingProjects.map(p => ({ id: p.id, name: p.name })),
         );
@@ -955,8 +732,6 @@ export class CapyCommand {
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
-        // Known now, before anything is pulled or written.
-        this.onProjectResolved?.({ org_id: selectedOrg.id, project_id: picked.id });
         await this.bootstrapExistingProject(
           picked,
           selectedOrg.id,
@@ -969,17 +744,7 @@ export class CapyCommand {
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
     let projectName: string;
-    if (this.flowProjectName) {
-      // CAP-451: the plan dialog already named it (`write_keep_lock`'s
-      // `project_name` param, or `capy onboard --project-name`).
-      projectName = this.flowProjectName;
-    } else if (this.noWizardStops) {
-      // Unlike the org/project pickers above, this stop HAS a documented
-      // default — the same one the TTY prompt pre-fills — so it uses it
-      // rather than refusing. Checked before `wizard` for the same reason
-      // as the pickers above.
-      projectName = defaultName;
-    } else if (wizard) {
+    if (wizard) {
       // Same two refusals the TTY validator makes, in the same words — the
       // screen holds its button on both, so either arriving here means the
       // submit did not come from the screen.
@@ -1023,22 +788,12 @@ export class CapyCommand {
 
     keySpinner.succeed('keep.lock created (0 secrets)');
 
-    // The project exists on the service from here on. Report it immediately:
-    // everything after this point can fail, and a retry that did not know this
-    // id would create a SECOND project.
-    this.onProjectResolved?.({ org_id: projectResult.org_id, project_id: projectResult.project_id });
-
     // Create the initial branch. `POST /projects` no longer auto-creates
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
     let initialBranchChoice: string;
-    if (this.noWizardStops) {
-      // CAP-451: the same default the TTY prompt's first (and effectively
-      // default) row offers — 'development' — used directly, never asked.
-      // Checked before `wizard` for the same reason as the stops above.
-      initialBranchChoice = 'development';
-    } else if (wizard) {
+    if (wizard) {
       // No TTY under --web: without a browser screen here, init dies one step
       // before createBranch/writeActiveBranch and leaves a branchless project.
       const chosen = await wizard.askBranchChoice();
@@ -1060,12 +815,7 @@ export class CapyCommand {
 
     let initialBranchName: string;
     if (initialBranchChoice === 'other') {
-      // Unreachable under noWizardStops — that branch always hard-codes
-      // 'development' above and never produces 'other' — but refuse rather
-      // than silently falling to inquirer if that ever changes.
-      if (this.noWizardStops) {
-        this.refuseWizardStop();
-      } else if (wizard) {
+      if (wizard) {
         const entered = await wizard.askBranchName();
         if (entered === null) {
           throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
@@ -1197,20 +947,7 @@ export class CapyCommand {
         // right project on first setup. After this step .env is rewritten
         // with ciphertext, so getting it wrong is painful to recover from.
         let confirmEncrypt: boolean;
-        if (this.assumeEncryptConsent) {
-          // Under the flow driver this question was already asked, once, by the
-          // onboard plan dialog — and the answer is recorded server-side on the
-          // flow instance. Asking again is the consent fatigue the flow layer
-          // exists to remove; it is NOT a consent being skipped.
-          confirmEncrypt = true;
-        } else if (this.noWizardStops) {
-          // Defensive: `write_keep_lock(select_or_create)` is always
-          // consent-gated, so assumeEncryptConsent should already be true
-          // by the time a broker-ceremony run reaches here. If it somehow
-          // isn't, refuse rather than fall through to a prompt nobody can
-          // answer — never silently encrypt-and-push without consent either.
-          this.refuseWizardStop();
-        } else if (wizard) {
+        if (wizard) {
           // NAMES and a count reach the page — never a value, and not even a
           // snippet of one. The whole question this stop asks is whether these
           // may stop being plaintext, and showing more than the terminal shows
@@ -1396,9 +1133,6 @@ export class CapyCommand {
         this.fileManager.writeKeepFile(stub);
         this.projectManager.writeActiveBranch(branch);
         this.fileManager.ensureCapyGitignore();
-        // human(), not console.log: this path is reachable under
-        // `--broker-ceremony --json` (pinned-project adopt), where stdout
-        // must stay exactly one JSON envelope.
         human(`\n${B(project.name)} has no secrets yet.`);
         human(`Add secrets to .env, then run ${B('capy push')}.`);
         this.installGitHooks();
@@ -1712,19 +1446,6 @@ export class CapyCommand {
             `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
             ERROR_CODES.NETWORK_ERROR,
             { detail: refreshFailure.detail }
-          );
-        }
-        // Bug D residual: a sandboxed `--broker-ceremony` caller has no
-        // browser to send loopback OAuth to — `this.authService.authenticate`
-        // below would otherwise bind one nothing can answer. Refused with a
-        // coded failure instead; the flow's own `authenticate` step (which
-        // DOES have a broker-driven ceremony) is what re-establishes a
-        // session for a broker-ceremony run, not this ordinary sync path.
-        if (this.options.brokerCeremony) {
-          spinner.fail('Session needs interactive sign-in');
-          throw new CapyError(
-            'This step needs interactive sign-in the flow cannot do here.',
-            ERROR_CODES.FLOW_STOP_UNREACHABLE,
           );
         }
         if (refreshFailure?.reason === 'session_ended') {
@@ -2160,14 +1881,6 @@ export class CapyCommand {
       const real = menuChoices.filter((c) => c.value !== 'skip');
       if (real.length !== 1) return null;
       if (isOnboarding) return real[0].value;
-      // Broker-ceremony first push (State 6: nothing pinned, nothing remote,
-      // menu = [commit_local]) is the same fully-determined shape: the flow's
-      // consent dialog already named every variable and `will_encrypt`, so
-      // the one real action is not a decision either — refusing it below
-      // dead-ends `encrypt_env` on a stop no human can reach. TTY and --web
-      // runs are deliberately NOT changed: they keep the prompt (the
-      // hardening rule — interactive behavior stays byte-identical).
-      if (this.options.brokerCeremony) return real[0].value;
       return null;
     })();
 
@@ -2175,19 +1888,6 @@ export class CapyCommand {
     // When the conflict is resolved in the browser we already hold the final env;
     // we tag the action 'individual' and skip the TTY ResolveTable below.
     let webFinalEnv: Record<string, string> | undefined;
-    // Bug D residual: a sandboxed `--broker-ceremony` caller has no browser to
-    // send a conflict resolver to — `resolveConflictViaBrowser` below binds a
-    // loopback server nothing can answer — and no TTY either, so falling
-    // through to `inquirer.prompt` hangs the process on piped stdin. This must
-    // gate on `brokerCeremony` alone: a broker run without `--web` still has
-    // neither a browser nor a TTY, so `this.options.web` is not a precondition
-    // for the refusal.
-    if (!soleAction && this.options.brokerCeremony) {
-      throw new CapyError(
-        'This step needs a human decision the flow cannot make for it here.',
-        ERROR_CODES.FLOW_STOP_UNREACHABLE,
-      );
-    }
     if (soleAction) {
       action = soleAction;
     } else if (this.options.web) {
