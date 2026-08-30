@@ -100,80 +100,8 @@ program
       web: options.web
     };
 
-    // Flow-driven onboarding, off by default while the existing path is the
-    // shipped one. Never in local-only mode: that path has no server to ask.
-    if (process.env.CAPY_FLOW_ONBOARD === '1') {
-      const { isLocalOnly } = await import('./config/profileConfig');
-      if (!isLocalOnly()) {
-        const { runOnboardCommand } = await import('./commands/onboardCommand');
-        await runOnboardCommand({ ...cliOptions, web: cliOptions.web === true });
-        return;
-      }
-    }
-
     const command = new CapyCommand(cliOptions);
     await command.execute();
-  });
-
-// Undocumented while the flag is off: the flow-driven onboarding path.
-// `--json` prints the step the run stopped on as one object and exits 0 —
-// confirm / screen / blocked are answers, not failures.
-program
-  .command('onboard', { hidden: true })
-  .description('Onboard this project to Capy through the flow service')
-  .option('--json', 'print the step this run stopped on as JSON')
-  .option('--target-dir <path>', 'directory to onboard (defaults to the current one)')
-  .option('--flow-id <id>', 'resume an existing flow instance')
-  .option('--flow-secret <secret>', 'credential for an anonymous flow instance')
-  .option('--reset', 'cancel a flow stuck on this repo (authorized by org ownership) and mint a fresh one')
-  .option('--client-pubkey <base64>', 'ephemeral public key; selects the browser-approval auth path')
-  .option('--broker-ceremony', 'run the sandbox-session broker ceremony via a detached worker (mints its own keypair)')
-  .option('--project-name <name>', 'project name to create with, skipping the interactive name prompt')
-  .option('--confirm <planHash>', 'optional: the plan_hash to confirm — omit it and this computes its own from the current plan')
-  .option('--accepted <bool>', 'answer the onboarding plan dialog: true or false', (v: string) => v === 'true')
-  .option('--uses-env-vars', 'compat hint: the app reads configuration from environment variables')
-  .option('--framework <name>', 'compat hint: detected framework, e.g. "Next.js"')
-  .option('--external-secret-manager <name>', 'compat hint: name of an external secret manager already in use')
-  // Internal only. The parent `onboard` command is itself already
-  // `{ hidden: true }`, so this needs no separate hiding.
-  .option('--ceremony-worker', 'internal: run a detached sandbox-session ceremony worker, reading its payload from stdin')
-  .action(async (options, cmd) => {
-    // Internal re-invocation only (`prepareCeremonyScreen`'s own spawn) —
-    // never reachable from a shell's argv in ordinary use. Reads its one
-    // payload from stdin, never argv/env/a file, and exits without printing
-    // anything: nobody reads this process's stdio (`stdio: ['pipe',
-    // 'ignore', 'ignore']` at the spawn site).
-    if (options.ceremonyWorker) {
-      const { runCeremonyWorker } = await import('./flows/onboard/ceremonyWorker');
-      await runCeremonyWorker();
-      return;
-    }
-    const globals = cmd.optsWithGlobals();
-    try {
-      const { runOnboardCommand } = await import('./commands/onboardCommand');
-      await runOnboardCommand({
-        envPath: globals.envPath,
-        json: options.json === true,
-        // `--web` is a program-level flag: the same one `capy --web` uses, so
-        // the browser wizard here is the one every other command already has.
-        web: globals.web === true,
-        targetDir: options.targetDir,
-        flowId: options.flowId,
-        flowSecret: options.flowSecret,
-        reset: options.reset === true,
-        clientPubkey: options.clientPubkey,
-        brokerCeremony: options.brokerCeremony === true,
-        projectName: options.projectName,
-        confirm: options.confirm,
-        accepted: options.accepted,
-        usesEnvVars: options.usesEnvVars === true,
-        framework: options.framework,
-        externalSecretManager: options.externalSecretManager,
-      });
-    } catch (error) {
-      const { displayErrorAndExit } = await import('./ui/errorScreen');
-      await displayErrorAndExit(error);
-    }
   });
 
 program

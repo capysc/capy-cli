@@ -9,7 +9,13 @@
  * Nothing anywhere reads the message.
  */
 import { resolveActiveUrl } from '../config/profileConfig';
-import { OnboardObservations } from './onboard/observe';
+
+/**
+ * The observation bag a flow report carries. Named generically now that the
+ * onboard flow (its original, and until now only, shape) is gone — every
+ * field is a plain boolean per the flow contract's own `observations` schema.
+ */
+export type FlowObservations = Record<string, boolean>;
 
 export interface FlowServiceError {
   status: number;
@@ -57,7 +63,7 @@ export interface CreateFlowResponse {
 
 export interface NextRequest {
   contract_version: string;
-  observations: OnboardObservations;
+  observations: FlowObservations;
   /**
    * Sent when the client found the plan no longer matches the one the
    * instance holds (a rebuild after a PLAN_CHANGED outcome), and also once,

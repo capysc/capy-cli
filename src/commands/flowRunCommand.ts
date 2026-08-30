@@ -9,12 +9,11 @@
  * and off by default — a sibling to `capy flow cancel` under the same
  * hidden `flow` group, never reachable from the plain `capy` entry point.
  *
- * Same three rules `flows/onboard/driver.ts` holds for onboard, held here for
- * checkout:
+ * Three rules held here for checkout:
  *
- *  1. NOTHING is executed before it is validated (`validateStep`, the SAME
- *     vendored-contract trust boundary onboard uses — closed kinds, closed
- *     verbs, params against the vendored schema).
+ *  1. NOTHING is executed before it is validated (`validateStep`, the
+ *     vendored-contract trust boundary — closed kinds, closed verbs, params
+ *     against the vendored schema).
  *  2. Observations are RE-OBSERVED every report. Nothing is carried over
  *     except the two pinned NAMES this run has itself already seen echoed
  *     back in a step's own params (see `computeRepoMatchesProject`'s doc).
@@ -44,7 +43,7 @@ import {
 } from '../flows/validate';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { syncAndWriteBranch } from './checkoutCommand';
-import { codeForSilentAuthFailure } from '../flows/onboard/executors/index';
+import { codeForSilentAuthFailure } from '../flows/shared';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
