@@ -31,6 +31,9 @@ import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { installGitHooks } from '../git/installGitHooks';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
+import { configuredGrantSocketPath } from '../auth/deviceKey/ephemeral';
+import { fetchGrantedKLocal } from '../auth/deviceKey/grantHolder';
+import { createGrantResolutionOps, resolveProjectKeyFromGrant } from '../auth/deviceKey/grantResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { Encryptor } from '../crypto/encryptor';
 import { writeKeepCache } from '../config/globalConfig';
@@ -302,6 +305,31 @@ export class SetupCommand {
     }
   }
 
+  /**
+   * Project-key resolution for the apply path: the standard resolver first;
+   * when it refuses PERMISSION_DENIED and this session carries a device-key
+   * grant (CAPY_DEVICE_KEY_GRANT_SOCKET), resolve through the grant daemon
+   * instead — the exact rail `capy run` already rides (runCommand.ts). A
+   * machine paired via the TEMPORARY grant holds no local key.enc/K_local
+   * at all — its key material lives behind the grant socket — so its first
+   * `setup --json --confirm` refused PERMISSION_DENIED without this
+   * (journey run 14, 2026-08-30). Grant-side failures keep their own coded
+   * errors (DEVICE_KEY_GRANT_EXPIRED / _NOT_FOUND) for the caller to refuse
+   * with.
+   */
+  private async resolveEncryptionKey(orgId: string, projectId: string, userId: string): Promise<string> {
+    try {
+      return await resolveProjectKey(orgId, projectId, userId, this.keyServiceOps());
+    } catch (err) {
+      const grantSocket = configuredGrantSocketPath();
+      const deniedLocally = err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED;
+      if (!grantSocket || !deniedLocally) throw err;
+      const grant = await fetchGrantedKLocal(grantSocket, userId);
+      const grantOps = createGrantResolutionOps(this.serviceClient, this.authService);
+      return resolveProjectKeyFromGrant(grant.kLocal, orgId, projectId, userId, grantOps);
+    }
+  }
+
   private async apply(plan: SetupPlanFacts, authResult: AuthResult, localEnv: Readonly<Record<string, string>>): Promise<void> {
     const userId = authResult.user_id!;
     const branch = plan.branch;
@@ -313,13 +341,14 @@ export class SetupCommand {
     }
     const { project, keep: baseKeep } = resolved;
 
-    let encryptionKey: string;
-    try {
-      encryptionKey = await resolveProjectKey(plan.org.id, project.id, userId, this.keyServiceOps());
-    } catch (err) {
-      refuse(codeOf(err), detailOf(err), { env_rewritten: false });
+    const encryptionKeyOutcome = await this.resolveEncryptionKey(plan.org.id, project.id, userId)
+      .then((key) => ({ ok: true as const, key }))
+      .catch((err: unknown) => ({ ok: false as const, err }));
+    if (!encryptionKeyOutcome.ok) {
+      refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
       return;
     }
+    const encryptionKey = encryptionKeyOutcome.key;
 
     // The project now definitely exists (created or confirmed) and this
     // machine can decrypt for it — safe to write local state.
