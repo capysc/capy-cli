@@ -107,6 +107,12 @@ ISOLATED_FILES=(
   tests/auth/pairing/pairE2E.int.test.ts
   tests/files/reservedVarsWrite.test.ts
   # <<< isolated test files (mock.module): append below >>>
+  # setupCommand.test.ts / syncCommand.test.ts mock projectManager/fileManager/
+  # authService/serviceClient/syncEngine/keyResolver/globalConfig/
+  # installGitHooks the same shape as capyCommand.test.ts, for the
+  # docs/cli-setup-json.md plan/confirm and sync surfaces.
+  tests/commands/setupCommand.test.ts
+  tests/commands/syncCommand.test.ts
   tests/ui/recoveryPhrase.test.ts
   tests/auth/authServiceKeepLoginBridge.test.ts
   # doctorCommand.test.ts mocks os.homedir() the same way (getGlobalCapyDir).

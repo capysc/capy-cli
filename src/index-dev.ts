@@ -103,6 +103,8 @@ program
       console.log(`\n  Unknown command: ${cmd.args[0]}\n`);
       console.log('  Available commands:\n');
       console.log(`    ${B('capy-dev')}                        \x1b[90mSync secrets\x1b[0m`);
+      console.log(`    ${B('capy-dev')} setup --json           \x1b[90mPlan/apply first-run setup as JSON (no TTY)\x1b[0m`);
+      console.log(`    ${B('capy-dev')} sync --json            \x1b[90mSync an already-initialized project as JSON (no TTY)\x1b[0m`);
       console.log(`    ${B('capy-dev')} edit                   \x1b[90mInspect and edit secrets in a TUI\x1b[0m`);
       console.log(`    ${B('capy-dev')} branch                 \x1b[90mList secret branches\x1b[0m`);
       console.log(`    ${B('capy-dev')} checkout -b <branch>   \x1b[90mSwitch to a secret branch\x1b[0m`);
@@ -133,6 +135,45 @@ program
 
     const command = new CapyCommand(cliOptions, true);
     await command.execute();
+  });
+
+program
+  .command('setup')
+  .description('Plan/apply first-run project setup as JSON — no TTY, no browser (docs/cli-setup-json.md)')
+  .option('--json', 'required today: this command has no TTY mode yet')
+  .option('--confirm <hash>', 'apply the plan whose plan_hash this names; omit to only print the plan')
+  .action(async (options, command) => {
+    if (!options.json) {
+      console.error('');
+      console.error('  capy-dev setup currently supports --json only (it is the onboarding tool\'s entry point).');
+      console.error('  A human setting up a project for the first time should just run capy-dev.');
+      console.error('');
+      process.exitCode = 1;
+      return;
+    }
+    const { SetupCommand } = await import('./commands/setupCommand');
+    const globalOpts = command.optsWithGlobals();
+    const cmd = new SetupCommand({ envPath: globalOpts.envPath }, true);
+    await cmd.execute({ confirm: options.confirm });
+  });
+
+program
+  .command('sync')
+  .description('Sync an already-initialized project as JSON — no TTY, no browser (docs/cli-setup-json.md)')
+  .option('--json', 'required today: this command has no TTY mode yet')
+  .action(async (options, command) => {
+    if (!options.json) {
+      console.error('');
+      console.error('  capy-dev sync currently supports --json only (it is the onboarding tool\'s entry point).');
+      console.error('  A human syncing an already-initialized project should just run capy-dev.');
+      console.error('');
+      process.exitCode = 1;
+      return;
+    }
+    const { SyncCommand } = await import('./commands/syncCommand');
+    const globalOpts = command.optsWithGlobals();
+    const cmd = new SyncCommand({ envPath: globalOpts.envPath }, true);
+    await cmd.execute();
   });
 
 program

@@ -53,6 +53,7 @@ import {
   DeviceKeyWiringContext,
 } from '../auth/deviceKey/wiring';
 import type { DeviceKeyEnrollmentOptions } from './orgCreation';
+import { installGitHooks as installGitHooksShared } from '../git/installGitHooks';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -1212,77 +1213,13 @@ export class CapyCommand {
   }
 
   /**
-   * Install git hooks (post-checkout, post-merge).
-   * Idempotent: checks for existing marker before appending.
-   * No pre-push hook.
+   * Install git hooks (post-checkout, post-merge). Idempotent, no pre-push
+   * hook. Body extracted to `../git/installGitHooks` (byte-identical
+   * behavior) so `SetupCommand`'s `capy setup --json --confirm` apply path
+   * can install the same hooks without a second copy of this logic.
    */
   private installGitHooks(): void {
-    try {
-      const gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-      const hooksDir = `${gitDir}/hooks`;
-      const { mkdirSync, readFileSync: readFs, writeFileSync: writeFs, chmodSync } = require('fs');
-      const { existsSync: exists } = require('fs');
-
-      if (!exists(hooksDir)) {
-        mkdirSync(hooksDir, { recursive: true });
-      }
-
-      const MARKER = '# --- capy auto-sync (do not remove) ---';
-      const END_MARKER = '# --- end capy ---';
-      const escMarker = MARKER.replace(/[()]/g, '\\$&');
-      const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
-      const cmd = this.devMode ? 'capy-dev' : 'capy';
-
-      const hooks: Record<string, string> = {
-        'post-checkout': [
-          MARKER,
-          'if [ "$3" = "1" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-merge" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-apply" ]; then',
-          `  command -v ${cmd} >/dev/null 2>&1 && ${cmd} status`,
-          'fi',
-          END_MARKER,
-        ].join('\n'),
-        'post-merge': [
-          MARKER,
-          `command -v ${cmd} >/dev/null 2>&1 && ${cmd} status`,
-          END_MARKER,
-        ].join('\n'),
-      };
-
-      // Remove pre-push capy block if it exists
-      const prePushPath = `${hooksDir}/pre-push`;
-      if (exists(prePushPath)) {
-        const prePushContent = readFs(prePushPath, 'utf-8');
-        if (prePushContent.includes(MARKER)) {
-          const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
-          const updated = prePushContent.replace(re, '');
-          writeFs(prePushPath, updated, 'utf-8');
-        }
-      }
-
-      for (const [hookName, content] of Object.entries(hooks)) {
-        const hookPath = `${hooksDir}/${hookName}`;
-        let existing = '';
-        if (exists(hookPath)) {
-          existing = readFs(hookPath, 'utf-8');
-          if (existing.includes(MARKER)) {
-            // Replace existing capy block (e.g. switching between capy/capy-dev)
-            const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
-            const updated = existing.replace(re, `${content}\n`);
-            if (updated !== existing) {
-              writeFs(hookPath, updated, 'utf-8');
-            }
-            continue;
-          }
-        }
-
-        const shebang = existing ? '' : '#!/bin/sh\n';
-        const separator = existing && !existing.endsWith('\n') ? '\n' : '';
-        writeFs(hookPath, `${existing}${separator}${shebang}${content}\n`, 'utf-8');
-        chmodSync(hookPath, 0o755);
-      }
-    } catch {
-      // Not a git repo or hooks dir inaccessible — silently skip
-    }
+    installGitHooksShared(this.devMode);
   }
 
   /**
