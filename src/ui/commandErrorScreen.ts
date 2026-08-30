@@ -290,29 +290,46 @@ function quotaExceeded(error: CapyError, detail: string): CommandErrorData {
   const kind = error.details?.kind;
   const limit = error.details?.limit;
 
-  // The one-org-per-account cap is a rule, not a paywall, and an upgrade link
-  // under it would be an offer that cannot be taken.
+  const upgradeUrl = error.details?.upgrade_url;
+
+  // Creating an org is a PAYWALL now, not a hard cap (CAP-550/CAP-592: it is
+  // gated on the Team tier). This branch used to say "Each Capy account can
+  // own one organization", tell the user to go get invited, and deliberately
+  // withhold the upgrade link — so the paid gate reached the user with no way
+  // to pay. Vince, 2026-08-30: it should prompt them to pay.
   if (kind === 'organization') {
     return {
       code: ERROR_CODES.QUOTA_EXCEEDED,
-      title: 'Organization limit reached',
-      detail: detail || 'Each Capy account can own one organization.',
+      title: 'Upgrade required',
+      // The service sends the specific reason; fall back only if it didn't.
+      // COPY-FLAG: fallback line + remedies below are minimal-neutral
+      // placeholders. Vince approved the SERVICE strings on 2026-08-30 and
+      // the behaviour here ("prompt users to pay"), not this wording.
+      detail: detail || 'Creating an organization requires a Team plan.',
+      context: upgradeUrl ? [{ label: 'Upgrade', value: upgradeUrl }] : [],
       remedies: [
-        { text: 'To work in another org, ask its owner to invite you', command: 'capy invite' },
+        { text: 'Upgrade to add organizations' },
+        { text: 'Or, to work in an existing org, ask its owner to invite you', command: 'capy invite' },
       ],
     };
   }
 
   const noun = kind === 'project' ? 'Project' : 'Member';
+  // COPY-FLAG: "Capy Business" was the single paid tier and is retired under
+  // the Free/Solo/Team model (CAP-550). Neutral placeholder until Vince
+  // approves per-tier wording.
   const upgrade =
     kind === 'project'
-      ? 'Upgrade to Capy Business for unlimited projects'
-      : 'Upgrade to Capy Business to invite more members';
+      ? 'Upgrade your plan for more projects'
+      : 'Upgrade your plan to invite more members';
   return {
     code: ERROR_CODES.QUOTA_EXCEEDED,
     title: limit ? `${noun} limit reached (${limit}/org)` : `${noun} limit reached`,
     detail,
-    context: limit ? [{ label: 'Limit', value: `${limit} per organization` }] : [],
+    context: [
+      ...(limit ? [{ label: 'Limit', value: `${limit} per organization` }] : []),
+      ...(upgradeUrl ? [{ label: 'Upgrade', value: upgradeUrl }] : []),
+    ],
     remedies: [
       { text: upgrade },
       {
