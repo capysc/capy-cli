@@ -33,6 +33,15 @@ mock.module('../../src/config/globalConfig', () => ({
 mock.module('../../src/crypto/keyResolver', () => ({
   resolveProjectKey: mock(async () => 'mock-project-key'),
 }));
+mock.module('../../src/sync/freeSyncKeyResolver', () => ({
+  resolveFreeSyncProjectKey: mock(async () => 'mock-project-key'),
+}));
+mock.module('../../src/auth/deviceKey/grantResolver', () => ({
+  createGrantResolutionOps: mock(() => ({
+    fetchKeyEnc: mock(async () => ''),
+    coDecrypt: mock(async (_orgId: string, ciphertext: string) => ciphertext),
+  })),
+}));
 
 afterEach(() => {
   mock.restore();
@@ -44,6 +53,7 @@ import { FileManager } from '../../src/files/fileManager';
 import { AuthService } from '../../src/auth/authService';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { resolveProjectKey } from '../../src/crypto/keyResolver';
+import { resolveFreeSyncProjectKey } from '../../src/sync/freeSyncKeyResolver';
 import { ERROR_CODES } from '../../src/types/index';
 
 const MockProjectManager = ProjectManager as any;
@@ -51,6 +61,7 @@ const MockFileManager = FileManager as any;
 const MockAuthService = AuthService as any;
 const MockServiceClient = ServiceClient as any;
 const MockResolveProjectKey = resolveProjectKey as any;
+const MockResolveFreeSyncProjectKey = resolveFreeSyncProjectKey as any;
 
 const PROJECT_STATE = {
   initialized: true,
@@ -124,6 +135,7 @@ beforeEach(() => {
   MockAuthService.mockImplementation(() => mockAuthService);
   MockServiceClient.mockImplementation(() => mockServiceClient);
   MockResolveProjectKey.mockImplementation(async () => 'mock-project-key');
+  MockResolveFreeSyncProjectKey.mockImplementation(async () => 'mock-project-key');
 });
 
 afterEach(() => {
@@ -202,6 +214,13 @@ describe('SyncCommand — capy sync --json', () => {
       pulled_variables: 1,
     });
     expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+    expect(MockResolveFreeSyncProjectKey).toHaveBeenCalledWith(
+      'org_1',
+      'proj_default',
+      'user_1',
+      expect.objectContaining({ coDecrypt: expect.any(Function), wrapOuterLayer: expect.any(Function) }),
+      expect.objectContaining({ fetchKeyEnc: expect.any(Function), coDecrypt: expect.any(Function) }),
+    );
     expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
       { REMOTE_ONLY: 'authoritative-remote-value' },
       'mock-project-key',

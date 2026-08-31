@@ -21,8 +21,8 @@
 import { createConnection } from 'net';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
-import { getGlobalCapyDir } from '../../config/globalConfig';
-import { CapyError, ERROR_CODES } from '../../types/index';
+import { getGlobalCapyDir, readAuthSession } from '../../config/globalConfig';
+import { CapyError, ERROR_CODES, type SessionStore } from '../../types/index';
 
 export interface RuntimePairingRecord {
   readonly version: 1;
@@ -34,6 +34,13 @@ export interface RuntimePairingRecord {
 }
 
 export interface RuntimePairingHandle {
+  readonly socketPath: string;
+  readonly expiresAt: number;
+}
+
+export interface ActiveRuntimePairing {
+  readonly userId: string;
+  readonly userEmail: string;
   readonly socketPath: string;
   readonly expiresAt: number;
 }
@@ -64,6 +71,48 @@ export function readRuntimePairing(): RuntimePairingRecord | null {
   } catch {
     return null;
   }
+}
+
+function readMatchingPairingSession(userId: string): SessionStore | null {
+  try {
+    const session = readAuthSession(userId) as SessionStore | null;
+    return session?.version === 2 && session.user_id === userId ? session : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Return the already-usable runtime pair, if one exists. All three facts are
+ * required before `capy pair` may skip a new human ceremony:
+ *
+ *  - metadata binds this environment home to a user;
+ *  - that user's own persisted session agrees with the binding; and
+ *  - the in-memory daemon is live and its advertised grant has not expired.
+ *
+ * Stale metadata deliberately remains an account binding (see
+ * assertRuntimePairingUser), but is not an active pair. The command therefore
+ * starts a fresh device flow for the same user; a different user is still
+ * refused before their session can be written.
+ */
+export async function readActiveRuntimePairing(): Promise<ActiveRuntimePairing | null> {
+  const record = readRuntimePairing();
+  if (!record || record.expiresAt <= Date.now()) return null;
+  const session = readMatchingPairingSession(record.userId);
+  if (!session) return null;
+  const live = await import('../deviceKey/grantHolder')
+    .then(({ isGrantActive }) => isGrantActive(record.socketPath))
+    .catch(() => false);
+  return live
+    ? {
+        userId: record.userId,
+        userEmail: typeof session.user_email === 'string' && session.user_email.length > 0
+          ? session.user_email
+          : record.userId,
+        socketPath: record.socketPath,
+        expiresAt: record.expiresAt,
+      }
+    : null;
 }
 
 /**

@@ -15,6 +15,10 @@ mock.module('../../src/config/profileConfig', () => ({
   resolveActiveUrl: () => 'https://api.test.invalid',
 }));
 
+mock.module('../../src/auth/pairing/runtimePairing', () => ({
+  readActiveRuntimePairing: async () => null,
+}));
+
 // CAP-566 moved the SEAM, not the branching: the command drives the device
 // grant (deviceAuth.ts) instead of runPairCeremony. Everything these tests
 // assert about the command — the printed block, exit codes, --json shape, the
@@ -181,6 +185,37 @@ describe('PairCommand — rail always on', () => {
     await new PairCommand().execute({});
     expect(ceremonyCalls.length).toBeGreaterThan(0);
     expect(installCalls.length).toBe(1);
+  });
+});
+
+describe('PairCommand — already-active runtime', () => {
+  test('--json returns a coded success without starting either human ceremony', async () => {
+    const expiresAt = Date.now() + 600_000;
+    const readActivePairing = async () => ({
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt,
+    });
+
+    await new PairCommand(undefined, false, { readActivePairing }).execute({ json: true });
+
+    const parsed = JSON.parse(logs.join('\n'));
+    expect(parsed).toEqual({
+      ok: true,
+      code: ERROR_CODES.RUNTIME_PAIR_ALREADY_ACTIVE,
+      alreadyActive: true,
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt,
+      envVar: 'CAPY_DEVICE_KEY_GRANT_SOCKET',
+    });
+    expect(ceremonyCalls).toEqual([]);
+    expect(installCalls).toEqual([]);
+    expect(resolveKeyMaterialCalls).toEqual([]);
+    expect(spawnCalls).toEqual([]);
+    expect(logs.join('\n')).not.toContain('ABCD-1234');
   });
 });
 

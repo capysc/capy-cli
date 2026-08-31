@@ -58,6 +58,7 @@ import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
 import { keepOrigin } from '../ui/screens/keepScreens';
 import { renderTerminalQr } from '../ui/terminalQr';
+import { readActiveRuntimePairing, type ActiveRuntimePairing } from '../auth/pairing/runtimePairing';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -84,11 +85,25 @@ export interface PairCommandOptions {
   ttlMinutes?: number;
 }
 
+export interface PairCommandDependencies {
+  readonly readActivePairing?: () => Promise<ActiveRuntimePairing | null>;
+}
+
 export class PairCommand {
-  constructor(private apiUrl?: string, private devMode: boolean = false) {}
+  constructor(
+    private readonly apiUrl?: string,
+    private readonly devMode: boolean = false,
+    private readonly dependencies: PairCommandDependencies = {},
+  ) {}
 
   async execute(options: PairCommandOptions = {}): Promise<void> {
     if (!deviceKeysEnabled()) refuseFlagOff();
+
+    const active = await (this.dependencies.readActivePairing ?? readActiveRuntimePairing)();
+    if (active) {
+      this.reportAlreadyActive(active, options);
+      return;
+    }
 
     const serviceUrl = resolveActiveUrl(this.devMode);
 
@@ -159,6 +174,33 @@ export class PairCommand {
         return;
       }
     }
+  }
+
+  private reportAlreadyActive(active: ActiveRuntimePairing, options: PairCommandOptions): void {
+    if (options.json) {
+      console.log(
+        JSON.stringify(
+          {
+            ok: true,
+            code: ERROR_CODES.RUNTIME_PAIR_ALREADY_ACTIVE,
+            alreadyActive: true,
+            userId: active.userId,
+            userEmail: active.userEmail,
+            socketPath: active.socketPath,
+            expiresAt: active.expiresAt,
+            envVar: GRANT_SOCKET_ENV_VAR,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    console.log('');
+    console.log(`  \x1b[32mAlready paired as ${B(active.userEmail)}.\x1b[0m`);
+    console.log(`  This runtime pair is active through ${new Date(active.expiresAt).toISOString()}.`);
+    console.log('');
   }
 
   /**

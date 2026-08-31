@@ -466,6 +466,11 @@ export const ERROR_CODES = {
    * replacement so session discovery can never silently cross identities.
    */
   RUNTIME_PAIR_USER_MISMATCH: 'RUNTIME_PAIR_USER_MISMATCH',
+  /**
+   * Successful `capy pair` no-op: this environment home already has a
+   * matching persisted session and a live, unexpired in-memory grant.
+   */
+  RUNTIME_PAIR_ALREADY_ACTIVE: 'RUNTIME_PAIR_ALREADY_ACTIVE',
   // CAP-402 (client-side only). Two independent gates: one on where a
   // one-time recovery phrase may be RENDERED, one on whether Case A's
   // ephemeral-environment mint may be left half-finished on disk.

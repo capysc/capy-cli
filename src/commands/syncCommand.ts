@@ -33,6 +33,8 @@ import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { resolveBranchFromLocalState, branchesFromKeep } from '../core/branchResolver';
 import { writeKeepCache } from '../config/globalConfig';
 import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
+import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
+import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { AuthResult, CapyError, ERROR_CODES, KeepFile, ProjectState, setSyncKeepHash } from '../types/index';
 
@@ -164,7 +166,13 @@ export class SyncCommand {
 
     const { authResult, org, project } = context;
     const branch = SyncEngine.DEFAULT_BRANCH;
-    const encryptionKey = await resolveProjectKey(org.id, project.id, authResult.user_id!, this.keyServiceOps());
+    const encryptionKey = await resolveFreeSyncProjectKey(
+      org.id,
+      project.id,
+      authResult.user_id!,
+      this.keyServiceOps(),
+      createGrantResolutionOps(this.serviceClient, this.authService),
+    );
     const decryptData = await this.serviceClient.getDecryptData(project.id, branch, undefined, true);
     if (!decryptData.keep_file) {
       refuse(

@@ -27,10 +27,13 @@
  *      `/wrappers*` using the just-installed session and unwraps K_local
  *      locally, then starts the in-memory grant daemon (a THIRD real,
  *      detached process) and prints `{socketPath, ...}`.
- *   2. `dist/index.js run -- node -e '...'` — a SEPARATE process, with
- *      CAPY_DEVICE_KEY_GRANT_SOCKET pointed at that socket and no prior
- *      local.key/key.enc anywhere — decrypts a real secret using ONLY the
- *      unwrapped K_local and the session `pair` just wrote.
+ *   2. A SECOND `dist/index.js pair --json` process sharing the same HOME
+ *      returns the coded already-active success without starting either
+ *      human ceremony or replacing the daemon.
+ *   3. `dist/index.js run -- node -e '...'` — a SEPARATE process, with no
+ *      CAPY_DEVICE_KEY_GRANT_SOCKET and no prior local.key/key.enc anywhere —
+ *      discovers the persisted runtime pair and decrypts a real secret using
+ *      ONLY the unwrapped K_local and the session `pair` just wrote.
  *
  * Then walks the ENTIRE temp HOME tree and asserts no file named `local.key`
  * or `key.enc` exists anywhere under it — the literal proof that pairing a
@@ -267,7 +270,7 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     service = undefined;
   });
 
-  it('pair -> capy run resolves the real secret, session lands correctly, and NO local.key/key.enc file exists anywhere under HOME', async () => {
+  it('pair -> pair no-op -> capy run resolves the real secret without an exported socket or durable key material', async () => {
     home = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-home-'));
     service = startFakePairingService();
 
@@ -344,13 +347,29 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     expect(session.user_email).toBe(USER_EMAIL);
     expect(session.organizations).toEqual([{ id: ORG_ID, workos_org_id: WORKOS_ORG_ID, name: ORG_NAME }]);
 
+    // A rerun against the same runtime must not ask the human to authenticate
+    // or touch their device key again. The live daemon and its persisted
+    // account/session binding are already the complete authority.
+    const repeatedPair = await spawnCli(['pair', '--json'], home, home, service.url).done;
+    expect(repeatedPair.exitCode).toBe(0);
+    const repeatedJson = JSON.parse(repeatedPair.stdout.slice(repeatedPair.stdout.lastIndexOf('{')));
+    expect(repeatedJson).toMatchObject({
+      ok: true,
+      code: 'RUNTIME_PAIR_ALREADY_ACTIVE',
+      alreadyActive: true,
+      userId: USER_ID,
+      socketPath: announced.socketPath,
+      expiresAt: announced.expiresAt,
+    });
+    expect(repeatedPair.stdout).not.toContain('enter:');
+    expect(service.devices.size).toBe(1);
+
     projectDir = projectDirWithSecret(masterKey, 'shh-pair-e2e-secret');
     const run = spawnCli(
       ['run', '--', 'node', '-e', 'console.log(process.env.SECRET_VAR)'],
       projectDir,
       home,
       service.url,
-      { CAPY_DEVICE_KEY_GRANT_SOCKET: announced.socketPath },
     );
     const runResult = await run.done;
 

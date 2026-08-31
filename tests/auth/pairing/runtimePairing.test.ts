@@ -23,6 +23,7 @@ import {
   assertRuntimePairingUser,
   clearRuntimePairing,
   getRuntimePairingPath,
+  readActiveRuntimePairing,
   readRuntimePairing,
   registerRuntimePairing,
 } from '../../../src/auth/pairing/runtimePairing';
@@ -156,6 +157,131 @@ describe('runtime pairing registry', () => {
       });
       expect(first.stdout).not.toContain(K_LOCAL.toString('base64'));
       expect(second.stdout).not.toContain(K_LOCAL.toString('base64'));
+    } finally {
+      daemon.close();
+    }
+  });
+
+  test('a fresh free-sync process resolves through persisted pair metadata with no socket environment variable', async () => {
+    const syncKLocal = Buffer.alloc(32, 0x4c);
+    const daemon = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: syncKLocal },
+      30_000,
+    );
+    await listenGrantDaemonServer(daemon.server, daemon.socketPath);
+    try {
+      await registerRuntimePairing(USER_A, CREDENTIAL_A, daemon);
+      const source = [
+        "import { resolveFreeSyncProjectKey } from './src/sync/freeSyncKeyResolver.ts';",
+        "import { encryptMasterKey, masterKeyAAD, deriveProjectKey } from './src/crypto/keyManager.ts';",
+        "import { deriveLocalInnerKey } from './src/crypto/localKeyRoot.ts';",
+        `const user = '${USER_A}';`,
+        `const org = 'org_runtime_sync';`,
+        `const project = 'project_runtime_sync';`,
+        `const kLocal = Buffer.alloc(32, 0x4c);`,
+        `const masterKey = Buffer.alloc(32, 0x6b);`,
+        `const keyEnc = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(user, org));`,
+        `const key = await resolveFreeSyncProjectKey(org, project, user, {`,
+        `  coDecrypt: async () => { throw new Error('disk custody must not run'); },`,
+        `  wrapOuterLayer: async () => { throw new Error('disk custody must not run'); },`,
+        `}, {`,
+        `  fetchKeyEnc: async () => keyEnc,`,
+        `  coDecrypt: async (_orgId, ciphertext) => ciphertext,`,
+        `});`,
+        `if (key !== deriveProjectKey(masterKey, project, org)) process.exit(12);`,
+        `console.log('FREE_SYNC_PAIR_OK');`,
+      ].join('\n');
+      const result = await childResult(source);
+      expect({ status: result.status, stdout: result.stdout.trim(), stderr: result.stderr }).toEqual({
+        status: 0,
+        stdout: 'FREE_SYNC_PAIR_OK',
+        stderr: '',
+      });
+      expect(result.stdout).not.toContain(syncKLocal.toString('base64'));
+    } finally {
+      daemon.close();
+    }
+  });
+
+  test('a fresh free-sync process without runtime or disk custody fails closed', async () => {
+    const source = [
+      "import { resolveFreeSyncProjectKey } from './src/sync/freeSyncKeyResolver.ts';",
+      `const outcome = await resolveFreeSyncProjectKey('org_unavailable', 'project_unavailable', '${USER_A}', {`,
+      `  coDecrypt: async (_orgId, ciphertext) => ciphertext,`,
+      `  wrapOuterLayer: async (_orgId, plaintext) => plaintext,`,
+      `}, {`,
+      `  fetchKeyEnc: async () => { throw new Error('grant custody must not run'); },`,
+      `  coDecrypt: async (_orgId, ciphertext) => ciphertext,`,
+      `}).then(() => 'UNEXPECTED_SUCCESS').catch((error) => String(error?.code));`,
+      `console.log(outcome);`,
+    ].join('\n');
+    const result = await childResult(source);
+    expect({ status: result.status, stdout: result.stdout.trim(), stderr: result.stderr }).toEqual({
+      status: 0,
+      stdout: ERROR_CODES.PERMISSION_DENIED,
+      stderr: '',
+    });
+  });
+
+  test('reports active only when the bound user session and live unexpired daemon agree', async () => {
+    const daemon = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      30_000,
+    );
+    await listenGrantDaemonServer(daemon.server, daemon.socketPath);
+    try {
+      await registerRuntimePairing(USER_A, CREDENTIAL_A, daemon);
+      await installPairedSession({
+        user: { id: USER_A, email: 'a@example.com' },
+        refresh_token: 'refresh_a',
+        organizations: [],
+      });
+
+      expect(await readActiveRuntimePairing()).toEqual({
+        userId: USER_A,
+        userEmail: 'a@example.com',
+        socketPath: daemon.socketPath,
+        expiresAt: daemon.expiresAt,
+      });
+    } finally {
+      daemon.close();
+    }
+  });
+
+  test('an unavailable daemon is not active and therefore remains retryable', async () => {
+    await registerRuntimePairing(USER_A, CREDENTIAL_A, {
+      socketPath: '/tmp/capy-runtime-pair-unavailable.sock',
+      expiresAt: Date.now() + 30_000,
+    });
+    await installPairedSession({
+      user: { id: USER_A, email: 'a@example.com' },
+      refresh_token: 'refresh_a',
+      organizations: [],
+    });
+
+    expect(await readActiveRuntimePairing()).toBeNull();
+    expect(assertRuntimePairingUser(USER_A)?.userId).toBe(USER_A);
+  });
+
+  test('an expired record is not active even if its daemon still answers during reap grace', async () => {
+    const daemon = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      30_000,
+    );
+    await listenGrantDaemonServer(daemon.server, daemon.socketPath);
+    try {
+      await registerRuntimePairing(USER_A, CREDENTIAL_A, {
+        socketPath: daemon.socketPath,
+        expiresAt: Date.now() - 1,
+      });
+      await installPairedSession({
+        user: { id: USER_A, email: 'a@example.com' },
+        refresh_token: 'refresh_a',
+        organizations: [],
+      });
+
+      expect(await isGrantActive(daemon.socketPath)).toBe(true);
+      expect(await readActiveRuntimePairing()).toBeNull();
     } finally {
       daemon.close();
     }
