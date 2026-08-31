@@ -47,6 +47,7 @@ const K_LOCAL = Buffer.alloc(32, 0x5a);
 
 beforeEach(() => {
   rmSync(getGlobalCapyDir(), { recursive: true, force: true });
+  rmSync(join(tempHome, '.capy-dev'), { recursive: true, force: true });
 });
 
 afterAll(() => {
@@ -56,7 +57,7 @@ afterAll(() => {
   rmSync(tempCwd, { recursive: true, force: true });
 });
 
-async function childResult(source: string): Promise<{
+async function childResult(source: string, globalDirName = '.capy'): Promise<{
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
@@ -66,7 +67,7 @@ async function childResult(source: string): Promise<{
     env: {
       ...process.env,
       HOME: tempHome,
-      CAPY_GLOBAL_DIR_NAME: '.capy',
+      CAPY_GLOBAL_DIR_NAME: globalDirName,
       CAPY_DEVICE_KEY_GRANT_SOCKET: '',
     },
   });
@@ -125,15 +126,29 @@ describe('runtime pairing registry', () => {
     }
   });
 
-  test('two fresh processes sharing the protected home discover and use the live pair without an exported socket', async () => {
+  test('two fresh capy-dev processes sharing ~/.capy-dev discover and use the live pair without an exported socket', async () => {
     const daemon = createGrantDaemonServer(
       { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
       30_000,
     );
     await listenGrantDaemonServer(daemon.server, daemon.socketPath);
     try {
-      await registerRuntimePairing(USER_A, CREDENTIAL_A, daemon);
-      expect(configuredGrantSocketPath()).toBe(daemon.socketPath);
+      const registerSource = [
+        "import { registerRuntimePairing } from './src/auth/pairing/runtimePairing.ts';",
+        `await registerRuntimePairing('${USER_A}', '${CREDENTIAL_A}', {`,
+        `  socketPath: '${daemon.socketPath}',`,
+        `  expiresAt: ${daemon.expiresAt},`,
+        `});`,
+        `console.log('REGISTERED_DEV_PAIR');`,
+      ].join('\n');
+      const registered = await childResult(registerSource, '.capy-dev');
+      expect({ status: registered.status, stdout: registered.stdout.trim(), stderr: registered.stderr }).toEqual({
+        status: 0,
+        stdout: 'REGISTERED_DEV_PAIR',
+        stderr: '',
+      });
+      expect(existsSync(join(tempHome, '.capy-dev', 'auth', 'runtime-pair.json'))).toBe(true);
+      expect(existsSync(join(tempHome, '.capy', 'auth', 'runtime-pair.json'))).toBe(false);
 
       const source = [
         "import { configuredGrantSocketPath } from './src/auth/deviceKey/ephemeral.ts';",
@@ -144,7 +159,10 @@ describe('runtime pairing registry', () => {
         `if (grant.userId !== '${USER_A}' || grant.kLocal.length !== 32) process.exit(11);`,
         `console.log('PAIR_OK');`,
       ].join('\n');
-      const [first, second] = await Promise.all([childResult(source), childResult(source)]);
+      const [first, second] = await Promise.all([
+        childResult(source, '.capy-dev'),
+        childResult(source, '.capy-dev'),
+      ]);
       expect({ status: first.status, stdout: first.stdout.trim(), stderr: first.stderr }).toEqual({
         status: 0,
         stdout: 'PAIR_OK',

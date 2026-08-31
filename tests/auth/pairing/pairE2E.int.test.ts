@@ -117,9 +117,9 @@ function spawnCli(
 
 /**
  * PHASE 1 of the drive sequence. Watches a spawned `pair`'s stdout for the
- * printed bold user_code (the exact spec §4.2 block, now sourced from the
- * device-authorize response rather than Keep's own connection: "... and
- * enter:  <CODE>" — `printPairingBlock` in pairCommand.ts), looks up the
+ * printed bold user_code from the device-authorize response. The code is
+ * printed as either the prefilled-link confirmation ("matches: <CODE>") or
+ * the bare-URI compatibility fallback ("enter: <CODE>"), looks up the
  * matching device-authorization row in the fake service's registry, and
  * pushes a caller-supplied completion onto that device's poll queue —
  * standing in for a human completing the identity provider's device page.
@@ -127,7 +127,7 @@ function spawnCli(
 async function waitForDeviceUserCode(stdoutSoFar: () => string): Promise<string> {
   const codeDeadline = Date.now() + 10_000;
   while (Date.now() < codeDeadline) {
-    const match = stdoutSoFar().match(/enter:\s+\x1b\[1m([^\x1b]+)\x1b\[0m/);
+    const match = stdoutSoFar().match(/(?:enter:|matches:)\s+\x1b\[1m([^\x1b]+)\x1b\[0m/);
     if (match) return match[1];
     await Bun.sleep(20);
   }

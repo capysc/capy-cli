@@ -41,6 +41,11 @@ const AUTHORIZATION = {
 let authorizeImpl: () => Promise<any> = async () => AUTHORIZATION;
 mock.module('../../src/auth/pairing/deviceAuth', () => ({
   startDeviceAuthorization: async () => authorizeImpl(),
+  deviceVerificationUrl: (authorization: {
+    readonly verification_uri: string;
+    readonly verification_uri_complete?: string;
+  }) =>
+    authorization.verification_uri_complete?.trim() || authorization.verification_uri,
   awaitDeviceApproval: async (_url: string, authorization: any) => {
     ceremonyCalls.push({ authorization });
     return ceremonyImpl({ authorization });
