@@ -371,35 +371,46 @@ function renderDevLiveFirewall(error: CapyError): string {
   return lines.join('\n');
 }
 
+/**
+ * Headline + call to action per quota kind. Extracted as early returns rather
+ * than reassigned bindings so each kind reads as one complete answer.
+ */
+function quotaCopyFor(kind: unknown, limit: unknown): { headline: string; cta: string } {
+  const suffix = limit ? grey(` (${limit}/org)`) : '';
+  if (kind === 'organization') {
+    return {
+      headline: 'Upgrade required',
+      cta: 'Upgrade to add organizations',
+    };
+  }
+  if (kind === 'project') {
+    return {
+      headline: `Project limit reached${suffix}`,
+      cta: 'Upgrade your plan for more projects',
+    };
+  }
+  return {
+    headline: `Member limit reached${suffix}`,
+    cta: 'Upgrade your plan to invite more members',
+  };
+}
+
 function renderQuotaExceeded(error: CapyError): string {
   const kind = error.details?.kind;
   const limit = error.details?.limit;
   const upgradeUrl = error.details?.upgrade_url || 'https://admin.capy.sc/billing';
 
-  // The 1-org-per-user cap is a hard rule, not a paywall — render distinctly.
-  if (kind === 'organization') {
-    const lines = [
-      '',
-      `  ${bold('Organization limit reached')}`,
-      `  ${grey(error.message)}`,
-      '',
-      `  Each Capy account can own one organization. To work in another org,`,
-      `  ask its owner to invite you with ${bold('capy invite')}.`,
-      '',
-    ];
-    return lines.join('\n');
-  }
-
-  let headline: string;
-  let cta: string;
-  if (kind === 'project') {
-    headline = `Project limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
-    cta = 'Upgrade to Capy Business for unlimited projects';
-  } else {
-    // member
-    headline = `Member limit reached${limit ? grey(` (${limit}/org)`) : ''}`;
-    cta = 'Upgrade to Capy Business to invite more members';
-  }
+  // Creating an org is a PAYWALL now, not a hard rule (CAP-550/CAP-592 — it
+  // is gated on the Team tier). This branch used to return early WITHOUT the
+  // upgrade URL, so the paid gate reached the user with no way to pay.
+  // Vince, 2026-08-30: it should prompt them to pay. Falls through to the
+  // shared paywall render below.
+  //
+  // COPY-FLAG: headlines and CTAs here are minimal-neutral placeholders.
+  // "Capy Business" was the single paid tier and is retired under the
+  // Free/Solo/Team model. Vince approved the SERVICE strings on 2026-08-30
+  // and the behaviour, not this wording.
+  const { headline, cta } = quotaCopyFor(kind, limit);
   const lines = [
     '',
     `  ${bold(headline)}`,
