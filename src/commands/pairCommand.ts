@@ -63,6 +63,7 @@ import { grantKeyMaterialForPairedMachine } from '../auth/pairing/pairDeviceGran
 import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
 import { keepOrigin } from '../ui/screens/keepScreens';
+import { openScreen } from '../ui/openScreen';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { readActiveRuntimePairing, type ActiveRuntimePairing } from '../auth/pairing/runtimePairing';
 
@@ -117,7 +118,7 @@ export class PairCommand {
     // binding (codebase immutability rule).
     const runDeviceFlow = async (): Promise<{ authorization: DeviceAuthorization; result: DevicePollResult }> => {
       const authorization = await startDeviceAuthorization(serviceUrl);
-      this.printPairingBlock(authorization);
+      await this.printPairingBlock(authorization);
       return { authorization, result: await awaitDeviceApproval(serviceUrl, authorization) };
     };
 
@@ -227,7 +228,7 @@ export class PairCommand {
    * QR open AuthKit with the code prefilled. The code is still printed for
    * the confirmation comparison and for the bare-URI compatibility fallback.
    */
-  private printPairingBlock(authorization: DeviceAuthorization): void {
+  private async printPairingBlock(authorization: DeviceAuthorization): Promise<void> {
     // The verification URI comes from the AUTHORIZE response — it is WorkOS's
     // page now, not Keep's /pair, because the machine authenticates itself
     // rather than being handed a session (CAP-566). Never hardcoded: the IdP
@@ -240,6 +241,13 @@ export class PairCommand {
     console.log('');
     console.log(`  To sign this machine in, go to ${B(url)}`);
     console.log(codeInstruction);
+    // Open the COMPLETE WorkOS handoff ourselves rather than asking an agent
+    // to reconstruct it from terminal prose. Agent clients commonly redact or
+    // normalize high-entropy query values; dropping `user_code` turns the
+    // one-click confirmation into manual transcription. `openScreen` is
+    // best-effort and honors CAPY_WEB_NO_OPEN, so headless/cloud runtimes keep
+    // the printed URL and code fallback without failing the pairing flow.
+    await openScreen(url, { kind: 'handoff' });
     const qr = renderTerminalQr(url);
     if (qr) {
       console.log('');
