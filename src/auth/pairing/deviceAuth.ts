@@ -46,7 +46,21 @@ export interface DevicePollComplete {
 }
 export type DevicePollResult = DevicePollPending | DevicePollDenied | DevicePollComplete;
 
-/** Starts the flow. The returned `user_code` is what the human types; `device_code` is never shown. */
+/**
+ * Selects the browser handoff WorkOS intends the user to open.
+ *
+ * `verification_uri_complete` carries `user_code` in the URL, so AuthKit
+ * opens on the confirmation step instead of asking the human to transcribe
+ * it. The bare URI remains a compatibility fallback for an older or partial
+ * authorization response; the separately displayed code still makes that
+ * fallback usable and preserves the anti-phishing comparison.
+ */
+export function deviceVerificationUrl(authorization: DeviceAuthorization): string {
+  const complete = authorization.verification_uri_complete?.trim();
+  return complete ? complete : authorization.verification_uri;
+}
+
+/** Starts the flow. The returned `user_code` is what the human confirms; `device_code` is never shown. */
 export async function startDeviceAuthorization(apiUrl: string): Promise<DeviceAuthorization> {
   const response = await fetch(`${apiUrl}/auth/device/authorize`, {
     method: 'POST',

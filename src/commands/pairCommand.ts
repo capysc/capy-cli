@@ -51,7 +51,13 @@ import { ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
-import { startDeviceAuthorization, awaitDeviceApproval, type DeviceAuthorization, type DevicePollResult } from '../auth/pairing/deviceAuth';
+import {
+  startDeviceAuthorization,
+  awaitDeviceApproval,
+  deviceVerificationUrl,
+  type DeviceAuthorization,
+  type DevicePollResult,
+} from '../auth/pairing/deviceAuth';
 import { installPairedSession } from '../auth/pairing/installPairedSession';
 import { grantKeyMaterialForPairedMachine } from '../auth/pairing/pairDeviceGrant';
 import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
@@ -204,7 +210,7 @@ export class PairCommand {
   }
 
   /**
-   * The spec's exact terminal UX (§4.2). No TTY-gating for the URL/code
+   * The device-grant terminal UX. No TTY-gating for the URL/code
    * themselves — spec §5's documented bright-line exception: this code is a
    * claim ticket, not a credential, so printing it unconditionally is safe
    * (unlike `capy transport`'s TRANSPORT_CODE_UNSAFE_SURFACE class of
@@ -216,21 +222,24 @@ export class PairCommand {
    * TTY, no NO_COLOR-style opt-out, wide/tall enough for this URL's
    * encoding). It never carries information the text above doesn't already
    * have, and it is never the only way to reach the code — see
-   * `../ui/terminalQr.ts`'s file header. It cannot encode the user code
-   * itself: the `/pair` page (packages/ui/screens/pair) has no
-   * query-param-prefill contract today, only a manually-typed code field,
-   * so a `?code=` URL would silently do nothing on the other end.
+   * `../ui/terminalQr.ts`'s file header. WorkOS's
+   * `verification_uri_complete` includes the code, so both the text link and
+   * QR open AuthKit with the code prefilled. The code is still printed for
+   * the confirmation comparison and for the bare-URI compatibility fallback.
    */
   private printPairingBlock(authorization: DeviceAuthorization): void {
     // The verification URI comes from the AUTHORIZE response — it is WorkOS's
     // page now, not Keep's /pair, because the machine authenticates itself
     // rather than being handed a session (CAP-566). Never hardcoded: the IdP
     // owns that URL and is entitled to change it.
-    const url = authorization.verification_uri;
+    const url = deviceVerificationUrl(authorization);
     const userCode = authorization.user_code;
+    const codeInstruction = authorization.verification_uri_complete?.trim()
+      ? `  The code is prefilled. Confirm it matches: ${B(userCode)}`
+      : `  If prompted, enter: ${B(userCode)}`;
     console.log('');
     console.log(`  To sign this machine in, go to ${B(url)}`);
-    console.log(`  and enter:  ${B(userCode)}`);
+    console.log(codeInstruction);
     const qr = renderTerminalQr(url);
     if (qr) {
       console.log('');
