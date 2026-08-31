@@ -332,8 +332,8 @@ describe('SetupCommand — apply (capy setup --json --confirm <hash>)', () => {
 
 describe('SetupCommand — billing-authoritative free onboarding', () => {
   function useFreeDefaultProject(): void {
-    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false }));
-    mockServiceClient.getBillingStatus = mock(async () => ({
+    mockProjectManager.detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false }));
+    mockServiceClient.getBillingStatus.mockImplementation(async () => ({
       tier: 'free',
       grandfathered: false,
       status: null,
@@ -341,21 +341,19 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
       member_count: 1,
       project_count: 1,
     }));
-    mockServiceClient.listProjects = mock(async () => [{ id: 'project_default', name: 'default', organization_id: ORG.id }]);
+    mockServiceClient.listProjects.mockImplementation(async () => [{ id: 'project_default', name: 'default', organization_id: ORG.id }]);
   }
 
   async function planHash(): Promise<string> {
     await new SetupCommand().execute({});
-    const out = parsedOutput();
-    logs.length = 0;
-    return out.plan_hash;
+    return JSON.parse(logs.at(-1)!).plan_hash;
   }
 
   test('remote marker wins over local values and the plan forbids local keep.lock', async () => {
     useFreeDefaultProject();
-    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
-    mockFileManager.readEnvFile = mock(() => ({ STALE_LOCAL: 'old' }));
-    mockServiceClient.getDecryptData = mock(async () => ({
+    mockProjectManager.detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
+    mockFileManager.readEnvFile.mockImplementation(() => ({ STALE_LOCAL: 'old' }));
+    mockServiceClient.getDecryptData.mockImplementation(async () => ({
       env_content: '',
       decrypt_key: '',
       expires_at: new Date().toISOString(),
@@ -370,14 +368,42 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
     expect(out.will_write).toEqual(['.env']);
   });
 
-  test('local-only root .env pushes through the canonical corpus without writing keep.lock', async () => {
+  test('remote fetch applies without ever materializing the authoritative remote keep.lock locally', async () => {
     useFreeDefaultProject();
-    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
-    mockFileManager.readEnvFile = mock(() => ({ API_KEY: 'secret' }));
+    mockProjectManager.detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
+    mockFileManager.readEnvFile.mockImplementation(() => ({ STALE_LOCAL: 'old' }));
+    mockServiceClient.getDecryptData.mockImplementation(async () => ({
+      env_content: 'REMOTE_ONLY=encrypted',
+      decrypt_key: '',
+      expires_at: new Date().toISOString(),
+      keep_file: JSON.stringify({
+        version: '3.0',
+        org_id: ORG.id,
+        project_id: 'project_default',
+        project_name: 'default',
+        variables: { REMOTE_ONLY: [] },
+      }),
+    }));
+    mockFileManager.parseEnvContent.mockImplementation(() => ({ REMOTE_ONLY: 'encrypted' }));
     const hash = await planHash();
 
     await new SetupCommand().execute({ confirm: hash });
-    const out = parsedOutput();
+    const out = JSON.parse(logs.at(-1)!);
+    expect(out.sync_mode).toBe('free');
+    expect(out.sync_action).toBe('fetch_remote');
+    expect(out.keep_lock_path).toBeNull();
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+    expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledTimes(1);
+  });
+
+  test('local-only root .env pushes through the canonical corpus without writing keep.lock', async () => {
+    useFreeDefaultProject();
+    mockProjectManager.detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
+    mockFileManager.readEnvFile.mockImplementation(() => ({ API_KEY: 'secret' }));
+    const hash = await planHash();
+
+    await new SetupCommand().execute({ confirm: hash });
+    const out = JSON.parse(logs.at(-1)!);
     expect(out.ok).toBe(true);
     expect(out.sync_action).toBe('push_root_env');
     expect(out.keep_lock_path).toBeNull();
@@ -391,7 +417,7 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
     const hash = await planHash();
 
     await new SetupCommand().execute({ confirm: hash });
-    const out = parsedOutput();
+    const out = JSON.parse(logs.at(-1)!);
     expect(out.ok).toBe(true);
     expect(out.sync_action).toBe('create_empty_remote_marker');
     expect(out.keep_lock_path).toBeNull();
@@ -403,11 +429,29 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
 
   test('a missing default project refuses instead of silently inferring paid mode', async () => {
     useFreeDefaultProject();
-    mockServiceClient.listProjects = mock(async () => []);
+    mockServiceClient.listProjects.mockImplementation(async () => []);
     await new SetupCommand().execute({});
     const out = parsedOutput();
     expect(out.ok).toBe(false);
     expect(out.code).toBe(ERROR_CODES.SERVICE_ERROR);
     expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+  });
+
+  test('grandfathered free billing delegates to the unchanged paid manifest executor', async () => {
+    mockServiceClient.getBillingStatus.mockImplementation(async () => ({
+      tier: 'free',
+      grandfathered: true,
+      status: null,
+      seats: null,
+      member_count: 1,
+      project_count: 0,
+    }));
+    const hash = await planHash();
+
+    await new SetupCommand().execute({ confirm: hash });
+    const out = JSON.parse(logs.at(-1)!);
+    expect(out.keep_lock_path).toBe('keep.lock');
+    expect(mockFileManager.writeKeepFile).toHaveBeenCalledTimes(1);
+    expect(mockServiceClient.getDecryptData).not.toHaveBeenCalled();
   });
 });

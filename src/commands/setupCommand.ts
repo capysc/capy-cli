@@ -71,6 +71,16 @@ interface SetupPlanFacts {
   readonly remoteVariableNames: readonly string[];
 }
 
+/** Immutable equivalent of Array#sort's default UTF-16 ordering. */
+function sortedStrings(values: readonly string[]): readonly string[] {
+  return values.reduce<readonly string[]>((sorted, value) => {
+    const insertionIndex = sorted.findIndex((candidate) => candidate > value);
+    return insertionIndex === -1
+      ? [...sorted, value]
+      : [...sorted.slice(0, insertionIndex), value, ...sorted.slice(insertionIndex)];
+  }, []);
+}
+
 /** Fixed key order, written out rather than sorted generically — see docs/cli-setup-json.md's "plan_hash: what it covers". */
 function canonicalPlanInput(cwd: string, plan: SetupPlanFacts): string {
   return JSON.stringify({
@@ -81,10 +91,10 @@ function canonicalPlanInput(cwd: string, plan: SetupPlanFacts): string {
     project_id: plan.project.status === 'existing' ? plan.project.id : null,
     project_name: plan.project.name,
     branch: plan.branch,
-    env_variable_names: [...plan.envVariableNames].sort(),
+    env_variable_names: sortedStrings(plan.envVariableNames),
     sync_mode: plan.syncMode,
     sync_action: plan.syncAction,
-    remote_variable_names: [...plan.remoteVariableNames].sort(),
+    remote_variable_names: sortedStrings(plan.remoteVariableNames),
   });
 }
 
@@ -249,7 +259,7 @@ export class SetupCommand {
 
     const branch = SyncEngine.DEFAULT_BRANCH;
     const localEnv = this.fileManager.readEnvFile(this.cliOptions.envPath);
-    const envVariableNames = Object.keys(localEnv).sort();
+    const envVariableNames = sortedStrings(Object.keys(localEnv));
     const authority = resolveBillingSyncAuthority(
       billingOutcome.value,
       org.id,
@@ -268,7 +278,7 @@ export class SetupCommand {
     const remoteKeep = remoteObservation.value?.keep_file
       ? JSON.parse(remoteObservation.value.keep_file) as KeepFile
       : undefined;
-    const remoteVariableNames = Object.keys(remoteKeep?.variables ?? {}).sort();
+    const remoteVariableNames = sortedStrings(Object.keys(remoteKeep?.variables ?? {}));
     const rootEnvExists = this.cliOptions.envPath
       ? existsSync(this.cliOptions.envPath)
       : projectState.hasEnvFile;
