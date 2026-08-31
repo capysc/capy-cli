@@ -27,6 +27,9 @@ mock.module('../../src/sync/syncEngine', () => {
 mock.module('../../src/git/installGitHooks', () => ({
   installGitHooks: mock(() => undefined),
 }));
+mock.module('../../src/config/globalConfig', () => ({
+  writeKeepCache: mock(() => undefined),
+}));
 mock.module('../../src/crypto/keyResolver', () => ({
   resolveProjectKey: mock(async () => 'mock-project-key'),
 }));
@@ -101,6 +104,15 @@ beforeEach(() => {
   };
   mockServiceClient = {
     setTokenProvider: mock(() => undefined),
+    getBillingStatus: mock(async () => ({
+      tier: 'free',
+      grandfathered: false,
+      status: null,
+      seats: null,
+      member_count: 1,
+      project_count: 1,
+    })),
+    listProjects: mock(async () => [{ id: 'proj_default', name: 'default', organization_id: 'org_1' }]),
     listBranches: mock(async () => [{ id: 'b1', name: 'development', project_id: 'proj_1', is_protected: false }]),
     getDecryptData: mock(async () => ({ env_content: '', decrypt_key: '', expires_at: new Date().toISOString() })),
     coDecrypt: mock(async () => ({ plaintext: '' })),
@@ -125,12 +137,106 @@ function parsedOutput(): any {
 }
 
 describe('SyncCommand — capy sync --json', () => {
-  test('no keep.lock: SYNC_NOT_INITIALIZED, exit 1, remedy points at capy setup --json', async () => {
+  test('no keep.lock + paid billing: retains manifest initialization refusal', async () => {
     mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false }));
+    mockProjectManager.readSyncState = mock(() => ({
+      last_sync: '',
+      synced_variables: [],
+      user_id: 'user_1',
+      org_id: 'org_1',
+    }));
+    mockServiceClient.getBillingStatus = mock(async () => ({
+      tier: 'business',
+      grandfathered: false,
+      status: 'active',
+      seats: 2,
+      member_count: 2,
+      project_count: 1,
+    }));
     await new SyncCommand().execute();
     const out = parsedOutput();
     expect(out).toEqual({ ok: false, code: ERROR_CODES.SYNC_NOT_INITIALIZED, detail: expect.any(String), remedy: 'capy setup --json' });
     expect(process.exitCode).toBe(1);
+    expect(mockServiceClient.listProjects).not.toHaveBeenCalled();
+  });
+
+  test('no keep.lock + free billing: pulls the authoritative default-project snapshot without writing keep.lock', async () => {
+    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
+    mockProjectManager.getEnvPath = mock(() => __filename);
+    mockProjectManager.readSyncState = mock(() => ({
+      last_sync: '2026-08-30T00:00:00.000Z',
+      synced_variables: ['LOCAL_ONLY'],
+      user_id: 'user_1',
+      org_id: 'org_1',
+      project_id: 'proj_default',
+      project_name: 'default',
+      sync_mode: 'free',
+    }));
+    mockFileManager.readEnvMeta = mock(() => ({ org_id: 'org_1', project_id: 'proj_default', branch: 'development' }));
+    mockFileManager.readEnvFile = mock(() => ({ LOCAL_ONLY: 'stale-local-value' }));
+    mockFileManager.parseEnvContent = mock(() => ({ REMOTE_ONLY: 'capy:rid:ciphertext' }));
+    mockFileManager.decryptValue = mock(() => 'authoritative-remote-value');
+    mockServiceClient.getDecryptData = mock(async () => ({
+      env_content: 'REMOTE_ONLY=capy:rid:ciphertext\n',
+      decrypt_key: '',
+      expires_at: new Date().toISOString(),
+      keep_file: JSON.stringify({
+        version: '3.0',
+        org_id: 'org_1',
+        project_id: 'proj_default',
+        project_name: 'default',
+        variables: { REMOTE_ONLY: [{ resource_id: 'rid', value_hash: 'hash', branch: 'development' }] },
+      }),
+    }));
+
+    await new SyncCommand().execute();
+
+    const out = parsedOutput();
+    expect(out).toMatchObject({
+      ok: true,
+      action: 'sync',
+      sync_mode: 'free',
+      sync_action: 'fetch_remote',
+      branch: 'development',
+      keep_lock_path: null,
+      pulled_variables: 1,
+    });
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+    expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
+      { REMOTE_ONLY: 'authoritative-remote-value' },
+      'mock-project-key',
+      undefined,
+      expect.objectContaining({ project_id: 'proj_default', project_name: 'default' }),
+      'development',
+    );
+    expect(mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
+      org_id: 'org_1',
+      project_id: 'proj_default',
+      project_name: 'default',
+      sync_mode: 'free',
+      synced_variables: ['REMOTE_ONLY'],
+    }));
+  });
+
+  test('no keep.lock + free billing but no remote marker: refuses because first sync is incomplete', async () => {
+    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false }));
+    mockProjectManager.readSyncState = mock(() => ({
+      last_sync: '',
+      synced_variables: [],
+      user_id: 'user_1',
+      org_id: 'org_1',
+      sync_mode: 'free',
+    }));
+
+    await new SyncCommand().execute();
+
+    expect(parsedOutput()).toEqual({
+      ok: false,
+      code: ERROR_CODES.SYNC_NOT_INITIALIZED,
+      detail: 'the default project has not completed its first sync',
+      remedy: 'capy setup --json',
+    });
+    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
   });
 
   test('clean pull, no local .env: succeeds, reports pulled_variables and zero drift', async () => {

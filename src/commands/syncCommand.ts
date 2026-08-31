@@ -1,7 +1,8 @@
 /**
- * `capy sync --json` — docs/cli-setup-json.md. JSON-mode sync for a project
- * that already has a `keep.lock` — the counterpart to `capy setup --json`'s
- * plan/confirm for an uninitialized one. No TTY, no browser, no `human()`.
+ * `capy sync --json` — docs/cli-setup-json.md. JSON-mode sync for either an
+ * existing paid/project-aware keep.lock or the free account's authoritative
+ * remote default project. It is the counterpart to `capy setup --json`'s
+ * first-sync plan/confirm. No TTY, no browser, no `human()`.
  *
  * NOT a root `--json` flag on bare `capy`, despite `docs/cli-setup-json.md`'s
  * original design: Commander 11 (this CLI's version, `package.json`)
@@ -16,11 +17,10 @@
  * `capy sync --json` gets the identical JSON contract as its own new,
  * uncontested subcommand instead — see the spec doc's amendment note.
  *
- * Deliberately conservative: an ordinary pull with no local drift needs no
- * consent gate (matches what bare `capy` already does today for a clean
- * sync), but ANY local `.env` value that disagrees with what Keep just
- * returned refuses `SYNC_CONFLICT` rather than guessing which side should
- * win — there is no picker and no merge screen under `--json`.
+ * Paid/project-aware sync stays deliberately conservative: any local `.env`
+ * value that disagrees with Keep refuses `SYNC_CONFLICT`. Free sync uses its
+ * simpler contract: pull means replace local with remote, and no local
+ * keep.lock is created. Billing — never file presence — selects the mode.
  */
 import { existsSync } from 'fs';
 import { ProjectManager } from '../core/projectManager';
@@ -31,8 +31,10 @@ import { SyncEngine } from '../sync/syncEngine';
 import { installGitHooks } from '../git/installGitHooks';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { resolveBranchFromLocalState, branchesFromKeep } from '../core/branchResolver';
+import { writeKeepCache } from '../config/globalConfig';
+import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
-import { CapyError, ERROR_CODES, KeepFile, ProjectState, setSyncKeepHash } from '../types/index';
+import { AuthResult, CapyError, ERROR_CODES, KeepFile, ProjectState, setSyncKeepHash } from '../types/index';
 
 export interface SyncCommandOptions {
   readonly envPath?: string;
@@ -56,6 +58,12 @@ function detailOf(err: unknown): string {
 }
 
 type BranchResolution = { readonly ok: true; readonly branch: string } | { readonly ok: false; readonly code: string; readonly detail: string; readonly needsInput?: boolean };
+
+interface FreeSyncContext {
+  readonly authResult: AuthResult;
+  readonly org: { readonly id: string; readonly name: string };
+  readonly project: { readonly id: string; readonly name: string; readonly organization_id: string };
+}
 
 export class SyncCommand {
   private readonly projectManager: ProjectManager;
@@ -85,7 +93,11 @@ export class SyncCommand {
   async execute(): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
-      refuse(ERROR_CODES.SYNC_NOT_INITIALIZED, 'no keep.lock in this directory', { remedy: 'capy setup --json' });
+      try {
+        await this.syncFreeWithoutLocalKeep();
+      } catch (err) {
+        refuse(codeOf(err), detailOf(err));
+      }
       return;
     }
 
@@ -94,6 +106,121 @@ export class SyncCommand {
     } catch (err) {
       refuse(codeOf(err), detailOf(err));
     }
+  }
+
+  /**
+   * Resolve the free personal-environment identity without treating the
+   * absence of keep.lock as evidence of entitlement. Billing is queried
+   * first and is the only mode authority; paid accounts retain the existing
+   * manifest-initialization refusal below.
+   */
+  private async resolveFreeContext(): Promise<FreeSyncContext | null> {
+    const syncState = this.projectManager.readSyncState();
+    const envMeta = this.fileManager.readEnvMeta(this.cliOptions.envPath);
+    const orgHint = syncState?.org_id ?? envMeta.org_id;
+    if (syncState?.user_id) this.authService.setSessionUserId(syncState.user_id);
+
+    const authResult = await this.authService.authenticateSilent(orgHint);
+    if (!authResult.success || !authResult.user_id) {
+      throw new CapyError(authResult.error ?? 'no valid session on this machine', ERROR_CODES.AUTH_FAILED);
+    }
+
+    const billing = await this.serviceClient.getBillingStatus();
+    if (billing.tier === 'business' || billing.grandfathered) return null;
+
+    const orgId = orgHint
+      ?? authResult.organization_id
+      ?? (authResult.organizations?.length === 1 ? authResult.organizations[0]?.id : undefined);
+    if (!orgId) {
+      throw new CapyError('could not determine the active organization for free sync', ERROR_CODES.ORG_AMBIGUOUS);
+    }
+
+    const projects = await this.serviceClient.listProjects();
+    const project = projects.find((candidate) => candidate.organization_id === orgId && candidate.name === 'default');
+    if (!project) {
+      throw new CapyError(
+        'free sync requires the server-provisioned default project; run capy setup --json',
+        ERROR_CODES.PROJECT_NOT_FOUND,
+      );
+    }
+
+    const authority = resolveBillingSyncAuthority(billing, orgId, project, SyncEngine.DEFAULT_BRANCH);
+    if (authority.mode !== 'free') return null;
+    const orgName = authResult.organizations?.find((candidate) => candidate.id === orgId)?.name ?? orgId;
+    return { authResult, org: { id: orgId, name: orgName }, project };
+  }
+
+  /**
+   * Free default-project pull. The remote keep is authoritative, but remains
+   * remote: this replaces local `.env` and runtime metadata without ever
+   * creating a local keep.lock or a second conflict corpus.
+   */
+  private async syncFreeWithoutLocalKeep(): Promise<void> {
+    const context = await this.resolveFreeContext();
+    if (!context) {
+      refuse(ERROR_CODES.SYNC_NOT_INITIALIZED, 'no keep.lock in this directory', { remedy: 'capy setup --json' });
+      return;
+    }
+
+    const { authResult, org, project } = context;
+    const branch = SyncEngine.DEFAULT_BRANCH;
+    const encryptionKey = await resolveProjectKey(org.id, project.id, authResult.user_id!, this.keyServiceOps());
+    const decryptData = await this.serviceClient.getDecryptData(project.id, branch, undefined, true);
+    if (!decryptData.keep_file) {
+      refuse(
+        ERROR_CODES.SYNC_NOT_INITIALIZED,
+        'the default project has not completed its first sync',
+        { remedy: 'capy setup --json' },
+      );
+      return;
+    }
+
+    const remoteKeep: KeepFile = {
+      ...(JSON.parse(decryptData.keep_file) as KeepFile),
+      org_id: org.id,
+      project_id: project.id,
+      project_name: project.name,
+    };
+    const remotePlaintext = Object.fromEntries(
+      Object.entries(this.fileManager.parseEnvContent(decryptData.env_content ?? ''))
+        .flatMap(([name, value]) => {
+          try {
+            return [[name, this.fileManager.decryptValue(value, encryptionKey)] as const];
+          } catch {
+            return [];
+          }
+        }),
+    );
+    const keepHash = SyncEngine.computeKeepHash(remoteKeep, branch);
+
+    this.projectManager.writeActiveBranch(branch);
+    this.fileManager.ensureCapyGitignore();
+    this.fileManager.writeEncryptedEnvFile(remotePlaintext, encryptionKey, this.cliOptions.envPath, remoteKeep, branch);
+    this.fileManager.writeSyncState({
+      last_sync: new Date().toISOString(),
+      synced_variables: Object.keys(remotePlaintext),
+      user_id: authResult.user_id,
+      org_id: org.id,
+      project_id: project.id,
+      project_name: project.name,
+      sync_mode: 'free',
+      keep_hash: setSyncKeepHash(this.projectManager.readSyncState(), branch, keepHash),
+    });
+    writeKeepCache(org.id, project.id, keepHash, decryptData.env_content ?? '');
+    installGitHooks(this.devMode);
+
+    printResult({
+      ok: true,
+      action: 'sync',
+      sync_mode: 'free',
+      sync_action: 'fetch_remote',
+      org,
+      project: { id: project.id, name: project.name },
+      branch,
+      keep_lock_path: null,
+      pulled_variables: Object.keys(remotePlaintext).length,
+      local_drift_resolved: 0,
+    });
   }
 
   /**
@@ -183,17 +310,17 @@ export class SyncCommand {
       ? { ...(JSON.parse(decryptData.keep_file) as KeepFile), org_id: orgId, project_id: projectId, project_name: projectState.projectName ?? '' }
       : { version: '3.0', org_id: orgId, project_id: projectId, project_name: projectState.projectName ?? '', variables: {} };
 
-    const serverPlaintext: Record<string, string> = {};
-    if (decryptData.env_content) {
-      const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-      for (const [key, value] of Object.entries(encrypted)) {
-        try {
-          serverPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
-        } catch {
-          // Not decryptable with this key (no variable-level permission) — same skip `bootstrapExistingProject` makes.
-        }
-      }
-    }
+    const serverPlaintext: Readonly<Record<string, string>> = Object.fromEntries(
+      Object.entries(this.fileManager.parseEnvContent(decryptData.env_content ?? ''))
+        .flatMap(([key, value]) => {
+          try {
+            return [[key, this.fileManager.decryptValue(value, encryptionKey)] as const];
+          } catch {
+            // Not decryptable with this key (no variable-level permission) — same skip `bootstrapExistingProject` makes.
+            return [];
+          }
+        }),
+    );
 
     // Local drift check: anything on disk that disagrees with what Keep just
     // returned is a decision this sync has no consent gate to make blind.
