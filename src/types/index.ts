@@ -398,6 +398,13 @@ export const ERROR_CODES = {
   NO_MANAGED_KEYS: 'NO_MANAGED_KEYS',
   /** The branch has no variables at all yet. */
   NO_VARIABLES: 'NO_VARIABLES',
+  /**
+   * A free lock-less project has neither a local nor remote environment yet.
+   * The first secret operation must stop before intake and obtain explicit
+   * approval to create `.env`; retry with the coded `--create-env` remedy.
+   * Client-side decision only — never emitted by capy-service.
+   */
+  FIRST_SECRET_ENV_REQUIRED: 'FIRST_SECRET_ENV_REQUIRED',
   /** The named variable is not in the environment on this branch. */
   VARIABLE_NOT_FOUND: 'VARIABLE_NOT_FOUND',
   /** No connector integrations are registered in this build. */
