@@ -176,6 +176,22 @@ async function ensureFreshToken(creds: WorkOSCredentials, nonTty?: boolean): Pro
 }
 
 /**
+ * The one way in. Never signed in and signed in but stale are the same
+ * problem wearing different clothes, and both end at the same browser.
+ *
+ * They were separate once, and the split was the bug: the no-credentials case
+ * exited with "run `workos auth login`" while the expired case ran that login
+ * itself. A user who had simply never signed in — or who had, and whose
+ * credential file was later removed — got told to do by hand the exact thing
+ * the connector was capable of doing for them.
+ */
+async function acquireToken(nonTty?: boolean): Promise<string> {
+  const creds = readStoredCredentials();
+  if (!creds) return loginAndReadToken(nonTty);
+  return ensureFreshToken(creds, nonTty);
+}
+
+/**
  * Re-establish the WorkOS session by running the provider's own login, then
  * read the credential it wrote.
  *
@@ -184,14 +200,17 @@ async function ensureFreshToken(creds: WorkOSCredentials, nonTty?: boolean): Pro
  * nobody to answer it.
  */
 async function loginAndReadToken(nonTty?: boolean): Promise<string> {
+  // Wording covers both callers: never signed in, and signed in but stale.
+  // Naming the wrong one sends the user looking for a session that was never
+  // there, or makes them think they have to sign out first.
   if (!isInteractive(nonTty)) {
     refuseNonInteractive(
-      'your WorkOS session has expired and renewing it needs a browser sign-in',
+      'Capy needs a WorkOS session and getting one needs a browser sign-in',
       'Run `workos auth login`, then run this again.',
     );
   }
 
-  console.log(`\n  Your WorkOS session has expired. Opening ${B('workos auth login')}.`);
+  console.log(`\n  Capy needs a WorkOS session. Opening ${B('workos auth login')}.`);
   const result = spawnSync('workos', ['auth', 'login'], { stdio: 'inherit' });
   if (result.status !== 0) {
     console.error(`\n  ${B('workos auth login')} failed or was cancelled. Nothing was changed.\n`);
@@ -718,13 +737,7 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
     process.exit(1);
   }
 
-  const creds = readStoredCredentials();
-  if (!creds) {
-    console.error(`\n  ${WORKOS_NOT_LOGGED_IN.title}`);
-    console.error(`  Run ${B(WORKOS_NOT_LOGGED_IN.remedy!)} and try again.\n`);
-    process.exit(1);
-  }
-  const token = await ensureFreshToken(creds, opts.nonTty);
+  const token = await acquireToken(opts.nonTty);
   const target = await resolveTarget(ctx, token, opts.nonTty);
 
   const current = ctx.localPlaintext[varName];
@@ -768,13 +781,7 @@ async function rotate(
   previous: ConnectorMetadata,
   opts: RotateOpts,
 ): Promise<RotateResult> {
-  const creds = readStoredCredentials();
-  if (!creds) {
-    console.error(`\n  ${WORKOS_NOT_LOGGED_IN.title}`);
-    console.error(`  Run ${B(WORKOS_NOT_LOGGED_IN.remedy!)} and try again.\n`);
-    process.exit(1);
-  }
-  const token = await ensureFreshToken(creds, opts.nonTty);
+  const token = await acquireToken(opts.nonTty);
 
   // Re-resolve from `.env` rather than trusting `previous.account_id`. The
   // client ID is the source of truth and the user may have repointed the app
