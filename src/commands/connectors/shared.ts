@@ -9,6 +9,7 @@ import { Encryptor } from '../../crypto/encryptor';
 import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
 import { formatRelativeTime } from '../../ui/relativeTime';
+import { createGrantResolutionOps } from '../../auth/deviceKey/grantResolver';
 import {
   setSyncKeepHash,
   getSyncKeepHash,
@@ -272,6 +273,7 @@ async function resolveLocklessContext(
           coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
           wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
         },
+        grantResolutionOps: createGrantResolutionOps(serviceClient, authService),
         orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
       });
     } catch (err: any) {

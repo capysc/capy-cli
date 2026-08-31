@@ -133,6 +133,9 @@ ISOLATED_FILES=(
   # masterKeyMint.test.ts mocks keyManager/keyResolver/ui/recoveryPhrase/
   # ui/interactive (master-key first-mint ceremony, unit-level).
   tests/auth/masterKeyMint.test.ts
+  # masterKeyMintRuntimePair.test.ts mocks the runtime-pair custody selector
+  # and free resolver; keep isolated from the disk/mint unit above.
+  tests/auth/masterKeyMintRuntimePair.test.ts
   # locklessMintFallback.test.ts mocks authService/serviceClient/keyResolver/
   # keyManager/ui/recoveryPhrase/ui/interactive and os.homedir() the same way
   # as locklessContext.test.ts, for the mint-chokepoint integration through

@@ -335,6 +335,8 @@ export interface ResolveProjectKeyWithMintOptions {
   userId: string;
   serviceClient: ServiceClient;
   keyServiceOps: KeyServiceOps;
+  /** Runtime-pair custody for commands running in a protected paired home. */
+  grantResolutionOps?: import('./deviceKey/grantResolver').GrantResolutionOps;
   orgKeyState?: OrgKeyState;
   web?: boolean;
 }
@@ -352,6 +354,17 @@ export interface ResolveProjectKeyWithMintOptions {
 export async function resolveProjectKeyWithMintFallback(
   opts: ResolveProjectKeyWithMintOptions,
 ): Promise<string> {
+  const { configuredGrantSocketPath } = await import('./deviceKey/ephemeral');
+  if (opts.grantResolutionOps !== undefined && configuredGrantSocketPath() !== null) {
+    const { resolveFreeSyncProjectKey } = await import('../sync/freeSyncKeyResolver');
+    return resolveFreeSyncProjectKey(
+      opts.orgId,
+      opts.projectId,
+      opts.userId,
+      opts.keyServiceOps,
+      opts.grantResolutionOps,
+    );
+  }
   const { resolveProjectKey } = await import('../crypto/keyResolver');
   try {
     return await resolveProjectKey(opts.orgId, opts.projectId, opts.userId, opts.keyServiceOps);
