@@ -95,6 +95,7 @@ ISOLATED_FILES=(
   tests/auth/deviceKey/security.int.test.ts
   tests/auth/deviceKey/grantE2E.int.test.ts
   tests/auth/pairing/installPairedSession.test.ts
+  tests/auth/pairing/runtimePairing.test.ts
   # The capy-staging pin tests assert behaviour that is BY DEFINITION a
   # function of process.env (CAPY_API_URL / CAPY_KEEP_ORIGIN /
   # CAPY_GLOBAL_DIR_NAME). Batched, they inherit whatever a sibling left

@@ -28,9 +28,11 @@
  *     machine; the acceptance criterion is explicit that no
  *     recovery-equivalent material is ever displayed or persisted anywhere)
  *     — it is handed to the exact same in-memory grant daemon `capy
- *     device-key grant` already uses (`spawnGrantDaemon`), so `capy run` and
- *     friends find a live `CAPY_DEVICE_KEY_GRANT_SOCKET` exactly as they
- *     would after a manual grant.
+ *     device-key grant` already uses (`spawnGrantDaemon`). Pair additionally
+ *     records a metadata-only socket pointer under the environment-specific
+ *     Capy home, so later processes discover the live daemon automatically;
+ *     exporting CAPY_DEVICE_KEY_GRANT_SOCKET remains a backwards-compatible
+ *     override, not a requirement.
  *
  * GATED BEHIND CAPY_DEVICE_KEYS, matching `capy device-key grant`'s own
  * `refuseFlagOff()` exactly — verified necessary, not assumed: `runCommand.ts`'s
@@ -77,9 +79,8 @@ const CEREMONY_FAILURE_MESSAGES: Record<string, string> = {
 
 export interface PairCommandOptions {
   json?: boolean;
-  /** Lifetime of the granted, in-memory device key — same knob as
-   *  `device-key grant --ttl-minutes`. Not the connection/code TTL, which is
-   *  fixed (see PAIR_TTL_SECONDS in pairCeremony.ts). */
+  /** Lifetime of the paired runtime's in-memory device key — same knob as
+   *  `device-key grant --ttl-minutes`. Not the device authorization TTL. */
   ttlMinutes?: number;
 }
 
@@ -260,7 +261,7 @@ export class PairCommand {
     }
 
     const ttlMs = options.ttlMinutes ? options.ttlMinutes * 60_000 : DEFAULT_GRANT_TTL_MS;
-    const daemon = await spawnGrantDaemon(resolved.material, { ttlMs });
+    const daemon = await spawnGrantDaemon(resolved.material, { ttlMs, persistRuntimePairing: true });
 
     if (options.json) {
       console.log(
@@ -293,12 +294,8 @@ export class PairCommand {
     } else {
       console.log(`  Multiple organizations available — run ${B('capy org')} to pick one.`);
     }
-    console.log(`  Granted a temporary device key to this machine for this session.`);
-    console.log(`  It lives in memory and is never written to disk; it expires at ${new Date(daemon.expiresAt).toISOString()}.`);
-    console.log('');
-    console.log('  Set this on every subsequent capy invocation in this session:');
-    console.log('');
-    console.log(`    ${B(`${GRANT_SOCKET_ENV_VAR}=${daemon.socketPath}`)}`);
+    console.log(`  Paired this runtime through ${new Date(daemon.expiresAt).toISOString()}.`);
+    console.log(`  The device key remains in memory; later capy processes discover it automatically.`);
     console.log('');
   }
 }

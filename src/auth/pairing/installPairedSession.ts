@@ -22,16 +22,17 @@ import { FileSessionStorageBackend } from '../session/fileBackend';
 import { AuthService } from '../authService';
 import { isInteractive } from '../../ui/interactive';
 import type { PairMachineAnswerSession } from './pairContract';
+import { assertRuntimePairingUser } from './runtimePairing';
 
 /** Pure: builds the on-disk `SessionStore` shape from the sealed payload's
  *  session half. No I/O — exported for direct unit testing. */
 export function buildSessionStoreFromAnswer(session: PairMachineAnswerSession): SessionStore {
-  const sessions: SessionStore['sessions'] = {};
-  if (session.sessions) {
-    for (const [orgId, orgSession] of Object.entries(session.sessions)) {
-      sessions[orgId] = { access_token: orgSession.access_token, expires_at: orgSession.expires_at };
-    }
-  }
+  const sessions: SessionStore['sessions'] = Object.fromEntries(
+    Object.entries(session.sessions ?? {}).map(([orgId, orgSession]) => [
+      orgId,
+      { access_token: orgSession.access_token, expires_at: orgSession.expires_at },
+    ]),
+  );
   return {
     version: 2,
     user_id: session.user.id,
@@ -93,19 +94,21 @@ export async function installPairedSession(
   answerSession: PairMachineAnswerSession,
   opts: InstallPairedSessionOptions = {},
 ): Promise<InstallPairedSessionResult> {
+  // The identity check happens before the session writer. A failed attempt to
+  // pair another account therefore cannot leave a second discoverable session
+  // inside this environment home.
+  assertRuntimePairingUser(answerSession.user.id);
   const session = buildSessionStoreFromAnswer(answerSession);
 
   // The one write site: FileSessionStorageBackend.save -> saveAuthSession.
   new FileSessionStorageBackend().save(session, session.user_id);
 
   const orgs = session.organizations;
-  let orgId: string | null = null;
-  if (orgs.length === 1) {
-    orgId = orgs[0].id;
-  } else if (orgs.length > 1) {
-    const selector = opts.selectOrg ?? defaultSelectOrg;
-    orgId = await selector(orgs);
-  }
+  const orgId = orgs.length === 1
+    ? orgs[0].id
+    : orgs.length > 1
+      ? await (opts.selectOrg ?? defaultSelectOrg)(orgs)
+      : null;
 
   if (!orgId) {
     return { orgId: null, orgTokenReady: false };

@@ -5,8 +5,8 @@
  * (/.dockerenv, cgroup inspection), CI env-var guessing. All of those are
  * either spoofable, wrong on real developer laptops running Docker, or wrong
  * on real sandboxes that happen to reuse a friendly hostname. The task
- * brief names the two honest alternatives; this module implements exactly
- * those two and nothing else:
+ * brief names the honest explicit alternatives; this module implements
+ * those and nothing else:
  *
  *   1. An env var an ORCHESTRATOR sets deliberately (e.g. capy-mcp's session
  *      bootstrap, once it has minted a grant and wants every subsequent
@@ -14,7 +14,11 @@
  *      `CAPY_DEVICE_KEY_GRANT_SOCKET`, pointing at the daemon's socket path.
  *      Its value is produced by exactly one thing: `capy device-key grant`'s
  *      own stdout (see deviceKeyCommand.ts), never guessed or derived.
- *   2. An explicit invocation — `capy device-key grant` (or the CLI's own
+ *   2. A metadata-only runtime pairing record under the active Capy home,
+ *      written by `capy pair`. It carries the same socket address but no key
+ *      bytes, and is what lets independent processes sharing that protected
+ *      home reuse the live in-memory grant without exporting an env var.
+ *   3. An explicit invocation — `capy device-key grant` (or the CLI's own
  *      internal wiring calling `runGrantCeremony` directly) — which is, by
  *      construction, a deliberate act naming this session ephemeral. There
  *      is no ambient/automatic promotion into grant mode: a command that
@@ -27,16 +31,20 @@
  * intent, not about detecting a fact about the host.
  */
 import { GRANT_SOCKET_ENV_VAR } from './grantHolder';
+import { readRuntimePairing } from '../pairing/runtimePairing';
 
 /**
- * The configured grant socket path, or null if none is set. Presence alone
- * is the signal that a caller should PREFER a grant over a durable unlock —
- * callers still verify liveness (`isGrantActive`) before trusting it, since
- * an env var can point at a socket whose daemon already expired and exited.
+ * The configured grant socket path, or null if none is set. The explicit env
+ * override wins; otherwise a runtime pairing record supplies the path.
+ * Presence alone is the signal that a caller should PREFER a grant over a
+ * durable unlock — callers still verify liveness (`isGrantActive`) before
+ * trusting it, since either source can point at a daemon that expired or
+ * exited.
  */
 export function configuredGrantSocketPath(): string | null {
   const value = process.env[GRANT_SOCKET_ENV_VAR];
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  if (typeof value === 'string' && value.length > 0) return value;
+  return readRuntimePairing()?.socketPath ?? null;
 }
 
 /**

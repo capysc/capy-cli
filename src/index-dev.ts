@@ -614,68 +614,8 @@ program
   .command('logout')
   .description('End the current session')
   .action(async () => {
-    const { existsSync, unlinkSync, rmSync } = await import('fs');
-    const { join } = await import('path');
-    const { getGlobalCapyDir } = await import('./config/globalConfig');
-
-    const capyDir = join(process.cwd(), '.capy');
-    const sessionFiles = ['token'];
-
-    let cleared = false;
-    for (const file of sessionFiles) {
-      const filePath = join(capyDir, file);
-      if (existsSync(filePath)) {
-        unlinkSync(filePath);
-        cleared = true;
-      }
-    }
-
-    // Drop user_id from .capy/sync-state — see logout in src/index.ts for the
-    // full reasoning. Short version: prevents the next `capy` from pinning
-    // the previous user's session on shared eval machines.
-    try {
-      const { ProjectManager } = await import('./core/projectManager');
-      if (new ProjectManager().clearSyncStateUserId()) cleared = true;
-    } catch {
-      // best-effort
-    }
-
-    // Clear global auth session and project key caches
-    const globalCapyDir = getGlobalCapyDir();
-    const authSession = join(globalCapyDir, 'auth', 'session.json');
-    if (existsSync(authSession)) {
-      unlinkSync(authSession);
-      cleared = true;
-    }
-
-    // Clear per-user session files
-    const sessionsDir = join(globalCapyDir, 'auth', 'sessions');
-    if (existsSync(sessionsDir)) {
-      rmSync(sessionsDir, { recursive: true, force: true });
-      cleared = true;
-    }
-
-    // Clear project key caches (master keys survive logout — they require the seed phrase)
-    const orgsDir = join(globalCapyDir, 'orgs');
-    if (existsSync(orgsDir)) {
-      const { readdirSync } = await import('fs');
-      for (const orgId of readdirSync(orgsDir)) {
-        const projectsDir = join(orgsDir, orgId, 'projects');
-        if (existsSync(projectsDir)) {
-          rmSync(projectsDir, { recursive: true, force: true });
-          cleared = true;
-        }
-      }
-    }
-
-    // Force the next OAuth round-trip to re-prompt instead of reusing the
-    // AuthKit SSO cookie — see logout in src/index.ts for full reasoning.
-    try {
-      const { setForceLoginMarker } = await import('./config/globalConfig');
-      setForceLoginMarker();
-    } catch {
-      // best-effort
-    }
+    const { performLogoutCleanup } = await import('./commands/logoutCommand');
+    const cleared = await performLogoutCleanup();
 
     if (cleared) {
       console.log('Logged out. Session cleared.');

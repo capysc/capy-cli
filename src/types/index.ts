@@ -457,6 +457,12 @@ export const ERROR_CODES = {
   DEVICE_KEY_GRANT_NOT_FOUND: 'DEVICE_KEY_GRANT_NOT_FOUND',
   /** The grant daemon is reachable but its TTL has elapsed; it has discarded the key material. Re-run `capy device-key grant`. */
   DEVICE_KEY_GRANT_EXPIRED: 'DEVICE_KEY_GRANT_EXPIRED',
+  /**
+   * Client-side runtime-pairing refusal. A Capy environment home is already
+   * bound to another user; explicit logout is required before account
+   * replacement so session discovery can never silently cross identities.
+   */
+  RUNTIME_PAIR_USER_MISMATCH: 'RUNTIME_PAIR_USER_MISMATCH',
   // CAP-402 (client-side only). Two independent gates: one on where a
   // one-time recovery phrase may be RENDERED, one on whether Case A's
   // ephemeral-environment mint may be left half-finished on disk.

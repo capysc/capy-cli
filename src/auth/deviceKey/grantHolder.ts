@@ -72,10 +72,10 @@ const STARTUP_TIMEOUT_MS = 10_000;
  */
 const DEFAULT_REAP_GRACE_MS = 2 * 60 * 1000;
 
-/** The env var a caller (e.g. the MCP, per its own session-bootstrap wiring)
- *  propagates to every subsequent `capy` invocation so it can find the
- *  daemon. Its mere presence is part of the ephemerality signal (see
- *  ./ephemeral.ts) — nothing else infers "am I a sandbox" from this file. */
+/** Backwards-compatible explicit socket override. `capy pair` now persists a
+ *  metadata-only pointer under the active Capy home, so subsequent processes
+ *  do not need this variable; manual `device-key grant` and orchestrators may
+ *  still use it. Its presence remains an ephemerality signal. */
 export const GRANT_SOCKET_ENV_VAR = 'CAPY_DEVICE_KEY_GRANT_SOCKET';
 
 /** Internal-only subcommand name; not documented in --help. */
@@ -315,58 +315,57 @@ function readOneLine(stream: NodeJS.ReadableStream): Promise<string> {
  * (never argv, never env — see file header), and wait for its readiness
  * announcement. The child is `unref()`d so the parent (`capy device-key
  * grant`) can exit immediately; the daemon keeps running on its own.
+ * `persistRuntimePairing` stores only the returned socket metadata, never
+ * K_local, for the `capy pair` runtime-scoped path.
  */
 export function spawnGrantDaemon(
   material: { userId: string; credentialId: string; kLocal: Buffer },
-  opts: { ttlMs?: number; execPath?: string; scriptPath?: string } = {},
+  opts: { ttlMs?: number; execPath?: string; scriptPath?: string; persistRuntimePairing?: boolean } = {},
 ): Promise<GrantDaemonHandle> {
   const execPath = opts.execPath ?? process.execPath;
   const scriptPath = opts.scriptPath ?? process.argv[1];
   const ttlMs = opts.ttlMs ?? DEFAULT_GRANT_TTL_MS;
 
-  return new Promise((resolve, reject) => {
+  const launch = new Promise<GrantDaemonHandle>((resolve, reject) => {
     const child = spawn(execPath, [scriptPath, GRANT_DAEMON_SUBCOMMAND], {
       detached: true,
       stdio: ['pipe', 'pipe', 'ignore'],
       env: process.env,
     });
 
-    let settled = false;
+    const announcement = child.stdout
+      ? readOneLine(child.stdout).then((line) => {
+        const announced = JSON.parse(line) as { socketPath: string; expiresAt: number };
+        return { socketPath: announced.socketPath, expiresAt: announced.expiresAt, pid: child.pid! };
+      })
+      : Promise.reject(new CapyError('Grant daemon stdout was unavailable.', ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND));
+    const processFailure = new Promise<never>((_resolve, rejectFailure) => {
+      child.once('error', rejectFailure);
+      child.once('exit', (code) => rejectFailure(
+        new CapyError(
+          `Grant daemon exited before announcing readiness (code ${code}).`,
+          ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND,
+        ),
+      ));
+    });
+    const startup = Promise.race([announcement, processFailure]);
     const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
       child.kill('SIGKILL');
       reject(new CapyError('Grant daemon did not start in time.', ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND));
     }, STARTUP_TIMEOUT_MS);
 
-    let out = '';
-    child.stdout?.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
-      const nl = out.indexOf('\n');
-      if (nl === -1 || settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try {
-        const announced = JSON.parse(out.slice(0, nl)) as { socketPath: string; expiresAt: number };
+    startup.then(
+      (handle) => {
+        clearTimeout(timer);
         child.unref();
         child.stdout?.destroy();
-        resolve({ socketPath: announced.socketPath, expiresAt: announced.expiresAt, pid: child.pid! });
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-    child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on('exit', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(new CapyError(`Grant daemon exited before announcing readiness (code ${code}).`, ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND));
-    });
+        resolve(handle);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
 
     child.stdin?.write(
       JSON.stringify({
@@ -377,6 +376,13 @@ export function spawnGrantDaemon(
       } satisfies GrantedKeyMaterialWire) + '\n',
     );
     child.stdin?.end();
+  });
+
+  if (!opts.persistRuntimePairing) return launch;
+  return launch.then(async (handle) => {
+    const { registerRuntimePairing } = await import('../pairing/runtimePairing');
+    await registerRuntimePairing(material.userId, material.credentialId, handle);
+    return handle;
   });
 }
 
