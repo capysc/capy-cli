@@ -49,6 +49,14 @@ export interface SetupCommandOptions {
   readonly envPath?: string;
 }
 
+/** The apply command must stay inside the same environment-specific binary
+ * that produced the plan. Otherwise a `capy-dev` plan hands the agent a
+ * production `capy` confirm command, which reads `~/.capy` instead of the
+ * paired runtime's `~/.capy-dev` session. */
+export function setupConfirmCommand(binaryName: string, planHash: string): string {
+  return `${binaryName} setup --json --confirm ${planHash}`;
+}
+
 interface OrgRef {
   readonly id: string;
   readonly name: string;
@@ -318,7 +326,10 @@ export class SetupCommand {
         will_write: plan.syncMode === 'paid'
           ? (envVariableNames.length > 0 ? ['keep.lock', '.env'] : ['keep.lock'])
           : (plan.syncAction === 'create_empty_remote_marker' ? [] : ['.env']),
-        confirm_command: `capy setup --json --confirm ${planHash}`,
+        confirm_command: setupConfirmCommand(
+          this.devMode ? 'capy-dev' : process.env.CAPY_BIN_NAME || 'capy',
+          planHash,
+        ),
       });
       return;
     }
