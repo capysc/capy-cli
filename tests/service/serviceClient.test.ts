@@ -171,6 +171,26 @@ describe('ServiceClient', () => {
     });
   });
 
+  describe('getBillingStatus', () => {
+    test('reads the authenticated server billing verdict used by sync routing', async () => {
+      const status = {
+        tier: 'free',
+        grandfathered: false,
+        status: null,
+        seats: null,
+        member_count: 1,
+        project_count: 1,
+      } as const;
+      mockFetch.mockResolvedValue(mockFetchResponse(status));
+
+      await expect(serviceClient.getBillingStatus()).resolves.toEqual(status);
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${defaultServiceUrl}/billing/status`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+  });
+
   describe('pushVariables', () => {
     test('should push variables successfully', async () => {
       const projectId = 'proj_123';

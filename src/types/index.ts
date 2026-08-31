@@ -115,6 +115,9 @@ export interface SyncState {
   synced_variables: string[];
   user_id?: string;
   org_id?: string;
+  project_id?: string;
+  project_name?: string;
+  sync_mode?: 'free' | 'paid';
   keep_hash?: string | Record<string, string>;
 }
 

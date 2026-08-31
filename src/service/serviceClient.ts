@@ -123,6 +123,16 @@ export interface MemberDetail {
   projects: MemberProject[];
 }
 
+/** Billing is the only authority for choosing the keepless free-sync corpus. */
+export interface BillingStatus {
+  readonly tier: 'free' | 'business';
+  readonly grandfathered: boolean;
+  readonly status: string | null;
+  readonly seats: number | null;
+  readonly member_count: number | null;
+  readonly project_count: number;
+}
+
 /**
  * Async callback that returns the current valid token, refreshing it if
  * needed. ServiceClient calls this before every request — no local token
@@ -534,6 +544,11 @@ export class ServiceClient {
       projects: Array<{ id: string; name: string; organization_id: string }>;
     }>('GET', '/projects');
     return data.projects;
+  }
+
+  /** Authenticated, organization-scoped billing verdict. Never derive this from local files. */
+  async getBillingStatus(): Promise<BillingStatus> {
+    return this.request<BillingStatus>('GET', '/billing/status');
   }
 
   async createBranch(projectId: string, name: string, isProtected: boolean = false): Promise<Branch> {

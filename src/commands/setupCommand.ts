@@ -24,6 +24,7 @@
  */
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
+import { existsSync } from 'fs';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
@@ -39,6 +40,9 @@ import { Encryptor } from '../crypto/encryptor';
 import { writeKeepCache } from '../config/globalConfig';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { AuthResult, CapyError, ERROR_CODES, KeepFile, setSyncKeepHash } from '../types/index';
+import { planCanonicalSync } from '../sync/canonicalSyncPolicy';
+import type { CanonicalSyncDecision } from '../sync/canonicalSyncPolicy';
+import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
 
 export interface SetupCommandOptions {
   readonly confirm?: string;
@@ -62,6 +66,9 @@ interface SetupPlanFacts {
   readonly project: ProjectRef;
   readonly branch: string;
   readonly envVariableNames: readonly string[];
+  readonly syncMode: 'free' | 'paid';
+  readonly syncAction: CanonicalSyncDecision['action'];
+  readonly remoteVariableNames: readonly string[];
 }
 
 /** Fixed key order, written out rather than sorted generically — see docs/cli-setup-json.md's "plan_hash: what it covers". */
@@ -75,6 +82,9 @@ function canonicalPlanInput(cwd: string, plan: SetupPlanFacts): string {
     project_name: plan.project.name,
     branch: plan.branch,
     env_variable_names: [...plan.envVariableNames].sort(),
+    sync_mode: plan.syncMode,
+    sync_action: plan.syncAction,
+    remote_variable_names: [...plan.remoteVariableNames].sort(),
   });
 }
 
@@ -204,6 +214,23 @@ export class SetupCommand {
     }
     const projects = existingProjects.value;
 
+    const billingOutcome = await this.serviceClient.getBillingStatus()
+      .then((value) => ({ ok: true as const, value }))
+      .catch((err: unknown) => ({ ok: false as const, err }));
+    if (!billingOutcome.ok) {
+      refuse(codeOf(billingOutcome.err), detailOf(billingOutcome.err));
+      return;
+    }
+    const isFree = billingOutcome.value.tier === 'free' && !billingOutcome.value.grandfathered;
+
+    if (isFree && (projects.length !== 1 || projects[0]?.name !== 'default')) {
+      refuse(
+        ERROR_CODES.SERVICE_ERROR,
+        'free onboarding requires the server-provisioned default project; retry signup provisioning before setup',
+      );
+      return;
+    }
+
     if (projects.length > 1) {
       refuse(
         ERROR_CODES.AMBIGUOUS_PROJECT,
@@ -223,8 +250,47 @@ export class SetupCommand {
     const branch = SyncEngine.DEFAULT_BRANCH;
     const localEnv = this.fileManager.readEnvFile(this.cliOptions.envPath);
     const envVariableNames = Object.keys(localEnv).sort();
+    const authority = resolveBillingSyncAuthority(
+      billingOutcome.value,
+      org.id,
+      { id: project.id, name: project.name, organization_id: org.id },
+      branch,
+    );
+    const remoteObservation = authority.mode === 'free'
+      ? await this.serviceClient.getDecryptData(project.id, branch, undefined, true)
+        .then((value) => ({ ok: true as const, value }))
+        .catch((err: unknown) => ({ ok: false as const, err }))
+      : { ok: true as const, value: undefined };
+    if (!remoteObservation.ok) {
+      refuse(codeOf(remoteObservation.err), detailOf(remoteObservation.err));
+      return;
+    }
+    const remoteKeep = remoteObservation.value?.keep_file
+      ? JSON.parse(remoteObservation.value.keep_file) as KeepFile
+      : undefined;
+    const remoteVariableNames = Object.keys(remoteKeep?.variables ?? {}).sort();
+    const rootEnvExists = this.cliOptions.envPath
+      ? existsSync(this.cliOptions.envPath)
+      : projectState.hasEnvFile;
+    const syncDecision = planCanonicalSync({
+      authority,
+      rootEnv: { exists: rootEnvExists, variableNames: envVariableNames },
+      remote: {
+        keepMarkerExists: remoteObservation.value?.keep_file !== undefined,
+        variableNames: remoteVariableNames,
+      },
+    });
 
-    const plan: SetupPlanFacts = { action, org, project, branch, envVariableNames };
+    const plan: SetupPlanFacts = {
+      action,
+      org,
+      project,
+      branch,
+      envVariableNames,
+      syncMode: syncDecision.mode,
+      syncAction: syncDecision.action,
+      remoteVariableNames,
+    };
     const planHash = computePlanHash(process.cwd(), plan);
 
     if (cmdOptions.confirm === undefined) {
@@ -235,9 +301,13 @@ export class SetupCommand {
         org,
         project,
         branch,
-        keep_lock_path: 'keep.lock',
+        sync_mode: plan.syncMode,
+        sync_action: plan.syncAction,
+        keep_lock_path: plan.syncMode === 'paid' ? 'keep.lock' : null,
         env: { path: '.env', variable_count: envVariableNames.length, variable_names: envVariableNames },
-        will_write: envVariableNames.length > 0 ? ['keep.lock', '.env'] : ['keep.lock'],
+        will_write: plan.syncMode === 'paid'
+          ? (envVariableNames.length > 0 ? ['keep.lock', '.env'] : ['keep.lock'])
+          : (plan.syncAction === 'create_empty_remote_marker' ? [] : ['.env']),
         confirm_command: `capy setup --json --confirm ${planHash}`,
       });
       return;
@@ -331,6 +401,11 @@ export class SetupCommand {
   }
 
   private async apply(plan: SetupPlanFacts, authResult: AuthResult, localEnv: Readonly<Record<string, string>>): Promise<void> {
+    if (plan.syncMode === 'free') {
+      await this.applyFree(plan, authResult, localEnv);
+      return;
+    }
+
     const userId = authResult.user_id!;
     const branch = plan.branch;
 
@@ -464,6 +539,178 @@ export class SetupCommand {
       branch,
       keep_lock_path: 'keep.lock',
       secrets_written: varNames.length,
+      git_hooks_installed: true,
+    });
+  }
+
+  /**
+   * Initial single-user onboarding. The remote keep is authoritative and is
+   * deliberately never written to `keep.lock`; only encrypted `.env` data and
+   * gitignored runtime metadata land in the working tree.
+   */
+  private async applyFree(
+    plan: SetupPlanFacts,
+    authResult: AuthResult,
+    localEnv: Readonly<Record<string, string>>,
+  ): Promise<void> {
+    const userId = authResult.user_id!;
+    const resolved = await this.resolveOrCreateProject(plan);
+    if (!resolved.ok) {
+      refuse(resolved.code, resolved.detail, { env_rewritten: false });
+      return;
+    }
+
+    const encryptionKeyOutcome = await this.resolveEncryptionKey(plan.org.id, resolved.project.id, userId)
+      .then((key) => ({ ok: true as const, key }))
+      .catch((err: unknown) => ({ ok: false as const, err }));
+    if (!encryptionKeyOutcome.ok) {
+      refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
+      return;
+    }
+    const encryptionKey = encryptionKeyOutcome.key;
+    const projectKeep: KeepFile = {
+      ...resolved.keep,
+      org_id: plan.org.id,
+      project_id: resolved.project.id,
+      project_name: resolved.project.name,
+    };
+
+    if (plan.syncAction === 'fetch_remote') {
+      const remote = await this.serviceClient.getDecryptData(resolved.project.id, plan.branch, undefined, true)
+        .then((value) => ({ ok: true as const, value }))
+        .catch((err: unknown) => ({ ok: false as const, err }));
+      if (!remote.ok) {
+        refuse(codeOf(remote.err), detailOf(remote.err), { env_rewritten: false });
+        return;
+      }
+      if (!remote.value.keep_file) {
+        refuse(ERROR_CODES.PLAN_CHANGED, 'remote state changed since this plan was computed — re-run capy setup --json');
+        return;
+      }
+
+      const remoteKeep = {
+        ...(JSON.parse(remote.value.keep_file) as KeepFile),
+        org_id: plan.org.id,
+        project_id: resolved.project.id,
+        project_name: resolved.project.name,
+      };
+      const remotePlaintext = Object.fromEntries(
+        Object.entries(this.fileManager.parseEnvContent(remote.value.env_content ?? ''))
+          .flatMap(([name, value]) => {
+            try {
+              return [[name, this.fileManager.decryptValue(value, encryptionKey)] as const];
+            } catch {
+              return [];
+            }
+          }),
+      );
+      this.projectManager.writeActiveBranch(plan.branch);
+      this.fileManager.ensureCapyGitignore();
+      this.fileManager.writeEncryptedEnvFile(remotePlaintext, encryptionKey, this.cliOptions.envPath, remoteKeep, plan.branch);
+      const keepHash = SyncEngine.computeKeepHash(remoteKeep, plan.branch);
+      this.fileManager.writeSyncState({
+        last_sync: new Date().toISOString(),
+        synced_variables: Object.keys(remotePlaintext),
+        user_id: userId,
+        org_id: plan.org.id,
+        project_id: resolved.project.id,
+        project_name: resolved.project.name,
+        sync_mode: 'free',
+        keep_hash: setSyncKeepHash(null, plan.branch, keepHash),
+      });
+      writeKeepCache(plan.org.id, resolved.project.id, keepHash, remote.value.env_content ?? '');
+      installGitHooks(this.devMode);
+      printResult({
+        ok: true,
+        action: plan.action,
+        sync_mode: 'free',
+        sync_action: 'fetch_remote',
+        org: plan.org,
+        project: { id: resolved.project.id, name: resolved.project.name, status: plan.project.status },
+        branch: plan.branch,
+        keep_lock_path: null,
+        secrets_written: Object.keys(remotePlaintext).length,
+        git_hooks_installed: true,
+      });
+      return;
+    }
+
+    const encryptedEntries = Object.entries(localEnv).filter(([, value]) => value.startsWith('capy:'));
+    const foreignKeys = encryptedEntries
+      .filter(([, value]) => !this.decryptsWithKey(value, encryptionKey))
+      .map(([name]) => name);
+    if (foreignKeys.length > 0) {
+      refuse(ERROR_CODES.PERMISSION_DENIED, "this .env holds values encrypted with a different project's key", { names: foreignKeys, env_rewritten: false });
+      return;
+    }
+    const resolvedLocalEnv = plan.syncAction === 'create_empty_remote_marker'
+      ? {}
+      : Object.fromEntries(
+          Object.entries(localEnv).map(([name, value]) => [
+            name,
+            value.startsWith('capy:') ? this.fileManager.decryptValue(value, encryptionKey) : value,
+          ]),
+        );
+    const built = Object.entries(resolvedLocalEnv).reduce<{
+      readonly encrypted: Readonly<Record<string, string>>;
+      readonly pushedVars: Readonly<Record<string, { readonly resource_id: string; readonly value_hash: string }>>;
+    }>(
+      (acc, [name, value]) => {
+        const resourceId = deriveResourceId(plan.branch, name);
+        return {
+          encrypted: { ...acc.encrypted, [name]: `capy:${resourceId}:${Encryptor.encrypt(value, encryptionKey)}` },
+          pushedVars: {
+            ...acc.pushedVars,
+            [name]: { resource_id: resourceId, value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16) },
+          },
+        };
+      },
+      { encrypted: {}, pushedVars: {} },
+    );
+    const envBlob = Object.entries(built.encrypted).map(([name, value]) => `${name}=${value}`).join('\n');
+    const updatedKeep = this.syncEngine.mergeWithKeep(projectKeep, built.pushedVars, plan.branch);
+    const pushed = await this.serviceClient.pushSecrets(
+      resolved.project.id,
+      JSON.stringify(updatedKeep),
+      envBlob,
+      plan.branch,
+    ).then((value) => ({ ok: true as const, value }))
+      .catch((err: unknown) => ({ ok: false as const, err }));
+    if (!pushed.ok) {
+      refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false });
+      return;
+    }
+
+    const adoptedKeep = SyncEngine.adoptServerKeep(pushed.value.keep_file, updatedKeep, plan.branch);
+    const keepHash = SyncEngine.computeKeepHash(adoptedKeep, plan.branch);
+    writeKeepCache(plan.org.id, resolved.project.id, keepHash, envBlob);
+    this.projectManager.writeActiveBranch(plan.branch);
+    this.fileManager.ensureCapyGitignore();
+    this.fileManager.writeSyncState({
+      last_sync: new Date().toISOString(),
+      synced_variables: Object.keys(resolvedLocalEnv),
+      user_id: userId,
+      org_id: plan.org.id,
+      project_id: resolved.project.id,
+      project_name: resolved.project.name,
+      sync_mode: 'free',
+      keep_hash: setSyncKeepHash(null, plan.branch, keepHash),
+    });
+    if (plan.syncAction === 'push_root_env') {
+      this.fileManager.backupPlaintextEnv(this.cliOptions.envPath, true);
+      this.fileManager.writeEncryptedEnvFile(resolvedLocalEnv, encryptionKey, this.cliOptions.envPath, adoptedKeep, plan.branch);
+    }
+    installGitHooks(this.devMode);
+    printResult({
+      ok: true,
+      action: plan.action,
+      sync_mode: 'free',
+      sync_action: plan.syncAction,
+      org: plan.org,
+      project: { id: resolved.project.id, name: resolved.project.name, status: plan.project.status },
+      branch: plan.branch,
+      keep_lock_path: null,
+      secrets_written: Object.keys(resolvedLocalEnv).length,
       git_hooks_installed: true,
     });
   }

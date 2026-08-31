@@ -88,6 +88,7 @@ beforeEach(() => {
   };
   mockFileManager = {
     readEnvFile: mock(() => ({})),
+    parseEnvContent: mock(() => ({})),
     writeKeepFile: mock(() => undefined),
     ensureCapyGitignore: mock(() => undefined),
     decryptValue: mock((value: string) => value),
@@ -101,6 +102,7 @@ beforeEach(() => {
   };
   mockServiceClient = {
     setTokenProvider: mock(() => undefined),
+    getBillingStatus: mock(async () => ({ tier: 'business', grandfathered: false, status: 'active', seats: 3, member_count: 3, project_count: 0 })),
     listProjects: mock(async () => []),
     initializeProject: mock(async () => ({ org_id: ORG.id, project_id: 'proj_new', project_name: 'my-repo', created: true })),
     createBranch: mock(async () => ({ id: 'b1', name: 'development', project_id: 'proj_new', is_protected: false })),
@@ -325,5 +327,87 @@ describe('SetupCommand — apply (capy setup --json --confirm <hash>)', () => {
     expect(out.env_rewritten).toBe(false);
     expect(out.pushed).toBe(false);
     expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('SetupCommand — billing-authoritative free onboarding', () => {
+  function useFreeDefaultProject(): void {
+    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false }));
+    mockServiceClient.getBillingStatus = mock(async () => ({
+      tier: 'free',
+      grandfathered: false,
+      status: null,
+      seats: null,
+      member_count: 1,
+      project_count: 1,
+    }));
+    mockServiceClient.listProjects = mock(async () => [{ id: 'project_default', name: 'default', organization_id: ORG.id }]);
+  }
+
+  async function planHash(): Promise<string> {
+    await new SetupCommand().execute({});
+    const out = parsedOutput();
+    logs.length = 0;
+    return out.plan_hash;
+  }
+
+  test('remote marker wins over local values and the plan forbids local keep.lock', async () => {
+    useFreeDefaultProject();
+    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
+    mockFileManager.readEnvFile = mock(() => ({ STALE_LOCAL: 'old' }));
+    mockServiceClient.getDecryptData = mock(async () => ({
+      env_content: '',
+      decrypt_key: '',
+      expires_at: new Date().toISOString(),
+      keep_file: JSON.stringify({ version: '3.0', org_id: ORG.id, project_id: 'project_default', project_name: 'default', variables: {} }),
+    }));
+
+    await new SetupCommand().execute({});
+    const out = parsedOutput();
+    expect(out.sync_mode).toBe('free');
+    expect(out.sync_action).toBe('fetch_remote');
+    expect(out.keep_lock_path).toBeNull();
+    expect(out.will_write).toEqual(['.env']);
+  });
+
+  test('local-only root .env pushes through the canonical corpus without writing keep.lock', async () => {
+    useFreeDefaultProject();
+    mockProjectManager.detectProjectState = mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
+    mockFileManager.readEnvFile = mock(() => ({ API_KEY: 'secret' }));
+    const hash = await planHash();
+
+    await new SetupCommand().execute({ confirm: hash });
+    const out = parsedOutput();
+    expect(out.ok).toBe(true);
+    expect(out.sync_action).toBe('push_root_env');
+    expect(out.keep_lock_path).toBeNull();
+    expect(mockServiceClient.pushSecrets).toHaveBeenCalledTimes(1);
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+    expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledTimes(1);
+  });
+
+  test('no local or remote env creates an empty remote marker and leaves .env absent', async () => {
+    useFreeDefaultProject();
+    const hash = await planHash();
+
+    await new SetupCommand().execute({ confirm: hash });
+    const out = parsedOutput();
+    expect(out.ok).toBe(true);
+    expect(out.sync_action).toBe('create_empty_remote_marker');
+    expect(out.keep_lock_path).toBeNull();
+    expect(mockServiceClient.pushSecrets).toHaveBeenCalledTimes(1);
+    expect(mockServiceClient.pushSecrets.mock.calls[0]?.[2]).toBe('');
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+  });
+
+  test('a missing default project refuses instead of silently inferring paid mode', async () => {
+    useFreeDefaultProject();
+    mockServiceClient.listProjects = mock(async () => []);
+    await new SetupCommand().execute({});
+    const out = parsedOutput();
+    expect(out.ok).toBe(false);
+    expect(out.code).toBe(ERROR_CODES.SERVICE_ERROR);
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
   });
 });
