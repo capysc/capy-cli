@@ -130,11 +130,13 @@ export interface ConnectorModule {
 /** Registered providers, keyed by name (matches `connector.provider` on each keep.lock entry). */
 export const providers: Record<string, () => Promise<ConnectorModule>> = {
   stripe: async () => (await import('./stripe')).stripeConnector,
+  workos: async () => (await import('./workos')).workosConnector,
 };
 
 export function listProviders(): { name: string; description: string }[] {
   return [
     { name: 'stripe', description: 'Stripe API key (test or live, restricted)' },
+    { name: 'workos', description: 'WorkOS environment API key (sandbox or production)' },
   ];
 }
 
