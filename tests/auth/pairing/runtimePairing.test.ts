@@ -6,7 +6,7 @@
  * processes. No key bytes are printed by the child processes.
  */
 import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { spawn } from 'child_process';
 
@@ -33,6 +33,7 @@ import {
   fetchGrantedKLocal,
   isGrantActive,
   listenGrantDaemonServer,
+  registerSpawnedRuntimePairing,
   spawnGrantDaemon,
 } from '../../../src/auth/deviceKey/grantHolder';
 import { installPairedSession } from '../../../src/auth/pairing/installPairedSession';
@@ -123,6 +124,40 @@ describe('runtime pairing registry', () => {
       expect(await fetchGrantedKLocal(handle.socketPath, USER_A)).toMatchObject({ userId: USER_A });
     } finally {
       await clearRuntimePairing();
+    }
+  });
+
+  test('a runtime-record write failure reaps only the newly launched holder and preserves the existing pair', async () => {
+    const existing = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    const candidateCredential = 'credential_runtime_candidate';
+    const candidate = createGrantDaemonServer(
+      { userId: USER_A, credentialId: candidateCredential, kLocal: Buffer.alloc(32, 0x6c) },
+      null,
+    );
+    await Promise.all([existing, candidate].map(
+      (daemon) => listenGrantDaemonServer(daemon.server, daemon.socketPath),
+    ));
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
+      writeFileSync(`${getRuntimePairingPath()}.${process.pid}.tmp`, 'force EEXIST', { flag: 'wx', mode: 0o600 });
+
+      const failure = await registerSpawnedRuntimePairing(
+        { userId: USER_A, credentialId: candidateCredential },
+        { socketPath: candidate.socketPath, expiresAt: candidate.expiresAt, pid: process.pid },
+      ).then(() => null).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as NodeJS.ErrnoException).code).toBe('EEXIST');
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(existing.socketPath)).toBe(true);
+      expect(await isGrantActive(candidate.socketPath)).toBe(false);
+      expect(existsSync(candidate.socketPath)).toBe(false);
+    } finally {
+      existing.close();
+      candidate.close();
     }
   });
 

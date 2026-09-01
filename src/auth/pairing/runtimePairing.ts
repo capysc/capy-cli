@@ -166,7 +166,9 @@ export async function registerRuntimePairing(
   userId: string,
   credentialId: string,
   handle: RuntimePairingHandle,
+  opts: { readonly cleanupRejectedHandle?: boolean } = {},
 ): Promise<RuntimePairingRecord> {
+  const cleanupRejectedHandle = opts.cleanupRejectedHandle ?? true;
   const existingBeforeCheck = readRuntimePairing();
   const existingOutcome = (() => {
     try {
@@ -178,7 +180,7 @@ export async function registerRuntimePairing(
   if (!existingOutcome.ok) {
     // A hostile/stale caller can point at the already-valid socket. Never
     // turn an identity refusal into a shutdown of the pair being protected.
-    if (handle.socketPath !== existingBeforeCheck?.socketPath) {
+    if (cleanupRejectedHandle && handle.socketPath !== existingBeforeCheck?.socketPath) {
       await requestDaemonShutdown(handle.socketPath);
     }
     throw existingOutcome.error;
@@ -195,7 +197,7 @@ export async function registerRuntimePairing(
     .then(({ isGrantActiveFor }) => isGrantActiveFor(handle.socketPath, userId, credentialId))
     .catch(() => false));
   if (!candidateMatches) {
-    if (handle.socketPath !== existingOutcome.existing?.socketPath) {
+    if (cleanupRejectedHandle && handle.socketPath !== existingOutcome.existing?.socketPath) {
       await requestDaemonShutdown(handle.socketPath);
     }
     throw new CapyError(
