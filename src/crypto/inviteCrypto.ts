@@ -108,13 +108,31 @@ export function innerUnwrap(innerBlob: string, token: Buffer, orgId: string, ema
  */
 const REDEEM_CODE_VERSION = 0x02;
 
-const DEFAULT_INVITE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+const DEFAULT_INVITE_TTL_SECONDS = 12 * 60 * 60; // 12 hours
+
+/**
+ * The longest an invite may live, whatever anyone asks for.
+ *
+ * A HARD CEILING, NOT A DEFAULT. The redeem code carries a double-wrapped copy
+ * of the organization key; it is unwrappable only by the invited email, but it
+ * sits in that person's inbox for its whole lifetime and a mailbox compromised
+ * inside the window is a compromised organization key. Twelve hours is long
+ * enough to cross a working day and a timezone, and short enough that a
+ * forgotten invite is not a standing liability.
+ *
+ * Equal to the default on purpose: there is no lifetime a caller can ask for
+ * that is longer than the one they get by saying nothing.
+ */
+export const MAX_INVITE_TTL_MS = 12 * 60 * 60 * 1000;
 
 /**
  * Resolve the invite TTL in milliseconds from CAPY_INVITE_TTL_SECONDS, falling
- * back to the 7-day default. Used by the inviter to compute `notAfter` at
+ * back to the 12-hour default. Used by the inviter to compute `notAfter` at
  * wrap time. Tests override the env to exercise expired-code paths quickly.
- * Server caps the value at 30 days regardless of what the client requests.
+ *
+ * Clamped to `MAX_INVITE_TTL_MS` rather than refused: this one is an ops and
+ * test knob, not a person asking for something, so the quiet ceiling is the
+ * right shape. The flags refuse instead — see `resolveNotAfter`.
  */
 export function resolveInviteTtlMs(): number {
   const raw = process.env.CAPY_INVITE_TTL_SECONDS;
@@ -123,7 +141,7 @@ export function resolveInviteTtlMs(): number {
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return DEFAULT_INVITE_TTL_SECONDS * 1000;
   }
-  return Math.floor(parsed * 1000);
+  return Math.min(Math.floor(parsed * 1000), MAX_INVITE_TTL_MS);
 }
 
 export function buildRedeemCode(

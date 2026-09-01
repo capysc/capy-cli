@@ -8,6 +8,7 @@ import {
   innerWrap,
   buildRedeemCode,
   resolveInviteTtlMs,
+  MAX_INVITE_TTL_MS,
 } from '../crypto/inviteCrypto';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import {
@@ -86,11 +87,28 @@ function resolveNotAfter(opts: InviteOpts, chosenTtl?: string): number {
       console.error(`\n  --expires "${opts.expires}" is in the past.\n`);
       process.exit(1);
     }
-    return t;
+    return refuseBeyondCeiling(t, `--expires ${opts.expires}`);
   }
-  if (opts.ttl) return Date.now() + parseTtlMs(opts.ttl);
-  if (chosenTtl) return Date.now() + parseTtlMs(chosenTtl);
+  if (opts.ttl) return refuseBeyondCeiling(Date.now() + parseTtlMs(opts.ttl), `--ttl ${opts.ttl}`);
+  if (chosenTtl) return refuseBeyondCeiling(Date.now() + parseTtlMs(chosenTtl), `an expiry of ${chosenTtl}`);
   return Date.now() + resolveInviteTtlMs();
+}
+
+/**
+ * Refuse a requested expiry past the ceiling instead of quietly shortening it.
+ *
+ * Silently clamping would tell the caller their invite lives seven days while
+ * handing them one that dies in twelve hours — and they would find out from a
+ * teammate who could not redeem it. A flag is somebody asking for something
+ * specific, so the answer to one we will not honour is a refusal, not a
+ * different invite wearing its name.
+ */
+function refuseBeyondCeiling(notAfter: number, source: string): number {
+  if (notAfter - Date.now() <= MAX_INVITE_TTL_MS) return notAfter;
+  console.error(`\n  ${source} exceeds the ${formatTtl(MAX_INVITE_TTL_MS)} maximum invite lifetime.`);
+  console.error('  The redeem code carries organization key material, so it is capped.');
+  console.error(`  Re-run with ${B(`--ttl ${formatTtl(MAX_INVITE_TTL_MS)}`)} or shorter.\n`);
+  process.exit(1);
 }
 
 /**

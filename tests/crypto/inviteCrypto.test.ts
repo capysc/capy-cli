@@ -6,6 +6,8 @@ import {
   innerUnwrap,
   buildRedeemCode,
   parseRedeemCode,
+  resolveInviteTtlMs,
+  MAX_INVITE_TTL_MS,
 } from '../../src/crypto/inviteCrypto';
 
 describe('inviteCrypto', () => {
@@ -150,5 +152,40 @@ describe('inviteCrypto', () => {
       const recoveredM = innerUnwrap(innerBlobRecovered, parsedToken, orgId, email);
       expect(recoveredM.equals(masterKey)).toBe(true);
     });
+  });
+});
+
+describe('invite lifetime ceiling', () => {
+  const HOUR = 60 * 60 * 1000;
+  const original = process.env.CAPY_INVITE_TTL_SECONDS;
+  afterEach(() => {
+    if (original === undefined) delete process.env.CAPY_INVITE_TTL_SECONDS;
+    else process.env.CAPY_INVITE_TTL_SECONDS = original;
+  });
+
+  test('the ceiling is 12 hours', () => {
+    expect(MAX_INVITE_TTL_MS).toBe(12 * HOUR);
+  });
+
+  test('the default is the ceiling — saying nothing gets you the longest allowed', () => {
+    delete process.env.CAPY_INVITE_TTL_SECONDS;
+    expect(resolveInviteTtlMs()).toBe(MAX_INVITE_TTL_MS);
+  });
+
+  test('an env override longer than the ceiling is clamped, not honoured', () => {
+    // The redeem code carries organization key material and sits in a mailbox
+    // for its whole lifetime. Seven days of that was the old default.
+    process.env.CAPY_INVITE_TTL_SECONDS = String(7 * 24 * 60 * 60);
+    expect(resolveInviteTtlMs()).toBe(MAX_INVITE_TTL_MS);
+  });
+
+  test('a shorter env override still wins, so tests can expire codes quickly', () => {
+    process.env.CAPY_INVITE_TTL_SECONDS = '60';
+    expect(resolveInviteTtlMs()).toBe(60_000);
+  });
+
+  test('a nonsense env value falls back to the default rather than to zero', () => {
+    process.env.CAPY_INVITE_TTL_SECONDS = 'later';
+    expect(resolveInviteTtlMs()).toBe(MAX_INVITE_TTL_MS);
   });
 });
