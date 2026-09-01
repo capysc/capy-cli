@@ -19,6 +19,8 @@ import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { pushKeepWithRetry, conflictOverwriteQuestion } from './connectors/shared';
+import { tryFreeLocklessPush } from '../sync/freeLocklessPush';
+import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -60,6 +62,15 @@ export class PushCommand {
 
   async execute(): Promise<void> {
     try {
+      const handledFreePush = await tryFreeLocklessPush({
+        projectManager: this.projectManager,
+        fileManager: this.fileManager,
+        authService: this.authService,
+        serviceClient: this.serviceClient,
+        devMode: this.devMode,
+        grantResolutionOps: createGrantResolutionOps(this.serviceClient, this.authService),
+      });
+      if (handledFreePush) return;
       await this._execute();
     } catch (error: any) {
       this.debugError('push execute caught', error);
