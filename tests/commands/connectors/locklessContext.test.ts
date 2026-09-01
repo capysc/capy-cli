@@ -106,6 +106,30 @@ mock.module(join(import.meta.dir, '../../../src/crypto/keyResolver.ts'), () => (
   resolveProjectKey: mock(async () => PROJECT_KEY),
 }));
 
+const fetchGrantedKLocalMock = mock(async (socketPath: string) => ({
+  userId: 'user-1',
+  credentialId: 'credential-1',
+  kLocal: Buffer.alloc(32, 0x34),
+}));
+mock.module(join(import.meta.dir, '../../../src/auth/deviceKey/grantHolder.ts'), () => ({
+  GRANT_SOCKET_ENV_VAR: 'CAPY_DEVICE_KEY_GRANT_SOCKET',
+  fetchGrantedKLocal: fetchGrantedKLocalMock,
+}));
+
+const resolveProjectKeyFromGrantMock = mock(async (
+  _kLocal: Buffer,
+  _orgId: string,
+  _projectId: string,
+  _userId: string,
+) => PROJECT_KEY);
+mock.module(join(import.meta.dir, '../../../src/auth/deviceKey/grantResolver.ts'), () => ({
+  createGrantResolutionOps: () => ({
+    fetchKeyEnc: async () => '',
+    coDecrypt: async () => '',
+  }),
+  resolveProjectKeyFromGrant: resolveProjectKeyFromGrantMock,
+}));
+
 // The edit screen's TUI reads a real TTY; replaced with a fake that hands the
 // built `state` to the test and drives `editContext.saveLocalEdits` the way a
 // person pressing save would. `classifyLocalRow` etc. pass through real —
@@ -134,6 +158,7 @@ import { CapyError, ERROR_CODES, KeepFile } from '../../../src/types/index';
 import { FileManager } from '../../../src/files/fileManager';
 import { Encryptor } from '../../../src/crypto/encryptor';
 import { deriveResourceId } from '../../../src/crypto/resourceId';
+import { registerRuntimePairing } from '../../../src/auth/pairing/runtimePairing';
 
 /** A real `KEY=capy:resourceId:ciphertext` .env line, decryptable with PROJECT_KEY. */
 function cipherLine(branch: string, key: string, value: string): string {
@@ -159,6 +184,8 @@ beforeEach(() => {
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
   mkdirSync(TEST_DIR, { recursive: true });
   process.chdir(TEST_DIR);
+  rmSync(join(TEMP_HOME, '.capy-dev'), { recursive: true, force: true });
+  rmSync(join(TEMP_HOME, '.capy'), { recursive: true, force: true });
   resetState();
 });
 
@@ -208,6 +235,36 @@ describe('resolveContext — lock-less identity resolution', () => {
     await expect(resolveContext({ devMode: true })).rejects.toMatchObject({
       code: ERROR_CODES.PROJECT_NOT_FOUND,
     });
+  });
+
+  test('auth failure surfaces as a coded CapyError instead of exiting with a bare line', async () => {
+    authResultQueue = [
+      { success: false, error: 'scoped auth gate unavailable' },
+      { success: false, error: 'unscoped auth gate unavailable' },
+      { success: false, error: 'network auth gate unavailable' },
+    ];
+
+    await expect(resolveContext({ devMode: true })).rejects.toMatchObject({
+      code: ERROR_CODES.AUTH_FAILED,
+      message: 'network auth gate unavailable',
+    });
+  });
+
+  test('discovers a persisted runtime-pair record without CAPY_DEVICE_KEY_GRANT_SOCKET in the lockless path', async () => {
+    const socketPath = join(TEMP_HOME, 'runtime-pair.sock');
+    await registerRuntimePairing('user-1', 'credential-1', { socketPath, expiresAt: 0 });
+    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
+    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
+
+    const ctx = await resolveContext({ devMode: true });
+
+    expect(process.env.CAPY_DEVICE_KEY_GRANT_SOCKET).toBeUndefined();
+    expect(ctx.lockless).toBe(true);
+    expect(ctx.projectKey).toBe(PROJECT_KEY);
+    expect(fetchGrantedKLocalMock).toHaveBeenCalledWith(socketPath, 'user-1');
+    expect(resolveProjectKeyFromGrantMock.mock.calls.map((call) => call.slice(1))).toEqual([
+      ['org-1', 'proj-1', 'user-1', expect.anything()],
+    ]);
   });
 
   test('branch defaults to "development" with no .env header, .capy/branch, or keep.lock signal', async () => {

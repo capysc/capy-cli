@@ -256,8 +256,7 @@ async function resolveLocklessContext(
 
   const authResult = opts.authResult ?? await authenticateContext(authService, identityMeta.org_id);
   if (!authResult.success || !authResult.user_id) {
-    console.error('Authentication failed');
-    process.exit(1);
+    throw new CapyError(authResult.error ?? 'Authentication failed', ERROR_CODES.AUTH_FAILED);
   }
   const userId = authResult.user_id;
 
