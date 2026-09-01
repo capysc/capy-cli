@@ -75,6 +75,10 @@ const STARTUP_TIMEOUT_MS = 10_000;
  * answer; only a request arriving even later ever sees "not found".
  */
 const DEFAULT_REAP_GRACE_MS = 2 * 60 * 1000;
+/** macOS exposes 104 bytes for sockaddr_un.sun_path including its trailing
+ * NUL. Linux permits slightly more, but the portable usable ceiling is 103. */
+const MAX_UNIX_SOCKET_PATH_BYTES = 103;
+const GRANT_SOCKET_PATH_TEMPLATE = join('capy-grant-XXXXXX', '0000000000000000.sock');
 
 /** Backwards-compatible explicit socket override. `capy pair` now persists a
  *  metadata-only pointer under the active Capy home, so subsequent processes
@@ -109,6 +113,14 @@ interface HeldGrant {
   credentialId: string;
   kLocal: Buffer;
   expiresAt: number;
+}
+
+function grantSocketTempRoot(): string {
+  const preferred = tmpdir();
+  const preferredSocket = join(preferred, GRANT_SOCKET_PATH_TEMPLATE);
+  return Buffer.byteLength(preferredSocket) <= MAX_UNIX_SOCKET_PATH_BYTES
+    ? preferred
+    : '/tmp';
 }
 
 type DaemonRequest =
@@ -146,7 +158,12 @@ export function createGrantDaemonServer(
   opts: { reapGraceMs?: number } = {},
 ): { server: Server; socketPath: string; socketDir: string; expiresAt: number; close: () => void } {
   const reapGraceMs = opts.reapGraceMs ?? DEFAULT_REAP_GRACE_MS;
-  const socketDir = mkdtempSync(join(tmpdir(), 'capy-grant-'));
+  // Agent runtimes commonly point TMPDIR at a deeply nested isolated home.
+  // Unix-domain socket paths are length-bounded, so retain that root when it
+  // fits and otherwise use the conventional short system temp alias. The
+  // holder still gets an atomically unique 0700 directory and a 0600 socket;
+  // no key material is ever written below either root.
+  const socketDir = mkdtempSync(join(grantSocketTempRoot(), 'capy-grant-'));
   chmodSync(socketDir, 0o700);
   const socketPath = join(socketDir, `${randomBytes(8).toString('hex')}.sock`);
 

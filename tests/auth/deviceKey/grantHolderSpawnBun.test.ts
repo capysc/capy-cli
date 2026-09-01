@@ -12,7 +12,7 @@
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchGrantedKLocal } from '../../../src/auth/deviceKey/grantHolder';
@@ -54,14 +54,14 @@ function nonTtyLauncherSource(): string {
   ].join('\n');
 }
 
-async function runNonTtyLauncher(home: string): Promise<{
+async function runNonTtyLauncher(home: string, tempDirectory: string): Promise<{
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
 }> {
   const child = spawn(process.execPath, ['-e', nonTtyLauncherSource()], {
     cwd: CLI_ROOT,
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, TMPDIR: tempDirectory },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const status = new Promise<number | null>((resolve) => child.once('close', resolve));
@@ -78,7 +78,16 @@ async function runNonTtyLauncher(home: string): Promise<{
 describe('Bun grant daemon launch without a TTY', () => {
   test('transfers material and remains live after the non-TTY launcher exits', async () => {
     const home = mkdtempSync(join(tmpdir(), 'capy-grant-bun-non-tty-'));
-    const result = await runNonTtyLauncher(home);
+    const tempDirectory = join(home, 'claude-state', 'runtime', 'tmp');
+    mkdirSync(tempDirectory, { recursive: true, mode: 0o700 });
+    const wouldBeSocket = join(
+      tempDirectory,
+      'capy-grant-XXXXXX',
+      '0000000000000000.sock',
+    );
+    expect(Buffer.byteLength(wouldBeSocket)).toBeGreaterThan(103);
+
+    const result = await runNonTtyLauncher(home, tempDirectory);
     expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
     const handle = JSON.parse(result.stdout) as Readonly<{ socketPath: string; expiresAt: number; pid: number }>;
 
@@ -90,6 +99,8 @@ describe('Bun grant daemon launch without a TTY', () => {
         expiresAt: 0,
       });
       expect(fetched.kLocal).toEqual(Buffer.alloc(32, K_LOCAL_BYTE));
+      expect(Buffer.byteLength(handle.socketPath)).toBeLessThanOrEqual(103);
+      expect(handle.socketPath.startsWith(`${tempDirectory}/`)).toBe(false);
     } finally {
       await shutdownGrantDaemon(handle.socketPath);
       rmSync(home, { recursive: true, force: true });
