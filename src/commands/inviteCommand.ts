@@ -35,7 +35,7 @@ export interface InviteOpts {
   role?: string;
   /** Project access by id or name; repeatable. Required for member/project-admin. */
   projects?: string[];
-  /** Invite lifetime, e.g. "30m", "24h", "7d", or bare seconds. Overrides CAPY_INVITE_TTL_SECONDS. */
+  /** Invite lifetime, max 12h, e.g. "30m", "2h", "12h", or bare seconds. Overrides CAPY_INVITE_TTL_SECONDS. */
   ttl?: string;
   /** Absolute expiry as an ISO date/time. Takes precedence over ttl. */
   expires?: string;
@@ -55,13 +55,13 @@ export interface InviteOpts {
   web?: boolean;
 }
 
-/** Parse "30s"/"10m"/"24h"/"7d" or bare seconds → ms. Exits on invalid input. */
+/** Parse "30s"/"10m"/"2h"/"12h" or bare seconds → ms. Exits on invalid input. */
 function parseTtlMs(raw: string): number {
   // The grammar lives in `invitePlan` so the flag and the browser's expiry step
   // accept exactly the same lifetimes. Only the exit is this command's.
   const ms = parseTtl(raw);
   if (ms === null) {
-    console.error(`\n  Invalid --ttl "${raw}". Use e.g. 30m, 24h, 7d, or a number of seconds.\n`);
+    console.error(`\n  Invalid --ttl "${raw}". Use e.g. 30m, 2h, 12h, or a number of seconds (max 12h).\n`);
     process.exit(1);
   }
   return ms;
@@ -87,28 +87,27 @@ function resolveNotAfter(opts: InviteOpts, chosenTtl?: string): number {
       console.error(`\n  --expires "${opts.expires}" is in the past.\n`);
       process.exit(1);
     }
-    return refuseBeyondCeiling(t, `--expires ${opts.expires}`);
+    return capAtCeiling(t, `--expires ${opts.expires}`);
   }
-  if (opts.ttl) return refuseBeyondCeiling(Date.now() + parseTtlMs(opts.ttl), `--ttl ${opts.ttl}`);
-  if (chosenTtl) return refuseBeyondCeiling(Date.now() + parseTtlMs(chosenTtl), `an expiry of ${chosenTtl}`);
+  if (opts.ttl) return capAtCeiling(Date.now() + parseTtlMs(opts.ttl), `--ttl ${opts.ttl}`);
+  if (chosenTtl) return capAtCeiling(Date.now() + parseTtlMs(chosenTtl), `an expiry of ${chosenTtl}`);
   return Date.now() + resolveInviteTtlMs();
 }
 
 /**
- * Refuse a requested expiry past the ceiling instead of quietly shortening it.
+ * Cap a requested expiry at the ceiling, and say so.
  *
- * Silently clamping would tell the caller their invite lives seven days while
- * handing them one that dies in twelve hours — and they would find out from a
- * teammate who could not redeem it. A flag is somebody asking for something
- * specific, so the answer to one we will not honour is a refusal, not a
- * different invite wearing its name.
+ * Warns rather than refusing so an existing script passing a longer lifetime
+ * keeps working, and warns rather than clamping in silence so nobody believes
+ * they issued a week-long invite that dies in twelve hours. Goes to stderr:
+ * `--json` callers parse stdout, and a notice does not belong in their payload.
  */
-function refuseBeyondCeiling(notAfter: number, source: string): number {
+function capAtCeiling(notAfter: number, source: string): number {
   if (notAfter - Date.now() <= MAX_INVITE_TTL_MS) return notAfter;
-  console.error(`\n  ${source} exceeds the ${formatTtl(MAX_INVITE_TTL_MS)} maximum invite lifetime.`);
-  console.error('  The redeem code carries organization key material, so it is capped.');
-  console.error(`  Re-run with ${B(`--ttl ${formatTtl(MAX_INVITE_TTL_MS)}`)} or shorter.\n`);
-  process.exit(1);
+  console.error(
+    `\n  ${source} exceeds the ${formatTtl(MAX_INVITE_TTL_MS)} maximum invite lifetime — using ${formatTtl(MAX_INVITE_TTL_MS)}.\n`,
+  );
+  return Date.now() + MAX_INVITE_TTL_MS;
 }
 
 /**
@@ -274,7 +273,7 @@ export class InviteCommand {
               : undefined,
         expiry: settledExpiry(opts),
         envTtl: envTtl(),
-        defaultTtl: envTtl() ?? '7d',
+        defaultTtl: envTtl() ?? '12h',
         canAskExpiry: opts.web === true,
       };
       const plan = invitePlan(planInput);

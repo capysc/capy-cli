@@ -44,7 +44,7 @@ const INVITE: WebInviteParams = {
     { id: 'p1', name: 'storefront', isCwd: true },
     { id: 'p2', name: 'warehouse', isCwd: false },
   ],
-  plan: { defaultTtl: '7d', canAskExpiry: true },
+  plan: { defaultTtl: '12h', canAskExpiry: true },
   open: false,
   now: NOW,
 };
@@ -104,13 +104,13 @@ describe('buildInviteData', () => {
 
   test('the presets are the --ttl flag\'s own documented lifetimes', () => {
     const d = buildInviteData(INVITE, 'n');
-    expect(d.expiry.presets.map((p) => p.ttl)).toEqual(['30m', '24h', '7d']);
+    expect(d.expiry.presets.map((p) => p.ttl)).toEqual(['30m', '1h', '2h', '4h', '8h', '12h']);
     // Resolved by the CLI, not by the page: the same computation that will
     // bind `notAfter` into the KMS wrap.
-    expect(d.expiry.presets[2].expiresAtIso).toBe('2026-08-06T00:00:00.000Z');
-    expect(d.expiry.presets[2].relative).toBe('in 7 days');
+    expect(d.expiry.presets[2].expiresAtIso).toBe('2026-07-30T02:00:00.000Z');
+    expect(d.expiry.presets[2].relative).toBe('in 2 hours');
     // The ceiling that clamps a longer invite and tells nobody.
-    expect(d.expiry.serverCapDays).toBe(30);
+    expect(d.expiry.maxTtlHours).toBe(12);
   });
 
   test('an environment override is named rather than applied in silence', () => {
@@ -187,7 +187,7 @@ describe('buildInviteData', () => {
     const d = buildInviteData(INVITE, 'display-only', { role: 'member', projectIds: ['p1'] }, ISSUED);
     const byId = Object.fromEntries(d.stops.map((s) => [s.id, s]));
     expect(byId.expiry.state).toBe('done');
-    expect(byId.expiry.answer).toBe('7d');
+    expect(byId.expiry.answer).toBe('12h');
     expect(byId.expiry.flag).toBe('default');
     expect(d.stops.filter((s) => s.state === 'upcoming').map((s) => s.id)).toEqual([]);
   });
@@ -244,12 +244,12 @@ describe('askInviteInBrowser', () => {
 
     expect((await (await submit({ step: 'role', role: 'member' })).json()).next).toBe(true);
     expect((await (await submit({ step: 'projects', projectIds: ['p1', 'p2'] })).json()).next).toBe(true);
-    await submit({ step: 'expiry', ttl: '24h' });
+    await submit({ step: 'expiry', ttl: '2h' });
 
     expect(await done).toEqual({
       role: 'member',
       projectIds: ['p1', 'p2'],
-      ttl: '24h',
+      ttl: '2h',
       cancelled: false,
     });
   });
@@ -324,7 +324,7 @@ describe('askInviteInBrowser', () => {
 
     // Answering with a real one finishes the step.
     expect((await (await submit({ step: 'projects', projectIds: ['p1'] })).json()).next).toBe(true);
-    await submit({ step: 'expiry', ttl: '7d' });
+    await submit({ step: 'expiry', ttl: '12h' });
     expect((await done).projectIds).toEqual(['p1']);
   });
 
@@ -358,7 +358,7 @@ describe('askInviteInBrowser', () => {
     let url = '';
     const done = askInviteInBrowser({
       ...INVITE,
-      plan: { defaultTtl: '7d', canAskExpiry: true, role: { value: 'admin', flag: '--role admin' } },
+      plan: { defaultTtl: '12h', canAskExpiry: true, role: { value: 'admin', flag: '--role admin' } },
       timeoutMs: 4_000,
       onListen: (u) => (url = u),
     });
@@ -371,7 +371,7 @@ describe('askInviteInBrowser', () => {
       headers,
       body: JSON.stringify({ nonce, payload: { __action: 'submit', step: 'expiry', ttl: 'forever' } }),
     });
-    expect((await res.json()).error).toContain('Use e.g. 30m, 24h, 7d');
+    expect((await res.json()).error).toContain('Use e.g. 30m, 2h, 12h');
 
     await fetch(`http://127.0.0.1:${u.port}/submit`, {
       method: 'POST',

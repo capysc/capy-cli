@@ -174,8 +174,8 @@ describe('invite lifetime ceiling', () => {
 
   test('an env override longer than the ceiling is clamped, not honoured', () => {
     // The redeem code carries organization key material and sits in a mailbox
-    // for its whole lifetime. Seven days of that was the old default.
-    process.env.CAPY_INVITE_TTL_SECONDS = String(7 * 24 * 60 * 60);
+    // for its whole lifetime.
+    process.env.CAPY_INVITE_TTL_SECONDS = String(24 * 60 * 60);
     expect(resolveInviteTtlMs()).toBe(MAX_INVITE_TTL_MS);
   });
 

@@ -91,7 +91,7 @@ export interface InvitePlanInput {
   expiry?: SettledAnswer;
   /** `CAPY_INVITE_TTL_SECONDS` rendered in `--ttl`'s own vocabulary, when set. */
   envTtl?: string;
-  /** What `resolveNotAfter` would use with no flag at all: `7d`, or the env's. */
+  /** What `resolveNotAfter` would use with no flag at all: `12h`, or the env's. */
   defaultTtl: string;
   /**
    * Whether this run has anywhere to ask about expiry.
@@ -119,7 +119,7 @@ const LABEL: Record<string, string> = {
 const DETAIL: Record<string, string> = {
   role: 'invitee role: member | project-admin | admin',
   projects: 'grant project access',
-  expiry: 'invite lifetime, e.g. 30m, 24h, 7d',
+  expiry: 'invite lifetime, max 12h, e.g. 30m, 2h, 12h',
   code: 'the redeem code, shown once',
 };
 
@@ -198,7 +198,7 @@ export function unansweredInviteStops(stops: InviteTeammateStop[]): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse `--ttl`'s grammar — `30s` / `10m` / `24h` / `7d`, or bare seconds — to
+ * Parse `--ttl`'s grammar — `30s` / `10m` / `2h` / `12h`, or bare seconds — to
  * milliseconds.
  *
  * Pure, and returns null rather than exiting, because the browser has to be

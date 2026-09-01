@@ -2195,7 +2195,7 @@ export interface GrantableRole {
 
 /** An expiry the user can pick without typing. */
 export interface ExpiryPreset {
-  /** Exactly what `--ttl` takes: `30m`, `24h`, `7d`. */
+  /** Exactly what `--ttl` takes: `30m`, `2h`, `12h`. */
   ttl: string;
   /** The absolute expiry it resolves to, ISO 8601, computed by the CLI. */
   expiresAtIso: string;
@@ -2205,7 +2205,7 @@ export interface ExpiryPreset {
 
 export interface ExpirySettings {
   presets: ExpiryPreset[];
-  /** The TTL the CLI would use unprompted. `7d`, unless the env overrides it. */
+  /** The TTL the CLI would use unprompted. `12h`, unless the env shortens it. */
   defaultTtl: string;
   /**
    * `CAPY_INVITE_TTL_SECONDS`, when it is set. The CLI honours it in silence,
@@ -2217,7 +2217,7 @@ export interface ExpirySettings {
    * The service's hard ceiling, in days. It clamps anything longer and tells
    * nobody, so a 90-day invite quietly becomes a 30-day one.
    */
-  serverCapDays: number;
+  maxTtlHours: number;
 }
 
 /** Answers the CLI already has, from a flag or from an existing membership. */

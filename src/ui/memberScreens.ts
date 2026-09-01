@@ -91,15 +91,13 @@ const ROLE_NOTES: Record<string, string> = {
 /**
  * The lifetimes offered without typing.
  *
- * `30m`, `24h` and `7d` are the CLI's own examples, lifted verbatim from
- * `--ttl <duration>`'s help — "invite lifetime, e.g. 30m, 24h, 7d (or
- * seconds)" — so the presets are the flag's documented vocabulary rather than
- * a second one invented for the page.
+ * Increments up to the 12-hour ceiling. Nothing longer is offerable, because
+ * nothing longer can be issued.
  */
-const TTL_PRESETS = ['30m', '24h', '7d'] as const;
+const TTL_PRESETS = ['30m', '1h', '2h', '4h', '8h', '12h'] as const;
 
-/** The service's ceiling. It clamps anything longer and tells nobody. */
-const SERVER_CAP_DAYS = 30;
+/** The ceiling, in hours. Nothing longer can be requested or issued. */
+const MAX_TTL_HOURS = 12;
 
 export interface WebInviteParams {
   /**
@@ -164,7 +162,7 @@ export interface InviteAnswers {
 function nonTtyEscapes(email: string): InviteTeammateData['nonTty'] {
   return {
     questions: {
-      command: `capy invite ${email} --role member --project <name> --ttl 7d`,
+      command: `capy invite ${email} --role member --project <name> --ttl 12h`,
       why: 'Off a TTY every question falls back rather than asking: the role becomes member, and the projects become whichever one you happen to be standing in. An invite scoped to the wrong project is a key handed to the wrong person, so name both.',
     },
     reveal: {
@@ -305,7 +303,7 @@ export function buildInviteData(
       presets: expiryPresets(now),
       defaultTtl: p.plan.defaultTtl,
       ...(p.plan.envTtl ? { envOverrideTtl: p.plan.envTtl } : {}),
-      serverCapDays: SERVER_CAP_DAYS,
+      maxTtlHours: MAX_TTL_HOURS,
     },
     // What each control opens on. Only answers this run actually holds — never
     // a default dressed up as one, which is how a rail ends up reporting `Role
@@ -409,7 +407,7 @@ export async function askInviteInBrowser(p: WebInviteParams): Promise<WebInviteR
         if (parseTtl(ttl) === null) {
           // `--ttl`'s own refusal, verbatim, so the flag and the page reject an
           // unparseable lifetime with one sentence rather than two.
-          return { error: `Invalid --ttl "${ttl}". Use e.g. 30m, 24h, 7d, or a number of seconds.` };
+          return { error: `Invalid --ttl "${ttl}". Use e.g. 30m, 2h, 12h, or a number of seconds (max 12h).` };
         }
         answered = { ...answered, ttl };
       } else {

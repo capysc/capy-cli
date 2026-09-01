@@ -25,9 +25,9 @@ import {
 import { renderScreen } from '../../src/ui/screens/serve';
 
 /** A terminal run: nothing settled by argv, and nowhere to ask about expiry. */
-const TTY = { defaultTtl: '7d', canAskExpiry: false };
+const TTY = { defaultTtl: '12h', canAskExpiry: false };
 /** A `--web` run: the expiry stop becomes a question. */
-const WEB = { defaultTtl: '7d', canAskExpiry: true };
+const WEB = { defaultTtl: '12h', canAskExpiry: true };
 
 describe('invitePlan', () => {
   test('an unanswered run stands on the first stop and declares all four', () => {
@@ -95,7 +95,7 @@ describe('invitePlan', () => {
     // The whole reason this stop exists. `resolveNotAfter` never prompts, so
     // on a TTY the question is already answered — by the 7-day default here.
     const stops = invitePlan(TTY);
-    expect(stops[2]).toMatchObject({ state: 'done', answer: '7d', flag: 'default' });
+    expect(stops[2]).toMatchObject({ state: 'done', answer: '12h', flag: 'default' });
     expect(unansweredInviteStops(stops)).toEqual(['role', 'projects']);
   });
 
@@ -124,7 +124,7 @@ describe('invitePlan', () => {
     const settled = invitePlan({
       ...WEB,
       role: { value: 'admin', flag: '--role admin' },
-      expiry: { value: '7d', flag: '--ttl 7d' },
+      expiry: { value: '12h', flag: '--ttl 12h' },
     });
     expect(unansweredInviteStops(settled)).toEqual([]);
     // …and the run is then standing on the code, which is the only stop left.
@@ -132,7 +132,7 @@ describe('invitePlan', () => {
   });
 
   test('a skipped stop is settled, not outstanding', () => {
-    const stops = invitePlan({ ...WEB, role: { value: 'admin' }, expiry: { value: '7d' } });
+    const stops = invitePlan({ ...WEB, role: { value: 'admin' }, expiry: { value: '12h' } });
     expect(stops[1].state).toBe('skipped');
     expect(unansweredInviteStops(stops)).toEqual([]);
   });
@@ -148,7 +148,7 @@ describe('invitePlan', () => {
     // Lifted verbatim from `--role` / `--project` / `--ttl`'s own help text.
     expect(stops[0].detail).toBe('invitee role: member | project-admin | admin');
     expect(stops[1].detail).toBe('grant project access');
-    expect(stops[2].detail).toBe('invite lifetime, e.g. 30m, 24h, 7d');
+    expect(stops[2].detail).toBe('invite lifetime, max 12h, e.g. 30m, 2h, 12h');
   });
 
   test('a stop only names what the run actually got, and says what it did not', () => {
@@ -193,7 +193,7 @@ describe('invitePlan', () => {
       grantableRoles: [],
       defaultRole: 'member',
       projects: [],
-      expiry: { presets: [], defaultTtl: '7d', serverCapDays: 30 },
+      expiry: { presets: [], defaultTtl: '12h', maxTtlHours: 12 },
       stops,
     } as never);
 
