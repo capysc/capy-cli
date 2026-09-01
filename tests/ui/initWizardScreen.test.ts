@@ -118,8 +118,8 @@ describe('buildInitWizardData', () => {
       expect(d.nonTty?.command).toBeTruthy();
       expect(d.nonTty?.why).toBeTruthy();
     }
-    // The invite code is a bearer credential, so its escape is a REFUSAL to
-    // take one from argv rather than a flag that would leak it.
+    // The invite code is key material, so its escape is a REFUSAL to take one
+    // from argv rather than a flag that would leak it.
     expect(buildInitWizardData({ step: 'redeem', input: {} }, 'n').nonTty!.command).toBe('capy redeem <code>');
   });
 

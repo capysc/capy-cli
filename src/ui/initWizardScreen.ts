@@ -91,8 +91,8 @@ export interface InitWizardView {
  * The root `capy` command has no flags for any of this and no `--non-tty`
  * either, so every one of these prompts hangs forever on a closed stdin. The
  * declared route is what makes the gap expressible rather than mysterious, and
- * `redeem` is a refusal on purpose: an invite code is a bearer credential, and
- * a flag would leave it in shell history and `ps` output whoever typed it.
+ * `redeem` is a refusal on purpose: an invite code is key material, and a
+ * flag would leave it in shell history and `ps` output whoever typed it.
  */
 const NON_TTY: Record<InitStep, { command: string; why: string }> = {
   auth: {
@@ -109,7 +109,7 @@ const NON_TTY: Record<InitStep, { command: string; why: string }> = {
   },
   redeem: {
     command: 'capy redeem <code>',
-    why: 'An invite code is a bearer credential. Passing it as a flag would leave it in shell history and in ps output.',
+    why: 'An invite code is key material. Passing it as a flag would leave it in shell history and in ps output.',
   },
   project: {
     command: 'capy',

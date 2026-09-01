@@ -217,7 +217,7 @@ describe('buildInviteData', () => {
     expect(d.nonTty!.questions.command).toContain('--role');
     expect(d.nonTty!.questions.command).toContain('--project');
     expect(d.nonTty!.reveal.command).toBe('capy invite bob@example.com --json');
-    expect(d.nonTty!.reveal.why).toContain('bearer credential');
+    expect(d.nonTty!.reveal.why).toContain('double-wrapped copy of the organization key');
   });
 });
 

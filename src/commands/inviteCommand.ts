@@ -525,8 +525,8 @@ export class InviteCommand {
       console.log('');
 
       if (webParams) {
-        // The redeem code is a bearer credential carrying a double-wrapped copy
-        // of the organization key — recovery-equivalent material. `--web` is
+        // The redeem code carries a double-wrapped copy of the organization
+        // key, unwrappable only by the invited email. `--web` is
         // agent-only, and an agent shelling `capy` reads stdout, so under it the
         // code goes to a page and NOWHERE else: not printed, not logged, not
         // copied to the clipboard. The page it lands on is served with the
@@ -568,10 +568,8 @@ export class InviteCommand {
         console.log('');
         console.log(`    ${B('capy')} redeem ${redeemCode}`);
         console.log('');
-        // Answers the question the sender actually has — is pasting this into
-        // Slack a mistake — rather than describing how the code is built.
         console.log('  \x1b[90mThis code is safe to share with your team member over email or your\x1b[0m');
-        console.log('  \x1b[90mteam messaging app. It can only be used by them.\x1b[0m');
+        console.log('  \x1b[90mteam messaging app. I can only be used by them.\x1b[0m');
         console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
         console.log('');
       }

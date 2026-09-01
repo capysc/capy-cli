@@ -169,7 +169,7 @@ function nonTtyEscapes(email: string): InviteTeammateData['nonTty'] {
     },
     reveal: {
       command: `capy invite ${email} --json`,
-      why: 'The code is a bearer credential — it carries a double-wrapped copy of the organization key, and anyone holding it can join until it expires. That flag puts it on stdout, where your shell history, your scrollback and anything piping this command all keep a copy. This page is why it does not have to.',
+      why: 'The code carries a double-wrapped copy of the organization key. That flag puts it on stdout, where your shell history, your scrollback and anything piping this command all keep a copy. This page is why it does not have to.',
     },
   };
 }

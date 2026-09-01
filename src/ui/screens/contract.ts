@@ -2098,7 +2098,7 @@ export interface InitWizardData {
    * the answer that was just refused, re-served so it can be edited rather
    * than retyped.
    *
-   * Never set for `redeem`. The value there is a bearer credential, and
+   * Never set for `redeem`. The value there is key material, and
    * re-serving a refused one back into the payload just to save a retype
    * would put it a second time on a surface it has already left once — the
    * page shows why the code was refused and leaves the field for a fresh
@@ -2149,7 +2149,7 @@ export interface InitWizardData {
    * material and therefore can never take an answer from argv.
    *
    * `redeem` is one of them still, even after CAP-319 turned it into a live
-   * browser stop: the code is a bearer credential exactly like the recovery
+   * browser stop: the code is key material exactly like the recovery
    * phrase is, and a flag would leave it in shell history and `ps` output
    * whether a human or an agent supplied it. What changed is only which
    * *browser* window can finish the stop — a headless run refuses here
@@ -2259,9 +2259,9 @@ export interface AssignmentFailure {
  * The minted invite.
  *
  * KEY MATERIAL. `redeemCommand` carries a double-wrapped copy of the
- * organization key: anyone holding it can join the org until it expires. It
- * arrives in the submit response and goes nowhere else — not into a log, not
- * back over the wire, not to stdout.
+ * organization key, unwrappable only by the invited email. It arrives in the
+ * submit response and goes nowhere else — not into a log, not back over the
+ * wire, not to stdout.
  */
 export interface IssuedInvite {
   /** The whole `capy redeem <code>` line, ready to send. */
@@ -3194,8 +3194,8 @@ export interface RedeemInviteData {
   /**
    * The code from argv.
    *
-   * KEY MATERIAL: it is a bearer credential carrying a double-wrapped copy of
-   * the organization key. Absent when the screen has to collect it, which is
+   * KEY MATERIAL: it carries a double-wrapped copy of the organization key,
+   * unwrappable only by the invited email. Absent when the screen collects it, which is
    * the safer of the two paths — `capy redeem <code>` leaves the credential in
    * shell history and in `ps` output.
    *
