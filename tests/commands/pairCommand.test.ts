@@ -284,7 +284,13 @@ describe('PairCommand — already-active runtime', () => {
     };
     const readActivePairing = async () => active;
     const ensureActiveSession = async () => ({ kind: 'reauthenticate' as const });
-    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+    ceremonyImpl = async () => ({
+      status: 'complete',
+      session: {
+        ...VALID_ANSWER.session,
+        user: { id: 'user_1', email: 'updated-address@example.com' },
+      },
+    });
 
     await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
 
@@ -295,13 +301,44 @@ describe('PairCommand — already-active runtime', () => {
       code: ERROR_CODES.RUNTIME_PAIR_ALREADY_ACTIVE,
       alreadyActive: true,
       userId: 'user_1',
+      userEmail: 'u@example.com',
       socketPath: '/tmp/already-active.sock',
       sessionRefreshed: true,
     });
+    expect(logs.join('\n')).not.toContain('updated-address@example.com');
     expect(ceremonyCalls.length).toBe(1);
     expect(installCalls.length).toBe(1);
     expect(resolveKeyMaterialCalls).toEqual([]);
     expect(spawnCalls).toEqual([]);
+  });
+
+  test('a different WorkOS account is refused before session install and cannot inherit the live daemon', async () => {
+    const active = {
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt: 0,
+    };
+    const readActivePairing = async () => active;
+    const ensureActiveSession = async () => ({ kind: 'reauthenticate' as const });
+    const wrongAccountSession = {
+      ...VALID_ANSWER.session,
+      user: { id: 'user_2', email: 'other@example.com' },
+    };
+    ceremonyImpl = async () => ({ status: 'complete', session: wrongAccountSession });
+
+    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
+
+    const jsonStart = logs.findIndex((line) => line.trim().startsWith('{'));
+    expect(JSON.parse(logs.slice(jsonStart).join('\n'))).toMatchObject({
+      ok: false,
+      code: ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH,
+    });
+    expect(installCalls).toEqual([]);
+    expect(resolveKeyMaterialCalls).toEqual([]);
+    expect(spawnCalls).toEqual([]);
+    expect(logs.join('\n')).not.toContain('other@example.com');
+    expect((process as any).exitCode).toBe(1);
   });
 
   test('a refresh transport failure stays coded and does not open WorkOS', async () => {

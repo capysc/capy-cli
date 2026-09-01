@@ -349,6 +349,24 @@ export class PairCommand {
     userCode: string,
     options: PairCommandOptions,
   ): Promise<void> {
+    if (session.user.id !== active.userId) {
+      const detail = 'The authenticated account does not match the account paired to this runtime. Sign in with the paired account or run `capy logout` first.';
+      if (options.json) {
+        console.log(JSON.stringify({
+          ok: false,
+          code: ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH,
+          detail,
+          userCode,
+        }, null, 2));
+      } else {
+        console.error('');
+        console.error(`  ${detail}`);
+        console.error('');
+      }
+      process.exitCode = 1;
+      return;
+    }
+
     const installed = await (async () => {
       try {
         return {
