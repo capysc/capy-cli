@@ -214,6 +214,38 @@ describe('PairCommand — rail always on', () => {
 });
 
 describe('PairCommand — already-active runtime', () => {
+  test('classifies silent refresh outcomes without confusing provider failure with reauthentication', async () => {
+    const { ensureActiveRuntimePairingSession } = await import('../../src/commands/pairCommand');
+    const active = {
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt: 0,
+    };
+    const outcomeFor = (result: unknown) => ensureActiveRuntimePairingSession(
+      active,
+      'https://api.test.invalid',
+      true,
+      () => ({ authenticateSilent: async () => result as any }),
+    );
+
+    expect(await outcomeFor({ success: true })).toEqual({ kind: 'ready' });
+    expect(await outcomeFor({
+      success: false,
+      error: 'Session expired — sign-in required',
+      error_code: 'session_ended',
+    })).toEqual({ kind: 'reauthenticate' });
+    expect(await outcomeFor({
+      success: false,
+      error: 'Could not reach the Capy service to refresh your session',
+      error_code: 'network',
+    })).toEqual({
+      kind: 'failed',
+      code: ERROR_CODES.NETWORK_ERROR,
+      detail: 'Could not reach the Capy service to refresh your session',
+    });
+  });
+
   test('--json returns a coded success without starting either human ceremony', async () => {
     const expiresAt = Date.now() + 600_000;
     const readActivePairing = async () => ({
@@ -222,8 +254,9 @@ describe('PairCommand — already-active runtime', () => {
       socketPath: '/tmp/already-active.sock',
       expiresAt,
     });
+    const ensureActiveSession = async () => ({ kind: 'ready' as const });
 
-    await new PairCommand(undefined, false, { readActivePairing }).execute({ json: true });
+    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
 
     const parsed = JSON.parse(logs.join('\n'));
     expect(parsed).toEqual({
@@ -240,6 +273,62 @@ describe('PairCommand — already-active runtime', () => {
     expect(resolveKeyMaterialCalls).toEqual([]);
     expect(spawnCalls).toEqual([]);
     expect(logs.join('\n')).not.toContain('ABCD-1234');
+  });
+
+  test('an ended session re-runs device authorization but preserves the live key daemon', async () => {
+    const active = {
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt: 0,
+    };
+    const readActivePairing = async () => active;
+    const ensureActiveSession = async () => ({ kind: 'reauthenticate' as const });
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+
+    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
+
+    const jsonStart = logs.findIndex((line) => line.trim().startsWith('{'));
+    const parsed = JSON.parse(logs.slice(jsonStart).join('\n'));
+    expect(parsed).toMatchObject({
+      ok: true,
+      code: ERROR_CODES.RUNTIME_PAIR_ALREADY_ACTIVE,
+      alreadyActive: true,
+      userId: 'user_1',
+      socketPath: '/tmp/already-active.sock',
+      sessionRefreshed: true,
+    });
+    expect(ceremonyCalls.length).toBe(1);
+    expect(installCalls.length).toBe(1);
+    expect(resolveKeyMaterialCalls).toEqual([]);
+    expect(spawnCalls).toEqual([]);
+  });
+
+  test('a refresh transport failure stays coded and does not open WorkOS', async () => {
+    const readActivePairing = async () => ({
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt: 0,
+    });
+    const ensureActiveSession = async () => ({
+      kind: 'failed' as const,
+      code: ERROR_CODES.NETWORK_ERROR,
+      detail: 'Could not reach the Capy service to refresh your session',
+    });
+
+    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
+
+    expect(JSON.parse(logs.join('\n'))).toEqual({
+      ok: false,
+      code: ERROR_CODES.NETWORK_ERROR,
+      detail: 'Could not reach the Capy service to refresh your session',
+    });
+    expect(ceremonyCalls).toEqual([]);
+    expect(installCalls).toEqual([]);
+    expect(resolveKeyMaterialCalls).toEqual([]);
+    expect(spawnCalls).toEqual([]);
+    expect((process as any).exitCode).toBe(1);
   });
 });
 

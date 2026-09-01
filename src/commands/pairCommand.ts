@@ -47,7 +47,7 @@
  * `device-key grant` already gives, instead of a surprise ten minutes later.
  */
 import { hostname } from 'os';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES, type AuthResult } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
@@ -71,6 +71,7 @@ import {
   releasePairAttemptLease,
   type PairAttemptLease,
 } from '../auth/pairing/pairAttemptLease';
+import { AuthService } from '../auth/authService';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -94,8 +95,51 @@ export interface PairCommandOptions {
   json?: boolean;
 }
 
+export type ActivePairingSessionOutcome =
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'reauthenticate' }
+  | { readonly kind: 'failed'; readonly code: string; readonly detail: string };
+
+interface ActivePairingSessionAuth {
+  readonly authenticateSilent: () => Promise<AuthResult>;
+}
+
+type ActivePairingSessionAuthFactory = (
+  active: ActiveRuntimePairing,
+  apiUrl: string | undefined,
+  devMode: boolean,
+) => ActivePairingSessionAuth;
+
+/**
+ * A live runtime-pair daemon proves that key custody is still available; it
+ * does not make an expired WorkOS session immortal. Before treating `pair`
+ * as a no-op, use the persisted refresh token through the ordinary silent
+ * auth path. An ended/missing session needs a fresh device-authorization
+ * login, while transport/service failures stay failures (opening WorkOS
+ * cannot repair them).
+ */
+export async function ensureActiveRuntimePairingSession(
+  active: ActiveRuntimePairing,
+  apiUrl: string | undefined,
+  devMode: boolean,
+  createAuth: ActivePairingSessionAuthFactory = (_active, resolvedApiUrl, resolvedDevMode) =>
+    new AuthService(resolvedApiUrl, resolvedDevMode, _active.userId),
+): Promise<ActivePairingSessionOutcome> {
+  const result = await createAuth(active, apiUrl, devMode).authenticateSilent();
+  if (result.success) return { kind: 'ready' };
+  if (result.error_code === 'session_ended' || result.error_code === 'no_session') {
+    return { kind: 'reauthenticate' };
+  }
+  return {
+    kind: 'failed',
+    code: result.error_code === 'network' ? ERROR_CODES.NETWORK_ERROR : ERROR_CODES.AUTH_FAILED,
+    detail: result.error || 'Could not refresh the paired runtime session.',
+  };
+}
+
 export interface PairCommandDependencies {
   readonly readActivePairing?: () => Promise<ActiveRuntimePairing | null>;
+  readonly ensureActiveSession?: (active: ActiveRuntimePairing) => Promise<ActivePairingSessionOutcome>;
   readonly acquirePairAttempt?: () => PairAttemptLease;
   readonly releasePairAttempt?: (lease: PairAttemptLease) => boolean;
 }
@@ -112,10 +156,29 @@ export class PairCommand {
 
     const active = await (this.dependencies.readActivePairing ?? readActiveRuntimePairing)();
     if (active) {
-      this.reportAlreadyActive(active, options);
+      const session = await (
+        this.dependencies.ensureActiveSession
+        ?? ((pairing) => ensureActiveRuntimePairingSession(pairing, this.apiUrl, this.devMode))
+      )(active);
+      if (session.kind === 'ready') {
+        this.reportAlreadyActive(active, options);
+        return;
+      }
+      if (session.kind === 'failed') {
+        this.reportActiveSessionFailure(session, options);
+        return;
+      }
+      await this.executePairAttempt(options, active);
       return;
     }
 
+    await this.executePairAttempt(options, null);
+  }
+
+  private async executePairAttempt(
+    options: PairCommandOptions,
+    active: ActiveRuntimePairing | null,
+  ): Promise<void> {
     const acquired = (() => {
       try {
         return { ok: true as const, lease: (this.dependencies.acquirePairAttempt ?? acquirePairAttemptLease)() };
@@ -142,13 +205,17 @@ export class PairCommand {
     }
 
     try {
-      await this.executeWithLease(options, acquired.lease);
+      await this.executeWithLease(options, acquired.lease, active);
     } finally {
       (this.dependencies.releasePairAttempt ?? releasePairAttemptLease)(acquired.lease);
     }
   }
 
-  private async executeWithLease(options: PairCommandOptions, lease: PairAttemptLease): Promise<void> {
+  private async executeWithLease(
+    options: PairCommandOptions,
+    lease: PairAttemptLease,
+    active: ActiveRuntimePairing | null,
+  ): Promise<void> {
     const serviceUrl = resolveActiveUrl(this.devMode);
 
     // Extracted so the outcome is a single const rather than a reassigned
@@ -188,7 +255,11 @@ export class PairCommand {
 
     switch (result.status) {
       case 'complete':
-        await this.finish(result.session, userCode, options);
+        if (active) {
+          await this.finishSessionRefresh(result.session, active, userCode, options);
+        } else {
+          await this.finish(result.session, userCode, options);
+        }
         return;
       case 'denied': {
         // `expired_token` keeps its own exit code and remedy: the code simply
@@ -223,7 +294,11 @@ export class PairCommand {
     }
   }
 
-  private reportAlreadyActive(active: ActiveRuntimePairing, options: PairCommandOptions): void {
+  private reportAlreadyActive(
+    active: ActiveRuntimePairing,
+    options: PairCommandOptions,
+    sessionRefreshed: boolean = false,
+  ): void {
     if (options.json) {
       console.log(
         JSON.stringify(
@@ -235,6 +310,7 @@ export class PairCommand {
             userEmail: active.userEmail,
             socketPath: active.socketPath,
             envVar: GRANT_SOCKET_ENV_VAR,
+            ...(sessionRefreshed ? { sessionRefreshed: true } : {}),
           },
           null,
           2,
@@ -244,9 +320,61 @@ export class PairCommand {
     }
 
     console.log('');
-    console.log(`  \x1b[32mAlready paired as ${B(active.userEmail)}.\x1b[0m`);
+    console.log(
+      sessionRefreshed
+        ? `  \x1b[32mSession refreshed; still paired as ${B(active.userEmail)}.\x1b[0m`
+        : `  \x1b[32mAlready paired as ${B(active.userEmail)}.\x1b[0m`,
+    );
     console.log('  This runtime pair remains active while its protected key-holder process is running.');
     console.log('');
+  }
+
+  private reportActiveSessionFailure(
+    failure: Extract<ActivePairingSessionOutcome, { readonly kind: 'failed' }>,
+    options: PairCommandOptions,
+  ): void {
+    if (options.json) {
+      console.log(JSON.stringify({ ok: false, code: failure.code, detail: failure.detail }, null, 2));
+    } else {
+      console.error('');
+      console.error(`  ${failure.detail}`);
+      console.error('');
+    }
+    process.exitCode = 1;
+  }
+
+  private async finishSessionRefresh(
+    session: PairMachineAnswerSession,
+    active: ActiveRuntimePairing,
+    userCode: string,
+    options: PairCommandOptions,
+  ): Promise<void> {
+    const installed = await (async () => {
+      try {
+        return {
+          ok: true as const,
+          value: await installPairedSession(session, { apiUrl: this.apiUrl, devMode: this.devMode }),
+        };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    })();
+    if (!installed.ok) {
+      const detail = installed.error instanceof Error
+        ? installed.error.message
+        : 'The refreshed session could not be installed.';
+      if (options.json) {
+        console.log(JSON.stringify({ ok: false, code: ERROR_CODES.AUTH_FAILED, detail, userCode }, null, 2));
+      } else {
+        console.error('');
+        console.error(`  Authentication succeeded but the refreshed session could not be installed: ${detail}`);
+        console.error('');
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    this.reportAlreadyActive(active, options, true);
   }
 
   /**
