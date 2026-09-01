@@ -44,6 +44,9 @@ mock.module('../../src/config/globalConfig', () => ({
 mock.module('../../src/crypto/keyResolver', () => ({
   resolveProjectKey: mock(async () => 'mock-project-key'),
 }));
+mock.module('../../src/sync/freeSyncKeyResolver', () => ({
+  resolveFreeSyncProjectKey: mock(async () => 'mock-project-key'),
+}));
 
 afterEach(() => {
   mock.restore();
@@ -55,13 +58,15 @@ import { FileManager } from '../../src/files/fileManager';
 import { AuthService } from '../../src/auth/authService';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { resolveProjectKey } from '../../src/crypto/keyResolver';
-import { ERROR_CODES } from '../../src/types/index';
+import { resolveFreeSyncProjectKey } from '../../src/sync/freeSyncKeyResolver';
+import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 const MockProjectManager = ProjectManager as any;
 const MockFileManager = FileManager as any;
 const MockAuthService = AuthService as any;
 const MockServiceClient = ServiceClient as any;
 const MockResolveProjectKey = resolveProjectKey as any;
+const MockResolveFreeSyncProjectKey = resolveFreeSyncProjectKey as any;
 
 const ORG = { id: 'org_1', name: 'test-org', workos_org_id: 'workos_1' };
 
@@ -116,7 +121,10 @@ beforeEach(() => {
   MockFileManager.mockImplementation(() => mockFileManager);
   MockAuthService.mockImplementation(() => mockAuthService);
   MockServiceClient.mockImplementation(() => mockServiceClient);
+  MockResolveProjectKey.mockClear();
+  MockResolveFreeSyncProjectKey.mockClear();
   MockResolveProjectKey.mockImplementation(async () => 'mock-project-key');
+  MockResolveFreeSyncProjectKey.mockImplementation(async () => 'mock-project-key');
 });
 
 afterEach(() => {
@@ -267,6 +275,26 @@ describe('SetupCommand — apply (capy setup --json --confirm <hash>)', () => {
     expect(mockServiceClient.initializeProject).toHaveBeenCalledTimes(1);
     expect(mockServiceClient.createBranch).toHaveBeenCalledTimes(1);
     expect(mockFileManager.writeKeepFile).toHaveBeenCalledTimes(1);
+    expect(mockServiceClient.pushSecrets).not.toHaveBeenCalled();
+  });
+
+  test('matching hash uses the runtime-aware resolver and refuses a stale pair before local writes', async () => {
+    MockResolveFreeSyncProjectKey.mockImplementation(async () => {
+      throw new CapyError(
+        'No device-key grant is active for this chat.',
+        ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND,
+      );
+    });
+    const hash = await planHash();
+
+    await new SetupCommand().execute({ confirm: hash });
+
+    const out = parsedOutput();
+    expect(out.code).toBe(ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND);
+    expect(out.env_rewritten).toBe(false);
+    expect(MockResolveFreeSyncProjectKey).toHaveBeenCalledTimes(1);
+    expect(MockResolveProjectKey).not.toHaveBeenCalled();
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
     expect(mockServiceClient.pushSecrets).not.toHaveBeenCalled();
   });
 

@@ -31,10 +31,8 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { installGitHooks } from '../git/installGitHooks';
-import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
-import { configuredGrantSocketPath } from '../auth/deviceKey/ephemeral';
-import { fetchGrantedKLocal } from '../auth/deviceKey/grantHolder';
-import { createGrantResolutionOps, resolveProjectKeyFromGrant } from '../auth/deviceKey/grantResolver';
+import { KeyServiceOps } from '../crypto/keyResolver';
+import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { Encryptor } from '../crypto/encryptor';
 import { writeKeepCache } from '../config/globalConfig';
@@ -43,6 +41,7 @@ import { AuthResult, CapyError, ERROR_CODES, KeepFile, setSyncKeepHash } from '.
 import { planCanonicalSync } from '../sync/canonicalSyncPolicy';
 import type { CanonicalSyncDecision } from '../sync/canonicalSyncPolicy';
 import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
+import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
 
 export interface SetupCommandOptions {
   readonly confirm?: string;
@@ -397,28 +396,22 @@ export class SetupCommand {
   }
 
   /**
-   * Project-key resolution for the apply path: the standard resolver first;
-   * when it refuses PERMISSION_DENIED and this session carries a device-key
-   * grant (CAPY_DEVICE_KEY_GRANT_SOCKET), resolve through the grant daemon
-   * instead — the exact rail `capy run` already rides (runCommand.ts). A
-   * machine paired via the TEMPORARY grant holds no local key.enc/K_local
-   * at all — its key material lives behind the grant socket — so its first
-   * `setup --json --confirm` refused PERMISSION_DENIED without this
-   * (journey run 14, 2026-08-30). Grant-side failures keep their own coded
-   * errors (DEVICE_KEY_GRANT_EXPIRED / _NOT_FOUND) for the caller to refuse
-   * with.
+   * Project-key resolution for the apply path shares the same custody-source
+   * precedence as free sync. A configured runtime pair is an explicit,
+   * exclusive instruction to use its live grant; setup must not silently
+   * fall back to older durable key material when that grant has expired.
+   * Without this alignment setup could report success through disk custody
+   * and the immediately following sync would correctly fail closed with
+   * DEVICE_KEY_GRANT_NOT_FOUND against the stale runtime-pair record.
    */
   private async resolveEncryptionKey(orgId: string, projectId: string, userId: string): Promise<string> {
-    try {
-      return await resolveProjectKey(orgId, projectId, userId, this.keyServiceOps());
-    } catch (err) {
-      const grantSocket = configuredGrantSocketPath();
-      const deniedLocally = err instanceof CapyError && err.code === ERROR_CODES.PERMISSION_DENIED;
-      if (!grantSocket || !deniedLocally) throw err;
-      const grant = await fetchGrantedKLocal(grantSocket, userId);
-      const grantOps = createGrantResolutionOps(this.serviceClient, this.authService);
-      return resolveProjectKeyFromGrant(grant.kLocal, orgId, projectId, userId, grantOps);
-    }
+    return resolveFreeSyncProjectKey(
+      orgId,
+      projectId,
+      userId,
+      this.keyServiceOps(),
+      createGrantResolutionOps(this.serviceClient, this.authService),
+    );
   }
 
   private async apply(plan: SetupPlanFacts, authResult: AuthResult, localEnv: Readonly<Record<string, string>>): Promise<void> {
