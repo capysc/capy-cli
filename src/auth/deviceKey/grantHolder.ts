@@ -84,6 +84,8 @@ export const GRANT_SOCKET_ENV_VAR = 'CAPY_DEVICE_KEY_GRANT_SOCKET';
 
 /** Internal-only subcommand name; not documented in --help. */
 export const GRANT_DAEMON_SUBCOMMAND = '__device-key-grant-daemon';
+/** Fixed, non-secret readiness preamble for the parent -> daemon stdin pipe. */
+const GRANT_DAEMON_STDIN_READY = 'CAPY_GRANT_DAEMON_STDIN_READY_V1';
 
 export interface GrantedKeyMaterialWire {
   userId: string;
@@ -246,8 +248,9 @@ export function listenGrantDaemonServer(server: Server, socketPath: string): Pro
 
 /**
  * The hidden daemon command's body (`capy __device-key-grant-daemon`):
- * reads exactly one line of JSON off stdin (the material — see file header
- * for why stdin, never argv/env), starts the server, announces
+ * first announces that its stdin pipe is attached, then reads exactly one
+ * line of JSON off stdin (the material — see file header for why stdin,
+ * never argv/env), starts the server, announces
  * `{socketPath, expiresAt}` on stdout (never the key), and then blocks until
  * finite TTL expiry or a `shutdown` request closes it. Process-bound runtime
  * custody has no finite TTL. This function's promise
@@ -255,6 +258,11 @@ export function listenGrantDaemonServer(server: Server, socketPath: string): Pro
  * calls it and lets the process end naturally afterward.
  */
 export async function runGrantDaemonForever(stdin: NodeJS.ReadableStream, ttlOverrideMs?: number): Promise<void> {
+  // Bun 1.3.11 can discard a write made immediately after spawning a detached
+  // child when the launcher itself has no TTY. This fixed preamble contains no
+  // material and proves the daemon attached its pipe before the parent sends
+  // the single secret-bearing line.
+  process.stdout.write(`${GRANT_DAEMON_STDIN_READY}\n`);
   const line = await readOneLine(stdin);
   const wire = (() => {
     try {
@@ -334,6 +342,12 @@ export function spawnGrantDaemon(
   const execPath = opts.execPath ?? process.execPath;
   const scriptPath = opts.scriptPath ?? process.argv[1];
   const ttlMs = opts.ttlMs === undefined ? DEFAULT_GRANT_TTL_MS : opts.ttlMs;
+  const payload = JSON.stringify({
+    userId: material.userId,
+    credentialId: material.credentialId,
+    kLocalB64: material.kLocal.toString('base64'),
+    ttlMs,
+  } satisfies GrantedKeyMaterialWire) + '\n';
 
   const launch = new Promise<GrantDaemonHandle>((resolve, reject) => {
     const child = spawn(execPath, [scriptPath, GRANT_DAEMON_SUBCOMMAND], {
@@ -341,13 +355,26 @@ export function spawnGrantDaemon(
       stdio: ['pipe', 'pipe', 'ignore'],
       env: process.env,
     });
+    const daemonStdin = child.stdin;
+    const daemonStdout = child.stdout;
 
-    const announcement = child.stdout
-      ? readOneLine(child.stdout).then((line) => {
-        const announced = JSON.parse(line) as { socketPath: string; expiresAt: number };
-        return { socketPath: announced.socketPath, expiresAt: announced.expiresAt, pid: child.pid! };
-      })
-      : Promise.reject(new CapyError('Grant daemon stdout was unavailable.', ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND));
+    const announcement = daemonStdout && daemonStdin
+      ? readOneLine(daemonStdout)
+        .then((ready) => {
+          if (ready !== GRANT_DAEMON_STDIN_READY) {
+            throw new CapyError('Grant daemon readiness handshake was invalid.', ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND);
+          }
+          // One atomic end(payload), not write(payload) followed by end(). The
+          // daemon has now proven its stdin pipe is attached, so this remains
+          // reliable under Bun even when the launcher has no TTY.
+          daemonStdin.end(payload);
+          return readOneLine(daemonStdout);
+        })
+        .then((line) => {
+          const announced = JSON.parse(line) as { socketPath: string; expiresAt: number };
+          return { socketPath: announced.socketPath, expiresAt: announced.expiresAt, pid: child.pid! };
+        })
+      : Promise.reject(new CapyError('Grant daemon stdio was unavailable.', ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND));
     const processFailure = new Promise<never>((_resolve, rejectFailure) => {
       child.once('error', rejectFailure);
       child.once('exit', (code) => rejectFailure(
@@ -372,23 +399,9 @@ export function spawnGrantDaemon(
       },
       (error: unknown) => {
         clearTimeout(timer);
+        child.kill('SIGKILL');
         reject(error instanceof Error ? error : new Error(String(error)));
       },
-    );
-
-    // One atomic end(payload), not write(payload) followed by end(). Bun's
-    // child-process bridge can deliver the EOF before a separately-buffered
-    // write when the child is detached, leaving the daemon with no material.
-    // Node preserves the same ordering contract for end(payload), so this is
-    // portable across both supported runtimes without adding a retry that
-    // could duplicate recovery-equivalent material.
-    child.stdin?.end(
-      JSON.stringify({
-        userId: material.userId,
-        credentialId: material.credentialId,
-        kLocalB64: material.kLocal.toString('base64'),
-        ttlMs,
-      } satisfies GrantedKeyMaterialWire) + '\n',
     );
   });
 
