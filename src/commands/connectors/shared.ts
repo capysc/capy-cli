@@ -138,7 +138,12 @@ export async function writeAndSync(
   ctx: ResolvedContext,
   varName: string,
   value: string | undefined,
-  opts: { push: boolean; connector?: ConnectorMetadata },
+  opts: {
+    push: boolean;
+    connector?: ConnectorMetadata;
+    /** Additional (varName, connector) pairs to mark managed in the same write. */
+    alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
+  },
 ): Promise<void> {
   const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
 
@@ -149,13 +154,9 @@ export async function writeAndSync(
     // Local-only path. Even though we're not hitting the service, we still
     // need to attach the connector marker to keep.lock so a follow-up `capy
     // push` (which will round-trip through mergeWithKeep) preserves it.
-    if (opts.connector) {
-      const merged = attachConnector(keep, varName, branch, opts.connector);
-      fileManager.writeKeepFile(merged);
-      fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
-    } else {
-      fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, keep, branch);
-    }
+    const merged = applyConnectors(keep, branch, varName, opts.connector, opts.alsoConnect);
+    if (merged !== keep) fileManager.writeKeepFile(merged);
+    fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
     return;
   }
 
@@ -187,9 +188,7 @@ export async function writeAndSync(
     }
   }
 
-  if (opts.connector) {
-    finalKeep = attachConnector(finalKeep, varName, branch, opts.connector);
-  }
+  finalKeep = applyConnectors(finalKeep, branch, varName, opts.connector, opts.alsoConnect);
 
   const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
 
@@ -210,6 +209,26 @@ export async function writeAndSync(
   // The new pin reaches teammates only through git.
   const { autoCommitKeep } = await import('../../git/autoCommitKeep');
   autoCommitKeep(branch);
+}
+
+/**
+ * Attach the primary connector and any extras in one pass.
+ *
+ * Returns `keep` unchanged when there is nothing to attach, so the local-only
+ * path can skip rewriting keep.lock exactly as it did before.
+ */
+function applyConnectors(
+  keep: KeepFile,
+  branch: string,
+  varName: string,
+  connector: ConnectorMetadata | undefined,
+  also: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }> | undefined,
+): KeepFile {
+  const withPrimary = connector ? attachConnector(keep, varName, branch, connector) : keep;
+  return (also ?? []).reduce(
+    (acc, extra) => attachConnector(acc, extra.varName, branch, extra.entry),
+    withPrimary,
+  );
 }
 
 /** Return a deep-cloned KeepFile with `connector` set on the (varName, branch) entry. */

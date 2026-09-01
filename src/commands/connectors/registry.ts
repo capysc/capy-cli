@@ -76,6 +76,18 @@ export interface ConnectResult {
    */
   value?: string;
   entry: ConnectorMetadata;
+  /**
+   * Further variables this connect should mark as managed, beyond `varName`.
+   *
+   * For providers where one variable is not the whole link. WorkOS is the
+   * case: the API key is meaningless without the client ID that says which
+   * environment it belongs to, so recording only the key would leave the other
+   * half of the pair looking untracked.
+   *
+   * Each becomes an ordinary connector entry — managed, and offered by
+   * `capy rotate` like any other.
+   */
+  also?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
 }
 
 /** Result of provider.rotate(): the new value, plus updated connector metadata (rotated_at, expires_at, fingerprint refreshed). */

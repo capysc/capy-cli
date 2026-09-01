@@ -551,6 +551,10 @@ interface ResolvedTarget {
   readonly environmentName: string;
   readonly sandbox: boolean;
   readonly clientId: string;
+  /** The `.env` variable the client ID came from. */
+  readonly clientIdVar: string;
+  /** True when the user had to pick between candidates. */
+  readonly clientIdAmbiguous: boolean;
 }
 
 /**
@@ -685,6 +689,8 @@ export function looksLikeClientIdName(name: string): boolean {
 export interface ClientIdCandidate {
   readonly name: string;
   readonly value: string;
+  /** Set when the user had to disambiguate rather than the match being sole. */
+  readonly ambiguous?: boolean;
   /** The name agrees with the value. Used to break ties, never to qualify. */
   readonly byName: boolean;
 }
@@ -800,7 +806,8 @@ async function chooseClientId(ctx: ResolvedContext, nonTty?: boolean): Promise<C
       default: candidates[0].name,
     },
   ]);
-  return candidates.find((c) => c.name === picked) ?? candidates[0];
+  const answered = candidates.find((c) => c.name === picked) ?? candidates[0];
+  return { ...answered, ambiguous: true };
 }
 
 /**
@@ -817,11 +824,14 @@ async function resolveTarget(
   token: string,
   nonTty?: boolean,
 ): Promise<ResolvedTarget> {
-  const { name: clientIdVar, value: clientId } = await chooseClientId(ctx, nonTty);
+  const clientIdPick = await chooseClientId(ctx, nonTty);
+  const { name: clientIdVar, value: clientId } = clientIdPick;
   const environments = await fetchEnvironments(token, { clientIdVar, clientId });
   const match = environments.find((e) => e.clientId === clientId);
   const chosen = await chooseEnvironment(environments, match, clientIdVar, clientId, nonTty);
   return {
+    clientIdVar,
+    clientIdAmbiguous: clientIdPick.ambiguous === true,
     environmentId: chosen.id,
     environmentName: environmentLabel(chosen),
     sandbox: chosen.sandbox ?? false,
@@ -1014,17 +1024,54 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
     console.log(`\n  Linked ${B(varName)} to WorkOS (${target.environmentName}).\n`);
   }
 
+  const createdAt = Math.floor(Date.now() / 1000);
+  const base = {
+    provider: 'workos',
+    source: 'cli',
+    mode: target.sandbox ? 'sandbox' : 'production',
+    account_id: target.environmentId,
+    created_at: createdAt,
+  } as const;
+
+  /**
+   * The client ID is marked managed alongside the key.
+   *
+   * The two are one link: an API key means nothing without the client ID that
+   * says which environment it belongs to, and marking only the key leaves the
+   * other half looking untracked in `capy list`.
+   *
+   * ONLY WHEN THE MATCH WAS UNAMBIGUOUS. If the user had to pick between
+   * candidates, marking their answer would quietly promote a disambiguation
+   * into a recorded fact about the project — and the next person to read
+   * keep.lock cannot tell the two apart.
+   */
+  const alsoClientId = target.clientIdAmbiguous
+    ? undefined
+    : [
+        {
+          varName: target.clientIdVar,
+          entry: {
+            ...base,
+            fingerprint: fingerprint(target.clientId),
+            ...(keyTypePrefix(target.clientId)
+              ? { key_prefix: keyTypePrefix(target.clientId) as string }
+              : {}),
+          },
+        },
+      ];
+
+  if (alsoClientId) {
+    console.log(`  Also tracking ${B(target.clientIdVar)}.`);
+  }
+
   return {
     varName,
     entry: {
-      provider: 'workos',
-      source: 'cli',
-      mode: target.sandbox ? 'sandbox' : 'production',
-      account_id: target.environmentId,
-      created_at: Math.floor(Date.now() / 1000),
+      ...base,
       fingerprint: fingerprint(current),
       ...(keyTypePrefix(current) ? { key_prefix: keyTypePrefix(current) as string } : {}),
     },
+    ...(alsoClientId ? { also: alsoClientId } : {}),
   };
 }
 
