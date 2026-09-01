@@ -54,7 +54,7 @@ import { deviceKeysEnabled } from '../auth/deviceKey/flag';
 import {
   startDeviceAuthorization,
   awaitDeviceApproval,
-  deviceVerificationUrl,
+  deviceVerificationHandoff,
   type DeviceAuthorization,
   type DevicePollResult,
 } from '../auth/pairing/deviceAuth';
@@ -272,9 +272,10 @@ export class PairCommand {
     // page now, not Keep's /pair, because the machine authenticates itself
     // rather than being handed a session (CAP-566). Never hardcoded: the IdP
     // owns that URL and is entitled to change it.
-    const url = deviceVerificationUrl(authorization);
-    const userCode = authorization.user_code;
-    const codeInstruction = authorization.verification_uri_complete?.trim()
+    const handoff = deviceVerificationHandoff(authorization);
+    const url = handoff.url;
+    const userCode = handoff.userCode;
+    const codeInstruction = handoff.codePrefilled
       ? `  The code is prefilled. Confirm it matches: ${B(userCode)}`
       : `  If prompted, enter: ${B(userCode)}`;
     console.log('');

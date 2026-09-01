@@ -46,6 +46,12 @@ export interface DevicePollComplete {
 }
 export type DevicePollResult = DevicePollPending | DevicePollDenied | DevicePollComplete;
 
+export interface DeviceVerificationHandoff {
+  readonly url: string;
+  readonly userCode: string;
+  readonly codePrefilled: boolean;
+}
+
 /**
  * Selects the browser handoff WorkOS intends the user to open.
  *
@@ -56,8 +62,21 @@ export type DevicePollResult = DevicePollPending | DevicePollDenied | DevicePoll
  * fallback usable and preserves the anti-phishing comparison.
  */
 export function deviceVerificationUrl(authorization: DeviceAuthorization): string {
+  return deviceVerificationHandoff(authorization).url;
+}
+
+/**
+ * The single production decision for both the opened URL and its terminal
+ * instruction. This prevents the command from opening the complete provider
+ * URL while accidentally telling the user to type a code, or vice versa.
+ */
+export function deviceVerificationHandoff(
+  authorization: DeviceAuthorization,
+): DeviceVerificationHandoff {
   const complete = authorization.verification_uri_complete?.trim();
-  return complete ? complete : authorization.verification_uri;
+  return complete
+    ? { url: complete, userCode: authorization.user_code, codePrefilled: true }
+    : { url: authorization.verification_uri, userCode: authorization.user_code, codePrefilled: false };
 }
 
 /** Starts the flow. The returned `user_code` is what the human confirms; `device_code` is never shown. */

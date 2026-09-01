@@ -42,6 +42,7 @@ const AUTHORIZATION = {
   device_code: 'dc_test',
   user_code: 'ABCD-1234',
   verification_uri: 'https://auth.test.invalid/device',
+  verification_uri_complete: 'https://auth.test.invalid/device?user_code=ABCD-1234&code=provider-state',
   expires_in: 300,
   interval: 5,
 };
@@ -56,6 +57,16 @@ mock.module('../../src/auth/pairing/deviceAuth', () => ({
     readonly verification_uri_complete?: string;
   }) =>
     authorization.verification_uri_complete?.trim() || authorization.verification_uri,
+  deviceVerificationHandoff: (authorization: {
+    readonly user_code: string;
+    readonly verification_uri: string;
+    readonly verification_uri_complete?: string;
+  }) => {
+    const complete = authorization.verification_uri_complete?.trim();
+    return complete
+      ? { url: complete, userCode: authorization.user_code, codePrefilled: true }
+      : { url: authorization.verification_uri, userCode: authorization.user_code, codePrefilled: false };
+  },
   awaitDeviceApproval: async (_url: string, authorization: any) => {
     ceremonyCalls.push({ authorization });
     return ceremonyImpl({ authorization });
@@ -466,6 +477,8 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
     // Asserted from the authorize response rather than hardcoded, so moving to
     // a custom domain changes config and not this test.
     expect(all).toContain(AUTHORIZATION.verification_uri);
+    expect(all).toContain(AUTHORIZATION.verification_uri_complete);
+    expect(all).toContain('The code is prefilled. Confirm it matches');
     expect(HALF_BLOCK.test(all)).toBe(true);
   });
 

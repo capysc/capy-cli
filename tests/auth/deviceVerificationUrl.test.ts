@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { deviceVerificationUrl, type DeviceAuthorization } from '../../src/auth/pairing/deviceAuth';
+import {
+  deviceVerificationHandoff,
+  deviceVerificationUrl,
+  type DeviceAuthorization,
+} from '../../src/auth/pairing/deviceAuth';
 
 const authorization = (complete?: string): DeviceAuthorization => ({
   device_code: 'device-code-not-for-display',
@@ -15,10 +19,20 @@ describe('deviceVerificationUrl', () => {
     const complete = 'https://auth.example.invalid/device?user_code=RJXN-HMFW';
 
     expect(deviceVerificationUrl(authorization(complete))).toBe(complete);
+    expect(deviceVerificationHandoff(authorization(complete))).toEqual({
+      url: complete,
+      userCode: 'RJXN-HMFW',
+      codePrefilled: true,
+    });
   });
 
   it('retains the bare verification URL as a compatibility fallback', () => {
     expect(deviceVerificationUrl(authorization())).toBe('https://auth.example.invalid/device');
     expect(deviceVerificationUrl(authorization('   '))).toBe('https://auth.example.invalid/device');
+    expect(deviceVerificationHandoff(authorization())).toEqual({
+      url: 'https://auth.example.invalid/device',
+      userCode: 'RJXN-HMFW',
+      codePrefilled: false,
+    });
   });
 });
