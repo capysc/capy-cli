@@ -658,8 +658,45 @@ export function findClientIdCandidates(
  * one there rotates a key the app in front of you does not use — the failure
  * mode is silent and lands in whichever environment was not being watched.
  */
+/**
+ * Variables whose NAME claims to hold a WorkOS client ID while their VALUE
+ * does not look like one.
+ *
+ * Shape decides which variable gets used, and on its own that makes a typo
+ * invisible: put garbage in `WORKOS_CLIENT_ID`, and it is simply dropped from
+ * the candidate list. If another variable happens to hold a valid client ID
+ * the run silently retargets to it, and if none does, the error says "no
+ * client ID found" while the thing the user just edited sits right there.
+ *
+ * Naming it is the whole fix. Shape still decides; a name that disagrees with
+ * its value is now said out loud rather than skipped.
+ */
+export function findMisshapenClientIdVars(
+  env: Readonly<Record<string, string>>,
+): readonly string[] {
+  return Object.entries(env)
+    .filter(([name, value]) => looksLikeClientIdName(name) && !looksLikeWorkOSClientId(value))
+    .map(([name]) => name);
+}
+
 async function chooseClientId(ctx: ResolvedContext, nonTty?: boolean): Promise<ClientIdCandidate> {
   const candidates = findClientIdCandidates(ctx.localPlaintext);
+  const misshapen = findMisshapenClientIdVars(ctx.localPlaintext);
+
+  if (candidates.length === 0 && misshapen.length > 0) {
+    console.error(`\n  ${B(misshapen.join(', '))} does not hold a WorkOS client ID.`);
+    console.error(`  Expected a ${B('client_…')} value; got something else.`);
+    console.error('  A WorkOS API key belongs to one environment, and the client ID is what');
+    console.error('  says which — Capy will not rotate without knowing it.\n');
+    process.exit(1);
+  }
+
+  // A valid client ID elsewhere does not excuse a broken one here: the user
+  // edited that variable expecting it to matter, and silently using a
+  // different one rotates against an environment they did not choose.
+  if (misshapen.length > 0) {
+    console.log(`  Ignoring ${B(misshapen.join(', '))} — not a ${B('client_…')} value.`);
+  }
 
   if (candidates.length === 0) {
     console.error(`\n  No WorkOS client ID found in .env on branch ${ctx.branch}.`);

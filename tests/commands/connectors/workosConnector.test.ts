@@ -10,6 +10,7 @@ import {
   looksLikeWorkOSClientId,
   looksLikeWorkOSApiKey,
   findClientIdCandidates,
+  findMisshapenClientIdVars,
   findApiKeyCandidates,
   WorkOSGraphQLError,
   workosConnector,
@@ -236,6 +237,34 @@ describe('findClientIdCandidates', () => {
   test('returns both when two client ids are present, so the caller can ask', () => {
     const found = findClientIdCandidates({ STAGING_CLIENT: CLIENT_ID, PROD_CLIENT: OTHER_CLIENT_ID });
     expect(found).toHaveLength(2);
+  });
+});
+
+describe('findMisshapenClientIdVars', () => {
+  test('names a client-id variable holding garbage', () => {
+    // The bug this fixes: a bogus WORKOS_CLIENT_ID was dropped by the shape
+    // filter, so the error said "no client ID found" while the variable the
+    // user had just edited sat right there.
+    expect(findMisshapenClientIdVars({ WORKOS_CLIENT_ID: 'bogus' })).toEqual(['WORKOS_CLIENT_ID']);
+  });
+
+  test('still flags it when another variable holds a valid client id', () => {
+    // The worse half: a valid value elsewhere silently won, so the run
+    // retargeted to an environment the user never chose and reported success.
+    expect(
+      findMisshapenClientIdVars({
+        WORKOS_CLIENT_ID: 'bogus',
+        NEXT_PUBLIC_AUTH_CLIENT_ID: CLIENT_ID,
+      }),
+    ).toEqual(['WORKOS_CLIENT_ID']);
+  });
+
+  test('says nothing when names and values agree', () => {
+    expect(findMisshapenClientIdVars({ WORKOS_CLIENT_ID: CLIENT_ID })).toEqual([]);
+  });
+
+  test('ignores variables that never claimed to be client ids', () => {
+    expect(findMisshapenClientIdVars({ PORT: '3000', DATABASE_URL: 'postgres://x' })).toEqual([]);
   });
 });
 
