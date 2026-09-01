@@ -465,23 +465,83 @@ export interface WorkOSKey {
   readonly expiredAt: string | null;
 }
 
-async function fetchEnvironments(token: string): Promise<readonly TeamEnvironment[]> {
+/**
+ * Turn a WorkOS API failure into something a person can act on.
+ *
+ * Every call here goes through this, because the alternative is what shipped:
+ * an unhandled `WorkOSGraphQLError` printing a stack trace through
+ * `processTicksAndRejections` at somebody who typed `capy connect workos`.
+ *
+ * 403 gets its own message because it has a specific cause and a specific fix.
+ * WorkOS returns it for anything the signed-in account cannot see, which in
+ * practice means the wrong account is signed in — so the message names the
+ * account, the client ID and the environment it was reaching for, since the
+ * whole question is which of those three does not line up.
+ *
+ * NOTE THE STATUS, NOT THE CODE. WorkOS labels these `INTERNAL_SERVER_ERROR`
+ * in `extensions.code` and puts the real 403 in `exception.status`, so the code
+ * is not the discriminator it looks like.
+ */
+function failWorkOSRequest(err: unknown, context: WorkOSErrorContext): never {
+  if (!(err instanceof WorkOSGraphQLError)) throw err;
+
+  if (err.status === 403) {
+    console.error(`\n  Your WorkOS account cannot see this environment.`);
+    if (context.email) console.error(`  Signed in as ${B(context.email)}.`);
+    if (context.clientIdVar && context.clientId) {
+      console.error(`  ${B(context.clientIdVar)} is ${context.clientId}.`);
+    }
+    if (context.environmentName) console.error(`  Reaching for ${B(context.environmentName)}.`);
+    console.error(`\n  Check ${B('workos auth status')} — signing in as a different account is`);
+    console.error('  the usual fix.\n');
+    process.exit(1);
+  }
+
+  const status = err.status ? ` (${err.status})` : '';
+  console.error(`\n  WorkOS request failed${status}. Try again.\n`);
+  process.exit(1);
+}
+
+interface WorkOSErrorContext {
+  readonly email?: string;
+  readonly clientIdVar?: string;
+  readonly clientId?: string;
+  readonly environmentName?: string;
+}
+
+/** The signed-in address, for error messages only. Absent is fine. */
+function signedInEmail(): string | undefined {
+  const creds = readCredentialsFile() ?? readCredentialsKeyring();
+  const email = (creds as unknown as { email?: unknown } | null)?.email;
+  return typeof email === 'string' ? email : undefined;
+}
+
+async function fetchEnvironments(
+  token: string,
+  context: WorkOSErrorContext = {},
+): Promise<readonly TeamEnvironment[]> {
   const data = await graphql<{
     currentTeam: {
       projectsV2: ReadonlyArray<{ name: string | null; environments: readonly TeamEnvironment[] | null }> | null;
     } | null;
-  }>(token, 'teamProjectsV2', TEAM_ENVIRONMENTS_QUERY);
+  }>(token, 'teamProjectsV2', TEAM_ENVIRONMENTS_QUERY).catch((err) =>
+    failWorkOSRequest(err, { ...context, email: signedInEmail() }),
+  );
   const projects = data.currentTeam?.projectsV2 ?? [];
   return projects.flatMap((p) => p.environments ?? []);
 }
 
-async function fetchKeys(token: string, environmentId: string): Promise<readonly WorkOSKey[]> {
+async function fetchKeys(
+  token: string,
+  environmentId: string,
+  context: WorkOSErrorContext = {},
+): Promise<readonly WorkOSKey[]> {
   const data = await graphql<{ keys: { data: readonly WorkOSKey[] } }>(
     token,
     'keys',
     KEYS_QUERY,
     { environmentId },
-  );
+  ).catch((err) => failWorkOSRequest(err, { ...context, email: signedInEmail() }));
   return data.keys.data;
 }
 
@@ -758,7 +818,7 @@ async function resolveTarget(
   nonTty?: boolean,
 ): Promise<ResolvedTarget> {
   const { name: clientIdVar, value: clientId } = await chooseClientId(ctx, nonTty);
-  const environments = await fetchEnvironments(token);
+  const environments = await fetchEnvironments(token, { clientIdVar, clientId });
   const match = environments.find((e) => e.clientId === clientId);
   const chosen = await chooseEnvironment(environments, match, clientIdVar, clientId, nonTty);
   return {
@@ -1150,7 +1210,7 @@ async function createKey(
     };
   }>(token, 'createKey', CREATE_KEY_MUTATION, {
     input: { environmentId, applicationId, name },
-  });
+  }).catch((err) => failWorkOSRequest(err, { email: signedInEmail() }));
   // Branch on the union member, not on any message. `KeyCreated` is the only
   // success shape; anything else is a refusal the server named.
   if (data.createKey.__typename !== 'KeyCreated') return undefined;
