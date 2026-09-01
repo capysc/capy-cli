@@ -223,11 +223,13 @@ export async function resolveContext(opts: ResolveContextOptions = {}): Promise<
  *      auto-provisioning of that project is a separate workstream; this
  *      function never creates one.
  *
- * Branch: `ProjectManager.deriveActiveBranch()` (which itself already checks
- * the `.env` header, `.capy/branch`, and single-branch fallbacks) or, when
- * none of those yield anything, `'development'` — lock-less mode is the ONE
- * caller allowed to default a branch rather than fail NO_ACTIVE_BRANCH; the
- * lock-full path above is untouched.
+ * Branch: billing-forced lock-less resolution always uses `'development'`,
+ * because free mode has one authoritative remote branch and stale local
+ * branch hints must not redirect it. Legacy lock-less resolution continues to
+ * use `ProjectManager.deriveActiveBranch()` (which itself already checks the
+ * `.env` header, `.capy/branch`, and single-branch fallbacks), defaulting to
+ * `'development'` only when none yield anything. The lock-full path above is
+ * untouched.
  */
 async function resolveLocklessContext(
   pm: ProjectManager,
@@ -287,7 +289,9 @@ async function resolveLocklessContext(
   })();
   const { orgId, projectId, projectName } = identity;
 
-  const branch = pm.deriveActiveBranch() || SyncEngine.DEFAULT_BRANCH;
+  const branch = opts.forceLockless
+    ? SyncEngine.DEFAULT_BRANCH
+    : pm.deriveActiveBranch() || SyncEngine.DEFAULT_BRANCH;
 
   const { resolveProjectKeyWithMintFallback } = await import('../../auth/masterKeyMint');
   const projectKey = await (async (): Promise<string> => {
@@ -409,8 +413,9 @@ export async function writeAndSync(
      */
     confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   },
-): Promise<void> {
-  maybeWarnPersonalEnv(ctx);
+  warningState: PersonalEnvWarningState = initialPersonalEnvWarningState(),
+): Promise<PersonalEnvWarningState> {
+  const nextWarningState = maybeWarnPersonalEnv(ctx, warningState);
   const finalEnv = value === undefined
     ? { ...ctx.localPlaintext }
     : { ...ctx.localPlaintext, [varName]: value };
@@ -429,7 +434,7 @@ export async function writeAndSync(
     } else {
       ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, ctx.keep, ctx.branch);
     }
-    return;
+    return nextWarningState;
   }
 
   await syncResolvedSnapshot(ctx, finalEnv, {
@@ -437,6 +442,7 @@ export async function writeAndSync(
     connector: opts.connector ? { varName, metadata: opts.connector } : undefined,
     confirmOverwrite: opts.confirmOverwrite,
   });
+  return nextWarningState;
 }
 
 export interface SyncResolvedSnapshotOptions {
@@ -632,10 +638,14 @@ function hasGitRemote(cwd: string): boolean {
   }
 }
 
-// Dedup key for `maybeWarnPersonalEnv` — one note per `ResolvedContext`, not
-// one per write, so a multi-var `capy add` or a multi-commit `capy edit`
-// session says it once rather than once per variable/commit.
-const personalEnvWarned = new WeakSet<object>();
+/** Immutable caller-owned state for a command/context's personal-env note. */
+export interface PersonalEnvWarningState {
+  readonly emitted: boolean;
+}
+
+export function initialPersonalEnvWarningState(): PersonalEnvWarningState {
+  return { emitted: false };
+}
 
 /**
  * Soft, non-blocking heads-up — never a prompt, never blocks the write — for
@@ -644,15 +654,20 @@ const personalEnvWarned = new WeakSet<object>();
  * identity header yet (`ctx.identitySource === 'server'`: see the field's own
  * doc comment on `ResolvedContext`). Once a write lands, `writeEncryptedEnvFile`
  * puts the header in place, so the very next command's `ctx.identitySource`
- * reads `'header'` and this stays silent from then on — no separate state to
- * track.
+ * reads `'header'` and this stays silent from then on. Within a command,
+ * callers thread the returned immutable state through repeated writes.
  */
-export function maybeWarnPersonalEnv(ctx: ResolvedContext, cwd: string = process.cwd()): void {
-  if (!ctx.lockless || ctx.identitySource !== 'server') return;
-  if (personalEnvWarned.has(ctx)) return;
-  personalEnvWarned.add(ctx);
-  if (!hasGitRemote(cwd)) return;
+export function maybeWarnPersonalEnv(
+  ctx: ResolvedContext,
+  state: PersonalEnvWarningState = initialPersonalEnvWarningState(),
+  cwd: string = process.cwd(),
+): PersonalEnvWarningState {
+  if (state.emitted || !ctx.lockless || ctx.identitySource !== 'server') return state;
+  const persistedIdentity = ctx.fileManager.readEnvMeta();
+  if (persistedIdentity.org_id && persistedIdentity.project_id) return state;
+  if (!hasGitRemote(cwd)) return state;
   console.error('Heads up: this saves to your personal env, not a team project.');
+  return { emitted: true };
 }
 
 /**

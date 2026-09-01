@@ -154,6 +154,7 @@ import {
   conflictContextLines,
   describeConnector,
   conflictOverwriteQuestion,
+  initialPersonalEnvWarningState,
   maybeWarnPersonalEnv,
   keepEntryFor,
 } from '../../../src/commands/connectors/shared';
@@ -826,8 +827,8 @@ describe('maybeWarnPersonalEnv — soft, non-blocking personal-env-in-a-team-pro
 
     const { lines: errs, restore } = captureErrors();
     try {
-      maybeWarnPersonalEnv(ctx, TEST_DIR);
-      maybeWarnPersonalEnv(ctx, TEST_DIR); // same ctx again — deduped, not a second line
+      const warningState = maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
+      maybeWarnPersonalEnv(ctx, warningState, TEST_DIR); // same state threaded through — no second line
     } finally {
       restore();
     }
@@ -845,7 +846,7 @@ describe('maybeWarnPersonalEnv — soft, non-blocking personal-env-in-a-team-pro
 
     const { lines: errs, restore } = captureErrors();
     try {
-      maybeWarnPersonalEnv(ctx, TEST_DIR);
+      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
     } finally {
       restore();
     }
@@ -860,7 +861,7 @@ describe('maybeWarnPersonalEnv — soft, non-blocking personal-env-in-a-team-pro
     const ctx = await resolveContext({ devMode: true });
     const { lines: errs, restore } = captureErrors();
     try {
-      maybeWarnPersonalEnv(ctx, TEST_DIR);
+      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
     } finally {
       restore();
     }
@@ -874,7 +875,7 @@ describe('maybeWarnPersonalEnv — soft, non-blocking personal-env-in-a-team-pro
     const ctx = await resolveContext({ devMode: true });
     const { lines: errs, restore } = captureErrors();
     try {
-      maybeWarnPersonalEnv(ctx, TEST_DIR);
+      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
     } finally {
       restore();
     }
@@ -886,7 +887,7 @@ describe('maybeWarnPersonalEnv — soft, non-blocking personal-env-in-a-team-pro
     const fauxLockFullCtx = { lockless: false, identitySource: undefined } as any;
     const { lines: errs, restore } = captureErrors();
     try {
-      maybeWarnPersonalEnv(fauxLockFullCtx, TEST_DIR);
+      maybeWarnPersonalEnv(fauxLockFullCtx, initialPersonalEnvWarningState(), TEST_DIR);
     } finally {
       restore();
     }

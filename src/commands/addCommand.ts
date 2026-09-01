@@ -1,5 +1,8 @@
 import { CapyError, ERROR_CODES } from '../types';
-import { resolveContext, writeAndSync } from './connectors/shared';
+import {
+  resolveContext,
+  writeAndSync,
+} from './connectors/shared';
 import { runWebIntake, parseVars, type SecretPair } from '../ui/secretIntakeScreen';
 import type { IntakeVar } from '../ui/screens/contract';
 
@@ -200,17 +203,18 @@ export class AddCommand {
       pairs: readonly SecretPair[],
       index: number = 0,
       currentCtx: typeof ctx = ctx,
+      warningState: { readonly emitted: boolean } = { emitted: false },
     ): Promise<void> => {
       const pair = pairs[index];
       if (pair === undefined) return;
-      await this.dependencies.writeAndSync(currentCtx, pair.name, pair.value, {
+      const nextWarningState = await this.dependencies.writeAndSync(currentCtx, pair.name, pair.value, {
         push: push && index === pairs.length - 1,
         confirmOverwrite,
-      });
+      }, warningState);
       return writeMany(pairs, index + 1, {
         ...currentCtx,
         localPlaintext: { ...currentCtx.localPlaintext, [pair.name]: pair.value },
-      });
+      }, nextWarningState);
     };
 
     const savedNames = await (async (): Promise<readonly string[]> => {

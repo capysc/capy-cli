@@ -35,6 +35,8 @@ function dependencies(input: {
   readonly confirm?: boolean;
   readonly localOnly?: boolean;
   readonly remoteKeepExists?: boolean;
+  readonly silentAuth?: { readonly success: boolean; readonly user_id?: string; readonly organization_id?: string; readonly error?: string };
+  readonly interactiveAuth?: { readonly success: boolean; readonly user_id?: string; readonly organization_id?: string; readonly error?: string };
 } = {}) {
   const local = input.local ?? { KEEP_ME: 'new-local-value' };
   const writeActiveBranch = mock(() => undefined);
@@ -69,7 +71,8 @@ function dependencies(input: {
     },
     authService: {
       setSessionUserId: mock(() => undefined),
-      authenticateSilent: mock(async () => ({ success: true, user_id: 'user_1', organization_id: 'org_1' })),
+      authenticateSilent: mock(async () => input.silentAuth ?? ({ success: true, user_id: 'user_1', organization_id: 'org_1' })),
+      authenticate: mock(async () => input.interactiveAuth ?? ({ success: false, error: 'interactive authentication was not expected' })),
       getValidToken: mock(async () => null),
     },
     serviceClient: { getBillingStatus: mock(async () => input.billing ?? FREE) },
@@ -150,6 +153,34 @@ describe('free lockless destructive-push policy', () => {
     expect(await tryFreeLocklessPush(result.deps)).toMatchObject({ handled: false });
     expect(result.resolveContext).not.toHaveBeenCalled();
     expect(result.syncSnapshot).not.toHaveBeenCalled();
+  });
+
+  test('paid billing preserves the silent-to-interactive fallback and returns that one auth result to the manifest path', async () => {
+    const interactiveAuth = { success: true as const, user_id: 'interactive_user', organization_id: 'org_1' };
+    const result = dependencies({
+      billing: PAID,
+      silentAuth: { success: false, error: 'expired session' },
+      interactiveAuth,
+    });
+
+    expect(await tryFreeLocklessPush(result.deps)).toEqual({ handled: false, authResult: interactiveAuth });
+    expect(result.deps.authService.authenticateSilent).toHaveBeenCalledTimes(2);
+    expect(result.deps.authService.authenticate).toHaveBeenCalledWith('org_1');
+    expect(result.resolveContext).not.toHaveBeenCalled();
+  });
+
+  test('grandfathered billing preserves the silent-to-interactive fallback and returns that one auth result to the manifest path', async () => {
+    const interactiveAuth = { success: true as const, user_id: 'legacy_user', organization_id: 'org_1' };
+    const result = dependencies({
+      billing: { ...FREE, grandfathered: true },
+      silentAuth: { success: false, error: 'expired session' },
+      interactiveAuth,
+    });
+
+    expect(await tryFreeLocklessPush(result.deps)).toEqual({ handled: false, authResult: interactiveAuth });
+    expect(result.deps.authService.authenticateSilent).toHaveBeenCalledTimes(2);
+    expect(result.deps.authService.authenticate).toHaveBeenCalledWith('org_1');
+    expect(result.resolveContext).not.toHaveBeenCalled();
   });
 
   test('true local-only mode bypasses billing and the entire hosted path', async () => {

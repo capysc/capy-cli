@@ -219,6 +219,35 @@ describe('resolveContext — lock-less identity resolution', () => {
     expect(ctx.branch).toBe('development');
   });
 
+  test('billing-forced lock-less resolution pins the free default project to development despite stale local branch signals', async () => {
+    writeFileSync(join(TEST_DIR, '.env'), [
+      '# capy:org_id=stale-org',
+      '# capy:project_id=stale-project',
+      '# capy:branch=feature/stale',
+      '',
+    ].join('\n'));
+    mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+    writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'feature/stale');
+    writeFileSync(join(TEST_DIR, '.capy', 'sync-state'), JSON.stringify({
+      last_sync: '', synced_variables: [], keep_hash: { 'feature/stale': 'stale-hash' },
+    }));
+    writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({
+      version: '3.0', org_id: 'stale-org', project_id: 'stale-project', project_name: 'stale',
+      variables: { STALE: [{ branch: 'feature/stale', resource_id: 'stale-rid', value_hash: 'stale-hash' }] },
+    }));
+    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
+    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
+
+    const ctx = await resolveContext({ devMode: true, forceLockless: true });
+
+    expect(ctx.branch).toBe('development');
+    expect(ctx.orgId).toBe('org-1');
+    expect(ctx.projectId).toBe('proj-1');
+    expect(serviceCalls.filter((call) => call[0] === 'getDecryptData')).toEqual([
+      ['getDecryptData', 'proj-1', 'development'],
+    ]);
+  });
+
   test('a fresh directory (no .env at all) seeds localPlaintext from the server\'s blob', async () => {
     // The normal case in single-user mode: the personal env follows the user
     // across repos, so a brand new directory has no local .env yet even

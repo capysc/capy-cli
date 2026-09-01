@@ -67,7 +67,7 @@ type FileManagerDependency = Pick<
   FileManager,
   'readEnvMeta' | 'readEnvFile'
 >;
-type AuthServiceDependency = Pick<AuthService, 'setSessionUserId' | 'authenticateSilent' | 'getValidToken'>;
+type AuthServiceDependency = Pick<AuthService, 'setSessionUserId' | 'authenticateSilent' | 'authenticate' | 'getValidToken'>;
 type ServiceClientDependency = Pick<ServiceClient, 'getBillingStatus'>;
 
 export interface FreeLocklessPushDependencies {
@@ -88,6 +88,17 @@ export interface FreeLocklessPushDependencies {
 export type FreeLocklessPushDispatch =
   | { readonly handled: true }
   | { readonly handled: false; readonly authResult?: AuthResult };
+
+async function authenticateForBilling(
+  authService: AuthServiceDependency,
+  organizationId?: string,
+): Promise<AuthResult> {
+  const scopedSilent = await authService.authenticateSilent(organizationId);
+  if (scopedSilent.success) return scopedSilent;
+  const unscopedSilent = await authService.authenticateSilent();
+  if (unscopedSilent.success) return unscopedSilent;
+  return authService.authenticate(organizationId);
+}
 
 async function defaultDestructiveConfirmation(plan: FreeLocklessPushPlan): Promise<boolean> {
   if (!process.stdin.isTTY) return false;
@@ -140,7 +151,7 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   const envMeta = deps.fileManager.readEnvMeta();
   const orgHint = syncState?.org_id ?? envMeta.org_id;
   if (syncState?.user_id) deps.authService.setSessionUserId(syncState.user_id);
-  const auth = await deps.authService.authenticateSilent(orgHint);
+  const auth = await authenticateForBilling(deps.authService, orgHint);
   if (!auth.success || !auth.user_id) {
     throw new CapyError(auth.error ?? 'No valid session on this machine.', ERROR_CODES.AUTH_FAILED);
   }
