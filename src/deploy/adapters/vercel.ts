@@ -260,24 +260,37 @@ function writeVercelLink(projectDir: string, p: PickableProject): void {
 }
 
 /**
- * Ask which Vercel project this is and link it. Returns false (so the caller
- * can fall back to interactive `vercel link`) when there's no saved login
- * token, the API calls fail, or the user picks "none of these".
+ * Ask which Vercel project this is and link it.
+ *
+ * REPORTS WHY IT COULD NOT, rather than a bare false. The caller used to
+ * escalate every failure to `vercel link`, whose wizard offers to pull the
+ * project's environment variables down into `.env.local` — the one thing capy
+ * must not let happen, since it manages those and a pull mixes sources of
+ * truth. Only two of the four failures actually need that wizard, so the
+ * others no longer reach it.
  */
-async function linkByProjectPicker(projectDir: string): Promise<boolean> {
+type PickerOutcome =
+  | { kind: 'linked' }
+  /** No saved Vercel credential. `vercel link` cannot help: it needs one too. */
+  | { kind: 'no-token' }
+  /** The API refused or was unreachable. Transient, and `vercel link` hits the same API. */
+  | { kind: 'api-error'; detail: string }
+  /** Nothing to pick. Creating a project is `vercel link`'s job, not ours. */
+  | { kind: 'no-projects' }
+  /** The user asked for the wizard. */
+  | { kind: 'declined' };
+
+async function linkByProjectPicker(projectDir: string): Promise<PickerOutcome> {
   const token = readVercelCliToken();
-  if (!token) return false;
+  if (!token) return { kind: 'no-token' };
 
   let projects: PickableProject[];
   try {
     projects = await listAllVercelProjects(token);
   } catch (e) {
-    process.stdout.write(
-      `\x1b[90m  could not list Vercel projects (${e instanceof Error ? e.message : e})\x1b[0m\n`,
-    );
-    return false;
+    return { kind: 'api-error', detail: e instanceof Error ? e.message : String(e) };
   }
-  if (projects.length === 0) return false;
+  if (projects.length === 0) return { kind: 'no-projects' };
 
   // Best guess first: a project named like the directory it lives in.
   const dirName = basename(projectDir);
@@ -306,24 +319,29 @@ async function linkByProjectPicker(projectDir: string): Promise<boolean> {
       ],
     } as any,
   ])) as any;
-  if (!ans.picked) return false;
+  if (!ans.picked) return { kind: 'declined' };
 
   writeVercelLink(projectDir, ans.picked);
   process.stdout.write(
     `\x1b[32m✓\x1b[0m linked ${ans.picked.scopeLabel}/${ans.picked.projectName} ` +
       `\x1b[90m(.vercel/project.json)\x1b[0m\n`,
   );
-  return true;
+  return { kind: 'linked' };
 }
 
 /**
- * Runs `vercel link` interactively so the user can pick scope + project. We
- * inherit stdio (vercel's scope/project pickers use arrow-key lists and
- * require a raw TTY on stdin — we can't both inject keystrokes AND let the
- * user navigate without a PTY). To honor the "decline env-var download"
- * intent, we print a clear instruction immediately before launching so the
- * answer is unambiguous: capy manages those vars, downloading them would
- * mix sources of truth.
+ * Runs `vercel link` interactively so the user can pick scope + project.
+ *
+ * LAST RESORT, AND ONLY FOR CREATING A PROJECT. Everything else is handled by
+ * `linkByProjectPicker`, which writes `.vercel/project.json` itself. This path
+ * exists because creating a Vercel project is the one thing the picker cannot
+ * do, and it is reached only when the account has no projects or the user
+ * explicitly asked for the wizard.
+ *
+ * Stdio is inherited because vercel's pickers are arrow-key lists needing a
+ * raw TTY on stdin — we cannot both drive them and let the user navigate
+ * without a PTY. Which is also why the env-var question below can only be
+ * answered by the person at the keyboard, and has to be asked of them clearly.
  */
 async function runVercelLink(projectDir: string): Promise<boolean> {
   // ANSI: 33 = yellow, 90 = grey, 0 = reset.
@@ -331,10 +349,10 @@ async function runVercelLink(projectDir: string): Promise<boolean> {
     '\n\x1b[33m▸ Project not linked to Vercel. Running `vercel link`…\x1b[0m\n',
   );
   process.stdout.write(
-    '\x1b[90m  When asked "Download Environment Variables?", answer N.\x1b[0m\n',
+    '\x1b[90m  If it offers to download Environment Variables, answer N —\x1b[0m\n',
   );
   process.stdout.write(
-    '\x1b[90m  capy manages those — pulling them would mix sources.\x1b[0m\n\n',
+    '\x1b[90m  capy manages those, and pulling them would mix sources.\x1b[0m\n\n',
   );
   return new Promise((resolve) => {
     const child = spawn('vercel', ['link'], {
@@ -442,13 +460,38 @@ export const vercelAdapter: DeployAdapter = {
             `Or in CI, set VERCEL_PROJECT_ID + VERCEL_ORG_ID + VERCEL_TOKEN.`,
         };
       }
-      // Preferred: list the user's Vercel projects and ask which one this
-      // is, writing .vercel/project.json directly. Fall back to vercel
-      // link's own wizard when there's no saved token, the API fails, or
-      // the user picks "none of these".
-      const linkOk =
-        (await linkByProjectPicker(projectDir)) ||
-        (await runVercelLink(projectDir));
+      // List the user's Vercel projects and ask which one this is, writing
+      // .vercel/project.json directly — the whole of what linking produces.
+      //
+      // `vercel link` is reached only where it can do something this cannot:
+      // create a project. Its wizard offers to pull the project's environment
+      // variables into `.env.local`, and capy owns those, so escalating every
+      // failure to it — which is what this used to do — risked that pull for
+      // reasons the wizard could not have fixed anyway. A missing credential
+      // and a failing API break `vercel link` in exactly the same way.
+      const picked = await linkByProjectPicker(projectDir);
+      if (picked.kind === 'no-token') {
+        return {
+          ok: false,
+          reason: 'not signed in to Vercel',
+          hint:
+            `Sign in once, then re-run:\n` +
+            `  vercel login\n` +
+            `Or set VERCEL_TOKEN in the environment.`,
+        };
+      }
+      if (picked.kind === 'api-error') {
+        return {
+          ok: false,
+          reason: `could not list your Vercel projects (${picked.detail})`,
+          hint:
+            `Usually transient — re-run. If it persists, your saved Vercel\n` +
+            `credential may have expired: vercel login`,
+        };
+      }
+      // Nothing to pick, or the user asked for the wizard. Creating a project
+      // is the one thing the picker cannot do.
+      const linkOk = picked.kind === 'linked' || (await runVercelLink(projectDir));
       if (!linkOk) {
         return {
           ok: false,
