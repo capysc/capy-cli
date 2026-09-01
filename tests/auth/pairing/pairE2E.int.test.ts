@@ -45,9 +45,19 @@
  *
  * Needs `dist/index.js` built first (`bun run build`).
  */
-import { describe, it, expect, afterEach } from 'bun:test';
+import { describe, it, expect } from 'bun:test';
 import { spawn } from 'child_process';
-import { mkdtempSync, rmSync, readdirSync, statSync, existsSync } from 'fs';
+import { createConnection } from 'net';
+import {
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
@@ -57,6 +67,7 @@ import { deriveDeviceKeyKek, deviceKeyWrapAAD, wrapKLocal, DEVICE_KEY_KDF_VERSIO
 import { encryptMasterKey, masterKeyAAD, deriveProjectKey } from '../../../src/crypto/keyManager';
 import { deriveLocalInnerKey } from '../../../src/crypto/localKeyRoot';
 import { Encryptor } from '../../../src/crypto/encryptor';
+import { isGrantActiveFor } from '../../../src/auth/deviceKey/grantHolder';
 
 const USER_ID = 'user_pair_e2e_1';
 const USER_EMAIL = 'pair-e2e@example.com';
@@ -80,10 +91,16 @@ function spawnCli(
   serviceUrl: string,
   extraEnv: Record<string, string | undefined> = {},
 ): { stdoutSoFar: () => string; done: Promise<SpawnResult> } {
+  const captureDirectory = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-capture-'));
+  const stdoutPath = join(captureDirectory, 'stdout');
+  const stderrPath = join(captureDirectory, 'stderr');
+  const stdoutFd = openSync(stdoutPath, 'w');
+  const stderrFd = openSync(stderrPath, 'w');
   const child = spawn('node', [CLI_PATH, ...args], {
     cwd,
     env: {
       ...process.env,
+      ...extraEnv,
       HOME: home,
       CAPY_API_URL: serviceUrl,
       CAPY_GLOBAL_DIR_NAME: undefined,
@@ -97,26 +114,30 @@ function spawnCli(
       // grant obtained without it is unusable by a later `capy run` either
       // way).
       CAPY_DEVICE_KEYS: '1',
-      ...extraEnv,
     } as Record<string, string>,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['pipe', stdoutFd, stderrFd],
   });
-  let stdout = '';
-  let stderr = '';
-  child.stdout?.on('data', (d) => (stdout += d.toString()));
-  child.stderr?.on('data', (d) => (stderr += d.toString()));
-  const done = new Promise<SpawnResult>((resolve) => {
+  const stdoutSoFar = (): string => readFileSync(stdoutPath, 'utf8');
+  const stderrSoFar = (): string => readFileSync(stderrPath, 'utf8');
+  const exitCode = new Promise<number | null>((resolve) => {
     const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
     child.on('close', (code) => {
       clearTimeout(killer);
-      resolve({ stdout, stderr, exitCode: code });
+      resolve(code);
     });
     child.on('error', () => {
       clearTimeout(killer);
-      resolve({ stdout, stderr, exitCode: 1 });
+      resolve(1);
     });
   });
-  return { stdoutSoFar: () => stdout, done };
+  const done = exitCode
+    .then((code) => ({ stdout: stdoutSoFar(), stderr: stderrSoFar(), exitCode: code }))
+    .finally(() => {
+      closeSync(stdoutFd);
+      closeSync(stderrFd);
+      rmSync(captureDirectory, { recursive: true, force: true });
+    });
+  return { stdoutSoFar, done };
 }
 
 /**
@@ -218,28 +239,29 @@ async function driveGrantCeremonyOverSubprocess(
 
 /** Recursively find every file named exactly `name` under `root`. */
 function findFilesNamed(root: string, name: string): string[] {
-  const hits: string[] = [];
-  const walk = (dir: string): void => {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = join(dir, entry);
-      let st;
+  const walk = (dir: string): readonly string[] => {
+    const entries = (() => {
       try {
-        st = statSync(full);
+        return readdirSync(dir);
       } catch {
-        continue;
+        return [];
       }
-      if (st.isDirectory()) walk(full);
-      else if (entry === name) hits.push(full);
-    }
+    })();
+    return entries.flatMap((entry) => {
+      const full = join(dir, entry);
+      const stat = (() => {
+        try {
+          return statSync(full);
+        } catch {
+          return null;
+        }
+      })();
+      if (!stat) return [];
+      if (stat.isDirectory()) return [...walk(full)];
+      return entry === name ? [full] : [];
+    });
   };
-  walk(root);
-  return hits;
+  return [...walk(root)];
 }
 
 function fakeAccessToken(): string {
@@ -260,25 +282,163 @@ function projectDirWithSecret(masterKey: Buffer, secretValue: string): string {
   return dir;
 }
 
-describe('CAP-409 pair E2E: real session + no durable key material, over real subprocesses', () => {
-  let home: string | undefined;
-  let projectDir: string | undefined;
-  let service: FakePairingService | undefined;
+interface RecordedRuntimePairing {
+  readonly userId: string;
+  readonly credentialId: string;
+  readonly socketPath: string;
+}
 
-  afterEach(() => {
-    if (projectDir) rmSync(projectDir, { recursive: true, force: true });
-    if (home) rmSync(home, { recursive: true, force: true });
-    service?.close();
-    home = undefined;
-    projectDir = undefined;
-    service = undefined;
+function readRecordedRuntimePairing(home: string): RecordedRuntimePairing | null {
+  const path = join(home, '.capy', 'auth', 'runtime-pair.json');
+  const parsed = (() => {
+    try {
+      return JSON.parse(readFileSync(path, 'utf8')) as Readonly<Record<string, unknown>>;
+    } catch {
+      return null;
+    }
+  })();
+  return parsed
+    && parsed.userId === USER_ID
+    && parsed.credentialId === CRED_ID
+    && typeof parsed.socketPath === 'string'
+    && parsed.socketPath.length > 0
+    ? {
+        userId: parsed.userId,
+        credentialId: parsed.credentialId,
+        socketPath: parsed.socketPath,
+      }
+    : null;
+}
+
+function readSocketLine(socket: ReturnType<typeof createConnection>, buffer = ''): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const onData = (chunk: Buffer | string): void => {
+      cleanup();
+      const next = buffer + chunk.toString();
+      const newline = next.indexOf('\n');
+      if (newline >= 0) {
+        resolve(next.slice(0, newline));
+        return;
+      }
+      void readSocketLine(socket, next).then(resolve, reject);
+    };
+    const onEnd = (): void => {
+      cleanup();
+      reject(new Error('pairE2E daemon shutdown ended without an acknowledgement'));
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = (): void => {
+      socket.removeListener('data', onData);
+      socket.removeListener('end', onEnd);
+      socket.removeListener('error', onError);
+    };
+    socket.once('data', onData);
+    socket.once('end', onEnd);
+    socket.once('error', onError);
   });
+}
 
+function requestTestDaemonShutdown(socketPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    const fail = (error: Error): void => {
+      clearTimeout(timeout);
+      socket.destroy();
+      reject(error);
+    };
+    const timeout = setTimeout(
+      () => fail(new Error(`pairE2E daemon shutdown timed out: ${socketPath}`)),
+      2_000,
+    );
+    timeout.unref?.();
+    socket.once('connect', () => {
+      socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`);
+      void readSocketLine(socket).then((line) => {
+        const acknowledgement = (() => {
+          try {
+            return JSON.parse(line) as Readonly<Record<string, unknown>>;
+          } catch {
+            return null;
+          }
+        })();
+        if (acknowledgement?.ok !== true) {
+          fail(new Error(`pairE2E daemon rejected shutdown: ${line}`));
+          return;
+        }
+        clearTimeout(timeout);
+        socket.destroy();
+        resolve();
+      }, (error: unknown) => fail(error instanceof Error ? error : new Error(String(error))));
+    });
+    socket.once('error', fail);
+  });
+}
+
+async function waitForRecordedDaemonStop(pairing: RecordedRuntimePairing, attempts = 40): Promise<boolean> {
+  const socketStillExists = existsSync(pairing.socketPath);
+  const stillOwnsLiveDaemon = socketStillExists
+    ? await isGrantActiveFor(pairing.socketPath, pairing.userId, pairing.credentialId).catch(() => true)
+    : false;
+  if (!socketStillExists && !stillOwnsLiveDaemon) return true;
+  if (attempts <= 0) return false;
+  await Bun.sleep(25);
+  return waitForRecordedDaemonStop(pairing, attempts - 1);
+}
+
+async function shutdownRecordedTestPairing(home: string | undefined): Promise<void> {
+  if (!home) return;
+  const pairing = readRecordedRuntimePairing(home);
+  if (!pairing) return;
+  if (!existsSync(pairing.socketPath)) return;
+  const ownsLiveDaemon = await isGrantActiveFor(
+    pairing.socketPath,
+    pairing.userId,
+    pairing.credentialId,
+  );
+  if (!ownsLiveDaemon) {
+    throw new Error(`pairE2E recorded socket failed its identity check: ${pairing.socketPath}`);
+  }
+  await requestTestDaemonShutdown(pairing.socketPath);
+  const stopped = await waitForRecordedDaemonStop(pairing);
+  expect(stopped).toBe(true);
+}
+
+interface PairE2EFixture {
+  readonly home: string;
+  readonly service: FakePairingService;
+}
+
+async function withPairE2EFixture<T>(run: (fixture: PairE2EFixture) => Promise<T>): Promise<T> {
+  const home = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-home-'));
+  const service = (() => {
+    try {
+      return startFakePairingService();
+    } catch (error) {
+      rmSync(home, { recursive: true, force: true });
+      throw error;
+    }
+  })();
+  try {
+    return await run({ home, service });
+  } finally {
+    try {
+      await shutdownRecordedTestPairing(home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      service.close();
+    }
+  }
+}
+
+describe('CAP-409 pair E2E: real session + no durable key material, over real subprocesses', () => {
   it('pair -> pair no-op -> capy run resolves the real secret without an exported socket or durable key material', async () => {
-    home = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-home-'));
-    service = startFakePairingService();
-
     const masterKey = randomBytes(32);
+    const projectDir = projectDirWithSecret(masterKey, 'shh-pair-e2e-secret');
+    try {
+      await withPairE2EFixture(async ({ home, service }) => {
     const kLocal = randomBytes(32);
     const innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(USER_ID, ORG_ID));
     service.keyEncRows.push({ organizationId: ORG_ID, keyEnc: kmsWrap(innerWrapped) });
@@ -369,7 +529,6 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     expect(repeatedPair.stdout).not.toContain('enter:');
     expect(service.devices.size).toBe(1);
 
-    projectDir = projectDirWithSecret(masterKey, 'shh-pair-e2e-secret');
     const run = spawnCli(
       ['run', '--', 'node', '-e', 'console.log(process.env.SECRET_VAR)'],
       projectDir,
@@ -385,11 +544,14 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     // pairing a headless machine must never write local.key/key.enc.
     expect(findFilesNamed(home, 'local.key')).toEqual([]);
     expect(findFilesNamed(home, 'key.enc')).toEqual([]);
+      });
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
   }, 30_000);
 
   it('an unanswered pairing code expires: exit EXIT_NEEDS_INPUT (3), coded PAIR_CODE_EXPIRED, no session or key material written anywhere', async () => {
-    home = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-expiry-home-'));
-    service = startFakePairingService();
+    await withPairE2EFixture(async ({ home, service }) => {
 
     // The device-authorize response's `expires_in` (300s) is the CLIENT's
     // own clock deadline, already proven with millisecond precision against
@@ -415,5 +577,6 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     expect(findFilesNamed(home, 'local.key')).toEqual([]);
     expect(findFilesNamed(home, 'key.enc')).toEqual([]);
     expect(existsSync(join(home, '.capy', 'auth'))).toBe(false);
+    });
   }, 20_000);
 });
