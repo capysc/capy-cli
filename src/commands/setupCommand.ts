@@ -265,6 +265,20 @@ export class SetupCommand {
         : { id: '', name: this.projectManager.getDefaultProjectName(), status: 'new' };
 
     const branch = SyncEngine.DEFAULT_BRANCH;
+    const syncState = this.projectManager.readSyncState();
+    const freeProjectAlreadyInitialized = isFree
+      && syncState?.sync_mode === 'free'
+      && syncState.org_id === org.id
+      && syncState.project_id === project.id;
+    if (freeProjectAlreadyInitialized) {
+      refuse(
+        ERROR_CODES.SETUP_ALREADY_INITIALIZED,
+        'the free default project is already initialized in this directory',
+        { remedy: 'capy sync --json' },
+      );
+      return;
+    }
+
     const localEnv = this.fileManager.readEnvFile(this.cliOptions.envPath);
     const envVariableNames = sortedStrings(Object.keys(localEnv));
     const authority = resolveBillingSyncAuthority(

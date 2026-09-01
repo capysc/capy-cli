@@ -88,6 +88,7 @@ beforeEach(() => {
   mockProjectManager = {
     detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false })),
     getDefaultProjectName: mock(() => 'my-repo'),
+    readSyncState: mock(() => null),
     writeKeepFile: mock(() => undefined),
     writeActiveBranch: mock(() => undefined),
   };
@@ -453,6 +454,31 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
     expect(mockServiceClient.pushSecrets.mock.calls[0]?.[2]).toBe('');
     expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
     expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+  });
+
+  test('a completed free setup in this directory refuses re-onboarding and points to sync', async () => {
+    useFreeDefaultProject();
+    mockProjectManager.readSyncState.mockImplementation(() => ({
+      last_sync: '2026-09-01T00:00:00.000Z',
+      synced_variables: [],
+      user_id: 'user_1',
+      org_id: ORG.id,
+      project_id: 'project_default',
+      project_name: 'default',
+      sync_mode: 'free',
+    }));
+
+    await new SetupCommand().execute({});
+
+    const out = parsedOutput();
+    expect(out).toEqual({
+      ok: false,
+      code: ERROR_CODES.SETUP_ALREADY_INITIALIZED,
+      detail: 'the free default project is already initialized in this directory',
+      remedy: 'capy sync --json',
+    });
+    expect(process.exitCode).toBe(1);
+    expect(mockServiceClient.getDecryptData).not.toHaveBeenCalled();
   });
 
   test('a missing default project refuses instead of silently inferring paid mode', async () => {
