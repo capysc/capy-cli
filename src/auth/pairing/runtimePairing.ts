@@ -167,6 +167,7 @@ export async function registerRuntimePairing(
   credentialId: string,
   handle: RuntimePairingHandle,
 ): Promise<RuntimePairingRecord> {
+  const existingBeforeCheck = readRuntimePairing();
   const existingOutcome = (() => {
     try {
       return { ok: true as const, existing: assertRuntimePairingUser(userId) };
@@ -175,8 +176,36 @@ export async function registerRuntimePairing(
     }
   })();
   if (!existingOutcome.ok) {
-    await requestDaemonShutdown(handle.socketPath);
+    // A hostile/stale caller can point at the already-valid socket. Never
+    // turn an identity refusal into a shutdown of the pair being protected.
+    if (handle.socketPath !== existingBeforeCheck?.socketPath) {
+      await requestDaemonShutdown(handle.socketPath);
+    }
     throw existingOutcome.error;
+  }
+
+  // Never trade a valid pair for an expired, dead, or foreign holder. The
+  // probe checks user + credential without asking the daemon to release
+  // K_local. This runs before the atomic metadata rename and before the old
+  // daemon receives shutdown, so every rejected replacement leaves the
+  // existing account binding and key holder untouched.
+  const replacement = existingOutcome.existing !== null;
+  const candidateIsCurrent = handle.expiresAt === 0 || handle.expiresAt > Date.now();
+  const candidateMatches = !replacement || (candidateIsCurrent && await import('../deviceKey/grantHolder')
+    .then(({ isGrantActiveFor }) => isGrantActiveFor(handle.socketPath, userId, credentialId))
+    .catch(() => false));
+  if (!candidateMatches) {
+    if (handle.socketPath !== existingOutcome.existing?.socketPath) {
+      await requestDaemonShutdown(handle.socketPath);
+    }
+    throw new CapyError(
+      candidateIsCurrent
+        ? 'The replacement runtime key holder was unavailable or belonged to another pairing.'
+        : 'The replacement runtime key holder had already expired.',
+      candidateIsCurrent
+        ? ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND
+        : ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED,
+    );
   }
 
   const record: RuntimePairingRecord = {

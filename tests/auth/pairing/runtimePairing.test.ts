@@ -180,6 +180,41 @@ describe('runtime pairing registry', () => {
     }
   });
 
+  test('production, development, and staging runtime-pair registries stay in separate protected homes', async () => {
+    const roots = [
+      { directory: '.capy', userId: 'user_prod_root', credentialId: 'credential_prod_root' },
+      { directory: '.capy-dev', userId: 'user_dev_root', credentialId: 'credential_dev_root' },
+      { directory: '.capy-staging', userId: 'user_staging_root', credentialId: 'credential_staging_root' },
+    ] as const;
+    const daemons = roots.map((root, index) => createGrantDaemonServer(
+      { userId: root.userId, credentialId: root.credentialId, kLocal: Buffer.alloc(32, index + 1) },
+      null,
+    ));
+    await Promise.all(daemons.map((daemon) => listenGrantDaemonServer(daemon.server, daemon.socketPath)));
+    try {
+      const registrations = await Promise.all(roots.map((root, index) => childResult([
+        "import { registerRuntimePairing } from './src/auth/pairing/runtimePairing.ts';",
+        `await registerRuntimePairing('${root.userId}', '${root.credentialId}', {`,
+        `  socketPath: '${daemons[index].socketPath}',`,
+        `  expiresAt: 0,`,
+        `});`,
+        `console.log('PAIR_ROOT_OK');`,
+      ].join('\n'), root.directory)));
+
+      expect(registrations.map(({ status, stdout, stderr }) => ({
+        status,
+        stdout: stdout.trim(),
+        stderr,
+      }))).toEqual(roots.map(() => ({ status: 0, stdout: 'PAIR_ROOT_OK', stderr: '' })));
+      expect(roots.map((root) => JSON.parse(readFileSync(
+        join(tempHome, root.directory, 'auth', 'runtime-pair.json'),
+        'utf8',
+      )).userId)).toEqual(roots.map(({ userId }) => userId));
+    } finally {
+      daemons.forEach((daemon) => daemon.close());
+    }
+  });
+
   test('a fresh free-sync process resolves through persisted pair metadata with no socket environment variable', async () => {
     const syncKLocal = Buffer.alloc(32, 0x4c);
     const daemon = createGrantDaemonServer(
@@ -327,6 +362,62 @@ describe('runtime pairing registry', () => {
     } finally {
       first.close();
       second.close();
+    }
+  });
+
+  test('mismatched, foreign, and expired replacements cannot displace or stop a valid pair', async () => {
+    const valid = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    const foreign = createGrantDaemonServer(
+      { userId: USER_B, credentialId: 'credential_runtime_b', kLocal: Buffer.alloc(32, 0x2b) },
+      null,
+    );
+    const expired = createGrantDaemonServer(
+      { userId: USER_A, credentialId: 'credential_runtime_expired', kLocal: Buffer.alloc(32, 0x3c) },
+      null,
+    );
+    await Promise.all([valid, foreign, expired].map(
+      (daemon) => listenGrantDaemonServer(daemon.server, daemon.socketPath),
+    ));
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, valid);
+
+      const wrongAccount = await registerRuntimePairing(USER_B, 'credential_runtime_b', {
+        socketPath: valid.socketPath,
+        expiresAt: 0,
+      }).then(() => null).catch((error: unknown) => error);
+      expect(wrongAccount).toBeInstanceOf(CapyError);
+      expect((wrongAccount as CapyError).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(valid.socketPath)).toBe(true);
+
+      const foreignHolder = await registerRuntimePairing(USER_A, CREDENTIAL_A, foreign)
+        .then(() => null)
+        .catch((error: unknown) => error);
+      expect(foreignHolder).toBeInstanceOf(CapyError);
+      expect((foreignHolder as CapyError).code).toBe(ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND);
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(foreign.socketPath)).toBe(false);
+      expect(await isGrantActive(valid.socketPath)).toBe(true);
+
+      const expiredHolder = await registerRuntimePairing(USER_A, 'credential_runtime_expired', {
+        socketPath: expired.socketPath,
+        expiresAt: Date.now() - 1,
+      }).then(() => null).catch((error: unknown) => error);
+      expect(expiredHolder).toBeInstanceOf(CapyError);
+      expect((expiredHolder as CapyError).code).toBe(ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED);
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(expired.socketPath)).toBe(false);
+      expect(await fetchGrantedKLocal(valid.socketPath, USER_A)).toMatchObject({
+        userId: USER_A,
+        credentialId: CREDENTIAL_A,
+      });
+    } finally {
+      valid.close();
+      foreign.close();
+      expired.close();
     }
   });
 

@@ -111,7 +111,11 @@ interface HeldGrant {
   expiresAt: number;
 }
 
-type DaemonRequest = { op: 'get'; userId?: string } | { op: 'ping' } | { op: 'shutdown' };
+type DaemonRequest =
+  | { op: 'get'; userId?: string }
+  | { op: 'ping' }
+  | { op: 'verify'; userId?: string; credentialId?: string }
+  | { op: 'shutdown' };
 
 function respond(socket: Socket, body: Record<string, unknown>): void {
   try {
@@ -119,6 +123,13 @@ function respond(socket: Socket, body: Record<string, unknown>): void {
   } catch {
     // Client already gone — nothing to do.
   }
+}
+
+/** Node's Buffer API requires in-place zeroization for the old secret bytes
+ * to stop remaining readable. Keep that forced external-object operation at
+ * this boundary; all Capy-owned lifecycle state remains immutable. */
+function zeroizeSecretBuffer(secret: Buffer): void {
+  Reflect.apply(Uint8Array.prototype.fill, secret, [0]);
 }
 
 /**
@@ -150,7 +161,7 @@ export function createGrantDaemonServer(
   };
 
   const lifecycle = new AbortController();
-  const wipe = (): void => void held.kLocal.fill(0);
+  const wipe = (): void => zeroizeSecretBuffer(held.kLocal);
 
   const server = createServer((socket) => {
     void readOneLine(socket).then((line) => {
@@ -168,6 +179,20 @@ export function createGrantDaemonServer(
 
       if (req.op === 'ping') {
         respond(socket, { ok: true });
+        return;
+      }
+      if (req.op === 'verify') {
+        const expired = held.expiresAt !== 0 && Date.now() >= held.expiresAt;
+        if (lifecycle.signal.aborted || expired) {
+          respond(socket, { ok: false, code: ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED });
+          close();
+          return;
+        }
+        const matches = req.userId === held.userId && req.credentialId === held.credentialId;
+        respond(socket, {
+          ok: matches,
+          ...(matches ? {} : { code: ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND }),
+        });
         return;
       }
       if (req.op === 'shutdown') {
@@ -511,6 +536,46 @@ export async function isGrantActive(socketPath: string): Promise<boolean> {
       } catch {
         resolve(false);
       }
+    }).catch(() => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    socket.on('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * Metadata-only identity probe used before a runtime-pair record is replaced.
+ * Unlike `fetchGrantedKLocal`, this never moves K_local out of its holder. A
+ * false result deliberately reveals neither the held user nor credential.
+ */
+export async function isGrantActiveFor(
+  socketPath: string,
+  userId: string,
+  credentialId: string,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection(socketPath);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, REQUEST_TIMEOUT_MS);
+    socket.on('connect', () => {
+      socket.write(JSON.stringify({ op: 'verify', userId, credentialId }) + '\n');
+    });
+    void readOneLine(socket).then((line) => {
+      clearTimeout(timer);
+      const verified = (() => {
+        try {
+          return JSON.parse(line.trim()).ok === true;
+        } catch {
+          return false;
+        }
+      })();
+      resolve(verified);
     }).catch(() => {
       clearTimeout(timer);
       resolve(false);
