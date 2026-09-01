@@ -52,19 +52,21 @@ describe('keepGate.buildDeployKeep', () => {
 
   test('bumped value → changed=true, new hash, others untouched', () => {
     const env = { WORKOS_API_KEY: 'sk_NEW', WORKOS_CLIENT_ID: 'client_x' };
-    const r = buildDeployKeep(base, env, ['WORKOS_API_KEY', 'WORKOS_CLIENT_ID'], 'staging', NOW);
+    const r = buildDeployKeep(base, env, ['WORKOS_API_KEY', 'WORKOS_CLIENT_ID'], 'staging');
     expect(r.changed).toBe(true);
     const keep = JSON.parse(r.content);
     expect(keep.variables.WORKOS_API_KEY[0].value_hash).toBe(hashValue('sk_NEW'));
     expect(keep.variables.WORKOS_CLIENT_ID[0].value_hash).toBe(hashValue('client_x'));
-    expect(keep.variables.WORKOS_API_KEY[0].changed_at).toBe(NOW);
+    // The deploy path does not mint changed_at — the service owns it, and this
+    // keep.lock goes straight into a git worktree without passing through it.
+    expect(keep.variables.WORKOS_API_KEY[0].changed_at).toBe(base.variables.WORKOS_API_KEY[0].changed_at);
   });
 
   test('the core bug: a STALE local keep.lock does not mask a real value change', () => {
     // Local keep.lock still records the OLD hash (lagging .env). The gate must
     // use the .env value, not the file, and still detect the change.
     const env = { WORKOS_API_KEY: 'sk_NEW' };
-    const r = buildDeployKeep(base, env, ['WORKOS_API_KEY'], 'staging', NOW);
+    const r = buildDeployKeep(base, env, ['WORKOS_API_KEY'], 'staging');
     expect(r.changed).toBe(true);
   });
 
@@ -77,10 +79,26 @@ describe('keepGate.buildDeployKeep', () => {
     expect(keep.variables.STRIPE_KEY[0].branch).toBe('staging');
   });
 
-  test('--force touch bumps changed_at so it differs from base', () => {
-    const touched = touchDeployKeep(base, ['WORKOS_API_KEY'], 'staging', NOW);
+  test('--force bumps deploy_revision so it differs from base', () => {
+    const touched = touchDeployKeep(base, ['WORKOS_API_KEY'], 'staging');
     expect(touched).not.toBe(serializeKeep(base));
-    expect(JSON.parse(touched).variables.WORKOS_API_KEY[0].changed_at).toBe(NOW);
+    expect(JSON.parse(touched).deploy_revision).toBe(1);
+  });
+
+  test('--force leaves changed_at alone', () => {
+    // The whole point: a forced redeploy changes no value, so no value's
+    // "last changed" may move. This is what used to collide with
+    // server-assigned timestamps on merge.
+    const touched = JSON.parse(touchDeployKeep(base, ['WORKOS_API_KEY'], 'staging'));
+    expect(touched.variables.WORKOS_API_KEY[0].changed_at).toBe(
+      base.variables.WORKOS_API_KEY[0].changed_at,
+    );
+  });
+
+  test('successive forces increment rather than reset', () => {
+    const once = JSON.parse(touchDeployKeep(base, ['WORKOS_API_KEY'], 'staging'));
+    const twice = JSON.parse(touchDeployKeep(once, ['WORKOS_API_KEY'], 'staging'));
+    expect(twice.deploy_revision).toBe(2);
   });
 });
 

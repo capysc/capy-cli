@@ -29,6 +29,13 @@ export function serializeKeep(keep: KeepFile): string {
     org_id: keep.org_id,
     project_id: keep.project_id,
     project_name: keep.project_name,
+    // Only emitted once a forced deploy has set it, so existing lockfiles are
+    // byte-identical until something actually bumps it. `capy deploy --force`
+    // increments this to make a real diff for CI; it used to move `changed_at`
+    // instead, which claimed a value had changed when none had.
+    ...(typeof (keep as { deploy_revision?: unknown }).deploy_revision === 'number'
+      ? { deploy_revision: (keep as { deploy_revision: number }).deploy_revision }
+      : {}),
     variables: {} as Record<string, any>,
   };
   // v3 format: variables are arrays of { resource_id, branch?, value_hash, ...extras }.
