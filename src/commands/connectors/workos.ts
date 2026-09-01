@@ -1161,6 +1161,30 @@ async function rotate(
   previous: ConnectorMetadata,
   opts: RotateOpts,
 ): Promise<RotateResult> {
+  /**
+   * A client ID IS NOT ROTATABLE, AND ROTATING IT DESTROYS IT.
+   *
+   * `connect` marks the client-ID variable managed so the pair is tracked
+   * together, and anything managed lands in `listManagedKeys` — which is
+   * exactly what `capy rotate` and `--all` build their targets from. Reaching
+   * here for that variable means minting an API key and writing it over the
+   * client ID, leaving the app pointed at an environment identifier that is
+   * now a secret. Observed in the wild: a client-ID entry carrying
+   * `key_prefix: 'sk_test_'`.
+   *
+   * Checked by value shape rather than variable name, because the name is a
+   * convention and the value is a fact — the same reason the connector finds
+   * these variables by shape in the first place.
+   */
+  const currentValue = ctx.localPlaintext[varName];
+  if (currentValue && looksLikeWorkOSClientId(currentValue)) {
+    console.error(`\n  ${B(varName)} holds a WorkOS client ID, which cannot be rotated.`);
+    console.error('  A client ID names an environment; it is not a secret and WorkOS does');
+    console.error('  not issue a replacement. Rotating would overwrite it with an API key.');
+    console.error(`\n  Rotate the key instead: ${B(`capy rotate ${DEFAULT_VAR}`)}\n`);
+    process.exit(1);
+  }
+
   const token = await acquireToken(opts.nonTty);
 
   // Re-resolve from `.env` rather than trusting `previous.account_id`. The

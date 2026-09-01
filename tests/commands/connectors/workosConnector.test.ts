@@ -335,3 +335,18 @@ describe('workosConnector module shape', () => {
     expect(workosConnector.requiresAuth).toBeUndefined();
   });
 });
+
+describe('client IDs are not rotatable', () => {
+  test('the shape test that guards rotate recognises a client ID', () => {
+    // rotate refuses on this predicate. If it ever stops matching, `capy
+    // rotate --all` mints an API key over the client ID again — observed as a
+    // client-ID entry carrying key_prefix 'sk_test_'.
+    expect(looksLikeWorkOSClientId(CLIENT_ID)).toBe(true);
+    expect(looksLikeWorkOSApiKey(CLIENT_ID)).toBe(false);
+  });
+
+  test('an API key is not mistaken for a client ID', () => {
+    expect(looksLikeWorkOSClientId(WOS_KEY)).toBe(false);
+    expect(looksLikeWorkOSApiKey(WOS_KEY)).toBe(true);
+  });
+});
