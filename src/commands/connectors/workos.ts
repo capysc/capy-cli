@@ -745,16 +745,36 @@ export function findMisshapenClientIdVars(
     .map(([name]) => name);
 }
 
-async function chooseClientId(ctx: ResolvedContext, nonTty?: boolean): Promise<ClientIdCandidate> {
+/**
+ * Which client ID to resolve the environment from, or null when `.env` has
+ * none usable.
+ *
+ * NULL IS NOT A FAILURE HERE. It used to exit: no client ID, or a malformed
+ * one, and the run stopped. But the environments are one API call away and
+ * capy fetches them moments later anyway, so it can offer the real ones and
+ * let the user say which project this is. Refusing while holding the answer
+ * is the worse product.
+ *
+ * Non-interactive still refuses — there is nobody to ask, and picking an
+ * environment unattended is the mistake the client ID exists to prevent.
+ */
+async function chooseClientId(
+  ctx: ResolvedContext,
+  nonTty?: boolean,
+): Promise<ClientIdCandidate | null> {
   const candidates = findClientIdCandidates(ctx.localPlaintext);
   const misshapen = findMisshapenClientIdVars(ctx.localPlaintext);
 
   if (candidates.length === 0 && misshapen.length > 0) {
-    console.error(`\n  ${B(misshapen.join(', '))} does not hold a WorkOS client ID.`);
-    console.error(`  Expected a ${B('client_…')} value; got something else.`);
-    console.error('  A WorkOS API key belongs to one environment, and the client ID is what');
-    console.error('  says which — Capy will not rotate without knowing it.\n');
-    process.exit(1);
+    console.log(`\n  ${B(misshapen.join(', '))} does not hold a WorkOS client ID`);
+    console.log(`  (expected a ${B('client_…')} value).`);
+    if (!isInteractive(nonTty)) {
+      refuseNonInteractive(
+        `${misshapen.join(', ')} does not hold a WorkOS client ID and there is no way to ask which environment this is`,
+        `Set it to the client_… value for this project's WorkOS environment.`,
+      );
+    }
+    return null;
   }
 
   // A valid client ID elsewhere does not excuse a broken one here: the user
@@ -765,11 +785,15 @@ async function chooseClientId(ctx: ResolvedContext, nonTty?: boolean): Promise<C
   }
 
   if (candidates.length === 0) {
-    console.error(`\n  No WorkOS client ID found in .env on branch ${ctx.branch}.`);
-    console.error('  A WorkOS API key belongs to one environment, and the client ID is what');
-    console.error(`  says which. Capy looked for a variable holding a ${B('client_…')} value`);
-    console.error(`  (conventionally ${B(CLIENT_ID_VAR)}). Add it, run ${B('capy')} to sync, then connect.\n`);
-    process.exit(1);
+    console.log(`\n  No WorkOS client ID found in .env on branch ${ctx.branch}`);
+    console.log(`  (conventionally ${B(CLIENT_ID_VAR)}, holding a ${B('client_…')} value).`);
+    if (!isInteractive(nonTty)) {
+      refuseNonInteractive(
+        'no WorkOS client ID in .env and there is no way to ask which environment this is',
+        `Add ${CLIENT_ID_VAR} with this project's client_… value, run \`capy\` to sync, then connect.`,
+      );
+    }
+    return null;
   }
 
   const named = candidates.filter((c) => c.byName);
@@ -825,19 +849,24 @@ async function resolveTarget(
   nonTty?: boolean,
 ): Promise<ResolvedTarget> {
   const clientIdPick = await chooseClientId(ctx, nonTty);
-  const { name: clientIdVar, value: clientId } = clientIdPick;
+  const clientIdVar = clientIdPick?.name ?? CLIENT_ID_VAR;
+  const clientId = clientIdPick?.value;
   const environments = await fetchEnvironments(token, { clientIdVar, clientId });
-  const match = environments.find((e) => e.clientId === clientId);
+  const match = clientId ? environments.find((e) => e.clientId === clientId) : undefined;
   const chosen = await chooseEnvironment(environments, match, clientIdVar, clientId, nonTty);
   return {
     clientIdVar,
-    clientIdAmbiguous: clientIdPick.ambiguous === true,
+    // A picked environment is never recorded as a detected client ID: nothing
+    // in `.env` said this, the user did, and the next reader cannot tell the
+    // two apart from keep.lock alone.
+    clientIdAmbiguous: clientIdPick === null || clientIdPick.ambiguous === true,
     environmentId: chosen.id,
     environmentName: environmentLabel(chosen),
     sandbox: chosen.sandbox ?? false,
     // The chosen environment's own client ID, not `.env`'s — after an override
-    // those differ, and the recorded value should describe what was rotated.
-    clientId: chosen.clientId ?? clientId,
+    // or a pick those differ, and the recorded value should describe what was
+    // actually rotated.
+    clientId: chosen.clientId ?? clientId ?? '',
   };
 }
 
@@ -864,7 +893,8 @@ async function chooseEnvironment(
   environments: readonly TeamEnvironment[],
   match: TeamEnvironment | undefined,
   clientIdVar: string,
-  clientId: string,
+  /** Absent when `.env` had no usable client ID — then there is no default. */
+  clientId: string | undefined,
   nonTty?: boolean,
 ): Promise<TeamEnvironment> {
   if (environments.length === 0) {
@@ -875,14 +905,22 @@ async function chooseEnvironment(
 
   if (!isInteractive(nonTty)) {
     if (match) return match;
-    console.error(`\n  No WorkOS environment matches ${B(clientIdVar)} (${clientId}).`);
+    console.error(`\n  No WorkOS environment matches ${B(clientIdVar)} (${clientId ?? 'unset'}).`);
     console.error('  Either the signed-in WorkOS account is not the one that owns this');
     console.error(`  environment, or the environment no longer exists. Check with ${B('workos auth status')}.\n`);
     process.exit(1);
   }
 
   if (!match) {
-    console.log(`\n  ${B(clientIdVar)} (${clientId}) matches no environment on this account.`);
+    // Two ways to get here: `.env` named a client ID nothing matches, or it
+    // had none to name. Both end at the same question, so both get asked it —
+    // the environments are already in hand, and refusing while holding the
+    // answer helps nobody.
+    console.log(
+      clientId
+        ? `\n  ${B(clientIdVar)} (${clientId}) matches no environment on this account.`
+        : `\n  Capy could not tell which WorkOS environment this project uses.`,
+    );
     console.log('  Pick the one this project uses, or cancel and check `workos auth status`.');
   }
 
