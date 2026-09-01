@@ -47,7 +47,7 @@
  * `device-key grant` already gives, instead of a surprise ten minutes later.
  */
 import { hostname } from 'os';
-import { ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
@@ -66,6 +66,11 @@ import { keepOrigin } from '../ui/screens/keepScreens';
 import { openScreen } from '../ui/openScreen';
 import { renderTerminalQr } from '../ui/terminalQr';
 import { readActiveRuntimePairing, type ActiveRuntimePairing } from '../auth/pairing/runtimePairing';
+import {
+  acquirePairAttemptLease,
+  releasePairAttemptLease,
+  type PairAttemptLease,
+} from '../auth/pairing/pairAttemptLease';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -91,6 +96,8 @@ export interface PairCommandOptions {
 
 export interface PairCommandDependencies {
   readonly readActivePairing?: () => Promise<ActiveRuntimePairing | null>;
+  readonly acquirePairAttempt?: () => PairAttemptLease;
+  readonly releasePairAttempt?: (lease: PairAttemptLease) => boolean;
 }
 
 export class PairCommand {
@@ -109,6 +116,39 @@ export class PairCommand {
       return;
     }
 
+    const acquired = (() => {
+      try {
+        return { ok: true as const, lease: (this.dependencies.acquirePairAttempt ?? acquirePairAttemptLease)() };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    })();
+    if (!acquired.ok) {
+      const code = acquired.error instanceof CapyError
+        ? acquired.error.code
+        : ERROR_CODES.PAIR_ALREADY_IN_PROGRESS;
+      const detail = acquired.error instanceof Error
+        ? acquired.error.message
+        : 'Another capy pair ceremony is already active in this runtime.';
+      if (options.json) {
+        console.log(JSON.stringify({ ok: false, code, detail }, null, 2));
+      } else {
+        console.error('');
+        console.error(`  ${detail}`);
+        console.error('');
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    try {
+      await this.executeWithLease(options);
+    } finally {
+      (this.dependencies.releasePairAttempt ?? releasePairAttemptLease)(acquired.lease);
+    }
+  }
+
+  private async executeWithLease(options: PairCommandOptions): Promise<void> {
     const serviceUrl = resolveActiveUrl(this.devMode);
 
     // Extracted so the outcome is a single const rather than a reassigned

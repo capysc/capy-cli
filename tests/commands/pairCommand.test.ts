@@ -18,6 +18,16 @@ mock.module('../../src/config/profileConfig', () => ({
 mock.module('../../src/auth/pairing/runtimePairing', () => ({
   readActiveRuntimePairing: async () => null,
 }));
+mock.module('../../src/auth/pairing/pairAttemptLease', () => ({
+  acquirePairAttemptLease: () => ({
+    version: 1,
+    pid: 4242,
+    startedAt: '2026-09-01T00:00:00.000Z',
+    nonce: 'pair-command-test',
+    path: '/tmp/pair-command-test.json',
+  }),
+  releasePairAttemptLease: () => true,
+}));
 
 // CAP-566 moved the SEAM, not the branching: the command drives the device
 // grant (deviceAuth.ts) instead of runPairCeremony. Everything these tests
@@ -219,6 +229,24 @@ describe('PairCommand — already-active runtime', () => {
     expect(resolveKeyMaterialCalls).toEqual([]);
     expect(spawnCalls).toEqual([]);
     expect(logs.join('\n')).not.toContain('ABCD-1234');
+  });
+});
+
+describe('PairCommand — overlapping ceremony', () => {
+  test('--json refuses before starting WorkOS when another process owns the pair lease', async () => {
+    const acquirePairAttempt = () => {
+      throw new Error('Another capy pair ceremony is already active in this runtime.');
+    };
+
+    await new PairCommand(undefined, false, { acquirePairAttempt }).execute({ json: true });
+
+    expect(JSON.parse(logs.join('\n'))).toMatchObject({
+      ok: false,
+      code: ERROR_CODES.PAIR_ALREADY_IN_PROGRESS,
+    });
+    expect(ceremonyCalls).toEqual([]);
+    expect(installCalls).toEqual([]);
+    expect(spawnCalls).toEqual([]);
   });
 });
 

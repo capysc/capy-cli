@@ -478,6 +478,8 @@ export const ERROR_CODES = {
    * matching persisted session and a live, unexpired in-memory grant.
    */
   RUNTIME_PAIR_ALREADY_ACTIVE: 'RUNTIME_PAIR_ALREADY_ACTIVE',
+  /** A live process already owns this environment home's pairing ceremony. */
+  PAIR_ALREADY_IN_PROGRESS: 'PAIR_ALREADY_IN_PROGRESS',
   // CAP-402 (client-side only). Two independent gates: one on where a
   // one-time recovery phrase may be RENDERED, one on whether Case A's
   // ephemeral-environment mint may be left half-finished on disk.
