@@ -11,6 +11,7 @@ import {
   ERROR_CODES,
   setSyncKeepHash,
   getSyncKeepHash,
+  type AuthResult,
   KeepFile,
 } from '../types/index';
 import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
@@ -20,24 +21,17 @@ import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { pushKeepWithRetry, conflictOverwriteQuestion } from './connectors/shared';
 import { tryFreeLocklessPush } from '../sync/freeLocklessPush';
-import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
 export class PushCommand {
-  private projectManager: ProjectManager;
-  private fileManager: FileManager;
-  private authService: AuthService;
-  private serviceClient: ServiceClient;
-  private devMode: boolean;
-
-  constructor(devMode: boolean = false) {
-    this.devMode = devMode;
-    this.projectManager = new ProjectManager();
-    this.fileManager = new FileManager();
-    this.authService = new AuthService(undefined, devMode);
-    this.serviceClient = new ServiceClient(undefined, devMode);
-
+  constructor(
+    private readonly devMode: boolean = false,
+    private readonly projectManager: ProjectManager = new ProjectManager(),
+    private readonly fileManager: FileManager = new FileManager(),
+    private readonly authService: AuthService = new AuthService(undefined, devMode),
+    private readonly serviceClient: ServiceClient = new ServiceClient(undefined, devMode),
+  ) {
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
@@ -62,24 +56,68 @@ export class PushCommand {
 
   async execute(): Promise<void> {
     try {
-      const handledFreePush = await tryFreeLocklessPush({
+      const dispatch = await tryFreeLocklessPush({
         projectManager: this.projectManager,
         fileManager: this.fileManager,
         authService: this.authService,
         serviceClient: this.serviceClient,
         devMode: this.devMode,
-        grantResolutionOps: createGrantResolutionOps(this.serviceClient, this.authService),
+        localOnly: isLocalOnly(),
       });
-      if (handledFreePush) return;
-      await this._execute();
-    } catch (error: any) {
+      if (dispatch.handled) return;
+      await this._execute(dispatch.authResult);
+    } catch (error: unknown) {
       this.debugError('push execute caught', error);
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
   }
 
-  private async _execute(): Promise<void> {
+  private async authenticate(organizationId?: string) {
+    const scopedSilent = await this.authService.authenticateSilent(organizationId);
+    if (scopedSilent.success) return scopedSilent;
+    const unscopedSilent = await this.authService.authenticateSilent();
+    if (unscopedSilent.success) return unscopedSilent;
+    return this.authService.authenticate(organizationId);
+  }
+
+  private async resolvePushIdentity(input: {
+    readonly localMode: boolean;
+    readonly organizationId: string;
+    readonly projectId: string;
+    readonly projectUserId?: string;
+    readonly authResult?: AuthResult;
+  }): Promise<{ readonly userId: string; readonly encryptionKey: string }> {
+    if (input.localMode) {
+      return {
+        userId: LOCAL_USER_ID,
+        encryptionKey: await resolveLocalProjectKey(input.projectId),
+      };
+    }
+    if (input.projectUserId) this.authService.setSessionUserId(input.projectUserId);
+    const spinner = ora('Authenticating...').start();
+    const authResult = input.authResult ?? await this.authenticate(input.organizationId);
+    this.debug('authResult', {
+      success: authResult.success,
+      user_id: authResult.user_id,
+      _auth_method: authResult._auth_method,
+    });
+    if (!authResult.success || !authResult.user_id) {
+      spinner.fail('Authentication failed');
+      throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
+    }
+    spinner.stop();
+    const keyOps: KeyServiceOps = {
+      coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then((result) => result.plaintext),
+      wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then((result) => result.ciphertext),
+    };
+    return {
+      userId: authResult.user_id,
+      encryptionKey: await resolveProjectKey(input.organizationId, input.projectId, authResult.user_id, keyOps),
+    };
+  }
+
+  private async _execute(preauthenticated?: AuthResult): Promise<void> {
     this.debug('starting push command');
     this.debug('cwd', process.cwd());
 
@@ -107,45 +145,14 @@ export class PushCommand {
     // commit — the local writes below ARE the commit. serviceClient is unused.
     const localMode = isLocalOnly();
 
-    let userId: string;
-    let encryptionKey: string;
-    if (localMode) {
-      userId = LOCAL_USER_ID;
-      encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
-    } else {
-      if (projectState.userId) {
-        this.authService.setSessionUserId(projectState.userId);
-      }
-
-      // Authenticate
-      const spinner = ora('Authenticating...').start();
-      let authResult = await this.authService.authenticateSilent(projectState.organizationId);
-      if (!authResult.success) authResult = await this.authService.authenticateSilent();
-      if (!authResult.success) authResult = await this.authService.authenticate(projectState.organizationId);
-      this.debug('authResult', {
-        success: authResult.success,
-        user_id: authResult.user_id,
-        _auth_method: authResult._auth_method,
-      });
-      if (!authResult.success) {
-        spinner.fail('Authentication failed');
-        throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
-      }
-
-      spinner.stop();
-
-      const keyOps: KeyServiceOps = {
-        coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-        wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-      };
-      encryptionKey = await resolveProjectKey(
-        projectState.organizationId!,
-        projectState.projectId!,
-        authResult.user_id!,
-        keyOps,
-      );
-      userId = authResult.user_id!;
-    }
+    const identity = await this.resolvePushIdentity({
+      localMode,
+      organizationId: projectState.organizationId!,
+      projectId: projectState.projectId!,
+      projectUserId: projectState.userId,
+      authResult: preauthenticated,
+    });
+    const { userId, encryptionKey } = identity;
     this.debug('encryptionKey resolved', { length: encryptionKey.length });
 
     // Read keep.lock
@@ -185,18 +192,18 @@ export class PushCommand {
 
     // Encrypt all values
     const { Encryptor } = await import('../crypto/encryptor');
-    const encrypted: Record<string, string> = {};
-    for (const [key, value] of Object.entries(rawLocal)) {
-      if (value.startsWith('capy:')) {
-        this.debug(`${key}: already encrypted, passing through`);
-        encrypted[key] = value; // Already encrypted
-      } else {
+    const encrypted = Object.fromEntries(
+      Object.entries(rawLocal).map(([key, value]) => {
+        if (value.startsWith('capy:')) {
+          this.debug(`${key}: already encrypted, passing through`);
+          return [key, value] as const;
+        }
         const enc = Encryptor.encrypt(value, encryptionKey);
         const resourceId = deriveResourceId(branch, key);
-        encrypted[key] = `capy:${resourceId}:${enc}`;
         this.debug(`${key}: encrypted`, { resourceId, encLength: enc.length });
-      }
-    }
+        return [key, `capy:${resourceId}:${enc}`] as const;
+      }),
+    );
 
     const envBlob = Object.entries(encrypted)
       .map(([key, value]) => `${key}=${value}`)
@@ -204,15 +211,17 @@ export class PushCommand {
     this.debug('envBlob length', envBlob.length);
 
     // Update keep.lock hashes for the active branch
-    const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-    for (const [key, value] of Object.entries(rawLocal)) {
-      const plaintext = value.startsWith('capy:')
-        ? this.fileManager.decryptValue(value, encryptionKey)
-        : value;
-      const valueHash = createHash('sha256').update(plaintext).digest('hex').slice(0, 16);
-      const resourceId = deriveResourceId(branch, key);
-      pushedVars[key] = { resource_id: resourceId, value_hash: valueHash };
-    }
+    const pushedVars = Object.fromEntries(
+      Object.entries(rawLocal).map(([key, value]) => {
+        const plaintext = value.startsWith('capy:')
+          ? this.fileManager.decryptValue(value, encryptionKey)
+          : value;
+        return [key, {
+          resource_id: deriveResourceId(branch, key),
+          value_hash: createHash('sha256').update(plaintext).digest('hex').slice(0, 16),
+        }] as const;
+      }),
+    );
     this.debug('pushedVars', pushedVars);
 
     const syncEngine = new SyncEngine();
@@ -250,10 +259,8 @@ export class PushCommand {
       return ok;
     };
     const baseKeepHash = getSyncKeepHash(this.projectManager.readSyncState(), branch);
-    let finalKeep: KeepFile = buildUpdatedKeep(keep);
-    let pushedEnvBlob = envBlob;
-    const pushResult = localMode
-      ? null
+    const pushOutcome = localMode
+      ? { result: null, finalKeep: buildUpdatedKeep(keep), pushedEnvBlob: envBlob }
       : await pushKeepWithRetry({
           serviceClient: this.serviceClient,
           projectId: projectState.projectId!,
@@ -265,11 +272,8 @@ export class PushCommand {
           buildFinalKeep: buildUpdatedKeep,
           primaryVarNames: Object.keys(rawLocal),
           confirmOverwrite,
-        }).then((r) => {
-          finalKeep = r.finalKeep;
-          pushedEnvBlob = r.envBlob;
-          return r;
-        });
+        }).then((result) => ({ result, finalKeep: result.finalKeep, pushedEnvBlob: result.envBlob }));
+    const { result: pushResult, finalKeep, pushedEnvBlob } = pushOutcome;
     // keep_hash is computed locally from what was actually pushed (after any
     // CAS rebase); the server returns the same value on a push. In
     // local-only mode there is no push.

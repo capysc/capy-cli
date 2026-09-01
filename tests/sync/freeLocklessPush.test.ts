@@ -4,200 +4,210 @@ import {
   selectFreeLocklessPushMode,
   tryFreeLocklessPush,
 } from '../../src/sync/freeLocklessPush';
-import { ERROR_CODES } from '../../src/types/index';
+import {
+  resolveContext as resolveSharedContext,
+  syncResolvedSnapshot,
+  type ResolvedContext,
+} from '../../src/commands/connectors/shared';
+import { CapyError, ERROR_CODES, type KeepFile } from '../../src/types/index';
 import type { BillingStatus } from '../../src/service/serviceClient';
 
 const FREE: BillingStatus = {
-  tier: 'free',
-  grandfathered: false,
-  status: null,
-  seats: null,
-  member_count: 1,
-  project_count: 1,
+  tier: 'free', grandfathered: false, status: null, seats: null,
+  member_count: 1, project_count: 1,
 };
 const PAID: BillingStatus = {
-  tier: 'business',
-  grandfathered: false,
-  status: 'active',
-  seats: 2,
-  member_count: 2,
-  project_count: 1,
+  tier: 'business', grandfathered: false, status: 'active', seats: 2,
+  member_count: 2, project_count: 1,
 };
-
-const remoteKeep = JSON.stringify({
-  version: '3.0',
-  org_id: 'org_1',
-  project_id: 'project_default',
-  project_name: 'default',
+const REMOTE_KEEP: KeepFile = {
+  version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default',
   variables: {
     KEEP_ME: [{ branch: 'development', resource_id: 'rid-keep', value_hash: 'old' }],
     DELETE_A: [{ branch: 'development', resource_id: 'rid-a', value_hash: 'old' }],
     DELETE_B: [{ branch: 'development', resource_id: 'rid-b', value_hash: 'old' }],
   },
-});
+};
 
 function dependencies(input: {
   readonly billing?: BillingStatus;
   readonly local?: Readonly<Record<string, string>>;
   readonly confirm?: boolean;
-  readonly initialized?: boolean;
+  readonly localOnly?: boolean;
+  readonly remoteKeepExists?: boolean;
 } = {}) {
-  const pushSecrets = mock(async () => ({ keep_hash: 'b'.repeat(64) }));
-  const writeKeepFile = mock(() => undefined);
-  const writeSyncState = mock(() => undefined);
+  const local = input.local ?? { KEEP_ME: 'new-local-value' };
+  const writeActiveBranch = mock(() => undefined);
+  const ensureCapyGitignore = mock(() => undefined);
+  const backupPlaintextEnv = mock(() => undefined);
+  const ctx = {
+    pm: { readSyncState: mock(() => null), writeActiveBranch },
+    fileManager: {
+      readEnvFile: mock(() => local), decryptValue: mock((value: string) => value),
+      ensureCapyGitignore, backupPlaintextEnv,
+    },
+    authService: {}, serviceClient: {}, orgId: 'org_1', projectId: 'project_default',
+    branch: 'development', userId: 'user_1', projectKey: 'test-project-key',
+    keep: REMOTE_KEEP, localPlaintext: {}, lockless: true,
+    base_keep_hash: 'a'.repeat(64), identitySource: 'header',
+    remoteKeepExists: input.remoteKeepExists ?? true,
+  } as unknown as ResolvedContext;
+  const syncSnapshot = mock(async (
+    _context: ResolvedContext,
+    _snapshot: Readonly<Record<string, string>>,
+    options: { readonly beforeLocalWrite?: () => void },
+  ) => options.beforeLocalWrite?.());
+  const resolveContext = mock(async (options: { readonly forceLockless?: boolean }) =>
+    options.forceLockless ? ctx : { ...ctx, lockless: false });
   const confirmDestructivePush = mock(async () => input.confirm ?? false);
   const deps = {
     projectManager: {
-      detectProjectState: mock(async () => ({
-        initialized: input.initialized ?? false,
-        hasKeepFile: input.initialized ?? false,
-        hasEnvFile: true,
-        activeBranch: input.initialized ? 'feature/existing' : null,
-      })),
-      readSyncState: mock(() => ({
-        last_sync: '2026-09-01T00:00:00.000Z',
-        synced_variables: ['KEEP_ME', 'DELETE_A', 'DELETE_B'],
-        user_id: 'user_1',
-        org_id: 'org_1',
-        project_id: 'project_default',
-        project_name: 'default',
-        sync_mode: 'free' as const,
-      })),
-      writeActiveBranch: mock(() => undefined),
-      writeKeepFile,
+      readSyncState: mock(() => ({ user_id: 'user_1', org_id: 'org_1' })),
     },
     fileManager: {
-      readEnvMeta: mock(() => ({ org_id: 'org_1', project_id: 'project_default', branch: 'development' })),
-      readEnvFile: mock(() => input.local ?? { KEEP_ME: 'new-local-value' }),
-      decryptValue: mock((value: string) => value),
-      ensureCapyGitignore: mock(() => undefined),
-      backupPlaintextEnv: mock(() => undefined),
-      writeEncryptedEnvFile: mock(() => undefined),
-      writeSyncState,
+      readEnvMeta: mock(() => ({ org_id: 'org_1' })), readEnvFile: mock(() => local),
     },
     authService: {
       setSessionUserId: mock(() => undefined),
-      authenticateSilent: mock(async () => ({
-        success: true,
-        user_id: 'user_1',
-        organization_id: 'org_1',
-        organizations: [{ id: 'org_1', name: 'Personal' }],
-      })),
+      authenticateSilent: mock(async () => ({ success: true, user_id: 'user_1', organization_id: 'org_1' })),
       getValidToken: mock(async () => null),
     },
-    serviceClient: {
-      getBillingStatus: mock(async () => input.billing ?? FREE),
-      listProjects: mock(async () => [{ id: 'project_default', name: 'default', organization_id: 'org_1' }]),
-      getDecryptData: mock(async () => ({ keep_file: remoteKeep, env_content: '', decrypt_key: '', expires_at: '' })),
-      pushSecrets,
-      coDecrypt: mock(async (_orgId: string, ciphertext: string) => ({ plaintext: ciphertext })),
-      wrapOuterLayer: mock(async (_orgId: string, plaintext: string) => ({ ciphertext: plaintext })),
-    },
-    devMode: true,
-    confirmDestructivePush,
-    resolveProjectKey: mock(async () => 'test-project-key'),
-    grantResolutionOps: {
-      fetchKeyEnc: mock(async () => ''),
-      coDecrypt: mock(async (_orgId: string, ciphertext: string) => ciphertext),
-    },
-    cacheRemote: mock(() => undefined),
-    installHooks: mock(() => undefined),
-    report: mock(() => undefined),
+    serviceClient: { getBillingStatus: mock(async () => input.billing ?? FREE) },
+    devMode: true, localOnly: input.localOnly ?? false, confirmDestructivePush,
+    resolveContext: resolveContext as unknown as typeof resolveSharedContext,
+    syncSnapshot: syncSnapshot as unknown as typeof syncResolvedSnapshot,
+    installHooks: mock(() => undefined), report: mock(() => undefined),
   };
-  return { deps, pushSecrets, writeKeepFile, writeSyncState, confirmDestructivePush };
+  return {
+    deps, ctx, syncSnapshot, resolveContext, confirmDestructivePush,
+    writeActiveBranch, ensureCapyGitignore, backupPlaintextEnv,
+  };
 }
 
 describe('free lockless destructive-push policy', () => {
   test('warns only when explicit replacement removes multiple remote values', () => {
     expect(planFreeLocklessPush(['A'], ['A', 'B'])).toMatchObject({
-      deletedRemoteVariableNames: ['B'],
-      requiresDestructiveConfirmation: false,
+      deletedRemoteVariableNames: ['B'], requiresDestructiveConfirmation: false,
     });
     expect(planFreeLocklessPush(['A'], ['C', 'A', 'B'])).toEqual({
-      localVariableNames: ['A'],
-      remoteVariableNames: ['A', 'B', 'C'],
-      deletedRemoteVariableNames: ['B', 'C'],
-      requiresDestructiveConfirmation: true,
+      localVariableNames: ['A'], remoteVariableNames: ['A', 'B', 'C'],
+      deletedRemoteVariableNames: ['B', 'C'], requiresDestructiveConfirmation: true,
     });
   });
 
-  test('declining a multi-delete warning performs no push and exposes names, never values', async () => {
-    const { deps, pushSecrets, confirmDestructivePush } = dependencies();
-
+  test('declining a multi-delete warning performs no sync and exposes names, never values', async () => {
+    const { deps, syncSnapshot, confirmDestructivePush } = dependencies();
     const outcome = await tryFreeLocklessPush(deps)
       .then(() => ({ ok: true as const }))
       .catch((error: unknown) => ({ ok: false as const, error }));
     expect(outcome).toMatchObject({
       ok: false,
-      error: {
-      code: ERROR_CODES.SYNC_CONFLICT,
-      details: { names: ['DELETE_A', 'DELETE_B'] },
-      },
+      error: { code: ERROR_CODES.SYNC_CONFLICT, details: { names: ['DELETE_A', 'DELETE_B'] } },
     });
     expect(JSON.stringify(outcome)).not.toContain('new-local-value');
     expect(confirmDestructivePush).toHaveBeenCalledTimes(1);
-    expect(deps.resolveProjectKey).not.toHaveBeenCalled();
-    expect(pushSecrets).not.toHaveBeenCalled();
+    expect(syncSnapshot).not.toHaveBeenCalled();
   });
 
-  test('approved replacement deletes missing remote entries without writing keep.lock', async () => {
-    const { deps, pushSecrets, writeKeepFile, writeSyncState } = dependencies({ confirm: true });
-
-    expect(await tryFreeLocklessPush(deps)).toBe(true);
-    expect(pushSecrets).toHaveBeenCalledTimes(1);
-    const pushedKeep = JSON.parse(pushSecrets.mock.calls[0]![1] as string);
-    expect(Object.keys(pushedKeep.variables)).toEqual(['KEEP_ME']);
-    expect(pushSecrets.mock.calls[0]![4]).toMatch(/^[a-f0-9]{64}$/);
-    expect(writeKeepFile).not.toHaveBeenCalled();
-    expect(writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
-      sync_mode: 'free',
-      synced_variables: ['KEEP_ME'],
-    }));
+  test('approved replacement delegates the whole snapshot to the canonical sync corpus', async () => {
+    const result = dependencies({ confirm: true });
+    expect(await tryFreeLocklessPush(result.deps)).toEqual({ handled: true });
+    expect(result.syncSnapshot).toHaveBeenCalledWith(
+      result.ctx,
+      { KEEP_ME: 'new-local-value' },
+      expect.objectContaining({ primaryVarNames: ['KEEP_ME', 'DELETE_A', 'DELETE_B'] }),
+    );
+    expect(result.writeActiveBranch).toHaveBeenCalledWith('development');
+    expect(result.ensureCapyGitignore).toHaveBeenCalledTimes(1);
+    expect(result.backupPlaintextEnv).toHaveBeenCalledWith(undefined, true);
   });
 
-  test('a one-value removal pushes immediately without invoking the multi-delete gate', async () => {
-    const { deps, pushSecrets, confirmDestructivePush } = dependencies({
-      local: { KEEP_ME: 'new-local-value', DELETE_A: 'kept-local-value' },
-    });
-
-    expect(await tryFreeLocklessPush(deps)).toBe(true);
-    expect(confirmDestructivePush).not.toHaveBeenCalled();
-    expect(pushSecrets).toHaveBeenCalledTimes(1);
-    const pushedKeep = JSON.parse(pushSecrets.mock.calls[0]![1] as string);
-    expect(Object.keys(pushedKeep.variables)).toHaveLength(2);
-    expect(Object.keys(pushedKeep.variables)).toEqual(expect.arrayContaining(['DELETE_A', 'KEEP_ME']));
+  test('a one-value removal delegates without invoking the multi-delete gate', async () => {
+    const result = dependencies({ local: { KEEP_ME: 'new-local-value', DELETE_A: 'kept-local-value' } });
+    expect(await tryFreeLocklessPush(result.deps)).toEqual({ handled: true });
+    expect(result.confirmDestructivePush).not.toHaveBeenCalled();
+    expect(result.syncSnapshot).toHaveBeenCalledTimes(1);
   });
 
-  test('paid billing returns to the existing manifest command before free project/key/write calls', async () => {
-    const { deps, pushSecrets, confirmDestructivePush } = dependencies({ billing: PAID });
+  test('a missing remote marker refuses before the canonical write corpus', async () => {
+    const result = dependencies({ remoteKeepExists: false });
+    await expect(tryFreeLocklessPush(result.deps)).rejects.toMatchObject({ code: ERROR_CODES.SYNC_NOT_INITIALIZED });
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
+  });
 
-    expect(selectFreeLocklessPushMode({ initialized: false, billing: PAID })).toBe('paid_manifest_required');
-    expect(await tryFreeLocklessPush(deps)).toBe(false);
-    expect(deps.serviceClient.listProjects).not.toHaveBeenCalled();
-    expect(deps.serviceClient.getDecryptData).not.toHaveBeenCalled();
-    expect(deps.resolveProjectKey).not.toHaveBeenCalled();
-    expect(confirmDestructivePush).not.toHaveBeenCalled();
-    expect(pushSecrets).not.toHaveBeenCalled();
+  test('paid billing returns before lockless context resolution or free writes', async () => {
+    const result = dependencies({ billing: PAID });
+    expect(selectFreeLocklessPushMode({ localOnly: false, billing: PAID })).toBe('paid_manifest');
+    expect(await tryFreeLocklessPush(result.deps)).toMatchObject({ handled: false });
+    expect(result.resolveContext).not.toHaveBeenCalled();
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
   });
 
   test('grandfathered billing is isolated with paid mode even when its UI tier is free', async () => {
     const grandfathered = { ...FREE, grandfathered: true };
-    const { deps, pushSecrets } = dependencies({ billing: grandfathered });
-
-    expect(selectFreeLocklessPushMode({ initialized: false, billing: grandfathered })).toBe('paid_manifest_required');
-    expect(await tryFreeLocklessPush(deps)).toBe(false);
-    expect(deps.serviceClient.listProjects).not.toHaveBeenCalled();
-    expect(deps.serviceClient.getDecryptData).not.toHaveBeenCalled();
-    expect(deps.resolveProjectKey).not.toHaveBeenCalled();
-    expect(pushSecrets).not.toHaveBeenCalled();
+    const result = dependencies({ billing: grandfathered });
+    expect(selectFreeLocklessPushMode({ localOnly: false, billing: grandfathered })).toBe('paid_manifest');
+    expect(await tryFreeLocklessPush(result.deps)).toMatchObject({ handled: false });
+    expect(result.resolveContext).not.toHaveBeenCalled();
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
   });
 
-  test('an existing local manifest bypasses billing and the entire free path', async () => {
-    const { deps, pushSecrets } = dependencies({ initialized: true });
+  test('true local-only mode bypasses billing and the entire hosted path', async () => {
+    const result = dependencies({ localOnly: true });
+    expect(selectFreeLocklessPushMode({ localOnly: true, billing: FREE })).toBe('local_only');
+    expect(await tryFreeLocklessPush(result.deps)).toEqual({ handled: false });
+    expect(result.deps.serviceClient.getBillingStatus).not.toHaveBeenCalled();
+    expect(result.resolveContext).not.toHaveBeenCalled();
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
+  });
 
-    expect(selectFreeLocklessPushMode({ initialized: true, billing: FREE })).toBe('existing_manifest');
-    expect(await tryFreeLocklessPush(deps)).toBe(false);
-    expect(deps.serviceClient.getBillingStatus).not.toHaveBeenCalled();
-    expect(pushSecrets).not.toHaveBeenCalled();
+  test('free billing forces lockless resolution even when a stale local keep.lock exists', async () => {
+    const result = dependencies({ confirm: true });
+    expect(await tryFreeLocklessPush(result.deps)).toEqual({ handled: true });
+    expect(result.resolveContext).toHaveBeenCalledWith(expect.objectContaining({
+      forceLockless: true,
+      authResult: expect.objectContaining({ user_id: 'user_1' }),
+    }));
+    expect(result.deps.authService.authenticateSilent).toHaveBeenCalledTimes(1);
+    expect(result.syncSnapshot).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('canonical snapshot CAS boundary', () => {
+  test('a concurrent change to a value this snapshot deletes refuses before retry or local writes', async () => {
+    const changedRemote: KeepFile = {
+      ...REMOTE_KEEP,
+      variables: {
+        ...REMOTE_KEEP.variables,
+        DELETE_A: [{ branch: 'development', resource_id: 'rid-a-new', value_hash: 'newer' }],
+      },
+    };
+    const pushSecrets = mock(async () => {
+      throw new CapyError('stale', ERROR_CODES.STALE_KEEP_HASH, {
+        keep_hash: 'b'.repeat(64), keep_file: JSON.stringify(changedRemote),
+      });
+    });
+    const writeEncryptedEnvFile = mock(() => undefined);
+    const writeSyncState = mock(() => undefined);
+    const cacheRemote = mock(() => undefined);
+    const confirmOverwrite = mock(async () => false);
+    const ctx = {
+      pm: { readSyncState: mock(() => null) },
+      fileManager: { writeEncryptedEnvFile, writeSyncState },
+      serviceClient: { pushSecrets, getSecrets: mock(async () => null) },
+      orgId: 'org_1', projectId: 'project_default', branch: 'development',
+      userId: 'user_1', projectKey: 'b'.repeat(64), keep: REMOTE_KEEP,
+      localPlaintext: {}, lockless: true, base_keep_hash: 'a'.repeat(64),
+      remoteKeepExists: true,
+    } as unknown as ResolvedContext;
+
+    await expect(syncResolvedSnapshot(ctx, { KEEP_ME: 'local' }, {
+      primaryVarNames: ['KEEP_ME', 'DELETE_A', 'DELETE_B'], confirmOverwrite, cacheRemote,
+    })).rejects.toMatchObject({ code: ERROR_CODES.STALE_KEEP_HASH });
+    expect(confirmOverwrite).toHaveBeenCalledWith(['DELETE_A'], []);
+    expect(pushSecrets).toHaveBeenCalledTimes(1);
+    expect(cacheRemote).not.toHaveBeenCalled();
+    expect(writeEncryptedEnvFile).not.toHaveBeenCalled();
+    expect(writeSyncState).not.toHaveBeenCalled();
   });
 });

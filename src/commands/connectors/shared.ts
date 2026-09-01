@@ -73,6 +73,35 @@ export interface ResolvedContext {
    * means an earlier write already left the header behind.
    */
   identitySource?: 'header' | 'server';
+  /** Whether the authoritative remote keep marker existed when this context was resolved. */
+  remoteKeepExists: boolean;
+}
+
+type ContextAuthResult = Awaited<ReturnType<AuthService['authenticateSilent']>>;
+
+async function authenticateContext(authService: AuthService, orgId?: string): Promise<ContextAuthResult> {
+  const scopedSilent = await authService.authenticateSilent(orgId);
+  if (scopedSilent.success) return scopedSilent;
+  const unscopedSilent = await authService.authenticateSilent();
+  if (unscopedSilent.success) return unscopedSilent;
+  return authService.authenticate(orgId);
+}
+
+function decryptReadableValues(
+  raw: Readonly<Record<string, string>>,
+  projectKey: string,
+  fileManager: FileManager,
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(
+    Object.entries(raw).flatMap(([name, value]) => {
+      if (!value.startsWith('capy:')) return [[name, value] as const];
+      try {
+        return [[name, fileManager.decryptValue(value, projectKey)] as const];
+      } catch {
+        return [];
+      }
+    }),
+  );
 }
 
 /**
@@ -80,14 +109,24 @@ export interface ResolvedContext {
  * setup. Mirrors the front half of editCommand.ts. Exits the process on
  * unrecoverable errors (no keep.lock, auth fail, key resolution fail).
  */
-export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean } = {}): Promise<ResolvedContext> {
+export interface ResolveContextOptions {
+  readonly apiUrl?: string;
+  readonly devMode?: boolean;
+  /** Billing-authoritative free mode ignores any stale/local keep.lock identity. */
+  readonly forceLockless?: boolean;
+  readonly authService?: AuthService;
+  readonly serviceClient?: ServiceClient;
+  readonly authResult?: ContextAuthResult;
+}
+
+export async function resolveContext(opts: ResolveContextOptions = {}): Promise<ResolvedContext> {
   const pm = new ProjectManager();
   const projectState = await pm.detectProjectState();
 
   // No keep.lock: single-user lock-less mode against the user's personal
   // ("default") project, rather than the old hard exit. A dir WITH
   // keep.lock keeps every line below byte-for-byte unchanged.
-  if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
+  if (opts.forceLockless || !projectState.initialized || !projectState.organizationId || !projectState.projectId) {
     return resolveLocklessContext(pm, opts);
   }
   const orgId = projectState.organizationId;
@@ -110,9 +149,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
   const serviceClient = new ServiceClient(opts.apiUrl, devMode);
   serviceClient.setTokenProvider(() => authService.getValidToken());
 
-  let authResult = await authService.authenticateSilent(orgId);
-  if (!authResult.success) authResult = await authService.authenticateSilent();
-  if (!authResult.success) authResult = await authService.authenticate(orgId);
+  const authResult = await authenticateContext(authService, orgId);
   if (!authResult.success || !authResult.user_id) {
     console.error('Authentication failed');
     process.exit(1);
@@ -135,7 +172,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
         // claim's own 409 as its probe instead. See resolveProjectKeyWithMintFallback.
         orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       const { displayErrorAndExit } = await import('../../ui/errorScreen');
       await displayErrorAndExit(err, {
         projectName: keep.project_name,
@@ -146,19 +183,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
     }
   })();
 
-  const localPlaintext: Record<string, string> = {};
-  const rawLocal = fileManager.readEnvFile();
-  for (const [k, v] of Object.entries(rawLocal)) {
-    if (v.startsWith('capy:')) {
-      try {
-        localPlaintext[k] = fileManager.decryptValue(v, projectKey);
-      } catch {
-        // skip undecryptable
-      }
-    } else {
-      localPlaintext[k] = v;
-    }
-  }
+  const localPlaintext = decryptReadableValues(fileManager.readEnvFile(), projectKey, fileManager);
 
   return {
     pm,
@@ -173,6 +198,7 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
     keep,
     localPlaintext,
     lockless: false,
+    remoteKeepExists: true,
     // sync-state's per-branch keep_hash when this machine has one recorded
     // (it does after any prior push or pull on this branch); `undefined` on
     // a keep.lock that was hand-created or predates keep_hash tracking —
@@ -205,41 +231,43 @@ export async function resolveContext(opts: { apiUrl?: string; devMode?: boolean 
  */
 async function resolveLocklessContext(
   pm: ProjectManager,
-  opts: { apiUrl?: string; devMode?: boolean },
+  opts: ResolveContextOptions,
 ): Promise<ResolvedContext> {
   const fileManager = new FileManager();
   const devMode = opts.devMode ?? false;
 
   const envMeta = fileManager.readEnvMeta();
-  let orgId = envMeta.org_id;
-  let projectId = envMeta.project_id;
+  const identityMeta = opts.forceLockless ? {} : envMeta;
   // Captured before the auth+listProjects fallback below can fill orgId in —
   // this is the only point that knows whether identity came from the header
   // or had to be looked up. See `identitySource` on `ResolvedContext`.
-  const identitySource: 'header' | 'server' = orgId && projectId ? 'header' : 'server';
+  const identitySource: 'header' | 'server' = identityMeta.org_id && identityMeta.project_id ? 'header' : 'server';
   // Used only to synthesize an empty KeepFile's project_name below, when
   // nothing has ever been pushed to this branch — a KeepFile fetched from the
   // server always carries the project's real name instead. Lock-less mode
   // always targets the org's project literally named "default" (the
   // identity-resolution contract above), so that's the safe assumption here
   // even when identity came from the `.env` header rather than listProjects.
-  let projectName = 'default';
+  const authService = opts.authService ?? new AuthService(opts.apiUrl, devMode, pm.readSyncState()?.user_id);
+  const serviceClient = opts.serviceClient ?? new ServiceClient(opts.apiUrl, devMode);
+  if (!opts.serviceClient) serviceClient.setTokenProvider(() => authService.getValidToken());
 
-  const authService = new AuthService(opts.apiUrl, devMode, pm.readSyncState()?.user_id);
-  const serviceClient = new ServiceClient(opts.apiUrl, devMode);
-  serviceClient.setTokenProvider(() => authService.getValidToken());
-
-  let authResult = await authService.authenticateSilent(orgId);
-  if (!authResult.success) authResult = await authService.authenticateSilent();
-  if (!authResult.success) authResult = await authService.authenticate(orgId);
+  const authResult = opts.authResult ?? await authenticateContext(authService, identityMeta.org_id);
   if (!authResult.success || !authResult.user_id) {
     console.error('Authentication failed');
     process.exit(1);
   }
   const userId = authResult.user_id;
 
-  if (!orgId || !projectId) {
-    orgId = authResult.organization_id;
+  const identity = await (async (): Promise<{
+    readonly orgId: string;
+    readonly projectId: string;
+    readonly projectName: string;
+  }> => {
+    if (identityMeta.org_id && identityMeta.project_id) {
+      return { orgId: identityMeta.org_id, projectId: identityMeta.project_id, projectName: 'default' };
+    }
+    const orgId = authResult.organization_id;
     if (!orgId) {
       throw new CapyError(
         'Could not determine an organization for this account.',
@@ -255,9 +283,9 @@ async function resolveLocklessContext(
         { orgId },
       );
     }
-    projectId = defaultProject.id;
-    projectName = defaultProject.name;
-  }
+    return { orgId, projectId: defaultProject.id, projectName: defaultProject.name };
+  })();
+  const { orgId, projectId, projectName } = identity;
 
   const branch = pm.deriveActiveBranch() || SyncEngine.DEFAULT_BRANCH;
 
@@ -276,7 +304,7 @@ async function resolveLocklessContext(
         grantResolutionOps: createGrantResolutionOps(serviceClient, authService),
         orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       const { displayErrorAndExit } = await import('../../ui/errorScreen');
       await displayErrorAndExit(err, { projectName, projectId, branch });
       throw err;
@@ -290,18 +318,12 @@ async function resolveLocklessContext(
   // yet" 404 (NO_SECRETS) into an empty result — see getDecryptData's own
   // doc comment for the PROJECT_NOT_FOUND/BRANCH_NOT_FOUND propagation rule.
   const decryptResult = await serviceClient.getDecryptData(projectId, branch);
-  let keep: KeepFile;
-  let baseKeepHash: string;
-  if (decryptResult.keep_file) {
-    keep = JSON.parse(decryptResult.keep_file);
-    baseKeepHash = decryptResult.keep_hash ?? SyncEngine.computeKeepHash(keep, branch);
-  } else {
-    // Nothing pushed to this branch yet — synthesize an in-memory KeepFile so
-    // every downstream caller (writeAndSync, add/edit/list) sees the same
-    // shape it would after a lock-full `capy` bootstrap.
-    keep = { version: '3.0', org_id: orgId, project_id: projectId, project_name: projectName, variables: {} };
-    baseKeepHash = EMPTY_KEEP_HASH;
-  }
+  const keep: KeepFile = decryptResult.keep_file
+    ? JSON.parse(decryptResult.keep_file)
+    : { version: '3.0', org_id: orgId, project_id: projectId, project_name: projectName, variables: {} };
+  const baseKeepHash = decryptResult.keep_file
+    ? decryptResult.keep_hash ?? SyncEngine.computeKeepHash(keep, branch)
+    : EMPTY_KEEP_HASH;
 
   // Seed from the server's blob FIRST. A fresh directory with no local `.env`
   // is the NORMAL case in single-user mode — the personal env follows the
@@ -313,29 +335,15 @@ async function resolveLocklessContext(
   // `localPlaintext` would make the very first write in a new directory
   // silently wipe every existing variable on the branch. Local `.env`
   // entries are layered on top afterward so uncommitted local edits win.
-  const localPlaintext: Record<string, string> = {};
-  if (decryptResult.env_content) {
-    const encrypted = fileManager.parseEnvContent(decryptResult.env_content);
-    for (const [k, v] of Object.entries(encrypted)) {
-      try {
-        localPlaintext[k] = fileManager.decryptValue(v, projectKey);
-      } catch {
-        // Skip values this project key can't open.
-      }
-    }
-  }
-  const rawLocal = fileManager.readEnvFile();
-  for (const [k, v] of Object.entries(rawLocal)) {
-    if (v.startsWith('capy:')) {
-      try {
-        localPlaintext[k] = fileManager.decryptValue(v, projectKey);
-      } catch {
-        // skip undecryptable
-      }
-    } else {
-      localPlaintext[k] = v;
-    }
-  }
+  const remotePlaintext = decryptReadableValues(
+    decryptResult.env_content ? fileManager.parseEnvContent(decryptResult.env_content) : {},
+    projectKey,
+    fileManager,
+  );
+  const localPlaintext = {
+    ...remotePlaintext,
+    ...decryptReadableValues(fileManager.readEnvFile(), projectKey, fileManager),
+  };
 
   return {
     pm,
@@ -352,6 +360,7 @@ async function resolveLocklessContext(
     lockless: true,
     base_keep_hash: baseKeepHash,
     identitySource,
+    remoteKeepExists: Boolean(decryptResult.keep_file),
   };
 }
 
@@ -401,12 +410,10 @@ export async function writeAndSync(
     confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   },
 ): Promise<void> {
-  const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext, lockless } = ctx;
-
   maybeWarnPersonalEnv(ctx);
-
-  const finalEnv: Record<string, string> =
-    value === undefined ? { ...localPlaintext } : { ...localPlaintext, [varName]: value };
+  const finalEnv = value === undefined
+    ? { ...ctx.localPlaintext }
+    : { ...ctx.localPlaintext, [varName]: value };
 
   if (!opts.push) {
     // Local-only path. Even though we're not hitting the service, we still
@@ -416,99 +423,140 @@ export async function writeAndSync(
     // keep is still handed to writeEncryptedEnvFile so the `.env` identity
     // header stays correct, but nothing lands on disk as keep.lock.
     if (opts.connector) {
-      const merged = attachConnector(keep, varName, branch, opts.connector);
-      if (!lockless) fileManager.writeKeepFile(merged);
-      fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
+      const merged = attachConnector(ctx.keep, varName, ctx.branch, opts.connector);
+      if (!ctx.lockless) ctx.fileManager.writeKeepFile(merged);
+      ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, merged, ctx.branch);
     } else {
-      fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, keep, branch);
+      ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, ctx.keep, ctx.branch);
     }
     return;
   }
 
-  const encrypted: Record<string, string> = {};
-  for (const [k, v] of Object.entries(finalEnv)) {
-    const resourceId = deriveResourceId(branch, k);
-    encrypted[k] = `capy:${resourceId}:${Encryptor.encrypt(v, projectKey)}`;
-  }
-  const envBlob = Object.entries(encrypted)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
+  await syncResolvedSnapshot(ctx, finalEnv, {
+    primaryVarNames: [varName],
+    connector: opts.connector ? { varName, metadata: opts.connector } : undefined,
+    confirmOverwrite: opts.confirmOverwrite,
+  });
+}
 
-  const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-  for (const [k, v] of Object.entries(finalEnv)) {
-    pushedVars[k] = {
-      resource_id: deriveResourceId(branch, k),
-      value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16),
+export interface SyncResolvedSnapshotOptions {
+  readonly primaryVarNames: readonly string[];
+  readonly connector?: {
+    readonly varName: string;
+    readonly metadata: ConnectorMetadata;
+  };
+  readonly confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
+  readonly cacheRemote?: typeof writeKeepCache;
+  readonly beforeLocalWrite?: () => void;
+}
+
+function encryptSnapshot(
+  finalEnv: Readonly<Record<string, string>>,
+  projectKey: string,
+  branch: string,
+): {
+  readonly envBlob: string;
+  readonly pushedVars: Readonly<Record<string, { readonly resource_id: string; readonly value_hash: string }>>;
+} {
+  const entries = Object.entries(finalEnv).map(([name, value]) => {
+    const resourceId = deriveResourceId(branch, name);
+    return {
+      name,
+      encrypted: `capy:${resourceId}:${Encryptor.encrypt(value, projectKey)}`,
+      pushed: {
+        resource_id: resourceId,
+        value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+      },
     };
-  }
+  });
+  return {
+    envBlob: entries.map(({ name, encrypted }) => `${name}=${encrypted}`).join('\n'),
+    pushedVars: Object.fromEntries(entries.map(({ name, pushed }) => [name, pushed])),
+  };
+}
 
+function replaceOriginalBranchSnapshot(
+  merged: KeepFile,
+  original: KeepFile,
+  finalVariableNames: ReadonlySet<string>,
+  branch: string,
+): KeepFile {
+  const variables = Object.fromEntries(
+    Object.entries(merged.variables).flatMap(([name, entries]) => {
+      const existedInOriginal = original.variables[name]?.some((entry) => entry.branch === branch) ?? false;
+      const nextEntries = existedInOriginal && !finalVariableNames.has(name)
+        ? entries.filter((entry) => entry.branch !== branch)
+        : entries;
+      return nextEntries.length > 0 ? [[name, nextEntries] as const] : [];
+    }),
+  );
+  return { ...merged, variables };
+}
+
+/**
+ * The one authoritative encrypted-snapshot write path used by connector
+ * writes and manifest-less explicit push: merge/prune, CAS retry, cache,
+ * local encrypted state, and sync-state bookkeeping stay in one corpus.
+ */
+export async function syncResolvedSnapshot(
+  ctx: ResolvedContext,
+  finalEnv: Readonly<Record<string, string>>,
+  opts: SyncResolvedSnapshotOptions,
+): Promise<void> {
+  const built = encryptSnapshot(finalEnv, ctx.projectKey, ctx.branch);
+  const finalVariableNames = new Set(Object.keys(finalEnv));
   const syncEngine = new SyncEngine();
-  // The keep this write started from, captured once — NOT `base`, which a CAS
-  // retry below replaces with a rebase onto the server's current state. The
-  // prune step needs to know what THIS machine's local basis actually was:
-  // a var missing from `finalEnv` that this basis never had either is
-  // someone else's concurrent addition (visible only because a retry rebased
-  // onto it), not something the local user deleted, and must survive.
-  // Conflating the two would make a same-branch CAS retry a data-loss bug —
-  // exactly the "silently re-merge, don't clobber" contract this function
-  // exists to uphold.
-  const originalKeep = keep;
   const buildFinalKeep = (base: KeepFile): KeepFile => {
-    let fk = syncEngine.mergeWithKeep(base, pushedVars, branch);
-    for (const name of Object.keys(fk.variables)) {
-      if (name in finalEnv) continue;
-      const wasInLocalBasis = originalKeep.variables[name]?.some((e) => e.branch === branch);
-      if (!wasInLocalBasis) continue;
-      const entries = fk.variables[name].filter((e) => e.branch !== branch);
-      if (entries.length > 0) fk.variables[name] = entries;
-      else delete fk.variables[name];
-    }
-    if (opts.connector) {
-      fk = attachConnector(fk, varName, branch, opts.connector);
-    }
-    return fk;
+    const merged = replaceOriginalBranchSnapshot(
+      syncEngine.mergeWithKeep(base, built.pushedVars, ctx.branch),
+      ctx.keep,
+      finalVariableNames,
+      ctx.branch,
+    );
+    return opts.connector
+      ? attachConnector(merged, opts.connector.varName, ctx.branch, opts.connector.metadata)
+      : merged;
   };
 
-  const {
-    keep_hash,
-    keep_file,
-    finalKeep,
-    envBlob: pushedEnvBlob,
-  } = await pushKeepWithRetry({
-    serviceClient,
-    projectId,
-    branch,
-    baseKeep: keep,
+  const pushed = await pushKeepWithRetry({
+    serviceClient: ctx.serviceClient,
+    projectId: ctx.projectId,
+    branch: ctx.branch,
+    baseKeep: ctx.keep,
     baseHash: ctx.base_keep_hash,
-    buildEnvBlob: (extraLines) => (extraLines.length > 0 ? [envBlob, ...extraLines].join('\n') : envBlob),
+    buildEnvBlob: (extraLines) => extraLines.length > 0
+      ? [built.envBlob, ...extraLines].filter((line) => line.length > 0).join('\n')
+      : built.envBlob,
     localVarNames: Object.keys(finalEnv),
     buildFinalKeep,
-    primaryVarNames: [varName],
+    primaryVarNames: [...opts.primaryVarNames],
     confirmOverwrite: opts.confirmOverwrite,
   });
 
-  writeKeepCache(orgId, projectId, keep_hash, pushedEnvBlob);
-  // Prefer the server's copy — it carries server-assigned changed_at. Never
-  // written in lock-less mode: there is no keep.lock file for this directory.
-  if (!lockless) {
-    fileManager.writeKeepFile(SyncEngine.adoptServerKeep(keep_file, finalKeep, branch));
-  }
-  fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
+  (opts.cacheRemote ?? writeKeepCache)(ctx.orgId, ctx.projectId, pushed.keep_hash, pushed.envBlob);
+  const adoptedKeep = SyncEngine.adoptServerKeep(pushed.keep_file, pushed.finalKeep, ctx.branch);
+  if (!ctx.lockless) ctx.fileManager.writeKeepFile(adoptedKeep);
+  opts.beforeLocalWrite?.();
+  ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, adoptedKeep, ctx.branch);
 
-  const existingSyncState = pm.readSyncState();
-  fileManager.writeSyncState({
+  const existingSyncState = ctx.pm.readSyncState();
+  ctx.fileManager.writeSyncState({
     ...existingSyncState,
     last_sync: new Date().toISOString(),
     synced_variables: Object.keys(finalEnv),
-    user_id: userId,
-    keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
+    user_id: ctx.userId,
+    ...(ctx.lockless ? {
+      org_id: ctx.orgId,
+      project_id: ctx.projectId,
+      project_name: ctx.keep.project_name,
+      sync_mode: 'free' as const,
+    } : {}),
+    keep_hash: setSyncKeepHash(existingSyncState, ctx.branch, pushed.keep_hash),
   });
 
-  // The new pin reaches teammates only through git — and in lock-less mode
-  // there is no keep.lock to commit; the server IS the pin.
-  if (!lockless) {
+  if (!ctx.lockless) {
     const { autoCommitKeep } = await import('../../git/autoCommitKeep');
-    autoCommitKeep(branch);
+    autoCommitKeep(ctx.branch);
   }
 }
 
@@ -548,17 +596,15 @@ export function conflictOverwriteQuestion(varNames: string[]): string {
  * nothing new.
  */
 export function conflictContextLines(keep: KeepFile, varNames: string[], branch: string): string[] {
-  const lines: string[] = [];
-  for (const varName of varNames) {
+  return varNames.flatMap((varName) => {
     const entry = keepEntryFor(keep, varName, branch);
-    if (!entry) continue;
-    const parts: string[] = [];
-    if (entry.connector) parts.push(describeConnector(entry.connector));
-    if (entry.changed_at) parts.push(`last written ${formatRelativeTime(entry.changed_at)}`);
-    if (parts.length === 0) continue;
-    lines.push(`  ${B(varName)} — ${parts.join(', ')}`);
-  }
-  return lines;
+    if (!entry) return [];
+    const parts = [
+      ...(entry.connector ? [describeConnector(entry.connector)] : []),
+      ...(entry.changed_at ? [`last written ${formatRelativeTime(entry.changed_at)}`] : []),
+    ];
+    return parts.length > 0 ? [`  ${B(varName)} — ${parts.join(', ')}`] : [];
+  });
 }
 
 /**
@@ -692,30 +738,27 @@ export async function pushKeepWithRetry(
 ): Promise<{ keep_hash: string; keep_file?: string; finalKeep: KeepFile; envBlob: string }> {
   const maxRetries = opts.maxRetries ?? 3;
   const fileManager = new FileManager();
-  let baseKeep = opts.baseKeep;
-  let baseHash = opts.baseHash;
-  let finalKeep = opts.buildFinalKeep(baseKeep);
   const knownKeys = new Set(opts.localVarNames);
-  const extraLines: string[] = [];
-  const extraLineKeys = new Set<string>();
-  let envBlob = opts.buildEnvBlob(extraLines);
-  let attempt = 0;
-
-  for (;;) {
+  const attemptPush = async (state: {
+    readonly baseKeep: KeepFile;
+    readonly baseHash: string | undefined;
+    readonly extraLines: readonly string[];
+    readonly attempt: number;
+  }): Promise<{ keep_hash: string; keep_file?: string; finalKeep: KeepFile; envBlob: string }> => {
+    const finalKeep = opts.buildFinalKeep(state.baseKeep);
+    const envBlob = opts.buildEnvBlob([...state.extraLines]);
     try {
       const result = await opts.serviceClient.pushSecrets(
         opts.projectId,
         JSON.stringify(finalKeep),
         envBlob,
         opts.branch,
-        baseHash,
+        state.baseHash,
       );
       return { ...result, finalKeep, envBlob };
     } catch (err) {
       if (!(err instanceof CapyError) || err.code !== ERROR_CODES.STALE_KEEP_HASH) throw err;
-
-      attempt++;
-      if (attempt > maxRetries) {
+      if (state.attempt >= maxRetries) {
         throw new CapyError(
           'Too many conflicting pushes to Keep — someone else keeps changing this branch faster than this write can land. Re-run to try again.',
           ERROR_CODES.STALE_KEEP_HASH,
@@ -727,10 +770,10 @@ export async function pushKeepWithRetry(
       const serverKeepHash = err.details?.keep_hash as string | undefined;
       const serverKeep: KeepFile = serverKeepJson
         ? JSON.parse(serverKeepJson)
-        : { ...baseKeep, variables: {} };
+        : { ...state.baseKeep, variables: {} };
 
       const conflicted = opts.primaryVarNames.filter((name) =>
-        keepEntryChanged(baseKeep, serverKeep, name, opts.branch),
+        keepEntryChanged(state.baseKeep, serverKeep, name, opts.branch),
       );
       if (conflicted.length > 0) {
         // The server's own copy — not `baseKeep` — is the freshest source for
@@ -747,36 +790,33 @@ export async function pushKeepWithRetry(
         }
       }
 
-      // Foreign keys: on the server for this branch, but not something this
-      // call's own blob has a line for. Pull their ciphertext forward so the
-      // keep this loop is about to push stays consistent with the blob.
-      if (serverKeepHash) {
-        const foreignKeys = Object.keys(serverKeep.variables).filter(
-          (name) =>
-            !knownKeys.has(name) &&
-            !extraLineKeys.has(name) &&
-            serverKeep.variables[name].some((e) => e.branch === opts.branch),
-        );
-        if (foreignKeys.length > 0) {
-          const serverBlob = await opts.serviceClient.getSecrets(opts.projectId, serverKeepHash);
-          if (serverBlob?.env_file) {
+      const extraLineKeys = new Set(
+        state.extraLines.map((line) => line.slice(0, Math.max(0, line.indexOf('=')))),
+      );
+      const foreignKeys = Object.keys(serverKeep.variables).filter(
+        (name) =>
+          !knownKeys.has(name) &&
+          !extraLineKeys.has(name) &&
+          serverKeep.variables[name].some((entry) => entry.branch === opts.branch),
+      );
+      const newExtraLines = serverKeepHash && foreignKeys.length > 0
+        ? await opts.serviceClient.getSecrets(opts.projectId, serverKeepHash).then((serverBlob) => {
+            if (!serverBlob?.env_file) return [];
             const parsed = fileManager.parseEnvContent(serverBlob.env_file);
-            for (const key of foreignKeys) {
-              if (key in parsed) {
-                extraLines.push(`${key}=${parsed[key]}`);
-                extraLineKeys.add(key);
-              }
-            }
-          }
-        }
-      }
+            return foreignKeys.flatMap((key) => key in parsed ? [`${key}=${parsed[key]}`] : []);
+          })
+        : [];
 
-      baseKeep = SyncEngine.spliceKeepBranch(baseKeep, serverKeep, opts.branch);
-      baseHash = serverKeepHash;
-      finalKeep = opts.buildFinalKeep(baseKeep);
-      envBlob = opts.buildEnvBlob(extraLines);
+      return attemptPush({
+        baseKeep: SyncEngine.spliceKeepBranch(state.baseKeep, serverKeep, opts.branch),
+        baseHash: serverKeepHash,
+        extraLines: [...state.extraLines, ...newExtraLines],
+        attempt: state.attempt + 1,
+      });
     }
-  }
+  };
+
+  return attemptPush({ baseKeep: opts.baseKeep, baseHash: opts.baseHash, extraLines: [], attempt: 0 });
 }
 
 /** Return a deep-cloned KeepFile with `connector` set on the (varName, branch) entry. */
@@ -786,18 +826,15 @@ export function attachConnector(
   branch: string,
   connector: ConnectorMetadata,
 ): KeepFile {
-  const next: KeepFile = { ...keep, variables: { ...keep.variables } };
-  const existing = next.variables[varName] ? next.variables[varName].map((e) => ({ ...e })) : [];
-  const idx = existing.findIndex((e) => e.branch === branch);
-  if (idx >= 0) {
-    existing[idx] = { ...existing[idx], connector };
-  } else {
-    // No entry on this branch yet (writeAndSync hasn't pushed). Defer to the
-    // next merge — but seed an entry so subsequent reads see the connector.
-    existing.push({ resource_id: '', branch, value_hash: '', connector });
-  }
-  next.variables[varName] = existing;
-  return next;
+  const existing = keep.variables[varName]?.map((entry) => ({ ...entry })) ?? [];
+  const hasBranchEntry = existing.some((entry) => entry.branch === branch);
+  const entries = hasBranchEntry
+    ? existing.map((entry) => entry.branch === branch ? { ...entry, connector } : entry)
+    : [...existing, { resource_id: '', branch, value_hash: '', connector }];
+  return {
+    ...keep,
+    variables: { ...keep.variables, [varName]: entries },
+  };
 }
 
 /**
@@ -819,21 +856,23 @@ export function listManagedKeys(
   keep: KeepFile,
   branch: string,
 ): Array<{ varName: string; connector: ConnectorMetadata }> {
-  const out: Array<{ varName: string; connector: ConnectorMetadata }> = [];
-  for (const [varName, entries] of Object.entries(keep.variables)) {
-    const entry = entries.find((e) => e.branch === branch);
-    if (entry?.connector) out.push({ varName, connector: entry.connector });
-  }
-  return out;
+  return Object.entries(keep.variables).flatMap(([varName, entries]) => {
+    const connector = entries.find((entry) => entry.branch === branch)?.connector;
+    return connector ? [{ varName, connector }] : [];
+  });
 }
 
 /** All variables with an entry on `branch`, sorted. Both managed and unmanaged. */
 export function listAllVarsOnBranch(keep: KeepFile, branch: string): string[] {
-  const out: string[] = [];
-  for (const [varName, entries] of Object.entries(keep.variables)) {
-    if (entries.some((e) => e.branch === branch)) out.push(varName);
-  }
-  return out.sort();
+  return Object.entries(keep.variables)
+    .filter(([, entries]) => entries.some((entry) => entry.branch === branch))
+    .map(([varName]) => varName)
+    .reduce<string[]>((ordered, value) => {
+      const insertionIndex = ordered.findIndex((candidate) => candidate.localeCompare(value) > 0);
+      return insertionIndex < 0
+        ? [...ordered, value]
+        : [...ordered.slice(0, insertionIndex), value, ...ordered.slice(insertionIndex)];
+    }, []);
 }
 
 /** `abc…xyz`-style snippet of a credential value; never plaintext. */
@@ -885,19 +924,18 @@ export function checkExpiringKeys(windowDays: number = 7): ExpiringKey[] {
     const managed = listManagedKeys(keep, branch);
     const now = Date.now() / 1000;
     const windowSec = windowDays * 86400;
-    const expiring: ExpiringKey[] = [];
-    for (const { varName, connector } of managed) {
-      if (typeof connector.expires_at !== 'number') continue;
+    return managed.flatMap(({ varName, connector }) => {
+      if (typeof connector.expires_at !== 'number') return [];
       const remainingSec = connector.expires_at - now;
-      if (remainingSec > windowSec) continue;
-      expiring.push({
-        varName,
-        provider: connector.provider,
-        expiresIn: Math.floor(remainingSec / 86400),
-        connector,
-      });
-    }
-    return expiring;
+      return remainingSec > windowSec
+        ? []
+        : [{
+            varName,
+            provider: connector.provider,
+            expiresIn: Math.floor(remainingSec / 86400),
+            connector,
+          }];
+    });
   } catch {
     return [];
   }

@@ -70,6 +70,9 @@ mock.module(join(import.meta.dir, '../../../src/service/serviceClient.ts'), () =
   ServiceClient: class {
     constructor(_apiUrl?: string, _devMode?: boolean) {}
     setTokenProvider() {}
+    async getBillingStatus() {
+      return { tier: 'business', grandfathered: false };
+    }
     async listProjects(): Promise<Project[]> {
       serviceCalls.push(['listProjects']);
       return listProjectsResult;
