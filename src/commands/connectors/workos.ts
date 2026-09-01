@@ -760,18 +760,82 @@ async function resolveTarget(
   const { name: clientIdVar, value: clientId } = await chooseClientId(ctx, nonTty);
   const environments = await fetchEnvironments(token);
   const match = environments.find((e) => e.clientId === clientId);
-  if (!match) {
+  const chosen = await chooseEnvironment(environments, match, clientIdVar, clientId, nonTty);
+  return {
+    environmentId: chosen.id,
+    environmentName: environmentLabel(chosen),
+    sandbox: chosen.sandbox ?? false,
+    // The chosen environment's own client ID, not `.env`'s — after an override
+    // those differ, and the recorded value should describe what was rotated.
+    clientId: chosen.clientId ?? clientId,
+  };
+}
+
+function environmentLabel(e: TeamEnvironment): string {
+  const name = e.name ?? e.id;
+  return e.sandbox ? `${name} (sandbox)` : name;
+}
+
+/**
+ * Which environment to act on: the one the client ID points at, offered as a
+ * default the user can change.
+ *
+ * THE CLIENT ID IS THE DEFAULT, NOT THE DECISION — a deliberate softening. It
+ * used to be a wall: an environment that did not match `.env` was fatal, on
+ * the grounds that rotating into the wrong one is silent and expensive. That
+ * is still true, so the disagreement is said out loud; what changed is that
+ * the person who can see both is now allowed to answer.
+ *
+ * Non-interactive keeps the old behaviour exactly. There is nobody to warn, so
+ * a mismatch stays fatal rather than becoming a guess — an unattended `capy
+ * rotate` must never pick an environment for itself.
+ */
+async function chooseEnvironment(
+  environments: readonly TeamEnvironment[],
+  match: TeamEnvironment | undefined,
+  clientIdVar: string,
+  clientId: string,
+  nonTty?: boolean,
+): Promise<TeamEnvironment> {
+  if (environments.length === 0) {
+    console.error(`\n  The signed-in WorkOS account has no environments.`);
+    console.error(`  Check with ${B('workos auth status')} that this is the right account.\n`);
+    process.exit(1);
+  }
+
+  if (!isInteractive(nonTty)) {
+    if (match) return match;
     console.error(`\n  No WorkOS environment matches ${B(clientIdVar)} (${clientId}).`);
     console.error('  Either the signed-in WorkOS account is not the one that owns this');
     console.error(`  environment, or the environment no longer exists. Check with ${B('workos auth status')}.\n`);
     process.exit(1);
   }
-  return {
-    environmentId: match.id,
-    environmentName: match.name ?? match.id,
-    sandbox: match.sandbox ?? false,
-    clientId,
-  };
+
+  if (!match) {
+    console.log(`\n  ${B(clientIdVar)} (${clientId}) matches no environment on this account.`);
+    console.log('  Pick the one this project uses, or cancel and check `workos auth status`.');
+  }
+
+  const inquirer = (await import('inquirer')).default;
+  const { picked } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'picked',
+      message: 'Which WorkOS environment?',
+      choices: environments.map((e) => ({
+        name: e.id === match?.id ? `${environmentLabel(e)}  ${DIM(`(matches ${clientIdVar})`)}` : environmentLabel(e),
+        value: e.id,
+      })),
+      default: match?.id ?? environments[0].id,
+    },
+  ]);
+
+  const chosen = environments.find((e) => e.id === picked) ?? match ?? environments[0];
+  if (match && chosen.id !== match.id) {
+    console.log(`\n  Heads up: ${B(environmentLabel(chosen))} is not what ${B(clientIdVar)} points at`);
+    console.log(`  (${B(environmentLabel(match))}). Rotating here changes a key that app is not using.\n`);
+  }
+  return chosen;
 }
 
 /**
@@ -936,13 +1000,7 @@ async function rotate(
   // otherwise the environment's sole application. Two applications and no
   // match is genuinely ambiguous, and guessing would put the key on the wrong
   // one.
-  const applicationId = resolveApplicationId(keys, outgoing);
-  if (!applicationId) {
-    console.error(`\n  Could not tell which WorkOS application ${B(varName)} belongs to.`);
-    console.error(`  ${target.environmentName} has several, and the current value did not match`);
-    console.error('  any key Capy can read. Rotate this one in the WorkOS dashboard.\n');
-    process.exit(1);
-  }
+  const applicationId = await chooseApplicationId(keys, outgoing, varName, target, opts.nonTty);
 
   const created = await createKey(token, target.environmentId, applicationId, rotationKeyName());
   if (!created) {
@@ -993,6 +1051,67 @@ async function rotate(
       ...(keyTypePrefix(created.value) ? { key_prefix: keyTypePrefix(created.value) as string } : {}),
     },
   };
+}
+
+/**
+ * Which application the replacement key is minted into.
+ *
+ * Derived silently when it is not a real question — the outgoing key's own
+ * application, or the environment's only one. It becomes a question exactly
+ * when derivation is ambiguous, which used to be a dead end: an environment
+ * with several applications and a key Capy could not read (every production
+ * key) refused outright and sent the user to the dashboard.
+ *
+ * Still refuses when unattended. Minting into the wrong application produces a
+ * key nothing uses while the live one keeps working — a rotation that reports
+ * success and changed nothing — and that is not a coin worth flipping without
+ * someone watching.
+ */
+async function chooseApplicationId(
+  keys: readonly WorkOSKey[],
+  outgoing: WorkOSKey | undefined,
+  varName: string,
+  target: ResolvedTarget,
+  nonTty?: boolean,
+): Promise<string> {
+  const derived = resolveApplicationId(keys, outgoing);
+  if (derived) return derived;
+
+  const applications = [...new Set(keys.flatMap((k) => (k.applicationId ? [k.applicationId] : [])))];
+
+  if (applications.length === 0) {
+    console.error(`\n  ${target.environmentName} has no keys Capy can see, so there is no`);
+    console.error(`  application to mint ${B(varName)} into. Create the first key in the`);
+    console.error('  WorkOS dashboard, then connect.\n');
+    process.exit(1);
+  }
+
+  if (!isInteractive(nonTty)) {
+    refuseNonInteractive(
+      `which WorkOS application ${varName} belongs to is ambiguous without a prompt`,
+      `${target.environmentName} has ${applications.length} applications and the current value matched none of its keys.`,
+    );
+  }
+
+  console.log(`\n  ${target.environmentName} has ${applications.length} applications, and the current`);
+  console.log(`  value of ${B(varName)} matched none of their keys — expected for a production key.`);
+
+  const inquirer = (await import('inquirer')).default;
+  const { picked } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'picked',
+      message: `Which application holds ${varName}?`,
+      // Name each application by the keys living in it — the id alone is
+      // unrecognisable, and the key names are what the dashboard shows.
+      choices: applications.map((id) => {
+        const names = keys.filter((k) => k.applicationId === id).map((k) => k.name ?? k.id);
+        return { name: `${id}  ${DIM(names.join(', '))}`, value: id };
+      }),
+      default: applications[0],
+    },
+  ]);
+  return picked;
 }
 
 export function resolveApplicationId(
