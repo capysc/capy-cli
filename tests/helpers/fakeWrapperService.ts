@@ -103,8 +103,15 @@ export interface FakeWrapperService {
   close(): void;
 }
 
-export function startFakeWrapperService(): FakeWrapperService {
-  const rows: WrapperRow[] = [];
+export interface FakeWrapperServiceOptions {
+  readonly initialRows?: readonly WrapperRow[];
+  readonly connectionResult?: (
+    connectionId: string,
+  ) => Readonly<{ status: number; body: unknown }> | undefined;
+}
+
+export function startFakeWrapperService(opts: FakeWrapperServiceOptions = {}): FakeWrapperService {
+  const rows: WrapperRow[] = [...(opts.initialRows ?? [])];
   const requests: RecordedRequest[] = [];
   const failures: FailureInjection[] = [];
   const connectionFailures: FailureInjection[] = [];
@@ -165,7 +172,9 @@ export function startFakeWrapperService(): FakeWrapperService {
       if (req.method === 'GET' && connResultMatch) {
         const conn = connections.get(decodeURIComponent(connResultMatch[1]));
         if (!conn) return Response.json({ error: 'not found', code: 'CONNECTION_NOT_FOUND' }, { status: 404 });
-        const next = conn.resultQueue.shift() ?? { status: 200, body: { status: 'pending' } };
+        const next = opts.connectionResult?.(conn.id)
+          ?? conn.resultQueue.shift()
+          ?? { status: 200, body: { status: 'pending' } };
         return Response.json(next.body as any, { status: next.status });
       }
       const connDeleteMatch = url.pathname.match(/^\/connections\/([^/]+)$/);

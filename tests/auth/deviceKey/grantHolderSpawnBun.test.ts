@@ -12,7 +12,7 @@
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchGrantedKLocal } from '../../../src/auth/deviceKey/grantHolder';
@@ -37,24 +37,33 @@ function requestAcknowledgedGrantShutdown(socketPath: string): Promise<void> {
       2_000,
     );
     timeout.unref?.();
-    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
-    socket.once('data', (chunk) => {
-      const acknowledged = (() => {
-        try {
-          return (JSON.parse(chunk.toString('utf8').trim()) as Readonly<{ ok?: unknown }>).ok === true;
-        } catch {
-          return false;
+    const readFrom = (buffer: string): void => {
+      socket.once('data', (chunk) => {
+        const next = buffer + chunk.toString('utf8');
+        const newline = next.indexOf('\n');
+        if (newline === -1) {
+          readFrom(next);
+          return;
         }
-      })();
-      finish(acknowledged
-        ? { ok: true }
-        : { ok: false, error: new Error(`grant daemon returned an invalid shutdown response: ${socketPath}`) });
-    });
+        const acknowledged = (() => {
+          try {
+            return (JSON.parse(next.slice(0, newline)) as Readonly<{ ok?: unknown }>).ok === true;
+          } catch {
+            return false;
+          }
+        })();
+        finish(acknowledged
+          ? { ok: true }
+          : { ok: false, error: new Error(`grant daemon returned an invalid shutdown response: ${socketPath}`) });
+      });
+    };
+    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
     socket.once('error', (error) => finish({ ok: false, error }));
     socket.once('end', () => finish({
       ok: false,
       error: new Error(`grant daemon closed without acknowledging shutdown: ${socketPath}`),
     }));
+    readFrom('');
   });
 }
 
@@ -65,12 +74,14 @@ async function expectExactSocketToDisappear(socketPath: string, deadline = Date.
   return expectExactSocketToDisappear(socketPath, deadline);
 }
 
-function nonTtyLauncherSource(): string {
+function nonTtyLauncherSource(ownershipRecordPath: string): string {
   return [
     "import { spawnGrantDaemon } from './src/auth/deviceKey/grantHolder.ts';",
+    "import { writeFileSync } from 'node:fs';",
     `const handle = await spawnGrantDaemon({ userId: '${USER_ID}', credentialId: '${CREDENTIAL_ID}', kLocal: Buffer.alloc(32, ${K_LOCAL_BYTE}) }, {`,
     `  execPath: process.execPath, scriptPath: ${JSON.stringify(INDEX_SOURCE)}, ttlMs: null,`,
     '});',
+    `writeFileSync(${JSON.stringify(ownershipRecordPath)}, handle.socketPath, { flag: 'wx', mode: 0o600 });`,
     // Keep the exact socket as a separate first line. Cleanup can be armed
     // before parsing or asserting anything about the richer announcement.
     'console.log(handle.socketPath);',
@@ -78,12 +89,12 @@ function nonTtyLauncherSource(): string {
   ].join('\n');
 }
 
-async function runNonTtyLauncher(home: string, tempDirectory: string): Promise<{
+async function runNonTtyLauncher(home: string, tempDirectory: string, ownershipRecordPath: string): Promise<{
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
 }> {
-  const child = spawn(process.execPath, ['-e', nonTtyLauncherSource()], {
+  const child = spawn(process.execPath, ['-e', nonTtyLauncherSource(ownershipRecordPath)], {
     cwd: CLI_ROOT,
     env: { ...process.env, HOME: home, TMPDIR: tempDirectory, CAPY_WEB_NO_OPEN: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -99,22 +110,31 @@ async function runNonTtyLauncher(home: string, tempDirectory: string): Promise<{
   return { status: result[0], stdout: result[1], stderr: result[2] };
 }
 
+function readOwnedSocketPath(ownershipRecordPath: string): string | undefined {
+  try {
+    const socketPath = readFileSync(ownershipRecordPath, 'utf8');
+    return socketPath.length > 0 ? socketPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 describe('Bun grant daemon launch without a TTY', () => {
   test('transfers material and remains live after the non-TTY launcher exits', async () => {
     const home = mkdtempSync(join(tmpdir(), 'capy-grant-bun-non-tty-'));
     const tempDirectory = join(home, 'claude-state', 'runtime', 'tmp');
+    const ownershipRecordPath = join(home, 'owned-grant.socket-path');
     mkdirSync(tempDirectory, { recursive: true, mode: 0o700 });
-    const wouldBeSocket = join(
-      tempDirectory,
-      'capy-grant-XXXXXX',
-      '0000000000000000.sock',
-    );
-    expect(Buffer.byteLength(wouldBeSocket)).toBeGreaterThan(103);
-
-    const result = await runNonTtyLauncher(home, tempDirectory);
-    const [announcedSocketPath = '', handleJson = ''] = result.stdout.trimEnd().split('\n');
-
     try {
+      const wouldBeSocket = join(
+        tempDirectory,
+        'capy-grant-XXXXXX',
+        '0000000000000000.sock',
+      );
+      expect(Buffer.byteLength(wouldBeSocket)).toBeGreaterThan(103);
+
+      const result = await runNonTtyLauncher(home, tempDirectory, ownershipRecordPath);
+      const [announcedSocketPath = '', handleJson = ''] = result.stdout.trimEnd().split('\n');
       expect(announcedSocketPath.length).toBeGreaterThan(0);
       expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
       const handle = JSON.parse(handleJson) as Readonly<{ socketPath: string; expiresAt: number; pid: number }>;
@@ -129,14 +149,18 @@ describe('Bun grant daemon launch without a TTY', () => {
       expect(Buffer.byteLength(handle.socketPath)).toBeLessThanOrEqual(103);
       expect(handle.socketPath.startsWith(`${tempDirectory}/`)).toBe(false);
     } finally {
-      // Successful launch always announces this raw first line before any
-      // parse/assert boundary. Teardown owns only that exact socket and must
-      // observe both {ok:true} and unlink before deleting the test home.
-      if (announcedSocketPath.length > 0) {
-        await requestAcknowledgedGrantShutdown(announcedSocketPath);
-        await expectExactSocketToDisappear(announcedSocketPath);
+      // The launcher records the exact handle immediately after spawnGrantDaemon
+      // resolves, before console output, parent await completion, JSON parsing,
+      // or assertions. Teardown therefore remains armed across every failure.
+      const ownedSocketPath = readOwnedSocketPath(ownershipRecordPath);
+      try {
+        if (ownedSocketPath) {
+          await requestAcknowledgedGrantShutdown(ownedSocketPath);
+          await expectExactSocketToDisappear(ownedSocketPath);
+        }
+      } finally {
+        rmSync(home, { recursive: true, force: true });
       }
-      rmSync(home, { recursive: true, force: true });
     }
   });
 });

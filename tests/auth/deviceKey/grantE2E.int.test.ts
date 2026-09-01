@@ -29,14 +29,30 @@
  * Needs `dist/index.js` built first (`bun run build`) — same precondition
  * as capyRunEquivalence.e2e.test.ts.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect, afterAll } from 'bun:test';
 import { spawn } from 'child_process';
 import { createConnection } from 'net';
-import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'fs';
+import {
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  statSync,
+} from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
-import { startFakeWrapperService, kmsWrap, type FakeWrapperService } from '../../helpers/fakeWrapperService';
+import {
+  startFakeWrapperService,
+  kmsWrap,
+  type FakeWrapperService,
+  type WrapperRow,
+} from '../../helpers/fakeWrapperService';
 import { sealEnvelopePageSide } from '../../helpers/sealEnvelope';
 import { deriveDeviceKeyKek, deviceKeyWrapAAD, wrapKLocal, DEVICE_KEY_KDF_VERSION } from '../../../src/auth/deviceKey/crypto';
 import { encryptMasterKey, masterKeyAAD, deriveProjectKey } from '../../../src/crypto/keyManager';
@@ -66,6 +82,11 @@ function spawnCli(
   serviceUrl: string,
   extraEnv: Record<string, string | undefined> = {},
 ): { child: ReturnType<typeof spawn>; stdoutSoFar: () => string; done: Promise<SpawnResult> } {
+  const outputId = randomBytes(8).toString('hex');
+  const stdoutPath = join(home, `.grant-child-${outputId}.stdout`);
+  const stderrPath = join(home, `.grant-child-${outputId}.stderr`);
+  const stdoutFd = openSync(stdoutPath, 'wx', 0o600);
+  const stderrFd = openSync(stderrPath, 'wx', 0o600);
   const child = spawn('node', [CLI_PATH, ...args], {
     cwd,
     env: {
@@ -79,24 +100,25 @@ function spawnCli(
       // make a focused run open the developer's real browser.
       CAPY_WEB_NO_OPEN: '1',
     } as Record<string, string>,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['pipe', stdoutFd, stderrFd],
   });
-  let stdout = '';
-  let stderr = '';
-  child.stdout?.on('data', (d) => (stdout += d.toString()));
-  child.stderr?.on('data', (d) => (stderr += d.toString()));
-  const done = new Promise<SpawnResult>((resolve) => {
-    const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
-    child.on('close', (code) => {
-      clearTimeout(killer);
-      resolve({ stdout, stderr, exitCode: code });
-    });
-    child.on('error', () => {
-      clearTimeout(killer);
-      resolve({ stdout, stderr, exitCode: 1 });
-    });
+  const exitCode = new Promise<number | null>((resolve) => {
+    child.once('close', resolve);
+    child.once('error', () => resolve(1));
   });
-  return { child, stdoutSoFar: () => stdout, done };
+  const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
+  const stdoutSoFar = (): string => readFileSync(stdoutPath, 'utf8');
+  const done = exitCode.then((code): SpawnResult => {
+    clearTimeout(killer);
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+    return {
+      stdout: stdoutSoFar(),
+      stderr: readFileSync(stderrPath, 'utf8'),
+      exitCode: code,
+    };
+  });
+  return { child, stdoutSoFar, done };
 }
 
 function requestAcknowledgedGrantShutdown(socketPath: string): Promise<void> {
@@ -113,24 +135,33 @@ function requestAcknowledgedGrantShutdown(socketPath: string): Promise<void> {
       2_000,
     );
     timeout.unref?.();
-    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
-    socket.once('data', (chunk) => {
-      const acknowledged = (() => {
-        try {
-          return (JSON.parse(chunk.toString('utf8').trim()) as Readonly<{ ok?: unknown }>).ok === true;
-        } catch {
-          return false;
+    const readFrom = (buffer: string): void => {
+      socket.once('data', (chunk) => {
+        const next = buffer + chunk.toString('utf8');
+        const newline = next.indexOf('\n');
+        if (newline === -1) {
+          readFrom(next);
+          return;
         }
-      })();
-      finish(acknowledged
-        ? { ok: true }
-        : { ok: false, error: new Error(`grant daemon returned an invalid shutdown response: ${socketPath}`) });
-    });
+        const acknowledged = (() => {
+          try {
+            return (JSON.parse(next.slice(0, newline)) as Readonly<{ ok?: unknown }>).ok === true;
+          } catch {
+            return false;
+          }
+        })();
+        finish(acknowledged
+          ? { ok: true }
+          : { ok: false, error: new Error(`grant daemon returned an invalid shutdown response: ${socketPath}`) });
+      });
+    };
+    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
     socket.once('error', (error) => finish({ ok: false, error }));
     socket.once('end', () => finish({
       ok: false,
       error: new Error(`grant daemon closed without acknowledging shutdown: ${socketPath}`),
     }));
+    readFrom('');
   });
 }
 
@@ -142,7 +173,24 @@ async function expectExactSocketToDisappear(socketPath: string, deadline = Date.
 }
 
 async function cleanupExactGrant(socketPath: string, requireAcknowledgement: boolean): Promise<void> {
-  if (requireAcknowledgement || existsSync(socketPath)) await requestAcknowledgedGrantShutdown(socketPath);
+  if (!requireAcknowledgement && !existsSync(socketPath)) {
+    await expectExactSocketToDisappear(socketPath);
+    return;
+  }
+  const shutdown = await (async (): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: Error & { readonly code?: string } }
+  > => {
+    try {
+      await requestAcknowledgedGrantShutdown(socketPath);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: (error instanceof Error ? error : new Error(String(error))) as Error & { readonly code?: string },
+      };
+    }
+  })();
+  if (!shutdown.ok && (requireAcknowledgement || shutdown.error.code !== 'ENOENT')) throw shutdown.error;
   await expectExactSocketToDisappear(socketPath);
 }
 
@@ -157,20 +205,16 @@ async function cleanupExactGrant(socketPath: string, requireAcknowledgement: boo
 async function driveGrantCeremonyOverSubprocess(
   stdoutSoFar: () => string,
   service: FakeWrapperService,
+  connectionAnswerDirectory: string,
   answer: (candidates: { credentialId: string; prfSalt: string }[]) =>
     | { ok: true; credentialId: string; prfOutput: string }
     | { ok: false; code: string },
 ): Promise<void> {
   const urlDeadline = Date.now() + 10_000;
-  let url: string | undefined;
-  while (Date.now() < urlDeadline) {
+  const url = await waitForValue(() => {
     const match = stdoutSoFar().match(/https:\/\/keep\.capy\.sc\/flow\/device-key\?c=[^\s]+/);
-    if (match) {
-      url = match[0];
-      break;
-    }
-    await Bun.sleep(20);
-  }
+    return match?.[0];
+  }, urlDeadline, 20);
   if (!url) throw new Error(`driveGrantCeremonyOverSubprocess: no ceremony URL seen in stdout: ${stdoutSoFar()}`);
 
   const u = new URL(url);
@@ -186,12 +230,8 @@ async function driveGrantCeremonyOverSubprocess(
   };
   expect(request.ceremony).toBe('grant');
 
-  let conn = service.connections.get(connectionId);
   const connDeadline = Date.now() + 5_000;
-  while (!conn && Date.now() < connDeadline) {
-    await Bun.sleep(10);
-    conn = service.connections.get(connectionId);
-  }
+  const conn = await waitForValue(() => service.connections.get(connectionId), connDeadline, 10);
   if (!conn) throw new Error(`connection ${connectionId} never registered with the fake broker`);
 
   const result = answer(request.candidates);
@@ -201,73 +241,108 @@ async function driveGrantCeremonyOverSubprocess(
     connectionId,
     clientPubkeyB64: conn.clientPubkeyB64,
   });
-  conn.resultQueue.push({ status: 200, body: { status: 'answered', ciphertext: sealed } });
+  writeFileSync(
+    join(connectionAnswerDirectory, encodeURIComponent(connectionId)),
+    JSON.stringify({ status: 200, body: { status: 'answered', ciphertext: sealed } }),
+    { flag: 'wx', mode: 0o600 },
+  );
+}
+
+async function waitForValue<T>(
+  read: () => T | undefined,
+  deadline: number,
+  intervalMs: number,
+): Promise<T | undefined> {
+  const value = read();
+  if (value !== undefined || Date.now() >= deadline) return value;
+  await Bun.sleep(intervalMs);
+  return waitForValue(read, deadline, intervalMs);
+}
+
+function readConnectionResult(
+  connectionAnswerDirectory: string,
+  connectionId: string,
+): Readonly<{ status: number; body: unknown }> | undefined {
+  try {
+    return JSON.parse(
+      readFileSync(join(connectionAnswerDirectory, encodeURIComponent(connectionId)), 'utf8'),
+    ) as Readonly<{ status: number; body: unknown }>;
+  } catch {
+    return undefined;
+  }
+}
+
+function exactAnnouncedSocketFromOutput(output: string): string | undefined {
+  const encodedPath = Array.from(
+    output.matchAll(/"socketPath"\s*:\s*("(?:\\.|[^"\\])*")/g),
+    (match) => match[1],
+  ).at(-1);
+  if (!encodedPath) return undefined;
+  try {
+    const path: unknown = JSON.parse(encodedPath);
+    return typeof path === 'string' && path.length > 0 ? path : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Recursively find every file named exactly `name` under `root`. */
 function findFilesNamed(root: string, name: string): string[] {
-  const hits: string[] = [];
-  const walk = (dir: string): void => {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = join(dir, entry);
-      let st;
+  const walk = (dir: string): string[] => {
+    const entries = (() => {
       try {
-        st = statSync(full);
+        return readdirSync(dir);
       } catch {
-        continue;
+        return [];
       }
-      if (st.isDirectory()) walk(full);
-      else if (entry === name) hits.push(full);
-    }
+    })();
+    return entries.flatMap((entry) => {
+      const full = join(dir, entry);
+      const stat = (() => {
+        try {
+          return statSync(full);
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!stat) return [];
+      if (stat.isDirectory()) return walk(full);
+      return entry === name ? [full] : [];
+    });
   };
-  walk(root);
-  return hits;
+  return walk(root);
 }
 
 describe('CAP-384 grant E2E: no durable key material, over real subprocesses', () => {
-  let fakeService: FakeWrapperService;
-  let masterKey: Buffer;
-  let kLocal: Buffer;
-  let prfSalt: Buffer;
-  let prfOutput: Buffer;
-
-  beforeAll(() => {
-    fakeService = startFakeWrapperService();
-    masterKey = randomBytes(32);
-    kLocal = randomBytes(32);
-    prfSalt = randomBytes(32);
-    prfOutput = randomBytes(32);
-
-    // A pre-enrolled live door, as if enrolled from some OTHER, already-
-    // unlocked machine — this test never runs an enroll ceremony.
-    const kek = deriveDeviceKeyKek(prfOutput, prfSalt, DEVICE_KEY_KDF_VERSION);
-    const wrapped = wrapKLocal(kLocal, kek, deviceKeyWrapAAD(USER_ID, CRED_ID));
-    fakeService.rows.push({
+  const masterKey = randomBytes(32);
+  const kLocal = randomBytes(32);
+  const prfSalt = randomBytes(32);
+  const prfOutput = randomBytes(32);
+  // A pre-enrolled live door, as if enrolled from some OTHER, already-
+  // unlocked machine — this test never runs an enroll ceremony.
+  const kek = deriveDeviceKeyKek(prfOutput, prfSalt, DEVICE_KEY_KDF_VERSION);
+  const wrapped = wrapKLocal(kLocal, kek, deviceKeyWrapAAD(USER_ID, CRED_ID));
+  // The org's key_enc row, already server-held — exactly what a grant-mode
+  // `capy run` fetches fresh instead of reading a local key.enc file.
+  const innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(USER_ID, ORG_ID));
+  const createdAt = new Date().toISOString();
+  const initialRows = [
+    {
       id: 'door-e2e-1',
       type: 'wrapped_k_local',
       credential_id: CRED_ID,
       kdf_version: DEVICE_KEY_KDF_VERSION,
       is_seed: true,
-      verified_at: new Date().toISOString(),
+      verified_at: createdAt,
       organization_id: null,
-      created_at: new Date().toISOString(),
+      created_at: createdAt,
       deleted_at: null,
       mirror_state: 'pending',
       wrapped_k_local: wrapped.wrappedKLocal,
       iv: wrapped.iv,
       prf_salt: prfSalt.toString('base64'),
-    });
-
-    // The org's key_enc row, already server-held — exactly what a grant-mode
-    // `capy run` fetches fresh instead of reading a local key.enc file.
-    const innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(USER_ID, ORG_ID));
-    fakeService.rows.push({
+    },
+    {
       id: 'keyenc-e2e-1',
       type: 'key_enc',
       credential_id: null,
@@ -275,15 +350,21 @@ describe('CAP-384 grant E2E: no durable key material, over real subprocesses', (
       is_seed: false,
       verified_at: null,
       organization_id: ORG_ID,
-      created_at: new Date().toISOString(),
+      created_at: createdAt,
       deleted_at: null,
       mirror_state: 'pending',
       key_enc: kmsWrap(innerWrapped),
-    });
+    },
+  ] satisfies readonly WrapperRow[];
+  const connectionAnswerDirectory = mkdtempSync(join(tmpdir(), 'capy-grant-e2e-answers-'));
+  const fakeService: FakeWrapperService = startFakeWrapperService({
+    initialRows,
+    connectionResult: (connectionId) => readConnectionResult(connectionAnswerDirectory, connectionId),
   });
 
   afterAll(() => {
     fakeService.close();
+    rmSync(connectionAnswerDirectory, { recursive: true, force: true });
   });
 
   function freshHomeWithSession(): string {
@@ -327,22 +408,28 @@ describe('CAP-384 grant E2E: no durable key material, over real subprocesses', (
     const home = freshHomeWithSession();
     try {
       const grant = spawnCli(['device-key', 'grant', '--json', '--label', 'sandbox:e2e-test'], home, home, fakeService.url);
-      await driveGrantCeremonyOverSubprocess(grant.stdoutSoFar, fakeService, answerWithRealCredential);
-      const grantResult = await grant.done;
-
-      // stdout also carries the relayed ceremony URL text before the final
-      // pretty-printed JSON block — the JSON's own opening brace is the LAST
-      // `{` in the whole stream (the relay text contains none).
-      const jsonStart = grantResult.stdout.lastIndexOf('{');
-      const announced = JSON.parse(grantResult.stdout.slice(jsonStart)) as Readonly<{
-        socketPath: string;
-        envVar?: unknown;
-      }>;
-      const announcedSocketPath = announced.socketPath;
       try {
+        await driveGrantCeremonyOverSubprocess(
+          grant.stdoutSoFar,
+          fakeService,
+          connectionAnswerDirectory,
+          answerWithRealCredential,
+        );
+        const grantResult = await grant.done;
+
+        // stdout also carries the relayed ceremony URL text before the final
+        // pretty-printed JSON block — the JSON's own opening brace is the LAST
+        // `{` in the whole stream (the relay text contains none).
+        const jsonStart = grantResult.stdout.lastIndexOf('{');
+        const announced = JSON.parse(grantResult.stdout.slice(jsonStart)) as Readonly<{
+          socketPath?: unknown;
+          envVar?: unknown;
+        }>;
+        const announcedSocketPath = announced.socketPath;
         expect(grantResult.exitCode).toBe(0);
         expect(typeof announcedSocketPath).toBe('string');
         expect(announced.envVar).toBe('CAPY_DEVICE_KEY_GRANT_SOCKET');
+        if (typeof announcedSocketPath !== 'string') throw new Error('grant did not announce a socket path');
 
         const projectDir = projectDirWithSecret('shh-grant-e2e-secret');
         try {
@@ -367,10 +454,17 @@ describe('CAP-384 grant E2E: no durable key material, over real subprocesses', (
           rmSync(projectDir, { recursive: true, force: true });
         }
       } finally {
-        // Own only the socket this child announced. A successful test must
-        // receive {ok:true} from that daemon and then observe that exact path
-        // disappear; no process-name or temp-directory sweep is involved.
-        await cleanupExactGrant(announcedSocketPath, true);
+        // This boundary is armed immediately after spawning the exact child,
+        // before ceremony waits, assertions, or final-object parsing. Even a
+        // malformed final JSON object cannot bypass teardown once that child
+        // has emitted its own socket announcement.
+        const announcedSocketPath = exactAnnouncedSocketFromOutput(grant.stdoutSoFar());
+        try {
+          if (announcedSocketPath) await cleanupExactGrant(announcedSocketPath, true);
+        } finally {
+          grant.child.kill('SIGKILL');
+          await grant.done;
+        }
       }
     } finally {
       rmSync(home, { recursive: true, force: true });
