@@ -568,8 +568,10 @@ export class InviteCommand {
         console.log('');
         console.log(`    ${B('capy')} redeem ${redeemCode}`);
         console.log('');
-        console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
-        console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
+        // Answers the question the sender actually has — is pasting this into
+        // Slack a mistake — rather than describing how the code is built.
+        console.log('  \x1b[90mThis code is safe to share with your team member over email or your\x1b[0m');
+        console.log('  \x1b[90mteam messaging app. It can only be used by them.\x1b[0m');
         console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
         console.log('');
       }
