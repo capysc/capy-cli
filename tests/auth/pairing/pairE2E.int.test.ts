@@ -338,6 +338,7 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     expect(announced.orgTokenReady).toBe(true);
     expect(typeof announced.socketPath).toBe('string');
     expect(announced.envVar).toBe('CAPY_DEVICE_KEY_GRANT_SOCKET');
+    expect(announced).not.toHaveProperty('expiresAt');
 
     // The session half: a normal ~/.capy session file, readable by every
     // other command exactly as a real OAuth login would leave it.
@@ -359,8 +360,8 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
       alreadyActive: true,
       userId: USER_ID,
       socketPath: announced.socketPath,
-      expiresAt: announced.expiresAt,
     });
+    expect(repeatedJson).not.toHaveProperty('expiresAt');
     expect(repeatedPair.stdout).not.toContain('enter:');
     expect(service.devices.size).toBe(1);
 

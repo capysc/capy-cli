@@ -493,11 +493,10 @@ program
   .command('pair')
   .description('Sign this headless machine in with a code entered on another device (no browser needed here)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .option('--ttl-minutes <n>', 'granted device-key lifetime in minutes (default 30)', (v) => parseInt(v, 10))
   .action(async (options) => {
     const { PairCommand } = await import('./commands/pairCommand');
     const cmd = new PairCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json, ttlMinutes: options.ttlMinutes });
+    await cmd.execute({ json: options.json });
   });
 
 program
@@ -862,6 +861,7 @@ deviceKeyCmd
   });
 
 // CAP-384: internal-only — see index.ts's identical registration for why.
+// Finite temporary grants expire; runtime-pair custody is process-bound.
 program
   .command(GRANT_DAEMON_SUBCOMMAND, { hidden: true })
   .action(async () => {

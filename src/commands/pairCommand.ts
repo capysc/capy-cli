@@ -61,7 +61,7 @@ import {
 import { installPairedSession } from '../auth/pairing/installPairedSession';
 import { grantKeyMaterialForPairedMachine } from '../auth/pairing/pairDeviceGrant';
 import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
-import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
+import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR } from '../auth/deviceKey/grantHolder';
 import { keepOrigin } from '../ui/screens/keepScreens';
 import { openScreen } from '../ui/openScreen';
 import { renderTerminalQr } from '../ui/terminalQr';
@@ -87,9 +87,6 @@ const CEREMONY_FAILURE_MESSAGES: Record<string, string> = {
 
 export interface PairCommandOptions {
   json?: boolean;
-  /** Lifetime of the paired runtime's in-memory device key — same knob as
-   *  `device-key grant --ttl-minutes`. Not the device authorization TTL. */
-  ttlMinutes?: number;
 }
 
 export interface PairCommandDependencies {
@@ -194,7 +191,6 @@ export class PairCommand {
             userId: active.userId,
             userEmail: active.userEmail,
             socketPath: active.socketPath,
-            expiresAt: active.expiresAt,
             envVar: GRANT_SOCKET_ENV_VAR,
           },
           null,
@@ -206,7 +202,7 @@ export class PairCommand {
 
     console.log('');
     console.log(`  \x1b[32mAlready paired as ${B(active.userEmail)}.\x1b[0m`);
-    console.log(`  This runtime pair is active through ${new Date(active.expiresAt).toISOString()}.`);
+    console.log('  This runtime pair remains active while its protected key-holder process is running.');
     console.log('');
   }
 
@@ -319,8 +315,7 @@ export class PairCommand {
       return;
     }
 
-    const ttlMs = options.ttlMinutes ? options.ttlMinutes * 60_000 : DEFAULT_GRANT_TTL_MS;
-    const daemon = await spawnGrantDaemon(resolved.material, { ttlMs, persistRuntimePairing: true });
+    const daemon = await spawnGrantDaemon(resolved.material, { ttlMs: null, persistRuntimePairing: true });
 
     if (options.json) {
       console.log(
@@ -334,7 +329,6 @@ export class PairCommand {
             orgName: install.orgName ?? null,
             orgTokenReady: install.orgTokenReady,
             socketPath: daemon.socketPath,
-            expiresAt: daemon.expiresAt,
             envVar: GRANT_SOCKET_ENV_VAR,
           },
           null,
@@ -353,8 +347,8 @@ export class PairCommand {
     } else {
       console.log(`  Multiple organizations available — run ${B('capy org')} to pick one.`);
     }
-    console.log(`  Paired this runtime through ${new Date(daemon.expiresAt).toISOString()}.`);
-    console.log(`  The device key remains in memory; later capy processes discover it automatically.`);
+    console.log('  The device key remains in memory; later capy processes discover it automatically.');
+    console.log('  Logout, runtime shutdown, or loss of the key-holder process requires pairing again.');
     console.log('');
   }
 }

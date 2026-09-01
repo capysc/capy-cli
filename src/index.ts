@@ -658,12 +658,11 @@ program
   .command('pair')
   .description('Sign this headless machine in with a code entered on another device (no browser needed here)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .option('--ttl-minutes <n>', 'granted device-key lifetime in minutes (default 30)', (v) => parseInt(v, 10))
   .action(async (options) => {
     assertNotLocalOnly('pair');
     const { PairCommand } = await import('./commands/pairCommand');
     const cmd = new PairCommand();
-    await cmd.execute({ json: options.json, ttlMinutes: options.ttlMinutes });
+    await cmd.execute({ json: options.json });
   });
 
 program
@@ -869,7 +868,8 @@ deviceKeyCmd
 // (auth/deviceKey/grantHolder.ts) re-execs this same binary with this hidden
 // subcommand to start the long-lived, in-memory grant holder. Reads the key
 // material from stdin (never argv/env — see grantHolder.ts's header) and
-// blocks until the grant's TTL elapses or it receives a shutdown request.
+// blocks until a finite temporary grant expires or it receives a shutdown
+// request. Runtime-pair custody is process-bound and has no finite TTL.
 program
   .command(GRANT_DAEMON_SUBCOMMAND, { hidden: true })
   .action(async () => {

@@ -35,7 +35,7 @@
  * threat, because nothing on this machine can (see the audit, §2 "Resistance
  * to a same-user attacker").
  *
- * LIFETIME: `DEFAULT_GRANT_TTL_MS` (30 minutes). Deliberately chosen to
+ * TEMPORARY-GRANT LIFETIME: `DEFAULT_GRANT_TTL_MS` (30 minutes). Deliberately chosen to
  * outlast a single WebAuthn ceremony but not a whole day: long enough that
  * one grant covers many `capy run` calls across one agentic coding session
  * without re-prompting for a touch each time (the ergonomic point of a
@@ -44,7 +44,11 @@
  * indefinitely. The daemon self-terminates at expiry — it does not wait for
  * a request to notice the clock ran out — so "the process is gone" and "the
  * grant is expired" are the same observable fact, not two things that can
- * drift apart.
+ * drift apart. `capy pair` is a different, explicit runtime-custody action:
+ * its daemon is process-bound and therefore has no wall-clock expiry. It is
+ * still only process-durable — logout, daemon death, or runtime shutdown wipes
+ * the in-memory key, and reboot durability requires the separate secure
+ * runtime-custody provider documented in docs-internal/runtime-pairing-custody.md.
  */
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
@@ -86,7 +90,8 @@ export interface GrantedKeyMaterialWire {
   credentialId: string;
   /** base64, 32 bytes. Crosses process boundaries exactly twice — see file header. */
   kLocalB64: string;
-  ttlMs: number;
+  /** null means process-bound runtime custody; finite values are temporary grants. */
+  ttlMs: number | null;
 }
 
 export interface GrantDaemonHandle {
@@ -124,7 +129,7 @@ function respond(socket: Socket, body: Record<string, unknown>): void {
  */
 export function createGrantDaemonServer(
   material: { userId: string; credentialId: string; kLocal: Buffer },
-  ttlMs: number,
+  ttlMs: number | null,
   opts: { reapGraceMs?: number } = {},
 ): { server: Server; socketPath: string; socketDir: string; expiresAt: number; close: () => void } {
   const reapGraceMs = opts.reapGraceMs ?? DEFAULT_REAP_GRACE_MS;
@@ -132,28 +137,29 @@ export function createGrantDaemonServer(
   chmodSync(socketDir, 0o700);
   const socketPath = join(socketDir, `${randomBytes(8).toString('hex')}.sock`);
 
-  let held: HeldGrant | null = {
+  const held: HeldGrant = {
     userId: material.userId,
     credentialId: material.credentialId,
-    kLocal: material.kLocal,
-    expiresAt: Date.now() + ttlMs,
+    kLocal: Buffer.from(material.kLocal),
+    // `0` is the persisted wire sentinel for process-bound custody. It keeps
+    // the v1 metadata shape backwards-compatible without inventing a fake
+    // far-future expiry date.
+    expiresAt: ttlMs === null ? 0 : Date.now() + ttlMs,
   };
 
-  const wipe = (): void => {
-    held?.kLocal.fill(0);
-    held = null;
-  };
+  const lifecycle = new AbortController();
+  const wipe = (): void => void held.kLocal.fill(0);
 
   const server = createServer((socket) => {
-    let buf = '';
-    socket.on('data', (chunk) => {
-      buf += chunk.toString('utf8');
-      const nl = buf.indexOf('\n');
-      if (nl === -1) return; // one request per connection; wait for the terminator.
-      let req: DaemonRequest;
-      try {
-        req = JSON.parse(buf.slice(0, nl));
-      } catch {
+    void readOneLine(socket).then((line) => {
+      const req = (() => {
+        try {
+          return JSON.parse(line) as DaemonRequest;
+        } catch {
+          return null;
+        }
+      })();
+      if (!req) {
         respond(socket, { ok: false, code: 'INVALID_REQUEST' });
         return;
       }
@@ -171,7 +177,8 @@ export function createGrantDaemonServer(
         respond(socket, { ok: false, code: 'INVALID_REQUEST' });
         return;
       }
-      if (!held || Date.now() >= held.expiresAt) {
+      const expired = held.expiresAt !== 0 && Date.now() >= held.expiresAt;
+      if (lifecycle.signal.aborted || expired) {
         respond(socket, { ok: false, code: ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED });
         close(); // The grant is dead the moment it's noticed dead — don't linger.
         return;
@@ -189,24 +196,22 @@ export function createGrantDaemonServer(
         kLocal: held.kLocal.toString('base64'),
         expiresAt: held.expiresAt,
       });
-    });
+    }).catch(() => respond(socket, { ok: false, code: 'INVALID_REQUEST' }));
     socket.on('error', () => {
       // A client that disconnects mid-write is not this server's problem.
     });
   });
 
-  let expiryTimer: NodeJS.Timeout | null = setTimeout(close, ttlMs + reapGraceMs);
+  const expiryTimer = ttlMs === null ? null : setTimeout(close, ttlMs + reapGraceMs);
   // Never keeps the daemon's own event loop alive by itself in tests that
   // hold a reference without calling close(); production callers always run
   // this to completion via runGrantDaemonForever.
-  expiryTimer.unref?.();
+  expiryTimer?.unref?.();
 
   function close(): void {
+    lifecycle.abort();
     wipe();
-    if (expiryTimer) {
-      clearTimeout(expiryTimer);
-      expiryTimer = null;
-    }
+    if (expiryTimer) clearTimeout(expiryTimer);
     try {
       server.close();
     } catch {
@@ -244,20 +249,26 @@ export function listenGrantDaemonServer(server: Server, socketPath: string): Pro
  * reads exactly one line of JSON off stdin (the material — see file header
  * for why stdin, never argv/env), starts the server, announces
  * `{socketPath, expiresAt}` on stdout (never the key), and then blocks until
- * TTL expiry or a `shutdown` request closes it. This function's promise
+ * finite TTL expiry or a `shutdown` request closes it. Process-bound runtime
+ * custody has no finite TTL. This function's promise
  * resolves only when the daemon should exit — production `index.ts` wiring
  * calls it and lets the process end naturally afterward.
  */
 export async function runGrantDaemonForever(stdin: NodeJS.ReadableStream, ttlOverrideMs?: number): Promise<void> {
   const line = await readOneLine(stdin);
-  let wire: GrantedKeyMaterialWire;
-  try {
-    wire = JSON.parse(line);
-  } catch {
-    throw new CapyError('Malformed grant daemon input.', ERROR_CODES.INVALID_FORMAT);
-  }
+  const wire = (() => {
+    try {
+      return JSON.parse(line) as GrantedKeyMaterialWire;
+    } catch {
+      throw new CapyError('Malformed grant daemon input.', ERROR_CODES.INVALID_FORMAT);
+    }
+  })();
   const kLocal = Buffer.from(wire.kLocalB64, 'base64');
-  const ttlMs = ttlOverrideMs ?? wire.ttlMs ?? DEFAULT_GRANT_TTL_MS;
+  const ttlMs = ttlOverrideMs !== undefined
+    ? ttlOverrideMs
+    : wire.ttlMs === undefined
+      ? DEFAULT_GRANT_TTL_MS
+      : wire.ttlMs;
 
   const { server, socketPath, expiresAt, close } = createGrantDaemonServer(
     { userId: wire.userId, credentialId: wire.credentialId, kLocal },
@@ -268,28 +279,25 @@ export async function runGrantDaemonForever(stdin: NodeJS.ReadableStream, ttlOve
 
   await new Promise<void>((resolve) => {
     server.on('close', resolve);
-    // Belt-and-suspenders: even if close() above is never reached (e.g. the
-    // process is killed instead), don't hang past the TTL by more than a
-    // beat once resumed — the outer setTimeout in createGrantDaemonServer
-    // owns the real expiry; this just guarantees the promise resolves.
-    setTimeout(() => close(), ttlMs + 5_000).unref?.();
+    // Finite temporary grants get a belt-and-suspenders expiry guard. A
+    // process-bound runtime pair deliberately waits for shutdown or process
+    // death instead.
+    if (ttlMs !== null) setTimeout(() => close(), ttlMs + 5_000).unref?.();
   });
 }
 
 function readOneLine(stream: NodeJS.ReadableStream): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let buf = '';
+  const readFrom = (buffer: string): Promise<string> => new Promise((resolve, reject) => {
     const onData = (chunk: Buffer | string): void => {
-      buf += chunk.toString();
-      const nl = buf.indexOf('\n');
-      if (nl !== -1) {
-        cleanup();
-        resolve(buf.slice(0, nl));
-      }
+      cleanup();
+      const next = buffer + chunk.toString();
+      const newline = next.indexOf('\n');
+      if (newline !== -1) return resolve(next.slice(0, newline));
+      void readFrom(next).then(resolve, reject);
     };
     const onEnd = (): void => {
       cleanup();
-      if (buf.length > 0) resolve(buf);
+      if (buffer.length > 0) resolve(buffer);
       else reject(new Error('grant daemon: stdin closed with no material'));
     };
     const onError = (err: Error): void => {
@@ -305,6 +313,7 @@ function readOneLine(stream: NodeJS.ReadableStream): Promise<string> {
     stream.on('end', onEnd);
     stream.on('error', onError);
   });
+  return readFrom('');
 }
 
 // --- Parent-side: spawn the daemon ------------------------------------------
@@ -320,11 +329,11 @@ function readOneLine(stream: NodeJS.ReadableStream): Promise<string> {
  */
 export function spawnGrantDaemon(
   material: { userId: string; credentialId: string; kLocal: Buffer },
-  opts: { ttlMs?: number; execPath?: string; scriptPath?: string; persistRuntimePairing?: boolean } = {},
+  opts: { ttlMs?: number | null; execPath?: string; scriptPath?: string; persistRuntimePairing?: boolean } = {},
 ): Promise<GrantDaemonHandle> {
   const execPath = opts.execPath ?? process.execPath;
   const scriptPath = opts.scriptPath ?? process.argv[1];
-  const ttlMs = opts.ttlMs ?? DEFAULT_GRANT_TTL_MS;
+  const ttlMs = opts.ttlMs === undefined ? DEFAULT_GRANT_TTL_MS : opts.ttlMs;
 
   const launch = new Promise<GrantDaemonHandle>((resolve, reject) => {
     const child = spawn(execPath, [scriptPath, GRANT_DAEMON_SUBCOMMAND], {
@@ -412,19 +421,19 @@ export function fetchGrantedKLocal(socketPath: string, userId: string): Promise<
       );
     }, REQUEST_TIMEOUT_MS);
 
-    let buf = '';
     socket.on('connect', () => {
       socket.write(JSON.stringify({ op: 'get', userId }) + '\n');
     });
-    socket.on('data', (chunk) => {
-      buf += chunk.toString('utf8');
-    });
-    socket.on('end', () => {
+    void readOneLine(socket).then((line) => {
       clearTimeout(timer);
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(buf.trim());
-      } catch {
+      const parsed = (() => {
+        try {
+          return JSON.parse(line.trim()) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })();
+      if (!parsed) {
         reject(new CapyError('The device-key grant answered with a malformed response.', ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND));
         return;
       }
@@ -448,6 +457,9 @@ export function fetchGrantedKLocal(socketPath: string, userId: string): Promise<
           code,
         ),
       );
+    }).catch(() => {
+      clearTimeout(timer);
+      reject(new CapyError('No device-key grant is active for this chat.', ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND));
     });
     socket.on('error', (err: NodeJS.ErrnoException) => {
       clearTimeout(timer);
@@ -474,15 +486,16 @@ export async function isGrantActive(socketPath: string): Promise<boolean> {
     socket.on('connect', () => {
       socket.write(JSON.stringify({ op: 'ping' }) + '\n');
     });
-    let buf = '';
-    socket.on('data', (chunk) => (buf += chunk.toString('utf8')));
-    socket.on('end', () => {
+    void readOneLine(socket).then((line) => {
       clearTimeout(timer);
       try {
-        resolve(JSON.parse(buf.trim()).ok === true);
+        resolve(JSON.parse(line.trim()).ok === true);
       } catch {
         resolve(false);
       }
+    }).catch(() => {
+      clearTimeout(timer);
+      resolve(false);
     });
     socket.on('error', () => {
       clearTimeout(timer);

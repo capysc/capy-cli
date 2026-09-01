@@ -15,7 +15,8 @@ record contains only:
 - the Capy user ID;
 - the answering credential ID;
 - the Unix-socket path;
-- the daemon expiry time; and
+- the daemon lifetime sentinel (`0` for process-bound custody; positive values
+  remain readable for legacy finite records); and
 - the pairing timestamp.
 
 It does not contain `K_local`, the PRF output, a key derived from either value,
@@ -36,9 +37,11 @@ requires pairing again.
 ## Deliberate stop condition
 
 This slice survives CLI, MCP, agent, and subagent process restarts while the
-runtime and daemon remain alive. It does not survive a host reboot or a daemon
-crash. The current repository has no packageable secure-at-rest primitive that
-can close that gap:
+runtime and daemon remain alive. Unlike temporary `device-key grant` custody,
+`capy pair` has no 30-minute wall-clock expiry: it ends on logout, protected
+home wipe, daemon death, or runtime shutdown. It does not survive a host reboot
+or a daemon crash. The current repository has no packageable secure-at-rest
+primitive that can close that gap:
 
 - writing `K_local` to an ordinary 0600 file is explicitly prohibited;
 - wrapping it with a key stored beside the ciphertext is equivalent to writing
@@ -96,4 +99,4 @@ The implementation test seam should supply an in-memory fake provider and pin:
 seal followed by a new CLI process unseal, same-user idempotency, wrong-user and
 wrong-environment refusal, deleted/wiped provider behavior, tamper refusal, and
 standalone-binary packaging. A real provider must pass that corpus before the
-30-minute daemon can be reconstructed after reboot without a new ceremony.
+process-bound daemon can be reconstructed after reboot without a new ceremony.

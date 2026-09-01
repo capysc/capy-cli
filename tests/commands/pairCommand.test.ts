@@ -86,7 +86,6 @@ mock.module('../../src/auth/deviceKey/grantHolder', () => ({
     return spawnResult;
   },
   GRANT_SOCKET_ENV_VAR: 'CAPY_DEVICE_KEY_GRANT_SOCKET',
-  DEFAULT_GRANT_TTL_MS: 30 * 60_000,
 }));
 
 class ExitError extends Error {
@@ -213,7 +212,6 @@ describe('PairCommand — already-active runtime', () => {
       userId: 'user_1',
       userEmail: 'u@example.com',
       socketPath: '/tmp/already-active.sock',
-      expiresAt,
       envVar: 'CAPY_DEVICE_KEY_GRANT_SOCKET',
     });
     expect(ceremonyCalls).toEqual([]);
@@ -254,13 +252,14 @@ describe('PairCommand — answered', () => {
     expect(parsed.orgId).toBe('org_1');
     expect(parsed.socketPath).toBe('/tmp/fake.sock');
     expect(parsed.envVar).toBe('CAPY_DEVICE_KEY_GRANT_SOCKET');
+    expect(parsed).not.toHaveProperty('expiresAt');
   });
 
-  test('--ttl-minutes is passed through to the grant daemon spawn', async () => {
+  test('runtime pairing uses process-bound custody rather than the temporary 30-minute lifetime', async () => {
     ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
 
-    await new PairCommand().execute({ ttlMinutes: 5 });
-    expect(spawnCalls[0].opts.ttlMs).toBe(5 * 60_000);
+    await new PairCommand().execute({});
+    expect(spawnCalls[0].opts).toEqual({ ttlMs: null, persistRuntimePairing: true });
   });
 
   test('a coded key-material resolution failure (e.g. malformed PRF output) is rejected before spawning a daemon', async () => {
