@@ -129,17 +129,53 @@ function readCredentialsFile(): WorkOSCredentials | null {
   }
 }
 
+/**
+ * THE KEYCHAIN BLOB IS BASE64, NOT JSON.
+ *
+ * `security ... -w` hands back exactly what was stored, and what the WorkOS
+ * CLI stores under service `workos-cli` / account `credentials` is base64 of
+ * the JSON — not the JSON. Parsing it directly always throws, and because the
+ * failure is a caught `return null` it presents as "not signed in" rather than
+ * as a decode error: `workos auth login` succeeds, and Capy then reports it
+ * could not read a session.
+ *
+ * Both encodings are accepted so the reader survives the CLI changing its
+ * mind, and so a machine whose credentials predate the base64 wrapping still
+ * works.
+ */
 function readCredentialsKeyring(): WorkOSCredentials | null {
   if (process.platform !== 'darwin') return null;
   try {
     const raw = execSync('security find-generic-password -s workos-cli -a credentials -w', {
       stdio: ['ignore', 'pipe', 'ignore'],
       encoding: 'utf8',
-    });
-    const parsed: unknown = JSON.parse(raw.trim());
-    return isCredentials(parsed) ? parsed : null;
+    }).trim();
+    const parsed = parseCredentialBlob(raw);
+    return parsed && isCredentials(parsed) ? parsed : null;
   } catch {
     return null;
+  }
+}
+
+/** JSON, or base64-of-JSON. Returns undefined when it is neither. */
+export function parseCredentialBlob(raw: string): unknown {
+  const direct = tryParseJson(raw);
+  if (direct !== undefined) return direct;
+  const decoded = (() => {
+    try {
+      return Buffer.from(raw, 'base64').toString('utf8');
+    } catch {
+      return undefined;
+    }
+  })();
+  return decoded === undefined ? undefined : tryParseJson(decoded);
+}
+
+function tryParseJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
   }
 }
 

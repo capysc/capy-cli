@@ -4,6 +4,7 @@ import {
   resolveApplicationId,
   rotationKeyName,
   isCredentials,
+  parseCredentialBlob,
   looksLikeWorkOSClientId,
   looksLikeWorkOSApiKey,
   findClientIdCandidates,
@@ -201,6 +202,28 @@ describe('findApiKeyCandidates', () => {
 
   test('finds nothing when no value has the prefix', () => {
     expect(findApiKeyCandidates({ WORKOS_API_KEY: 'not-a-key' })).toHaveLength(0);
+  });
+});
+
+describe('parseCredentialBlob', () => {
+  const creds = { accessToken: 'tok', expiresAt: 123, refreshToken: 'r' };
+
+  test('reads the base64 blob the macOS keychain actually stores', () => {
+    // The regression this exists for: `security -w` returns base64 of the
+    // JSON, not the JSON. Parsing directly threw, the throw was swallowed as
+    // "no credentials", and a successful `workos auth login` was followed by
+    // "could not read a usable WorkOS session".
+    const b64 = Buffer.from(JSON.stringify(creds)).toString('base64');
+    expect(parseCredentialBlob(b64)).toEqual(creds);
+  });
+
+  test('still reads plain JSON, as the file store holds it', () => {
+    expect(parseCredentialBlob(JSON.stringify(creds))).toEqual(creds);
+  });
+
+  test('returns undefined for a blob that is neither', () => {
+    expect(parseCredentialBlob('not-a-thing')).toBeUndefined();
+    expect(parseCredentialBlob('')).toBeUndefined();
   });
 });
 
