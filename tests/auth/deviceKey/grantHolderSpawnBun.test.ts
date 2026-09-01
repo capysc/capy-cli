@@ -12,7 +12,7 @@
 import { describe, expect, test } from 'bun:test';
 import { spawn } from 'node:child_process';
 import { createConnection } from 'node:net';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchGrantedKLocal } from '../../../src/auth/deviceKey/grantHolder';
@@ -23,25 +23,46 @@ const USER_ID = 'user_bun_non_tty';
 const CREDENTIAL_ID = 'credential_bun_non_tty';
 const K_LOCAL_BYTE = 0x6b;
 
-function shutdownGrantDaemon(socketPath: string): Promise<void> {
-  return new Promise((resolve) => {
+function requestAcknowledgedGrantShutdown(socketPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
-    const finish = (): void => {
+    const finish = (outcome: { readonly ok: true } | { readonly ok: false; readonly error: Error }): void => {
+      clearTimeout(timeout);
       socket.destroy();
-      resolve();
+      if (outcome.ok) resolve();
+      else reject(outcome.error);
     };
-    const timeout = setTimeout(finish, 2_000);
+    const timeout = setTimeout(
+      () => finish({ ok: false, error: new Error(`grant daemon did not acknowledge shutdown: ${socketPath}`) }),
+      2_000,
+    );
     timeout.unref?.();
     socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
-    socket.once('data', () => {
-      clearTimeout(timeout);
-      finish();
+    socket.once('data', (chunk) => {
+      const acknowledged = (() => {
+        try {
+          return (JSON.parse(chunk.toString('utf8').trim()) as Readonly<{ ok?: unknown }>).ok === true;
+        } catch {
+          return false;
+        }
+      })();
+      finish(acknowledged
+        ? { ok: true }
+        : { ok: false, error: new Error(`grant daemon returned an invalid shutdown response: ${socketPath}`) });
     });
-    socket.once('error', () => {
-      clearTimeout(timeout);
-      finish();
-    });
+    socket.once('error', (error) => finish({ ok: false, error }));
+    socket.once('end', () => finish({
+      ok: false,
+      error: new Error(`grant daemon closed without acknowledging shutdown: ${socketPath}`),
+    }));
   });
+}
+
+async function expectExactSocketToDisappear(socketPath: string, deadline = Date.now() + 2_000): Promise<void> {
+  if (!existsSync(socketPath)) return;
+  if (Date.now() >= deadline) throw new Error(`grant daemon socket still exists after shutdown: ${socketPath}`);
+  await Bun.sleep(10);
+  return expectExactSocketToDisappear(socketPath, deadline);
 }
 
 function nonTtyLauncherSource(): string {
@@ -50,6 +71,9 @@ function nonTtyLauncherSource(): string {
     `const handle = await spawnGrantDaemon({ userId: '${USER_ID}', credentialId: '${CREDENTIAL_ID}', kLocal: Buffer.alloc(32, ${K_LOCAL_BYTE}) }, {`,
     `  execPath: process.execPath, scriptPath: ${JSON.stringify(INDEX_SOURCE)}, ttlMs: null,`,
     '});',
+    // Keep the exact socket as a separate first line. Cleanup can be armed
+    // before parsing or asserting anything about the richer announcement.
+    'console.log(handle.socketPath);',
     'console.log(JSON.stringify(handle));',
   ].join('\n');
 }
@@ -61,7 +85,7 @@ async function runNonTtyLauncher(home: string, tempDirectory: string): Promise<{
 }> {
   const child = spawn(process.execPath, ['-e', nonTtyLauncherSource()], {
     cwd: CLI_ROOT,
-    env: { ...process.env, HOME: home, TMPDIR: tempDirectory },
+    env: { ...process.env, HOME: home, TMPDIR: tempDirectory, CAPY_WEB_NO_OPEN: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const status = new Promise<number | null>((resolve) => child.once('close', resolve));
@@ -88,10 +112,13 @@ describe('Bun grant daemon launch without a TTY', () => {
     expect(Buffer.byteLength(wouldBeSocket)).toBeGreaterThan(103);
 
     const result = await runNonTtyLauncher(home, tempDirectory);
-    expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
-    const handle = JSON.parse(result.stdout) as Readonly<{ socketPath: string; expiresAt: number; pid: number }>;
+    const [announcedSocketPath = '', handleJson = ''] = result.stdout.trimEnd().split('\n');
 
     try {
+      expect(announcedSocketPath.length).toBeGreaterThan(0);
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
+      const handle = JSON.parse(handleJson) as Readonly<{ socketPath: string; expiresAt: number; pid: number }>;
+      expect(handle.socketPath).toBe(announcedSocketPath);
       const fetched = await fetchGrantedKLocal(handle.socketPath, USER_ID);
       expect(fetched).toMatchObject({
         userId: USER_ID,
@@ -102,7 +129,13 @@ describe('Bun grant daemon launch without a TTY', () => {
       expect(Buffer.byteLength(handle.socketPath)).toBeLessThanOrEqual(103);
       expect(handle.socketPath.startsWith(`${tempDirectory}/`)).toBe(false);
     } finally {
-      await shutdownGrantDaemon(handle.socketPath);
+      // Successful launch always announces this raw first line before any
+      // parse/assert boundary. Teardown owns only that exact socket and must
+      // observe both {ok:true} and unlink before deleting the test home.
+      if (announcedSocketPath.length > 0) {
+        await requestAcknowledgedGrantShutdown(announcedSocketPath);
+        await expectExactSocketToDisappear(announcedSocketPath);
+      }
       rmSync(home, { recursive: true, force: true });
     }
   });

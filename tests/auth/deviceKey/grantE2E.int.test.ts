@@ -31,7 +31,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import { spawn } from 'child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'fs';
+import { createConnection } from 'net';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
@@ -74,6 +75,9 @@ function spawnCli(
       CAPY_GLOBAL_DIR_NAME: undefined,
       CAPY_DEVICE_KEYS: '1',
       ...extraEnv,
+      // Test-local and deliberately last: no caller can override this and
+      // make a focused run open the developer's real browser.
+      CAPY_WEB_NO_OPEN: '1',
     } as Record<string, string>,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -93,6 +97,53 @@ function spawnCli(
     });
   });
   return { child, stdoutSoFar: () => stdout, done };
+}
+
+function requestAcknowledgedGrantShutdown(socketPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    const finish = (outcome: { readonly ok: true } | { readonly ok: false; readonly error: Error }): void => {
+      clearTimeout(timeout);
+      socket.destroy();
+      if (outcome.ok) resolve();
+      else reject(outcome.error);
+    };
+    const timeout = setTimeout(
+      () => finish({ ok: false, error: new Error(`grant daemon did not acknowledge shutdown: ${socketPath}`) }),
+      2_000,
+    );
+    timeout.unref?.();
+    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
+    socket.once('data', (chunk) => {
+      const acknowledged = (() => {
+        try {
+          return (JSON.parse(chunk.toString('utf8').trim()) as Readonly<{ ok?: unknown }>).ok === true;
+        } catch {
+          return false;
+        }
+      })();
+      finish(acknowledged
+        ? { ok: true }
+        : { ok: false, error: new Error(`grant daemon returned an invalid shutdown response: ${socketPath}`) });
+    });
+    socket.once('error', (error) => finish({ ok: false, error }));
+    socket.once('end', () => finish({
+      ok: false,
+      error: new Error(`grant daemon closed without acknowledging shutdown: ${socketPath}`),
+    }));
+  });
+}
+
+async function expectExactSocketToDisappear(socketPath: string, deadline = Date.now() + 2_000): Promise<void> {
+  if (!existsSync(socketPath)) return;
+  if (Date.now() >= deadline) throw new Error(`grant daemon socket still exists after shutdown: ${socketPath}`);
+  await Bun.sleep(10);
+  return expectExactSocketToDisappear(socketPath, deadline);
+}
+
+async function cleanupExactGrant(socketPath: string, requireAcknowledgement: boolean): Promise<void> {
+  if (requireAcknowledgement || existsSync(socketPath)) await requestAcknowledgedGrantShutdown(socketPath);
+  await expectExactSocketToDisappear(socketPath);
 }
 
 /**
@@ -274,48 +325,60 @@ describe('CAP-384 grant E2E: no durable key material, over real subprocesses', (
 
   it('grant -> capy run resolves the real secret, and NO local.key/key.enc file exists anywhere under HOME', async () => {
     const home = freshHomeWithSession();
-    let projectDir: string | undefined;
     try {
       const grant = spawnCli(['device-key', 'grant', '--json', '--label', 'sandbox:e2e-test'], home, home, fakeService.url);
       await driveGrantCeremonyOverSubprocess(grant.stdoutSoFar, fakeService, answerWithRealCredential);
       const grantResult = await grant.done;
 
-      expect(grantResult.exitCode).toBe(0);
       // stdout also carries the relayed ceremony URL text before the final
       // pretty-printed JSON block — the JSON's own opening brace is the LAST
       // `{` in the whole stream (the relay text contains none).
       const jsonStart = grantResult.stdout.lastIndexOf('{');
-      const announced = JSON.parse(grantResult.stdout.slice(jsonStart));
-      expect(typeof announced.socketPath).toBe('string');
-      expect(announced.envVar).toBe('CAPY_DEVICE_KEY_GRANT_SOCKET');
+      const announced = JSON.parse(grantResult.stdout.slice(jsonStart)) as Readonly<{
+        socketPath: string;
+        envVar?: unknown;
+      }>;
+      const announcedSocketPath = announced.socketPath;
+      try {
+        expect(grantResult.exitCode).toBe(0);
+        expect(typeof announcedSocketPath).toBe('string');
+        expect(announced.envVar).toBe('CAPY_DEVICE_KEY_GRANT_SOCKET');
 
-      projectDir = projectDirWithSecret('shh-grant-e2e-secret');
-      const run = spawnCli(
-        ['run', '--', 'node', '-e', 'console.log(process.env.SECRET_VAR)'],
-        projectDir,
-        home,
-        fakeService.url,
-        { CAPY_DEVICE_KEY_GRANT_SOCKET: announced.socketPath },
-      );
-      const runResult = await run.done;
+        const projectDir = projectDirWithSecret('shh-grant-e2e-secret');
+        try {
+          const run = spawnCli(
+            ['run', '--', 'node', '-e', 'console.log(process.env.SECRET_VAR)'],
+            projectDir,
+            home,
+            fakeService.url,
+            { CAPY_DEVICE_KEY_GRANT_SOCKET: announcedSocketPath },
+          );
+          const runResult = await run.done;
 
-      expect(runResult.exitCode).toBe(0);
-      expect(runResult.stdout.trim()).toBe('shh-grant-e2e-secret');
+          expect(runResult.exitCode).toBe(0);
+          expect(runResult.stdout.trim()).toBe('shh-grant-e2e-secret');
 
-      // THE PROOF: walk the entire HOME tree, find zero durable key files —
-      // in particular, none of the org-key-material files unlock's
-      // installOrgFromServer would have written (key.enc, local.key).
-      expect(findFilesNamed(home, 'local.key')).toEqual([]);
-      expect(findFilesNamed(home, 'key.enc')).toEqual([]);
+          // THE PROOF: walk the entire HOME tree, find zero durable key files —
+          // in particular, none of the org-key-material files unlock's
+          // installOrgFromServer would have written (key.enc, local.key).
+          expect(findFilesNamed(home, 'local.key')).toEqual([]);
+          expect(findFilesNamed(home, 'key.enc')).toEqual([]);
+        } finally {
+          rmSync(projectDir, { recursive: true, force: true });
+        }
+      } finally {
+        // Own only the socket this child announced. A successful test must
+        // receive {ok:true} from that daemon and then observe that exact path
+        // disappear; no process-name or temp-directory sweep is involved.
+        await cleanupExactGrant(announcedSocketPath, true);
+      }
     } finally {
-      if (projectDir) rmSync(projectDir, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
     }
   }, 30_000);
 
   it('an EXPIRED grant makes capy run exit EXIT_NEEDS_INPUT (3) — coded, not string-matched — and still writes nothing', async () => {
     const home = freshHomeWithSession();
-    let projectDir: string | undefined;
     try {
       // Bypasses the ceremony (already proven above) to get a deterministic,
       // millisecond-precise expiry without waiting on the CLI's whole-minute
@@ -330,24 +393,34 @@ describe('CAP-384 grant E2E: no durable key material, over real subprocesses', (
         { userId: USER_ID, credentialId: CRED_ID, kLocal },
         { ttlMs: 30, execPath: 'node', scriptPath: CLI_PATH },
       );
-      await Bun.sleep(150); // past ttl, still inside the reap grace window
+      try {
+        await Bun.sleep(150); // past ttl, still inside the reap grace window
 
-      projectDir = projectDirWithSecret('should-never-be-read');
-      const run = spawnCli(
-        ['run', '--', 'node', '-e', 'console.log(process.env.SECRET_VAR)'],
-        projectDir,
-        home,
-        fakeService.url,
-        { CAPY_DEVICE_KEY_GRANT_SOCKET: handle.socketPath },
-      );
-      const runResult = await run.done;
+        const projectDir = projectDirWithSecret('should-never-be-read');
+        try {
+          const run = spawnCli(
+            ['run', '--', 'node', '-e', 'console.log(process.env.SECRET_VAR)'],
+            projectDir,
+            home,
+            fakeService.url,
+            { CAPY_DEVICE_KEY_GRANT_SOCKET: handle.socketPath },
+          );
+          const runResult = await run.done;
 
-      expect(runResult.exitCode).toBe(3); // EXIT_NEEDS_INPUT — a coded signal, not prose
-      expect(runResult.stderr).toContain('DEVICE_KEY_GRANT_EXPIRED');
-      expect(findFilesNamed(home, 'local.key')).toEqual([]);
-      expect(findFilesNamed(home, 'key.enc')).toEqual([]);
+          expect(runResult.exitCode).toBe(3); // EXIT_NEEDS_INPUT — a coded signal, not prose
+          expect(runResult.stderr).toContain('DEVICE_KEY_GRANT_EXPIRED');
+          expect(findFilesNamed(home, 'local.key')).toEqual([]);
+          expect(findFilesNamed(home, 'key.enc')).toEqual([]);
+        } finally {
+          rmSync(projectDir, { recursive: true, force: true });
+        }
+      } finally {
+        // The expired get normally closes its own daemon. If an earlier
+        // failure left it live, require a shutdown acknowledgement; either
+        // way, prove this exact announced socket has disappeared.
+        await cleanupExactGrant(handle.socketPath, false);
+      }
     } finally {
-      if (projectDir) rmSync(projectDir, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
     }
   }, 20_000);
