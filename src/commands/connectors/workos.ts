@@ -4,7 +4,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { ConnectorModule, ConnectResult, RotateResult, ConnectOpts, RotateOpts } from './registry';
 import { ConnectorMetadata } from '../../types/index';
-import { ResolvedContext, fingerprint, keyTypePrefix } from './shared';
+import { ResolvedContext, fingerprint, keyTypePrefix, findManagedConnector } from './shared';
 import { isInteractive, refuseNonInteractive } from '../../ui/interactive';
 import type { Blocked } from '../../ui/screens/contract';
 
@@ -847,13 +847,22 @@ async function resolveTarget(
   ctx: ResolvedContext,
   token: string,
   nonTty?: boolean,
+  /** Environment already recorded in keep.lock for this variable, if any. */
+  recordedEnvironmentId?: string,
 ): Promise<ResolvedTarget> {
   const clientIdPick = await chooseClientId(ctx, nonTty);
   const clientIdVar = clientIdPick?.name ?? CLIENT_ID_VAR;
   const clientId = clientIdPick?.value;
   const environments = await fetchEnvironments(token, { clientIdVar, clientId });
   const match = clientId ? environments.find((e) => e.clientId === clientId) : undefined;
-  const chosen = await chooseEnvironment(environments, match, clientIdVar, clientId, nonTty);
+  const chosen = await chooseEnvironment(
+    environments,
+    match,
+    clientIdVar,
+    clientId,
+    nonTty,
+    recordedEnvironmentId,
+  );
   return {
     clientIdVar,
     // A picked environment is never recorded as a detected client ID: nothing
@@ -896,6 +905,7 @@ async function chooseEnvironment(
   /** Absent when `.env` had no usable client ID — then there is no default. */
   clientId: string | undefined,
   nonTty?: boolean,
+  recordedEnvironmentId?: string,
 ): Promise<TeamEnvironment> {
   if (environments.length === 0) {
     console.error(`\n  The signed-in WorkOS account has no environments.`);
@@ -909,6 +919,31 @@ async function chooseEnvironment(
     console.error('  Either the signed-in WorkOS account is not the one that owns this');
     console.error(`  environment, or the environment no longer exists. Check with ${B('workos auth status')}.\n`);
     process.exit(1);
+  }
+
+  /**
+   * ALREADY ANSWERED: keep.lock records the environment for this variable.
+   *
+   * The picker exists for the first connect, when nothing knows which
+   * environment this project is. Once that is written down, asking again on
+   * every rotate is a question with a recorded answer — the user said it, and
+   * being asked to repeat themselves reads as capy having forgotten.
+   *
+   * A recorded id that no longer resolves falls through to the picker: the
+   * environment was deleted, or this is a different WorkOS account, and both
+   * are worth stopping for.
+   */
+  const recorded = recordedEnvironmentId
+    ? environments.find((e) => e.id === recordedEnvironmentId)
+    : undefined;
+  if (recorded) {
+    // Still say it when `.env` disagrees — the client ID is what the running
+    // app uses, so a silent divergence there is worth one line.
+    if (match && match.id !== recorded.id) {
+      console.log(`\n  ${B(clientIdVar)} points at ${B(environmentLabel(match))}, but`);
+      console.log(`  keep.lock records ${B(environmentLabel(recorded))}. Using the recorded one.\n`);
+    }
+    return recorded;
   }
 
   if (!match) {
@@ -1043,7 +1078,10 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
   }
 
   const token = await acquireToken(opts.nonTty);
-  const target = await resolveTarget(ctx, token, opts.nonTty);
+  // Re-connecting an already-managed variable should not re-ask which
+  // environment it is: keep.lock answered that the first time.
+  const recordedEnv = findManagedConnector(ctx.keep, varName, ctx.branch)?.account_id;
+  const target = await resolveTarget(ctx, token, opts.nonTty, recordedEnv);
 
   const current = ctx.localPlaintext[varName];
   const keys = await fetchKeys(token, target.environmentId);
@@ -1130,7 +1168,7 @@ async function rotate(
   // at a different environment since `connect` — in which case the recorded
   // environment is stale and rotating against it would mint a key nothing
   // uses while leaving the live one alone.
-  const target = await resolveTarget(ctx, token, opts.nonTty);
+  const target = await resolveTarget(ctx, token, opts.nonTty, previous.account_id);
   if (previous.account_id && previous.account_id !== target.environmentId) {
     console.log(`\n  ${B(CLIENT_ID_VAR)} now points at ${target.environmentName}.`);
     console.log('  Rotating there, and updating the recorded environment.\n');
