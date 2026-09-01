@@ -376,7 +376,13 @@ export function spawnGrantDaemon(
       },
     );
 
-    child.stdin?.write(
+    // One atomic end(payload), not write(payload) followed by end(). Bun's
+    // child-process bridge can deliver the EOF before a separately-buffered
+    // write when the child is detached, leaving the daemon with no material.
+    // Node preserves the same ordering contract for end(payload), so this is
+    // portable across both supported runtimes without adding a retry that
+    // could duplicate recovery-equivalent material.
+    child.stdin?.end(
       JSON.stringify({
         userId: material.userId,
         credentialId: material.credentialId,
@@ -384,7 +390,6 @@ export function spawnGrantDaemon(
         ttlMs,
       } satisfies GrantedKeyMaterialWire) + '\n',
     );
-    child.stdin?.end();
   });
 
   if (!opts.persistRuntimePairing) return launch;
