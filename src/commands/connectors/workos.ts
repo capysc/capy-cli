@@ -26,6 +26,16 @@ const DEFAULT_VAR = 'WORKOS_API_KEY';
  */
 const CLIENT_ID_VAR = 'WORKOS_CLIENT_ID';
 
+/**
+ * `ConnectorMetadata.source` for the client-ID entry.
+ *
+ * `source` is documented as provider-specific, and this is the provider being
+ * specific: it distinguishes the half of the pair that identifies an
+ * environment from the half that is a credential. `rotate` refuses on it, and
+ * unlike a value-shape test it still holds once the value has been damaged.
+ */
+const CLIENT_ID_SOURCE = 'client-id';
+
 const GRAPHQL_URL = 'https://api.workos.com/graphql';
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -1128,6 +1138,11 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
           varName: target.clientIdVar,
           entry: {
             ...base,
+            // Marks this entry as the client ID rather than the key, so
+            // `rotate` can refuse it even after something has overwritten the
+            // value — a shape check alone cannot, since a stuffed variable no
+            // longer looks like a client ID.
+            source: CLIENT_ID_SOURCE,
             fingerprint: fingerprint(target.clientId),
             ...(keyTypePrefix(target.clientId)
               ? { key_prefix: keyTypePrefix(target.clientId) as string }
@@ -1177,8 +1192,13 @@ async function rotate(
    * these variables by shape in the first place.
    */
   const currentValue = ctx.localPlaintext[varName];
-  if (currentValue && looksLikeWorkOSClientId(currentValue)) {
-    console.error(`\n  ${B(varName)} holds a WorkOS client ID, which cannot be rotated.`);
+  const recordedAsClientId = previous.source === CLIENT_ID_SOURCE;
+  if (recordedAsClientId || (currentValue && looksLikeWorkOSClientId(currentValue))) {
+    console.error(`\n  ${B(varName)} is a WorkOS client ID, which cannot be rotated.`);
+    if (recordedAsClientId && currentValue && !looksLikeWorkOSClientId(currentValue)) {
+      console.error(`  Its value no longer looks like one — an earlier rotate may have`);
+      console.error(`  overwritten it with an API key. Restore it from the WorkOS dashboard.`);
+    }
     console.error('  A client ID names an environment; it is not a secret and WorkOS does');
     console.error('  not issue a replacement. Rotating would overwrite it with an API key.');
     console.error(`\n  Rotate the key instead: ${B(`capy rotate ${DEFAULT_VAR}`)}\n`);
