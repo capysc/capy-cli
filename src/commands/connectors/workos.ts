@@ -424,7 +424,7 @@ const TEAM_ENVIRONMENTS_QUERY = `
 const KEYS_QUERY = `
   query keys($environmentId: String!) {
     keys(environmentId: $environmentId) {
-      data { id name displayValue applicationId expiredAt }
+      data { id name createdAt displayValue applicationId expiredAt }
     }
   }
 `;
@@ -459,6 +459,7 @@ interface TeamEnvironment {
 export interface WorkOSKey {
   readonly id: string;
   readonly name: string | null;
+  readonly createdAt: string | null;
   readonly displayValue: string | null;
   readonly applicationId: string | null;
   readonly expiredAt: string | null;
@@ -750,6 +751,65 @@ export function findKeyByValue(keys: readonly WorkOSKey[], value: string): WorkO
   return keys.find((k) => k.displayValue === value);
 }
 
+/** Names this connector mints, e.g. `capy-rotated-2026-08-31`. */
+const ROTATED_NAME_RE = /^capy-rotated-\d{4}-\d{2}-\d{2}$/;
+
+export function isCapyRotatedName(name: string | null): boolean {
+  return name !== null && ROTATED_NAME_RE.test(name);
+}
+
+/**
+ * The newest still-live key this connector minted, excluding one id.
+ *
+ * WHY THIS EXISTS, AND WHY IT IS A FALLBACK RATHER THAN THE PRIMARY LOOKUP.
+ *
+ * Matching `.env`'s value against `displayValue` identifies the outgoing key
+ * exactly, and is right whenever it works. It does not work for production:
+ * WorkOS reveals a production key's plaintext once, at creation, so
+ * `displayValue` never matches and the value lookup misses every time. Without
+ * a second route, rotating a production key mints a replacement and expires
+ * nothing — every rotation leaves another live key behind, forever.
+ *
+ * A key named `capy-rotated-<date>` is one this connector created, which is a
+ * claim about provenance the value lookup cannot make. It is still second in
+ * line: the name says Capy minted it, not that the app is using it, and on the
+ * first rotation after `connect` there is no such key at all.
+ *
+ * `excludeId` is the key just minted — without it this would expire the
+ * replacement it is supposed to be handing over to.
+ */
+export function findPreviousRotatedKey(
+  keys: readonly WorkOSKey[],
+  excludeId: string,
+  applicationId: string | null,
+): WorkOSKey | undefined {
+  const candidates = keys.filter(
+    (k) =>
+      k.id !== excludeId &&
+      isCapyRotatedName(k.name) &&
+      k.expiredAt === null &&
+      (applicationId === null || k.applicationId === applicationId),
+  );
+  // Newest first. Sorting a freshly built array; nothing else has seen it.
+  const ordered = [...candidates].sort((a, b) => sortableTime(b) - sortableTime(a));
+  return ordered[0];
+}
+
+/**
+ * `createdAt` as a number, falling back to the date encoded in the name.
+ *
+ * The name carries only a day, so it cannot order two rotations made on the
+ * same day — which is exactly when ordering matters most. `createdAt` is the
+ * real signal and the name is the backstop for a key whose timestamp the API
+ * omitted.
+ */
+function sortableTime(k: WorkOSKey): number {
+  const fromField = k.createdAt ? Date.parse(k.createdAt) : NaN;
+  if (!Number.isNaN(fromField)) return fromField;
+  const fromName = k.name ? Date.parse(k.name.replace('capy-rotated-', '')) : NaN;
+  return Number.isNaN(fromName) ? 0 : fromName;
+}
+
 // ---------------------------------------------------------------------------
 // connect
 // ---------------------------------------------------------------------------
@@ -854,18 +914,31 @@ async function rotate(
     process.exit(1);
   }
 
-  // Expire the old key AFTER the new one exists, and on a delay. Order and
-  // delay are both load-bearing: expiring first would leave the app with no
-  // working key if creation then failed, and expiring immediately would break
-  // it in the window between `.env` being written and the deploy that reads it.
-  const expiredOutgoing = outgoing ? await expireKey(token, outgoing.id, new Date(Date.now() + OVERLAP_MS)) : false;
+  // Who gets expired. The key whose value is in `.env` when we could identify
+  // it; otherwise the last key Capy minted here. The second route is what
+  // keeps production from accumulating live keys forever: a production key's
+  // plaintext is never returned, so the value match always misses there and
+  // without this nothing would ever be expired.
+  const superseded = outgoing ?? findPreviousRotatedKey(keys, created.id, applicationId);
+
+  // Expire AFTER the new key exists, and on a delay. Order and delay are both
+  // load-bearing: expiring first would leave the app with no working key if
+  // creation then failed, and expiring immediately would break it in the
+  // window between `.env` being written and the deploy that reads it.
+  const scheduled = superseded
+    ? await expireKey(token, superseded.id, new Date(Date.now() + OVERLAP_MS))
+    : false;
 
   console.log(`\n  Rotated ${B(varName)} in ${target.environmentName}.`);
-  if (expiredOutgoing) {
-    console.log(`  The previous key stops working in 1 hour — deploy before then.`);
-  } else if (outgoing) {
+  if (scheduled && superseded) {
+    // Name the key when it was found by provenance rather than by value —
+    // "the previous key" is precise when we matched `.env`, and a guess worth
+    // showing the user when we matched a `capy-rotated-*` name instead.
+    const via = outgoing ? 'The previous key' : `The previous Capy key (${superseded.name})`;
+    console.log(`  ${via} stops working in 1 hour — deploy before then.`);
+  } else if (superseded) {
     console.log(`  Heads up: the new key is live, but Capy could not schedule the previous`);
-    console.log(`  one (${outgoing.id}) to expire. Revoke it in the WorkOS dashboard.`);
+    console.log(`  one (${superseded.id}) to expire. Revoke it in the WorkOS dashboard.`);
   } else {
     console.log(`  Capy could not identify the previous key, so nothing was expired.`);
     console.log(`  Revoke the old key in the WorkOS dashboard once the new one is deployed.`);

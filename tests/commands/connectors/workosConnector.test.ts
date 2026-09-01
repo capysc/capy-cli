@@ -1,6 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import {
   findKeyByValue,
+  findPreviousRotatedKey,
+  isCapyRotatedName,
   resolveApplicationId,
   rotationKeyName,
   isCredentials,
@@ -21,6 +23,7 @@ const WOS_KEY = 'sk_test_a2V5XzAxTTFDODg2Tko4NDFYMlkwSlJO';
 const key = (over: Partial<WorkOSKey> = {}): WorkOSKey => ({
   id: 'key_1',
   name: 'Secret Key',
+  createdAt: '2026-08-01T00:00:00.000Z',
   displayValue: 'sk_test_aaa',
   applicationId: 'app_1',
   expiredAt: null,
@@ -74,6 +77,68 @@ describe('resolveApplicationId', () => {
   test('ignores a null application on the outgoing key and falls through', () => {
     const keys = [key({ id: 'key_1', applicationId: 'app_1' })];
     expect(resolveApplicationId(keys, key({ applicationId: null }))).toBe('app_1');
+  });
+});
+
+describe('findPreviousRotatedKey', () => {
+  const rotated = (id: string, date: string, over: Partial<WorkOSKey> = {}) =>
+    key({ id, name: `capy-rotated-${date}`, createdAt: `${date}T12:00:00.000Z`, ...over });
+
+  test('finds the newest Capy-minted key when the value match missed', () => {
+    // The production case: displayValue never matches, so this is the only
+    // route to expiring anything at all.
+    const keys = [rotated('key_old', '2026-08-01'), rotated('key_new', '2026-08-30')];
+    expect(findPreviousRotatedKey(keys, 'key_created', 'app_1')?.id).toBe('key_new');
+  });
+
+  test('never returns the key just created', () => {
+    // Without the exclusion this expires the replacement it is handing over to.
+    const keys = [rotated('key_created', '2026-08-31'), rotated('key_old', '2026-08-01')];
+    expect(findPreviousRotatedKey(keys, 'key_created', 'app_1')?.id).toBe('key_old');
+  });
+
+  test('ignores keys the connector did not mint', () => {
+    const keys = [key({ id: 'key_manual', name: 'Secret Key', createdAt: '2026-08-30T00:00:00Z' })];
+    expect(findPreviousRotatedKey(keys, 'key_created', 'app_1')).toBeUndefined();
+  });
+
+  test('ignores keys already scheduled to expire', () => {
+    const keys = [rotated('key_done', '2026-08-30', { expiredAt: '2026-09-01T00:00:00Z' })];
+    expect(findPreviousRotatedKey(keys, 'key_created', 'app_1')).toBeUndefined();
+  });
+
+  test('stays within the target application', () => {
+    const keys = [rotated('key_other', '2026-08-30', { applicationId: 'app_2' })];
+    expect(findPreviousRotatedKey(keys, 'key_created', 'app_1')).toBeUndefined();
+    expect(findPreviousRotatedKey(keys, 'key_created', null)?.id).toBe('key_other');
+  });
+
+  test('falls back to the name date when createdAt is absent', () => {
+    const keys = [
+      rotated('key_old', '2026-08-01', { createdAt: null }),
+      rotated('key_new', '2026-08-30', { createdAt: null }),
+    ];
+    expect(findPreviousRotatedKey(keys, 'key_created', 'app_1')?.id).toBe('key_new');
+  });
+
+  test('returns undefined on a first rotation, when Capy has minted nothing', () => {
+    expect(findPreviousRotatedKey([], 'key_created', 'app_1')).toBeUndefined();
+  });
+});
+
+describe('isCapyRotatedName', () => {
+  test('matches only the exact minted shape', () => {
+    expect(isCapyRotatedName('capy-rotated-2026-08-31')).toBe(true);
+    expect(isCapyRotatedName('capy-rotated-soon')).toBe(false);
+    expect(isCapyRotatedName('my-capy-rotated-2026-08-31')).toBe(false);
+    expect(isCapyRotatedName('Secret Key')).toBe(false);
+    expect(isCapyRotatedName(null)).toBe(false);
+  });
+
+  test('agrees with the name rotationKeyName actually produces', () => {
+    // These two must not drift: the writer and the reader of that name are
+    // the only contract linking one rotation to the next.
+    expect(isCapyRotatedName(rotationKeyName())).toBe(true);
   });
 });
 
