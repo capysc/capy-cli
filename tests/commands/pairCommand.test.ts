@@ -29,6 +29,14 @@ mock.module('../../src/auth/pairing/pairAttemptLease', () => ({
   releasePairAttemptLease: () => true,
 }));
 
+// PairCommand opens verification_uri_complete as a user convenience. These
+// command tests are also valid as focused `bun test <file>` runs, where the
+// suite wrapper's CAPY_WEB_NO_OPEN export is absent. Keep the OS boundary
+// mocked here so fixture URLs can never reach the developer's browser.
+mock.module('../../src/ui/openScreen', () => ({
+  openScreen: mock(async () => ({ via: 'suppressed' as const })),
+}));
+
 // CAP-566 moved the SEAM, not the branching: the command drives the device
 // grant (deviceAuth.ts) instead of runPairCeremony. Everything these tests
 // assert about the command — the printed block, exit codes, --json shape, the

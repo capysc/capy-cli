@@ -15,10 +15,13 @@ mock.module('crypto', () => ({
   })),
 }));
 
-const mockOpen = mock(() => Promise.resolve({}));
-mock.module('open', () => ({
-  __esModule: true,
-  default: mockOpen,
+// Keep the browser boundary fake even in a focused `bun test <file>` run.
+// Mocking `open` itself is insufficient because openScreen loads it through a
+// dynamic import; clearing CAPY_WEB_NO_OPEN here previously reached the host
+// OS opener despite the test's static module mock.
+const mockOpenScreen = mock(async () => ({ via: 'suppressed' as const }));
+mock.module('../../src/ui/openScreen', () => ({
+  openScreen: mockOpenScreen,
 }));
 
 afterAll(() => { mock.restore(); });
@@ -26,7 +29,6 @@ afterAll(() => { mock.restore(); });
 import { createServer } from 'http';
 import { OAuthServer } from '../../src/auth/oauthServer';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
-import open from 'open';
 
 describe('OAuthServer', () => {
   let oauthServer: OAuthServer;
@@ -45,9 +47,6 @@ describe('OAuthServer', () => {
       removeListener: mock(() => undefined),
     };
     (mockCreateServer as any).mockReturnValue(mockServer);
-
-    // Mock open
-    (mockOpen as any).mockResolvedValue({} as any);
 
     oauthServer = new OAuthServer();
   });
@@ -103,28 +102,7 @@ describe('OAuthServer', () => {
   });
 
   describe('startAuthFlow', () => {
-    /**
-     * Sign-in now goes through `openScreen`, which honours CAPY_WEB_NO_OPEN —
-     * and `run-tests.sh` exports it for the whole suite, precisely so that no
-     * test opens the developer's browser. Cases that assert a browser WAS
-     * opened have to lift it for their own duration and put it back, or they
-     * would be asserting against the suite's own safety net.
-     */
-    const withBrowserAllowed = async (body: () => Promise<void>): Promise<void> => {
-      const saved = process.env.CAPY_WEB_NO_OPEN;
-      delete process.env.CAPY_WEB_NO_OPEN;
-      try {
-        await body();
-      } finally {
-        if (saved !== undefined) process.env.CAPY_WEB_NO_OPEN = saved;
-      }
-    };
-
-    test('CAPY_WEB_NO_OPEN reaches sign-in too, and the flow still completes', async () => {
-      // Before `openScreen`, this one call site ignored the flag: a CI run or a
-      // suite that reached authentication launched a real browser. The flag has
-      // to suppress the window WITHOUT suppressing the flow — the URL is
-      // printed, and a person can still finish in a browser of their choosing.
+    test('requests a handoff window without crossing the real OS browser boundary', async () => {
       const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
       (oauthServer as any).server = mockServer;
 
@@ -138,7 +116,7 @@ describe('OAuthServer', () => {
 
       const result = await oauthServer.startAuthFlow(authUrl);
 
-      expect(mockOpen).not.toHaveBeenCalled();
+      expect(mockOpenScreen).toHaveBeenCalledWith(authUrl, { kind: 'handoff' });
       expect(result).toBe('test-auth-code');
     });
 
@@ -198,60 +176,6 @@ describe('OAuthServer', () => {
       const parsed = JSON.parse(writes[eventIndex].slice('CAPY_EVENT_V1 '.length).trimEnd());
       expect(parsed.flow).toBe('login');
       expect(parsed.url).toBe(authUrl);
-    });
-
-    test('should open browser and resolve with auth code on success', async () => {
-      const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
-
-      // Manually set the server (as bind() would)
-      (oauthServer as any).server = mockServer;
-
-      // Mock successful flow
-      await withBrowserAllowed(async () => {
-        setTimeout(() => {
-          // Simulate server close event with successful auth code
-          const closeHandler = mockServer.on.mock.calls.find(
-            (call: any) => call[0] === 'close',
-          )?.[1];
-          if (closeHandler) {
-            // Set auth code before calling close handler
-            (oauthServer as any).authorizationCode = 'test-auth-code';
-            closeHandler();
-          }
-        }, 10);
-
-        const result = await oauthServer.startAuthFlow(authUrl);
-
-        // Browser selection itself is covered deterministically by
-        // openScreen.test.ts. The dynamic import used by that helper is not
-        // interceptable by this module mock under Bun, so this boundary test
-        // verifies that allowing a browser does not block the OAuth result.
-        expect(result).toBe('test-auth-code');
-      });
-    });
-
-    test('should handle browser open failure gracefully', async () => {
-      const authUrl = 'https://api.workos.com/sso/authorize?client_id=test';
-      (mockOpen as any).mockRejectedValue(new Error('Browser failed'));
-
-      // Manually set the server (as bind() would)
-      (oauthServer as any).server = mockServer;
-
-      await withBrowserAllowed(async () => {
-        // Mock successful auth after browser failure
-        setTimeout(() => {
-          const closeHandler = mockServer.on.mock.calls.find(
-            (call: any) => call[0] === 'close',
-          )?.[1];
-          if (closeHandler) {
-            (oauthServer as any).authorizationCode = 'test-auth-code';
-            closeHandler();
-          }
-        }, 10);
-
-        const result = await oauthServer.startAuthFlow(authUrl);
-        expect(result).toBe('test-auth-code');
-      });
     });
 
     test('should timeout after 5 minutes', async () => {

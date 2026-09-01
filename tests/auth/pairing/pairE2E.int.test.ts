@@ -87,6 +87,10 @@ function spawnCli(
       HOME: home,
       CAPY_API_URL: serviceUrl,
       CAPY_GLOBAL_DIR_NAME: undefined,
+      // This file is frequently run directly while debugging pairing. Do not
+      // rely on tests/run-tests.sh to supply the browser guard: a focused run
+      // must never hand the fake verification_uri to the host OS browser.
+      CAPY_WEB_NO_OPEN: '1',
       // `capy pair` gates on the same flag `capy device-key grant` does —
       // see pairCommand.ts's module doc for why (runCommand.ts's grant-
       // consuming branch is itself nested inside this same flag check, so a
