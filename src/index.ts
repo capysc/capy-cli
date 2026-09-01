@@ -662,7 +662,8 @@ program
     assertNotLocalOnly('pair');
     const { PairCommand } = await import('./commands/pairCommand');
     const cmd = new PairCommand();
-    await cmd.execute({ json: options.json });
+    const exitCode = await cmd.execute({ json: options.json });
+    if (exitCode !== 0) process.exit(exitCode);
   });
 
 program

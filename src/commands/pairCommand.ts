@@ -126,13 +126,28 @@ export async function ensureActiveRuntimePairingSession(
     new AuthService(resolvedApiUrl, resolvedDevMode, _active.userId),
 ): Promise<ActivePairingSessionOutcome> {
   const result = await createAuth(active, apiUrl, devMode).authenticateSilent();
-  if (result.success) return { kind: 'ready' };
+  if (result.success) {
+    return result.user_id === active.userId
+      ? { kind: 'ready' }
+      : {
+          kind: 'failed',
+          code: ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH,
+          detail: 'The authenticated session does not match the account paired to this runtime.',
+        };
+  }
   if (result.error_code === 'session_ended' || result.error_code === 'no_session') {
     return { kind: 'reauthenticate' };
   }
+  const code = result.error_code === 'network'
+    ? ERROR_CODES.NETWORK_ERROR
+    : result.error_code === 'server_error'
+      ? ERROR_CODES.SERVICE_ERROR
+      : result.error_code === 'org_not_found'
+        ? ERROR_CODES.ORG_NOT_FOUND
+        : ERROR_CODES.AUTH_FAILED;
   return {
     kind: 'failed',
-    code: result.error_code === 'network' ? ERROR_CODES.NETWORK_ERROR : ERROR_CODES.AUTH_FAILED,
+    code,
     detail: result.error || 'Could not refresh the paired runtime session.',
   };
 }
@@ -144,6 +159,8 @@ export interface PairCommandDependencies {
   readonly releasePairAttempt?: (lease: PairAttemptLease) => boolean;
 }
 
+type PairCommandExitCode = 0 | 1;
+
 export class PairCommand {
   constructor(
     private readonly apiUrl?: string,
@@ -151,34 +168,12 @@ export class PairCommand {
     private readonly dependencies: PairCommandDependencies = {},
   ) {}
 
-  async execute(options: PairCommandOptions = {}): Promise<void> {
+  async execute(options: PairCommandOptions = {}): Promise<PairCommandExitCode> {
     if (!deviceKeysEnabled()) refuseFlagOff();
-
-    const active = await (this.dependencies.readActivePairing ?? readActiveRuntimePairing)();
-    if (active) {
-      const session = await (
-        this.dependencies.ensureActiveSession
-        ?? ((pairing) => ensureActiveRuntimePairingSession(pairing, this.apiUrl, this.devMode))
-      )(active);
-      if (session.kind === 'ready') {
-        this.reportAlreadyActive(active, options);
-        return;
-      }
-      if (session.kind === 'failed') {
-        this.reportActiveSessionFailure(session, options);
-        return;
-      }
-      await this.executePairAttempt(options, active);
-      return;
-    }
-
-    await this.executePairAttempt(options, null);
+    return this.executePairAttempt(options);
   }
 
-  private async executePairAttempt(
-    options: PairCommandOptions,
-    active: ActiveRuntimePairing | null,
-  ): Promise<void> {
+  private async executePairAttempt(options: PairCommandOptions): Promise<PairCommandExitCode> {
     const acquired = (() => {
       try {
         return { ok: true as const, lease: (this.dependencies.acquirePairAttempt ?? acquirePairAttemptLease)() };
@@ -200,12 +195,28 @@ export class PairCommand {
         console.error(`  ${detail}`);
         console.error('');
       }
-      process.exitCode = 1;
-      return;
+      return 1;
     }
 
     try {
-      await this.executeWithLease(options, acquired.lease, active);
+      // Serialize the active-session probe as well as the browser ceremony.
+      // Refresh tokens may rotate, so two simultaneous `pair` commands must
+      // not both refresh the same persisted token before reaching the lease.
+      const active = await (this.dependencies.readActivePairing ?? readActiveRuntimePairing)();
+      if (active) {
+        const session = await (
+          this.dependencies.ensureActiveSession
+          ?? ((pairing) => ensureActiveRuntimePairingSession(pairing, this.apiUrl, this.devMode))
+        )(active);
+        if (session.kind === 'ready') {
+          this.reportAlreadyActive(active, options);
+          return 0;
+        }
+        if (session.kind === 'failed') {
+          return this.reportActiveSessionFailure(session, options);
+        }
+      }
+      return await this.executeWithLease(options, acquired.lease, active);
     } finally {
       (this.dependencies.releasePairAttempt ?? releasePairAttemptLease)(acquired.lease);
     }
@@ -215,7 +226,7 @@ export class PairCommand {
     options: PairCommandOptions,
     lease: PairAttemptLease,
     active: ActiveRuntimePairing | null,
-  ): Promise<void> {
+  ): Promise<PairCommandExitCode> {
     const serviceUrl = resolveActiveUrl(this.devMode);
 
     // Extracted so the outcome is a single const rather than a reassigned
@@ -246,8 +257,7 @@ export class PairCommand {
         console.error(`  Could not start pairing: ${message}`);
         console.error('');
       }
-      process.exitCode = 1;
-      return;
+      return 1;
     }
 
     const { authorization, result } = flow.value;
@@ -256,11 +266,9 @@ export class PairCommand {
     switch (result.status) {
       case 'complete':
         if (active) {
-          await this.finishSessionRefresh(result.session, active, userCode, options);
-        } else {
-          await this.finish(result.session, userCode, options);
+          return this.finishSessionRefresh(result.session, userCode, options);
         }
-        return;
+        return this.finish(result.session, userCode, options);
       case 'denied': {
         // `expired_token` keeps its own exit code and remedy: the code simply
         // ran out, which is a retry, not a refusal.
@@ -288,8 +296,18 @@ export class PairCommand {
           console.error('  No session or key material was installed.');
           console.error('');
         }
-        process.exitCode = 1;
-        return;
+        return 1;
+      }
+      case 'pending': {
+        const detail = 'The pairing poll ended before device authorization reached a terminal state.';
+        if (options.json) {
+          console.log(JSON.stringify({ ok: false, code: ERROR_CODES.SERVICE_ERROR, detail, userCode }, null, 2));
+        } else {
+          console.error('');
+          console.error(`  ${detail}`);
+          console.error('');
+        }
+        return 1;
       }
     }
   }
@@ -332,7 +350,7 @@ export class PairCommand {
   private reportActiveSessionFailure(
     failure: Extract<ActivePairingSessionOutcome, { readonly kind: 'failed' }>,
     options: PairCommandOptions,
-  ): void {
+  ): PairCommandExitCode {
     if (options.json) {
       console.log(JSON.stringify({ ok: false, code: failure.code, detail: failure.detail }, null, 2));
     } else {
@@ -340,16 +358,25 @@ export class PairCommand {
       console.error(`  ${failure.detail}`);
       console.error('');
     }
-    process.exitCode = 1;
+    return 1;
   }
 
   private async finishSessionRefresh(
     session: PairMachineAnswerSession,
-    active: ActiveRuntimePairing,
     userCode: string,
     options: PairCommandOptions,
-  ): Promise<void> {
-    if (session.user.id !== active.userId) {
+  ): Promise<PairCommandExitCode> {
+    // The device flow can outlive its starting daemon (logout, crash, or a
+    // same-user replacement). Re-read the runtime authority before choosing
+    // the install-only path: when custody disappeared, finish as a full pair
+    // so the newly authenticated session never gets reported with a dead
+    // socket; when it changed, bind the result to the current record.
+    const current = await (this.dependencies.readActivePairing ?? readActiveRuntimePairing)();
+    if (!current) {
+      return this.finish(session, userCode, options);
+    }
+
+    if (session.user.id !== current.userId) {
       const detail = 'The authenticated account does not match the account paired to this runtime. Sign in with the paired account or run `capy logout` first.';
       if (options.json) {
         console.log(JSON.stringify({
@@ -363,8 +390,7 @@ export class PairCommand {
         console.error(`  ${detail}`);
         console.error('');
       }
-      process.exitCode = 1;
-      return;
+      return 1;
     }
 
     const installed = await (async () => {
@@ -388,11 +414,11 @@ export class PairCommand {
         console.error(`  Authentication succeeded but the refreshed session could not be installed: ${detail}`);
         console.error('');
       }
-      process.exitCode = 1;
-      return;
+      return 1;
     }
 
-    this.reportAlreadyActive(active, options, true);
+    this.reportAlreadyActive({ ...current, userEmail: session.user.email }, options, true);
+    return 0;
   }
 
   /**
@@ -443,7 +469,11 @@ export class PairCommand {
     console.log('  Waiting…');
   }
 
-  private async finish(session: PairMachineAnswerSession, userCode: string, options: PairCommandOptions): Promise<void> {
+  private async finish(
+    session: PairMachineAnswerSession,
+    userCode: string,
+    options: PairCommandOptions,
+  ): Promise<PairCommandExitCode> {
     // Single const rather than a reassigned binding (immutability rule).
     const installed = await (async () => {
       try {
@@ -466,8 +496,7 @@ export class PairCommand {
         console.error(`  Pairing succeeded but the session could not be installed: ${message}`);
         console.error('');
       }
-      process.exitCode = 1;
-      return;
+      return 1;
     }
 
     // The session is on disk now — fetch this account's own wrapped_k_local
@@ -501,8 +530,7 @@ export class PairCommand {
         console.error(`  The session was installed; run ${B('capy pair')} again to retry the key grant.`);
         console.error('');
       }
-      process.exitCode = 1;
-      return;
+      return 1;
     }
 
     const daemon = await spawnGrantDaemon(resolved.material, { ttlMs: null, persistRuntimePairing: true });
@@ -525,7 +553,7 @@ export class PairCommand {
           2,
         ),
       );
-      return;
+      return 0;
     }
 
     console.log('');
@@ -540,5 +568,6 @@ export class PairCommand {
     console.log('  The device key remains in memory; later capy processes discover it automatically.');
     console.log('  Logout, runtime shutdown, or loss of the key-holder process requires pairing again.');
     console.log('');
+    return 0;
   }
 }

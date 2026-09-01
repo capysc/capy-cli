@@ -165,11 +165,6 @@ beforeEach(async () => {
     ok: true,
     material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) },
   });
-  // Bun (unlike Node) does not treat `process.exitCode = undefined` as
-  // clearing a previously-set nonzero value — the process still exits 1 at
-  // the end even though the value reads back as `undefined` in between.
-  // `0` is the only value that actually clears it under Bun.
-  process.exitCode = 0;
   // Every describe block below exercises the ceremony/install/daemon
   // branching, which only runs with the flag on (see pairCommand.ts's
   // module doc: a grant obtained with the flag off is unusable by
@@ -191,14 +186,6 @@ afterEach(() => {
   console.error = originalErr;
   if (ORIGINAL_FLAG === undefined) delete process.env.CAPY_DEVICE_KEYS;
   else process.env.CAPY_DEVICE_KEYS = ORIGINAL_FLAG;
-  // Several tests intentionally drive PairCommand down a failure path that
-  // sets process.exitCode = 1 (asserted above via `expect((process as
-  // any).exitCode).toBe(1)`). Without resetting it here, whichever test
-  // happens to run last leaves it set for the rest of the process — bun
-  // test then exits 1 for this whole file even though every assertion
-  // passed, which run-tests.sh's isolation loop (correctly) reads as FAIL.
-  // Must be `0`, not `undefined` — see the beforeEach comment above.
-  process.exitCode = 0;
 });
 
 describe('PairCommand — rail always on', () => {
@@ -229,7 +216,12 @@ describe('PairCommand — already-active runtime', () => {
       () => ({ authenticateSilent: async () => result as any }),
     );
 
-    expect(await outcomeFor({ success: true })).toEqual({ kind: 'ready' });
+    expect(await outcomeFor({ success: true, user_id: 'user_1' })).toEqual({ kind: 'ready' });
+    expect(await outcomeFor({ success: true, user_id: 'user_2' })).toEqual({
+      kind: 'failed',
+      code: ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH,
+      detail: 'The authenticated session does not match the account paired to this runtime.',
+    });
     expect(await outcomeFor({
       success: false,
       error: 'Session expired — sign-in required',
@@ -244,6 +236,24 @@ describe('PairCommand — already-active runtime', () => {
       code: ERROR_CODES.NETWORK_ERROR,
       detail: 'Could not reach the Capy service to refresh your session',
     });
+    expect(await outcomeFor({
+      success: false,
+      error: 'Token refresh failed (HTTP 503)',
+      error_code: 'server_error',
+    })).toEqual({
+      kind: 'failed',
+      code: ERROR_CODES.SERVICE_ERROR,
+      detail: 'Token refresh failed (HTTP 503)',
+    });
+    expect(await outcomeFor({
+      success: false,
+      error: 'Organization not found while refreshing your session',
+      error_code: 'org_not_found',
+    })).toEqual({
+      kind: 'failed',
+      code: ERROR_CODES.ORG_NOT_FOUND,
+      detail: 'Organization not found while refreshing your session',
+    });
   });
 
   test('--json returns a coded success without starting either human ceremony', async () => {
@@ -256,7 +266,8 @@ describe('PairCommand — already-active runtime', () => {
     });
     const ensureActiveSession = async () => ({ kind: 'ready' as const });
 
-    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
+    const exitCode = await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession })
+      .execute({ json: true });
 
     const parsed = JSON.parse(logs.join('\n'));
     expect(parsed).toEqual({
@@ -268,6 +279,7 @@ describe('PairCommand — already-active runtime', () => {
       socketPath: '/tmp/already-active.sock',
       envVar: 'CAPY_DEVICE_KEY_GRANT_SOCKET',
     });
+    expect(exitCode).toBe(0);
     expect(ceremonyCalls).toEqual([]);
     expect(installCalls).toEqual([]);
     expect(resolveKeyMaterialCalls).toEqual([]);
@@ -292,24 +304,27 @@ describe('PairCommand — already-active runtime', () => {
       },
     });
 
-    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
+    const exitCode = await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession })
+      .execute({ json: true });
 
     const jsonStart = logs.findIndex((line) => line.trim().startsWith('{'));
     const parsed = JSON.parse(logs.slice(jsonStart).join('\n'));
-    expect(parsed).toMatchObject({
+    expect(parsed).toEqual({
       ok: true,
       code: ERROR_CODES.RUNTIME_PAIR_ALREADY_ACTIVE,
       alreadyActive: true,
       userId: 'user_1',
-      userEmail: 'u@example.com',
+      userEmail: 'updated-address@example.com',
       socketPath: '/tmp/already-active.sock',
+      envVar: 'CAPY_DEVICE_KEY_GRANT_SOCKET',
       sessionRefreshed: true,
     });
-    expect(logs.join('\n')).not.toContain('updated-address@example.com');
+    expect(logs.join('\n')).toContain('updated-address@example.com');
     expect(ceremonyCalls.length).toBe(1);
     expect(installCalls.length).toBe(1);
     expect(resolveKeyMaterialCalls).toEqual([]);
     expect(spawnCalls).toEqual([]);
+    expect(exitCode).toBe(0);
   });
 
   test('a different WorkOS account is refused before session install and cannot inherit the live daemon', async () => {
@@ -321,24 +336,63 @@ describe('PairCommand — already-active runtime', () => {
     };
     const readActivePairing = async () => active;
     const ensureActiveSession = async () => ({ kind: 'reauthenticate' as const });
+    const releasePairAttempt = mock(() => true);
     const wrongAccountSession = {
       ...VALID_ANSWER.session,
       user: { id: 'user_2', email: 'other@example.com' },
     };
     ceremonyImpl = async () => ({ status: 'complete', session: wrongAccountSession });
 
-    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
+    const exitCode = await new PairCommand(undefined, false, {
+      readActivePairing,
+      ensureActiveSession,
+      releasePairAttempt,
+    })
+      .execute({ json: true });
 
     const jsonStart = logs.findIndex((line) => line.trim().startsWith('{'));
-    expect(JSON.parse(logs.slice(jsonStart).join('\n'))).toMatchObject({
+    expect(JSON.parse(logs.slice(jsonStart).join('\n'))).toEqual({
       ok: false,
       code: ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH,
+      detail: 'The authenticated account does not match the account paired to this runtime. Sign in with the paired account or run `capy logout` first.',
+      userCode: 'ABCD-1234',
     });
     expect(installCalls).toEqual([]);
     expect(resolveKeyMaterialCalls).toEqual([]);
     expect(spawnCalls).toEqual([]);
     expect(logs.join('\n')).not.toContain('other@example.com');
-    expect((process as any).exitCode).toBe(1);
+    expect(exitCode).toBe(1);
+    expect(releasePairAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  test('a daemon lost during reauthentication falls back to a complete pair instead of announcing a stale socket', async () => {
+    const active = {
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt: 0,
+    };
+    const readActivePairing = mock(async () =>
+      readActivePairing.mock.calls.length === 1 ? active : null
+    );
+    const ensureActiveSession = async () => ({ kind: 'reauthenticate' as const });
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+
+    const exitCode = await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession })
+      .execute({ json: true });
+
+    const jsonStart = logs.findIndex((line) => line.trim().startsWith('{'));
+    const parsed = JSON.parse(logs.slice(jsonStart).join('\n'));
+    expect(parsed).toMatchObject({
+      ok: true,
+      userId: 'user_1',
+      socketPath: '/tmp/fake.sock',
+    });
+    expect(parsed).not.toHaveProperty('sessionRefreshed');
+    expect(exitCode).toBe(0);
+    expect(readActivePairing).toHaveBeenCalledTimes(2);
+    expect(resolveKeyMaterialCalls.length).toBe(1);
+    expect(spawnCalls.length).toBe(1);
   });
 
   test('a refresh transport failure stays coded and does not open WorkOS', async () => {
@@ -354,7 +408,8 @@ describe('PairCommand — already-active runtime', () => {
       detail: 'Could not reach the Capy service to refresh your session',
     });
 
-    await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession }).execute({ json: true });
+    const exitCode = await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession })
+      .execute({ json: true });
 
     expect(JSON.parse(logs.join('\n'))).toEqual({
       ok: false,
@@ -365,7 +420,37 @@ describe('PairCommand — already-active runtime', () => {
     expect(installCalls).toEqual([]);
     expect(resolveKeyMaterialCalls).toEqual([]);
     expect(spawnCalls).toEqual([]);
-    expect((process as any).exitCode).toBe(1);
+    expect(exitCode).toBe(1);
+  });
+
+  test('a refreshed-session install failure is atomic at the command boundary and never regrants key material', async () => {
+    const active = {
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      socketPath: '/tmp/already-active.sock',
+      expiresAt: 0,
+    };
+    const readActivePairing = async () => active;
+    const ensureActiveSession = async () => ({ kind: 'reauthenticate' as const });
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+    installImpl = async () => {
+      throw new Error('disk full');
+    };
+
+    const exitCode = await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession })
+      .execute({ json: true });
+
+    const jsonStart = logs.findIndex((line) => line.trim().startsWith('{'));
+    expect(JSON.parse(logs.slice(jsonStart).join('\n'))).toEqual({
+      ok: false,
+      code: ERROR_CODES.AUTH_FAILED,
+      detail: 'disk full',
+      userCode: 'ABCD-1234',
+    });
+    expect(exitCode).toBe(1);
+    expect(installCalls.length).toBe(1);
+    expect(resolveKeyMaterialCalls).toEqual([]);
+    expect(spawnCalls).toEqual([]);
   });
 });
 
@@ -431,9 +516,9 @@ describe('PairCommand — answered', () => {
     ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
     resolveKeyMaterialImpl = async () => ({ ok: false, code: ERROR_CODES.DEVICE_KEY_UNWRAP_FAILED });
 
-    await new PairCommand().execute({});
+    const exitCode = await new PairCommand().execute({});
     expect(spawnCalls.length).toBe(0);
-    expect((process as any).exitCode).toBe(1);
+    expect(exitCode).toBe(1);
   });
 
   test('the session installs BEFORE key material is resolved — the fetch authenticates with the just-installed session', async () => {
@@ -509,8 +594,8 @@ describe('PairCommand — declined/cancelled/error', () => {
   test('a CeremonyFailure code exits 1 and installs nothing', async () => {
     ceremonyImpl = async () => ({ status: 'denied', error: 'cancelled' });
 
-    await new PairCommand().execute({});
-    expect((process as any).exitCode).toBe(1);
+    const exitCode = await new PairCommand().execute({});
+    expect(exitCode).toBe(1);
     expect(installCalls.length).toBe(0);
     expect(spawnCalls.length).toBe(0);
   });
@@ -522,8 +607,8 @@ describe('PairCommand — bootstrap failure before any code is ever shown', () =
       throw new Error('network is down');
     };
 
-    await new PairCommand().execute({});
-    expect((process as any).exitCode).toBe(1);
+    const exitCode = await new PairCommand().execute({});
+    expect(exitCode).toBe(1);
     expect(installCalls.length).toBe(0);
     expect(spawnCalls.length).toBe(0);
     expect(logs.join('\n')).not.toMatch(/[A-Z0-9]{4}-[A-Z0-9]{4}/);
@@ -537,8 +622,8 @@ describe('PairCommand — install failure', () => {
       throw new Error('disk full');
     };
 
-    await new PairCommand().execute({});
-    expect((process as any).exitCode).toBe(1);
+    const exitCode = await new PairCommand().execute({});
+    expect(exitCode).toBe(1);
     expect(spawnCalls.length).toBe(0);
   });
 });

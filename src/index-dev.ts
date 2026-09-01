@@ -496,7 +496,8 @@ program
   .action(async (options) => {
     const { PairCommand } = await import('./commands/pairCommand');
     const cmd = new PairCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ json: options.json });
+    const exitCode = await cmd.execute({ json: options.json });
+    if (exitCode !== 0) process.exit(exitCode);
   });
 
 program

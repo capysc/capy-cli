@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'fs';
-import { createHash } from 'crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, rmSync } from 'fs';
+import { createHash, randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
 import { isStagingEntrypoint, STAGING_GLOBAL_DIR } from './stagingTarget';
@@ -252,6 +252,23 @@ function writeSecureFile(filePath: string, content: string): void {
   writeFileSync(filePath, content, { mode: 0o600 });
 }
 
+function writeSecureFileAtomic(filePath: string, content: string): void {
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  ensureDir(join(filePath, '..'));
+  try {
+    writeFileSync(temporary, content, { mode: 0o600, flag: 'wx' });
+    renameSync(temporary, filePath);
+  } catch (error) {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // Preserve the original write/rename failure; stale temp files are not
+      // session-discoverable and can be cleaned independently.
+    }
+    throw error;
+  }
+}
+
 function readFileOrNull(filePath: string): string | null {
   try {
     return readFileSync(filePath, 'utf-8');
@@ -332,7 +349,10 @@ export function readProjectKeyCache(
 }
 
 export function saveAuthSession(token: object, userId?: string): void {
-  writeSecureFile(getAuthSessionPath(userId), JSON.stringify(token, null, 2));
+  // Session renewal must never expose a truncated JSON file to another CLI
+  // process. Write a private sibling first, then atomically replace the
+  // discoverable path only after the complete payload reaches the filesystem.
+  writeSecureFileAtomic(getAuthSessionPath(userId), JSON.stringify(token, null, 2));
 }
 
 export function readAuthSession(userId?: string): object | null {
