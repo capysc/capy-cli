@@ -512,6 +512,112 @@ describe('CapyCommand', () => {
       expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
     });
 
+    test('bootstrap existing project leaves absent .env absent when remote marker is empty', async () => {
+      mockProjectManager.getEnvPath.mockReturnValue('/test/path/.env');
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(false as any);
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        keep_file: JSON.stringify({
+          version: '3.0',
+          org_id: 'old-org',
+          project_id: 'old-project',
+          project_name: 'old-project',
+          variables: {},
+        }),
+        env_content: '',
+      });
+      mockFileManager.parseEnvContent.mockReturnValue({});
+
+      try {
+        await (capyCommand as any).bootstrapExistingProject(
+          { id: 'proj-123', name: 'test-project', organization_id: 'org-123' },
+          'org-123',
+          'user-456',
+        );
+
+        expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(expect.objectContaining({
+          org_id: 'org-123',
+          project_id: 'proj-123',
+          project_name: 'test-project',
+          variables: {},
+        }));
+        expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('development');
+        expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+      } finally {
+        existsSyncSpy.mockRestore();
+      }
+    });
+
+    test('bootstrap existing project writes absent .env when remote marker has variables', async () => {
+      mockProjectManager.getEnvPath.mockReturnValue('/test/path/.env');
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(false as any);
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        keep_file: JSON.stringify({
+          version: '3.0',
+          org_id: 'old-org',
+          project_id: 'old-project',
+          project_name: 'old-project',
+          variables: {
+            API_KEY: [{ branch: 'development', resource_id: 'dev:API_KEY', value_hash: 'hash' }],
+          },
+        }),
+        env_content: 'API_KEY=capy:rid:ciphertext',
+      });
+      mockFileManager.parseEnvContent.mockReturnValue({ API_KEY: 'capy:rid:ciphertext' });
+      mockFileManager.decryptValue.mockReturnValue('remote-secret');
+
+      try {
+        await (capyCommand as any).bootstrapExistingProject(
+          { id: 'proj-123', name: 'test-project', organization_id: 'org-123' },
+          'org-123',
+          'user-456',
+        );
+
+        expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
+          { API_KEY: 'remote-secret' },
+          'mock-derived-project-key-hex',
+          undefined,
+          expect.objectContaining({ project_id: 'proj-123' }),
+          'development',
+        );
+      } finally {
+        existsSyncSpy.mockRestore();
+      }
+    });
+
+    test('bootstrap existing project clears existing .env when remote marker is empty', async () => {
+      mockProjectManager.getEnvPath.mockReturnValue('/test/path/.env');
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(true as any);
+      mockServiceClient.getDecryptData.mockResolvedValue({
+        keep_file: JSON.stringify({
+          version: '3.0',
+          org_id: 'old-org',
+          project_id: 'old-project',
+          project_name: 'old-project',
+          variables: {},
+        }),
+        env_content: undefined,
+      });
+      mockFileManager.parseEnvContent.mockReturnValue({});
+
+      try {
+        await (capyCommand as any).bootstrapExistingProject(
+          { id: 'proj-123', name: 'test-project', organization_id: 'org-123' },
+          'org-123',
+          'user-456',
+        );
+
+        expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
+          {},
+          'mock-derived-project-key-hex',
+          undefined,
+          expect.objectContaining({ project_id: 'proj-123' }),
+          'development',
+        );
+      } finally {
+        existsSyncSpy.mockRestore();
+      }
+    });
+
     test('should handle service errors during project creation', async () => {
       mockServiceClient.getDecryptData.mockRejectedValue(new Error('Service error'));
 

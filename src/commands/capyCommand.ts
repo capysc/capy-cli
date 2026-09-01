@@ -1112,35 +1112,40 @@ export class CapyCommand {
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
 
-    let decryptData;
-    try {
-      decryptData = await this.serviceClient.getDecryptData(
-        project.id,
-        branch,
-        undefined, // ask for latest
-        true,
-      );
-    } catch (err: any) {
-      // 404 with "No secrets" → empty project, write a stub keep.lock and exit
-      if (err instanceof CapyError && err.details?.status === 404 && /No secrets/i.test(err.message)) {
-        fetchSpinner.stop();
-        const stub: KeepFile = {
-          version: '3.0',
-          org_id: orgId,
-          project_id: project.id,
-          project_name: project.name,
-          variables: {},
-        };
-        this.fileManager.writeKeepFile(stub);
-        this.projectManager.writeActiveBranch(branch);
-        this.fileManager.ensureCapyGitignore();
-        human(`\n${B(project.name)} has no secrets yet.`);
-        human(`Add secrets to .env, then run ${B('capy push')}.`);
-        this.installGitHooks();
-        return;
+    const decryptData = await (async () => {
+      try {
+        return await this.serviceClient.getDecryptData(
+          project.id,
+          branch,
+          undefined, // ask for latest
+          true,
+        );
+      } catch (err: any) {
+        // 404 with "No secrets" → empty project, write a stub keep.lock and exit
+        if (err instanceof CapyError && err.details?.status === 404 && /No secrets/i.test(err.message)) {
+          fetchSpinner.stop();
+          const stub: KeepFile = {
+            version: '3.0',
+            org_id: orgId,
+            project_id: project.id,
+            project_name: project.name,
+            variables: {},
+          };
+          this.fileManager.writeKeepFile(stub);
+          this.projectManager.writeActiveBranch(branch);
+          this.fileManager.ensureCapyGitignore();
+          human(`\n${B(project.name)} has no secrets yet.`);
+          human(`Add secrets to .env, then run ${B('capy push')}.`);
+          this.installGitHooks();
+          return null;
+        }
+        fetchSpinner.fail(`Failed to pull from ${B(project.name)}.`);
+        throw err;
       }
-      fetchSpinner.fail(`Failed to pull from ${B(project.name)}.`);
-      throw err;
+    })();
+
+    if (!decryptData) {
+      return;
     }
 
     if (!decryptData.keep_file) {
@@ -1165,31 +1170,43 @@ export class CapyCommand {
     }
 
     // Parse the keep.json the server sent us
-    const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
+    const parsedServerKeep = JSON.parse(decryptData.keep_file) as KeepFile;
     // Make sure project metadata is consistent (server's keep.json may have
     // been written before project_name existed in the schema)
-    serverKeep.org_id = orgId;
-    serverKeep.project_id = project.id;
-    serverKeep.project_name = project.name;
+    const serverKeep: KeepFile = {
+      ...parsedServerKeep,
+      org_id: orgId,
+      project_id: project.id,
+      project_name: project.name,
+    };
 
     // Decrypt the env blob into plaintext
-    const plaintext: Record<string, string> = {};
-    if (decryptData.env_content) {
-      const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-      for (const [key, value] of Object.entries(encrypted)) {
-        try {
-          plaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
-        } catch {
-          // Skip undecryptable (user lacks variable-level permission)
-        }
+    const decryptEntry = ([key, value]: [string, string]): readonly [string, string] | null => {
+      try {
+        return [key, this.fileManager.decryptValue(value, encryptionKey)] as const;
+      } catch {
+        // Skip undecryptable (user lacks variable-level permission)
+        return null;
       }
-    }
+    };
+    const plaintext = decryptData.env_content
+      ? Object.fromEntries(
+          Object.entries(this.fileManager.parseEnvContent(decryptData.env_content))
+            .map(decryptEntry)
+            .filter((entry): entry is readonly [string, string] => entry !== null),
+        )
+      : {};
+
+    const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
+    const shouldWriteLocalEnv = Object.keys(plaintext).length > 0 || existsSync(localEnvPath);
 
     // Write keep.lock + encrypted .env locally
     this.fileManager.writeKeepFile(serverKeep);
     this.projectManager.writeActiveBranch(branch);
     this.fileManager.ensureCapyGitignore();
-    this.fileManager.writeEncryptedEnvFile(plaintext, encryptionKey, undefined, serverKeep, branch);
+    if (shouldWriteLocalEnv) {
+      this.fileManager.writeEncryptedEnvFile(plaintext, encryptionKey, undefined, serverKeep, branch);
+    }
 
     this.fileManager.writeSyncState({
       last_sync: new Date().toISOString(),

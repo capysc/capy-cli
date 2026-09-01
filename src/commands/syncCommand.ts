@@ -200,13 +200,18 @@ export class SyncCommand {
         }),
     );
     const keepHash = SyncEngine.computeKeepHash(remoteKeep, branch);
+    const remoteVariableNames = Object.keys(remotePlaintext);
+    const localEnvPath = this.projectManager.getEnvPath(this.cliOptions.envPath);
+    const shouldWriteLocalEnv = remoteVariableNames.length > 0 || existsSync(localEnvPath);
 
     this.projectManager.writeActiveBranch(branch);
     this.fileManager.ensureCapyGitignore();
-    this.fileManager.writeEncryptedEnvFile(remotePlaintext, encryptionKey, this.cliOptions.envPath, remoteKeep, branch);
+    if (shouldWriteLocalEnv) {
+      this.fileManager.writeEncryptedEnvFile(remotePlaintext, encryptionKey, this.cliOptions.envPath, remoteKeep, branch);
+    }
     this.fileManager.writeSyncState({
       last_sync: new Date().toISOString(),
-      synced_variables: Object.keys(remotePlaintext),
+      synced_variables: remoteVariableNames,
       user_id: authResult.user_id,
       org_id: org.id,
       project_id: project.id,
@@ -226,7 +231,7 @@ export class SyncCommand {
       project: { id: project.id, name: project.name },
       branch,
       keep_lock_path: null,
-      pulled_variables: Object.keys(remotePlaintext).length,
+      pulled_variables: remoteVariableNames.length,
       local_drift_resolved: 0,
     });
   }
