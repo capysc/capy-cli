@@ -81,6 +81,13 @@ interface RuntimeCustodyProvider {
 }
 ```
 
+The provider-neutral seam now exists in
+`src/auth/pairing/runtimeCustodyProvider.ts`. Its facade validates the provider
+kind, environment, user, opaque handle, and 32-byte result before returning a
+fresh copy to the caller. A process-memory fake pins those refusal semantics.
+This is a development-only architecture slice: no provider is selected or
+wired into `capy pair`, so it adds no persistence and makes no reboot claim.
+
 Security requirements:
 
 1. The opaque handle and all ordinary files are useless without a secret held
@@ -100,3 +107,25 @@ seal followed by a new CLI process unseal, same-user idempotency, wrong-user and
 wrong-environment refusal, deleted/wiped provider behavior, tamper refusal, and
 standalone-binary packaging. A real provider must pass that corpus before the
 process-bound daemon can be reconstructed after reboot without a new ceremony.
+
+## Minimal implementation plan
+
+1. Select one secure provider for the development host. It must keep its
+   unsealing secret outside ordinary Capy/workspace storage and accept key
+   material through a protected IPC channel, never argv or environment.
+2. Run the provider contract from a fresh packaged `capy-dev` process. Add
+   provider wipe, tamper, wrong-user, wrong-environment, and host-restart
+   evidence. A process-memory fake is not evidence for this gate.
+3. Introduce a versioned runtime-pair record carrying the provider kind and
+   opaque handle alongside the live socket metadata. Keep reading v1 records;
+   do not synthesize a provider handle for them.
+4. On `capy pair`, seal before publishing the new record. On a dead socket,
+   acquire a single-runtime recovery lease, unseal, start a new in-memory grant
+   daemon, and atomically replace only the socket metadata. Concurrent callers
+   wait for or reuse the winning daemon.
+5. On logout, delete the provider entry before removing its only handle. A
+   missing/tampered/wiped provider fails closed as unpaired; it never falls
+   back to `local.key`, a refresh-token-derived key, or an ordinary file.
+6. Prove an actual host reboot, daemon kill/reconstruction, environment-home
+   isolation, same-user idempotency, different-user refusal, logout, home wipe,
+   and standalone packaging before changing CAP-628 from partial to complete.
