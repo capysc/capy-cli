@@ -142,13 +142,13 @@ export class PairCommand {
     }
 
     try {
-      await this.executeWithLease(options);
+      await this.executeWithLease(options, acquired.lease);
     } finally {
       (this.dependencies.releasePairAttempt ?? releasePairAttemptLease)(acquired.lease);
     }
   }
 
-  private async executeWithLease(options: PairCommandOptions): Promise<void> {
+  private async executeWithLease(options: PairCommandOptions, lease: PairAttemptLease): Promise<void> {
     const serviceUrl = resolveActiveUrl(this.devMode);
 
     // Extracted so the outcome is a single const rather than a reassigned
@@ -202,8 +202,11 @@ export class PairCommand {
             console.error(`  Run ${B('capy pair')} again.`);
             console.error('');
           }
+          // `process.exit()` does not unwind `finally`, so release the
+          // in-flight ceremony lease before preserving the CLI's established
+          // immediate EXIT_NEEDS_INPUT behavior.
+          (this.dependencies.releasePairAttempt ?? releasePairAttemptLease)(lease);
           process.exit(EXIT_NEEDS_INPUT);
-          return;
         }
         const message = CEREMONY_FAILURE_MESSAGES[result.error] ?? 'The pairing request was not approved.';
         if (options.json) {

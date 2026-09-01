@@ -12,7 +12,7 @@
  * remove a newer process's lease.
  */
 import { randomUUID } from 'crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { getGlobalCapyDir } from '../../config/globalConfig';
 import { CapyError, ERROR_CODES } from '../../types/index';
@@ -168,6 +168,12 @@ export function releasePairAttemptLease(lease: PairAttemptLease): boolean {
   if (!current || current.nonce !== lease.nonce) return false;
   try {
     rmSync(lease.path, { force: true });
+    try {
+      rmdirSync(dirname(lease.path));
+    } catch {
+      // A completed pair leaves session files here, and another process may
+      // have acquired the lease already. Only an empty directory is removed.
+    }
     return true;
   } catch {
     return false;
