@@ -45,6 +45,7 @@ import type {
   RuntimeCustodyEnvironment,
   RuntimeCustodyProvider,
 } from '../../../src/auth/pairing/runtimeCustodyProvider';
+import type { PairAttemptLease } from '../../../src/auth/pairing/pairAttemptLease';
 
 const USER_A = 'user_runtime_a';
 const USER_B = 'user_runtime_b';
@@ -571,6 +572,66 @@ describe('runtime pairing registry', () => {
 
     await expect(clearRuntimePairing()).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
     expect(readRuntimePairing()).toEqual(record);
+  });
+
+  test('logout refuses a lost shared runtime lease before provider deletion', async () => {
+    const custody = createCustodyProvider();
+    const record = await registerRuntimePairingWithCustody(
+      custody.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-lost-logout-lease.sock', expiresAt: 0 },
+    );
+    const lease: PairAttemptLease = {
+      version: 1,
+      pid: process.pid,
+      startedAt: '2026-09-02T12:34:56.000Z',
+      nonce: 'lost-logout-lease',
+      path: join(tempHome, 'lost-logout-lease.json'),
+    };
+    const releaseLease = mock((_lease: PairAttemptLease) => true);
+
+    await expect(clearRuntimePairing({
+      resolveCustodyProvider: () => custody.provider,
+      expectedEnvironment: 'development',
+      acquireLease: () => lease,
+      ownsLease: () => false,
+      releaseLease,
+    })).rejects.toMatchObject({ code: ERROR_CODES.PAIR_ALREADY_IN_PROGRESS });
+
+    expect(custody.remove).not.toHaveBeenCalled();
+    expect(readRuntimePairing()).toEqual(record);
+    expect(releaseLease).toHaveBeenCalledWith(lease);
+  });
+
+  test('logout rechecks its shared lease after provider deletion and preserves retry metadata', async () => {
+    const custody = createCustodyProvider();
+    const record = await registerRuntimePairingWithCustody(
+      custody.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-stolen-logout-lease.sock', expiresAt: 0 },
+    );
+    const lease: PairAttemptLease = {
+      version: 1,
+      pid: process.pid,
+      startedAt: '2026-09-02T12:34:56.000Z',
+      nonce: 'stolen-logout-lease',
+      path: join(tempHome, 'stolen-logout-lease.json'),
+    };
+    const releaseLease = mock((_lease: PairAttemptLease) => true);
+
+    await expect(clearRuntimePairing({
+      resolveCustodyProvider: () => custody.provider,
+      expectedEnvironment: 'development',
+      acquireLease: () => lease,
+      ownsLease: () => custody.remove.mock.calls.length === 0,
+      releaseLease,
+    })).rejects.toMatchObject({ code: ERROR_CODES.PAIR_ALREADY_IN_PROGRESS });
+
+    expect(custody.remove).toHaveBeenCalledTimes(1);
+    expect(readRuntimePairing()).toEqual(record);
+    expect(releaseLease).toHaveBeenCalledWith(lease);
   });
 
   test('v2 logout preserves sessions on metadata failure and retries an idempotent provider delete', async () => {

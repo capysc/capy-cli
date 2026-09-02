@@ -4,6 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import {
   acquirePairAttemptLease,
+  ownsPairAttemptLease,
   releasePairAttemptLease,
 } from '../../../src/auth/pairing/pairAttemptLease';
 import { ERROR_CODES } from '../../../src/types/index';
@@ -37,7 +38,9 @@ describe('pair attempt lease', () => {
         isProcessAlive: (pid) => pid === 101,
       })).toThrow(expect.objectContaining({ code: ERROR_CODES.PAIR_ALREADY_IN_PROGRESS }));
       expect(JSON.parse(readFileSync(path, 'utf8')).nonce).toBe('first');
+      expect(ownsPairAttemptLease(first)).toBe(true);
       expect(releasePairAttemptLease(first)).toBe(true);
+      expect(ownsPairAttemptLease(first)).toBe(false);
     });
   });
 
@@ -57,6 +60,8 @@ describe('pair attempt lease', () => {
       });
 
       expect(replacement.pid).toBe(202);
+      expect(ownsPairAttemptLease(first)).toBe(false);
+      expect(ownsPairAttemptLease(replacement)).toBe(true);
       expect(releasePairAttemptLease(first)).toBe(false);
       expect(JSON.parse(readFileSync(path, 'utf8')).nonce).toBe('replacement');
       expect(releasePairAttemptLease(replacement)).toBe(true);

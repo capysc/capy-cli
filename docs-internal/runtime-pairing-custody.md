@@ -99,10 +99,23 @@ fresh copy to the caller. Provider-backed registration seals before atomically
 publishing version 2 metadata, refuses provider/environment drift before
 provider I/O, reaps rejected detached daemons, and prevents version 2 from
 being downgraded to version 1. Logout deletes provider state before discarding
-its only ordinary-file handle. A process-memory fake pins those refusal and
-rollback semantics. This remains an inactive architecture slice: no concrete
-provider is selected or wired into `capy pair`, no dead-daemon recovery exists,
-and no reboot claim is made.
+its only ordinary-file handle.
+
+The inactive recovery primitive in `src/auth/pairing/runtimePairing.ts` can
+reconstruct a dead process-bound holder from an explicitly selected provider
+and environment. Pairing, recovery, and logout share the same protected-home
+lease. Recovery verifies the stored user and environment before provider I/O,
+unseals only through the recorded provider kind, verifies the replacement
+holder's exact socket identity, and atomically replaces only the socket path
+and lifetime sentinel. Concurrent recoveries reuse the winning holder; every
+failed or losing candidate is ownership-verified and reaped. A missing v2
+record, provider wipe, changed lease, invalid key result, or metadata race
+fails closed without inventing custody or falling back to disk.
+
+Process-memory fakes pin the registration, recovery, refusal, race, and rollback
+semantics. This remains an inactive architecture slice: no concrete provider
+or authoritative environment selector is wired into `capy pair` or downstream
+key consumers, and no reboot or packaged-binary claim is made.
 
 Security requirements:
 
@@ -138,10 +151,12 @@ process-bound daemon can be reconstructed after reboot without a new ceremony.
 3. **Foundation implemented, not wired:** introduce a versioned runtime-pair
    record carrying the provider kind and opaque handle alongside live socket
    metadata. Keep reading v1 records; never synthesize a provider handle.
-4. **Registration half implemented, recovery missing:** seal before publishing
-   the new record. On a dead socket, acquire a single-runtime recovery lease,
-   unseal, start a new in-memory grant daemon, and atomically replace only the
-   socket metadata. Concurrent callers wait for or reuse the winning daemon.
+4. **Provider-neutral recovery implemented, composition missing:** on a dead
+   v2 socket, the inactive primitive acquires the shared runtime lease, unseals,
+   starts a process-bound in-memory grant daemon, and atomically replaces only
+   the socket metadata. Concurrent callers wait for or reuse the winning
+   daemon. Wire it only after the composition root supplies the authenticated
+   user, explicit environment, and exact recorded provider resolver.
 5. **Foundation implemented, composition missing:** logout deletes the provider
    entry before removing its only handle and preserves sessions on cleanup
    failure. Wire the explicit environment/provider resolver; a missing,

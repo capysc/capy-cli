@@ -179,3 +179,12 @@ export function releasePairAttemptLease(lease: PairAttemptLease): boolean {
     return false;
   }
 }
+
+/** Read-only proof that this exact process/nonce still owns the active lease. */
+export function ownsPairAttemptLease(lease: PairAttemptLease): boolean {
+  const current = readLease(lease.path);
+  return current !== null
+    && current.version === lease.version
+    && current.pid === lease.pid
+    && current.nonce === lease.nonce;
+}

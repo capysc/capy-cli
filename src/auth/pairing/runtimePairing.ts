@@ -26,11 +26,18 @@ import { CapyError, ERROR_CODES, type SessionStore } from '../../types/index';
 import {
   deleteRuntimeCustody,
   sealRuntimeCustody,
+  unsealRuntimeCustody,
   type RuntimeCustodyBinding,
   type RuntimeCustodyEnvironment,
   type RuntimeCustodyProvider,
   type RuntimeCustodyProviderResolver,
 } from './runtimeCustodyProvider';
+import {
+  acquirePairAttemptLease,
+  ownsPairAttemptLease,
+  releasePairAttemptLease,
+  type PairAttemptLease,
+} from './pairAttemptLease';
 
 interface RuntimePairingRecordFields {
   readonly userId: string;
@@ -67,6 +74,48 @@ export interface ActiveRuntimePairing {
   readonly userEmail: string;
   readonly socketPath: string;
   readonly expiresAt: number;
+}
+
+export interface RuntimePairingRecoveryRequest {
+  readonly environment: RuntimeCustodyEnvironment;
+  readonly expectedUserId: string;
+  readonly resolveProvider: RuntimeCustodyProviderResolver;
+}
+
+export interface RecoveryGrantMaterial {
+  readonly userId: string;
+  readonly credentialId: string;
+  readonly kLocal: Uint8Array;
+}
+
+export type RuntimePairingRecoveryOutcome =
+  | { readonly kind: 'not_v2' }
+  | { readonly kind: 'active'; readonly record: RuntimePairingRecordV2 }
+  | { readonly kind: 'recovered'; readonly record: RuntimePairingRecordV2 }
+  | { readonly kind: 'reused'; readonly record: RuntimePairingRecordV2 };
+
+export interface RuntimePairingRecoveryDependencies {
+  readonly acquireLease?: () => PairAttemptLease;
+  readonly ownsLease?: (lease: PairAttemptLease) => boolean;
+  readonly releaseLease?: (lease: PairAttemptLease) => boolean;
+  readonly now?: () => number;
+  readonly wait?: (milliseconds: number) => Promise<void>;
+  readonly waitTimeoutMs?: number;
+  readonly probeHolder?: (
+    socketPath: string,
+    userId: string,
+    credentialId: string,
+  ) => Promise<boolean>;
+  readonly spawnHolder?: (material: RecoveryGrantMaterial) => Promise<RuntimePairingHandle>;
+  readonly cleanupCandidate?: (
+    socketPath: string,
+    userId: string,
+    credentialId: string,
+  ) => Promise<void>;
+  readonly compareAndSwapSocket?: (
+    expected: RuntimePairingRecordV2,
+    replacement: RuntimePairingRecordV2,
+  ) => 'committed' | 'changed';
 }
 
 export function getRuntimePairingPath(): string {
@@ -535,12 +584,378 @@ export async function registerRuntimePairingWithCustody(
   throw registration.error;
 }
 
+const RECOVERY_WAIT_TIMEOUT_MS = 2_000;
+const RECOVERY_WAIT_INTERVAL_MS = 25;
+
+function recoveryRefusal(message: string): CapyError {
+  return new CapyError(message, ERROR_CODES.PERMISSION_DENIED);
+}
+
+function readRecoveryRecord(
+  request: RuntimePairingRecoveryRequest,
+  now: number,
+): RuntimePairingRecordV2 | null {
+  const state = readRuntimePairingState();
+  if (state.kind === 'missing') return null;
+  if (state.kind === 'invalid') {
+    throw recoveryRefusal(
+      'The runtime pairing record is invalid; it was preserved and custody recovery was refused.',
+    );
+  }
+  const record = state.record;
+  if (record.version === 1) return null;
+  if (record.userId !== request.expectedUserId) {
+    throw new CapyError(
+      'The runtime custody record belongs to another Capy account.',
+      ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH,
+    );
+  }
+  if (record.custody.environment !== request.environment) {
+    throw recoveryRefusal('The runtime custody record belongs to another Capy environment.');
+  }
+  if (record.expiresAt !== 0 && record.expiresAt <= now) {
+    throw new CapyError(
+      'The runtime custody record has expired.',
+      ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED,
+    );
+  }
+  return record;
+}
+
+function runtimePairingV2Equal(
+  left: RuntimePairingRecordV2,
+  right: RuntimePairingRecordV2,
+): boolean {
+  return left.version === right.version
+    && left.userId === right.userId
+    && left.credentialId === right.credentialId
+    && left.socketPath === right.socketPath
+    && left.expiresAt === right.expiresAt
+    && left.pairedAt === right.pairedAt
+    && custodyBindingsEqual(left.custody, right.custody);
+}
+
+function compareAndSwapRuntimePairingSocket(
+  expected: RuntimePairingRecordV2,
+  replacement: RuntimePairingRecordV2,
+): 'committed' | 'changed' {
+  const state = readRuntimePairingState();
+  if (
+    state.kind !== 'valid'
+    || state.record.version !== 2
+    || !runtimePairingV2Equal(state.record, expected)
+  ) {
+    return 'changed';
+  }
+  writeRuntimePairing(replacement);
+  return 'committed';
+}
+
+function defaultRecoveryProbe(
+  socketPath: string,
+  userId: string,
+  credentialId: string,
+): Promise<boolean> {
+  return import('../deviceKey/grantHolder')
+    .then(({ isGrantActiveFor }) => isGrantActiveFor(socketPath, userId, credentialId))
+    .catch(() => false);
+}
+
+function defaultRecoverySpawn(material: RecoveryGrantMaterial): Promise<RuntimePairingHandle> {
+  return import('../deviceKey/grantHolder').then(({ spawnGrantDaemon }) => spawnGrantDaemon(
+    {
+      userId: material.userId,
+      credentialId: material.credentialId,
+      kLocal: Buffer.from(material.kLocal),
+    },
+    { ttlMs: null, persistRuntimePairing: false },
+  ));
+}
+
+async function cleanupRecoveryCandidateAndThrow(
+  error: unknown,
+  candidate: RuntimePairingHandle,
+  record: RuntimePairingRecordV2,
+  dependencies: RuntimePairingRecoveryDependencies,
+): Promise<never> {
+  const cleanup = await (async (): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: unknown }
+  > => {
+    try {
+      await (dependencies.cleanupCandidate ?? cleanupRejectedRuntimeHandle)(
+        candidate.socketPath,
+        record.userId,
+        record.credentialId,
+      );
+      return { ok: true };
+    } catch (cleanupError) {
+      return { ok: false, error: cleanupError };
+    }
+  })();
+  if (!cleanup.ok) {
+    throw new AggregateError(
+      [error, cleanup.error],
+      'Runtime custody recovery failed and its candidate key holder could not be cleaned up.',
+    );
+  }
+  throw error;
+}
+
+type RecoveryLeaseAcquisition =
+  | { readonly kind: 'lease'; readonly lease: PairAttemptLease }
+  | { readonly kind: 'outcome'; readonly outcome: RuntimePairingRecoveryOutcome };
+
+async function waitForRecoveryLeaseOrWinner(
+  request: RuntimePairingRecoveryRequest,
+  dependencies: RuntimePairingRecoveryDependencies,
+  contentionError: unknown,
+  deadline: number,
+): Promise<RecoveryLeaseAcquisition> {
+  const now = (dependencies.now ?? Date.now)();
+  const record = readRecoveryRecord(request, now);
+  if (!record) return { kind: 'outcome', outcome: { kind: 'not_v2' } };
+  const probe = dependencies.probeHolder ?? defaultRecoveryProbe;
+  if (await probe(record.socketPath, record.userId, record.credentialId)) {
+    return { kind: 'outcome', outcome: { kind: 'reused', record } };
+  }
+  if (now >= deadline) throw contentionError;
+  await (dependencies.wait ?? ((milliseconds) => new Promise<void>(
+    (resolve) => setTimeout(resolve, milliseconds),
+  )))(RECOVERY_WAIT_INTERVAL_MS);
+  const acquired = (() => {
+    try {
+      return {
+        ok: true as const,
+        lease: (dependencies.acquireLease ?? acquirePairAttemptLease)(),
+      };
+    } catch (error) {
+      return { ok: false as const, error };
+    }
+  })();
+  if (acquired.ok) return { kind: 'lease', lease: acquired.lease };
+  if (
+    acquired.error instanceof CapyError
+    && acquired.error.code === ERROR_CODES.PAIR_ALREADY_IN_PROGRESS
+  ) {
+    return waitForRecoveryLeaseOrWinner(request, dependencies, contentionError, deadline);
+  }
+  throw acquired.error;
+}
+
+async function acquireRecoveryLease(
+  request: RuntimePairingRecoveryRequest,
+  dependencies: RuntimePairingRecoveryDependencies,
+): Promise<RecoveryLeaseAcquisition> {
+  const acquired = (() => {
+    try {
+      return {
+        ok: true as const,
+        lease: (dependencies.acquireLease ?? acquirePairAttemptLease)(),
+      };
+    } catch (error) {
+      return { ok: false as const, error };
+    }
+  })();
+  if (acquired.ok) return { kind: 'lease', lease: acquired.lease };
+  if (
+    !(acquired.error instanceof CapyError)
+    || acquired.error.code !== ERROR_CODES.PAIR_ALREADY_IN_PROGRESS
+  ) {
+    throw acquired.error;
+  }
+  const now = (dependencies.now ?? Date.now)();
+  return waitForRecoveryLeaseOrWinner(
+    request,
+    dependencies,
+    acquired.error,
+    now + Math.max(0, dependencies.waitTimeoutMs ?? RECOVERY_WAIT_TIMEOUT_MS),
+  );
+}
+
+/**
+ * Reconstruct a dead process-bound grant from an explicitly selected custody
+ * provider. This primitive is intentionally inactive until a CLI composition
+ * root supplies both the provider and authoritative environment.
+ */
+export async function recoverRuntimePairingFromCustody(
+  request: RuntimePairingRecoveryRequest,
+  dependencies: RuntimePairingRecoveryDependencies = {},
+): Promise<RuntimePairingRecoveryOutcome> {
+  const now = (dependencies.now ?? Date.now)();
+  const record = readRecoveryRecord(request, now);
+  if (!record) return { kind: 'not_v2' };
+  const probe = dependencies.probeHolder ?? defaultRecoveryProbe;
+  if (await probe(record.socketPath, record.userId, record.credentialId)) {
+    return { kind: 'active', record };
+  }
+
+  const acquisition = await acquireRecoveryLease(request, dependencies);
+  if (acquisition.kind === 'outcome') return acquisition.outcome;
+  try {
+    return await recoverRuntimePairingFromCustodyWhileLeaseHeld(
+      request,
+      acquisition.lease,
+      dependencies,
+    );
+  } finally {
+    (dependencies.releaseLease ?? releasePairAttemptLease)(acquisition.lease);
+  }
+}
+
+/** Recover while the caller owns the shared pair/recovery/logout lease. */
+export async function recoverRuntimePairingFromCustodyWhileLeaseHeld(
+  request: RuntimePairingRecoveryRequest,
+  _lease: PairAttemptLease,
+  dependencies: RuntimePairingRecoveryDependencies = {},
+): Promise<RuntimePairingRecoveryOutcome> {
+  const ownsLease = dependencies.ownsLease ?? ownsPairAttemptLease;
+  if (!ownsLease(_lease)) {
+    throw new CapyError(
+      'Runtime custody recovery no longer owns the pairing lease.',
+      ERROR_CODES.PAIR_ALREADY_IN_PROGRESS,
+    );
+  }
+  const current = readRecoveryRecord(request, (dependencies.now ?? Date.now)());
+  if (!current) return { kind: 'not_v2' };
+  const probe = dependencies.probeHolder ?? defaultRecoveryProbe;
+  if (await probe(current.socketPath, current.userId, current.credentialId)) {
+    return { kind: 'active', record: current };
+  }
+
+  const provider = request.resolveProvider(current.custody.providerKind);
+  if (!provider || provider.kind !== current.custody.providerKind) {
+    throw recoveryRefusal('The recorded runtime custody provider is unavailable.');
+  }
+  const kLocal = await unsealRuntimeCustody(provider, current.custody, {
+    environment: request.environment,
+    userId: request.expectedUserId,
+  });
+  const candidate = await (dependencies.spawnHolder ?? defaultRecoverySpawn)({
+    userId: current.userId,
+    credentialId: current.credentialId,
+    kLocal,
+  });
+  if (candidate.expiresAt !== 0) {
+    return cleanupRecoveryCandidateAndThrow(
+      recoveryRefusal('A recovered runtime key holder must be process-bound.'),
+      candidate,
+      current,
+      dependencies,
+    );
+  }
+  const candidateProbe = await probe(candidate.socketPath, current.userId, current.credentialId).then(
+    (active) => ({ ok: true as const, active }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  if (!candidateProbe.ok || !candidateProbe.active) {
+    return cleanupRecoveryCandidateAndThrow(
+      candidateProbe.ok
+        ? new CapyError(
+            'The recovered runtime key holder was unavailable or belonged to another pairing.',
+            ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND,
+          )
+        : candidateProbe.error,
+      candidate,
+      current,
+      dependencies,
+    );
+  }
+
+  if (!ownsLease(_lease)) {
+    return cleanupRecoveryCandidateAndThrow(
+      new CapyError(
+        'Runtime custody recovery lost the pairing lease before metadata commit.',
+        ERROR_CODES.PAIR_ALREADY_IN_PROGRESS,
+      ),
+      candidate,
+      current,
+      dependencies,
+    );
+  }
+
+  const replacement: RuntimePairingRecordV2 = {
+    ...current,
+    socketPath: candidate.socketPath,
+    expiresAt: candidate.expiresAt,
+  };
+  const committed = await (async (): Promise<
+    { readonly ok: true; readonly result: 'committed' | 'changed' }
+    | { readonly ok: false; readonly error: unknown }
+  > => {
+    try {
+      return {
+        ok: true,
+        result: (dependencies.compareAndSwapSocket ?? compareAndSwapRuntimePairingSocket)(
+          current,
+          replacement,
+        ),
+      };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  })();
+  if (!committed.ok) {
+    return cleanupRecoveryCandidateAndThrow(committed.error, candidate, current, dependencies);
+  }
+  if (committed.result === 'committed') return { kind: 'recovered', record: replacement };
+
+  const cleanup = await (async (): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: unknown }
+  > => {
+    try {
+      await (dependencies.cleanupCandidate ?? cleanupRejectedRuntimeHandle)(
+        candidate.socketPath,
+        current.userId,
+        current.credentialId,
+      );
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  })();
+  if (!cleanup.ok) {
+    throw new AggregateError(
+      [recoveryRefusal('Runtime pairing metadata changed during recovery.'), cleanup.error],
+      'Runtime pairing metadata changed and its candidate key holder could not be cleaned up.',
+    );
+  }
+  const winner = readRecoveryRecord(request, (dependencies.now ?? Date.now)());
+  if (!winner) return { kind: 'not_v2' };
+  if (await probe(winner.socketPath, winner.userId, winner.credentialId)) {
+    return { kind: 'reused', record: winner };
+  }
+  throw recoveryRefusal('Runtime pairing metadata changed during custody recovery.');
+}
+
 /** Clear the metadata binding and stop its daemon best-effort. */
 export async function clearRuntimePairing(options: {
   readonly resolveCustodyProvider?: RuntimeCustodyProviderResolver;
   readonly expectedEnvironment?: RuntimeCustodyEnvironment;
   readonly removeMetadata?: (path: string) => void;
+  readonly acquireLease?: () => PairAttemptLease;
+  readonly ownsLease?: (lease: PairAttemptLease) => boolean;
+  readonly releaseLease?: (lease: PairAttemptLease) => boolean;
 } = {}): Promise<boolean> {
+  const lease = (options.acquireLease ?? acquirePairAttemptLease)();
+  try {
+    if (!(options.ownsLease ?? ownsPairAttemptLease)(lease)) {
+      throw new CapyError(
+        'Runtime pairing cleanup no longer owns the pairing lease.',
+        ERROR_CODES.PAIR_ALREADY_IN_PROGRESS,
+      );
+    }
+    return await clearRuntimePairingWhileLeaseHeld(options, lease);
+  } finally {
+    (options.releaseLease ?? releasePairAttemptLease)(lease);
+  }
+}
+
+async function clearRuntimePairingWhileLeaseHeld(options: {
+  readonly resolveCustodyProvider?: RuntimeCustodyProviderResolver;
+  readonly expectedEnvironment?: RuntimeCustodyEnvironment;
+  readonly removeMetadata?: (path: string) => void;
+  readonly ownsLease?: (lease: PairAttemptLease) => boolean;
+}, lease: PairAttemptLease): Promise<boolean> {
   const state = readRuntimePairingState();
   if (state.kind === 'invalid') {
     throw custodyCleanupRefusal(
@@ -564,6 +979,12 @@ export async function clearRuntimePairing(options: {
       environment: existing.custody.environment,
       userId: existing.userId,
     });
+  }
+  if (!(options.ownsLease ?? ownsPairAttemptLease)(lease)) {
+    throw new CapyError(
+      'Runtime pairing cleanup lost the pairing lease before metadata removal.',
+      ERROR_CODES.PAIR_ALREADY_IN_PROGRESS,
+    );
   }
   if (existing) await requestDaemonShutdown(existing.socketPath);
   try {
