@@ -57,6 +57,10 @@ import { chmodSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { CapyError, ERROR_CODES } from '../../types/index';
+import type {
+  RuntimeCustodyEnvironment,
+  RuntimeCustodyProvider,
+} from '../pairing/runtimeCustodyProvider';
 
 export const DEFAULT_GRANT_TTL_MS = 30 * 60 * 1000;
 /** How long a client waits for the daemon to answer one request. */
@@ -397,7 +401,16 @@ function readOneLine(stream: NodeJS.ReadableStream): Promise<string> {
  */
 export function spawnGrantDaemon(
   material: { userId: string; credentialId: string; kLocal: Buffer },
-  opts: { ttlMs?: number | null; execPath?: string; scriptPath?: string; persistRuntimePairing?: boolean } = {},
+  opts: {
+    readonly ttlMs?: number | null;
+    readonly execPath?: string;
+    readonly scriptPath?: string;
+    readonly persistRuntimePairing?: boolean;
+    readonly runtimeCustody?: {
+      readonly provider: RuntimeCustodyProvider;
+      readonly environment: RuntimeCustodyEnvironment;
+    };
+  } = {},
 ): Promise<GrantDaemonHandle> {
   const execPath = opts.execPath ?? process.execPath;
   const scriptPath = opts.scriptPath ?? process.argv[1];
@@ -466,7 +479,7 @@ export function spawnGrantDaemon(
   });
 
   if (!opts.persistRuntimePairing) return launch;
-  return launch.then((handle) => commitSpawnedRuntimePairing(material, handle));
+  return launch.then((handle) => commitSpawnedRuntimePairing(material, handle, opts.runtimeCustody));
 }
 
 /**
@@ -476,14 +489,25 @@ export function spawnGrantDaemon(
  * rejection; protected existing holders are outside that ownership boundary.
  */
 async function commitSpawnedRuntimePairing(
-  material: { readonly userId: string; readonly credentialId: string },
+  material: { readonly userId: string; readonly credentialId: string; readonly kLocal: Buffer },
   handle: GrantDaemonHandle,
+  runtimeCustody?: {
+    readonly provider: RuntimeCustodyProvider;
+    readonly environment: RuntimeCustodyEnvironment;
+  },
 ): Promise<GrantDaemonHandle> {
-  const { registerRuntimePairing } = await import('../pairing/runtimePairing');
+  const { registerRuntimePairing, registerRuntimePairingWithCustody } = await import('../pairing/runtimePairing');
   // The registry transaction owns this distinct candidate until its metadata
   // commit succeeds. On any rejection it acknowledges shutdown and proves
   // exact-path disappearance before surfacing the original failure.
-  await registerRuntimePairing(material.userId, material.credentialId, handle);
+  await (runtimeCustody
+    ? registerRuntimePairingWithCustody(
+        runtimeCustody.provider,
+        runtimeCustody.environment,
+        material,
+        handle,
+      )
+    : registerRuntimePairing(material.userId, material.credentialId, handle));
   return handle;
 }
 

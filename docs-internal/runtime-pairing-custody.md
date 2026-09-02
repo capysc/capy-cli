@@ -1,6 +1,6 @@
 # Runtime pairing custody boundary
 
-Status: CAP-628 process-durable slice, 2026-08-30.
+Status: CAP-628 provider-neutral v2 foundation; no provider selected, 2026-09-02.
 
 ## Implemented boundary
 
@@ -9,8 +9,10 @@ continues to recover `K_local` through the existing PRF-backed device ceremony.
 The key is handed to the detached grant daemon over stdin and remains only in
 that process's memory.
 
-The CLI now writes `auth/runtime-pair.json` below the active Capy home. The
-record contains only:
+The CLI writes `auth/runtime-pair.json` below the active Capy home. Version 1
+remains the process-bound record. The inactive provider-backed path can write
+a version 2 record only after a provider seals `K_local`; that record contains
+only:
 
 - the Capy user ID;
 - the answering credential ID;
@@ -18,6 +20,11 @@ record contains only:
 - the daemon lifetime sentinel (`0` for process-bound custody; positive values
   remain readable for legacy finite records); and
 - the pairing timestamp.
+
+Version 2 additionally carries the provider kind, explicit Capy environment,
+user binding, and an opaque provider handle. The parser continues to accept
+valid version 1 records, refuses malformed or downgrade-shaped version 2
+records without deleting them, and never synthesizes custody for version 1.
 
 It does not contain `K_local`, the PRF output, a key derived from either value,
 or a ciphertext that can be opened with data in the same file. File mode is
@@ -30,9 +37,13 @@ Later CLI processes first honor the legacy
 and subagents that share the protected home can therefore reuse the pair
 without copying an environment variable. A stale daemon does not erase the
 account binding: the same user may pair again, while a different user is
-refused before its session is written. `capy logout` terminates the daemon and
-removes the record. Wiping the environment home removes the association and
-requires pairing again.
+refused before its session is written. Version 1 logout terminates the daemon
+and removes the record. Version 2 logout first validates the caller-selected
+environment, deletes the provider entry, then terminates the daemon and removes
+metadata. Any provider or metadata-removal failure preserves session state so
+cleanup is retryable. Wiping the environment home removes the ordinary
+association, but a wired provider must also define and prove its own wipe
+semantics.
 
 ## Deliberate stop condition
 
@@ -52,13 +63,13 @@ primitive that can close that gap:
 - the prior OS-keychain implementation used `@napi-rs/keyring` and was removed
   because native addons broke the standalone binary release pipeline.
 
-The process-durable registry is therefore not represented as full CAP-628
-completion.
+Neither the process-durable registry nor the inactive v2 foundation is
+represented as full CAP-628 completion.
 
 ## Required interface for reboot durability
 
-The missing seam is a runtime custody provider, injected below pairing and key
-resolution, with this minimal contract:
+Reboot durability requires a runtime custody provider injected below pairing
+and key resolution, with this minimal contract:
 
 ```ts
 interface RuntimeCustodyProvider {
@@ -84,9 +95,14 @@ interface RuntimeCustodyProvider {
 The provider-neutral seam now exists in
 `src/auth/pairing/runtimeCustodyProvider.ts`. Its facade validates the provider
 kind, environment, user, opaque handle, and 32-byte result before returning a
-fresh copy to the caller. A process-memory fake pins those refusal semantics.
-This is a development-only architecture slice: no provider is selected or
-wired into `capy pair`, so it adds no persistence and makes no reboot claim.
+fresh copy to the caller. Provider-backed registration seals before atomically
+publishing version 2 metadata, refuses provider/environment drift before
+provider I/O, reaps rejected detached daemons, and prevents version 2 from
+being downgraded to version 1. Logout deletes provider state before discarding
+its only ordinary-file handle. A process-memory fake pins those refusal and
+rollback semantics. This remains an inactive architecture slice: no concrete
+provider is selected or wired into `capy pair`, no dead-daemon recovery exists,
+and no reboot claim is made.
 
 Security requirements:
 
@@ -101,6 +117,9 @@ Security requirements:
    inherited descriptor or authenticated local socket.
 5. Logout deletes the handle and provider entry; a wiped provider behaves as
    an unpaired runtime.
+6. Repeated same-user seal returns the same stable opaque handle, and delete is
+   idempotent after an earlier delete or provider wipe so interrupted logout is
+   safely retryable.
 
 The implementation test seam should supply an in-memory fake provider and pin:
 seal followed by a new CLI process unseal, same-user idempotency, wrong-user and
@@ -116,16 +135,18 @@ process-bound daemon can be reconstructed after reboot without a new ceremony.
 2. Run the provider contract from a fresh packaged `capy-dev` process. Add
    provider wipe, tamper, wrong-user, wrong-environment, and host-restart
    evidence. A process-memory fake is not evidence for this gate.
-3. Introduce a versioned runtime-pair record carrying the provider kind and
-   opaque handle alongside the live socket metadata. Keep reading v1 records;
-   do not synthesize a provider handle for them.
-4. On `capy pair`, seal before publishing the new record. On a dead socket,
-   acquire a single-runtime recovery lease, unseal, start a new in-memory grant
-   daemon, and atomically replace only the socket metadata. Concurrent callers
-   wait for or reuse the winning daemon.
-5. On logout, delete the provider entry before removing its only handle. A
-   missing/tampered/wiped provider fails closed as unpaired; it never falls
-   back to `local.key`, a refresh-token-derived key, or an ordinary file.
+3. **Foundation implemented, not wired:** introduce a versioned runtime-pair
+   record carrying the provider kind and opaque handle alongside live socket
+   metadata. Keep reading v1 records; never synthesize a provider handle.
+4. **Registration half implemented, recovery missing:** seal before publishing
+   the new record. On a dead socket, acquire a single-runtime recovery lease,
+   unseal, start a new in-memory grant daemon, and atomically replace only the
+   socket metadata. Concurrent callers wait for or reuse the winning daemon.
+5. **Foundation implemented, composition missing:** logout deletes the provider
+   entry before removing its only handle and preserves sessions on cleanup
+   failure. Wire the explicit environment/provider resolver; a missing,
+   tampered, or wiped provider must never fall back to `local.key`, a
+   refresh-token-derived key, or an ordinary file.
 6. Prove an actual host reboot, daemon kill/reconstruction, environment-home
    isolation, same-user idempotency, different-user refusal, logout, home wipe,
    and standalone packaging before changing CAP-628 from partial to complete.

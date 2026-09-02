@@ -11,7 +11,7 @@ import {
   type RuntimeCustodyEnvironment,
   type RuntimeCustodyProvider,
 } from '../../../src/auth/pairing/runtimeCustodyProvider';
-import { ERROR_CODES } from '../../../src/types/index';
+import { CapyError, ERROR_CODES } from '../../../src/types/index';
 
 const USER_ID = 'user_runtime_custody';
 const OTHER_USER_ID = 'user_runtime_custody_other';
@@ -28,23 +28,28 @@ function createProvider(): RuntimeCustodyProvider {
     readonly opaqueHandle?: string;
   }): void => {
     if (
-      lifecycle.signal.aborted
-      || input.environment !== ENVIRONMENT
+      input.environment !== ENVIRONMENT
       || input.userId !== USER_ID
       || (input.opaqueHandle !== undefined && input.opaqueHandle !== OPAQUE_HANDLE)
     ) {
-      throw Object.assign(new Error('custody binding refused'), { code: ERROR_CODES.PERMISSION_DENIED });
+      throw new CapyError('custody binding refused', ERROR_CODES.PERMISSION_DENIED);
     }
   };
   return {
     kind: 'orchestrator-secret-store',
     async seal(input) {
       assertRequest(input);
+      if (lifecycle.signal.aborted) {
+        throw new CapyError('custody binding refused', ERROR_CODES.PERMISSION_DENIED);
+      }
       expect(input.kLocal).toEqual(stored);
       return { opaqueHandle: OPAQUE_HANDLE };
     },
     async unseal(input) {
       assertRequest(input);
+      if (lifecycle.signal.aborted) {
+        throw new CapyError('custody binding refused', ERROR_CODES.PERMISSION_DENIED);
+      }
       return Uint8Array.from(stored);
     },
     async delete(input) {
@@ -116,6 +121,10 @@ describe('runtime custody provider boundary', () => {
       userId: USER_ID,
     })).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
 
+    await deleteRuntimeCustody(provider, binding, {
+      environment: ENVIRONMENT,
+      userId: USER_ID,
+    });
     await deleteRuntimeCustody(provider, binding, {
       environment: ENVIRONMENT,
       userId: USER_ID,

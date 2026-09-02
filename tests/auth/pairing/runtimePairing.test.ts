@@ -6,7 +6,7 @@
  * processes. No key bytes are printed by the child processes.
  */
 import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { spawn } from 'child_process';
 import { createServer } from 'net';
@@ -27,6 +27,7 @@ import {
   readActiveRuntimePairing,
   readRuntimePairing,
   registerRuntimePairing,
+  registerRuntimePairingWithCustody,
 } from '../../../src/auth/pairing/runtimePairing';
 import { configuredGrantSocketPath } from '../../../src/auth/deviceKey/ephemeral';
 import {
@@ -40,11 +41,85 @@ import { installPairedSession } from '../../../src/auth/pairing/installPairedSes
 import { getAuthSessionPath, getGlobalCapyDir } from '../../../src/config/globalConfig';
 import { performLogoutCleanup } from '../../../src/commands/logoutCommand';
 import { CapyError, ERROR_CODES } from '../../../src/types/index';
+import type {
+  RuntimeCustodyEnvironment,
+  RuntimeCustodyProvider,
+} from '../../../src/auth/pairing/runtimeCustodyProvider';
 
 const USER_A = 'user_runtime_a';
 const USER_B = 'user_runtime_b';
 const CREDENTIAL_A = 'credential_runtime_a';
 const K_LOCAL = Buffer.alloc(32, 0x5a);
+const CUSTODY_HANDLE = 'custody-runtime-a-stable-handle';
+
+function createCustodyProvider(options: {
+  readonly handle?: string;
+  readonly deleteError?: Error;
+} = {}): {
+  readonly provider: RuntimeCustodyProvider;
+  readonly seal: ReturnType<typeof mock>;
+  readonly unseal: ReturnType<typeof mock>;
+  readonly remove: ReturnType<typeof mock>;
+} {
+  const lifecycle = new AbortController();
+  const handle = options.handle ?? CUSTODY_HANDLE;
+  const assertRequest = (input: {
+    readonly environment: RuntimeCustodyEnvironment;
+    readonly userId: string;
+    readonly opaqueHandle?: string;
+  }): void => {
+    if (
+      input.environment !== 'development'
+      || input.userId !== USER_A
+      || (input.opaqueHandle !== undefined && input.opaqueHandle !== handle)
+    ) {
+      throw new CapyError('Custody binding refused.', ERROR_CODES.PERMISSION_DENIED);
+    }
+  };
+  const seal = mock(async (input: {
+    readonly environment: RuntimeCustodyEnvironment;
+    readonly userId: string;
+    readonly kLocal: Uint8Array;
+  }) => {
+    assertRequest(input);
+    if (lifecycle.signal.aborted) {
+      throw new CapyError('Custody entry was deleted.', ERROR_CODES.PERMISSION_DENIED);
+    }
+    expect(input.kLocal).toEqual(K_LOCAL);
+    return { opaqueHandle: handle };
+  });
+  const unseal = mock(async (input: {
+    readonly environment: RuntimeCustodyEnvironment;
+    readonly userId: string;
+    readonly opaqueHandle: string;
+  }) => {
+    assertRequest(input);
+    if (lifecycle.signal.aborted) {
+      throw new CapyError('Custody entry was deleted.', ERROR_CODES.PERMISSION_DENIED);
+    }
+    return Uint8Array.from(K_LOCAL);
+  });
+  const remove = mock(async (input: {
+    readonly environment: RuntimeCustodyEnvironment;
+    readonly userId: string;
+    readonly opaqueHandle: string;
+  }) => {
+    assertRequest(input);
+    if (options.deleteError) throw options.deleteError;
+    lifecycle.abort();
+  });
+  return {
+    provider: {
+      kind: 'orchestrator-secret-store',
+      seal,
+      unseal,
+      delete: remove,
+    },
+    seal,
+    unseal,
+    remove,
+  };
+}
 
 beforeEach(() => {
   rmSync(getGlobalCapyDir(), { recursive: true, force: true });
@@ -228,6 +303,311 @@ describe('runtime pairing registry', () => {
     } finally {
       await clearRuntimePairing();
     }
+  });
+
+  test('the daemon spawner seals before publishing a version-2 custody record', async () => {
+    const custody = createCustodyProvider();
+    const handle = await spawnGrantDaemon(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      {
+        execPath: process.execPath,
+        scriptPath: join(originalCwd, 'src', 'index.ts'),
+        ttlMs: null,
+        persistRuntimePairing: true,
+        runtimeCustody: {
+          provider: custody.provider,
+          environment: 'development',
+        },
+      },
+    );
+    try {
+      expect(custody.seal).toHaveBeenCalledTimes(1);
+      expect(readRuntimePairing()).toMatchObject({
+        version: 2,
+        userId: USER_A,
+        credentialId: CREDENTIAL_A,
+        socketPath: handle.socketPath,
+        custody: {
+          providerKind: 'orchestrator-secret-store',
+          environment: 'development',
+          userId: USER_A,
+          opaqueHandle: CUSTODY_HANDLE,
+        },
+      });
+      expect(readFileSync(getRuntimePairingPath(), 'utf8')).not.toContain(K_LOCAL.toString('base64'));
+      expect(await fetchGrantedKLocal(handle.socketPath, USER_A)).toMatchObject({ userId: USER_A });
+    } finally {
+      await clearRuntimePairing({
+        resolveCustodyProvider: (kind) => kind === custody.provider.kind ? custody.provider : null,
+        expectedEnvironment: 'development',
+      });
+    }
+    expect(custody.remove).toHaveBeenCalledTimes(1);
+  });
+
+  test('reads v1 unchanged and rejects malformed or cross-user v2 custody metadata', async () => {
+    const v1 = await registerRuntimePairing(USER_A, CREDENTIAL_A, {
+      socketPath: '/tmp/capy-runtime-v1-compatible.sock',
+      expiresAt: 0,
+    });
+    expect(readRuntimePairing()).toEqual(v1);
+    rmSync(getRuntimePairingPath(), { force: true });
+
+    const custody = createCustodyProvider();
+    const v2 = await registerRuntimePairingWithCustody(
+      custody.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-compatible.sock', expiresAt: 0 },
+    );
+    expect(readRuntimePairing()).toEqual(v2);
+
+    const writeRecord = (record: unknown): void => {
+      mkdirSync(join(getGlobalCapyDir(), 'auth'), { recursive: true, mode: 0o700 });
+      writeFileSync(getRuntimePairingPath(), JSON.stringify(record), { mode: 0o600 });
+    };
+    writeRecord({ ...v2, custody: { ...v2.custody, userId: USER_B } });
+    expect(readRuntimePairing()).toBeNull();
+    writeRecord({ ...v2, custody: { ...v2.custody, opaqueHandle: '' } });
+    expect(readRuntimePairing()).toBeNull();
+    writeRecord({ ...v2, custody: { ...v2.custody, providerKind: 'ordinary-file' } });
+    expect(readRuntimePairing()).toBeNull();
+    writeRecord({ ...v2, custody: { ...v2.custody, environment: 'custom-home-name' } });
+    expect(readRuntimePairing()).toBeNull();
+    writeRecord({ ...v2, version: 1 });
+    expect(readRuntimePairing()).toBeNull();
+    await expect(clearRuntimePairing({
+      resolveCustodyProvider: () => custody.provider,
+      expectedEnvironment: 'development',
+    })).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+    await expect(registerRuntimePairing(USER_A, CREDENTIAL_A, {
+      socketPath: '/tmp/capy-runtime-invalid-record-candidate.sock',
+      expiresAt: 0,
+    })).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+    expect(existsSync(getRuntimePairingPath())).toBe(true);
+  });
+
+  test('wrong-user preflight occurs before provider seal and a changed stable handle is refused', async () => {
+    const stable = createCustodyProvider();
+    const original = await registerRuntimePairingWithCustody(
+      stable.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-original.sock', expiresAt: 0 },
+    );
+    const wrongUser = await registerRuntimePairingWithCustody(
+      stable.provider,
+      'development',
+      { userId: USER_B, credentialId: 'credential_runtime_b', kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-wrong-user.sock', expiresAt: 0 },
+    ).then(() => null, (error: unknown) => error);
+    expect(wrongUser).toMatchObject({ code: ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH });
+    expect(stable.seal).toHaveBeenCalledTimes(1);
+
+    await expect(registerRuntimePairingWithCustody(
+      stable.provider,
+      'staging',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-wrong-environment.sock', expiresAt: 0 },
+    )).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+    const wrongKindProvider: RuntimeCustodyProvider = {
+      ...stable.provider,
+      kind: 'os-secure-store',
+    };
+    await expect(registerRuntimePairingWithCustody(
+      wrongKindProvider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-wrong-provider.sock', expiresAt: 0 },
+    )).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+    expect(stable.seal).toHaveBeenCalledTimes(1);
+
+    const changed = createCustodyProvider({ handle: `${CUSTODY_HANDLE}-changed` });
+    const changedHandle = await registerRuntimePairingWithCustody(
+      changed.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-changed.sock', expiresAt: 0 },
+    ).then(() => null, (error: unknown) => error);
+    expect(changedHandle).toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+    expect(changed.remove).toHaveBeenCalledTimes(1);
+    expect(readRuntimePairing()).toEqual(original);
+  });
+
+  test('pre-registration refusals reap detached candidates and v2 cannot downgrade to v1', async () => {
+    const stable = createCustodyProvider();
+    const originalHandle = await spawnGrantDaemon(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      {
+        execPath: process.execPath,
+        scriptPath: join(originalCwd, 'src', 'index.ts'),
+        ttlMs: null,
+      },
+    );
+    const original = await registerRuntimePairingWithCustody(
+      stable.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      originalHandle,
+    );
+    try {
+      const wrongUserHandle = await spawnGrantDaemon(
+        { userId: USER_B, credentialId: 'credential_runtime_b', kLocal: K_LOCAL },
+        {
+          execPath: process.execPath,
+          scriptPath: join(originalCwd, 'src', 'index.ts'),
+          ttlMs: null,
+        },
+      );
+      await expect(registerRuntimePairingWithCustody(
+        stable.provider,
+        'development',
+        { userId: USER_B, credentialId: 'credential_runtime_b', kLocal: K_LOCAL },
+        wrongUserHandle,
+      )).rejects.toMatchObject({ code: ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH });
+      expect(await isGrantActive(wrongUserHandle.socketPath)).toBe(false);
+
+      const changedHandle = await spawnGrantDaemon(
+        { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+        {
+          execPath: process.execPath,
+          scriptPath: join(originalCwd, 'src', 'index.ts'),
+          ttlMs: null,
+        },
+      );
+      const changed = createCustodyProvider({ handle: `${CUSTODY_HANDLE}-changed` });
+      await expect(registerRuntimePairingWithCustody(
+        changed.provider,
+        'development',
+        { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+        changedHandle,
+      )).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+      expect(await isGrantActive(changedHandle.socketPath)).toBe(false);
+
+      const downgradeHandle = await spawnGrantDaemon(
+        { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+        {
+          execPath: process.execPath,
+          scriptPath: join(originalCwd, 'src', 'index.ts'),
+          ttlMs: null,
+        },
+      );
+      await expect(registerRuntimePairing(USER_A, CREDENTIAL_A, downgradeHandle))
+        .rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+      expect(await isGrantActive(downgradeHandle.socketPath)).toBe(false);
+      expect(await isGrantActive(originalHandle.socketPath)).toBe(true);
+      expect(readRuntimePairing()).toEqual(original);
+      await expect(clearRuntimePairing({
+        resolveCustodyProvider: () => stable.provider,
+        expectedEnvironment: 'staging',
+      })).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+      expect(stable.remove).not.toHaveBeenCalled();
+    } finally {
+      await clearRuntimePairing({
+        resolveCustodyProvider: () => stable.provider,
+        expectedEnvironment: 'development',
+      });
+    }
+  });
+
+  test('registration rollback deletes only a new custody entry and preserves an existing stable binding', async () => {
+    await registerRuntimePairing(USER_A, CREDENTIAL_A, {
+      socketPath: '/tmp/capy-runtime-v1-protected.sock',
+      expiresAt: 0,
+    });
+    const newlySealed = createCustodyProvider();
+    const v1Failure = await registerRuntimePairingWithCustody(
+      newlySealed.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-invalid-candidate.sock', expiresAt: 0 },
+    ).then(() => null, (error: unknown) => error);
+    expect(v1Failure).toMatchObject({ code: ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND });
+    expect(newlySealed.remove).toHaveBeenCalledTimes(1);
+    expect(readRuntimePairing()).toMatchObject({ version: 1, socketPath: '/tmp/capy-runtime-v1-protected.sock' });
+
+    rmSync(getRuntimePairingPath(), { force: true });
+    const stable = createCustodyProvider();
+    const v2 = await registerRuntimePairingWithCustody(
+      stable.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-protected.sock', expiresAt: 0 },
+    );
+    const v2Failure = await registerRuntimePairingWithCustody(
+      stable.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-invalid-replacement.sock', expiresAt: 0 },
+    ).then(() => null, (error: unknown) => error);
+    expect(v2Failure).toMatchObject({ code: ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND });
+    expect(stable.remove).not.toHaveBeenCalled();
+    expect(readRuntimePairing()).toEqual(v2);
+  });
+
+  test('v2 logout deletes custody first and preserves every local artifact on provider failure', async () => {
+    const custody = createCustodyProvider({ deleteError: new Error('provider unavailable') });
+    const record = await registerRuntimePairingWithCustody(
+      custody.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-logout.sock', expiresAt: 0 },
+    );
+    const localToken = join(process.cwd(), '.capy', 'token');
+    const authSession = join(getGlobalCapyDir(), 'auth', 'session.json');
+    mkdirSync(join(process.cwd(), '.capy'), { recursive: true });
+    mkdirSync(join(getGlobalCapyDir(), 'auth'), { recursive: true });
+    writeFileSync(localToken, 'local-session');
+    writeFileSync(authSession, 'global-session');
+
+    await expect(performLogoutCleanup({
+      resolveRuntimeCustodyProvider: () => custody.provider,
+      runtimeCustodyEnvironment: 'development',
+    })).rejects.toThrow('provider unavailable');
+    expect(custody.remove).toHaveBeenCalledTimes(1);
+    expect(readRuntimePairing()).toEqual(record);
+    expect(readFileSync(localToken, 'utf8')).toBe('local-session');
+    expect(readFileSync(authSession, 'utf8')).toBe('global-session');
+
+    await expect(clearRuntimePairing()).rejects.toMatchObject({ code: ERROR_CODES.PERMISSION_DENIED });
+    expect(readRuntimePairing()).toEqual(record);
+  });
+
+  test('v2 logout preserves sessions on metadata failure and retries an idempotent provider delete', async () => {
+    const custody = createCustodyProvider();
+    const record = await registerRuntimePairingWithCustody(
+      custody.provider,
+      'development',
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      { socketPath: '/tmp/capy-runtime-v2-logout-retry.sock', expiresAt: 0 },
+    );
+    const localToken = join(process.cwd(), '.capy', 'token');
+    const authSession = join(getGlobalCapyDir(), 'auth', 'session.json');
+    mkdirSync(join(process.cwd(), '.capy'), { recursive: true });
+    mkdirSync(join(getGlobalCapyDir(), 'auth'), { recursive: true });
+    writeFileSync(localToken, 'local-session');
+    writeFileSync(authSession, 'global-session');
+
+    await expect(performLogoutCleanup({
+      resolveRuntimeCustodyProvider: () => custody.provider,
+      runtimeCustodyEnvironment: 'development',
+      removeRuntimePairingMetadata: () => {
+        throw new Error('metadata unavailable');
+      },
+    })).rejects.toThrow('metadata unavailable');
+    expect(custody.remove).toHaveBeenCalledTimes(1);
+    expect(readRuntimePairing()).toEqual(record);
+    expect(readFileSync(localToken, 'utf8')).toBe('local-session');
+    expect(readFileSync(authSession, 'utf8')).toBe('global-session');
+
+    expect(await performLogoutCleanup({
+      resolveRuntimeCustodyProvider: () => custody.provider,
+      runtimeCustodyEnvironment: 'development',
+    })).toBe(true);
+    expect(custody.remove).toHaveBeenCalledTimes(2);
+    expect(readRuntimePairing()).toBeNull();
+    expect(existsSync(localToken)).toBe(false);
+    expect(existsSync(authSession)).toBe(false);
   });
 
   test('a runtime-record write failure reaps only the newly launched holder and preserves the existing pair', async () => {

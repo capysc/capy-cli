@@ -11,11 +11,34 @@
  *
  * Returns true if anything was cleared.
  */
-export async function performLogoutCleanup(): Promise<boolean> {
+import type {
+  RuntimeCustodyEnvironment,
+  RuntimeCustodyProviderResolver,
+} from '../auth/pairing/runtimeCustodyProvider';
+
+export interface LogoutCleanupDependencies {
+  readonly resolveRuntimeCustodyProvider?: RuntimeCustodyProviderResolver;
+  readonly runtimeCustodyEnvironment?: RuntimeCustodyEnvironment;
+  readonly removeRuntimePairingMetadata?: (path: string) => void;
+}
+
+export async function performLogoutCleanup(
+  dependencies: LogoutCleanupDependencies = {},
+): Promise<boolean> {
   const { existsSync, unlinkSync, rmSync, readdirSync } = await import('fs');
   const { join } = await import('path');
   const { getGlobalCapyDir } = await import('../config/globalConfig');
   const { clearRuntimePairing } = await import('../auth/pairing/runtimePairing');
+
+  // A v2 pairing record is the sole ordinary-file handle for an external
+  // custody entry. Delete that provider entry first; if it fails, preserve
+  // every session/cache artifact so logout is retryable and never orphans the
+  // sealed key. Existing v1 records retain their daemon-stop/remove behavior.
+  const runtimePairingCleared = await clearRuntimePairing({
+    resolveCustodyProvider: dependencies.resolveRuntimeCustodyProvider,
+    expectedEnvironment: dependencies.runtimeCustodyEnvironment,
+    removeMetadata: dependencies.removeRuntimePairingMetadata,
+  });
 
   const deleteFile = (path: string): boolean => {
     if (!existsSync(path)) return false;
@@ -59,11 +82,6 @@ export async function performLogoutCleanup(): Promise<boolean> {
       .map((orgId) => deleteDirectory(join(orgsDir, orgId, 'projects')))
       .some(Boolean)
     : false;
-
-  // A runtime pairing is an account binding, not recovery material. Logout
-  // stops its in-memory daemon and removes the metadata pointer so another
-  // account can pair explicitly.
-  const runtimePairingCleared = await clearRuntimePairing();
 
   // Drop a marker so the next interactive OAuth flow forces WorkOS to
   // re-prompt instead of reusing the AuthKit SSO cookie. Without this,

@@ -14,6 +14,10 @@ export type RuntimeCustodyProviderKind = 'os-secure-store' | 'orchestrator-secre
 
 export interface RuntimeCustodyProvider {
   readonly kind: RuntimeCustodyProviderKind;
+  /**
+   * Seal is same-user idempotent for one environment: repeated calls return
+   * the same stable opaque handle and replace no independently owned entry.
+   */
   seal(input: {
     readonly environment: RuntimeCustodyEnvironment;
     readonly userId: string;
@@ -24,12 +28,18 @@ export interface RuntimeCustodyProvider {
     readonly userId: string;
     readonly opaqueHandle: string;
   }): Promise<Uint8Array>;
+  /** Deletion is idempotent, including after an earlier delete or provider wipe. */
   delete(input: {
     readonly environment: RuntimeCustodyEnvironment;
     readonly userId: string;
     readonly opaqueHandle: string;
   }): Promise<void>;
 }
+
+/** Resolve only an explicitly recorded provider kind; never infer one from a path or hostname. */
+export type RuntimeCustodyProviderResolver = (
+  kind: RuntimeCustodyProviderKind,
+) => RuntimeCustodyProvider | null;
 
 /**
  * The only provider-derived value that may enter runtime-pair metadata.

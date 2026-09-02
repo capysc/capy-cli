@@ -18,14 +18,21 @@
  * needs a packageable secure-at-rest backend or a new service/Keep sealing
  * contract; persisting plaintext K_local here is not an acceptable fallback.
  */
-import { createConnection } from 'net';
+import { Socket } from 'net';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { getGlobalCapyDir, readAuthSession } from '../../config/globalConfig';
 import { CapyError, ERROR_CODES, type SessionStore } from '../../types/index';
+import {
+  deleteRuntimeCustody,
+  sealRuntimeCustody,
+  type RuntimeCustodyBinding,
+  type RuntimeCustodyEnvironment,
+  type RuntimeCustodyProvider,
+  type RuntimeCustodyProviderResolver,
+} from './runtimeCustodyProvider';
 
-export interface RuntimePairingRecord {
-  readonly version: 1;
+interface RuntimePairingRecordFields {
   readonly userId: string;
   readonly credentialId: string;
   readonly socketPath: string;
@@ -33,6 +40,22 @@ export interface RuntimePairingRecord {
   readonly expiresAt: number;
   readonly pairedAt: string;
 }
+
+export interface RuntimePairingRecordV1 extends RuntimePairingRecordFields {
+  readonly version: 1;
+}
+
+export interface RuntimePairingRecordV2 extends RuntimePairingRecordFields {
+  readonly version: 2;
+  readonly custody: RuntimeCustodyBinding;
+}
+
+export type RuntimePairingRecord = RuntimePairingRecordV1 | RuntimePairingRecordV2;
+
+type RuntimePairingRecordState =
+  | { readonly kind: 'missing' }
+  | { readonly kind: 'invalid' }
+  | { readonly kind: 'valid'; readonly record: RuntimePairingRecord };
 
 export interface RuntimePairingHandle {
   readonly socketPath: string;
@@ -50,11 +73,20 @@ export function getRuntimePairingPath(): string {
   return join(getGlobalCapyDir(), 'auth', 'runtime-pair.json');
 }
 
-function isRuntimePairingRecord(value: unknown): value is RuntimePairingRecord {
+function isRuntimeCustodyBinding(value: unknown, userId: string): value is RuntimeCustodyBinding {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Readonly<Record<string, unknown>>;
-  return candidate.version === 1
-    && typeof candidate.userId === 'string'
+  const providerKind = candidate.providerKind;
+  const environment = candidate.environment;
+  return (providerKind === 'os-secure-store' || providerKind === 'orchestrator-secret-store')
+    && (environment === 'development' || environment === 'staging' || environment === 'production')
+    && candidate.userId === userId
+    && typeof candidate.opaqueHandle === 'string'
+    && candidate.opaqueHandle.length > 0;
+}
+
+function hasRuntimePairingFields(candidate: Readonly<Record<string, unknown>>): boolean {
+  return typeof candidate.userId === 'string'
     && candidate.userId.length > 0
     && typeof candidate.credentialId === 'string'
     && candidate.credentialId.length > 0
@@ -65,13 +97,32 @@ function isRuntimePairingRecord(value: unknown): value is RuntimePairingRecord {
     && typeof candidate.pairedAt === 'string';
 }
 
-export function readRuntimePairing(): RuntimePairingRecord | null {
+function isRuntimePairingRecord(value: unknown): value is RuntimePairingRecord {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Readonly<Record<string, unknown>>;
+  if (!hasRuntimePairingFields(candidate)) return false;
+  if (candidate.version === 1) return !Object.hasOwn(candidate, 'custody');
+  return candidate.version === 2
+    && typeof candidate.userId === 'string'
+    && isRuntimeCustodyBinding(candidate.custody, candidate.userId);
+}
+
+function readRuntimePairingState(): RuntimePairingRecordState {
   try {
     const parsed: unknown = JSON.parse(readFileSync(getRuntimePairingPath(), 'utf8'));
-    return isRuntimePairingRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
+    return isRuntimePairingRecord(parsed)
+      ? { kind: 'valid', record: parsed }
+      : { kind: 'invalid' };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { kind: 'missing' }
+      : { kind: 'invalid' };
   }
+}
+
+export function readRuntimePairing(): RuntimePairingRecord | null {
+  const state = readRuntimePairingState();
+  return state.kind === 'valid' ? state.record : null;
 }
 
 function readMatchingPairingSession(userId: string): SessionStore | null {
@@ -122,7 +173,13 @@ export async function readActiveRuntimePairing(): Promise<ActiveRuntimePairing |
  * repair it by pairing again, while a different user must explicitly logout.
  */
 export function assertRuntimePairingUser(userId: string): RuntimePairingRecord | null {
-  const existing = readRuntimePairing();
+  const state = readRuntimePairingState();
+  if (state.kind === 'invalid') {
+    throw custodyCleanupRefusal(
+      'The runtime pairing record is invalid; it was preserved so custody can be repaired safely.',
+    );
+  }
+  const existing = state.kind === 'valid' ? state.record : null;
   if (!existing || existing.userId === userId) return existing;
   throw new CapyError(
     'This runtime is paired to another Capy account. Run `capy logout` before pairing a different account.',
@@ -141,7 +198,7 @@ function writeRuntimePairing(record: RuntimePairingRecord): void {
 
 function requestDaemonShutdown(socketPath: string): Promise<void> {
   return new Promise((resolve) => {
-    const socket = createConnection(socketPath);
+    const socket = new Socket();
     const finish = (): void => {
       clearTimeout(timer);
       socket.destroy();
@@ -154,6 +211,7 @@ function requestDaemonShutdown(socketPath: string): Promise<void> {
     socket.once('end', finish);
     socket.once('close', finish);
     socket.once('error', finish);
+    socket.connect(socketPath);
   });
 }
 
@@ -165,7 +223,7 @@ function requestAcknowledgedDaemonShutdown(
   credentialId: string,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = new Socket();
     const finish = (outcome: { readonly ok: true } | { readonly ok: false; readonly error: Error }): void => {
       clearTimeout(timer);
       socket.destroy();
@@ -213,6 +271,7 @@ function requestAcknowledgedDaemonShutdown(
       error: new Error(`Runtime key holder closed without acknowledging shutdown: ${socketPath}`),
     }));
     readFrom('');
+    socket.connect(socketPath);
   });
 }
 
@@ -248,23 +307,43 @@ async function cleanupRejectedRuntimeHandle(
   await waitForExactSocketDisappearance(socketPath);
 }
 
+async function cleanupRejectedRuntimeHandleOutcome(
+  socketPath: string,
+  userId: string,
+  credentialId: string,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: unknown }> {
+  try {
+    await cleanupRejectedRuntimeHandle(socketPath, userId, credentialId);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
 /**
  * Commit a newly started daemon as this runtime's active pairing. Re-pairing
  * the same user replaces the old daemon; a different user is refused and the
  * just-created daemon is shut down so no orphaned key holder remains.
  */
-export async function registerRuntimePairing(
+async function registerRuntimePairingRecord<TRecord extends RuntimePairingRecord>(
   userId: string,
   credentialId: string,
   handle: RuntimePairingHandle,
-): Promise<RuntimePairingRecord> {
+  requestedVersion: TRecord['version'],
+  createRecord: (fields: RuntimePairingRecordFields) => TRecord,
+): Promise<TRecord> {
   const existingBeforeCheck = readRuntimePairing();
   const registration = await (async (): Promise<
-    { readonly ok: true; readonly record: RuntimePairingRecord }
+    { readonly ok: true; readonly record: TRecord }
     | { readonly ok: false; readonly error: unknown }
   > => {
     try {
       const existing = assertRuntimePairingUser(userId);
+      if (existing?.version === 2 && requestedVersion === 1) {
+        throw custodyCleanupRefusal(
+          'A provider-backed runtime pairing cannot be downgraded to process-only custody.',
+        );
+      }
       // Never trade a valid pair for an expired, dead, or foreign holder. The
       // probe checks user + credential without asking the daemon to release
       // K_local. This runs before the atomic metadata rename and before the old
@@ -286,14 +365,13 @@ export async function registerRuntimePairing(
         );
       }
 
-      const record: RuntimePairingRecord = {
-        version: 1,
+      const record = createRecord({
         userId,
         credentialId,
         socketPath: handle.socketPath,
         expiresAt: handle.expiresAt,
         pairedAt: new Date().toISOString(),
-      };
+      });
       writeRuntimePairing(record);
 
       const previousSocket = existing?.socketPath;
@@ -311,16 +389,7 @@ export async function registerRuntimePairing(
   // owns its socket. Only a distinct candidate may be cleaned up after a
   // failed commit.
   if (handle.socketPath === existingBeforeCheck?.socketPath) throw registration.error;
-  const cleanup = await (async (): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: unknown }
-  > => {
-    try {
-      await cleanupRejectedRuntimeHandle(handle.socketPath, userId, credentialId);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error };
-    }
-  })();
+  const cleanup = await cleanupRejectedRuntimeHandleOutcome(handle.socketPath, userId, credentialId);
   if (!cleanup.ok) {
     throw new AggregateError(
       [registration.error, cleanup.error],
@@ -330,16 +399,182 @@ export async function registerRuntimePairing(
   throw registration.error;
 }
 
+export async function registerRuntimePairing(
+  userId: string,
+  credentialId: string,
+  handle: RuntimePairingHandle,
+): Promise<RuntimePairingRecordV1> {
+  return registerRuntimePairingRecord(
+    userId,
+    credentialId,
+    handle,
+    1,
+    (fields) => ({ version: 1, ...fields }),
+  );
+}
+
+function custodyBindingsEqual(
+  left: RuntimeCustodyBinding,
+  right: RuntimeCustodyBinding,
+): boolean {
+  return left.providerKind === right.providerKind
+    && left.environment === right.environment
+    && left.userId === right.userId
+    && left.opaqueHandle === right.opaqueHandle;
+}
+
+async function deleteNewCustodyBinding(
+  provider: RuntimeCustodyProvider,
+  binding: RuntimeCustodyBinding,
+): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: unknown }> {
+  try {
+    await deleteRuntimeCustody(provider, binding, {
+      environment: binding.environment,
+      userId: binding.userId,
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+/**
+ * Publish a version-2 runtime record only after the provider has sealed
+ * K_local. Existing v1 callers remain unchanged until a concrete provider is
+ * selected at the CLI composition root.
+ */
+export async function registerRuntimePairingWithCustody(
+  provider: RuntimeCustodyProvider,
+  environment: RuntimeCustodyEnvironment,
+  material: {
+    readonly userId: string;
+    readonly credentialId: string;
+    readonly kLocal: Uint8Array;
+  },
+  handle: RuntimePairingHandle,
+): Promise<RuntimePairingRecordV2> {
+  const existingBeforePreparation = readRuntimePairing();
+  const preparation = await (async () => {
+    const existing = assertRuntimePairingUser(material.userId);
+    if (
+      existing?.version === 2
+      && (
+        existing.custody.providerKind !== provider.kind
+        || existing.custody.environment !== environment
+      )
+    ) {
+      throw custodyCleanupRefusal(
+        'The existing runtime custody binding does not match the selected provider and environment.',
+      );
+    }
+    const binding = await sealRuntimeCustody(provider, {
+      environment,
+      userId: material.userId,
+      kLocal: material.kLocal,
+    });
+    const existingBinding = existing?.version === 2 ? existing.custody : null;
+    const reusesExistingBinding = existingBinding !== null && custodyBindingsEqual(existingBinding, binding);
+
+    if (existingBinding !== null && !reusesExistingBinding) {
+      const cleanup = await deleteNewCustodyBinding(provider, binding);
+      const refusal = custodyCleanupRefusal(
+        'The runtime custody provider changed the stable handle for an existing pairing.',
+      );
+      if (!cleanup.ok) {
+        throw new AggregateError(
+          [refusal, cleanup.error],
+          'Runtime custody refused a changed handle and could not delete the rejected provider entry.',
+        );
+      }
+      throw refusal;
+    }
+    return { binding, reusesExistingBinding };
+  })().then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+
+  if (!preparation.ok) {
+    if (handle.socketPath === existingBeforePreparation?.socketPath) throw preparation.error;
+    const cleanup = await cleanupRejectedRuntimeHandleOutcome(
+      handle.socketPath,
+      material.userId,
+      material.credentialId,
+    );
+    if (!cleanup.ok) {
+      throw new AggregateError(
+        [preparation.error, cleanup.error],
+        'Runtime custody preparation failed and its candidate key holder could not be cleaned up.',
+      );
+    }
+    throw preparation.error;
+  }
+
+  const { binding, reusesExistingBinding } = preparation.value;
+
+  const registration = await registerRuntimePairingRecord(
+    material.userId,
+    material.credentialId,
+    handle,
+    2,
+    (fields) => ({ version: 2, ...fields, custody: binding }),
+  ).then(
+    (record) => ({ ok: true as const, record }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  if (registration.ok) return registration.record;
+  if (reusesExistingBinding) throw registration.error;
+
+  const cleanup = await deleteNewCustodyBinding(provider, binding);
+  if (!cleanup.ok) {
+    throw new AggregateError(
+      [registration.error, cleanup.error],
+      'Runtime pairing registration failed and its new custody entry could not be deleted.',
+    );
+  }
+  throw registration.error;
+}
+
 /** Clear the metadata binding and stop its daemon best-effort. */
-export async function clearRuntimePairing(): Promise<boolean> {
-  const existing = readRuntimePairing();
+export async function clearRuntimePairing(options: {
+  readonly resolveCustodyProvider?: RuntimeCustodyProviderResolver;
+  readonly expectedEnvironment?: RuntimeCustodyEnvironment;
+  readonly removeMetadata?: (path: string) => void;
+} = {}): Promise<boolean> {
+  const state = readRuntimePairingState();
+  if (state.kind === 'invalid') {
+    throw custodyCleanupRefusal(
+      'The runtime pairing record is invalid; it was preserved so custody can be repaired safely.',
+    );
+  }
+  const existing = state.kind === 'valid' ? state.record : null;
   const path = getRuntimePairingPath();
   const existed = existsSync(path);
+  if (existing?.version === 2) {
+    if (options.expectedEnvironment !== existing.custody.environment) {
+      throw custodyCleanupRefusal(
+        'The runtime custody binding does not match this CLI environment; pairing metadata was preserved.',
+      );
+    }
+    const provider = options.resolveCustodyProvider?.(existing.custody.providerKind) ?? null;
+    if (!provider) {
+      throw custodyCleanupRefusal('The runtime custody provider is unavailable; pairing metadata was preserved.');
+    }
+    await deleteRuntimeCustody(provider, existing.custody, {
+      environment: existing.custody.environment,
+      userId: existing.userId,
+    });
+  }
   if (existing) await requestDaemonShutdown(existing.socketPath);
   try {
-    rmSync(path, { force: true });
-  } catch {
+    (options.removeMetadata ?? ((metadataPath) => rmSync(metadataPath, { force: true })))(path);
+  } catch (error) {
+    if (existing?.version === 2) throw error;
     return false;
   }
   return existed;
+}
+
+function custodyCleanupRefusal(message: string): CapyError {
+  return new CapyError(message, ERROR_CODES.PERMISSION_DENIED);
 }
