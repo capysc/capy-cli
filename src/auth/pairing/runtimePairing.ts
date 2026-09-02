@@ -157,6 +157,92 @@ function requestDaemonShutdown(socketPath: string): Promise<void> {
   });
 }
 
+const REJECTED_HANDLE_CLEANUP_TIMEOUT_MS = 2_000;
+
+function requestAcknowledgedDaemonShutdown(socketPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    const finish = (outcome: { readonly ok: true } | { readonly ok: false; readonly error: Error }): void => {
+      clearTimeout(timer);
+      socket.destroy();
+      if (outcome.ok) resolve();
+      else reject(outcome.error);
+    };
+    const timer = setTimeout(
+      () => finish({ ok: false, error: new Error(`Runtime key holder did not acknowledge shutdown: ${socketPath}`) }),
+      REJECTED_HANDLE_CLEANUP_TIMEOUT_MS,
+    );
+    timer.unref?.();
+    const readFrom = (buffer: string): void => {
+      socket.once('data', (chunk) => {
+        const next = buffer + chunk.toString('utf8');
+        const newline = next.indexOf('\n');
+        if (newline === -1) {
+          readFrom(next);
+          return;
+        }
+        const acknowledged = (() => {
+          try {
+            return (JSON.parse(next.slice(0, newline)) as Readonly<{ ok?: unknown }>).ok === true;
+          } catch {
+            return false;
+          }
+        })();
+        finish(acknowledged
+          ? { ok: true }
+          : { ok: false, error: new Error(`Runtime key holder returned an invalid shutdown response: ${socketPath}`) });
+      });
+    };
+    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
+    socket.once('error', (error) => finish({ ok: false, error }));
+    socket.once('end', () => finish({
+      ok: false,
+      error: new Error(`Runtime key holder closed without acknowledging shutdown: ${socketPath}`),
+    }));
+    readFrom('');
+  });
+}
+
+async function waitForExactSocketDisappearance(
+  socketPath: string,
+  deadline = Date.now() + REJECTED_HANDLE_CLEANUP_TIMEOUT_MS,
+): Promise<void> {
+  if (!existsSync(socketPath)) return;
+  if (Date.now() >= deadline) throw new Error(`Runtime key holder socket remained after shutdown: ${socketPath}`);
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  return waitForExactSocketDisappearance(socketPath, deadline);
+}
+
+async function cleanupRejectedRuntimeHandle(socketPath: string): Promise<void> {
+  const shutdown = await (async (): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: Error & { readonly code?: string } }
+  > => {
+    try {
+      await requestAcknowledgedDaemonShutdown(socketPath);
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: (error instanceof Error ? error : new Error(String(error))) as Error & { readonly code?: string },
+      };
+    }
+  })();
+  if (!shutdown.ok && shutdown.error.code !== 'ENOENT') throw shutdown.error;
+  await waitForExactSocketDisappearance(socketPath);
+}
+
+async function rejectedHandleOwnershipIsProven(
+  socketPath: string,
+  userId: string,
+  credentialId: string,
+): Promise<boolean> {
+  if (!existsSync(socketPath)) return true;
+  const verified = await import('../deviceKey/grantHolder')
+    .then(({ isGrantActiveFor }) => isGrantActiveFor(socketPath, userId, credentialId))
+    .catch(() => false);
+  return verified || !existsSync(socketPath);
+}
+
 /**
  * Commit a newly started daemon as this runtime's active pairing. Re-pairing
  * the same user replaces the old daemon; a different user is refused and the
@@ -166,65 +252,84 @@ export async function registerRuntimePairing(
   userId: string,
   credentialId: string,
   handle: RuntimePairingHandle,
-  opts: { readonly cleanupRejectedHandle?: boolean } = {},
 ): Promise<RuntimePairingRecord> {
-  const cleanupRejectedHandle = opts.cleanupRejectedHandle ?? true;
   const existingBeforeCheck = readRuntimePairing();
-  const existingOutcome = (() => {
+  const registration = await (async (): Promise<
+    { readonly ok: true; readonly record: RuntimePairingRecord }
+    | { readonly ok: false; readonly error: unknown }
+  > => {
     try {
-      return { ok: true as const, existing: assertRuntimePairingUser(userId) };
+      const existing = assertRuntimePairingUser(userId);
+      // Never trade a valid pair for an expired, dead, or foreign holder. The
+      // probe checks user + credential without asking the daemon to release
+      // K_local. This runs before the atomic metadata rename and before the old
+      // daemon receives shutdown, so every rejected replacement leaves the
+      // existing account binding and key holder untouched.
+      const replacement = existing !== null;
+      const candidateIsCurrent = handle.expiresAt === 0 || handle.expiresAt > Date.now();
+      const candidateMatches = !replacement || (candidateIsCurrent && await import('../deviceKey/grantHolder')
+        .then(({ isGrantActiveFor }) => isGrantActiveFor(handle.socketPath, userId, credentialId))
+        .catch(() => false));
+      if (!candidateMatches) {
+        throw new CapyError(
+          candidateIsCurrent
+            ? 'The replacement runtime key holder was unavailable or belonged to another pairing.'
+            : 'The replacement runtime key holder had already expired.',
+          candidateIsCurrent
+            ? ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND
+            : ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED,
+        );
+      }
+
+      const record: RuntimePairingRecord = {
+        version: 1,
+        userId,
+        credentialId,
+        socketPath: handle.socketPath,
+        expiresAt: handle.expiresAt,
+        pairedAt: new Date().toISOString(),
+      };
+      writeRuntimePairing(record);
+
+      const previousSocket = existing?.socketPath;
+      if (previousSocket && previousSocket !== handle.socketPath) {
+        await requestDaemonShutdown(previousSocket);
+      }
+      return { ok: true, record };
     } catch (error) {
-      return { ok: false as const, error };
+      return { ok: false, error };
     }
   })();
-  if (!existingOutcome.ok) {
-    // A hostile/stale caller can point at the already-valid socket. Never
-    // turn an identity refusal into a shutdown of the pair being protected.
-    if (cleanupRejectedHandle && handle.socketPath !== existingBeforeCheck?.socketPath) {
-      await requestDaemonShutdown(handle.socketPath);
-    }
-    throw existingOutcome.error;
-  }
+  if (registration.ok) return registration.record;
 
-  // Never trade a valid pair for an expired, dead, or foreign holder. The
-  // probe checks user + credential without asking the daemon to release
-  // K_local. This runs before the atomic metadata rename and before the old
-  // daemon receives shutdown, so every rejected replacement leaves the
-  // existing account binding and key holder untouched.
-  const replacement = existingOutcome.existing !== null;
-  const candidateIsCurrent = handle.expiresAt === 0 || handle.expiresAt > Date.now();
-  const candidateMatches = !replacement || (candidateIsCurrent && await import('../deviceKey/grantHolder')
-    .then(({ isGrantActiveFor }) => isGrantActiveFor(handle.socketPath, userId, credentialId))
-    .catch(() => false));
-  if (!candidateMatches) {
-    if (cleanupRejectedHandle && handle.socketPath !== existingOutcome.existing?.socketPath) {
-      await requestDaemonShutdown(handle.socketPath);
-    }
-    throw new CapyError(
-      candidateIsCurrent
-        ? 'The replacement runtime key holder was unavailable or belonged to another pairing.'
-        : 'The replacement runtime key holder had already expired.',
-      candidateIsCurrent
-        ? ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND
-        : ERROR_CODES.DEVICE_KEY_GRANT_EXPIRED,
+  // The existing record is protected state, never evidence that this caller
+  // owns its socket. Only a distinct candidate may be cleaned up after a
+  // failed commit.
+  if (handle.socketPath === existingBeforeCheck?.socketPath) throw registration.error;
+  const ownershipIsProven = await rejectedHandleOwnershipIsProven(handle.socketPath, userId, credentialId);
+  if (!ownershipIsProven) {
+    throw new AggregateError(
+      [registration.error, new Error(`Rejected runtime key holder ownership could not be proven: ${handle.socketPath}`)],
+      'Runtime pairing registration failed and its candidate key holder was not safe to clean up.',
     );
   }
-
-  const record: RuntimePairingRecord = {
-    version: 1,
-    userId,
-    credentialId,
-    socketPath: handle.socketPath,
-    expiresAt: handle.expiresAt,
-    pairedAt: new Date().toISOString(),
-  };
-  writeRuntimePairing(record);
-
-  const previousSocket = existingOutcome.existing?.socketPath;
-  if (previousSocket && previousSocket !== handle.socketPath) {
-    await requestDaemonShutdown(previousSocket);
+  const cleanup = await (async (): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly error: unknown }
+  > => {
+    try {
+      await cleanupRejectedRuntimeHandle(handle.socketPath);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  })();
+  if (!cleanup.ok) {
+    throw new AggregateError(
+      [registration.error, cleanup.error],
+      'Runtime pairing registration failed and its candidate key holder could not be cleaned up.',
+    );
   }
-  return record;
+  throw registration.error;
 }
 
 /** Clear the metadata binding and stop its daemon best-effort. */

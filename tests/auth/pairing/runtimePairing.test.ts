@@ -9,6 +9,7 @@ import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { spawn } from 'child_process';
+import { createServer } from 'net';
 
 const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-runtime-pairing-'));
 const tempCwd = mkdtempSync(join(require('os').tmpdir(), 'capy-runtime-pairing-cwd-'));
@@ -33,7 +34,6 @@ import {
   fetchGrantedKLocal,
   isGrantActive,
   listenGrantDaemonServer,
-  registerSpawnedRuntimePairing,
   spawnGrantDaemon,
 } from '../../../src/auth/deviceKey/grantHolder';
 import { installPairedSession } from '../../../src/auth/pairing/installPairedSession';
@@ -81,6 +81,47 @@ async function childResult(source: string, globalDirName = '.capy'): Promise<{
     : Promise.resolve('');
   const result = await Promise.all([status, stdout, stderr]);
   return { status: result[0], stdout: result[1], stderr: result[2] };
+}
+
+type ShutdownFixtureBehavior = 'ack-and-linger' | 'malformed' | 'missing-ack';
+
+async function startShutdownFixture(behavior: ShutdownFixtureBehavior): Promise<{
+  readonly socketPath: string;
+  readonly close: () => Promise<void>;
+}> {
+  const directory = mkdtempSync(join(require('os').tmpdir(), 'capy-runtime-shutdown-fixture-'));
+  const socketPath = join(directory, 'holder.sock');
+  const server = createServer((socket) => {
+    socket.once('data', (chunk) => {
+      const request = (() => {
+        try {
+          return JSON.parse(chunk.toString('utf8').trim()) as Readonly<{ op?: unknown }>;
+        } catch {
+          return null;
+        }
+      })();
+      if (request?.op === 'verify') {
+        socket.end(`${JSON.stringify({ ok: true })}\n`);
+        return;
+      }
+      if (behavior === 'ack-and-linger') socket.end(`${JSON.stringify({ ok: true })}\n`);
+      else if (behavior === 'malformed') socket.end('not-json\n');
+      else socket.end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, resolve);
+  });
+  return {
+    socketPath,
+    close: () => new Promise<void>((resolve) => {
+      server.close(() => {
+        rmSync(directory, { recursive: true, force: true });
+        resolve();
+      });
+    }),
+  };
 }
 
 describe('runtime pairing registry', () => {
@@ -144,10 +185,9 @@ describe('runtime pairing registry', () => {
       const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
       writeFileSync(`${getRuntimePairingPath()}.${process.pid}.tmp`, 'force EEXIST', { flag: 'wx', mode: 0o600 });
 
-      const failure = await registerSpawnedRuntimePairing(
-        { userId: USER_A, credentialId: candidateCredential },
-        { socketPath: candidate.socketPath, expiresAt: candidate.expiresAt, pid: process.pid },
-      ).then(() => null).catch((error: unknown) => error);
+      const failure = await registerRuntimePairing(USER_A, candidateCredential, candidate)
+        .then(() => null)
+        .catch((error: unknown) => error);
 
       expect(failure).toBeInstanceOf(Error);
       expect((failure as NodeJS.ErrnoException).code).toBe('EEXIST');
@@ -158,6 +198,116 @@ describe('runtime pairing registry', () => {
     } finally {
       existing.close();
       candidate.close();
+    }
+  });
+
+  test('ENOENT cleanup is accepted only after the exact rejected socket is proven absent', async () => {
+    const existing = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    await listenGrantDaemonServer(existing.server, existing.socketPath);
+    const absentSocketPath = join(tempHome, 'exact-rejected-holder.sock');
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
+      const failure = await registerRuntimePairing(USER_B, 'credential_runtime_absent', {
+        socketPath: absentSocketPath,
+        expiresAt: 0,
+      }).then(() => null).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(CapyError);
+      expect(failure).not.toBeInstanceOf(AggregateError);
+      expect((failure as CapyError).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+      expect(existsSync(absentSocketPath)).toBe(false);
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(existing.socketPath)).toBe(true);
+    } finally {
+      existing.close();
+    }
+  });
+
+  test('a protected existing socket is never treated as the rejected caller-owned holder', async () => {
+    const existing = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    await listenGrantDaemonServer(existing.server, existing.socketPath);
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
+      const failure = await registerRuntimePairing(USER_B, 'credential_runtime_alias', {
+        socketPath: existing.socketPath,
+        expiresAt: 0,
+      }).then(() => null).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(CapyError);
+      expect(failure).not.toBeInstanceOf(AggregateError);
+      expect((failure as CapyError).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(existing.socketPath)).toBe(true);
+    } finally {
+      existing.close();
+    }
+  });
+
+  test('an acknowledged shutdown that leaves its exact socket behind is a combined cleanup failure', async () => {
+    const existing = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    const lingering = await startShutdownFixture('ack-and-linger');
+    await listenGrantDaemonServer(existing.server, existing.socketPath);
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
+      const failure = await registerRuntimePairing(USER_B, 'credential_runtime_lingering', {
+        socketPath: lingering.socketPath,
+        expiresAt: 0,
+      }).then(() => null).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      const [registrationError, cleanupError] = (failure as AggregateError).errors;
+      expect(registrationError).toBeInstanceOf(CapyError);
+      expect((registrationError as CapyError).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+      expect(String(cleanupError)).toContain('socket remained after shutdown');
+      expect(existsSync(lingering.socketPath)).toBe(true);
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(existing.socketPath)).toBe(true);
+    } finally {
+      existing.close();
+      await lingering.close();
+    }
+  }, 10_000);
+
+  test('malformed or missing shutdown acknowledgement preserves the registration error first', async () => {
+    const existing = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    await listenGrantDaemonServer(existing.server, existing.socketPath);
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
+      for (const behavior of ['malformed', 'missing-ack'] as const) {
+        const candidate = await startShutdownFixture(behavior);
+        try {
+          const failure = await registerRuntimePairing(USER_B, `credential_runtime_${behavior}`, {
+            socketPath: candidate.socketPath,
+            expiresAt: 0,
+          }).then(() => null).catch((error: unknown) => error);
+
+          expect(failure).toBeInstanceOf(AggregateError);
+          const [registrationError, cleanupError] = (failure as AggregateError).errors;
+          expect(registrationError).toBeInstanceOf(CapyError);
+          expect((registrationError as CapyError).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+          expect(String(cleanupError)).toContain(
+            behavior === 'malformed' ? 'invalid shutdown response' : 'without acknowledging shutdown',
+          );
+          expect(readRuntimePairing()).toEqual(original);
+          expect(await isGrantActive(existing.socketPath)).toBe(true);
+        } finally {
+          await candidate.close();
+        }
+      }
+    } finally {
+      existing.close();
     }
   });
 
@@ -431,10 +581,13 @@ describe('runtime pairing registry', () => {
       const foreignHolder = await registerRuntimePairing(USER_A, CREDENTIAL_A, foreign)
         .then(() => null)
         .catch((error: unknown) => error);
-      expect(foreignHolder).toBeInstanceOf(CapyError);
-      expect((foreignHolder as CapyError).code).toBe(ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND);
+      expect(foreignHolder).toBeInstanceOf(AggregateError);
+      const [foreignRegistrationError, foreignOwnershipError] = (foreignHolder as AggregateError).errors;
+      expect(foreignRegistrationError).toBeInstanceOf(CapyError);
+      expect((foreignRegistrationError as CapyError).code).toBe(ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND);
+      expect(String(foreignOwnershipError)).toContain('ownership could not be proven');
       expect(readRuntimePairing()).toEqual(original);
-      expect(await isGrantActive(foreign.socketPath)).toBe(false);
+      expect(await isGrantActive(foreign.socketPath)).toBe(true);
       expect(await isGrantActive(valid.socketPath)).toBe(true);
 
       const expiredHolder = await registerRuntimePairing(USER_A, 'credential_runtime_expired', {

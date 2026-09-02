@@ -448,84 +448,25 @@ export function spawnGrantDaemon(
   });
 
   if (!opts.persistRuntimePairing) return launch;
-  return launch.then((handle) => registerSpawnedRuntimePairing(material, handle));
-}
-
-function requestAcknowledgedGrantShutdown(socketPath: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
-    const finish = (outcome: { readonly ok: true } | { readonly ok: false; readonly error: Error }): void => {
-      clearTimeout(timer);
-      socket.destroy();
-      if (outcome.ok) resolve();
-      else reject(outcome.error);
-    };
-    const timer = setTimeout(
-      () => finish({ ok: false, error: new Error(`Grant daemon did not acknowledge shutdown: ${socketPath}`) }),
-      REQUEST_TIMEOUT_MS,
-    );
-    timer.unref?.();
-    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
-    socket.once('error', (error) => finish({ ok: false, error }));
-    void readOneLine(socket).then((line) => {
-      const acknowledged = (() => {
-        try {
-          return (JSON.parse(line) as Readonly<{ ok?: unknown }>).ok === true;
-        } catch {
-          return false;
-        }
-      })();
-      finish(acknowledged
-        ? { ok: true }
-        : { ok: false, error: new Error(`Grant daemon returned an invalid shutdown response: ${socketPath}`) });
-    }).catch((error: unknown) => finish({
-      ok: false,
-      error: error instanceof Error ? error : new Error(String(error)),
-    }));
-  });
+  return launch.then((handle) => commitSpawnedRuntimePairing(material, handle));
 }
 
 /**
  * Transfer ownership of one successfully launched daemon to the runtime
- * registry. Until the metadata commit succeeds, this function owns that
- * exact handle. Any registration failure therefore requires an acknowledged
- * shutdown before the failure reaches the caller; an existing registered
- * holder is never selected or searched for cleanup.
+ * registry. The registry transaction owns this exact candidate until its
+ * metadata commit succeeds and performs verified, acknowledged cleanup on
+ * rejection; protected existing holders are outside that ownership boundary.
  */
-export async function registerSpawnedRuntimePairing(
+async function commitSpawnedRuntimePairing(
   material: { readonly userId: string; readonly credentialId: string },
   handle: GrantDaemonHandle,
 ): Promise<GrantDaemonHandle> {
-  const registration = await (async (): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: unknown }
-  > => {
-    try {
-      const { registerRuntimePairing } = await import('../pairing/runtimePairing');
-      await registerRuntimePairing(material.userId, material.credentialId, handle, { cleanupRejectedHandle: false });
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error };
-    }
-  })();
-  if (registration.ok) return handle;
-
-  const shutdown = await (async (): Promise<
-    { readonly ok: true } | { readonly ok: false; readonly error: unknown }
-  > => {
-    try {
-      await requestAcknowledgedGrantShutdown(handle.socketPath);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error };
-    }
-  })();
-  if (!shutdown.ok) {
-    throw new AggregateError(
-      [registration.error, shutdown.error],
-      'Runtime pairing registration failed and its new grant daemon could not be shut down.',
-    );
-  }
-  throw registration.error;
+  const { registerRuntimePairing } = await import('../pairing/runtimePairing');
+  // The registry transaction owns this distinct candidate until its metadata
+  // commit succeeds. On any rejection it acknowledges shutdown and proves
+  // exact-path disappearance before surfacing the original failure.
+  await registerRuntimePairing(material.userId, material.credentialId, handle);
+  return handle;
 }
 
 // --- Client: talk to an already-running daemon ------------------------------
