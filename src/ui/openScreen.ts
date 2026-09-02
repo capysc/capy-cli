@@ -299,8 +299,10 @@ export interface PlanOptions {
  * Decide, without doing anything.
  *
  * Precedence, and each step exists because of a way this can go wrong:
- *  1. `CAPY_WEB_NO_OPEN` — nothing opens. The test suite and every CI run set
- *     this, and it is the backstop that keeps a suite from launching the
+ *  1. `CAPY_WEB_NO_OPEN` or `NODE_ENV=test` — nothing opens. The suite wrapper
+ *     sets the explicit Capy flag; Bun supplies the standard test environment
+ *     even for a focused `bun test <file>` run that bypasses that wrapper.
+ *     Together they keep both full and focused suites from launching the
  *     developer's browser.
  *  2. `CAPY_WEB_WINDOW=tab` — an escape hatch for anyone who wants the address
  *     bar back, without having to know why we took it away.
@@ -310,7 +312,7 @@ export interface PlanOptions {
  */
 export function planOpen(url: string, opts: PlanOptions): OpenPlan {
   const env = opts.env ?? process.env;
-  if (env.CAPY_WEB_NO_OPEN) return { via: 'suppressed' };
+  if (env.CAPY_WEB_NO_OPEN || env.NODE_ENV === 'test') return { via: 'suppressed' };
   if (env.CAPY_WEB_WINDOW === 'tab') return { via: 'default-browser' };
   if (opts.kind === 'handoff') return { via: 'default-browser' };
 

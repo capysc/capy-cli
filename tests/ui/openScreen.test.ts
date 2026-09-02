@@ -62,6 +62,14 @@ describe('which window a screen opens in', () => {
     }
   });
 
+  test('NODE_ENV=test suppresses every kind in a focused Bun test', () => {
+    for (const kind of ['dialog', 'handoff'] as const) {
+      expect(planOpen(URL, { kind, browser: CHROME, env: env({ NODE_ENV: 'test' }) }).via).toBe(
+        'suppressed',
+      );
+    }
+  });
+
   test('CAPY_WEB_WINDOW=tab gives the address bar back without an argument', () => {
     expect(
       planOpen(URL, { kind: 'dialog', browser: CHROME, env: env({ CAPY_WEB_WINDOW: 'tab' }) }).via,
