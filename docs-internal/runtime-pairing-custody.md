@@ -1,6 +1,8 @@
 # Runtime pairing custody boundary
 
-Status: CAP-628 provider-neutral v2 foundation; no provider selected, 2026-09-02.
+Status: CAP-628 provider-neutral v2 foundation plus an inactive Development
+macOS adapter; no provider selected or wired and no real-Keychain evidence,
+2026-09-02.
 
 ## Implemented boundary
 
@@ -51,8 +53,11 @@ This slice survives CLI, MCP, agent, and subagent process restarts while the
 runtime and daemon remain alive. Unlike temporary `device-key grant` custody,
 `capy pair` has no 30-minute wall-clock expiry: it ends on logout, protected
 home wipe, daemon death, or runtime shutdown. It does not survive a host reboot
-or a daemon crash. The current repository has no packageable secure-at-rest
-primitive that can close that gap:
+or a daemon crash. The repository now contains an inactive macOS Development
+candidate that talks to the system Keychain through `/usr/bin/security`'s
+interactive stdin mode. It has not run against a real Keychain, been composed
+into the CLI, or passed a packaged-process/reboot gate, so it does not close
+that gap yet:
 
 - writing `K_local` to an ordinary 0600 file is explicitly prohibited;
 - wrapping it with a key stored beside the ciphertext is equivalent to writing
@@ -62,6 +67,20 @@ primitive that can close that gap:
   not zero-trust;
 - the prior OS-keychain implementation used `@napi-rs/keyring` and was removed
   because native addons broke the standalone binary release pipeline.
+
+The replacement candidate has no native addon. Its process argv is fixed to
+`/usr/bin/security -i -q -p ''`; commands and sealed material enter only over
+a parent-owned stdin pipe, and unsealed material returns only over a bounded,
+captured stdout pipe that is never inherited by the terminal or included in
+logs or errors. Find, add, and delete all name the same validated absolute
+login-Keychain path captured when the provider is constructed; they never
+depend on the user's mutable Keychain search list. Every complete stdin line is
+rejected before executor I/O unless it is below the macOS interactive parser's
+4096-byte boundary, including envelope expansion caused by worst-case JSON
+escaping. One Development-only generic-password item binds the explicit
+environment, user, stable opaque handle, and 32-byte key. Importing or
+constructing the adapter does not touch Keychain. Its tests model multiple
+Keychains and changing search order through a fake executor only.
 
 Neither the process-durable registry nor the inactive v2 foundation is
 represented as full CAP-628 completion.
@@ -113,9 +132,11 @@ record, provider wipe, changed lease, invalid key result, or metadata race
 fails closed without inventing custody or falling back to disk.
 
 Process-memory fakes pin the registration, recovery, refusal, race, and rollback
-semantics. This remains an inactive architecture slice: no concrete provider
-or authoritative environment selector is wired into `capy pair` or downstream
-key consumers, and no reboot or packaged-binary claim is made.
+semantics. A dependency-injected macOS Development adapter additionally pins
+its command transport and item semantics without invoking Keychain. This
+remains an inactive architecture slice: no provider or authoritative
+environment selector is wired into `capy pair` or downstream key consumers,
+and no real-Keychain, reboot, or packaged-binary claim is made.
 
 Security requirements:
 
@@ -123,8 +144,10 @@ Security requirements:
    outside the workspace and outside the Capy service.
 2. The provider binds a sealed value to the environment and user ID and refuses
    cross-user or cross-environment unseal.
-3. `K_local` never appears in argv, environment variables, stdout/stderr,
-   logs, chat, or service/Keep plaintext.
+3. `K_local` never appears in argv, environment variables, user-visible or
+   inherited stdout/stderr, logs, chat, or service/Keep plaintext. A provider
+   may return it through a bounded parent-owned IPC pipe that is never logged
+   or forwarded.
 4. A standalone packaged binary can load the provider without unpackaged
    native addons, or the runtime/orchestrator exposes it through a protected
    inherited descriptor or authenticated local socket.
@@ -142,9 +165,13 @@ process-bound daemon can be reconstructed after reboot without a new ceremony.
 
 ## Minimal implementation plan
 
-1. Select one secure provider for the development host. It must keep its
-   unsealing secret outside ordinary Capy/workspace storage and accept key
-   material through a protected IPC channel, never argv or environment.
+1. **Candidate implemented, not selected or wired:** the macOS Development
+   adapter keeps its item in one explicit user login Keychain and accepts key
+   material only through bounded interactive stdin. The default path is
+   derived once from the current user's home and can be dependency-injected by
+   future composition without a search-list lookup. Real-Keychain path,
+   quoting, ACL/prompt behavior, locked-Keychain behavior, and machine-local
+   access semantics still require proof before selection.
 2. Run the provider contract from a fresh packaged `capy-dev` process. Add
    provider wipe, tamper, wrong-user, wrong-environment, and host-restart
    evidence. A process-memory fake is not evidence for this gate.
