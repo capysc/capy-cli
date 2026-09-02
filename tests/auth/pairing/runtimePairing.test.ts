@@ -83,7 +83,7 @@ async function childResult(source: string, globalDirName = '.capy'): Promise<{
   return { status: result[0], stdout: result[1], stderr: result[2] };
 }
 
-type ShutdownFixtureBehavior = 'ack-and-linger' | 'malformed' | 'missing-ack';
+type ShutdownFixtureBehavior = 'ack-and-linger' | 'malformed' | 'missing-ack' | 'split-ack';
 
 async function startShutdownFixture(behavior: ShutdownFixtureBehavior): Promise<{
   readonly socketPath: string;
@@ -105,6 +105,14 @@ async function startShutdownFixture(behavior: ShutdownFixtureBehavior): Promise<
         return;
       }
       if (behavior === 'ack-and-linger') socket.end(`${JSON.stringify({ ok: true })}\n`);
+      else if (behavior === 'split-ack') {
+        socket.write('{"ok":');
+        setTimeout(() => {
+          socket.end('true}\n');
+          server.close();
+          rmSync(socketPath, { force: true });
+        }, 10);
+      }
       else if (behavior === 'malformed') socket.end('not-json\n');
       else socket.end();
     });
@@ -115,13 +123,67 @@ async function startShutdownFixture(behavior: ShutdownFixtureBehavior): Promise<
   });
   return {
     socketPath,
-    close: () => new Promise<void>((resolve) => {
-      server.close(() => {
+    close: () => server.listening
+      ? new Promise<void>((resolve) => {
+        server.close(() => {
+          rmSync(directory, { recursive: true, force: true });
+          resolve();
+        });
+      })
+      : Promise.resolve().then(() => {
         rmSync(directory, { recursive: true, force: true });
-        resolve();
-      });
-    }),
+      }),
   };
+}
+
+async function startRebindingShutdownFixture(): Promise<{
+  readonly socketPath: string;
+  readonly rebound: Promise<{
+    readonly requestObserved: Promise<void>;
+    readonly close: () => Promise<void>;
+  }>;
+}> {
+  const directory = mkdtempSync(join(require('os').tmpdir(), 'capy-runtime-rebind-fixture-'));
+  const socketPath = join(directory, 'holder.sock');
+  return new Promise((resolveStarted, rejectStarted) => {
+    const rebound = new Promise<{
+      readonly requestObserved: Promise<void>;
+      readonly close: () => Promise<void>;
+    }>((resolveRebound) => {
+      const original = createServer((socket) => {
+        socket.once('data', () => {
+          socket.end(`${JSON.stringify({ ok: false, code: 'NOT_OWNED' })}\n`);
+          original.close(() => {
+            const replacementStarted = new Promise<{
+              readonly requestObserved: Promise<void>;
+              readonly close: () => Promise<void>;
+            }>((resolveReplacement) => {
+              const requestObserved = new Promise<void>((resolveRequest) => {
+                const replacement = createServer((replacementSocket) => {
+                  replacementSocket.once('data', () => {
+                    resolveRequest();
+                    replacementSocket.end(`${JSON.stringify({ ok: true })}\n`);
+                  });
+                });
+                replacement.listen(socketPath, () => resolveReplacement({
+                  requestObserved,
+                  close: () => new Promise<void>((resolveClose) => {
+                    replacement.close(() => {
+                      rmSync(directory, { recursive: true, force: true });
+                      resolveClose();
+                    });
+                  }),
+                }));
+              });
+            });
+            void replacementStarted.then(resolveRebound);
+          });
+        });
+      });
+      original.once('error', rejectStarted);
+      original.listen(socketPath, () => resolveStarted({ socketPath, rebound }));
+    });
+  });
 }
 
 describe('runtime pairing registry', () => {
@@ -249,6 +311,42 @@ describe('runtime pairing registry', () => {
     }
   });
 
+  test('a rejected socket rebound to an unrelated holder is never reopened for shutdown', async () => {
+    const existing = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    const candidate = await startRebindingShutdownFixture();
+    await listenGrantDaemonServer(existing.server, existing.socketPath);
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
+      const failure = await registerRuntimePairing(USER_B, 'credential_runtime_rebound', {
+        socketPath: candidate.socketPath,
+        expiresAt: 0,
+      }).then(() => null).catch((error: unknown) => error);
+      const rebound = await candidate.rebound;
+      try {
+        expect(failure).toBeInstanceOf(AggregateError);
+        const [registrationError, cleanupError] = (failure as AggregateError).errors;
+        expect(registrationError).toBeInstanceOf(CapyError);
+        expect((registrationError as CapyError).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+        expect(String(cleanupError)).toContain('did not confirm cleanup ownership');
+        const replacementWasUntouched = await Promise.race([
+          rebound.requestObserved.then(() => false),
+          Bun.sleep(100).then(() => true),
+        ]);
+        expect(replacementWasUntouched).toBe(true);
+        expect(existsSync(candidate.socketPath)).toBe(true);
+        expect(readRuntimePairing()).toEqual(original);
+        expect(await isGrantActive(existing.socketPath)).toBe(true);
+      } finally {
+        await rebound.close();
+      }
+    } finally {
+      existing.close();
+    }
+  });
+
   test('an acknowledged shutdown that leaves its exact socket behind is a combined cleanup failure', async () => {
     const existing = createGrantDaemonServer(
       { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
@@ -308,6 +406,32 @@ describe('runtime pairing registry', () => {
       }
     } finally {
       existing.close();
+    }
+  });
+
+  test('a newline acknowledgement split across socket chunks still completes exact cleanup', async () => {
+    const existing = createGrantDaemonServer(
+      { userId: USER_A, credentialId: CREDENTIAL_A, kLocal: K_LOCAL },
+      null,
+    );
+    const candidate = await startShutdownFixture('split-ack');
+    await listenGrantDaemonServer(existing.server, existing.socketPath);
+    try {
+      const original = await registerRuntimePairing(USER_A, CREDENTIAL_A, existing);
+      const failure = await registerRuntimePairing(USER_B, 'credential_runtime_split_ack', {
+        socketPath: candidate.socketPath,
+        expiresAt: 0,
+      }).then(() => null).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(CapyError);
+      expect(failure).not.toBeInstanceOf(AggregateError);
+      expect((failure as CapyError).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+      expect(existsSync(candidate.socketPath)).toBe(false);
+      expect(readRuntimePairing()).toEqual(original);
+      expect(await isGrantActive(existing.socketPath)).toBe(true);
+    } finally {
+      existing.close();
+      await candidate.close();
     }
   });
 
@@ -585,7 +709,7 @@ describe('runtime pairing registry', () => {
       const [foreignRegistrationError, foreignOwnershipError] = (foreignHolder as AggregateError).errors;
       expect(foreignRegistrationError).toBeInstanceOf(CapyError);
       expect((foreignRegistrationError as CapyError).code).toBe(ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND);
-      expect(String(foreignOwnershipError)).toContain('ownership could not be proven');
+      expect(String(foreignOwnershipError)).toContain('did not confirm cleanup ownership');
       expect(readRuntimePairing()).toEqual(original);
       expect(await isGrantActive(foreign.socketPath)).toBe(true);
       expect(await isGrantActive(valid.socketPath)).toBe(true);

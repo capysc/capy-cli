@@ -159,7 +159,11 @@ function requestDaemonShutdown(socketPath: string): Promise<void> {
 
 const REJECTED_HANDLE_CLEANUP_TIMEOUT_MS = 2_000;
 
-function requestAcknowledgedDaemonShutdown(socketPath: string): Promise<void> {
+function requestAcknowledgedDaemonShutdown(
+  socketPath: string,
+  userId: string,
+  credentialId: string,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     const finish = (outcome: { readonly ok: true } | { readonly ok: false; readonly error: Error }): void => {
@@ -181,19 +185,28 @@ function requestAcknowledgedDaemonShutdown(socketPath: string): Promise<void> {
           readFrom(next);
           return;
         }
-        const acknowledged = (() => {
+        const response = (() => {
           try {
-            return (JSON.parse(next.slice(0, newline)) as Readonly<{ ok?: unknown }>).ok === true;
+            return JSON.parse(next.slice(0, newline)) as Readonly<{ ok?: unknown }>;
           } catch {
-            return false;
+            return null;
           }
         })();
-        finish(acknowledged
+        finish(response?.ok === true
           ? { ok: true }
-          : { ok: false, error: new Error(`Runtime key holder returned an invalid shutdown response: ${socketPath}`) });
+          : {
+              ok: false,
+              error: new Error(response
+                ? `Runtime key holder did not confirm cleanup ownership: ${socketPath}`
+                : `Runtime key holder returned an invalid shutdown response: ${socketPath}`),
+            });
       });
     };
-    socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'shutdown' })}\n`));
+    socket.once('connect', () => socket.write(`${JSON.stringify({
+      op: 'verify_shutdown',
+      userId,
+      credentialId,
+    })}\n`));
     socket.once('error', (error) => finish({ ok: false, error }));
     socket.once('end', () => finish({
       ok: false,
@@ -213,12 +226,16 @@ async function waitForExactSocketDisappearance(
   return waitForExactSocketDisappearance(socketPath, deadline);
 }
 
-async function cleanupRejectedRuntimeHandle(socketPath: string): Promise<void> {
+async function cleanupRejectedRuntimeHandle(
+  socketPath: string,
+  userId: string,
+  credentialId: string,
+): Promise<void> {
   const shutdown = await (async (): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: Error & { readonly code?: string } }
   > => {
     try {
-      await requestAcknowledgedDaemonShutdown(socketPath);
+      await requestAcknowledgedDaemonShutdown(socketPath, userId, credentialId);
       return { ok: true };
     } catch (error) {
       return {
@@ -229,18 +246,6 @@ async function cleanupRejectedRuntimeHandle(socketPath: string): Promise<void> {
   })();
   if (!shutdown.ok && shutdown.error.code !== 'ENOENT') throw shutdown.error;
   await waitForExactSocketDisappearance(socketPath);
-}
-
-async function rejectedHandleOwnershipIsProven(
-  socketPath: string,
-  userId: string,
-  credentialId: string,
-): Promise<boolean> {
-  if (!existsSync(socketPath)) return true;
-  const verified = await import('../deviceKey/grantHolder')
-    .then(({ isGrantActiveFor }) => isGrantActiveFor(socketPath, userId, credentialId))
-    .catch(() => false);
-  return verified || !existsSync(socketPath);
 }
 
 /**
@@ -306,18 +311,11 @@ export async function registerRuntimePairing(
   // owns its socket. Only a distinct candidate may be cleaned up after a
   // failed commit.
   if (handle.socketPath === existingBeforeCheck?.socketPath) throw registration.error;
-  const ownershipIsProven = await rejectedHandleOwnershipIsProven(handle.socketPath, userId, credentialId);
-  if (!ownershipIsProven) {
-    throw new AggregateError(
-      [registration.error, new Error(`Rejected runtime key holder ownership could not be proven: ${handle.socketPath}`)],
-      'Runtime pairing registration failed and its candidate key holder was not safe to clean up.',
-    );
-  }
   const cleanup = await (async (): Promise<
     { readonly ok: true } | { readonly ok: false; readonly error: unknown }
   > => {
     try {
-      await cleanupRejectedRuntimeHandle(handle.socketPath);
+      await cleanupRejectedRuntimeHandle(handle.socketPath, userId, credentialId);
       return { ok: true };
     } catch (error) {
       return { ok: false, error };

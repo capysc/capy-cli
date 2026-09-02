@@ -127,6 +127,7 @@ type DaemonRequest =
   | { op: 'get'; userId?: string }
   | { op: 'ping' }
   | { op: 'verify'; userId?: string; credentialId?: string }
+  | { op: 'verify_shutdown'; userId?: string; credentialId?: string }
   | { op: 'shutdown' };
 
 function respond(socket: Socket, body: Record<string, unknown>): void {
@@ -210,6 +211,23 @@ export function createGrantDaemonServer(
           ok: matches,
           ...(matches ? {} : { code: ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND }),
         });
+        return;
+      }
+      if (req.op === 'verify_shutdown') {
+        const expired = held.expiresAt !== 0 && Date.now() >= held.expiresAt;
+        const matches = !expired
+          && !lifecycle.signal.aborted
+          && req.userId === held.userId
+          && req.credentialId === held.credentialId;
+        if (!matches) {
+          respond(socket, { ok: false, code: ERROR_CODES.DEVICE_KEY_GRANT_NOT_FOUND });
+          return;
+        }
+        // Identity proof and shutdown share this one connection. A pathname
+        // that disappears or is rebound cannot redirect a later cleanup
+        // connection to an unrelated holder.
+        respond(socket, { ok: true });
+        close();
         return;
       }
       if (req.op === 'shutdown') {
