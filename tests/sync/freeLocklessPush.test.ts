@@ -88,9 +88,9 @@ function dependencies(input: {
 }
 
 describe('free lockless destructive-push policy', () => {
-  test('warns only when explicit replacement removes multiple remote values', () => {
+  test('warns whenever explicit replacement would remove one or more remote values', () => {
     expect(planFreeLocklessPush(['A'], ['A', 'B'])).toMatchObject({
-      deletedRemoteVariableNames: ['B'], requiresDestructiveConfirmation: false,
+      deletedRemoteVariableNames: ['B'], requiresDestructiveConfirmation: true,
     });
     expect(planFreeLocklessPush(['A'], ['C', 'A', 'B'])).toEqual({
       localVariableNames: ['A'], remoteVariableNames: ['A', 'B', 'C'],
@@ -98,7 +98,16 @@ describe('free lockless destructive-push policy', () => {
     });
   });
 
-  test('declining a multi-delete warning performs no sync and exposes names, never values', async () => {
+  test('exactly one removed remote variable requires confirmation; zero removed does not', () => {
+    expect(planFreeLocklessPush(['A'], ['A'])).toMatchObject({
+      deletedRemoteVariableNames: [], requiresDestructiveConfirmation: false,
+    });
+    expect(planFreeLocklessPush(['A'], ['A', 'B'])).toMatchObject({
+      deletedRemoteVariableNames: ['B'], requiresDestructiveConfirmation: true,
+    });
+  });
+
+  test('declining a delete warning performs no sync and exposes names, never values', async () => {
     const { deps, syncSnapshot, confirmDestructivePush } = dependencies();
     const outcome = await tryFreeLocklessPush(deps)
       .then(() => ({ ok: true as const }))
@@ -125,11 +134,26 @@ describe('free lockless destructive-push policy', () => {
     expect(result.backupPlaintextEnv).toHaveBeenCalledWith(undefined, true);
   });
 
-  test('a one-value removal delegates without invoking the multi-delete gate', async () => {
-    const result = dependencies({ local: { KEEP_ME: 'new-local-value', DELETE_A: 'kept-local-value' } });
+  test('a one-value removal now requires confirmation before it delegates to the sync corpus', async () => {
+    const result = dependencies({
+      local: { KEEP_ME: 'new-local-value', DELETE_A: 'kept-local-value' },
+      confirm: true,
+    });
     expect(await tryFreeLocklessPush(result.deps)).toEqual({ handled: true });
-    expect(result.confirmDestructivePush).not.toHaveBeenCalled();
+    expect(result.confirmDestructivePush).toHaveBeenCalledTimes(1);
     expect(result.syncSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  test('declining a one-value removal performs no sync', async () => {
+    const result = dependencies({
+      local: { KEEP_ME: 'new-local-value', DELETE_A: 'kept-local-value' },
+      confirm: false,
+    });
+    await expect(tryFreeLocklessPush(result.deps)).rejects.toMatchObject({
+      code: ERROR_CODES.SYNC_CONFLICT,
+      details: { names: ['DELETE_B'] },
+    });
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
   });
 
   test('a missing remote marker refuses before the canonical write corpus', async () => {

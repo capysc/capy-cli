@@ -34,9 +34,11 @@ function sorted(values: readonly string[]): readonly string[] {
 }
 
 /**
- * Explicit free push replaces the remote development snapshot. The initial
- * product contract warns only when that replacement removes multiple values;
- * per-value conflict resolution remains intentionally out of scope.
+ * Explicit free push replaces the remote development snapshot. There is no
+ * standalone delete-a-secret command in this CLI — removal only ever
+ * happens through an edit or a push — so the product contract warns
+ * whenever that replacement would remove one or more remote values.
+ * Per-value conflict resolution remains intentionally out of scope.
  */
 export function planFreeLocklessPush(
   localVariableNames: readonly string[],
@@ -48,7 +50,7 @@ export function planFreeLocklessPush(
     localVariableNames: sorted(localVariableNames),
     remoteVariableNames: sorted(remoteVariableNames),
     deletedRemoteVariableNames: sorted(deleted),
-    requiresDestructiveConfirmation: deleted.length > 1,
+    requiresDestructiveConfirmation: deleted.length >= 1,
   };
 }
 
