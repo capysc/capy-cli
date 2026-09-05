@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from 'fs';
 import { homedir } from 'os';
+import { randomUUID } from 'crypto';
 import { join } from 'path';
 
 // Resolved lazily so `capy-dev` can isolate its state at `~/.capy-dev/` by
@@ -172,7 +173,15 @@ export function readProjectKeyCache(
 }
 
 export function saveAuthSession(token: object, userId?: string): void {
-  writeSecureFile(getAuthSessionPath(userId), JSON.stringify(token, null, 2));
+  const path = getAuthSessionPath(userId);
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  try {
+    // Readers outside the refresh lock must see a complete old or new snapshot.
+    writeSecureFile(temporaryPath, JSON.stringify(token, null, 2));
+    renameSync(temporaryPath, path);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
 }
 
 export function readAuthSession(userId?: string): object | null {

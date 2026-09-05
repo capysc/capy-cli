@@ -1,6 +1,7 @@
 import { unlinkSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { lockSync, unlockSync } from 'proper-lockfile';
+import { createStore } from 'zustand/vanilla';
+import { withSessionLock } from './sessionLock';
 import { AuthResult, Organization, ServiceToken, SessionStore, CapyError, ERROR_CODES, SilentAuthFailureCode } from '../types/index';
 import { OAuthServer } from './oauthServer';
 import { saveAuthSession, readAuthSession, getAuthSessionPath, getGlobalCapyDir, consumeForceLoginMarker } from '../config/globalConfig';
@@ -8,8 +9,8 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
 
 export class HttpStatusError extends Error {
-  status: number;
-  body: any;
+  readonly status: number;
+  readonly body: any;
   constructor(message: string, status: number, body?: any) {
     super(message);
     this.name = 'HttpStatusError';
@@ -30,10 +31,10 @@ export class HttpStatusError extends Error {
 export type RefreshFailureReason = Exclude<SilentAuthFailureCode, 'no_session'>;
 
 export interface RefreshFailure {
-  reason: RefreshFailureReason;
-  status?: number;
+  readonly reason: RefreshFailureReason;
+  readonly status?: number;
   /** Server `error` body or transport error message. Never contains tokens. */
-  detail?: string;
+  readonly detail?: string;
 }
 
 function classifyRefreshFailure(error: any): RefreshFailure {
@@ -89,7 +90,7 @@ function resolveExpiresAt(expiresInSeconds: number): number {
   return Date.now() + ttl * 1000;
 }
 
-async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
+async function postJson<T>(url: string, body: Readonly<Record<string, unknown>>): Promise<T> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -103,13 +104,44 @@ async function postJson<T>(url: string, body: Record<string, unknown>): Promise<
   return res.json() as Promise<T>;
 }
 
+type AuthSession = Readonly<Omit<SessionStore, 'organizations' | 'sessions'>> & {
+  readonly organizations: readonly Readonly<Organization>[];
+  readonly sessions: Readonly<Record<string, Readonly<SessionStore['sessions'][string]>>>;
+};
+
+type AuthState = Readonly<{
+  sessionUserId: string | undefined;
+  session: AuthSession | null;
+  currentOrgId: string | null;
+  lastRefreshFailure: RefreshFailure | null;
+}>;
+
+function tokenOrgId(accessToken: string, organizations: readonly Organization[]): string | undefined {
+  try {
+    const payload = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64').toString());
+    return organizations.find(org => org.workos_org_id === payload.org_id)?.id;
+  } catch {
+    return undefined;
+  }
+}
+
 export class AuthService {
-  private serviceApiUrl: string;
-  private devMode: boolean;
-  private sessionUserId: string | undefined;
-  private session: SessionStore | null = null;
-  private currentOrgId: string | null = null;
-  private lastRefreshFailure: RefreshFailure | null = null;
+  private readonly serviceApiUrl: string;
+  private readonly devMode: boolean;
+  // The library owns the state reference; each transition replaces a snapshot.
+  // Session objects and their collections are never modified in place.
+  private readonly state = createStore<AuthState>(() => ({
+    sessionUserId: undefined, session: null, currentOrgId: null, lastRefreshFailure: null,
+  }));
+
+  private get sessionUserId() { return this.state.getState().sessionUserId; }
+  private get session() { return this.state.getState().session; }
+  private get currentOrgId() { return this.state.getState().currentOrgId; }
+  private get lastRefreshFailure() { return this.state.getState().lastRefreshFailure; }
+
+  private updateState(update: Partial<AuthState>): void {
+    this.state.setState(previous => ({ ...previous, ...update }), true);
+  }
 
   constructor(serviceApiUrl?: string, devMode: boolean = false, sessionUserId?: string) {
     this.devMode = devMode;
@@ -118,7 +150,7 @@ export class AuthService {
     // ignored CAPY_API_URL — capy-staging and byoc would authenticate against
     // prod (returning prod orgs) even though every other call hit the override.
     this.serviceApiUrl = serviceApiUrl || resolveActiveUrl(devMode);
-    this.sessionUserId = sessionUserId;
+    this.updateState({ sessionUserId });
     if (devMode) {
       // Suppress the dev diagnostic in local-only mode — no identity provider
       // is used there, so the server URL is irrelevant and misleading.
@@ -130,44 +162,16 @@ export class AuthService {
 
   setSessionUserId(userId: string): void {
     if (this.sessionUserId === userId) return;
-    this.sessionUserId = userId;
+    this.updateState({ sessionUserId: userId });
     this.loadSession(); // Reload from the user-scoped file
   }
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
-      // If we have a session and a specific org is requested, try to use/refresh it
-      if (this.session && organizationId) {
-        const orgSession = this.session.sessions[organizationId];
-        if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(organizationId, orgSession.access_token)) {
-          this.currentOrgId = organizationId;
-          return this.buildAuthResult('cached');
-        }
-        // Token missing, expired, or org mismatch — refresh into the correct org
-        if (this.session.refresh_token) {
-          const refreshed = await this.refreshForOrg(organizationId);
-          if (refreshed) {
-            return this.buildAuthResult('refreshed');
-          }
-        }
-      }
-
-      // If we have a session with no specific org requested, use any valid session
-      if (this.session && !organizationId) {
-        for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
-          if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
-            this.currentOrgId = orgId;
-            return this.buildAuthResult('cached');
-          }
-        }
-        // Try refreshing the first known org
-        if (this.session.refresh_token && this.session.organizations.length > 0) {
-          const firstOrg = this.session.organizations[0];
-          const refreshed = await this.refreshForOrg(firstOrg.id);
-          if (refreshed) {
-            return this.buildAuthResult('refreshed');
-          }
-        }
+      const silent = await this.authenticateSilent(organizationId);
+      if (silent.success) return silent;
+      if (silent.error_code !== 'no_session' && silent.error_code !== 'session_ended') {
+        return silent;
       }
 
       // Try password auth (E2E testing only — requires devMode + env vars)
@@ -189,11 +193,11 @@ export class AuthService {
    * Never triggers interactive OAuth — returns failure instead.
    */
   async authenticateSilent(organizationId?: string): Promise<AuthResult> {
-    this.lastRefreshFailure = null;
+    this.updateState({ lastRefreshFailure: null });
     if (this.session && organizationId) {
       const orgSession = this.session.sessions[organizationId];
       if (orgSession && orgSession.expires_at > Date.now() && this.validateTokenOrg(organizationId, orgSession.access_token)) {
-        this.currentOrgId = organizationId;
+        this.updateState({ currentOrgId: organizationId });
         return this.buildAuthResult('cached');
       }
       if (this.session.refresh_token) {
@@ -207,7 +211,7 @@ export class AuthService {
     if (this.session && !organizationId) {
       for (const [orgId, orgSession] of Object.entries(this.session.sessions)) {
         if (orgSession.expires_at > Date.now() && this.validateTokenOrg(orgId, orgSession.access_token)) {
-          this.currentOrgId = orgId;
+          this.updateState({ currentOrgId: orgId });
           return this.buildAuthResult('cached');
         }
       }
@@ -324,7 +328,7 @@ export class AuthService {
   ): Promise<AuthResult> {
     // Fresh auth = fresh session. Never carry over stale org tokens —
     // a leftover token for the wrong org is an access-control violation.
-    this.session = {
+    const session: AuthSession = {
       version: 2,
       user_id: user.id,
       user_email: user.email,
@@ -339,37 +343,21 @@ export class AuthService {
     // The JWT's org_id claim is the source of truth — always decode it to
     // resolve the org. The client-provided organizationId is only a fallback.
     if (token.access_token) {
-      let resolvedOrgId = '';
-
-      // Decode JWT to find which org the token is scoped to
-      try {
-        const payload = JSON.parse(
-          Buffer.from(token.access_token.split('.')[1], 'base64').toString()
-        );
-        if (payload.org_id) {
-          const match = organizations?.find(o => o.workos_org_id === payload.org_id);
-          if (match) resolvedOrgId = match.id;
-        }
-      } catch {
-        // JWT decode failed — fall through
-      }
-
-      // Fallbacks: explicit organizationId if in the org list, then single-org
-      if (!resolvedOrgId && organizationId) {
-        const orgExists = organizations?.find(o => o.id === organizationId);
-        if (orgExists) resolvedOrgId = organizationId;
-      }
-      if (!resolvedOrgId && organizations?.length === 1) {
-        resolvedOrgId = organizations[0].id;
-      }
-
-      if (resolvedOrgId) {
-        this.session.sessions[resolvedOrgId] = {
-          access_token: token.access_token,
-          expires_at: resolveExpiresAt(token.expires_in),
-        };
-        this.currentOrgId = resolvedOrgId;
-      }
+      const resolvedOrgId = tokenOrgId(token.access_token, organizations)
+        || organizations.find(org => org.id === organizationId)?.id
+        || (organizations.length === 1 ? organizations[0].id : '');
+      this.updateState({
+        session: {
+          ...session,
+          sessions: resolvedOrgId ? {
+            [resolvedOrgId]: {
+              access_token: token.access_token,
+              expires_at: resolveExpiresAt(token.expires_in),
+            },
+          } : {},
+        },
+        ...(resolvedOrgId ? { currentOrgId: resolvedOrgId } : {}),
+      });
 
       this.saveSession();
 
@@ -389,9 +377,10 @@ export class AuthService {
     }
 
     // No JWT yet — multi-org user. If a specific org was requested, refresh into it.
+    this.updateState({ session });
     this.saveSession();
 
-    if (organizationId && this.session.refresh_token) {
+    if (organizationId && session.refresh_token) {
       const refreshed = await this.refreshForOrg(organizationId);
       if (refreshed) {
         return this.buildAuthResult('refreshed');
@@ -427,20 +416,13 @@ export class AuthService {
     organizationId: string,
     userId?: string,
   ): Promise<AuthResult> {
-    // Bootstrap session if needed
-    if (!this.session) {
-      this.session = {
-        version: 2,
-        user_id: userId || '',
-        refresh_token: refreshToken,
-        organizations: [],
-        sessions: {},
-      };
-    } else {
-      this.session.refresh_token = refreshToken;
-    }
-
-    const success = await this.refreshForOrg(organizationId);
+    const session: AuthSession = this.session
+      ? { ...this.session, refresh_token: refreshToken }
+      : { version: 2, user_id: userId || '', refresh_token: refreshToken, organizations: [], sessions: {} };
+    this.updateState({ session });
+    // An explicitly supplied token comes from a new auth/org-selection flow.
+    // Do not replace it with a prior login's disk snapshot.
+    const success = await this.refreshForOrg(organizationId, true);
     if (success) {
       return this.buildAuthResult('refreshed');
     }
@@ -460,107 +442,78 @@ export class AuthService {
     return this.lastRefreshFailure;
   }
 
-  private async refreshForOrg(orgId: string): Promise<boolean> {
-    if (!this.session?.refresh_token) return false;
-    this.lastRefreshFailure = null;
-
-    const userId = this.sessionUserId || this.session.user_id;
+  private async refreshForOrg(orgId: string, useProvidedCredentials = false): Promise<boolean> {
+    const originalSession = this.session;
+    if (!originalSession?.refresh_token) return false;
+    this.updateState({ lastRefreshFailure: null });
+    const userId = this.sessionUserId || originalSession.user_id;
     const sessionPath = getAuthSessionPath(userId);
-    let release: (() => void) | null = null;
 
     try {
-      // Acquire file lock to prevent concurrent refresh races
-      try {
-        release = lockSync(sessionPath, { retries: { retries: 3, minTimeout: 100 } });
-      } catch {
-        // If locking fails (file doesn't exist yet, etc.), proceed without lock
-      }
-
-      // Re-read session from disk in case another process updated it
-      if (release) {
-        const freshSession = readAuthSession(userId) as SessionStore | null;
-        if (freshSession?.version === 2) {
-          // Check if another process already refreshed this org
-          const existing = freshSession.sessions[orgId];
-          if (existing && existing.expires_at > Date.now()) {
-            this.session = freshSession;
-            this.currentOrgId = orgId;
-            return true;
-          }
-          // Use the latest refresh token
-          this.session.refresh_token = freshSession.refresh_token;
+      return await withSessionLock(sessionPath, async () => {
+        // Read only after locking: another CLI may have rotated the token
+        // while this instance was idle or waiting for the lock.
+        const stored = useProvidedCredentials ? null : readAuthSession(userId) as SessionStore | null;
+        const session = stored?.version === 2 && stored.user_id === originalSession.user_id
+          ? stored : originalSession;
+        this.updateState({ session });
+        const existing = session.sessions[orgId];
+        if (!useProvidedCredentials && existing && existing.expires_at > Date.now()
+          && this.validateTokenOrg(orgId, existing.access_token)) {
+          this.updateState({ currentOrgId: orgId });
+          return true;
         }
-      }
 
-      const data = await postJson<{
-        access_token: string;
-        refresh_token: string;
-        expires_in: number;
-        user?: { id: string; email: string; first_name: string | null; last_name: string | null };
-        organization?: { id: string; workos_org_id: string; name: string };
-      }>(
-        `${this.serviceApiUrl}/auth/refresh`,
-        {
-          refresh_token: this.session.refresh_token,
+        const data = await postJson<{
+          access_token: string;
+          refresh_token: string;
+          expires_in: number;
+          user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+          organization?: Organization;
+        }>(`${this.serviceApiUrl}/auth/refresh`, {
+          refresh_token: session.refresh_token,
           organization_id: orgId,
-        },
-      );
-
-      // Resolve the actual org from the JWT — the caller may have passed a
-      // stale internal org ID but the token is scoped to the canonical one.
-      let resolvedOrgId = orgId;
-      try {
-        const payload = JSON.parse(
-          Buffer.from(data.access_token.split('.')[1], 'base64').toString()
-        );
-        if (payload.org_id) {
-          const match = this.session.organizations.find(o => o.workos_org_id === payload.org_id);
-          if (match) resolvedOrgId = match.id;
-        }
-      } catch {
-        // JWT decode failed — use the orgId as-is
-      }
-
-      // Add/update the session for this org. Other org sessions are preserved —
-      // the KMS co-decrypt endpoint is the security gate per-org, not the client.
-      this.session.sessions[resolvedOrgId] = {
-        access_token: data.access_token,
-        expires_at: resolveExpiresAt(data.expires_in),
-      };
-      this.session.refresh_token = data.refresh_token;
-
-      // If this org isn't in the organizations list yet (e.g. user was just
-      // invited and we refreshed into the new org), add it from the response.
-      if (!this.session.organizations.some(o => o.id === resolvedOrgId) && data.organization) {
-        this.session.organizations.push({
-          id: data.organization.id,
-          workos_org_id: data.organization.workos_org_id,
-          name: data.organization.name,
         });
-      }
 
-      if (data.user) {
-        this.session.user_id = data.user.id;
-        this.session.user_email = data.user.email;
-        this.session.user_first_name = data.user.first_name;
-        this.session.user_last_name = data.user.last_name;
-      }
-
-      this.currentOrgId = resolvedOrgId;
-      this.saveSession();
-      return true;
+        if (typeof data.access_token !== 'string' || !data.access_token
+          || typeof data.refresh_token !== 'string' || !data.refresh_token
+          || !Number.isFinite(data.expires_in) || data.expires_in <= 0) {
+          throw new HttpStatusError('Invalid token refresh response', 502);
+        }
+        const resolvedOrgId = tokenOrgId(data.access_token, session.organizations) || orgId;
+        const nextSession: AuthSession = {
+          ...session,
+          sessions: {
+            ...session.sessions,
+            [resolvedOrgId]: {
+              access_token: data.access_token,
+              expires_at: resolveExpiresAt(data.expires_in),
+            },
+          },
+          refresh_token: data.refresh_token,
+          organizations: !session.organizations.some(org => org.id === resolvedOrgId) && data.organization
+            ? [...session.organizations, data.organization] : session.organizations,
+          ...(data.user ? {
+            user_id: data.user.id,
+            user_email: data.user.email,
+            user_first_name: data.user.first_name,
+            user_last_name: data.user.last_name,
+          } : {}),
+        };
+        // Publish the cache only after persistence succeeds, under the lock.
+        // Otherwise a subsequent call could use an unsaved token as "cached".
+        saveAuthSession(nextSession, userId);
+        this.updateState({ session: nextSession, currentOrgId: resolvedOrgId });
+        return true;
+      });
     } catch (error: any) {
       const failure = classifyRefreshFailure(error);
-      this.lastRefreshFailure = failure;
+      this.updateState({ lastRefreshFailure: failure });
       debug(
         `[auth] token refresh failed for org ${orgId} (${failure.reason}` +
         `${failure.status ? `, HTTP ${failure.status}` : ''}): ${failure.detail || 'no detail'}`
       );
       return false;
-    } finally {
-      if (release) {
-        try { release(); } catch { /* ignore */ }
-      }
     }
   }
 
@@ -585,13 +538,21 @@ export class AuthService {
         );
         if (payload.org_id && payload.org_id !== org.workos_org_id) {
           // Token is for a different org — discard it.
-          delete this.session.sessions[this.currentOrgId];
+          this.updateState({ session: {
+            ...this.session,
+            sessions: Object.fromEntries(Object.entries(this.session.sessions)
+              .filter(([orgId]) => orgId !== this.currentOrgId)),
+          } });
           this.saveSession();
           return null;
         }
       } catch {
         // Can't decode token — treat as invalid
-        delete this.session.sessions[this.currentOrgId];
+        this.updateState({ session: {
+            ...this.session,
+            sessions: Object.fromEntries(Object.entries(this.session.sessions)
+              .filter(([orgId]) => orgId !== this.currentOrgId)),
+          } });
         this.saveSession();
         return null;
       }
@@ -606,7 +567,7 @@ export class AuthService {
       user_email: this.session.user_email,
       user_first_name: this.session.user_first_name,
       user_last_name: this.session.user_last_name,
-      organizations: this.session.organizations,
+      organizations: [...this.session.organizations],
     };
   }
 
@@ -645,58 +606,58 @@ export class AuthService {
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
-    let data: Organization & {
+    const create = async (): Promise<Organization & {
       access_token?: string;
       refresh_token?: string;
       expires_in?: number;
       user?: { id: string; email: string; first_name: string | null; last_name: string | null };
-    };
-    try {
-      data = await postJson(
-        `${this.serviceApiUrl}/auth/create-org`,
-        { name, refresh_token: refreshToken },
-      );
-    } catch (err: any) {
-      // Translate quota responses into a CapyError so renderError can show the
-      // upgrade screen — and so the createNewOrganization retry loop does not
-      // mistake a 402 for a name conflict (409) and keep re-prompting.
-      if (err instanceof HttpStatusError && err.status === 402 && err.body?.code === 'QUOTA_EXCEEDED') {
-        throw new CapyError(
-          err.body.error || 'Account quota exceeded',
-          ERROR_CODES.QUOTA_EXCEEDED,
-          { status: 402, kind: err.body.kind, limit: err.body.limit, upgrade_url: err.body.upgrade_url },
+    }> => {
+      try {
+        return await postJson(
+          `${this.serviceApiUrl}/auth/create-org`,
+          { name, refresh_token: refreshToken },
         );
+      } catch (err: any) {
+        // Translate quota responses into a CapyError so renderError can show the
+        // upgrade screen — and so the createNewOrganization retry loop does not
+        // mistake a 402 for a name conflict (409) and keep re-prompting.
+        if (err instanceof HttpStatusError && err.status === 402 && err.body?.code === 'QUOTA_EXCEEDED') {
+          throw new CapyError(
+            err.body.error || 'Account quota exceeded',
+            ERROR_CODES.QUOTA_EXCEEDED,
+            { status: 402, kind: err.body.kind, limit: err.body.limit, upgrade_url: err.body.upgrade_url },
+          );
+        }
+        throw err;
       }
-      throw err;
-    }
-
+    };
+    const data = await create();
     const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
 
-    if (!this.session) {
-      this.session = {
-        version: 2,
-        user_id: data.user?.id || userId,
-        user_email: data.user?.email,
-        user_first_name: data.user?.first_name,
-        user_last_name: data.user?.last_name,
-        refresh_token: data.refresh_token || refreshToken,
-        organizations: [newOrg],
-        sessions: {},
-      };
-    } else {
-      this.session.organizations = [...this.session.organizations, newOrg];
-      if (data.refresh_token) {
-        this.session.refresh_token = data.refresh_token;
-      }
-    }
-
-    if (data.access_token) {
-      this.session.sessions[data.id] = {
-        access_token: data.access_token,
-        expires_at: resolveExpiresAt(data.expires_in || 86400),
-      };
-      this.currentOrgId = data.id;
-    }
+    const session: AuthSession = this.session ? {
+      ...this.session,
+      organizations: [...this.session.organizations, newOrg],
+      refresh_token: data.refresh_token || this.session.refresh_token,
+    } : {
+      version: 2,
+      user_id: data.user?.id || userId,
+      user_email: data.user?.email,
+      user_first_name: data.user?.first_name,
+      user_last_name: data.user?.last_name,
+      refresh_token: data.refresh_token || refreshToken,
+      organizations: [newOrg],
+      sessions: {},
+    };
+    this.updateState({
+      session: data.access_token ? {
+        ...session,
+        sessions: { ...session.sessions, [data.id]: {
+          access_token: data.access_token,
+          expires_at: resolveExpiresAt(data.expires_in || 86400),
+        } },
+      } : session,
+      ...(data.access_token ? { currentOrgId: data.id } : {}),
+    });
 
     this.saveSession();
     return data;
@@ -704,8 +665,7 @@ export class AuthService {
 
   clearSession(): void {
     const userId = this.sessionUserId || this.session?.user_id;
-    this.session = null;
-    this.currentOrgId = null;
+    this.updateState({ session: null, currentOrgId: null });
     try {
       const sessionPath = getAuthSessionPath(userId);
       if (existsSync(sessionPath)) {
@@ -750,7 +710,7 @@ export class AuthService {
       user_email: this.session!.user_email,
       user_first_name: this.session!.user_first_name,
       user_last_name: this.session!.user_last_name,
-      organizations: this.session!.organizations,
+      organizations: [...this.session!.organizations],
       _auth_method: method,
     };
   }
@@ -762,12 +722,10 @@ export class AuthService {
         // Prune sessions for orgs not in the organizations list (stale/deleted).
         // Keep all sessions for known orgs — multi-org users need tokens for each.
         const knownOrgIds = new Set(data.organizations.map(o => o.id));
-        for (const key of Object.keys(data.sessions)) {
-          if (!knownOrgIds.has(key)) {
-            delete data.sessions[key];
-          }
-        }
-        this.session = data;
+        this.updateState({ session: {
+          ...data,
+          sessions: Object.fromEntries(Object.entries(data.sessions).filter(([key]) => knownOrgIds.has(key))),
+        } });
         return;
       }
     } catch {
@@ -792,8 +750,8 @@ export class AuthService {
             // old path, leaving a snapshot that disagrees with the
             // authoritative per-user file.
             if (data && data.version === 2 && data.user_id === userId) {
-              this.session = data;
-              this.sessionUserId = userId;
+              this.updateState({ session: data });
+              this.updateState({ sessionUserId: userId });
               return;
             }
           } catch {

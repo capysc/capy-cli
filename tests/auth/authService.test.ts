@@ -1,4 +1,4 @@
-import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll, jest } from 'bun:test';
+import { mock, spyOn, describe, test, expect, beforeEach, afterAll, jest } from 'bun:test';
 
 // Mock dependencies - must come BEFORE imports that use them
 mock.module('fs', () => ({
@@ -10,9 +10,8 @@ mock.module('fs', () => ({
   readdirSync: mock(() => []),
 }));
 
-mock.module('proper-lockfile', () => ({
-  lockSync: mock(() => undefined),
-  unlockSync: mock(() => undefined),
+mock.module('../../src/auth/sessionLock', () => ({
+  withSessionLock: async (_path: string, operation: () => Promise<unknown>) => operation(),
 }));
 
 const mockOAuthServerConstructor = mock(() => ({}));
@@ -24,6 +23,7 @@ const mockReadAuthSession = mock(() => null);
 const mockSaveAuthSession = mock(() => undefined);
 const mockGetAuthSessionPath = mock(() => '/home/test/.capy/auth/session.json');
 mock.module('../../src/config/globalConfig', () => ({
+  consumeForceLoginMarker: mock(() => false),
   readAuthSession: mockReadAuthSession,
   saveAuthSession: mockSaveAuthSession,
   getAuthSessionPath: mockGetAuthSessionPath,
@@ -51,7 +51,7 @@ const mockUnlinkSync = unlinkSync as any;
 
 // Mock global fetch
 const mockFetch = mock(() => Promise.resolve(new Response())) as any;
-global.fetch = mockFetch;
+spyOn(globalThis, 'fetch').mockImplementation(mockFetch);
 
 function mockFetchResponse(data: any, ok = true, status = 200) {
   return {
@@ -95,22 +95,19 @@ function makeSession(overrides: Partial<SessionStore> = {}): SessionStore {
   };
 }
 
-describe('AuthService', () => {
-  let originalEnv: NodeJS.ProcessEnv;
+mock.module('../../src/config/profileConfig', () => ({
+  resolveActiveUrl: () => 'https://api.capy.sc',
+}));
 
+describe('AuthService', () => {
   beforeEach(() => {
-    originalEnv = { ...process.env };
     jest.clearAllMocks();
-    delete process.env.CAPY_MOCK_AUTH;
-    delete process.env.CAPY_API_URL;
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(() => Promise.reject(new Error('Unexpected fetch')));
 
     mockGetAuthSessionPath.mockReturnValue('/home/test/.capy/auth/session.json');
     mockReadAuthSession.mockReturnValue(null);
     mockExistsSync.mockReturnValue(false);
-  });
-
-  afterEach(() => {
-    process.env = originalEnv;
   });
 
   describe('constructor', () => {
@@ -471,7 +468,7 @@ describe('AuthService', () => {
 
       const service = new AuthService(undefined, false, 'user-456');
       // Manually set currentOrgId to simulate post-authenticate state
-      (service as any).currentOrgId = 'org-123';
+      (service as any).updateState({ currentOrgId: 'org-123' });
 
       // getToken should detect the mismatch and return null
       expect(service.getToken()).toBeNull();
@@ -542,7 +539,7 @@ describe('AuthService', () => {
       (MockOAuthServer as any).mockImplementation(() => mockOAuthInstance);
 
       // Force OAuth by clearing session
-      (service as any).session = null;
+      (service as any).updateState({ session: null });
       const result = await service.authenticate('org-123');
       expect(result.success).toBe(true);
 
@@ -600,7 +597,7 @@ describe('AuthService', () => {
     test('authenticate with unknown org ID does NOT fall through to another org', async () => {
       // If keep.lock has an org ID that doesn't exist in the session,
       // authenticate must NOT silently use a different org's session.
-      // It should try refresh (fails), then fall to OAuth.
+      // A terminal refresh refusal may fall through to OAuth.
       const session: SessionStore = {
         version: 2,
         user_id: 'user-456',
@@ -616,9 +613,9 @@ describe('AuthService', () => {
       };
       mockReadAuthSession.mockReturnValue(session);
 
-      // Refresh for 'org-OLD' fails, OAuth mock returns success
+      // Refresh for 'org-OLD' is terminally refused, OAuth mock returns success
       mockFetch
-        .mockRejectedValueOnce(new Error('refresh failed'))
+        .mockResolvedValueOnce(mockFetchResponse({ error: 'Session ended' }, false, 401))
         .mockResolvedValueOnce(mockFetchResponse({ auth_url: 'https://workos.com/auth' }))
         .mockResolvedValueOnce(mockFetchResponse({
           token: { access_token: fakeJwt({ org_id: 'workos-org-OLD' }), refresh_token: 'new-refresh', expires_in: 3600 },
@@ -751,6 +748,23 @@ describe('AuthService', () => {
       expect(result.error).toBe('No valid session available');
       expect(result.error_code).toBe('no_session');
       expect(service.getLastRefreshFailure()).toBeNull();
+    });
+
+    test('a failed write does not report a successful refresh', async () => {
+      const original = expiredSession();
+      mockReadAuthSession.mockReturnValue(original);
+      mockFetch.mockResolvedValueOnce(mockFetchResponse({
+        access_token: fakeJwt({ org_id: 'workos-org-123' }),
+        refresh_token: 'rotated-refresh',
+        expires_in: 3600,
+      }));
+      mockSaveAuthSession.mockImplementationOnce(() => { throw new Error('Disk unavailable'); });
+      const service = new AuthService(undefined, false, 'user-456');
+      const result = await service.authenticate('org-123');
+      expect(result.success).toBe(false);
+      expect(MockOAuthServer).not.toHaveBeenCalled();
+      expect(original.refresh_token).toBe('test-refresh');
+      expect(original.sessions['org-123'].expires_at).toBeLessThan(Date.now());
     });
 
     test('successful refresh clears a previous failure record', async () => {
