@@ -24,13 +24,10 @@
  *     ceremony over it (`runGrantCeremony` against a `BrokerCeremonyTransport`)
  *     — the PRF still happens on the human's OWN device, reached through the
  *     broker; nothing WebAuthn-shaped is attempted on this headless box.
- *     K_local itself is still NEVER written to disk (this is a headless
- *     machine; the acceptance criterion is explicit that no
- *     recovery-equivalent material is ever displayed or persisted anywhere)
- *     — it is handed to the exact same in-memory grant daemon `capy
- *     device-key grant` already uses (`spawnGrantDaemon`). Pair additionally
- *     records a metadata-only socket pointer under the environment-specific
- *     Capy home, so later processes discover the live daemon automatically;
+ *     Approved key material uses the existing protected filesystem local.key
+ *     custody, with an explicit account/environment binding. The same grant
+ *     holder serves subsequent commands and can be restored after restart.
+ *     Logout removes the runtime binding, not the retained recovery files;
  *     exporting CAPY_DEVICE_KEY_GRANT_SOCKET remains a backwards-compatible
  *     override, not a requirement.
  *
@@ -65,7 +62,14 @@ import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR } from '../auth/deviceKey/grantH
 import { keepOrigin } from '../ui/screens/keepScreens';
 import { openScreen } from '../ui/openScreen';
 import { renderTerminalQr } from '../ui/terminalQr';
-import { readActiveRuntimePairing, type ActiveRuntimePairing } from '../auth/pairing/runtimePairing';
+import {
+  readActiveRuntimePairing,
+  readRuntimePairing,
+  recoverFilesystemRuntimePairingWhileLeaseHeld,
+  registerFilesystemRuntimePairing,
+  type ActiveRuntimePairing,
+} from '../auth/pairing/runtimePairing';
+import { runtimePairingEnvironment } from '../auth/pairing/runtimePairingEnvironment';
 import {
   acquirePairAttemptLease,
   releasePairAttemptLease,
@@ -92,7 +96,7 @@ const CEREMONY_FAILURE_MESSAGES: Record<string, string> = {
 };
 
 export interface PairCommandOptions {
-  json?: boolean;
+  readonly json?: boolean;
 }
 
 export type ActivePairingSessionOutcome =
@@ -153,6 +157,7 @@ export async function ensureActiveRuntimePairingSession(
 }
 
 export interface PairCommandDependencies {
+  readonly restorePairing?: (lease: PairAttemptLease) => Promise<void>;
   readonly readActivePairing?: () => Promise<ActiveRuntimePairing | null>;
   readonly ensureActiveSession?: (active: ActiveRuntimePairing) => Promise<ActivePairingSessionOutcome>;
   readonly acquirePairAttempt?: () => PairAttemptLease;
@@ -199,6 +204,21 @@ export class PairCommand {
     }
 
     try {
+      const restoration = await (async () => {
+        try {
+          await (this.dependencies.restorePairing ?? (async (lease) => {
+            const record = readRuntimePairing();
+            if (record?.version === 1 && record.filesystemCustody) {
+              await recoverFilesystemRuntimePairingWhileLeaseHeld({
+                expectedUserId: record.userId,
+                environment: runtimePairingEnvironment(this.devMode),
+              }, lease);
+            }
+          }))(acquired.lease);
+          return { ok: true as const };
+        } catch (error) { return { ok: false as const, error }; }
+      })();
+      if (!restoration.ok) return this.reportPairingFailure(restoration.error, options);
       // Serialize the active-session probe as well as the browser ceremony.
       // Refresh tokens may rotate, so two simultaneous `pair` commands must
       // not both refresh the same persisted token before reaching the lease.
@@ -220,6 +240,14 @@ export class PairCommand {
     } finally {
       (this.dependencies.releasePairAttempt ?? releasePairAttemptLease)(acquired.lease);
     }
+  }
+
+  private reportPairingFailure(error: unknown, options: PairCommandOptions): PairCommandExitCode {
+    return this.reportActiveSessionFailure({
+      kind: 'failed',
+      code: error instanceof CapyError ? error.code : ERROR_CODES.AUTH_FAILED,
+      detail: error instanceof Error ? error.message : 'Pairing could not be completed. Try again.',
+    }, options);
   }
 
   private async executeWithLease(
@@ -343,7 +371,7 @@ export class PairCommand {
         ? `  \x1b[32mSession refreshed; still paired as ${B(active.userEmail)}.\x1b[0m`
         : `  \x1b[32mAlready paired as ${B(active.userEmail)}.\x1b[0m`,
     );
-    console.log('  This runtime pair remains active while its protected key-holder process is running.');
+    console.log('  This device is ready to use Capy.');
     console.log('');
   }
 
@@ -533,7 +561,21 @@ export class PairCommand {
       return 1;
     }
 
-    const daemon = await spawnGrantDaemon(resolved.material, { ttlMs: null, persistRuntimePairing: true });
+    // This org is a custody storage location, not a repository attribution.
+    if (!authOrgId) {
+      throw new CapyError('Your account needs an organization before this device can be connected.', ERROR_CODES.AUTH_FAILED);
+    }
+    const persisted = await (async () => {
+      try {
+        const daemon = await spawnGrantDaemon(resolved.material, { ttlMs: null, persistRuntimePairing: false });
+        await registerFilesystemRuntimePairing(
+          runtimePairingEnvironment(this.devMode), authOrgId, resolved.material, daemon,
+        );
+        return { ok: true as const, daemon };
+      } catch (error) { return { ok: false as const, error }; }
+    })();
+    if (!persisted.ok) return this.reportPairingFailure(persisted.error, options);
+    const daemon = persisted.daemon;
 
     if (options.json) {
       console.log(
@@ -565,8 +607,8 @@ export class PairCommand {
     } else {
       console.log(`  Multiple organizations available — run ${B('capy org')} to pick one.`);
     }
-    console.log('  The device key remains in memory; later capy processes discover it automatically.');
-    console.log('  Logout, runtime shutdown, or loss of the key-holder process requires pairing again.');
+    console.log('  This device stays connected across restarts while its protected Capy files remain.');
+    console.log('  Run `capy logout` to disconnect it.');
     console.log('');
     return 0;
   }

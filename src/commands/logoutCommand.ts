@@ -74,6 +74,8 @@ export async function performLogoutCleanup(
   // Clear per-user session files
   const sessionsDir = join(globalCapyDir, 'auth', 'sessions');
   const userSessionsCleared = deleteDirectory(sessionsDir);
+  // Pending device grants and retry receipts are auth state, never pairing custody.
+  const authenticationFlowsCleared = deleteDirectory(join(globalCapyDir, 'auth', 'authentication-flows'));
 
   // Clear project key caches (orgs/<orgId>/users/<userId>/ survives — see above)
   const orgsDir = join(globalCapyDir, 'orgs');
@@ -95,6 +97,7 @@ export async function performLogoutCleanup(
     syncStateCleared,
     globalSessionCleared,
     userSessionsCleared,
+    authenticationFlowsCleared,
     projectCachesCleared,
     runtimePairingCleared,
   ].some(Boolean);

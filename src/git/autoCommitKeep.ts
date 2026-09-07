@@ -40,19 +40,19 @@ function git(projectRoot: string, args: string[]): string {
  *
  * Opt out with CAPY_NO_AUTOCOMMIT=1.
  */
-export function autoCommitKeep(branch: string, projectRoot: string = process.cwd()): AutoCommitResult {
+export function autoCommitKeep(branch: string, projectRoot: string = process.cwd(),
+  report: (message: string, warning: boolean) => void = (message, warning) => warning ? console.error(message) : console.log(message),
+): AutoCommitResult {
   if (process.env.CAPY_NO_AUTOCOMMIT === '1') {
     return { committed: false, reason: 'disabled' };
   }
 
-  let inRepo = false;
-  try {
-    inRepo = git(projectRoot, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
-  } catch {
-    inRepo = false;
-  }
+  const inRepo = (() => {
+    try { return git(projectRoot, ['rev-parse', '--is-inside-work-tree']).trim() === 'true'; }
+    catch { return false; }
+  })();
   if (!inRepo) {
-    warnUncommitted('not in a git repository');
+    warnUncommitted('not in a git repository', report);
     return { committed: false, reason: 'not_a_repo' };
   }
 
@@ -68,25 +68,25 @@ export function autoCommitKeep(branch: string, projectRoot: string = process.cwd
     const absGitDir = join(projectRoot, gitDir);
     for (const marker of ['rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD']) {
       if (existsSync(join(absGitDir, marker))) {
-        warnUncommitted('a rebase/merge is in progress');
+        warnUncommitted('a rebase/merge is in progress', report);
         return { committed: false, reason: 'in_progress_operation' };
       }
     }
 
     git(projectRoot, ['add', '--', 'keep.lock']);
     git(projectRoot, ['commit', '-m', `chore(capy): pin ${branch} secrets`, '--', 'keep.lock']);
-    console.log(`> keep.lock committed ${'\x1b[90m'}(chore(capy): pin ${branch} secrets)\x1b[0m`);
+    report(`> keep.lock committed ${'\x1b[90m'}(chore(capy): pin ${branch} secrets)\x1b[0m`, false);
     return { committed: true };
   } catch {
-    warnUncommitted('git commit failed');
+    warnUncommitted('git commit failed', report);
     return { committed: false, reason: 'commit_failed' };
   }
 }
 
-function warnUncommitted(cause: string): void {
-  console.error(
+function warnUncommitted(cause: string, report: (message: string, warning: boolean) => void): void {
+  report(
     `${YELLOW('⚠')} keep.lock updated but not committed (${cause}).\n` +
     `  Your team's pins won't include this change until it is committed.\n` +
-    `  Run: ${B('git add keep.lock && git commit')}`,
+    `  Run: ${B('git add keep.lock && git commit')}`, true,
   );
 }

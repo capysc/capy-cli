@@ -1,6 +1,8 @@
+import { existsSync } from 'fs';
 import { ProjectManager } from '../core/projectManager';
-import { KeepFile } from '../types/index';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { listAllVarsOnBranch, listManagedKeys, findManagedConnector } from './connectors/shared';
+import { createListMetadataDependencies, requireListIdentity, resolveListMetadata } from './listMetadata';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = '\x1b[90m';
@@ -10,52 +12,39 @@ const RESET = '\x1b[0m';
  * `capy list` — variable NAMES + connector metadata for the active branch.
  *
  * With a keep.lock present this reads it directly: no auth, no network, no
- * decryption, never emits values — unchanged from before single-user
- * lock-less mode existed. Without one (lock-less mode) there is no local
- * file to read from, so this falls back to `resolveContext()`, which does
- * need auth + network to fetch the server's latest keep.json for the
- * branch — still never decrypts or emits values, since KeepFile entries
- * only ever carry resource_id/value_hash.
+ * decryption, never emits values. Without a lock, silently authenticate and
+ * fetch the free default project's metadata; never resolve a key or decrypt.
+ * Hosted callers additionally require an exact matching session identity.
  */
 export class ListCommand {
   constructor(private readonly devMode: boolean = false) {}
 
-  async execute(opts: { json?: boolean } = {}): Promise<void> {
+  async execute(opts: { readonly json?: boolean; readonly expectedUserId?: string } = {}): Promise<void> {
     const pm = new ProjectManager();
-    const projectState = await pm.detectProjectState();
 
-    let keep: KeepFile;
-    let branch: string;
-    if (!projectState.initialized) {
-      const { resolveContext } = await import('./connectors/shared');
-      const ctx = await resolveContext({ devMode: this.devMode });
-      keep = ctx.keep;
-      branch = ctx.branch;
-    } else {
+    const context = await (async () => {
+      if (!existsSync(pm.getKeepPath())) {
+        return resolveListMetadata(await createListMetadataDependencies(this.devMode, opts.expectedUserId), opts.expectedUserId);
+      }
+      const projectState = await pm.detectProjectState();
       const found = pm.readKeepFile();
       if (!found) {
-        console.error('Could not read keep.lock');
-        process.exit(1);
+        throw new CapyError('Could not read keep.lock', ERROR_CODES.PROJECT_NOT_FOUND);
       }
-      keep = found;
-      const activeBranch = projectState.activeBranch;
-      if (!activeBranch) {
-        // No branch resolved (fresh clone / gitignored .capy) — report and bail
-        // rather than guessing one, mirroring status/checkout post-#264.
-        if (opts.json) {
-          console.log(
-            JSON.stringify(
-              { projectName: keep.project_name, branch: null, variables: [] },
-              null,
-              2,
-            ),
-          );
-        } else {
-          console.error(`No active branch. Run ${B('capy')} to select a branch.`);
-        }
-        return;
+      if (opts.expectedUserId) {
+        await requireListIdentity(await createListMetadataDependencies(this.devMode, opts.expectedUserId), opts.expectedUserId, found.org_id);
       }
-      branch = activeBranch;
+      return { keep: found, branch: projectState.activeBranch };
+    })();
+    const { keep, branch } = context;
+    if (!branch) {
+      // No branch resolved: report it rather than guessing.
+      if (opts.json) {
+        console.log(JSON.stringify({ projectName: keep.project_name, branch: null, variables: [] }, null, 2));
+      } else {
+        console.error(`No active branch. Run ${B('capy')} to select a branch.`);
+      }
+      return;
     }
 
     const managed = new Set(listManagedKeys(keep, branch).map((m) => m.varName));
@@ -70,7 +59,6 @@ export class ListCommand {
               source: c.source,
               mode: c.mode ?? null,
               accountId: c.account_id ?? null,
-              fingerprint: c.fingerprint,
               createdAt: new Date(c.created_at * 1000).toISOString(),
               rotatedAt: c.rotated_at ? new Date(c.rotated_at * 1000).toISOString() : null,
               expiresAt: c.expires_at ? new Date(c.expires_at * 1000).toISOString() : null,

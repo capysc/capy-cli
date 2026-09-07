@@ -1,14 +1,13 @@
-import { createHash } from 'crypto';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
-import { AuthService, silentAuthFailureMessage } from '../auth/authService';
+import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { SyncEngine } from '../sync/syncEngine';
 import { CapyError, ERROR_CODES, KeepFile } from '../types/index';
-import { fetchSecretsWithCache, readSecretsLocal } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
-import { isReservedRuntimeVar } from '../core/reservedVars';
+export { compareSecrets, hashValue, type DiffResult } from './statusComparison';
+import { branchHashes, localStatusHashes, makeStatusReport, withStatusStage } from './statusData';
+import { requireListIdentity, resolveListMetadata } from './listMetadata';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = '\x1b[90m';
@@ -38,93 +37,6 @@ function classifyRemoteFailure(err: unknown): RemoteFailure {
   return 'network_error';
 }
 
-export interface DiffResult {
-  variable: string;
-  type: 'new' | 'changed' | 'deleted';
-  pinned?: string;
-  local?: string;
-  remote?: string;
-}
-
-/**
- * Compare three sources: pinned (keep.lock hashes), local (.env values), remote (Keep values).
- * Returns diff results and column visibility flags.
- */
-export function compareSecrets(
-  pinned: Record<string, string>,  // variable -> value_hash
-  local: Record<string, string>,   // variable -> plaintext value (hashed for comparison)
-  remote: Record<string, string>,  // variable -> plaintext value (hashed for comparison)
-): { diffs: DiffResult[]; showLocal: boolean; showRemote: boolean } {
-  const hasRemote = Object.keys(remote).length > 0;
-
-  const allVars = new Set([
-    ...Object.keys(pinned),
-    ...Object.keys(local),
-    ...(hasRemote ? Object.keys(remote) : []),
-  ]);
-
-  const diffs: DiffResult[] = [];
-  let localDiffersFromPinned = false;
-  let remoteDiffersFromPinned = false;
-
-  for (const variable of allVars) {
-    const pinnedHash = pinned[variable];
-    const localHash = local[variable];
-    // If remote has no data at all, treat each variable as matching pinned.
-    // If remote has data but this variable is missing, it's a real absence.
-    const remoteHash = hasRemote ? remote[variable] : pinnedHash;
-
-    // Silent reconcile (CAP-307): no pinned baseline yet, but local and remote
-    // already agree. There is nothing to push (remote already holds this exact
-    // value) and nothing to pull — so don't report a diff and don't let this
-    // variable flip the showLocal/showRemote direction hints. The pin is adopted
-    // naturally via the "Everything is up to date!" path when no other variable
-    // differs. Scoped tightly: only when pinned is absent AND local === remote
-    // (both present); genuine divergence (local !== remote) still surfaces below.
-    if (!pinnedHash && localHash !== undefined && localHash === remoteHash) {
-      continue;
-    }
-
-    // Track if local or remote differs from pinned at all
-    if (localHash !== pinnedHash) localDiffersFromPinned = true;
-    if (remoteHash !== pinnedHash) remoteDiffersFromPinned = true;
-
-    // Only report rows with mismatches
-    if (pinnedHash === localHash && pinnedHash === remoteHash) continue;
-    if (!pinnedHash && !localHash && !remoteHash) continue;
-
-    // Determine type
-    let type: 'new' | 'changed' | 'deleted';
-    if (!pinnedHash && !localHash && remoteHash) {
-      type = 'new';
-    } else if (!pinnedHash && localHash && !remoteHash) {
-      type = 'new';
-    } else if (pinnedHash && !remoteHash && !localHash) {
-      type = 'deleted';
-    } else if ((pinnedHash && !remoteHash) || (!pinnedHash && remoteHash)) {
-      type = remoteHash ? 'new' : 'deleted';
-    } else {
-      type = 'changed';
-    }
-
-    diffs.push({
-      variable,
-      type,
-      pinned: pinnedHash || undefined,
-      local: localHash || undefined,
-      remote: remoteHash || undefined,
-    });
-  }
-
-  // Column visibility:
-  // If all local values match pinned → hide Local column
-  // If all remote values match pinned → hide Remote column
-  const showLocal = localDiffersFromPinned;
-  const showRemote = remoteDiffersFromPinned;
-
-  return { diffs, showLocal, showRemote };
-}
-
 /**
  * Create a value snippet in abc...xyz format.
  */
@@ -135,184 +47,103 @@ export function formatSnippet(value: string): string {
   return `${value.slice(0, 3)}...${value.slice(-3)}`;
 }
 
-/**
- * Hash a plaintext value the same way keep.lock stores it.
- */
-export function hashValue(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 16);
-}
-
 export class StatusCommand {
-  private projectManager: ProjectManager;
-  private fileManager: FileManager;
-  private authService: AuthService;
-  private serviceClient: ServiceClient;
-  private terse: boolean;
+  private readonly projectManager: ProjectManager;
+  private readonly fileManager: FileManager;
+  private readonly authService: AuthService;
+  private readonly serviceClient: ServiceClient;
+  private readonly terse: boolean;
 
-  constructor(terse: boolean = false, devMode: boolean = false) {
+  constructor(terse: boolean = false, devMode: boolean = false, private readonly expectedUserId?: string) {
     this.terse = terse;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
-    this.authService = new AuthService(undefined, devMode);
+    this.authService = new AuthService(undefined, devMode, expectedUserId);
     this.serviceClient = new ServiceClient(undefined, devMode);
 
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
-  async execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
+  async execute(opts: { readonly json?: boolean; readonly web?: boolean } = {}): Promise<void> {
     try {
       await this._execute(opts);
-    } catch {
-      // Exit silently on any error (auth, network, etc.)
-      // Hooks must never block git operations
-      process.exit(0);
+    } catch (error: unknown) {
+      // Only Git-hook mode is silent. A requested JSON diagnostic must fail honestly.
+      if (this.terse) return;
+      const code = error instanceof CapyError ? error.code : ERROR_CODES.SERVICE_ERROR;
+      const message = 'Could not check drift. Confirm Capy is connected and this repository has completed setup.';
+      const stage = error instanceof CapyError ? error.details?.statusStage : undefined;
+      const keyStep = error instanceof CapyError ? error.details?.statusKeyStep : undefined;
+      if (opts.json) console.log(JSON.stringify({ ok: false, code, message, stage, keyStep }));
+      else console.error(message);
+      process.exit(1);
     }
   }
 
-  private async _execute(opts: { json?: boolean; web?: boolean } = {}): Promise<void> {
-    const projectState = await this.projectManager.detectProjectState();
-    if (!projectState.initialized) {
-      if (this.terse) return;
-      console.log(`No keep.lock found. Run ${B('capy')} to initialize.`);
-      return;
-    }
-
-    const keep = this.projectManager.readKeepFile();
-    if (!keep) return;
-
-    const branch = projectState.activeBranch;
-    if (!branch) {
-      // Runs from git hooks — report and bail rather than guessing a branch.
-      if (!this.terse) console.log(`No active branch. Run ${B('capy')} to select a branch.`);
-      return;
-    }
-    const branchLabel = branch;
-
-    // Build pinned hashes from keep.lock for active branch
-    const pinned: Record<string, string> = {};
-    for (const [varName, entries] of Object.entries(keep.variables)) {
-      const entry = entries.find(e => e.branch === branch);
-      if (entry) {
-        pinned[varName] = entry.value_hash;
-      }
-    }
-
-    // Build local hashes from .env
-    const localHashes: Record<string, string> = {};
-    let encryptionKey: string | undefined;
-    // Two facts, deliberately separate: the sentence a person reads, and the
-    // verdict the report and the screen branch on. Deriving the second from
-    // the first is what this pair replaces.
-    let remoteSkipReason: string | undefined;
-    let remoteFailureKind: RemoteFailure | undefined;
+  private async _execute(opts: { readonly json?: boolean; readonly web?: boolean } = {}): Promise<void> {
     const localMode = isLocalOnly();
-    try {
-      if (localMode) {
-        encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
-      } else {
-        if (projectState.userId) {
-          this.authService.setSessionUserId(projectState.userId);
-        }
-        const { resolveProjectKey } = await import('../crypto/keyResolver');
-        const authResult = await this.authService.authenticateSilent(projectState.organizationId);
-        // The message becomes `remoteSkipReason`, which the report and the
-        // screen both show. "auth failed" told the reader nothing about
-        // whether to sign in again or check the network.
-        if (!authResult.success) throw new Error(silentAuthFailureMessage(authResult));
-
-        const keyOps = {
-          coDecrypt: (oid: string, ct: string) => this.serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-          wrapOuterLayer: (oid: string, pt: string) => this.serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-        };
-        encryptionKey = await resolveProjectKey(
-          projectState.organizationId!,
-          projectState.projectId!,
-          authResult.user_id!,
-          keyOps,
-        );
-      }
-
-      const rawLocal = this.fileManager.readEnvFile();
-      for (const [key, value] of Object.entries(rawLocal)) {
-        // A reserved runtime variable is never pushed, so counting it as
-        // local drift would report the deploy artifact as unpushed changes
-        // forever — which trains people to ignore drift output (CAP-424).
-        if (isReservedRuntimeVar(key)) continue;
-        let plaintext = value;
-        if (value.startsWith('capy:') && encryptionKey) {
-          try {
-            plaintext = this.fileManager.decryptValue(value, encryptionKey);
-          } catch {
-            continue;
-          }
-        }
-        localHashes[key] = hashValue(plaintext);
-      }
-    } catch (err: any) {
-      // Auth or key resolution failed — compare pinned vs local only
-      remoteSkipReason = err?.message || 'auth or key resolution failed';
-      remoteFailureKind = classifyRemoteFailure(err);
-    }
-
-    // Build remote hashes (fetch from Keep)
-    const remoteHashes: Record<string, string> = {};
-    if (encryptionKey) {
-      try {
-        const hasVariables = Object.keys(pinned).length > 0;
-        if (hasVariables) {
-          const keepHash = SyncEngine.computeKeepHash(keep, branch);
-          const blob = localMode
-            ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
-            : await fetchSecretsWithCache(
-                this.serviceClient,
-                projectState.organizationId!,
-                projectState.projectId!,
-                keepHash,
-              );
-          if (blob?.env_file) {
-            const encrypted = this.fileManager.parseEnvContent(blob.env_file);
-            for (const [key, value] of Object.entries(encrypted)) {
-              try {
-                const plaintext = this.fileManager.decryptValue(value, encryptionKey);
-                remoteHashes[key] = hashValue(plaintext);
-              } catch {
-                // Skip values we can't decrypt
-              }
-            }
-          } else {
-            remoteSkipReason = 'no data at this keep_hash';
-            // Known here, so recorded here. Nothing downstream re-reads the
-            // sentence to work out what this line already knew.
-            remoteFailureKind = 'no_data';
-          }
-        }
-      } catch (err: any) {
-        remoteSkipReason = err?.message || 'network error';
-        remoteFailureKind = classifyRemoteFailure(err);
-      }
-    }
-
-    const hasRemote = Object.keys(remoteHashes).length > 0;
-    const remoteFailure: RemoteFailure | undefined =
-      !hasRemote && remoteSkipReason ? (remoteFailureKind ?? 'network_error') : undefined;
-    const { diffs, showLocal, showRemote } = compareSecrets(pinned, localHashes, remoteHashes);
-
-    // ONE report object, rendered three ways. `--json` prints it, `--web`
-    // carries it into the page verbatim, and the TTY draws the same numbers
-    // below — so what a person reads and what a script parses cannot describe
-    // different states. diffs carry value HASHES only (sha256 prefix), never
-    // plaintext.
-    const totalSecrets = new Set([...Object.keys(pinned), ...Object.keys(localHashes)]).size;
-    const report = {
-      projectName: keep.project_name,
-      branch,
-      totalSecrets,
-      inSync: diffs.length === 0,
-      localMatchesPinned: !showLocal,
-      remoteMatchesPinned: !showRemote,
-      remoteFailure: remoteFailure ?? null,
-      diffs,
+    const localKeep = this.projectManager.readKeepFile();
+    const metadata = {
+      authenticate: (orgId?: string) => this.authService.authenticateSilent(orgId),
+      billing: () => this.serviceClient.getBillingStatus(),
+      projects: () => this.serviceClient.listProjects(),
+      snapshot: (projectId: string, branch: string) => this.serviceClient.getDecryptData(projectId, branch),
     };
+    const binding = await withStatusStage('binding', async () => {
+      if (!localKeep) {
+        if (localMode) throw new CapyError('No local project binding.', ERROR_CODES.PROJECT_NOT_FOUND);
+        const resolved = await resolveListMetadata(metadata, this.expectedUserId);
+        const auth = await requireListIdentity(metadata, this.expectedUserId, resolved.keep.org_id);
+        return { ...resolved, userId: auth.user_id! };
+      }
+      const state = await this.projectManager.detectProjectState();
+      if (!state.activeBranch) throw new CapyError('Select a branch before checking drift.', ERROR_CODES.BRANCH_NOT_FOUND);
+      if (localMode) {
+        if (this.expectedUserId) throw new CapyError('Hosted status requires a connected account.', ERROR_CODES.AUTH_FAILED);
+        return { keep: localKeep, branch: state.activeBranch, userId: '' };
+      }
+      if (!this.expectedUserId && state.userId) this.authService.setSessionUserId(state.userId);
+      const auth = await requireListIdentity(metadata, this.expectedUserId, localKeep.org_id);
+      return { keep: localKeep, branch: state.activeBranch, userId: auth.user_id! };
+    });
+    const { keep, branch, userId } = binding;
+    const branchLabel = branch;
+    const pinned = branchHashes(keep, branch);
+    const rawLocal = this.fileManager.readEnvFile();
+    const encryptionKey = await withStatusStage('key_access', async () => {
+      if (!Object.values(rawLocal).some((value) => value.startsWith('capy:'))) return undefined;
+      if (localMode) return resolveLocalProjectKey(keep.project_id);
+      const { resolveStatusProjectKey } = await import('./statusKey');
+      return resolveStatusProjectKey(keep.org_id, keep.project_id, userId, this.serviceClient, this.authService);
+    });
+    const localHashes = await withStatusStage('local_values', async () => localStatusHashes(rawLocal, (value) => {
+      if (!encryptionKey) throw new CapyError('Device access is required.', ERROR_CODES.PERMISSION_DENIED);
+      return this.fileManager.decryptValue(value, encryptionKey);
+    }));
+    const remote = await (async (): Promise<{ readonly hashes: Readonly<Record<string, string>>; readonly failure?: RemoteFailure }> => {
+      if (localMode) return { hashes: pinned };
+      try {
+        // Latest branch metadata, not the cached snapshot named by the local pin.
+        const snapshot = await this.serviceClient.getDecryptData(keep.project_id, branch);
+        if (!snapshot.keep_file) return { hashes: {} };
+        const latest: KeepFile = JSON.parse(snapshot.keep_file);
+        if (latest.org_id !== keep.org_id || latest.project_id !== keep.project_id) {
+          throw new CapyError('Remote project mismatch.', ERROR_CODES.PERMISSION_DENIED);
+        }
+        return { hashes: branchHashes(latest, branch) };
+      } catch (error: unknown) {
+        return { hashes: {}, failure: classifyRemoteFailure(error) };
+      }
+    })();
+    const report = makeStatusReport({ projectName: keep.project_name, branch, pinned, local: localHashes,
+      remote: remote.hashes, remoteFailure: remote.failure });
+    const { diffs, totalSecrets } = report;
+    const showLocal = !report.localMatchesPinned;
+    const showRemote = !report.remoteMatchesPinned;
+    const remoteFailure = remote.failure;
+    const remoteSkipReason = remoteFailure === 'access_denied' ? 'access denied'
+      : remoteFailure ? 'remote status unavailable' : undefined;
+    const hasRemote = !remoteFailure;
 
     if (opts.json) {
       console.log(JSON.stringify(report, null, 2));
@@ -413,28 +244,13 @@ export class StatusCommand {
       : remoteFailure === 'no_data' ? '(no data)' : undefined;
 
     for (const diff of diffs) {
-      let prefix: string;
-      let desc: string;
-
-      if (failureLabel) {
-        prefix = '?';
-        desc = failureLabel;
-      } else if (diff.type === 'new') {
-        prefix = '+';
-        if (diff.remote && !diff.pinned) desc = '(new on remote)';
-        else if (diff.local && !diff.pinned) desc = '(new locally)';
-        else desc = '(new)';
-      } else if (diff.type === 'deleted') {
-        prefix = '-';
-        if (!diff.remote && diff.pinned) desc = '(missing from remote)';
-        else if (!diff.local && diff.pinned) desc = '(missing locally)';
-        else desc = '(missing)';
-      } else {
-        prefix = '~';
-        if (diff.local !== diff.pinned && diff.remote === diff.pinned) desc = '(changed locally)';
-        else if (diff.remote !== diff.pinned && diff.local === diff.pinned) desc = '(changed on remote)';
-        else desc = '(changed)';
-      }
+      const prefix = failureLabel ? '?' : diff.type === 'new' ? '+' : diff.type === 'deleted' ? '-' : '~';
+      const desc = failureLabel ?? (diff.type === 'new'
+        ? diff.remote && !diff.pinned ? '(new on remote)' : diff.local && !diff.pinned ? '(new locally)' : '(new)'
+        : diff.type === 'deleted'
+          ? !diff.remote && diff.pinned ? '(missing from remote)' : !diff.local && diff.pinned ? '(missing locally)' : '(missing)'
+          : diff.local !== diff.pinned && diff.remote === diff.pinned ? '(changed locally)'
+            : diff.remote !== diff.pinned && diff.local === diff.pinned ? '(changed on remote)' : '(changed)');
 
       console.log(`  ${prefix} ${diff.variable.padEnd(20)} ${desc}`);
     }

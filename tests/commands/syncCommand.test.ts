@@ -154,6 +154,71 @@ function parsedOutput(log: ReturnType<typeof mock>): any {
 }
 
 describe('SyncCommand — capy sync --json', () => {
+  test('free sync rejects ambiguous default projects before fetching secrets', async () => {
+    const { log, mockServiceClient, mockFileManager } = setupMocks({
+      projectManager: { detectProjectState: mock(async () => ({ initialized: false })) },
+      serviceClient: { listProjects: mock(async () => [
+        { id: 'first', name: 'default', organization_id: 'org_1' },
+        { id: 'second', name: 'default', organization_id: 'org_1' },
+      ]) },
+    });
+    await new SyncCommand().execute();
+    expect(parsedOutput(log).code).toBe(ERROR_CODES.PERMISSION_DENIED);
+    expect(mockServiceClient.getDecryptData).not.toHaveBeenCalled();
+    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+  });
+
+  for (const failure of ['identity', 'decryption'] as const) {
+    test(`free sync ${failure} failure refuses before every repository write`, async () => {
+      const { log, mockProjectManager, mockFileManager } = setupMocks({
+        projectManager: { detectProjectState: mock(async () => ({ initialized: false })) },
+        serviceClient: { getDecryptData: mock(async () => ({
+          keep_file: JSON.stringify({ org_id: 'org_1', project_id: failure === 'identity' ? 'wrong' : 'proj_default', variables: {} }),
+          env_content: 'private fixture ciphertext',
+        })) },
+        fileManager: {
+          parseEnvContent: mock(() => ({ FIRST: 'valid', SECOND: 'invalid' })),
+          decryptValue: mock((value: string) => { if (value === 'invalid') throw new Error('PRIVATE_SENTINEL'); return value; }),
+        },
+      });
+      await new SyncCommand().execute();
+      const output = parsedOutput(log);
+      expect(output.code).toBe(failure === 'identity' ? ERROR_CODES.PERMISSION_DENIED : ERROR_CODES.DECRYPT_KEY_MISMATCH);
+      expect(JSON.stringify(output)).not.toContain('PRIVATE_SENTINEL');
+      expect(mockProjectManager.writeActiveBranch).not.toHaveBeenCalled();
+      expect(mockFileManager.ensureCapyGitignore).not.toHaveBeenCalled();
+      expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+      expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+      expect(mockFileManager.writeSyncState).not.toHaveBeenCalled();
+    });
+  }
+
+  test('plan is read-only and matching consent retains the existing sync path', async () => {
+    const { log, mockProjectManager, mockFileManager } = setupMocks();
+    await new SyncCommand().execute({ plan: true });
+    const plan = parsedOutput(log);
+    expect(plan.plan_hash).toMatch(/^sha256:/);
+    expect(mockProjectManager.writeActiveBranch).not.toHaveBeenCalled();
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+    log.mockClear();
+    await new SyncCommand().execute({ confirm: plan.plan_hash });
+    expect(parsedOutput(log).ok).toBe(true);
+    expect(mockFileManager.writeKeepFile).toHaveBeenCalledTimes(1);
+  });
+
+  test('changed consent facts refuse before writes', async () => {
+    const { log, mockFileManager } = setupMocks();
+    await new SyncCommand().execute({ confirm: 'sha256:outdated' });
+    expect(parsedOutput(log).code).toBe(ERROR_CODES.PLAN_CHANGED);
+    expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
+  });
+
+  test('explicit target mismatch refuses before selecting a different project', async () => {
+    const { log, mockAuthService } = setupMocks();
+    await new SyncCommand({ org: 'another-org' }).execute({ plan: true });
+    expect(parsedOutput(log).code).toBe(ERROR_CODES.PERMISSION_DENIED);
+    expect(mockAuthService.authenticateSilent).not.toHaveBeenCalled();
+  });
   test('no keep.lock + paid billing: retains manifest initialization refusal', async () => {
     const { log, mockServiceClient } = setupMocks({
       projectManager: {

@@ -142,6 +142,9 @@ program
   .description('Plan/apply first-run project setup as JSON — no TTY, no browser (docs/cli-setup-json.md)')
   .option('--json', 'required today: this command has no TTY mode yet')
   .option('--confirm <hash>', 'apply the plan whose plan_hash this names; omit to only print the plan')
+  .option('--org <id>', 'explicit organization attribution')
+  .option('--project <id>', 'explicit existing project attribution')
+  .option('--create-project <name>', 'explicitly create a project on approved apply')
   .action(async (options, command) => {
     if (!options.json) {
       console.error('');
@@ -154,13 +157,14 @@ program
     const { SetupCommand } = await import('./commands/setupCommand');
     const globalOpts = command.optsWithGlobals();
     const cmd = new SetupCommand({ envPath: globalOpts.envPath }, true);
-    await cmd.execute({ confirm: options.confirm });
+    await cmd.execute({ confirm: options.confirm, org: options.org, project: options.project, createProject: options.createProject });
   });
 
 program
   .command('sync')
   .description('Sync an already-initialized project as JSON — no TTY, no browser (docs/cli-setup-json.md)')
   .option('--json', 'required today: this command has no TTY mode yet')
+  .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
   .action(async (options, command) => {
     if (!options.json) {
       console.error('');
@@ -172,7 +176,7 @@ program
     }
     const { SyncCommand } = await import('./commands/syncCommand');
     const globalOpts = command.optsWithGlobals();
-    const cmd = new SyncCommand({ envPath: globalOpts.envPath }, true);
+    const cmd = new SyncCommand({ envPath: globalOpts.envPath, expectedUserId: options.expectedUserId }, true);
     await cmd.execute();
   });
 
@@ -340,9 +344,10 @@ program
   .command('status')
   .description('Show secret drift between local, pinned, and remote')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
   .action(async (options, command) => {
     const { StatusCommand } = await import('./commands/statusCommand');
-    const cmd = new StatusCommand(false, true);
+    const cmd = new StatusCommand(false, true, options.expectedUserId);
     await cmd.execute({ json: options.json, web: command.optsWithGlobals().web === true });
   });
 
@@ -514,6 +519,56 @@ const flow = program
   .description('Flow-service instance management');
 
 flow
+  .command('authenticate <id>')
+  .description('Execute or resume a Keep-owned sign-in step without opening a browser or prompting')
+  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
+  .requiredOption('--service-origin <origin>', 'must match this CLI environment')
+  .option('--onboard-flow-id <id>', 'return the handoff to its parent onboarding flow')
+  .option('--json', 'emit the public handoff and coded outcome only')
+  .action(async (id: string, options: import('./commands/flowAuthenticateCommand').FlowAuthenticationOptions) => {
+    const { runFlowAuthenticateCommand } = await import('./commands/flowAuthenticateCommand');
+    const code = await runFlowAuthenticateCommand(id, options);
+    if (code !== 0) process.exit(code);
+  });
+
+flow
+  .command('pair <id>')
+  .description('Execute or resume runtime pairing for a Keep-owned onboarding flow')
+  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
+  .requiredOption('--service-origin <origin>', 'must match this CLI environment')
+  .option('--json', 'emit only the public handoff and coded outcome')
+  .action(async (id: string, options: import('./commands/flowPairCommand').FlowPairOptions) => {
+    const { runFlowPairCommand } = await import('./commands/flowPairCommand');
+    const code = await runFlowPairCommand(id, options, true);
+    if (code !== 0) process.exit(code);
+  });
+
+flow
+  .command('setup <id>')
+  .description('Execute or resume approved repository setup for a Keep-owned onboarding flow')
+  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
+  .requiredOption('--service-origin <origin>', 'must match this CLI environment')
+  .option('--json', 'emit the public continuation and coded outcome')
+  .action(async (id: string, options: import('./commands/flowSetupCommand').FlowSetupOptions) => {
+    const { runFlowSetupCommand } = await import('./commands/flowSetupCommand');
+    const code = await runFlowSetupCommand(id, options, true);
+    if (code !== 0) process.exit(code);
+  });
+
+flow
+  .command('add <id>')
+  .option('--cancel', 'Cancel this secret request before any application')
+  .description('Resume a Keep-owned secure secret intake on this paired runtime')
+  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
+  .requiredOption('--service-origin <origin>', 'must match this CLI environment')
+  .option('--json', 'emit only the public handoff and coded outcome')
+  .action(async (id: string, options: import('./commands/flowAddCommand').FlowAddOptions) => {
+    const { runFlowAddCommand } = await import('./commands/flowAddCommand');
+    const code = await runFlowAddCommand(id, options, true);
+    if (code !== 0) process.exit(code);
+  });
+
+flow
   .command('cancel <id>')
   .description('Cancel a stuck flow (org-owner escape hatch — releases any repo lock it holds)')
   .option('--json', 'emit machine-readable JSON instead of the human UI, on success AND failure')
@@ -661,10 +716,11 @@ program
   .command('list')
   .description('List variable names + connector metadata for the active branch (no values)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
   .action(async (options) => {
     const { ListCommand } = await import('./commands/listCommand');
     const cmd = new ListCommand(true);
-    await cmd.execute({ json: options.json });
+    await cmd.execute({ json: options.json, expectedUserId: options.expectedUserId });
   });
 
 program
@@ -883,13 +939,16 @@ program
 program
   .command('run')
   .description('Run a command with decrypted secrets')
+  .option('--expected-user-id <id>', 'run non-interactively as the hosted MCP caller')
   .allowUnknownOption()
   .helpOption(false)
   .action(async (_opts: any, cmd: any) => {
     const { runCommand } = await import('./commands/runCommand');
     const dashIdx = process.argv.indexOf('--');
     const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
-    const code = await runCommand(childArgs, true);
+    const code = cmd.opts().expectedUserId !== undefined
+      ? await (await import('./commands/runHostedCommand')).runHostedCommand(childArgs, cmd.opts().expectedUserId, true)
+      : await runCommand(childArgs, true);
     process.exit(code);
   });
 

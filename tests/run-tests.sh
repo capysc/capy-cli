@@ -96,6 +96,7 @@ ISOLATED_FILES=(
   tests/auth/deviceKey/grantE2E.int.test.ts
   tests/auth/pairing/installPairedSession.test.ts
   tests/auth/pairing/runtimePairing.test.ts
+  tests/auth/pairing/runtimeFilesystemPairing.test.ts
   tests/auth/pairing/pairAttemptLease.test.ts
   # The capy-staging pin tests assert behaviour that is BY DEFINITION a
   # function of process.env (CAPY_API_URL / CAPY_KEEP_ORIGIN /
@@ -123,6 +124,7 @@ ISOLATED_FILES=(
   # (single-user lock-less resolveContext/writeAndSync) and os.homedir()
   # (writeKeepCache lands in a throwaway home, not the developer's real ~/.capy).
   tests/commands/connectors/locklessContext.test.ts
+  tests/commands/connectors/boundIntakeContext.test.ts
   # conflictUx.test.ts mocks authService/serviceClient/keyResolver/inquirer/
   # ui/editScreen.ts and os.homedir() the same way, for the conflict-gate
   # context lines, the edit/push CAS confirm wiring, and the personal-env

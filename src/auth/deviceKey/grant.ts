@@ -17,8 +17,9 @@
  * stops there. It never calls installOrgFromServer, never calls
  * saveLocalRoot/saveMasterKey, never touches globalConfig's disk helpers at
  * all. The caller (grantHolder.ts) is responsible for what happens to the
- * resulting K_local — by construction, that's "hold it in RAM behind a
- * Unix-domain-socket daemon," never a file.
+ * resulting K_local. Temporary grants hold it in the Unix-socket daemon;
+ * runtime pairing additionally uses the owner's approved protected
+ * filesystem custody. This cryptographic primitive itself writes nothing.
  *
  * Deliberately NOT reusing onboarding.ts's `runUnlock` with a "skip the
  * install step" flag: that function is CAP-383's regression-suite surface
@@ -79,13 +80,13 @@ export async function runGrantCeremony(deps: GrantCeremonyDeps): Promise<GrantCe
     );
   }
 
-  const doorPayloads = new Map<string, KeyWrapperPayload>();
-  for (const door of doors) {
-    const payload = await deps.ops.fetchWrapper(door.id);
-    if (payload.credential_id && payload.wrapped_k_local && payload.iv && payload.prf_salt) {
-      doorPayloads.set(payload.credential_id, payload);
-    }
-  }
+  const payloads = await doors.reduce<Promise<readonly KeyWrapperPayload[]>>(async (previous, door) => {
+    const collected = await previous;
+    return [...collected, await deps.ops.fetchWrapper(door.id)];
+  }, Promise.resolve([]));
+  const doorPayloads: ReadonlyMap<string, KeyWrapperPayload> = new Map(payloads.flatMap((payload) =>
+    payload.credential_id && payload.wrapped_k_local && payload.iv && payload.prf_salt
+      ? [[payload.credential_id, payload] as const] : []));
   if (doorPayloads.size === 0) {
     throw new CapyError(
       'Every enrolled device-key record is malformed.',

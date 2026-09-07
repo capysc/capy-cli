@@ -12,16 +12,16 @@
  * staging remain isolated at ~/.capy, ~/.capy-dev, and ~/.capy-staging.
  * Deleting that environment home is the definition of wiping the runtime.
  *
- * This is process-durable, not reboot-durable: if the daemon dies, the
- * metadata remains as the one-user binding and the same user may pair again.
- * A different user must explicitly log out first. Reboot-durable custody
- * needs a packageable secure-at-rest backend or a new service/Keep sealing
- * contract; persisting plaintext K_local here is not an acceptable fallback.
+ * Legacy records are process-durable. A filesystemCustody binding permits
+ * restoration from the existing protected local.key after holder loss.
+ * The binding is required: preserved recovery files alone never restore a
+ * pairing after logout. No external storage provider is needed for this path.
  */
 import { Socket } from 'net';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
-import { getGlobalCapyDir, readAuthSession } from '../../config/globalConfig';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { createHash } from 'crypto';
+import { dirname, join, relative, sep } from 'path';
+import { getGlobalCapyDir, getLocalRootPath, readAuthSession, saveLocalRootExclusive } from '../../config/globalConfig';
 import { CapyError, ERROR_CODES, type SessionStore } from '../../types/index';
 import {
   deleteRuntimeCustody,
@@ -50,6 +50,15 @@ interface RuntimePairingRecordFields {
 
 export interface RuntimePairingRecordV1 extends RuntimePairingRecordFields {
   readonly version: 1;
+  readonly filesystemCustody?: FilesystemPairingCustody;
+}
+
+export interface FilesystemPairingCustody {
+  readonly environment: RuntimeCustodyEnvironment;
+  /** Storage location only; this does not attribute a repository. */
+  readonly orgId: string;
+  readonly path: string;
+  readonly sha256: string;
 }
 
 export interface RuntimePairingRecordV2 extends RuntimePairingRecordFields {
@@ -150,8 +159,10 @@ function isRuntimePairingRecord(value: unknown): value is RuntimePairingRecord {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Readonly<Record<string, unknown>>;
   if (!hasRuntimePairingFields(candidate)) return false;
-  if (candidate.version === 1) return !Object.hasOwn(candidate, 'custody');
+  if (candidate.version === 1) return !Object.hasOwn(candidate, 'custody')
+    && (!Object.hasOwn(candidate, 'filesystemCustody') || isFilesystemCustody(candidate.filesystemCustody));
   return candidate.version === 2
+    && !Object.hasOwn(candidate, 'filesystemCustody')
     && typeof candidate.userId === 'string'
     && isRuntimeCustodyBinding(candidate.custody, candidate.userId);
 }
@@ -421,6 +432,10 @@ async function registerRuntimePairingRecord<TRecord extends RuntimePairingRecord
         expiresAt: handle.expiresAt,
         pairedAt: new Date().toISOString(),
       });
+      if (existing?.version === 1 && existing.filesystemCustody
+        && (record.version !== 1 || !record.filesystemCustody)) {
+        throw custodyCleanupRefusal('Filesystem pairing custody cannot be silently downgraded.');
+      }
       writeRuntimePairing(record);
 
       const previousSocket = existing?.socketPath;
@@ -998,4 +1013,169 @@ async function clearRuntimePairingWhileLeaseHeld(options: {
 
 function custodyCleanupRefusal(message: string): CapyError {
   return new CapyError(message, ERROR_CODES.PERMISSION_DENIED);
+}
+
+const custodyDigest = (key: Buffer): string => createHash('sha256').update(key).digest('hex');
+const custodyId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value);
+
+function isFilesystemCustody(value: unknown): value is FilesystemPairingCustody {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Readonly<Record<string, unknown>>;
+  return ['development', 'staging', 'production'].includes(String(candidate.environment))
+    && custodyId(candidate.orgId) && typeof candidate.path === 'string'
+    && typeof candidate.sha256 === 'string' && /^[a-f0-9]{64}$/.test(candidate.sha256);
+}
+
+function protectedFilesystemKey(path: string): Buffer {
+  try {
+    assertCustodyDirectories(path);
+    const stat = lstatSync(path);
+    const parent = lstatSync(dirname(path));
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || !parent.isDirectory()
+      || (parent.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+      throw recoveryRefusal('Runtime custody permissions are invalid.');
+    }
+    const text = readFileSync(path, 'utf8').trim();
+    const key = Buffer.from(text, 'base64');
+    if (key.length !== 32 || key.toString('base64') !== text) throw recoveryRefusal('Runtime custody is invalid.');
+    return key;
+  } catch {
+    throw recoveryRefusal('Runtime custody is missing, corrupt, or not protected. Pair this machine again.');
+  }
+}
+
+function assertCustodyDirectories(path: string): void {
+  const home = getGlobalCapyDir();
+  const parts = relative(home, dirname(path)).split(sep);
+  if (parts.includes('..')) throw recoveryRefusal('Runtime custody escaped its protected home.');
+  const directories = [home, ...parts.map((_part, index) => join(home, ...parts.slice(0, index + 1)))];
+  for (const directory of directories) {
+    try {
+      const stat = lstatSync(directory);
+      if (!stat.isDirectory() || (stat.mode & 0o077) !== 0
+        || (process.getuid && stat.uid !== process.getuid())) throw recoveryRefusal('Runtime custody directory is not protected.');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+export interface FilesystemPairingRequest {
+  readonly environment: RuntimeCustodyEnvironment;
+  readonly expectedUserId: string;
+}
+
+function readFilesystemPairing(request: FilesystemPairingRequest): RuntimePairingRecordV1 | null {
+  if (!custodyId(request.expectedUserId)) throw recoveryRefusal('Runtime pairing account is invalid.');
+  const record = assertRuntimePairingUser(request.expectedUserId);
+  if (record?.version !== 1 || !record.filesystemCustody) return null;
+  const binding = record.filesystemCustody;
+  const stat = lstatSync(getRuntimePairingPath());
+  if (!stat.isFile() || (stat.mode & 0o077) !== 0 || !custodyId(record.userId)
+    || binding.environment !== request.environment
+    || binding.path !== getLocalRootPath(binding.orgId, record.userId)
+    || record.expiresAt !== 0) throw recoveryRefusal('The filesystem pairing binding is invalid for this runtime.');
+  return record;
+}
+
+/** The caller holds the pairing lease. Custody location is not repository attribution. */
+export async function registerFilesystemRuntimePairing(
+  environment: RuntimeCustodyEnvironment,
+  orgId: string,
+  material: { readonly userId: string; readonly credentialId: string; readonly kLocal: Buffer },
+  handle: RuntimePairingHandle,
+): Promise<RuntimePairingRecordV1> {
+  const prepared = await (async () => {
+    try {
+      const existing = assertRuntimePairingUser(material.userId);
+      if (!['development', 'staging', 'production'].includes(environment)
+        || !custodyId(orgId) || !custodyId(material.userId) || material.kLocal.length !== 32
+        || handle.expiresAt !== 0 || existing?.version === 2) throw recoveryRefusal('Filesystem pairing custody was refused.');
+      const path = getLocalRootPath(orgId, material.userId);
+      const binding: FilesystemPairingCustody = { environment, orgId, path, sha256: custodyDigest(material.kLocal) };
+      if (existing?.filesystemCustody && JSON.stringify(existing.filesystemCustody) !== JSON.stringify(binding)) {
+        throw recoveryRefusal('The existing runtime custody binding cannot be replaced implicitly.');
+      }
+      assertCustodyDirectories(path);
+      saveLocalRootExclusive(orgId, material.kLocal, material.userId);
+      if (custodyDigest(protectedFilesystemKey(path)) !== binding.sha256) {
+        throw recoveryRefusal('The existing local key does not match the approved pairing.');
+      }
+      if (!await defaultRecoveryProbe(handle.socketPath, material.userId, material.credentialId)) {
+        throw recoveryRefusal('The runtime key holder identity could not be verified.');
+      }
+      return { ok: true as const, binding };
+    } catch (error) { return { ok: false as const, error }; }
+  })();
+  if (!prepared.ok) {
+    if (readRuntimePairing()?.socketPath !== handle.socketPath) {
+      await cleanupRejectedRuntimeHandle(handle.socketPath, material.userId, material.credentialId);
+    }
+    throw prepared.error;
+  }
+  return registerRuntimePairingRecord(material.userId, material.credentialId, handle, 1,
+    (fields) => ({ version: 1, ...fields, filesystemCustody: prepared.binding }));
+}
+
+/** Restores only an explicit durable binding, never merely a surviving local.key. */
+export async function recoverFilesystemRuntimePairing(
+  request: FilesystemPairingRequest,
+  dependencies: RuntimePairingRecoveryDependencies = {},
+): Promise<RuntimePairingRecordV1 | null> {
+  if (!readFilesystemPairing(request)) return null;
+  const deadline = (dependencies.now ?? Date.now)() + (dependencies.waitTimeoutMs ?? RECOVERY_WAIT_TIMEOUT_MS);
+  const lease = await acquireFilesystemRecoveryLease(dependencies, deadline);
+  try { return await recoverFilesystemRuntimePairingWhileLeaseHeld(request, lease, dependencies); }
+  finally { (dependencies.releaseLease ?? releasePairAttemptLease)(lease); }
+}
+
+async function acquireFilesystemRecoveryLease(
+  dependencies: RuntimePairingRecoveryDependencies,
+  deadline: number,
+): Promise<PairAttemptLease> {
+  const attempt = (() => {
+    try { return { ok: true as const, lease: (dependencies.acquireLease ?? acquirePairAttemptLease)() }; }
+    catch (error) { return { ok: false as const, error }; }
+  })();
+  if (attempt.ok) return attempt.lease;
+  const now = (dependencies.now ?? Date.now)();
+  if (!(attempt.error instanceof CapyError) || attempt.error.code !== ERROR_CODES.PAIR_ALREADY_IN_PROGRESS
+    || now >= deadline) throw attempt.error;
+  await (dependencies.wait ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))))(
+    Math.min(RECOVERY_WAIT_INTERVAL_MS, deadline - now),
+  );
+  return acquireFilesystemRecoveryLease(dependencies, deadline);
+}
+
+export async function recoverFilesystemRuntimePairingWhileLeaseHeld(
+  request: FilesystemPairingRequest,
+  lease: PairAttemptLease,
+  dependencies: RuntimePairingRecoveryDependencies = {},
+): Promise<RuntimePairingRecordV1 | null> {
+  const ownsLease = dependencies.ownsLease ?? ownsPairAttemptLease;
+  if (!ownsLease(lease)) throw recoveryRefusal('Runtime pairing recovery does not own its lease.');
+  const record = readFilesystemPairing(request);
+  if (!record?.filesystemCustody) return null;
+  const key = protectedFilesystemKey(record.filesystemCustody.path);
+  if (custodyDigest(key) !== record.filesystemCustody.sha256) throw recoveryRefusal('Runtime custody no longer matches this pairing.');
+  const probe = dependencies.probeHolder ?? defaultRecoveryProbe;
+  if (await probe(record.socketPath, record.userId, record.credentialId)) return record;
+  const candidate = await (dependencies.spawnHolder ?? defaultRecoverySpawn)({
+    userId: record.userId, credentialId: record.credentialId, kLocal: key,
+  });
+  try {
+    if (candidate.expiresAt !== 0 || !await probe(candidate.socketPath, record.userId, record.credentialId)
+      || !ownsLease(lease) || JSON.stringify(readFilesystemPairing(request)) !== JSON.stringify(record)) {
+      throw recoveryRefusal('Runtime pairing changed during holder restoration.');
+    }
+    const replacement = { ...record, socketPath: candidate.socketPath };
+    writeRuntimePairing(replacement);
+    return replacement;
+  } catch (error) {
+    // Never shut down a protected existing socket supplied by a faulty spawner.
+    if (candidate.socketPath !== record.socketPath) {
+      await (dependencies.cleanupCandidate ?? cleanupRejectedRuntimeHandle)(candidate.socketPath, record.userId, record.credentialId);
+    }
+    throw error;
+  }
 }

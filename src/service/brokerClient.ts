@@ -32,12 +32,19 @@ export type BrokerErrorCode =
   | 'INVALID_FORMAT';
 
 export interface BrokerConnection {
-  connectionId: string;
+  readonly connectionId: string;
   /** ISO date-time the broker will stop honoring this connection. */
-  expiresAt: string;
+  readonly expiresAt: string;
   /** Ephemeral keypair minted for exactly this connection. */
-  keypair: ConnectionKeypair;
+  readonly keypair: ConnectionKeypair;
 }
+
+/** One bounded read. Pending leaves the connection alive for another CLI invocation. */
+export type PollAnswerResult = Exclude<AwaitAnswerResult, { kind: 'timeout' }> | { readonly kind: 'pending' };
+/** Resumable payload callers checkpoint the sealed answer before opening it. */
+export type PollExchangeResult = Exclude<PollAnswerResult, { kind: 'pending' | 'answered' }>
+  | { readonly kind: 'pending'; readonly pagePubkeyB64?: string }
+  | { readonly kind: 'answered'; readonly ciphertextB64: string; readonly pagePubkeyB64?: string };
 
 export type AwaitAnswerResult =
   /** Sealed answer delivered and opened. */
@@ -144,8 +151,8 @@ export class BrokerClient {
    * @param getToken   supplies the org-scoped access token for CLI-side verbs
    */
   constructor(
-    private serviceUrl: string,
-    private getToken: () => string | null | Promise<string | null>,
+    private readonly serviceUrl: string,
+    private readonly getToken: () => string | null | Promise<string | null>,
   ) {}
 
   private async headers(): Promise<Record<string, string>> {
@@ -181,24 +188,26 @@ export class BrokerClient {
   }): Promise<BrokerConnection> {
     const keypair = mintConnectionKeypair();
     const headers = await this.headers();
-    let res: Response;
-    try {
-      res = await fetch(`${this.serviceUrl}/connections`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          purpose: opts.purpose,
-          ...(opts.machineName ? { machine_name: opts.machineName } : {}),
-          client_pubkey: keypair.publicKeyB64,
-          ttl_seconds: opts.ttlSeconds ?? DEFAULT_TTL_SECONDS,
-        }),
-      });
-    } catch (error: any) {
-      throw new CapyError(
-        `Could not reach the connection broker: ${error?.message ?? 'network error'}`,
-        ERROR_CODES.NETWORK_ERROR,
-      );
-    }
+    const res = await (async () => {
+      try {
+        return await fetch(`${this.serviceUrl}/connections`, {
+          method: 'POST',
+          signal: AbortSignal.timeout(15_000),
+          headers,
+          body: JSON.stringify({
+            purpose: opts.purpose,
+            ...(opts.machineName ? { machine_name: opts.machineName } : {}),
+            client_pubkey: keypair.publicKeyB64,
+            ttl_seconds: opts.ttlSeconds ?? DEFAULT_TTL_SECONDS,
+          }),
+        });
+      } catch (error) {
+        throw new CapyError(
+          `Could not reach the connection broker: ${error instanceof Error ? error.message : 'network error'}`,
+          ERROR_CODES.NETWORK_ERROR,
+        );
+      }
+    })();
     if (!res.ok) {
       throw new CapyError(
         `Connection broker refused create (HTTP ${res.status})`,
@@ -217,6 +226,48 @@ export class BrokerClient {
       expiresAt: body.expires_at,
       keypair,
     };
+  }
+
+  /**
+   * Return after one bounded poll without cancelling a pending request.
+   * A resumable caller must persist its private connection handle before
+   * handing out the URL. Delivery remains single-use: CONNECTION_CONSUMED
+   * without a saved answer requires a new ceremony, not a successful retry.
+   */
+  async pollExchange(connection: BrokerConnection, waitSeconds: number = 20): Promise<PollExchangeResult> {
+    const boundedWait = Number.isFinite(waitSeconds) ? Math.max(0, Math.min(Math.floor(waitSeconds), 25)) : 20;
+    const headers = await this.headers().catch(() => null);
+    if (!headers) return { kind: 'network', detail: 'no session token' };
+    const response = await (async () => {
+      try {
+        return { ok: true as const, value: await fetch(
+          `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${boundedWait}`,
+          { method: 'GET', headers, redirect: 'error', signal: AbortSignal.timeout((boundedWait + 5) * 1000) },
+        ) };
+      } catch (error) {
+        return { ok: false as const, detail: error instanceof Error ? error.message : undefined };
+      }
+    })();
+    if (!response.ok) return { kind: 'network', detail: response.detail };
+    const res = response.value;
+    const body = await readBody(res);
+    if (!res.ok) {
+      if (res.status === 410) return { kind: 'expired' };
+      if (res.status === 409) return { kind: 'consumed' };
+      return { kind: 'service', status: res.status, code: typeof body.code === 'string' ? body.code : undefined };
+    }
+    const pageKey = typeof body.page_pubkey === 'string' ? { pagePubkeyB64: body.page_pubkey } : {};
+    if (body.status === 'pending' || body.status === 'attached') return { kind: 'pending', ...pageKey };
+    if (body.status !== 'answered' || typeof body.ciphertext !== 'string') return { kind: 'service', status: res.status, code: 'INVALID_FORMAT' };
+    return { kind: 'answered', ciphertextB64: body.ciphertext, ...pageKey };
+  }
+
+  async pollAnswer(connection: BrokerConnection, waitSeconds: number = 20): Promise<PollAnswerResult> {
+    const result = await this.pollExchange(connection, waitSeconds);
+    if (result.kind === 'pending') return { kind: 'pending' };
+    if (result.kind !== 'answered') return result;
+    const opened = openEnvelope({ ciphertextB64: result.ciphertextB64, connectionId: connection.connectionId, keypair: connection.keypair });
+    return opened.ok ? { kind: 'answered', plaintext: opened.plaintext } : { kind: 'bad_envelope', code: opened.code };
   }
 
   /**
@@ -244,44 +295,9 @@ export class BrokerClient {
     const pollGapMs = opts.pollGapMs ?? DEFAULT_POLL_GAP_MS;
 
     while (Date.now() < deadline) {
-      let res: Response;
-      let headers: Record<string, string>;
-      try {
-        headers = await this.headers();
-      } catch {
-        // Token became unavailable mid-flow — a session problem, not a wire
-        // problem, but equally unrecoverable inside this poll loop.
-        return { kind: 'network', detail: 'no session token' };
-      }
-      try {
-        res = await fetch(
-          `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${waitSeconds}`,
-          { method: 'GET', headers },
-        );
-      } catch (error: any) {
-        return { kind: 'network', detail: error?.message };
-      }
-
-      if (res.ok) {
-        const body = await readBody(res);
-        if (body.status === 'answered' && typeof body.ciphertext === 'string') {
-          const opened = openEnvelope({
-            ciphertextB64: body.ciphertext,
-            connectionId: connection.connectionId,
-            keypair: connection.keypair,
-          });
-          if (!opened.ok) return { kind: 'bad_envelope', code: opened.code };
-          return { kind: 'answered', plaintext: opened.plaintext };
-        }
-        // pending / attached — keep polling until the deadline.
-        if (Date.now() < deadline) await sleep(pollGapMs);
-        continue;
-      }
-
-      const body = (await readBody(res)) as ErrorBody;
-      if (res.status === 410) return { kind: 'expired' };
-      if (res.status === 409) return { kind: 'consumed' };
-      return { kind: 'service', status: res.status, code: body.code };
+      const answer = await this.pollAnswer(connection, waitSeconds);
+      if (answer.kind !== 'pending') return answer;
+      if (Date.now() < deadline) await sleep(pollGapMs);
     }
 
     await this.cancel(connection.connectionId);
@@ -373,22 +389,20 @@ export class BrokerClient {
     });
     if (!sealed.ok) return { kind: 'bad_page_pubkey', code: sealed.code };
 
-    let headers: Record<string, string>;
-    try {
-      headers = await this.headers();
-    } catch {
-      return { kind: 'network', detail: 'no session token' };
-    }
-    let res: Response;
-    try {
-      res = await fetch(`${this.serviceUrl}/connections/${connection.connectionId}/request`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ ciphertext: sealed.ciphertextB64 }),
-      });
-    } catch (error: any) {
-      return { kind: 'network', detail: error?.message };
-    }
+    const headers = await this.headers().catch(() => null);
+    if (!headers) return { kind: 'network', detail: 'no session token' };
+    const response = await (async () => {
+      try {
+        return { ok: true as const, value: await fetch(`${this.serviceUrl}/connections/${connection.connectionId}/request`, {
+          method: 'POST', headers, signal: AbortSignal.timeout(15_000),
+          body: JSON.stringify({ ciphertext: sealed.ciphertextB64 }),
+        }) };
+      } catch (error) {
+        return { ok: false as const, detail: error instanceof Error ? error.message : undefined };
+      }
+    })();
+    if (!response.ok) return { kind: 'network', detail: response.detail };
+    const res = response.value;
 
     if (res.ok) return { kind: 'sent' };
 

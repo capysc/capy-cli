@@ -25,6 +25,7 @@
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
 import { existsSync } from 'fs';
+import { resolve } from 'path';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
@@ -42,18 +43,31 @@ import { planCanonicalSync } from '../sync/canonicalSyncPolicy';
 import type { CanonicalSyncDecision } from '../sync/canonicalSyncPolicy';
 import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
 import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
+import { resolveActiveUrl } from '../config/profileConfig';
+import { SyncCommand } from './syncCommand';
 
 export interface SetupCommandOptions {
   readonly confirm?: string;
   readonly envPath?: string;
+  readonly org?: string;
+  readonly project?: string;
+  readonly createProject?: string;
+  readonly expectedUserId?: string;
 }
 
 /** The apply command must stay inside the same environment-specific binary
  * that produced the plan. Otherwise a `capy-dev` plan hands the agent a
  * production `capy` confirm command, which reads `~/.capy` instead of the
  * paired runtime's `~/.capy-dev` session. */
-export function setupConfirmCommand(binaryName: string, planHash: string): string {
-  return `${binaryName} setup --json --confirm ${planHash}`;
+export function setupConfirmCommand(binaryName: string, planHash: string, options: SetupCommandOptions = {}): string {
+  const quote = (value: string): string => /^[a-zA-Z0-9_./:-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+  const flags = [
+    ...(options.org ? ['--org', options.org] : []),
+    ...(options.project ? ['--project', options.project] : []),
+    ...(options.createProject ? ['--create-project', options.createProject] : []),
+    ...(options.envPath ? ['--env-path', options.envPath] : []),
+  ];
+  return `${binaryName} setup --json --confirm ${planHash}${flags.length ? ` ${flags.map(quote).join(' ')}` : ''}`;
 }
 
 interface OrgRef {
@@ -76,6 +90,9 @@ interface SetupPlanFacts {
   readonly syncMode: 'free' | 'paid';
   readonly syncAction: CanonicalSyncDecision['action'];
   readonly remoteVariableNames: readonly string[];
+  readonly environment: string;
+  readonly envPath: string;
+  readonly choices: Readonly<Pick<SetupCommandOptions, 'org' | 'project' | 'createProject'>>;
 }
 
 /** Immutable equivalent of Array#sort's default UTF-16 ordering. */
@@ -102,6 +119,9 @@ function canonicalPlanInput(cwd: string, plan: SetupPlanFacts): string {
     sync_mode: plan.syncMode,
     sync_action: plan.syncAction,
     remote_variable_names: sortedStrings(plan.remoteVariableNames),
+    environment: plan.environment,
+    env_path: plan.envPath,
+    choices: plan.choices,
   });
 }
 
@@ -141,7 +161,7 @@ type IdentityResolution =
  * case in `pairCommand.ts` where a non-interactive multi-org pairing leaves
  * `orgId` unset).
  */
-async function resolveIdentity(authService: AuthService): Promise<IdentityResolution> {
+async function resolveIdentity(authService: AuthService, selectedOrg?: string): Promise<IdentityResolution> {
   const first = await authService.authenticateSilent();
   if (!first.success || !first.user_id) {
     return { ok: false, code: ERROR_CODES.AUTH_FAILED, detail: first.error ?? 'no valid session on this machine — run capy pair first' };
@@ -150,6 +170,15 @@ async function resolveIdentity(authService: AuthService): Promise<IdentityResolu
   const orgs = first.organizations ?? [];
   if (orgs.length === 0) {
     return { ok: false, code: ERROR_CODES.NO_ORGANIZATIONS, detail: 'this account belongs to no organization yet' };
+  }
+  if (selectedOrg) {
+    const selected = orgs.find((org) => org.id === selectedOrg);
+    if (!selected) return { ok: false, code: ERROR_CODES.PERMISSION_DENIED, detail: 'The selected organization is not available to this account.' };
+    const scoped = await authService.authenticateSilent(selectedOrg);
+    if (!scoped.success || scoped.user_id !== first.user_id || scoped.organization_id !== selectedOrg) {
+      return { ok: false, code: ERROR_CODES.AUTH_FAILED, detail: 'Could not authenticate this account in the selected organization.' };
+    }
+    return { ok: true, authResult: scoped, org: { id: selected.id, name: selected.name } };
   }
 
   const active = orgs.find((o) => o.id === first.organization_id);
@@ -178,6 +207,15 @@ type ProjectResolution =
   | { readonly ok: false; readonly code: string; readonly detail: string };
 
 export class SetupCommand {
+  private printResult(body: Readonly<Record<string, unknown>>): void {
+    (this.reporter ?? printResult)(body);
+  }
+
+  private refuse(code: string, detail: string, extra: Readonly<Record<string, unknown>> = {}, exitCode = 1): void {
+    if (!this.reporter) { refuse(code, detail, extra, exitCode); return; }
+    this.reporter({ ok: false, code, detail, ...extra });
+  }
+
   private readonly projectManager: ProjectManager;
   private readonly fileManager: FileManager;
   private readonly authService: AuthService;
@@ -186,7 +224,7 @@ export class SetupCommand {
   private readonly devMode: boolean;
   private readonly cliOptions: { readonly envPath?: string };
 
-  constructor(cliOptions: { readonly envPath?: string } = {}, devMode: boolean = false) {
+  constructor(cliOptions: { readonly envPath?: string } = {}, devMode: boolean = false, private readonly reporter?: (body: Readonly<Record<string, unknown>>) => void) {
     this.cliOptions = cliOptions;
     this.devMode = devMode;
     this.projectManager = new ProjectManager();
@@ -205,18 +243,26 @@ export class SetupCommand {
   }
 
   async execute(cmdOptions: SetupCommandOptions): Promise<void> {
+    if (cmdOptions.project && cmdOptions.createProject) {
+      this.refuse('SETUP_CHOICES_INVALID', 'Choose either --project or --create-project, not both.');
+      return;
+    }
     const projectState = await this.projectManager.detectProjectState();
     if (projectState.initialized) {
-      refuse(ERROR_CODES.SETUP_ALREADY_INITIALIZED, 'keep.lock already exists in this directory', { remedy: 'capy sync --json' });
+      this.refuse(ERROR_CODES.SETUP_ALREADY_INITIALIZED, 'keep.lock already exists in this directory', { remedy: 'capy sync --json' });
       return;
     }
 
-    const identity = await resolveIdentity(this.authService);
+    if (cmdOptions.expectedUserId) this.authService.setSessionUserId(cmdOptions.expectedUserId);
+    const identity = await resolveIdentity(this.authService, cmdOptions.org);
     if (!identity.ok) {
-      refuse(identity.code, identity.detail, {}, identity.needsInput ? EXIT_NEEDS_INPUT : 1);
+      this.refuse(identity.code, identity.detail, {}, identity.needsInput ? EXIT_NEEDS_INPUT : 1);
       return;
     }
     const { authResult, org } = identity;
+    if (cmdOptions.expectedUserId && authResult.user_id !== cmdOptions.expectedUserId) {
+      this.refuse(ERROR_CODES.PERMISSION_DENIED, 'This setup request belongs to a different signed-in account.'); return;
+    }
 
     const existingProjects = await (async () => {
       try {
@@ -226,7 +272,7 @@ export class SetupCommand {
       }
     })();
     if (!existingProjects.ok) {
-      refuse(codeOf(existingProjects.err), detailOf(existingProjects.err));
+      this.refuse(codeOf(existingProjects.err), detailOf(existingProjects.err));
       return;
     }
     const projects = existingProjects.value;
@@ -235,49 +281,45 @@ export class SetupCommand {
       .then((value) => ({ ok: true as const, value }))
       .catch((err: unknown) => ({ ok: false as const, err }));
     if (!billingOutcome.ok) {
-      refuse(codeOf(billingOutcome.err), detailOf(billingOutcome.err));
+      this.refuse(codeOf(billingOutcome.err), detailOf(billingOutcome.err));
       return;
     }
     const isFree = billingOutcome.value.tier === 'free' && !billingOutcome.value.grandfathered;
 
     if (isFree && (projects.length !== 1 || projects[0]?.name !== 'default')) {
-      refuse(
+      this.refuse(
         ERROR_CODES.SERVICE_ERROR,
         'free onboarding requires the server-provisioned default project; retry signup provisioning before setup',
       );
       return;
     }
 
-    if (projects.length > 1) {
-      refuse(
+    if (!isFree && (!cmdOptions.org || (!cmdOptions.project && !cmdOptions.createProject))) {
+      this.refuse(
         ERROR_CODES.AMBIGUOUS_PROJECT,
-        `this organization has ${projects.length} projects; pass --project <id> to pick one`,
+        'Choose an organization and project: pass --org <id> with --project <id> or --create-project <name>.',
         { projects: projects.map((p) => ({ id: p.id, name: p.name })) },
         EXIT_NEEDS_INPUT,
       );
       return;
     }
 
-    const action: 'adopt_project' | 'create_project' = projects.length === 1 ? 'adopt_project' : 'create_project';
-    const project: ProjectRef =
-      projects.length === 1
-        ? { id: projects[0]!.id, name: projects[0]!.name, status: 'existing' }
-        : { id: '', name: this.projectManager.getDefaultProjectName(), status: 'new' };
-
-    const branch = SyncEngine.DEFAULT_BRANCH;
-    const syncState = this.projectManager.readSyncState();
-    const freeProjectAlreadyInitialized = isFree
-      && syncState?.sync_mode === 'free'
-      && syncState.org_id === org.id
-      && syncState.project_id === project.id;
-    if (freeProjectAlreadyInitialized) {
-      refuse(
-        ERROR_CODES.SETUP_ALREADY_INITIALIZED,
-        'the free default project is already initialized in this directory',
-        { remedy: 'capy sync --json' },
-      );
+    const selected = isFree ? projects[0] : projects.find((project) => project.id === cmdOptions.project);
+    if ((isFree && (cmdOptions.createProject || (cmdOptions.project && cmdOptions.project !== selected?.id)))
+      || (!isFree && cmdOptions.project && (!selected || selected.organization_id !== org.id))) {
+      this.refuse('SETUP_TARGET_INVALID', 'The selected project is not an available target in this organization.');
       return;
     }
+    if (cmdOptions.createProject !== undefined && !cmdOptions.createProject.trim()) {
+      this.refuse('SETUP_CHOICES_INVALID', 'Provide a non-empty project name.');
+      return;
+    }
+    const action = selected ? 'adopt_project' as const : 'create_project' as const;
+    const project: ProjectRef = selected
+      ? { id: selected.id, name: selected.name, status: 'existing' }
+      : { id: '', name: cmdOptions.createProject!.trim(), status: 'new' };
+
+    const branch = SyncEngine.DEFAULT_BRANCH;
 
     const localEnv = this.fileManager.readEnvFile(this.cliOptions.envPath);
     const envVariableNames = sortedStrings(Object.keys(localEnv));
@@ -287,13 +329,13 @@ export class SetupCommand {
       { id: project.id, name: project.name, organization_id: org.id },
       branch,
     );
-    const remoteObservation = authority.mode === 'free'
+    const remoteObservation = project.status === 'existing'
       ? await this.serviceClient.getDecryptData(project.id, branch, undefined, true)
         .then((value) => ({ ok: true as const, value }))
         .catch((err: unknown) => ({ ok: false as const, err }))
       : { ok: true as const, value: undefined };
     if (!remoteObservation.ok) {
-      refuse(codeOf(remoteObservation.err), detailOf(remoteObservation.err));
+      this.refuse(codeOf(remoteObservation.err), detailOf(remoteObservation.err));
       return;
     }
     const remoteKeep = remoteObservation.value?.keep_file
@@ -321,11 +363,14 @@ export class SetupCommand {
       syncMode: syncDecision.mode,
       syncAction: syncDecision.action,
       remoteVariableNames,
+      environment: `${this.devMode ? 'development' : 'configured'}:${resolveActiveUrl(this.devMode)}`,
+      envPath: resolve(this.cliOptions.envPath ?? '.env'),
+      choices: { org: cmdOptions.org, project: cmdOptions.project, createProject: cmdOptions.createProject },
     };
     const planHash = computePlanHash(process.cwd(), plan);
 
     if (cmdOptions.confirm === undefined) {
-      printResult({
+      this.printResult({
         ok: true,
         action,
         plan_hash: planHash,
@@ -334,21 +379,24 @@ export class SetupCommand {
         branch,
         sync_mode: plan.syncMode,
         sync_action: plan.syncAction,
+        // Existing setup merges local entries or pulls remote; neither deletes remote entries.
+        removed_remote_variable_names: [],
         keep_lock_path: plan.syncMode === 'paid' ? 'keep.lock' : null,
         env: { path: '.env', variable_count: envVariableNames.length, variable_names: envVariableNames },
         will_write: plan.syncMode === 'paid'
-          ? (envVariableNames.length > 0 ? ['keep.lock', '.env'] : ['keep.lock'])
-          : (plan.syncAction === 'create_empty_remote_marker' ? [] : ['.env']),
+          ? (envVariableNames.length > 0 || remoteVariableNames.length > 0 ? ['keep.lock', '.env'] : ['keep.lock'])
+          : (plan.syncAction === 'create_empty_remote_marker' || (!rootEnvExists && remoteVariableNames.length === 0) ? [] : ['.env']),
         confirm_command: setupConfirmCommand(
           this.devMode ? 'capy-dev' : process.env.CAPY_BIN_NAME || 'capy',
           planHash,
+          { ...cmdOptions, envPath: this.cliOptions.envPath },
         ),
       });
       return;
     }
 
     if (cmdOptions.confirm !== planHash) {
-      refuse(ERROR_CODES.PLAN_CHANGED, 'the plan has changed since it was computed — re-run capy setup --json for a fresh one');
+      this.refuse(ERROR_CODES.PLAN_CHANGED, 'the plan has changed since it was computed — re-run capy setup --json for a fresh one');
       return;
     }
 
@@ -439,7 +487,7 @@ export class SetupCommand {
 
     const resolved = await this.resolveOrCreateProject(plan);
     if (!resolved.ok) {
-      refuse(resolved.code, resolved.detail, { env_rewritten: false });
+      this.refuse(resolved.code, resolved.detail, { env_rewritten: false });
       return;
     }
     const { project, keep: baseKeep } = resolved;
@@ -448,7 +496,7 @@ export class SetupCommand {
       .then((key) => ({ ok: true as const, key }))
       .catch((err: unknown) => ({ ok: false as const, err }));
     if (!encryptionKeyOutcome.ok) {
-      refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
+      this.refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
       return;
     }
     const encryptionKey = encryptionKeyOutcome.key;
@@ -461,9 +509,16 @@ export class SetupCommand {
 
     const varNames = Object.keys(localEnv);
     if (varNames.length === 0) {
+      if (plan.remoteVariableNames.length > 0) {
+        await new SyncCommand({ envPath: this.cliOptions.envPath, org: plan.org.id, project: project.id,
+          expectedUserId: userId }, this.devMode, (result) => this.printResult({ ...result, action: plan.action }))
+          .execute();
+        this.gitAddKeepLockBestEffort();
+        return;
+      }
       installGitHooks(this.devMode);
       this.gitAddKeepLockBestEffort();
-      printResult({
+      this.printResult({
         ok: true,
         action: plan.action,
         org: plan.org,
@@ -482,7 +537,7 @@ export class SetupCommand {
     const encryptedEntries = Object.entries(localEnv).filter(([, value]) => value.startsWith('capy:'));
     const foreignKeys: readonly string[] = encryptedEntries.filter(([, value]) => !this.decryptsWithKey(value, encryptionKey)).map(([key]) => key);
     if (foreignKeys.length > 0) {
-      refuse(ERROR_CODES.PERMISSION_DENIED, "this .env holds values encrypted with a different project's key", { names: foreignKeys, env_rewritten: false });
+      this.refuse(ERROR_CODES.PERMISSION_DENIED, "this .env holds values encrypted with a different project's key", { names: foreignKeys, env_rewritten: false });
       return;
     }
     const resolvedLocalEnv: Record<string, string> = Object.fromEntries(
@@ -523,7 +578,7 @@ export class SetupCommand {
       }
     })();
     if (!pushed.ok) {
-      refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false });
+      this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false });
       return;
     }
 
@@ -552,14 +607,14 @@ export class SetupCommand {
       }
     })();
     if (!localWrite.ok) {
-      refuse(codeOf(localWrite.err), detailOf(localWrite.err), { env_rewritten: false, pushed: true });
+      this.refuse(codeOf(localWrite.err), detailOf(localWrite.err), { env_rewritten: false, pushed: true });
       return;
     }
 
     installGitHooks(this.devMode);
     this.gitAddKeepLockBestEffort();
 
-    printResult({
+    this.printResult({
       ok: true,
       action: plan.action,
       org: plan.org,
@@ -584,7 +639,7 @@ export class SetupCommand {
     const userId = authResult.user_id!;
     const resolved = await this.resolveOrCreateProject(plan);
     if (!resolved.ok) {
-      refuse(resolved.code, resolved.detail, { env_rewritten: false });
+      this.refuse(resolved.code, resolved.detail, { env_rewritten: false });
       return;
     }
 
@@ -592,7 +647,7 @@ export class SetupCommand {
       .then((key) => ({ ok: true as const, key }))
       .catch((err: unknown) => ({ ok: false as const, err }));
     if (!encryptionKeyOutcome.ok) {
-      refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
+      this.refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
       return;
     }
     const encryptionKey = encryptionKeyOutcome.key;
@@ -608,11 +663,11 @@ export class SetupCommand {
         .then((value) => ({ ok: true as const, value }))
         .catch((err: unknown) => ({ ok: false as const, err }));
       if (!remote.ok) {
-        refuse(codeOf(remote.err), detailOf(remote.err), { env_rewritten: false });
+        this.refuse(codeOf(remote.err), detailOf(remote.err), { env_rewritten: false });
         return;
       }
       if (!remote.value.keep_file) {
-        refuse(ERROR_CODES.PLAN_CHANGED, 'remote state changed since this plan was computed — re-run capy setup --json');
+        this.refuse(ERROR_CODES.PLAN_CHANGED, 'remote state changed since this plan was computed — re-run capy setup --json');
         return;
       }
 
@@ -634,7 +689,9 @@ export class SetupCommand {
       );
       this.projectManager.writeActiveBranch(plan.branch);
       this.fileManager.ensureCapyGitignore();
-      this.fileManager.writeEncryptedEnvFile(remotePlaintext, encryptionKey, this.cliOptions.envPath, remoteKeep, plan.branch);
+      if (Object.keys(remotePlaintext).length > 0 || existsSync(this.projectManager.getEnvPath(this.cliOptions.envPath))) {
+        this.fileManager.writeEncryptedEnvFile(remotePlaintext, encryptionKey, this.cliOptions.envPath, remoteKeep, plan.branch);
+      }
       const keepHash = SyncEngine.computeKeepHash(remoteKeep, plan.branch);
       this.fileManager.writeSyncState({
         last_sync: new Date().toISOString(),
@@ -648,7 +705,7 @@ export class SetupCommand {
       });
       writeKeepCache(plan.org.id, resolved.project.id, keepHash, remote.value.env_content ?? '');
       installGitHooks(this.devMode);
-      printResult({
+      this.printResult({
         ok: true,
         action: plan.action,
         sync_mode: 'free',
@@ -668,7 +725,7 @@ export class SetupCommand {
       .filter(([, value]) => !this.decryptsWithKey(value, encryptionKey))
       .map(([name]) => name);
     if (foreignKeys.length > 0) {
-      refuse(ERROR_CODES.PERMISSION_DENIED, "this .env holds values encrypted with a different project's key", { names: foreignKeys, env_rewritten: false });
+      this.refuse(ERROR_CODES.PERMISSION_DENIED, "this .env holds values encrypted with a different project's key", { names: foreignKeys, env_rewritten: false });
       return;
     }
     const resolvedLocalEnv = plan.syncAction === 'create_empty_remote_marker'
@@ -705,7 +762,7 @@ export class SetupCommand {
     ).then((value) => ({ ok: true as const, value }))
       .catch((err: unknown) => ({ ok: false as const, err }));
     if (!pushed.ok) {
-      refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false });
+      this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false });
       return;
     }
 
@@ -729,7 +786,7 @@ export class SetupCommand {
       this.fileManager.writeEncryptedEnvFile(resolvedLocalEnv, encryptionKey, this.cliOptions.envPath, adoptedKeep, plan.branch);
     }
     installGitHooks(this.devMode);
-    printResult({
+    this.printResult({
       ok: true,
       action: plan.action,
       sync_mode: 'free',

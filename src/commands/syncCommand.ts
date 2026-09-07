@@ -23,6 +23,9 @@
  * keep.lock is created. Billing — never file presence — selects the mode.
  */
 import { existsSync } from 'fs';
+import { createHash } from 'crypto';
+import { resolve } from 'path';
+import { resolveActiveUrl } from '../config/profileConfig';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
@@ -34,13 +37,18 @@ import { resolveBranchFromLocalState, branchesFromKeep } from '../core/branchRes
 import { writeKeepCache } from '../config/globalConfig';
 import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
 import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
+import { decryptSyncSnapshot } from '../sync/decryptSyncSnapshot';
 import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { AuthResult, CapyError, ERROR_CODES, KeepFile, ProjectState, setSyncKeepHash } from '../types/index';
 
 export interface SyncCommandOptions {
   readonly envPath?: string;
+  readonly org?: string;
+  readonly project?: string;
+  readonly expectedUserId?: string;
 }
+export interface SyncConsentOptions { readonly plan?: boolean; readonly confirm?: string }
 
 function printResult(body: Readonly<Record<string, unknown>>): void {
   console.log(JSON.stringify(body, null, 2));
@@ -68,14 +76,23 @@ interface FreeSyncContext {
 }
 
 export class SyncCommand {
+  private printResult(body: Readonly<Record<string, unknown>>): void {
+    (this.reporter ?? printResult)(body);
+  }
+
+  private refuse(code: string, detail: string, extra: Readonly<Record<string, unknown>> = {}, exitCode = 1): void {
+    if (!this.reporter) { refuse(code, detail, extra, exitCode); return; }
+    this.reporter({ ok: false, code, detail, ...extra });
+  }
+
   private readonly projectManager: ProjectManager;
   private readonly fileManager: FileManager;
   private readonly authService: AuthService;
   private readonly serviceClient: ServiceClient;
   private readonly devMode: boolean;
-  private readonly cliOptions: { readonly envPath?: string };
+  private readonly cliOptions: SyncCommandOptions;
 
-  constructor(cliOptions: { readonly envPath?: string } = {}, devMode: boolean = false) {
+  constructor(cliOptions: SyncCommandOptions = {}, devMode: boolean = false, private readonly reporter?: (body: Readonly<Record<string, unknown>>) => void) {
     this.cliOptions = cliOptions;
     this.devMode = devMode;
     this.projectManager = new ProjectManager();
@@ -92,21 +109,21 @@ export class SyncCommand {
     };
   }
 
-  async execute(): Promise<void> {
+  async execute(consent: SyncConsentOptions = {}): Promise<void> {
     const projectState = await this.projectManager.detectProjectState();
     if (!projectState.initialized) {
       try {
-        await this.syncFreeWithoutLocalKeep();
+        await this.syncFreeWithoutLocalKeep(consent);
       } catch (err) {
-        refuse(codeOf(err), detailOf(err));
+        this.refuse(codeOf(err), detailOf(err));
       }
       return;
     }
 
     try {
-      await this.sync(projectState);
+      await this.sync(projectState, consent);
     } catch (err) {
-      refuse(codeOf(err), detailOf(err));
+      this.refuse(codeOf(err), detailOf(err));
     }
   }
 
@@ -117,13 +134,11 @@ export class SyncCommand {
    * manifest-initialization refusal below.
    */
   private async resolveFreeContext(): Promise<FreeSyncContext | null> {
-    const syncState = this.projectManager.readSyncState();
-    const envMeta = this.fileManager.readEnvMeta(this.cliOptions.envPath);
-    const orgHint = syncState?.org_id ?? envMeta.org_id;
-    if (syncState?.user_id) this.authService.setSessionUserId(syncState.user_id);
+    const orgHint = this.cliOptions.org;
+    if (this.cliOptions.expectedUserId) this.authService.setSessionUserId(this.cliOptions.expectedUserId);
 
     const authResult = await this.authService.authenticateSilent(orgHint);
-    if (!authResult.success || !authResult.user_id) {
+    if (!authResult.success || !authResult.user_id || (this.cliOptions.expectedUserId && authResult.user_id !== this.cliOptions.expectedUserId)) {
       throw new CapyError(authResult.error ?? 'no valid session on this machine', ERROR_CODES.AUTH_FAILED);
     }
 
@@ -138,12 +153,17 @@ export class SyncCommand {
     }
 
     const projects = await this.serviceClient.listProjects();
-    const project = projects.find((candidate) => candidate.organization_id === orgId && candidate.name === 'default');
+    const defaults = projects.filter((candidate) => candidate.organization_id === orgId && candidate.name === 'default');
+    if (defaults.length > 1) throw new CapyError('More than one default project was returned. Resolve the project selection before syncing.', ERROR_CODES.PERMISSION_DENIED);
+    const project = defaults[0];
     if (!project) {
       throw new CapyError(
         'free sync requires the server-provisioned default project; run capy setup --json',
         ERROR_CODES.PROJECT_NOT_FOUND,
       );
+    }
+    if (this.cliOptions.project && this.cliOptions.project !== project.id) {
+      throw new CapyError('Selected project is not the free default project.', ERROR_CODES.PERMISSION_DENIED);
     }
 
     const authority = resolveBillingSyncAuthority(billing, orgId, project, SyncEngine.DEFAULT_BRANCH);
@@ -157,10 +177,10 @@ export class SyncCommand {
    * remote: this replaces local `.env` and runtime metadata without ever
    * creating a local keep.lock or a second conflict corpus.
    */
-  private async syncFreeWithoutLocalKeep(): Promise<void> {
+  private async syncFreeWithoutLocalKeep(consent: SyncConsentOptions): Promise<void> {
     const context = await this.resolveFreeContext();
     if (!context) {
-      refuse(ERROR_CODES.SYNC_NOT_INITIALIZED, 'no keep.lock in this directory', { remedy: 'capy setup --json' });
+      this.refuse(ERROR_CODES.SYNC_NOT_INITIALIZED, 'no keep.lock in this directory', { remedy: 'capy setup --json' });
       return;
     }
 
@@ -175,7 +195,7 @@ export class SyncCommand {
     );
     const decryptData = await this.serviceClient.getDecryptData(project.id, branch, undefined, true);
     if (!decryptData.keep_file) {
-      refuse(
+      this.refuse(
         ERROR_CODES.SYNC_NOT_INITIALIZED,
         'the default project has not completed its first sync',
         { remedy: 'capy setup --json' },
@@ -183,26 +203,19 @@ export class SyncCommand {
       return;
     }
 
-    const remoteKeep: KeepFile = {
-      ...(JSON.parse(decryptData.keep_file) as KeepFile),
-      org_id: org.id,
-      project_id: project.id,
-      project_name: project.name,
-    };
-    const remotePlaintext = Object.fromEntries(
-      Object.entries(this.fileManager.parseEnvContent(decryptData.env_content ?? ''))
-        .flatMap(([name, value]) => {
-          try {
-            return [[name, this.fileManager.decryptValue(value, encryptionKey)] as const];
-          } catch {
-            return [];
-          }
-        }),
-    );
+    const remoteKeep: KeepFile = JSON.parse(decryptData.keep_file);
+    if (remoteKeep.org_id !== org.id || remoteKeep.project_id !== project.id) {
+      throw new CapyError('The remote snapshot belongs to a different project. No local files were changed.', ERROR_CODES.PERMISSION_DENIED);
+    }
+    const remotePlaintext = decryptSyncSnapshot(this.fileManager.parseEnvContent(decryptData.env_content ?? ''),
+      (value) => this.fileManager.decryptValue(value, encryptionKey));
     const keepHash = SyncEngine.computeKeepHash(remoteKeep, branch);
     const remoteVariableNames = Object.keys(remotePlaintext);
     const localEnvPath = this.projectManager.getEnvPath(this.cliOptions.envPath);
     const shouldWriteLocalEnv = remoteVariableNames.length > 0 || existsSync(localEnvPath);
+    if (!this.checkConsent(consent, { org, project, branch, sync_mode: 'free',
+      sync_action: 'fetch_remote', env_variable_names: Object.keys(this.fileManager.readEnvFile(this.cliOptions.envPath)),
+      remote_variable_names: remoteVariableNames, will_write: shouldWriteLocalEnv ? ['.env'] : [] })) return;
 
     this.projectManager.writeActiveBranch(branch);
     this.fileManager.ensureCapyGitignore();
@@ -222,7 +235,7 @@ export class SyncCommand {
     writeKeepCache(org.id, project.id, keepHash, decryptData.env_content ?? '');
     installGitHooks(this.devMode);
 
-    printResult({
+    this.printResult({
       ok: true,
       action: 'sync',
       sync_mode: 'free',
@@ -254,7 +267,6 @@ export class SyncCommand {
     });
 
     if (local.kind === 'resolved') {
-      if (local.rebuildBranchFile) this.projectManager.writeActiveBranch(local.branch);
       return { ok: true, branch: local.branch };
     }
 
@@ -268,7 +280,6 @@ export class SyncCommand {
         }
       })();
       if (!fileBranchIsReal) {
-        this.projectManager.writeActiveBranch(local.envBranch);
         return { ok: true, branch: local.envBranch };
       }
       return {
@@ -281,7 +292,6 @@ export class SyncCommand {
     // No local signal — keep.lock pins the branch(es) this project tracks.
     const pinned = branchesFromKeep(this.projectManager.readKeepFile());
     if (pinned.length === 1) {
-      this.projectManager.writeActiveBranch(pinned[0]!);
       return { ok: true, branch: pinned[0]! };
     }
     return {
@@ -295,20 +305,24 @@ export class SyncCommand {
     };
   }
 
-  private async sync(projectState: ProjectState): Promise<void> {
+  private async sync(projectState: ProjectState, consent: SyncConsentOptions): Promise<void> {
+    if ((this.cliOptions.org && this.cliOptions.org !== projectState.organizationId)
+      || (this.cliOptions.project && this.cliOptions.project !== projectState.projectId)) {
+      this.refuse(ERROR_CODES.PERMISSION_DENIED, 'keep.lock does not match the approved project.'); return;
+    }
     const branchResolution = await this.resolveActiveBranch(projectState);
     if (!branchResolution.ok) {
-      refuse(branchResolution.code, branchResolution.detail, {}, branchResolution.needsInput ? EXIT_NEEDS_INPUT : 1);
+      this.refuse(branchResolution.code, branchResolution.detail, {}, branchResolution.needsInput ? EXIT_NEEDS_INPUT : 1);
       return;
     }
     const branch = branchResolution.branch;
 
-    if (projectState.userId) {
-      this.authService.setSessionUserId(projectState.userId);
+    if (this.cliOptions.expectedUserId ?? projectState.userId) {
+      this.authService.setSessionUserId(this.cliOptions.expectedUserId ?? projectState.userId!);
     }
     const authResult = await this.authService.authenticateSilent(projectState.organizationId);
-    if (!authResult.success || !authResult.user_id) {
-      refuse(ERROR_CODES.AUTH_FAILED, authResult.error ?? 'no valid session on this machine');
+    if (!authResult.success || !authResult.user_id || (this.cliOptions.expectedUserId && authResult.user_id !== this.cliOptions.expectedUserId)) {
+      this.refuse(ERROR_CODES.AUTH_FAILED, authResult.error ?? 'no valid session on this machine');
       return;
     }
 
@@ -354,7 +368,7 @@ export class SyncCommand {
         }, [])
       : [];
     if (drift.length > 0) {
-      refuse(
+      this.refuse(
         ERROR_CODES.SYNC_CONFLICT,
         'local .env holds values that differ from Keep — resolve interactively (capy) or push explicitly (capy push)',
         { names: drift },
@@ -363,10 +377,15 @@ export class SyncCommand {
       return;
     }
 
+    const shouldWriteLocalEnv = existsSync(localEnvPath) || Object.keys(serverPlaintext).length > 0;
+    if (!this.checkConsent(consent, { org: { id: orgId, name: orgName },
+      project: { id: projectId, name: projectState.projectName ?? '' }, branch, sync_mode: 'paid',
+      sync_action: 'fetch_remote', env_variable_names: Object.keys(this.fileManager.readEnvFile(this.cliOptions.envPath)),
+      remote_variable_names: Object.keys(serverPlaintext), will_write: shouldWriteLocalEnv ? ['keep.lock', '.env'] : ['keep.lock'] })) return;
     this.fileManager.writeKeepFile(serverKeep);
     this.projectManager.writeActiveBranch(branch);
     this.fileManager.ensureCapyGitignore();
-    this.fileManager.writeEncryptedEnvFile(serverPlaintext, encryptionKey, this.cliOptions.envPath, serverKeep, branch);
+    if (shouldWriteLocalEnv) this.fileManager.writeEncryptedEnvFile(serverPlaintext, encryptionKey, this.cliOptions.envPath, serverKeep, branch);
     this.fileManager.writeSyncState({
       last_sync: new Date().toISOString(),
       synced_variables: Object.keys(serverPlaintext),
@@ -375,7 +394,7 @@ export class SyncCommand {
     });
     installGitHooks(this.devMode);
 
-    printResult({
+    this.printResult({
       ok: true,
       action: 'sync',
       org: { id: orgId, name: orgName },
@@ -384,5 +403,16 @@ export class SyncCommand {
       pulled_variables: Object.keys(serverPlaintext).length,
       local_drift_resolved: 0,
     });
+  }
+
+  /** Consent describes the existing operation; canonical sync conflict checks above remain authoritative. */
+  private checkConsent(options: SyncConsentOptions, facts: Readonly<Record<string, unknown>>): boolean {
+    const hash = `sha256:${createHash('sha256').update(JSON.stringify({ cwd: process.cwd(),
+      env_path: resolve(this.cliOptions.envPath ?? '.env'), service: resolveActiveUrl(this.devMode), ...facts })).digest('hex')}`;
+    if (options.plan) { this.printResult({ ok: true, action: 'sync', ...facts, plan_hash: hash, removed_remote_variable_names: [] }); return false; }
+    if (options.confirm !== undefined && options.confirm !== hash) {
+      this.refuse(ERROR_CODES.PLAN_CHANGED, 'The sync plan changed. Ask your agent to show the updated plan for approval.'); return false;
+    }
+    return true;
   }
 }

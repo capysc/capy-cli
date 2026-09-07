@@ -453,6 +453,7 @@ export interface SyncResolvedSnapshotOptions {
   readonly confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   readonly cacheRemote?: typeof writeKeepCache;
   readonly beforeLocalWrite?: () => void;
+  readonly reportStatus?: (message: string, warning: boolean) => void;
 }
 
 function encryptSnapshot(
@@ -561,7 +562,8 @@ export async function syncResolvedSnapshot(
 
   if (!ctx.lockless) {
     const { autoCommitKeep } = await import('../../git/autoCommitKeep');
-    autoCommitKeep(ctx.branch);
+    if (opts.reportStatus) autoCommitKeep(ctx.branch, undefined, opts.reportStatus);
+    else autoCommitKeep(ctx.branch);
   }
 }
 

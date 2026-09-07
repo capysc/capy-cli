@@ -82,6 +82,7 @@ export function deviceVerificationHandoff(
 /** Starts the flow. The returned `user_code` is what the human confirms; `device_code` is never shown. */
 export async function startDeviceAuthorization(apiUrl: string): Promise<DeviceAuthorization> {
   const response = await fetch(`${apiUrl}/auth/device/authorize`, {
+    redirect: 'error', signal: AbortSignal.timeout(10_000),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',

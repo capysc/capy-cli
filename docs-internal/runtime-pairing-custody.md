@@ -1,194 +1,65 @@
-# Runtime pairing custody boundary
+# Runtime pairing custody
 
-Status: CAP-628 provider-neutral v2 foundation plus an inactive Development
-macOS adapter; no provider selected or wired and no real-Keychain evidence,
-2026-09-02.
+Owner ruling, 2026-09-03; implementation checkpoint, 2026-09-06:
+pairing uses existing protected filesystem custody. The previous prohibition
+against storing pairing key material in an ordinary 0600 file is withdrawn.
+No OS keychain, native addon, or new storage dependency is required.
 
-## Implemented boundary
+## Filesystem mechanism
 
-`capy pair` continues to authenticate the runtime through WorkOS RFC 8628 and
-continues to recover `K_local` through the existing PRF-backed device ceremony.
-The key is handed to the detached grant daemon over stdin and remains only in
-that process's memory.
+The existing local.key stores the account's 32-byte local root under the
+active Capy home's orgs/<orgId>/users/<userId>/ directory. Pairing verifies an
+existing key or exclusively creates one, never silently overwriting a different
+recovery key. The org identifies storage/authentication context only; it does
+not attribute any repository.
 
-The CLI writes `auth/runtime-pair.json` below the active Capy home. Version 1
-remains the process-bound record. The inactive provider-backed path can write
-a version 2 record only after a provider seals `K_local`; that record contains
-only:
+auth/runtime-pair.json contains the user, credential, holder socket, lifetime,
+and pairing timestamp. A version-1 record may additionally carry a validated
+filesystemCustody binding: explicit environment, org, exact local.key path,
+and SHA-256 digest. The record contains no raw key or PRF output. Old version-1
+records remain process-only; existing recovery files never implicitly promote
+them. Inactive provider-backed version-2 records retain their prior semantics.
 
-- the Capy user ID;
-- the answering credential ID;
-- the Unix-socket path;
-- the daemon lifetime sentinel (`0` for process-bound custody; positive values
-  remain readable for legacy finite records); and
-- the pairing timestamp.
+Both files are mode 0600; custody directories are mode 0700. Restoration rejects
+symlinked or insufficiently protected custody, invalid key encoding/length,
+wrong digest, another user/environment, relocated custody, expired metadata,
+or malformed runtime records. Errors never print file contents or secrets.
 
-Version 2 additionally carries the provider kind, explicit Capy environment,
-user binding, and an opaque provider handle. The parser continues to accept
-valid version 1 records, refuses malformed or downgrade-shaped version 2
-records without deleting them, and never synthesizes custody for version 1.
+## Restart and interruption
 
-It does not contain `K_local`, the PRF output, a key derived from either value,
-or a ciphertext that can be opened with data in the same file. File mode is
-0600 and its parent directory is 0700. `~/.capy`, `~/.capy-dev`, and
-`~/.capy-staging` remain independent because the path is derived exclusively
-through `getGlobalCapyDir()`.
+Restoration requires the durable runtime binding, not a filesystem scan.
+The existing pairing lease serializes recovery, which verifies the key,
+starts the existing in-memory holder when needed, proves its user/credential
+identity, and atomically updates the socket address. Key material enters the
+holder through its existing private stdin, never argv, environment, chat, or
+inherited output. A matching active holder is reused.
 
-Later CLI processes first honor the legacy
-`CAPY_DEVICE_KEY_GRANT_SOCKET` override, then discover this record. Processes
-and subagents that share the protected home can therefore reuse the pair
-without copying an environment variable. A stale daemon does not erase the
-account binding: the same user may pair again, while a different user is
-refused before its session is written. Version 1 logout terminates the daemon
-and removes the record. Version 2 logout first validates the caller-selected
-environment, deletes the provider entry, then terminates the daemon and removes
-metadata. Any provider or metadata-removal failure preserves session state so
-cleanup is retryable. Wiping the environment home removes the ordinary
-association, but a wired provider must also define and prove its own wipe
-semantics.
+A changed/deleted runtime binding or lost lease prevents publication. A
+rejected replacement holder is identity-verified and cleaned up.
 
-## Deliberate stop condition
+The filesystem is the custody boundary, not an additional encryption-at-rest
+claim: anyone able to read protected local.key has its key material. Wiped or
+unavailable storage requires pairing again. The mechanism supports reboot when
+storage survives, but simulated holder/process tests are not physical-reboot
+acceptance evidence.
 
-This slice survives CLI, MCP, agent, and subagent process restarts while the
-runtime and daemon remain alive. Unlike temporary `device-key grant` custody,
-`capy pair` has no 30-minute wall-clock expiry: it ends on logout, protected
-home wipe, daemon death, or runtime shutdown. It does not survive a host reboot
-or a daemon crash. The repository now contains an inactive macOS Development
-candidate that talks to the system Keychain through `/usr/bin/security`'s
-interactive stdin mode. It has not run against a real Keychain, been composed
-into the CLI, or passed a packaged-process/reboot gate, so it does not close
-that gap yet:
+## Logout remains unchanged
 
-- writing `K_local` to an ordinary 0600 file is explicitly prohibited;
-- wrapping it with a key stored beside the ciphertext is equivalent to writing
-  plaintext for this threat model;
-- deriving a wrapper from the WorkOS refresh token would give the service-side
-  identity plane enough material to participate in decryption and is therefore
-  not zero-trust;
-- the prior OS-keychain implementation used `@napi-rs/keyring` and was removed
-  because native addons broke the standalone binary release pipeline.
+Logout stops the holder and removes runtime pairing metadata and sessions.
+It preserves recovery-equivalent local.key and key.enc files. Without the
+runtime binding these files never silently restore a pairing. Inactive
+external-provider records retain their explicit provider-cleanup contract;
+no provider is selected for this filesystem path.
 
-The replacement candidate has no native addon. Its process argv is fixed to
-`/usr/bin/security -i -q -p ''`; commands and sealed material enter only over
-a parent-owned stdin pipe, and unsealed material returns only over a bounded,
-captured stdout pipe that is never inherited by the terminal or included in
-logs or errors. Find, add, and delete all name the same validated absolute
-login-Keychain path captured when the provider is constructed; they never
-depend on the user's mutable Keychain search list. Every complete stdin line is
-rejected before executor I/O unless it is below the macOS interactive parser's
-4096-byte boundary, including envelope expansion caused by worst-case JSON
-escaping. One Development-only generic-password item binds the explicit
-environment, user, stable opaque handle, and 32-byte key. Importing or
-constructing the adapter does not touch Keychain. Its tests model multiple
-Keychains and changing search order through a fake executor only.
+## Evidence
 
-Neither the process-durable registry nor the inactive v2 foundation is
-represented as full CAP-628 completion.
+tests/auth/pairing/runtimeFilesystemPairing.test.ts covers holder recreation,
+fresh-process key use, logout/no-auto-restore, wrong user/environment,
+missing/corrupt/different keys, permissions and symlinks, malformed/relocated
+metadata, wrong-holder cleanup, and binding deletion during restore.
+Tests use disposable homes and local sockets, not WorkOS, production, OS
+Keychain, or real user credentials.
 
-## Required interface for reboot durability
-
-Reboot durability requires a runtime custody provider injected below pairing
-and key resolution, with this minimal contract:
-
-```ts
-interface RuntimeCustodyProvider {
-  readonly kind: 'os-secure-store' | 'orchestrator-secret-store';
-  seal(input: {
-    readonly environment: 'development' | 'staging' | 'production';
-    readonly userId: string;
-    readonly kLocal: Uint8Array;
-  }): Promise<{ readonly opaqueHandle: string }>;
-  unseal(input: {
-    readonly environment: 'development' | 'staging' | 'production';
-    readonly userId: string;
-    readonly opaqueHandle: string;
-  }): Promise<Uint8Array>;
-  delete(input: {
-    readonly environment: 'development' | 'staging' | 'production';
-    readonly userId: string;
-    readonly opaqueHandle: string;
-  }): Promise<void>;
-}
-```
-
-The provider-neutral seam now exists in
-`src/auth/pairing/runtimeCustodyProvider.ts`. Its facade validates the provider
-kind, environment, user, opaque handle, and 32-byte result before returning a
-fresh copy to the caller. Provider-backed registration seals before atomically
-publishing version 2 metadata, refuses provider/environment drift before
-provider I/O, reaps rejected detached daemons, and prevents version 2 from
-being downgraded to version 1. Logout deletes provider state before discarding
-its only ordinary-file handle.
-
-The inactive recovery primitive in `src/auth/pairing/runtimePairing.ts` can
-reconstruct a dead process-bound holder from an explicitly selected provider
-and environment. Pairing, recovery, and logout share the same protected-home
-lease. Recovery verifies the stored user and environment before provider I/O,
-unseals only through the recorded provider kind, verifies the replacement
-holder's exact socket identity, and atomically replaces only the socket path
-and lifetime sentinel. Concurrent recoveries reuse the winning holder; every
-failed or losing candidate is ownership-verified and reaped. A missing v2
-record, provider wipe, changed lease, invalid key result, or metadata race
-fails closed without inventing custody or falling back to disk.
-
-Process-memory fakes pin the registration, recovery, refusal, race, and rollback
-semantics. A dependency-injected macOS Development adapter additionally pins
-its command transport and item semantics without invoking Keychain. This
-remains an inactive architecture slice: no provider or authoritative
-environment selector is wired into `capy pair` or downstream key consumers,
-and no real-Keychain, reboot, or packaged-binary claim is made.
-
-Security requirements:
-
-1. The opaque handle and all ordinary files are useless without a secret held
-   outside the workspace and outside the Capy service.
-2. The provider binds a sealed value to the environment and user ID and refuses
-   cross-user or cross-environment unseal.
-3. `K_local` never appears in argv, environment variables, user-visible or
-   inherited stdout/stderr, logs, chat, or service/Keep plaintext. A provider
-   may return it through a bounded parent-owned IPC pipe that is never logged
-   or forwarded.
-4. A standalone packaged binary can load the provider without unpackaged
-   native addons, or the runtime/orchestrator exposes it through a protected
-   inherited descriptor or authenticated local socket.
-5. Logout deletes the handle and provider entry; a wiped provider behaves as
-   an unpaired runtime.
-6. Repeated same-user seal returns the same stable opaque handle, and delete is
-   idempotent after an earlier delete or provider wipe so interrupted logout is
-   safely retryable.
-
-The implementation test seam should supply an in-memory fake provider and pin:
-seal followed by a new CLI process unseal, same-user idempotency, wrong-user and
-wrong-environment refusal, deleted/wiped provider behavior, tamper refusal, and
-standalone-binary packaging. A real provider must pass that corpus before the
-process-bound daemon can be reconstructed after reboot without a new ceremony.
-
-## Minimal implementation plan
-
-1. **Candidate implemented, not selected or wired:** the macOS Development
-   adapter keeps its item in one explicit user login Keychain and accepts key
-   material only through bounded interactive stdin. The default path is
-   derived once from the current user's home and can be dependency-injected by
-   future composition without a search-list lookup. Real-Keychain path,
-   quoting, ACL/prompt behavior, locked-Keychain behavior, and machine-local
-   access semantics still require proof before selection.
-2. Run the provider contract from a fresh packaged `capy-dev` process. Add
-   provider wipe, tamper, wrong-user, wrong-environment, and host-restart
-   evidence. A process-memory fake is not evidence for this gate.
-3. **Foundation implemented, not wired:** introduce a versioned runtime-pair
-   record carrying the provider kind and opaque handle alongside live socket
-   metadata. Keep reading v1 records; never synthesize a provider handle.
-4. **Provider-neutral recovery implemented, composition missing:** on a dead
-   v2 socket, the inactive primitive acquires the shared runtime lease, unseals,
-   starts a process-bound in-memory grant daemon, and atomically replaces only
-   the socket metadata. Concurrent callers wait for or reuse the winning
-   daemon. Wire it only after the composition root supplies the authenticated
-   user, explicit environment, and exact recorded provider resolver.
-5. **Foundation implemented, composition missing:** logout deletes the provider
-   entry before removing its only handle and preserves sessions on cleanup
-   failure. Wire the explicit environment/provider resolver; a missing,
-   tampered, or wiped provider must never fall back to `local.key`, a
-   refresh-token-derived key, or an ordinary file.
-6. Prove an actual host reboot, daemon kill/reconstruction, environment-home
-   isolation, same-user idempotency, different-user refusal, logout, home wipe,
-   and standalone packaging before changing CAP-628 from partial to complete.
+The legacy runtime-pairing and inactive provider-recovery suites retain their
+identity, lease, rollback, and cleanup coverage. Agent / Keep / runtime E2E
+acceptance and actual reboot validation remain separate gates.

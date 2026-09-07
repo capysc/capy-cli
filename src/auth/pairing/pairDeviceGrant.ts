@@ -11,9 +11,9 @@
  * The broker transport is what keeps this workable on the machine `capy pair`
  * exists for: one with no browser at all. The PRF still happens on the
  * human's OWN device, reached through the broker — it is not moved onto the
- * headless box, and no WebAuthn is attempted locally. K_local is never
- * written to disk; it goes to the in-memory grant daemon exactly as
- * `capy device-key grant` already does.
+ * headless box, and no WebAuthn is attempted locally. This resolver returns
+ * key material without persisting it. PairCommand owns the protected
+ * filesystem custody and runtime binding required for restart durability.
  *
  * Nothing about the PRF path changes. What changes is only that the ceremony
  * now runs over a session belonging to THIS machine rather than one copied

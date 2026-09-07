@@ -10,12 +10,11 @@
  * separate, DETACHED process (the "grant daemon") that outlives the command
  * that spawned it, and every later `capy` invocation in the same sandbox
  * talks to it over a Unix domain socket. This is the one place this
- * program's design intentionally trades "zero extra process" for "zero
- * extra disk write" — see the CAP-384 report for the alternatives
- * considered (env-var-carried key material, a CAPY_GLOBAL_DIR_NAME-scoped
- * cache file) and why both were rejected.
+ * program's design serves key material through a protected local socket.
+ * Temporary grants remain memory-only; runtime pairing separately binds
+ * the existing protected local.key file for restoration after restart.
  *
- * WHAT NEVER HAPPENS: K_local is never written to a file, never placed in
+ * WHAT NEVER HAPPENS HERE: K_local is never placed in
  * argv (visible via `ps`), and never placed in an environment variable
  * (visible via /proc/<pid>/environ on Linux). It crosses two boundaries
  * only: (1) parent → daemon, over the daemon's stdin pipe, once, at daemon
@@ -46,9 +45,9 @@
  * grant is expired" are the same observable fact, not two things that can
  * drift apart. `capy pair` is a different, explicit runtime-custody action:
  * its daemon is process-bound and therefore has no wall-clock expiry. It is
- * still only process-durable — logout, daemon death, or runtime shutdown wipes
- * the in-memory key, and reboot durability requires the separate secure
- * runtime-custody provider documented in docs-internal/runtime-pairing-custody.md.
+ * restored from explicitly bound protected filesystem custody after daemon
+ * death or reboot. Logout removes that binding and prevents restoration;
+ * preserved recovery files alone never authorize a new runtime holder.
  */
 import { randomBytes } from 'crypto';
 import { spawn } from 'child_process';
@@ -527,9 +526,11 @@ export interface FetchedGrant {
  * caller can tell "you never granted" from "you did, and it lapsed — run
  * `capy device-key grant` again."
  */
-export function fetchGrantedKLocal(socketPath: string, userId: string): Promise<FetchedGrant> {
+export async function fetchGrantedKLocal(socketPath: string, userId: string): Promise<FetchedGrant> {
+  const { resolveRuntimePairingSocket } = await import('../pairing/runtimePairingSocket');
+  const activeSocketPath = await resolveRuntimePairingSocket(socketPath, userId);
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = createConnection(activeSocketPath);
     const timer = setTimeout(() => {
       socket.destroy();
       reject(
