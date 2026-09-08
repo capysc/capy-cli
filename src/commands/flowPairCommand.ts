@@ -1,10 +1,11 @@
 /** Keep/service owns onboarding; this executor performs only typed local pairing work. */
 import { createHash, randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'fs';
 import { dirname, join, relative, sep } from 'path';
 import { hostname } from 'os';
 import { AuthService } from '../auth/authService';
+import type { AuthResult } from '../types/index';
 import { FileSessionStorageBackend } from '../auth/session/fileBackend';
 import { getGlobalCapyDir } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
@@ -26,6 +27,8 @@ export interface FlowPairOptions {
   readonly expectedUserId: string;
   readonly serviceOrigin: string;
   readonly json?: boolean;
+  /** Runtime-only pairing deliberately binds to the durable runtime id, never a repository. */
+  readonly runtimeOnly?: boolean;
 }
 export interface PairRuntimeView {
   readonly flow_id: string;
@@ -64,6 +67,8 @@ export interface PairCheckpoint {
   readonly completed?: true;
 }
 type PairReport = { readonly action: 'attach'; readonly runtime_id: string; readonly repo_fingerprint: string }
+  | { readonly action: 'reuse'; readonly runtime_id: string; readonly repo_fingerprint: string;
+      readonly source_flow_id: string; readonly receipt_id: string }
   | { readonly action: 'handoff'; readonly runtime_id: string; readonly repo_fingerprint: string;
       readonly connection_id: string; readonly url: string }
   | { readonly action: 'complete'; readonly runtime_id: string; readonly repo_fingerprint: string;
@@ -84,7 +89,7 @@ export interface PairExecutorDependencies {
   readonly keepOrigin: string;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-class PairExecutorError extends Error { constructor(readonly code: string) { super(code); } }
+export class PairExecutorError extends Error { constructor(readonly code: string) { super(code); } }
 const reject = (code: string): never => { throw new PairExecutorError(code); };
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex');
 
@@ -94,6 +99,19 @@ function validateArguments(flowId: string, options: FlowPairOptions): void {
   const devHttp = origin.protocol === 'http:' && (['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)
     || origin.hostname.endsWith('.ts.net'));
   if (origin.origin !== options.serviceOrigin || (origin.protocol !== 'https:' && !devHttp)) reject('PAIR_ENVIRONMENT_MISMATCH');
+}
+
+/** Only a missing/ended local session can be repaired by the readiness authenticator. */
+export function requirePairSilentAuthentication(result: AuthResult, expectedUserId: string): void {
+  if (result.success) {
+    if (result.user_id !== expectedUserId) return reject('PAIR_ACCOUNT_MISMATCH');
+    return;
+  }
+  if (['no_session', 'session_ended'].includes(result.error_code ?? '')) return reject('PAIR_AUTHENTICATION_REQUIRED');
+  if (result.error_code === 'org_not_found') return reject('PAIR_SIGNUP_REQUIRED');
+  if (result.error_code === 'network') return reject('PAIR_AUTH_NETWORK_UNAVAILABLE');
+  if (result.error_code === 'server_error') return reject('PAIR_AUTH_SERVICE_UNAVAILABLE');
+  return reject('PAIR_AUTH_SERVICE_UNAVAILABLE');
 }
 
 function pending(state: PairCheckpoint) {
@@ -277,28 +295,48 @@ function errorMessage(code: string): string {
   return 'Pairing could not finish. Ask your agent to check this request and retry; your account is unchanged.';
 }
 
-export async function runFlowPairCommand(flowId: string, options: FlowPairOptions, devMode = false): Promise<number> {
-  try {
+/** A completed receipt is reusable only with this exact runtime, account, and deployment binding. */
+function completedPairCheckpoint(userId: string, serviceOrigin: string, runtimeId: string, credentialId: string): PairCheckpoint | null {
+  const directory = join(getGlobalCapyDir(), 'auth', 'authentication-flows');
+  if (!existsSync(directory)) return null;
+  const candidates = readdirSync(directory)
+    .filter((name) => /^pair-[0-9a-f-]{36}\.json$/i.test(name))
+    .map((name) => readProtectedJson<PairCheckpoint>(join(directory, name)))
+    .filter((state): state is PairCheckpoint => state !== null && state.completed === true
+      && state.userId === userId && state.serviceOrigin === serviceOrigin
+      && state.runtimeId === runtimeId && state.credentialId === credentialId && Boolean(state.receiptId));
+  return candidates.reduce<PairCheckpoint | null>((selected, candidate) =>
+    selected === null || candidate.flowId > selected.flowId ? candidate : selected, null);
+}
+
+export async function executeLocalFlowPair(flowId: string, options: FlowPairOptions, devMode = false) {
     validateArguments(flowId, options);
     if (new URL(resolveActiveUrl(devMode)).origin !== options.serviceOrigin) return reject('PAIR_ENVIRONMENT_MISMATCH');
     const backend = new FileSessionStorageBackend();
     const session = backend.load(options.expectedUserId);
     if (!session?.refresh_token || session.user_id !== options.expectedUserId) return reject('PAIR_AUTHENTICATION_REQUIRED');
     assertRuntimePairingUser(options.expectedUserId);
-    const repositoryRoot = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'],
-      { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim());
-    const fingerprint = sha256(repositoryRoot);
     const checkpointPath = join(getGlobalCapyDir(), 'auth', 'authentication-flows', `pair-${flowId}.json`);
-    const prior = readProtectedJson<PairCheckpoint>(checkpointPath);
-    if (prior && (prior.userId !== options.expectedUserId || prior.serviceOrigin !== options.serviceOrigin
-      || prior.repositoryFingerprint !== fingerprint)) return reject('PAIR_CHECKPOINT_MISMATCH');
-    const auth = new AuthService(options.serviceOrigin, devMode, options.expectedUserId);
+    const runtimePath = join(getGlobalCapyDir(), 'auth', 'authentication-flows', 'runtime-id.json');
     const lease = acquirePairAttemptLease();
     try {
+      const runtimeId = () => {
+        const existing = readProtectedJson<{ readonly id: string }>(runtimePath);
+        if (existing) return UUID.test(existing.id) ? existing.id : reject('PAIR_CHECKPOINT_INVALID');
+        const id = randomUUID(); saveProtectedJson(runtimePath, { id }); return id;
+      };
+      const fingerprint = options.runtimeOnly
+        ? runtimeId()
+        : sha256(realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'],
+          { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()));
+      const prior = readProtectedJson<PairCheckpoint>(checkpointPath);
+      if (prior && (prior.userId !== options.expectedUserId || prior.serviceOrigin !== options.serviceOrigin
+        || prior.repositoryFingerprint !== fingerprint)) return reject('PAIR_CHECKPOINT_MISMATCH');
+      const auth = new AuthService(options.serviceOrigin, devMode, options.expectedUserId);
       const authOrgId = prior?.custodyOrgId ?? session.organizations[0]?.id;
       if (!authOrgId) return reject('PAIR_SIGNUP_REQUIRED');
       const authenticated = await auth.authenticateSilent(authOrgId);
-      if (!authenticated.success || authenticated.user_id !== options.expectedUserId) return reject('PAIR_AUTHENTICATION_REQUIRED');
+      requirePairSilentAuthentication(authenticated, options.expectedUserId);
       const token = async () => (await auth.getValidToken())?.access_token ?? reject('PAIR_AUTHENTICATION_REQUIRED');
       const request = async (body?: PairReport): Promise<PairRuntimeView> => {
         const response = await fetch(`${options.serviceOrigin}/flows/${flowId}/runtime`, {
@@ -312,11 +350,40 @@ export async function runFlowPairCommand(flowId: string, options: FlowPairOption
         }
         return response.json() as Promise<PairRuntimeView>;
       };
+      const existingCredential = async () => {
+        const record = readRuntimePairing();
+        if (!record) return null;
+        if (record.version !== 1 || !record.filesystemCustody) return reject('PAIR_EXISTING_REQUIRES_PROOF');
+        const restored = await recoverFilesystemRuntimePairingWhileLeaseHeld({
+          environment: runtimePairingEnvironment(devMode), expectedUserId: options.expectedUserId,
+        }, lease);
+        return restored?.credentialId ?? null;
+      };
+      const reusableCredential = !prior ? await existingCredential() : null;
+      if (reusableCredential) {
+        const source = completedPairCheckpoint(options.expectedUserId, options.serviceOrigin, runtimeId(), reusableCredential);
+        if (!source) return reject('PAIR_EXISTING_REQUIRES_PROOF');
+        const reused = await request({ action: 'reuse', runtime_id: runtimeId(), repo_fingerprint: fingerprint,
+          source_flow_id: source.flowId, receipt_id: source.receiptId });
+        if (reused.phase !== 'paired' || reused.user_id !== options.expectedUserId
+          || reused.runtime_id !== runtimeId() || reused.repo_fingerprint !== fingerprint
+          || reused.receipt_id !== source.receiptId || reused.custody_org_id !== source.custodyOrgId) {
+          return reject('PAIR_COMPLETION_NOT_ACKNOWLEDGED');
+        }
+        // A source receipt proves this exact runtime; the new parent still needs
+        // its own durable local correlation for subsequent setup commands.
+        saveProtectedJson(checkpointPath, {
+          ...source, flowId, repositoryFingerprint: fingerprint,
+          connection: undefined, snapshot: undefined, answer: undefined, completed: true,
+        });
+        return { ok: true as const, flow_id: flowId, stage: 'paired' as const,
+          continuation: { tool: 'capy_onboard' as const, args: { flow_id: flowId } } };
+      }
       const view = await request();
       validateView(view, flowId, options.expectedUserId);
       if (view.custody_org_id !== authOrgId) {
         const pinned = await auth.authenticateSilent(view.custody_org_id);
-        if (!pinned.success || pinned.user_id !== options.expectedUserId) return reject('PAIR_AUTHENTICATION_REQUIRED');
+        requirePairSilentAuthentication(pinned, options.expectedUserId);
       }
       const broker = new BrokerClient(options.serviceOrigin, token);
       const client = new ServiceClient(options.serviceOrigin, devMode);
@@ -325,32 +392,25 @@ export async function runFlowPairCommand(flowId: string, options: FlowPairOption
       const result = await executeFlowPair(flowId, options, {
         now: Date.now, repositoryFingerprint: fingerprint, view: async () => view, report: request,
         read: () => readProtectedJson<PairCheckpoint>(checkpointPath), save: (state) => saveProtectedJson(checkpointPath, state),
-        runtimeId: () => {
-          const path = join(getGlobalCapyDir(), 'auth', 'authentication-flows', 'runtime-id.json');
-          const existing = readProtectedJson<{ readonly id: string }>(path);
-          if (existing) return UUID.test(existing.id) ? existing.id : reject('PAIR_CHECKPOINT_INVALID');
-          const id = randomUUID(); saveProtectedJson(path, { id }); return id;
-        },
+        runtimeId,
         keepOrigin: keepOrigin(), wrappers: ops,
         createConnection: () => broker.createConnection({ purpose: 'device-key', machineName: hostname(), ttlSeconds: 900 }),
         poll: (connection) => broker.pollAnswer(connection, 20),
-        existingCredential: async () => {
-          const record = readRuntimePairing();
-          if (!record) return null;
-          if (record.version !== 1 || !record.filesystemCustody) return reject('PAIR_EXISTING_REQUIRES_PROOF');
-          const restored = await recoverFilesystemRuntimePairingWhileLeaseHeld({
-            environment: runtimePairingEnvironment(devMode), expectedUserId: options.expectedUserId,
-          }, lease);
-          return restored?.credentialId ?? null;
-        },
+        existingCredential,
         persist: async (material, orgId) => {
           const handle = await spawnGrantDaemon(material, { ttlMs: null, persistRuntimePairing: false });
           await registerFilesystemRuntimePairing(runtimePairingEnvironment(devMode), orgId, material, handle);
         },
       });
-      console.log(JSON.stringify(result));
-      return 0;
+      return result;
     } finally { releasePairAttemptLease(lease); }
+}
+
+export async function runFlowPairCommand(flowId: string, options: FlowPairOptions, devMode = false): Promise<number> {
+  try {
+    const result = await executeLocalFlowPair(flowId, options, devMode);
+    console.log(JSON.stringify(result));
+    return 0;
   } catch (error) {
     const code = error instanceof PairExecutorError ? error.code : 'PAIR_EXECUTOR_FAILED';
     console.log(JSON.stringify({ ok: false, flow_id: flowId, code, message: errorMessage(code) }));

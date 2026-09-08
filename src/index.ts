@@ -640,8 +640,27 @@ program
   .command('pair')
   .description('Sign this headless machine in with a code entered on another device (no browser needed here)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--flow-id <id>', 'Keep-owned runtime or onboarding correlation')
+  .option('--authentication-flow-id <id>', 'Keep-owned authentication correlation')
+  .option('--expected-user-id <id>', 'the account bound by the hosted MCP')
+  .option('--service-origin <origin>', 'must match this CLI environment')
+  .option('--runtime-only', 'pair outside a repository through a standalone runtime handle')
   .action(async (options) => {
     assertNotLocalOnly('pair');
+    const instrumented = options.flowId !== undefined || options.authenticationFlowId !== undefined
+      || options.expectedUserId !== undefined || options.serviceOrigin !== undefined || options.runtimeOnly === true;
+    if (instrumented) {
+      if (!options.json || !options.flowId || !options.authenticationFlowId || !options.expectedUserId || !options.serviceOrigin) {
+        console.log(JSON.stringify({ ok: false, code: 'READINESS_ARGUMENT_INVALID' }));
+        process.exit(1);
+      }
+      const { runFlowReadinessCommand } = await import('./commands/flowReadinessCommand');
+      const code = await runFlowReadinessCommand({ flowId: options.flowId, authenticationFlowId: options.authenticationFlowId,
+        expectedUserId: options.expectedUserId, serviceOrigin: options.serviceOrigin,
+        runtimeOnly: options.runtimeOnly === true, continuationTool: options.runtimeOnly ? 'capy_pair' : 'capy_onboard' });
+      if (code !== 0) process.exit(code);
+      return;
+    }
     const { PairCommand } = await import('./commands/pairCommand');
     const cmd = new PairCommand();
     const exitCode = await cmd.execute({ json: options.json });
@@ -661,33 +680,6 @@ program
 const flow = program
   .command('flow')
   .description('Flow-service instance management');
-
-flow
-  .command('authenticate <id>')
-  .description('Execute or resume a Keep-owned sign-in step without opening a browser or prompting')
-  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
-  .requiredOption('--service-origin <origin>', 'must match this CLI environment')
-  .option('--onboard-flow-id <id>', 'return the handoff to its parent onboarding flow')
-  .option('--json', 'emit the public handoff and coded outcome only')
-  .action(async (id: string, options: import('./commands/flowAuthenticateCommand').FlowAuthenticationOptions) => {
-    assertNotLocalOnly('flow authenticate');
-    const { runFlowAuthenticateCommand } = await import('./commands/flowAuthenticateCommand');
-    const code = await runFlowAuthenticateCommand(id, options);
-    if (code !== 0) process.exit(code);
-  });
-
-flow
-  .command('pair <id>')
-  .description('Execute or resume runtime pairing for a Keep-owned onboarding flow')
-  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
-  .requiredOption('--service-origin <origin>', 'must match this CLI environment')
-  .option('--json', 'emit only the public handoff and coded outcome')
-  .action(async (id: string, options: import('./commands/flowPairCommand').FlowPairOptions) => {
-    assertNotLocalOnly('flow pair');
-    const { runFlowPairCommand } = await import('./commands/flowPairCommand');
-    const code = await runFlowPairCommand(id, options);
-    if (code !== 0) process.exit(code);
-  });
 
 flow
   .command('setup <id>')

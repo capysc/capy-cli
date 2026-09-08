@@ -52,7 +52,7 @@ export interface AuthenticationExecutorDependencies {
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-class AuthenticationExecutorError extends Error {
+export class AuthenticationExecutorError extends Error {
   constructor(readonly code: string) { super(code); }
 }
 const reject = (code: string): never => { throw new AuthenticationExecutorError(code); };
@@ -174,12 +174,13 @@ function assertLocalUser(userId: string): void {
   if ((existing && existing.userId !== userId) || (legacy && legacy.user_id !== userId)) reject('AUTH_LOCAL_ACCOUNT_MISMATCH');
 }
 
-export async function runFlowAuthenticateCommand(flowId: string, options: FlowAuthenticationOptions): Promise<number> {
+/** Local protected-state adapter reused by the single instrumented readiness command. */
+export async function executeLocalFlowAuthentication(flowId: string, options: FlowAuthenticationOptions) {
   if (!UUID.test(flowId) || (options.onboardFlowId !== undefined && !UUID.test(options.onboardFlowId))) {
-    console.log(JSON.stringify({ ok: false, code: 'AUTH_ARGUMENT_INVALID' })); return 1;
+    return reject('AUTH_ARGUMENT_INVALID');
   }
   const apiUrl = new URL(resolveActiveUrl()).origin;
-  if (apiUrl !== options.serviceOrigin) { console.log(JSON.stringify({ ok: false, code: 'AUTH_ENVIRONMENT_MISMATCH' })); return 1; }
+  if (apiUrl !== options.serviceOrigin) return reject('AUTH_ENVIRONMENT_MISMATCH');
   const path = join(getGlobalCapyDir(), 'auth', 'authentication-flows', `${flowId}.json`);
   const lease = acquirePairAttemptLease();
   try {
@@ -205,6 +206,13 @@ export async function runFlowAuthenticateCommand(flowId: string, options: FlowAu
       },
       remove: () => { if (existsSync(path)) unlinkSync(path); },
     });
+    return result;
+  } finally { releasePairAttemptLease(lease); }
+}
+
+export async function runFlowAuthenticateCommand(flowId: string, options: FlowAuthenticationOptions): Promise<number> {
+  try {
+    const result = await executeLocalFlowAuthentication(flowId, options);
     console.log(JSON.stringify(projectAuthenticationResult(result, options.onboardFlowId)));
     return 0;
   } catch (error) {
@@ -212,7 +220,7 @@ export async function runFlowAuthenticateCommand(flowId: string, options: FlowAu
     console.log(JSON.stringify({ ok: false, flow_id: flowId,
       code: error instanceof AuthenticationExecutorError ? error.code : 'AUTH_EXECUTOR_FAILED' }));
     return 1;
-  } finally { releasePairAttemptLease(lease); }
+  }
 }
 
 export function projectAuthenticationResult(

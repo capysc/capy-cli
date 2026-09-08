@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { executeFlowPair, type PairCheckpoint, type PairExecutorDependencies, type PairRuntimeView } from '../../src/commands/flowPairCommand';
+import { executeFlowPair, requirePairSilentAuthentication, type PairCheckpoint, type PairExecutorDependencies, type PairRuntimeView } from '../../src/commands/flowPairCommand';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
 import { deriveDeviceKeyKek, deviceKeyWrapAAD, wrapKLocal, DEVICE_KEY_KDF_VERSION } from '../../src/auth/deviceKey/crypto';
 import type { KeyWrapperMetadata, KeyWrapperPayload } from '../../src/service/serviceClient';
@@ -51,6 +51,18 @@ function harness(initial: PairCheckpoint | null = null) {
 }
 
 describe('noninteractive Keep-owned runtime pairing executor', () => {
+  test.each([
+    [{ success: false, error_code: 'no_session' }, 'PAIR_AUTHENTICATION_REQUIRED'],
+    [{ success: false, error_code: 'session_ended' }, 'PAIR_AUTHENTICATION_REQUIRED'],
+    [{ success: false, error_code: 'network' }, 'PAIR_AUTH_NETWORK_UNAVAILABLE'],
+    [{ success: false, error_code: 'server_error' }, 'PAIR_AUTH_SERVICE_UNAVAILABLE'],
+    [{ success: false }, 'PAIR_AUTH_SERVICE_UNAVAILABLE'],
+    [{ success: false, error_code: 'unrecognized_failure' }, 'PAIR_AUTH_SERVICE_UNAVAILABLE'],
+    [{ success: false, error_code: 'org_not_found' }, 'PAIR_SIGNUP_REQUIRED'],
+    [{ success: true, user_id: 'user_other' }, 'PAIR_ACCOUNT_MISMATCH'],
+  ] as const)('classifies silent auth %j without starting a new device sign-in', (result, code) => {
+    expect(() => requirePairSilentAuthentication(result, options.expectedUserId)).toThrow(code);
+  });
   test('checkpoints private connection before returning its public handoff and exits without polling', async () => {
     const h = harness();
     const result = await executeFlowPair(flowId, options, h.deps);
