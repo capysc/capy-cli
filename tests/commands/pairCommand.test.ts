@@ -10,6 +10,36 @@
  * ISOLATED (mock.module): registered in run-tests.sh.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { CapyError } from '../../src/types/index';
+
+const authState = {
+  result: { success: false, error_code: 'no_session' } as any,
+  binding: null as null | { userId: string },
+  activeOrg: undefined as string | undefined,
+  calls: [] as any[],
+  constructors: [] as any[],
+  authorizeCalls: [] as string[],
+};
+mock.module('../../src/auth/authService', () => ({
+  AuthService: class {
+    constructor(...args: any[]) { authState.constructors.push(args); }
+    getOrganizationId() { return authState.activeOrg; }
+    async authenticateSilent(orgId?: string) {
+      authState.calls.push(orgId);
+      return authState.result;
+    }
+  },
+}));
+mock.module('../../src/auth/pairing/runtimePairing', () => ({
+  readRuntimePairing: () => authState.binding,
+  assertRuntimePairingUser: (userId: string) => {
+    if (authState.binding && authState.binding.userId !== userId) {
+      throw new CapyError('This runtime is paired to another Capy account. Run `capy logout` before pairing a different account.',
+        'RUNTIME_PAIR_USER_MISMATCH');
+    }
+    return authState.binding;
+  },
+}));
 
 mock.module('../../src/config/profileConfig', () => ({
   resolveActiveUrl: () => 'https://api.test.invalid',
@@ -36,7 +66,10 @@ const AUTHORIZATION = {
 // the code has necessarily been shown by then.
 let authorizeImpl: () => Promise<any> = async () => AUTHORIZATION;
 mock.module('../../src/auth/pairing/deviceAuth', () => ({
-  startDeviceAuthorization: async () => authorizeImpl(),
+  startDeviceAuthorization: async (url: string) => {
+    authState.authorizeCalls.push(url);
+    return authorizeImpl();
+  },
   awaitDeviceApproval: async (_url: string, authorization: any) => {
     ceremonyCalls.push({ authorization });
     return ceremonyImpl({ authorization });
@@ -126,6 +159,12 @@ const originalErr = console.error;
 const ORIGINAL_FLAG = process.env.CAPY_DEVICE_KEYS;
 
 beforeEach(async () => {
+  authState.result = { success: false, error_code: 'no_session' };
+  authState.binding = null;
+  authState.activeOrg = undefined;
+  authState.calls.length = 0;
+  authState.constructors.length = 0;
+  authState.authorizeCalls.length = 0;
   ceremonyCalls.length = 0;
   installCalls.length = 0;
   resolveKeyMaterialCalls.length = 0;
@@ -500,5 +539,154 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
 
       expect(logs.join('\n')).not.toContain('CAPY_EVENT_V1');
     }
+  });
+});
+
+const REUSED_AUTH = {
+  success: true,
+  user_id: 'user_1',
+  user_email: 'u@example.com',
+  organization_id: 'org_1',
+  organizations: [{ id: 'org_1', name: 'Org One', workos_org_id: 'wo_1' }],
+  _auth_method: 'cached',
+  _refresh_token: 'mock-refresh-must-not-print',
+  _orgless_access_token: 'mock-bearer-must-not-print',
+};
+
+function expectNoLogin() {
+  expect(authState.authorizeCalls).toHaveLength(0);
+  expect(ceremonyCalls).toHaveLength(0);
+  expect(installCalls).toHaveLength(0);
+  expect(logs.join('\n')).not.toContain(AUTHORIZATION.verification_uri);
+  expect(logs.join('\n')).not.toContain(AUTHORIZATION.user_code);
+  expect(logs.join('\n')).not.toContain('sign this machine in');
+}
+
+describe('PairCommand — reuse CLI authentication', () => {
+  beforeEach(() => { authState.result = REUSED_AUTH; });
+
+  test.each(['cached', 'refreshed'])('%s authentication proceeds directly to the grant', async (method) => {
+    authState.result = { ...REUSED_AUTH, _auth_method: method };
+    authState.binding = { userId: 'user_1' };
+    await new PairCommand('https://custom.test.invalid').execute({ json: true });
+    expectNoLogin();
+    expect(authState.calls).toHaveLength(1);
+    expect(authState.constructors).toEqual([['https://custom.test.invalid', false, 'user_1']]);
+    expect(resolveKeyMaterialCalls[0].opts).toMatchObject({ userId: 'user_1', authOrgId: 'org_1', serviceUrl: 'https://custom.test.invalid' });
+    expect(spawnCalls).toHaveLength(1);
+    expect(JSON.parse(logs[0])).toMatchObject({ ok: true, userCode: null, userId: 'user_1', orgTokenReady: true });
+    expect(logs.join('\n')).not.toContain('mock-refresh');
+    expect(logs.join('\n')).not.toContain('mock-bearer');
+    expect(logs.join('\n')).not.toContain('kLocal');
+  });
+
+  test.each(['network', 'server_error', 'org_not_found', undefined])('preserves session on %s without device login', async (error_code) => {
+    authState.result = { success: false, error_code, error: 'Sign in again (untrusted prose)' };
+    await new PairCommand().execute({ json: true });
+    expectNoLogin();
+    expect(process.exitCode).toBe(1);
+    expect(resolveKeyMaterialCalls).toHaveLength(0);
+    expect(spawnCalls).toHaveLength(0);
+    expect(JSON.parse(logs[0]).code).toBe(error_code ?? ERROR_CODES.AUTH_FAILED);
+  });
+
+  test('account mismatch stops before the grant and preserves session', async () => {
+    authState.binding = { userId: 'other_user' };
+    await new PairCommand().execute({ json: true });
+    expectNoLogin();
+    expect(JSON.parse(logs[0]).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+    expect(resolveKeyMaterialCalls).toHaveLength(0);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  test('failed grant then retry reuses authentication both times', async () => {
+    resolveKeyMaterialImpl = async () => ({ ok: false, code: 'transport_error' });
+    const command = new PairCommand();
+    await command.execute({ json: true });
+    expect(process.exitCode).toBe(1);
+    expect(spawnCalls).toHaveLength(0);
+    resolveKeyMaterialImpl = async () => ({ ok: true, material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) } });
+    process.exitCode = 0;
+    await command.execute({ json: true });
+    expectNoLogin();
+    expect(authState.calls).toHaveLength(2);
+    expect(resolveKeyMaterialCalls).toHaveLength(2);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  test.each([
+    { active: 'org_2', orgs: [{ id: 'org_1', name: 'One' }, { id: 'org_2', name: 'Two' }], expected: 'org_2', grant: 'org_2' },
+    { active: '', orgs: [{ id: 'org_1', name: 'One' }, { id: 'org_2', name: 'Two' }], expected: null, grant: 'org_1' },
+    { active: '', orgs: [{ id: 'org_1', name: 'One' }], expected: 'org_1', grant: 'org_1' },
+    { active: '', orgs: [], expected: null, grant: null },
+  ])('keeps organization context $active / $expected', async ({ active, orgs, expected, grant }) => {
+    authState.result = { ...REUSED_AUTH, organization_id: active, organizations: orgs };
+    authState.activeOrg = active || undefined;
+    await new PairCommand().execute({ json: true });
+    expectNoLogin();
+    expect(authState.calls).toEqual([active || undefined]);
+    expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBe(grant);
+    expect(JSON.parse(logs[0]).orgId).toBe(expected);
+  });
+});
+
+describe('PairCommand — definitive reauthentication', () => {
+  test('fresh authentication survives a failed grant and is reused on retry', async () => {
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+    installImpl = async () => {
+      authState.result = REUSED_AUTH;
+      return { orgId: 'org_1', orgName: 'Org One', orgTokenReady: true };
+    };
+    resolveKeyMaterialImpl = async () => ({ ok: false, code: 'transport_error' });
+    await new PairCommand().execute({ json: true });
+    expect(process.exitCode).toBe(1);
+    expect(spawnCalls).toHaveLength(0);
+    const beforeRetry = logs.length;
+    resolveKeyMaterialImpl = async () => ({ ok: true, material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) } });
+    process.exitCode = 0;
+    await new PairCommand().execute({ json: true });
+    expect(authState.authorizeCalls).toHaveLength(1);
+    expect(ceremonyCalls).toHaveLength(1);
+    expect(installCalls).toHaveLength(1);
+    expect(resolveKeyMaterialCalls).toHaveLength(2);
+    expect(spawnCalls).toHaveLength(1);
+    expect(JSON.parse(logs[beforeRetry])).toMatchObject({ ok: true, userCode: null });
+  });
+
+  test.each([true, false])('org-less authentication preserves the existing grant refusal (reuse: %s)', async (reuse) => {
+    authState.result = reuse ? { ...REUSED_AUTH, organization_id: '', organizations: [] } : { success: false, error_code: 'no_session' };
+    ceremonyImpl = async () => ({ status: 'complete', session: { ...VALID_ANSWER.session, organizations: [] } });
+    installImpl = async () => ({ orgId: null, orgTokenReady: false });
+    resolveKeyMaterialImpl = async () => ({ ok: false, code: ERROR_CODES.AUTH_FAILED });
+    await new PairCommand().execute({ json: true });
+    expect(resolveKeyMaterialCalls[0].opts.authOrgId).toBeNull();
+    expect(spawnCalls).toHaveLength(0);
+    expect(process.exitCode).toBe(1);
+    expect(JSON.parse(logs.find((line) => line.startsWith('{'))!)).toMatchObject({ ok: false, code: ERROR_CODES.AUTH_FAILED });
+  });
+
+  test.each(['no_session', 'session_ended'])('%s installs before grant', async (error_code) => {
+    authState.result = { success: false, error_code };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+    resolveKeyMaterialImpl = async () => {
+      expect(installCalls).toHaveLength(1);
+      return { ok: true, material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) } };
+    };
+    await new PairCommand().execute({ json: true });
+    expect(ceremonyCalls).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(1);
+    expect(JSON.parse(logs.find((line) => line.startsWith('{'))!)).toMatchObject({ ok: true, userCode: AUTHORIZATION.user_code });
+    expect(logs.join('\n')).not.toContain('rt_1');
+    expect(logs.join('\n')).not.toContain('kLocal');
+  });
+
+  test('fresh account mismatch is reported before session installation', async () => {
+    authState.binding = { userId: 'other_user' };
+    ceremonyImpl = async () => ({ status: 'complete', session: VALID_ANSWER.session });
+    await new PairCommand().execute({ json: true });
+    expect(installCalls).toHaveLength(0);
+    expect(resolveKeyMaterialCalls).toHaveLength(0);
+    expect(spawnCalls).toHaveLength(0);
+    expect(JSON.parse(logs.find((line) => line.startsWith('{'))!).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
   });
 });

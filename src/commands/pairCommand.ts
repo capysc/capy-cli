@@ -2,7 +2,8 @@
  * `capy pair` (CAP-409, device-grant internals per CAP-566/#328) — RFC 8628
  * machine pairing for a headless machine with no browser at all: SSH'd into
  * a container, nothing to open a browser tab with, no existing capy session
- * on this box yet.
+ * on this box yet. A usable existing CLI session is reused (including silent
+ * refresh); only missing or ended sessions require device authorization.
  *
  * Unlike `capy transport`/`capy redeem` (which require an ALREADY
  * `capy`-initialized machine to mint the code), `capy pair` needs nothing but
@@ -46,8 +47,7 @@
  * a working one. Gating here fails fast with the same clear message
  * `device-key grant` already gives, instead of a surprise ten minutes later.
  */
-import { hostname } from 'os';
-import { ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
@@ -56,7 +56,9 @@ import { installPairedSession } from '../auth/pairing/installPairedSession';
 import { grantKeyMaterialForPairedMachine } from '../auth/pairing/pairDeviceGrant';
 import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR, DEFAULT_GRANT_TTL_MS } from '../auth/deviceKey/grantHolder';
-import { keepOrigin } from '../ui/screens/keepScreens';
+import { AuthService } from '../auth/authService';
+import { assertRuntimePairingUser, readRuntimePairing } from '../auth/pairing/runtimePairing';
+import type { InstallPairedSessionResult } from '../auth/pairing/installPairedSession';
 import { renderTerminalQr } from '../ui/terminalQr';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -84,13 +86,62 @@ export interface PairCommandOptions {
   ttlMinutes?: number;
 }
 
+export interface PairCommandSuccessResult {
+  ok: true;
+  userCode: string | null;
+  userId: string;
+  userEmail?: string;
+  orgId: string | null;
+  orgName: string | null;
+  orgTokenReady: boolean;
+  socketPath: string;
+  expiresAt: number;
+  envVar: string;
+}
+
 export class PairCommand {
   constructor(private apiUrl?: string, private devMode: boolean = false) {}
 
   async execute(options: PairCommandOptions = {}): Promise<void> {
     if (!deviceKeysEnabled()) refuseFlagOff();
 
-    const serviceUrl = resolveActiveUrl(this.devMode);
+    const serviceUrl = this.apiUrl || resolveActiveUrl(this.devMode);
+    const silent = await (async () => {
+      try {
+        const binding = readRuntimePairing();
+        const auth = new AuthService(this.apiUrl, this.devMode, binding?.userId);
+        return await auth.authenticateSilent(auth.getOrganizationId() ?? undefined);
+      } catch {
+        return { success: false as const, error_code: 'network' as const };
+      }
+    })();
+    if (silent.success) {
+      if (!silent.user_id) {
+        this.fail(ERROR_CODES.AUTH_FAILED, 'Authentication did not resolve an account. Retry capy pair.', null, options);
+        return;
+      }
+      const organizations = silent.organizations ?? [];
+      const orgId = silent.organization_id || (organizations.length === 1 ? organizations[0].id : null);
+      await this.finishAuthenticated({
+        user: { id: silent.user_id, email: silent.user_email },
+        organizations,
+      }, {
+        orgId,
+        orgName: organizations.find((org) => org.id === orgId)?.name,
+        orgTokenReady: Boolean(silent.organization_id),
+      }, null, options);
+      return;
+    }
+    // Only these typed failures require a human login. In particular, an
+    // expired access token is refreshed by the lifecycle before we get here.
+    if (silent.error_code !== 'no_session' && silent.error_code !== 'session_ended') {
+      this.fail(silent.error_code ?? ERROR_CODES.AUTH_FAILED,
+        silent.error_code === 'org_not_found'
+          ? 'The session organization is no longer available. Check your organization access and retry capy pair.'
+          : 'Could not reuse CLI authentication. Check your connection and retry capy pair; the session has been preserved.',
+        null, options);
+      return;
+    }
 
     // Extracted so the outcome is a single const rather than a reassigned
     // binding (codebase immutability rule).
@@ -202,6 +253,7 @@ export class PairCommand {
     // Single const rather than a reassigned binding (immutability rule).
     const installed = await (async () => {
       try {
+        assertRuntimePairingUser(session.user.id);
         return { ok: true as const, value: await installPairedSession(session, { apiUrl: this.apiUrl, devMode: this.devMode }) };
       } catch (err) {
         return { ok: false as const, err };
@@ -215,7 +267,7 @@ export class PairCommand {
       // spawned; nothing partial is left running.
       const message = err instanceof Error ? err.message : String(err);
       if (options.json) {
-        console.log(JSON.stringify({ ok: false, code: ERROR_CODES.AUTH_FAILED, detail: message, userCode }, null, 2));
+        console.log(JSON.stringify({ ok: false, code: err instanceof CapyError ? err.code : ERROR_CODES.AUTH_FAILED, detail: message, userCode }, null, 2));
       } else {
         console.error('');
         console.error(`  Pairing succeeded but the session could not be installed: ${message}`);
@@ -225,27 +277,42 @@ export class PairCommand {
       return;
     }
 
-    // The session is on disk now — fetch this account's own wrapped_k_local
-    // over the authenticated API and unwrap it locally (see this file's
-    // header and pairKeyMaterial.ts). Doors are org-less server-side, so
-    // ANY org this account belongs to authenticates the fetch: prefer the
-    // org the session just activated, falling back to answer.keyMaterial.orgId
-    // (the org the browser had active at approval time) for the
-    // non-interactive multi-org case where install.orgId is deliberately
-    // null (installPairedSession.ts's own doc explains why).
-    // The session belongs to THIS machine now, so the key-material half runs
-    // the ordinary CAP-384 grant ceremony over it rather than unwrapping a
-    // PRF output sealed by the approver. The PRF itself still happens on the
-    // human's own device, reached through the broker transport — nothing
-    // WebAuthn-shaped is attempted on this headless box.
-    const install = installed.value;
+    await this.finishAuthenticated(session, installed.value, userCode, options);
+  }
+
+  private fail(code: string, detail: string, userCode: string | null, options: PairCommandOptions): void {
+    if (options.json) {
+      console.log(JSON.stringify({ ok: false, code, detail, userCode }, null, 2));
+    } else {
+      console.error(`\n  ${detail}\n`);
+    }
+    process.exitCode = 1;
+  }
+
+  /** Both authentication paths enter the same grant ceremony without copying
+   * credentials or rewriting a reused session. */
+  private async finishAuthenticated(
+    session: { user: { id: string; email?: string }; organizations: { id: string; name: string }[] },
+    install: InstallPairedSessionResult,
+    userCode: string | null,
+    options: PairCommandOptions,
+  ): Promise<void> {
+    try {
+      assertRuntimePairingUser(session.user.id);
+    } catch (error) {
+      this.fail(error instanceof CapyError ? error.code : ERROR_CODES.AUTH_FAILED,
+        error instanceof Error ? error.message : 'Could not verify the runtime account binding.', userCode, options);
+      return;
+    }
+    // Preserve the selected org; a headless multi-org session can still use
+    // its first org for the existing ceremony without introducing a prompt.
     const authOrgId = install.orgId ?? session.organizations[0]?.id ?? null;
     const resolved = await grantKeyMaterialForPairedMachine({
       apiUrl: this.apiUrl,
       devMode: this.devMode,
       authOrgId,
       userId: session.user.id,
-      serviceUrl: resolveActiveUrl(this.devMode),
+      serviceUrl: this.apiUrl || resolveActiveUrl(this.devMode),
     });
     if (!resolved.ok) {
       if (options.json) {
@@ -253,7 +320,7 @@ export class PairCommand {
       } else {
         console.error('');
         console.error(`  Pairing succeeded but the key material could not be granted (${resolved.code}).`);
-        console.error(`  The session was installed; run ${B('capy pair')} again to retry the key grant.`);
+        console.error(`  The CLI session is preserved; run ${B('capy pair')} again to retry the key grant.`);
         console.error('');
       }
       process.exitCode = 1;
@@ -277,7 +344,7 @@ export class PairCommand {
             socketPath: daemon.socketPath,
             expiresAt: daemon.expiresAt,
             envVar: GRANT_SOCKET_ENV_VAR,
-          },
+          } satisfies PairCommandSuccessResult,
           null,
           2,
         ),
@@ -286,7 +353,7 @@ export class PairCommand {
     }
 
     console.log('');
-    console.log(`  \x1b[32mPaired as ${B(session.user.email)}.\x1b[0m`);
+    console.log(`  \x1b[32mPaired as ${B(session.user.email ?? session.user.id)}.\x1b[0m`);
     if (install.orgId) {
       console.log(`  Active organization: ${B(install.orgName || install.orgId)}`);
     } else if (session.organizations.length === 0) {
