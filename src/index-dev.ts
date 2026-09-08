@@ -326,8 +326,9 @@ program
   .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
   .option('--expected-org-id <id>', 'require the repository organization bound by the hosted MCP')
   .option('--expected-project-id <id>', 'require the repository project bound by the hosted MCP')
+  .option('--expected-branch-id <id>', 'require the branch identity selected through the hosted MCP')
   .action(async (branch, options, command) => {
-    const hosted = options.nonTty || [options.expectedUserId, options.expectedOrgId, options.expectedProjectId]
+    const hosted = options.nonTty || [options.expectedUserId, options.expectedOrgId, options.expectedProjectId, options.expectedBranchId]
       .some(value => value !== undefined);
     if (hosted || (options.json && !options.create)) {
       const { runCheckoutJsonCommand } = await import('./commands/checkoutJsonCommand');

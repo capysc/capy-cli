@@ -28,13 +28,13 @@ for (const entrypoint of ['index.ts', 'index-dev.ts'] as const) {
   test(`${entrypoint}: expected account alone cannot fall back to interactive checkout`, () => {
     expect(invoke(['--expected-user-id', 'fixture-user']).body.code).toBe('CHECKOUT_TARGET_REQUIRED');
   });
-  test.each(['--expected-user-id', '--expected-org-id', '--expected-project-id'])(`${entrypoint}: empty %s never falls back to interactive checkout`, (flag) => {
+  test.each(['--expected-user-id', '--expected-org-id', '--expected-project-id', '--expected-branch-id'])(`${entrypoint}: empty %s never falls back to interactive checkout`, (flag) => {
     const result = invoke([flag, '']);
     expect(result.status).toBe(1);
     expect(result.body.code).toBe('CHECKOUT_TARGET_REQUIRED');
   });
   test(`${entrypoint}: complete hosted target still requires a real keep.lock`, () => {
-    const result = invoke(['--json', '--non-tty', '--expected-user-id', 'fixture-user', '--expected-org-id', 'fixture-org', '--expected-project-id', 'fixture-project']);
+    const result = invoke(['--json', '--non-tty', '--expected-user-id', 'fixture-user', '--expected-org-id', 'fixture-org', '--expected-project-id', 'fixture-project', '--expected-branch-id', 'fixture-branch']);
     expect(result.status).toBe(1);
     expect(result.body.code).toBe('NO_KEEP_FILE');
   });

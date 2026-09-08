@@ -9,6 +9,7 @@ export interface CheckoutJsonOptions {
   readonly expectedUserId?: string;
   readonly expectedOrgId?: string;
   readonly expectedProjectId?: string;
+  readonly expectedBranchId?: string;
   readonly nonTty?: boolean;
   readonly create?: boolean;
   readonly refresh?: boolean;
@@ -20,10 +21,10 @@ export interface CheckoutJsonDeps {
   readonly envBranch: () => string | undefined;
   readonly syncState: () => SyncState | null;
   readonly authenticate: (orgId?: string) => Promise<AuthResult>;
-  readonly branches: (projectId: string) => Promise<readonly { readonly name: string }[]>;
+  readonly branches: (projectId: string) => Promise<readonly { readonly id: string; readonly name: string }[]>;
   readonly resolveKey: (keep: KeepFile, userId: string) => Promise<string>;
   readonly localValues: (key: string) => Record<string, string>;
-  readonly apply: (keep: KeepFile, branch: string, key: string, recheck: () => void) => Promise<BranchSyncOutcome>;
+  readonly apply: (keep: KeepFile, branch: string, key: string, recheck: () => void, verifyTarget: () => Promise<void>) => Promise<BranchSyncOutcome>;
 }
 
 /** Existing-branch switch only: no creation, refresh override, browser or auth fallback. */
@@ -32,8 +33,8 @@ export async function checkoutJson(branch: string, options: CheckoutJsonOptions,
   if (!branch || branch.includes('\0') || options.create || options.refresh || options.protected !== undefined) {
     return refuse('CHECKOUT_OPTIONS_UNSUPPORTED', 'This non-interactive path switches an existing branch only. Creation and refresh require their own reviewed operation.');
   }
-  if (options.nonTty && (!options.expectedUserId || !options.expectedOrgId || !options.expectedProjectId)) {
-    return refuse('CHECKOUT_TARGET_REQUIRED', 'The hosted command must identify the expected account, organization and project.');
+  if (options.nonTty && (!options.expectedUserId || !options.expectedOrgId || !options.expectedProjectId || !options.expectedBranchId)) {
+    return refuse('CHECKOUT_TARGET_REQUIRED', 'The hosted command must identify the expected account, organization, project and branch.');
   }
   try {
     const keep = deps.readKeep();
@@ -44,9 +45,13 @@ export async function checkoutJson(branch: string, options: CheckoutJsonOptions,
     }
     const auth = await requireListIdentity(deps, options.expectedUserId, keep.org_id);
     if (auth.organization_id !== keep.org_id) return refuse('CHECKOUT_ORG_MISMATCH', 'The active session does not match this repository organization.');
-    if (!(await deps.branches(keep.project_id)).some((candidate) => candidate.name === branch)) {
-      return refuse('BRANCH_NOT_FOUND', 'That branch does not exist in this project. Select an existing branch.');
-    }
+    const verifyTarget = async () => {
+      if (!(await deps.branches(keep.project_id)).some(candidate => candidate.name === branch
+        && (!options.expectedBranchId || candidate.id === options.expectedBranchId))) {
+        throw new CapyError('The selected branch no longer exists with that name and identity.', ERROR_CODES.BRANCH_NOT_FOUND);
+      }
+    };
+    await verifyTarget();
     const key = await deps.resolveKey(keep, auth.user_id!);
     const active = deps.activeBranch();
     const header = deps.envBranch();
@@ -69,7 +74,7 @@ export async function checkoutJson(branch: string, options: CheckoutJsonOptions,
       }
     };
     recheck();
-    const outcome = await deps.apply(keep, branch, key, recheck);
+    const outcome = await deps.apply(keep, branch, key, recheck, verifyTarget);
     if (outcome.kind === 'forbidden') return refuse('PERMISSION_DENIED', 'This account cannot access that branch. Nothing was switched.');
     if (outcome.kind !== 'ok') return refuse('BRANCH_SWITCH_FAILED', 'The branch switch could not complete. Inspect repository status before retrying.');
     return { ok: true as const, code: 'BRANCH_SWITCHED', project_id: keep.project_id, branch, variable_count: outcome.varCount };
@@ -86,18 +91,13 @@ export function guardedCheckoutSnapshot(
   keep: KeepFile,
   key: string,
   recheck: () => void,
+  verifyTarget: () => Promise<void> = async () => {},
 ): ServiceClient['getDecryptData'] {
-  return async (...args) => {
+  return (...args) => (async () => {
     const [projectId, branch] = args;
     if (projectId !== keep.project_id || !branch) throw new CapyError('Invalid checkout target.', ERROR_CODES.PERMISSION_DENIED);
     const snapshot = await service.getDecryptData(...args).catch((error: unknown) => {
       recheck();
-      // ServiceClient already returns ordinary empty branches as successful
-      // snapshots. A propagated 404 is a missing target, never permission to
-      // invoke the legacy writer's empty-branch fallback.
-      if (error instanceof CapyError && error.details?.status === 404) {
-        throw new CapyError('The requested snapshot is unavailable.', error.code);
-      }
       throw error;
     });
     const remote: KeepFile = snapshot.keep_file ? JSON.parse(snapshot.keep_file) : keep;
@@ -120,9 +120,20 @@ export function guardedCheckoutSnapshot(
     if (findUncommittedEnvChange(values, remote.variables, branch) !== null) {
       throw new CapyError('Snapshot values do not match the target branch pins.', ERROR_CODES.INVALID_FORMAT);
     }
+    // Check again after the remote fetch: deletion/recreation with the same
+    // name must not substitute a new branch for the one the user selected.
+    await verifyTarget();
     recheck();
     return snapshot;
-  };
+  })().catch((error: unknown) => {
+    // ServiceClient represents ordinary empty branches as success. No 404
+    // from fetching OR subsequent verification may reach the legacy writer's
+    // fallback, which would otherwise clear the local environment.
+    if (error instanceof CapyError && error.details?.status === 404) {
+      throw new CapyError('The requested snapshot is unavailable.', error.code);
+    }
+    throw error;
+  });
 }
 
 export async function runCheckoutJsonCommand(branch: string, options: CheckoutJsonOptions, devMode = false): Promise<number> {
@@ -142,8 +153,8 @@ export async function runCheckoutJsonCommand(branch: string, options: CheckoutJs
     branches: (projectId) => service.listBranches(projectId),
     resolveKey: (keep, userId) => resolveStatusProjectKey(keep.org_id, keep.project_id, userId, service, auth),
     localValues: (key) => fm.readEncryptedEnvFile(key),
-    apply: async (keep, target, key, recheck) => syncAndWriteBranch({ projectManager: pm, fileManager: fm,
-      serviceClient: { getDecryptData: guardedCheckoutSnapshot(service, fm, keep, key, recheck) },
+    apply: async (keep, target, key, recheck, verifyTarget) => syncAndWriteBranch({ projectManager: pm, fileManager: fm,
+      serviceClient: { getDecryptData: guardedCheckoutSnapshot(service, fm, keep, key, recheck, verifyTarget) },
     }, keep.project_id, target, key, false),
   });
   console.log(JSON.stringify(outcome));

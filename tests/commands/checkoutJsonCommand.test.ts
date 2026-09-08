@@ -14,7 +14,7 @@ const keep: KeepFile = {
   version: '3.0', org_id: 'org-fixture', project_id: 'project-fixture', project_name: 'checkout-fixture',
   variables: { PLACEHOLDER: [{ resource_id: 'fixture-variable', branch: 'development', value_hash: hashValue('') }] },
 };
-const options = { nonTty: true, expectedUserId: 'user-fixture', expectedOrgId: keep.org_id, expectedProjectId: keep.project_id } as const;
+const options = { nonTty: true, expectedUserId: 'user-fixture', expectedOrgId: keep.org_id, expectedProjectId: keep.project_id, expectedBranchId: 'branch-fixture' } as const;
 const success = { kind: 'ok', varCount: 0, seededFromCurrent: false } as const;
 const dirtyEnvironments: readonly Record<string, string>[] = [
   {}, { PLACEHOLDER: 'edited' }, { PLACEHOLDER: '', ADDED: 'fixture' },
@@ -26,7 +26,7 @@ function fixture(overrides: Partial<CheckoutJsonDeps> = {}) {
   const apply = mock<CheckoutJsonDeps['apply']>(async (_keep, _branch, _key, recheck) => { recheck(); return success; });
   const deps: CheckoutJsonDeps = {
     readKeep: () => keep, activeBranch: () => 'development', envBranch: () => 'development', syncState: () => null,
-    authenticate, branches: async () => [{ name: 'preview' }], resolveKey,
+    authenticate, branches: async () => [{ id: options.expectedBranchId, name: 'preview' }], resolveKey,
     localValues: () => ({ PLACEHOLDER: '' }), apply, ...overrides,
   };
   return { deps, authenticate, resolveKey, apply };
@@ -47,6 +47,7 @@ describe('non-interactive existing-branch checkout', () => {
     { ...options, expectedUserId: undefined },
     { ...options, expectedOrgId: undefined },
     { ...options, expectedProjectId: undefined },
+    { ...options, expectedBranchId: undefined },
   ])('requires the complete hosted target before authentication', async (input) => {
     const run = fixture();
     expect((await checkoutJson('preview', input, run.deps)).code).toBe('CHECKOUT_TARGET_REQUIRED');
@@ -85,6 +86,12 @@ describe('non-interactive existing-branch checkout', () => {
     const run = fixture({ branches: async () => [] });
     expect((await checkoutJson('preview', options, run.deps)).code).toBe('BRANCH_NOT_FOUND');
     expect(run.resolveKey).not.toHaveBeenCalled();
+  });
+  test('a replacement branch with the same name does not match the selected identity', async () => {
+    const run = fixture({ branches: async () => [{ id: 'replacement-branch', name: 'preview' }] });
+    expect((await checkoutJson('preview', options, run.deps)).code).toBe(ERROR_CODES.BRANCH_NOT_FOUND);
+    expect(run.resolveKey).not.toHaveBeenCalled();
+    expect(run.apply).not.toHaveBeenCalled();
   });
 
   test.each([...dirtyEnvironments])('preserves local additions, edits and deletions', async (values) => {
@@ -160,7 +167,7 @@ describe('guarded snapshot with the actual filesystem writer', () => {
     expect(run.pm.readKeepFile()?.variables.PLACEHOLDER).toEqual(keep.variables.PLACEHOLDER);
   });
 
-  test.each(['wrong-project', 'bad-ciphertext', 'short-envelope', 'wrong-branch', 'wrong-header', 'fetch-drift', 'empty-drift'] as const)('%s changes no repository files', async (failure) => {
+  test.each(['wrong-project', 'bad-ciphertext', 'short-envelope', 'wrong-branch', 'wrong-header', 'fetch-drift', 'empty-drift', 'target-drift'] as const)('%s changes no repository files', async (failure) => {
     const run = files();
     const fetch = guardedCheckoutSnapshot({ getDecryptData: async () => {
       if (failure === 'empty-drift') throw new CapyError('No snapshot', ERROR_CODES.SERVICE_ERROR, { status: 404 });
@@ -170,6 +177,8 @@ describe('guarded snapshot with the actual filesystem writer', () => {
         env_content: `${failure === 'wrong-header' ? '# capy:branch=other\n' : ''}TARGET=${value}`, decrypt_key: '', expires_at: '' };
     } }, run.fm, keep, key, () => {
       if (failure === 'fetch-drift' || failure === 'empty-drift') throw new CapyError('Changed', ERROR_CODES.SYNC_CONFLICT);
+    }, async () => {
+      if (failure === 'target-drift') throw new CapyError('Branch was replaced during fetch', ERROR_CODES.BRANCH_NOT_FOUND);
     });
     const result = await syncAndWriteBranch({ projectManager: run.pm, fileManager: run.fm, serviceClient: { getDecryptData: fetch } }, keep.project_id, 'preview', key, false);
     expect(result.kind).toBe('sync_error');
