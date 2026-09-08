@@ -383,10 +383,12 @@ program
 program
   .command('push')
   .description('Push encrypted values to Keep')
-  .action(async () => {
+  .option('--non-tty', 'never start an interactive sign-in')
+  .option('--expected-user-id <id>', 'require this existing CLI account')
+  .action(async (options: Readonly<{ nonTty?: boolean; expectedUserId?: string }>) => {
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand();
-    await cmd.execute();
+    await cmd.execute({ nonInteractive: options.nonTty, expectedUserId: options.expectedUserId });
   });
 
 // `capy deploy` is a single picker that surfaces both:

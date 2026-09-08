@@ -8,6 +8,7 @@
 import type { ProjectManager } from '../core/projectManager';
 import type { FileManager } from '../files/fileManager';
 import type { AuthService } from '../auth/authService';
+import { authenticatePush, type PushAuthPolicy } from '../auth/pushAuthentication';
 import type { BillingStatus, ServiceClient } from '../service/serviceClient';
 import { installGitHooks } from '../git/installGitHooks';
 import { CapyError, ERROR_CODES, type AuthResult, type KeepFile } from '../types/index';
@@ -79,6 +80,7 @@ export interface FreeLocklessPushDependencies {
   readonly serviceClient: ServiceClientDependency;
   readonly devMode: boolean;
   readonly localOnly: boolean;
+  readonly authPolicy?: PushAuthPolicy;
   readonly confirmDestructivePush?: (plan: FreeLocklessPushPlan) => Promise<boolean>;
   readonly confirmConcurrentOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   readonly resolveContext?: typeof resolveContext;
@@ -90,17 +92,6 @@ export interface FreeLocklessPushDependencies {
 export type FreeLocklessPushDispatch =
   | { readonly handled: true }
   | { readonly handled: false; readonly authResult?: AuthResult };
-
-async function authenticateForBilling(
-  authService: AuthServiceDependency,
-  organizationId?: string,
-): Promise<AuthResult> {
-  const scopedSilent = await authService.authenticateSilent(organizationId);
-  if (scopedSilent.success) return scopedSilent;
-  const unscopedSilent = await authService.authenticateSilent();
-  if (unscopedSilent.success) return unscopedSilent;
-  return authService.authenticate(organizationId);
-}
 
 async function defaultDestructiveConfirmation(plan: FreeLocklessPushPlan): Promise<boolean> {
   if (!process.stdin.isTTY) return false;
@@ -152,8 +143,9 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   const syncState = deps.projectManager.readSyncState();
   const envMeta = deps.fileManager.readEnvMeta();
   const orgHint = syncState?.org_id ?? envMeta.org_id;
-  if (syncState?.user_id) deps.authService.setSessionUserId(syncState.user_id);
-  const auth = await authenticateForBilling(deps.authService, orgHint);
+  const expectedUser = deps.authPolicy?.expectedUserId ?? syncState?.user_id;
+  if (expectedUser) deps.authService.setSessionUserId(expectedUser);
+  const auth = await authenticatePush(deps.authService, orgHint, deps.authPolicy);
   if (!auth.success || !auth.user_id) {
     throw new CapyError(auth.error ?? 'No valid session on this machine.', ERROR_CODES.AUTH_FAILED);
   }
@@ -166,6 +158,7 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   const ctx = await (deps.resolveContext ?? resolveContext)({
     devMode: deps.devMode,
     forceLockless: true,
+    nonInteractive: deps.authPolicy?.nonInteractive,
     authService: deps.authService as AuthService,
     serviceClient: deps.serviceClient as ServiceClient,
     authResult: auth,
@@ -182,7 +175,7 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   const localRaw = deps.fileManager.readEnvFile();
   const plan = planFreeLocklessPush(Object.keys(localRaw), branchVariableNames(ctx.keep, ctx.branch));
   if (plan.requiresDestructiveConfirmation) {
-    const confirmed = await (deps.confirmDestructivePush ?? defaultDestructiveConfirmation)(plan);
+    const confirmed = await (deps.confirmDestructivePush ?? (deps.authPolicy?.nonInteractive ? async () => false : defaultDestructiveConfirmation))(plan);
     if (!confirmed) {
       throw new CapyError(
         `Push aborted: it would delete ${plan.deletedRemoteVariableNames.length} remote values.`,
@@ -213,7 +206,7 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   );
   await (deps.syncSnapshot ?? syncResolvedSnapshot)(ctx, localPlaintext, {
     primaryVarNames: [...new Set([...plan.localVariableNames, ...plan.deletedRemoteVariableNames])],
-    confirmOverwrite: deps.confirmConcurrentOverwrite ?? defaultConcurrentOverwriteConfirmation,
+    confirmOverwrite: deps.confirmConcurrentOverwrite ?? (deps.authPolicy?.nonInteractive ? async () => false : defaultConcurrentOverwriteConfirmation),
     beforeLocalWrite: () => {
       ctx.pm.writeActiveBranch(ctx.branch);
       ctx.fileManager.ensureCapyGitignore();

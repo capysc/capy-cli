@@ -117,6 +117,8 @@ export interface ResolveContextOptions {
   readonly authService?: AuthService;
   readonly serviceClient?: ServiceClient;
   readonly authResult?: ContextAuthResult;
+  /** Fail directly instead of displaying a browser error surface. */
+  readonly nonInteractive?: boolean;
 }
 
 export async function resolveContext(opts: ResolveContextOptions = {}): Promise<ResolvedContext> {
@@ -308,6 +310,7 @@ async function resolveLocklessContext(
         orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
       });
     } catch (err: unknown) {
+      if (opts.nonInteractive) throw err;
       const { displayErrorAndExit } = await import('../../ui/errorScreen');
       await displayErrorAndExit(err, { projectName, projectId, branch });
       throw err;

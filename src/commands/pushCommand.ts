@@ -2,6 +2,7 @@ import ora from '../ui/spinner';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
 import { AuthService } from '../auth/authService';
+import { authenticatePush, verifyPushIdentity, type PushAuthPolicy } from '../auth/pushAuthentication';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { debugLine } from '../ui/debug';
@@ -56,7 +57,8 @@ export class PushCommand {
     }
   }
 
-  async execute(): Promise<void> {
+  async execute(options: PushAuthPolicy = {}): Promise<void> {
+    const authPolicy = { ...options, nonInteractive: options.nonInteractive === true || !process.stdin.isTTY };
     try {
       const dispatch = await tryFreeLocklessPush({
         projectManager: this.projectManager,
@@ -65,22 +67,16 @@ export class PushCommand {
         serviceClient: this.serviceClient,
         devMode: this.devMode,
         localOnly: isLocalOnly(),
+        authPolicy,
       });
       if (dispatch.handled) return;
-      await this._execute(dispatch.authResult);
+      await this._execute(dispatch.authResult, authPolicy);
     } catch (error: unknown) {
       this.debugError('push execute caught', error);
+      if (authPolicy.nonInteractive) throw error;
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
     }
-  }
-
-  private async authenticate(organizationId?: string) {
-    const scopedSilent = await this.authService.authenticateSilent(organizationId);
-    if (scopedSilent.success) return scopedSilent;
-    const unscopedSilent = await this.authService.authenticateSilent();
-    if (unscopedSilent.success) return unscopedSilent;
-    return this.authService.authenticate(organizationId);
   }
 
   private async resolvePushIdentity(input: {
@@ -89,6 +85,7 @@ export class PushCommand {
     readonly projectId: string;
     readonly projectUserId?: string;
     readonly authResult?: AuthResult;
+    readonly authPolicy?: PushAuthPolicy;
   }): Promise<{ readonly userId: string; readonly encryptionKey: string }> {
     if (input.localMode) {
       return {
@@ -96,19 +93,26 @@ export class PushCommand {
         encryptionKey: await resolveLocalProjectKey(input.projectId),
       };
     }
-    if (input.projectUserId) this.authService.setSessionUserId(input.projectUserId);
-    const spinner = ora('Authenticating...').start();
-    const authResult = input.authResult ?? await this.authenticate(input.organizationId);
+    const policy = input.authPolicy ?? {};
+    const expectedUser = policy.expectedUserId ?? input.projectUserId;
+    if (expectedUser) this.authService.setSessionUserId(expectedUser);
+    const spinner = policy.nonInteractive ? null : ora('Authenticating...').start();
+    const authResult = await (async () => {
+      try {
+        return verifyPushIdentity(input.authResult ?? await authenticatePush(this.authService, input.organizationId, policy), policy);
+      } finally {
+        spinner?.stop();
+      }
+    })();
     this.debug('authResult', {
       success: authResult.success,
       user_id: authResult.user_id,
       _auth_method: authResult._auth_method,
     });
     if (!authResult.success || !authResult.user_id) {
-      spinner.fail('Authentication failed');
+      spinner?.fail('Authentication failed');
       throw new CapyError(authResult.error || 'Authentication failed', ERROR_CODES.AUTH_FAILED);
     }
-    spinner.stop();
     const keyOps: KeyServiceOps = {
       coDecrypt: (oid, ct) => this.serviceClient.coDecrypt(oid, ct).then((result) => result.plaintext),
       wrapOuterLayer: (oid, pt) => this.serviceClient.wrapOuterLayer(oid, pt).then((result) => result.ciphertext),
@@ -125,7 +129,7 @@ export class PushCommand {
     };
   }
 
-  private async _execute(preauthenticated?: AuthResult): Promise<void> {
+  private async _execute(preauthenticated?: AuthResult, authPolicy: PushAuthPolicy = {}): Promise<void> {
     this.debug('starting push command');
     this.debug('cwd', process.cwd());
 
@@ -159,6 +163,7 @@ export class PushCommand {
       projectId: projectState.projectId!,
       projectUserId: projectState.userId,
       authResult: preauthenticated,
+      authPolicy,
     });
     const { userId, encryptionKey } = identity;
     this.debug('encryptionKey resolved', { length: encryptionKey.length });
@@ -251,7 +256,7 @@ export class PushCommand {
       envBlobLength: envBlob.length,
     });
     const confirmOverwrite = async (changedNames: string[], contextLines: string[]): Promise<boolean> => {
-      if (!process.stdin.isTTY) return false;
+      if (authPolicy.nonInteractive || !process.stdin.isTTY) return false;
       pushSpinner.stop();
       for (const line of contextLines) console.log(line);
       const inquirer = (await import('inquirer')).default;

@@ -64,7 +64,7 @@ function dependencies(input: {
   const confirmDestructivePush = mock(async () => input.confirm ?? false);
   const deps = {
     projectManager: {
-      readSyncState: mock(() => ({ user_id: 'user_1', org_id: 'org_1' })),
+      readSyncState: mock(() => ({ user_id: 'user_1', org_id: 'org_1', last_sync: '2026-09-07T00:00:00Z', synced_variables: [] })),
     },
     fileManager: {
       readEnvMeta: mock(() => ({ org_id: 'org_1' })), readEnvFile: mock(() => local),
@@ -225,6 +225,53 @@ describe('free lockless destructive-push policy', () => {
     }));
     expect(result.deps.authService.authenticateSilent).toHaveBeenCalledTimes(1);
     expect(result.syncSnapshot).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('caller-bound noninteractive push', () => {
+  test('expired auth refuses before billing or filesystem writes without interactive fallback', async () => {
+    const result = dependencies({ silentAuth: { success: false, error: 'expired' } });
+    await expect(tryFreeLocklessPush({
+      ...result.deps, authPolicy: { nonInteractive: true, expectedUserId: 'user_1' },
+    })).rejects.toMatchObject({ code: ERROR_CODES.AUTH_FAILED });
+    expect(result.deps.authService.authenticate).not.toHaveBeenCalled();
+    expect(result.deps.serviceClient.getBillingStatus).not.toHaveBeenCalled();
+    expect(result.resolveContext).not.toHaveBeenCalled();
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
+  });
+
+  test('wrong account refuses before billing even when it has a valid silent session', async () => {
+    const result = dependencies({ silentAuth: { success: true, user_id: 'other' } });
+    await expect(tryFreeLocklessPush({
+      ...result.deps, authPolicy: { nonInteractive: true, expectedUserId: 'user_1' },
+    })).rejects.toMatchObject({ code: ERROR_CODES.AUTH_FAILED });
+    expect(result.deps.authService.authenticate).not.toHaveBeenCalled();
+    expect(result.deps.serviceClient.getBillingStatus).not.toHaveBeenCalled();
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
+  });
+
+  test('expected MCP caller overrides stale local user metadata and reaches the silent context', async () => {
+    const result = dependencies({ confirm: true });
+    await tryFreeLocklessPush({
+      ...result.deps,
+      projectManager: { readSyncState: () => ({ user_id: 'stale-user', org_id: 'org_1', last_sync: '2026-09-07T00:00:00Z', synced_variables: [] }) },
+      authPolicy: { nonInteractive: true, expectedUserId: 'user_1' },
+    });
+    expect(result.deps.authService.setSessionUserId).toHaveBeenCalledWith('user_1');
+    expect(result.deps.authService.setSessionUserId).not.toHaveBeenCalledWith('stale-user');
+    expect(result.resolveContext).toHaveBeenCalledWith(expect.objectContaining({
+      nonInteractive: true, authResult: expect.objectContaining({ user_id: 'user_1' }),
+    }));
+  });
+
+  test('noninteractive removal without an injected approval refuses before writes', async () => {
+    const result = dependencies();
+    const { confirmDestructivePush: _confirmation, ...deps } = result.deps;
+    await expect(tryFreeLocklessPush({
+      ...deps, authPolicy: { nonInteractive: true, expectedUserId: 'user_1' },
+    })).rejects.toMatchObject({ code: ERROR_CODES.SYNC_CONFLICT });
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
+    expect(result.writeActiveBranch).not.toHaveBeenCalled();
   });
 });
 

@@ -67,3 +67,11 @@ test('failed authentication refuses before resolving any project key', async () 
   expect(legacyKey).not.toHaveBeenCalled();
   expect(localKey).not.toHaveBeenCalled();
 });
+
+test('paid preauthentication cannot bypass the hosted caller identity pin', async () => {
+  const { command, auth } = fixture();
+  await expect(command['resolvePushIdentity']({ ...input, authPolicy: { nonInteractive: true, expectedUserId: 'different-user' } }))
+    .rejects.toMatchObject({ code: ERROR_CODES.AUTH_FAILED });
+  expect(auth.setSessionUserId).toHaveBeenCalledWith('different-user');
+  expect(runtimeKey).not.toHaveBeenCalled();
+});
