@@ -816,52 +816,13 @@ profileCmd
 
 program
   .command('cleanup')
-  .description('Remove Capy git hooks from this repository')
-  .action(async () => {
-    const { execSync } = await import('child_process');
-    const { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync } = await import('fs');
-
-    let gitDir: string;
-    try {
-      gitDir = execSync('git rev-parse --git-dir', { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    } catch {
-      console.log('Not a git repository.');
-      return;
-    }
-
-    const hooksDir = `${gitDir}/hooks`;
-    const MARKER = '# --- capy auto-sync (do not remove) ---';
-    const END_MARKER = '# --- end capy ---';
-    const hookNames = ['post-checkout', 'post-merge', 'pre-push'];
-    let removed = false;
-
-    for (const hookName of hookNames) {
-      const hookPath = `${hooksDir}/${hookName}`;
-      if (!existsSync(hookPath)) continue;
-
-      const content = readFileSync(hookPath, 'utf-8');
-      if (!content.includes(MARKER)) continue;
-
-      const escMarker = MARKER.replace(/[()]/g, '\\$&');
-      const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
-      const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
-      const updated = content.replace(re, '').trim();
-
-      if (!updated || /^#!.*sh$/.test(updated)) {
-        unlinkSync(hookPath);
-      } else {
-        writeFileSync(hookPath, updated + '\n', 'utf-8');
-        chmodSync(hookPath, 0o755);
-      }
-      removed = true;
-      console.log(`Removed ${B('Capy')} hook from ${hookName}`);
-    }
-
-    if (removed) {
-      console.log(`${B('Capy')} git hooks removed.`);
-    } else {
-      console.log(`No ${B('Capy')} hooks found.`);
-    }
+  .description('Remove Capy git-hook blocks, preserving other hook content')
+  .option('--json', 'emit a machine-readable result')
+  .option('--non-tty', 'never prompt (cleanup is always non-interactive)')
+  .option('--yes', 'explicitly request removal of Capy hook blocks')
+  .action(async (options: Readonly<{ json?: boolean; nonTty?: boolean; yes?: boolean }>) => {
+    const { cleanupCommand } = await import('./commands/cleanupCommand');
+    process.exit(cleanupCommand(options));
   });
 
 program
