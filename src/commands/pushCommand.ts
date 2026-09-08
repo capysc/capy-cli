@@ -14,7 +14,9 @@ import {
   type AuthResult,
   KeepFile,
 } from '../types/index';
-import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
+import type { KeyServiceOps } from '../crypto/keyResolver';
+import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
+import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
@@ -113,7 +115,13 @@ export class PushCommand {
     };
     return {
       userId: authResult.user_id,
-      encryptionKey: await resolveProjectKey(input.organizationId, input.projectId, authResult.user_id, keyOps),
+      // Paid push shares pairing custody with setup and sync. The existing
+      // resolver preserves legacy unpaired behavior and fails closed when a
+      // configured runtime grant is unavailable; local-only mode exits above.
+      encryptionKey: await resolveFreeSyncProjectKey(
+        input.organizationId, input.projectId, authResult.user_id, keyOps,
+        createGrantResolutionOps(this.serviceClient, this.authService),
+      ),
     };
   }
 

@@ -117,6 +117,7 @@ ISOLATED_FILES=(
   tests/commands/setupCommand.test.ts
   tests/commands/syncCommand.test.ts
   tests/commands/paidSyncRuntimeCustody.test.ts
+  tests/commands/paidPushRuntimeCustody.test.ts
   tests/ui/recoveryPhrase.test.ts
   tests/auth/authServiceKeepLoginBridge.test.ts
   # doctorCommand.test.ts mocks os.homedir() the same way (getGlobalCapyDir).
