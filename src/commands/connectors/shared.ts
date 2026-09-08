@@ -119,6 +119,8 @@ export interface ResolveContextOptions {
   readonly authResult?: ContextAuthResult;
   /** Fail directly instead of displaying a browser error surface. */
   readonly nonInteractive?: boolean;
+  /** Planning/agent push may restore existing custody, never mint replacement keys. */
+  readonly existingKeyOnly?: boolean;
 }
 
 export async function resolveContext(opts: ResolveContextOptions = {}): Promise<ResolvedContext> {
@@ -297,6 +299,13 @@ async function resolveLocklessContext(
   const { resolveProjectKeyWithMintFallback } = await import('../../auth/masterKeyMint');
   const projectKey = await (async (): Promise<string> => {
     try {
+      if (opts.existingKeyOnly) {
+        const { resolveFreeSyncProjectKey } = await import('../../sync/freeSyncKeyResolver');
+        return resolveFreeSyncProjectKey(orgId, projectId, userId, {
+          coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then(result => result.plaintext),
+          wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then(result => result.ciphertext),
+        }, createGrantResolutionOps(serviceClient, authService));
+      }
       return await resolveProjectKeyWithMintFallback({
         orgId,
         projectId,
@@ -455,8 +464,11 @@ export interface SyncResolvedSnapshotOptions {
   };
   readonly confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   readonly cacheRemote?: typeof writeKeepCache;
+  /** Revalidate a reviewed target before request and before local persistence. */
+  readonly beforePush?: () => Promise<void> | void;
   readonly beforeLocalWrite?: () => void;
   readonly reportStatus?: (message: string, warning: boolean) => void;
+  readonly maxRetries?: number;
 }
 
 function encryptSnapshot(
@@ -540,8 +552,11 @@ export async function syncResolvedSnapshot(
     buildFinalKeep,
     primaryVarNames: [...opts.primaryVarNames],
     confirmOverwrite: opts.confirmOverwrite,
+    beforePush: opts.beforePush,
+    maxRetries: opts.maxRetries,
   });
 
+  await opts.beforePush?.();
   (opts.cacheRemote ?? writeKeepCache)(ctx.orgId, ctx.projectId, pushed.keep_hash, pushed.envBlob);
   const adoptedKeep = SyncEngine.adoptServerKeep(pushed.keep_file, pushed.finalKeep, ctx.branch);
   if (!ctx.lockless) ctx.fileManager.writeKeepFile(adoptedKeep);
@@ -721,6 +736,12 @@ export interface PushKeepWithRetryOpts {
   primaryVarNames: string[];
   /** See `writeAndSync`'s `confirmOverwrite` — same contract, just plural. */
   confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
+  /**
+   * Reviewed callers re-check their local target immediately before each
+   * request. This keeps a stale review from being applied after the
+   * repository or keep metadata changes while key/network work is pending.
+   */
+  beforePush?: () => Promise<void> | void;
   maxRetries?: number;
 }
 
@@ -767,6 +788,7 @@ export async function pushKeepWithRetry(
     const finalKeep = opts.buildFinalKeep(state.baseKeep);
     const envBlob = opts.buildEnvBlob([...state.extraLines]);
     try {
+      await opts.beforePush?.();
       const result = await opts.serviceClient.pushSecrets(
         opts.projectId,
         JSON.stringify(finalKeep),

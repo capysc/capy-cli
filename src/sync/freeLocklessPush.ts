@@ -9,6 +9,7 @@ import type { ProjectManager } from '../core/projectManager';
 import type { FileManager } from '../files/fileManager';
 import type { AuthService } from '../auth/authService';
 import { authenticatePush, type PushAuthPolicy } from '../auth/pushAuthentication';
+import { buildPushReview, pushCompleted, pushReviewDecision, type PushReviewOptions, type PushReviewResult, type PushReviewScope } from './pushReview';
 import type { BillingStatus, ServiceClient } from '../service/serviceClient';
 import { installGitHooks } from '../git/installGitHooks';
 import { CapyError, ERROR_CODES, type AuthResult, type KeepFile } from '../types/index';
@@ -27,7 +28,7 @@ export interface FreeLocklessPushPlan {
 
 function sorted(values: readonly string[]): readonly string[] {
   return values.reduce<readonly string[]>((ordered, value) => {
-    const insertionIndex = ordered.findIndex((candidate) => candidate.localeCompare(value) > 0);
+    const insertionIndex = ordered.findIndex((candidate) => candidate > value);
     return insertionIndex < 0
       ? [...ordered, value]
       : [...ordered.slice(0, insertionIndex), value, ...ordered.slice(insertionIndex)];
@@ -81,6 +82,9 @@ export interface FreeLocklessPushDependencies {
   readonly devMode: boolean;
   readonly localOnly: boolean;
   readonly authPolicy?: PushAuthPolicy;
+  /** A JSON entrypoint may authenticate once before binding its service origin. */
+  readonly preauthenticated?: AuthResult;
+  readonly review?: PushReviewOptions & PushReviewScope;
   readonly confirmDestructivePush?: (plan: FreeLocklessPushPlan) => Promise<boolean>;
   readonly confirmConcurrentOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   readonly resolveContext?: typeof resolveContext;
@@ -90,7 +94,7 @@ export interface FreeLocklessPushDependencies {
 }
 
 export type FreeLocklessPushDispatch =
-  | { readonly handled: true }
+  | { readonly handled: true; readonly result?: PushReviewResult }
   | { readonly handled: false; readonly authResult?: AuthResult };
 
 async function defaultDestructiveConfirmation(plan: FreeLocklessPushPlan): Promise<boolean> {
@@ -145,7 +149,7 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   const orgHint = syncState?.org_id ?? envMeta.org_id;
   const expectedUser = deps.authPolicy?.expectedUserId ?? syncState?.user_id;
   if (expectedUser) deps.authService.setSessionUserId(expectedUser);
-  const auth = await authenticatePush(deps.authService, orgHint, deps.authPolicy);
+  const auth = deps.preauthenticated ?? await authenticatePush(deps.authService, orgHint, deps.authPolicy);
   if (!auth.success || !auth.user_id) {
     throw new CapyError(auth.error ?? 'No valid session on this machine.', ERROR_CODES.AUTH_FAILED);
   }
@@ -159,6 +163,7 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
     devMode: deps.devMode,
     forceLockless: true,
     nonInteractive: deps.authPolicy?.nonInteractive,
+    existingKeyOnly: Boolean(deps.review),
     authService: deps.authService as AuthService,
     serviceClient: deps.serviceClient as ServiceClient,
     authResult: auth,
@@ -174,7 +179,15 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   }
   const localRaw = deps.fileManager.readEnvFile();
   const plan = planFreeLocklessPush(Object.keys(localRaw), branchVariableNames(ctx.keep, ctx.branch));
-  if (plan.requiresDestructiveConfirmation) {
+  const reviewInput = deps.review ? {
+    ...deps.review, mode: 'free_snapshot' as const, userId: ctx.userId,
+    organizationId: ctx.orgId, projectId: ctx.projectId, branch: ctx.branch,
+    keep: ctx.keep, baseKeepHash: ctx.base_keep_hash, localRaw, projectKey: ctx.projectKey,
+  } : null;
+  const review = reviewInput ? buildPushReview(reviewInput) : null;
+  const decision = review && deps.review ? pushReviewDecision(review, deps.review) : null;
+  if (decision) return { handled: true, result: decision };
+  if (!review && plan.requiresDestructiveConfirmation) {
     const confirmed = await (deps.confirmDestructivePush ?? (deps.authPolicy?.nonInteractive ? async () => false : defaultDestructiveConfirmation))(plan);
     if (!confirmed) {
       throw new CapyError(
@@ -204,16 +217,26 @@ export async function tryFreeLocklessPush(deps: FreeLocklessPushDependencies): P
   const localPlaintext = Object.fromEntries(
     localEntries.flatMap((entry) => entry.ok ? [[entry.name, entry.value] as const] : []),
   );
+  const assertLocalUnchanged = () => {
+    if (reviewInput && review && buildPushReview({ ...reviewInput, localRaw: deps.fileManager.readEnvFile() }).plan_hash !== review.plan_hash)
+      throw new CapyError('Local values changed during push. Inspect the current state before retrying.', ERROR_CODES.SYNC_CONFLICT);
+  };
+  assertLocalUnchanged();
   await (deps.syncSnapshot ?? syncResolvedSnapshot)(ctx, localPlaintext, {
     primaryVarNames: [...new Set([...plan.localVariableNames, ...plan.deletedRemoteVariableNames])],
     confirmOverwrite: deps.confirmConcurrentOverwrite ?? (deps.authPolicy?.nonInteractive ? async () => false : defaultConcurrentOverwriteConfirmation),
+    beforePush: assertLocalUnchanged,
+    // A reviewed removal may not be rebased onto an unseen remote snapshot.
+    maxRetries: review?.requires_confirmation ? 0 : undefined,
     beforeLocalWrite: () => {
+      assertLocalUnchanged();
       ctx.pm.writeActiveBranch(ctx.branch);
       ctx.fileManager.ensureCapyGitignore();
       ctx.fileManager.backupPlaintextEnv(undefined, true);
     },
   });
   (deps.installHooks ?? installGitHooks)(deps.devMode);
+  if (review) return { handled: true, result: pushCompleted(review) };
   (deps.report ?? console.log)(
     `Pushed ${Object.keys(localPlaintext).length} secret(s) to Keep${plan.deletedRemoteVariableNames.length > 0
       ? `; deleted ${plan.deletedRemoteVariableNames.length} remote value(s)`

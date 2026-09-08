@@ -276,6 +276,83 @@ describe('caller-bound noninteractive push', () => {
 });
 
 describe('canonical snapshot CAS boundary', () => {
+  test('review validation before a request leaves remote and local state untouched', async () => {
+    const pushSecrets = mock(async () => ({ keep_hash: 'next-hash' }));
+    const cacheRemote = mock(() => undefined);
+    const writeEncryptedEnvFile = mock(() => undefined);
+    const writeSyncState = mock(() => undefined);
+    const beforePush = mock(() => {
+      throw new CapyError('review changed before submit', ERROR_CODES.SYNC_CONFLICT);
+    });
+    const ctx = {
+      pm: { readSyncState: mock(() => null) },
+      fileManager: { writeEncryptedEnvFile, writeSyncState },
+      serviceClient: { pushSecrets },
+      orgId: 'org_1', projectId: 'project_default', branch: 'development',
+      userId: 'user_1', projectKey: 'a'.repeat(64), keep: REMOTE_KEEP,
+      localPlaintext: {}, lockless: true, base_keep_hash: 'a'.repeat(64), remoteKeepExists: true,
+    } as unknown as ResolvedContext;
+
+    await expect(syncResolvedSnapshot(ctx, { KEEP_ME: 'fictional-local' }, {
+      primaryVarNames: ['KEEP_ME'], beforePush, cacheRemote,
+    })).rejects.toMatchObject({ code: ERROR_CODES.SYNC_CONFLICT });
+    expect(pushSecrets).not.toHaveBeenCalled();
+    expect(cacheRemote).not.toHaveBeenCalled();
+    expect(writeEncryptedEnvFile).not.toHaveBeenCalled();
+    expect(writeSyncState).not.toHaveBeenCalled();
+  });
+
+  test('review validation after a remote response blocks local persistence without claiming rollback', async () => {
+    const pushSecrets = mock(async () => ({ keep_hash: 'next-hash' }));
+    const cacheRemote = mock(() => undefined);
+    const writeEncryptedEnvFile = mock(() => undefined);
+    const writeSyncState = mock(() => undefined);
+    const beforePush = mock(() => {
+      if (beforePush.mock.calls.length === 2) {
+        throw new CapyError('review changed after submit', ERROR_CODES.SYNC_CONFLICT);
+      }
+    });
+    const ctx = {
+      pm: { readSyncState: mock(() => null) },
+      fileManager: { writeEncryptedEnvFile, writeSyncState },
+      serviceClient: { pushSecrets },
+      orgId: 'org_1', projectId: 'project_default', branch: 'development',
+      userId: 'user_1', projectKey: 'a'.repeat(64), keep: REMOTE_KEEP,
+      localPlaintext: {}, lockless: true, base_keep_hash: 'a'.repeat(64), remoteKeepExists: true,
+    } as unknown as ResolvedContext;
+
+    await expect(syncResolvedSnapshot(ctx, { KEEP_ME: 'fictional-local' }, {
+      primaryVarNames: ['KEEP_ME'], beforePush, cacheRemote,
+    })).rejects.toMatchObject({ code: ERROR_CODES.SYNC_CONFLICT });
+    expect(beforePush).toHaveBeenCalledTimes(2);
+    expect(pushSecrets).toHaveBeenCalledTimes(1);
+    expect(cacheRemote).not.toHaveBeenCalled();
+    expect(writeEncryptedEnvFile).not.toHaveBeenCalled();
+    expect(writeSyncState).not.toHaveBeenCalled();
+  });
+
+  test('a reviewed snapshot never rebases onto unseen remote state even if overwrite would be approved', async () => {
+    const pushSecrets = mock(async () => { throw new CapyError('stale', ERROR_CODES.STALE_KEEP_HASH, {
+      keep_hash: 'b'.repeat(64), keep_file: JSON.stringify(REMOTE_KEEP),
+    }); });
+    const getSecrets = mock(async () => null);
+    const confirmOverwrite = mock(async () => true);
+    const cacheRemote = mock(() => undefined);
+    const beforeLocalWrite = mock(() => undefined);
+    const original = dependencies();
+    const ctx = { ...original.ctx, projectKey: 'b'.repeat(64),
+      serviceClient: { pushSecrets, getSecrets } } as unknown as ResolvedContext;
+    await expect(syncResolvedSnapshot(ctx, { KEEP_ME: 'fictional-local' }, {
+      primaryVarNames: ['KEEP_ME', 'DELETE_A', 'DELETE_B'], maxRetries: 0,
+      confirmOverwrite, cacheRemote, beforeLocalWrite,
+    })).rejects.toMatchObject({ code: ERROR_CODES.STALE_KEEP_HASH });
+    expect(pushSecrets).toHaveBeenCalledTimes(1);
+    expect(getSecrets).not.toHaveBeenCalled();
+    expect(confirmOverwrite).not.toHaveBeenCalled();
+    expect(cacheRemote).not.toHaveBeenCalled();
+    expect(beforeLocalWrite).not.toHaveBeenCalled();
+  });
+
   test('a concurrent change to a value this snapshot deletes refuses before retry or local writes', async () => {
     const changedRemote: KeepFile = {
       ...REMOTE_KEEP,
@@ -311,5 +388,69 @@ describe('canonical snapshot CAS boundary', () => {
     expect(cacheRemote).not.toHaveBeenCalled();
     expect(writeEncryptedEnvFile).not.toHaveBeenCalled();
     expect(writeSyncState).not.toHaveBeenCalled();
+  });
+});
+
+describe('instrumented push review before snapshot writes', () => {
+  const scope = { repository: '/fixture/repository', serviceOrigin: 'https://service.example.invalid' } as const;
+  const authPolicy = { nonInteractive: true, expectedUserId: 'user_1' } as const;
+
+  async function planFor(result: ReturnType<typeof dependencies>) {
+    const planned = await tryFreeLocklessPush({ ...result.deps, authPolicy, review: { ...scope, plan: true } });
+    if (!planned.handled || planned.result?.code !== 'PUSH_PLANNED') throw new Error('EXPECTED_PUSH_PLAN');
+    return planned.result.plan;
+  }
+
+  test('planning restores existing access but never prompts, syncs or changes repository files', async () => {
+    const result = dependencies();
+    const plan = await planFor(result);
+    expect(plan).toMatchObject({ variable_names: ['KEEP_ME'], removed_remote_names: ['DELETE_A', 'DELETE_B'], requires_confirmation: true });
+    expect(JSON.stringify(plan)).not.toContain('new-local-value');
+    expect(JSON.stringify(plan)).not.toContain('test-project-key');
+    expect(result.resolveContext).toHaveBeenCalledWith(expect.objectContaining({ existingKeyOnly: true, nonInteractive: true }));
+    expect(result.deps.authService.authenticate).not.toHaveBeenCalled();
+    expect(result.confirmDestructivePush).not.toHaveBeenCalled();
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
+    expect(result.writeActiveBranch).not.toHaveBeenCalled();
+    expect(result.backupPlaintextEnv).not.toHaveBeenCalled();
+    expect(result.ensureCapyGitignore).not.toHaveBeenCalled();
+    expect(result.deps.installHooks).not.toHaveBeenCalled();
+  });
+
+  test('missing or mismatched confirmation refuses without another prompt or any writes', async () => {
+    for (const confirm of [undefined, 'hmac-sha256:wrong']) {
+      const result = dependencies();
+      const outcome = await tryFreeLocklessPush({ ...result.deps, authPolicy, review: { ...scope, confirm } });
+      expect(outcome).toMatchObject({ handled: true, result: { ok: false, code: confirm ? 'PUSH_PLAN_CHANGED' : 'PUSH_CONFIRM_REQUIRED' } });
+      expect(result.confirmDestructivePush).not.toHaveBeenCalled();
+      expect(result.syncSnapshot).not.toHaveBeenCalled();
+      expect(result.writeActiveBranch).not.toHaveBeenCalled();
+      expect(result.deps.installHooks).not.toHaveBeenCalled();
+    }
+  });
+
+  test('the exact approved deletion enters the canonical writer with no unseen-snapshot retry', async () => {
+    const result = dependencies();
+    const plan = await planFor(result);
+    const outcome = await tryFreeLocklessPush({ ...result.deps, authPolicy, review: { ...scope, confirm: plan.plan_hash } });
+    expect(outcome).toMatchObject({ handled: true, result: { ok: true, code: 'PUSH_DONE', pushed_count: 1, removed_count: 2 } });
+    expect(result.syncSnapshot).toHaveBeenCalledTimes(1);
+    expect(result.syncSnapshot).toHaveBeenCalledWith(result.ctx, { KEEP_ME: 'new-local-value' }, expect.objectContaining({ maxRetries: 0 }));
+    expect(result.confirmDestructivePush).not.toHaveBeenCalled();
+    expect(result.backupPlaintextEnv).toHaveBeenCalledTimes(1);
+    expect(result.deps.installHooks).toHaveBeenCalledTimes(1);
+  });
+
+  test('local drift after matching approval refuses before invoking the remote writer', async () => {
+    const result = dependencies();
+    const plan = await planFor(result);
+    const readEnvFile = mock(() => ({ KEEP_ME: 'changed-after-review' }))
+      .mockReturnValueOnce({ KEEP_ME: 'new-local-value' });
+    const outcome = tryFreeLocklessPush({ ...result.deps, authPolicy,
+      fileManager: { ...result.deps.fileManager, readEnvFile }, review: { ...scope, confirm: plan.plan_hash } });
+    await expect(outcome).rejects.toMatchObject({ code: ERROR_CODES.SYNC_CONFLICT });
+    expect(result.syncSnapshot).not.toHaveBeenCalled();
+    expect(result.backupPlaintextEnv).not.toHaveBeenCalled();
+    expect(result.deps.installHooks).not.toHaveBeenCalled();
   });
 });

@@ -1,9 +1,7 @@
 /**
- * Pending acceptance contract, NOT implemented or part of the passing suite.
- * Public push wiring requires owner approval after execution review rejected it.
- * Restore the .test.ts suffix when that implementation is authorized; the
- * retained current result is seven failures because the public flags are absent.
- * Real CLI parsing/refusal uses no saved identity or reachable service.
+ * Public parser/refusal contract. These subprocess cases use no saved
+ * identity or reachable service, and must leave the fixture repository
+ * untouched when a reviewed push cannot authenticate or validate its input.
  */
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';

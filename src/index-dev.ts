@@ -353,9 +353,28 @@ program
 program
   .command('push')
   .description('Push encrypted values to Keep')
+  .option('--json', 'emit one machine-readable reviewed-push result')
+  .option('--plan', 'prepare a reviewed push plan without writing')
+  .option('--confirm <plan-hash>', 'apply the exact reviewed push plan')
   .option('--non-tty', 'never start an interactive sign-in')
   .option('--expected-user-id <id>', 'require this existing CLI account')
-  .action(async (options: Readonly<{ nonTty?: boolean; expectedUserId?: string }>) => {
+  .option('--service-origin <origin>', 'require the active CLI service environment')
+  .action(async (options: Readonly<{
+    json?: boolean; plan?: boolean; confirm?: string; nonTty?: boolean; expectedUserId?: string; serviceOrigin?: string;
+  }>) => {
+    if (options.plan || options.confirm) {
+      const { runPushJsonCommand } = await import('./commands/pushJsonCommand');
+      if (!options.json) {
+        console.log(JSON.stringify({ ok: false, code: 'PUSH_JSON_REQUIRED' }));
+        process.exit(1);
+      }
+      process.exit(await runPushJsonCommand({ plan: options.plan, confirm: options.confirm,
+        expectedUserId: options.expectedUserId, serviceOrigin: options.serviceOrigin }, true));
+    }
+    if (options.json) {
+      console.log(JSON.stringify({ ok: false, code: 'PUSH_REVIEW_ARGUMENT_INVALID' }));
+      process.exit(1);
+    }
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand(true);
     await cmd.execute({ nonInteractive: options.nonTty, expectedUserId: options.expectedUserId });

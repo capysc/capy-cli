@@ -20,12 +20,29 @@ import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
 import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
-import { isLocalOnly } from '../config/profileConfig';
+import { isLocalOnly, resolveActiveUrl } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { pushKeepWithRetry, conflictOverwriteQuestion } from './connectors/shared';
 import { tryFreeLocklessPush } from '../sync/freeLocklessPush';
+import { buildPushReview, pushCompleted, pushNoop, pushReviewDecision, type PushReviewOptions, type PushReviewResult, type PushReviewScope } from '../sync/pushReview';
+import { realpathSync } from 'fs';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+export interface PushJsonReviewOptions extends PushReviewOptions {
+  readonly expectedUserId: string;
+  readonly serviceOrigin: string;
+}
+
+type PushReviewExecution = PushReviewOptions & PushReviewScope;
+
+function normalizedOrigin(value: string): string {
+  try {
+    return new URL(value).origin;
+  } catch {
+    throw new CapyError('A valid service origin is required for a reviewed push.', 'PUSH_REVIEW_ARGUMENT_INVALID');
+  }
+}
 
 export class PushCommand {
   constructor(
@@ -79,6 +96,47 @@ export class PushCommand {
     }
   }
 
+  /**
+   * The noninteractive agent surface. A plan hash binds the reviewed target
+   * and values; it does not itself represent a human approval. The hosted
+   * bridge owns that consent before it returns an exact `--confirm` value.
+   */
+  async executeJsonReview(options: PushJsonReviewOptions): Promise<PushReviewResult> {
+    if (isLocalOnly()) {
+      throw new CapyError('A reviewed push requires a connected CLI account.', ERROR_CODES.AUTH_FAILED);
+    }
+    const authPolicy = { nonInteractive: true, expectedUserId: options.expectedUserId } as const;
+    const authenticated = await authenticatePush(this.authService, undefined, authPolicy);
+    const activeOrigin = normalizedOrigin(resolveActiveUrl(this.devMode));
+    if (normalizedOrigin(options.serviceOrigin) !== activeOrigin) {
+      throw new CapyError('The reviewed push origin does not match this CLI environment.', 'PUSH_ENVIRONMENT_MISMATCH');
+    }
+    const review: PushReviewExecution = {
+      repository: realpathSync(process.cwd()),
+      serviceOrigin: activeOrigin,
+      plan: options.plan,
+      confirm: options.confirm,
+    };
+    const dispatch = await tryFreeLocklessPush({
+      projectManager: this.projectManager,
+      fileManager: this.fileManager,
+      authService: this.authService,
+      serviceClient: this.serviceClient,
+      devMode: this.devMode,
+      localOnly: false,
+      authPolicy,
+      preauthenticated: authenticated,
+      review,
+    });
+    if (dispatch.handled && dispatch.result) return dispatch.result;
+    if (dispatch.handled) {
+      throw new CapyError('Reviewed push completed without a structured result.', ERROR_CODES.SERVICE_ERROR);
+    }
+    const result = await this._execute(dispatch.authResult ?? authenticated, authPolicy, review);
+    if (result) return result;
+    throw new CapyError('Reviewed push completed without a structured result.', ERROR_CODES.SERVICE_ERROR);
+  }
+
   private async resolvePushIdentity(input: {
     readonly localMode: boolean;
     readonly organizationId: string;
@@ -129,7 +187,11 @@ export class PushCommand {
     };
   }
 
-  private async _execute(preauthenticated?: AuthResult, authPolicy: PushAuthPolicy = {}): Promise<void> {
+  private async _execute(
+    preauthenticated?: AuthResult,
+    authPolicy: PushAuthPolicy = {},
+    reviewOptions?: PushReviewExecution,
+  ): Promise<PushReviewResult | void> {
     this.debug('starting push command');
     this.debug('cwd', process.cwd());
 
@@ -189,17 +251,37 @@ export class PushCommand {
     const branch = projectState.activeBranch;
     this.debug('active branch', branch);
     if (!branch) {
+      if (reviewOptions) {
+        throw new CapyError('The reviewed push target has no active branch.', ERROR_CODES.SYNC_CONFLICT);
+      }
       console.error('No active branch. Run capy to select a branch before pushing.');
       process.exit(1);
     }
 
     // Read and encrypt .env file
-    const pushSpinner = ora(localMode ? 'Storing secrets locally...' : 'Pushing secrets to Keep...').start();
+    const pushSpinner = reviewOptions ? null : ora(localMode ? 'Storing secrets locally...' : 'Pushing secrets to Keep...').start();
 
     const rawLocal = this.fileManager.readEnvFile();
     this.debug('.env raw keys', Object.keys(rawLocal));
+    const baseKeepHash = getSyncKeepHash(this.projectManager.readSyncState(), branch);
+    const reviewInput = reviewOptions ? {
+      ...reviewOptions,
+      mode: localMode ? 'local_only' as const : 'paid_merge' as const,
+      userId,
+      organizationId: projectState.organizationId!,
+      projectId: projectState.projectId!,
+      branch,
+      keep,
+      baseKeepHash,
+      localRaw: rawLocal,
+      projectKey: encryptionKey,
+    } : null;
+    const review = reviewInput ? buildPushReview(reviewInput) : null;
+    const reviewDecision = review && reviewOptions ? pushReviewDecision(review, reviewOptions) : null;
+    if (reviewDecision) return reviewDecision;
     if (Object.keys(rawLocal).length === 0) {
-      pushSpinner.fail('No .env file to push');
+      if (review) return pushNoop(review);
+      pushSpinner?.fail('No .env file to push');
       return;
     }
 
@@ -235,10 +317,31 @@ export class PushCommand {
         }] as const;
       }),
     );
-    this.debug('pushedVars', pushedVars);
+    this.debug('pushedVars', { names: Object.keys(pushedVars), count: Object.keys(pushedVars).length });
 
     const syncEngine = new SyncEngine();
     const buildUpdatedKeep = (base: KeepFile): KeepFile => syncEngine.mergeWithKeep(base, pushedVars, branch);
+
+    const assertReviewedTargetUnchanged = async (): Promise<void> => {
+      if (!review || !reviewInput) return;
+      const currentProject = await this.projectManager.detectProjectState();
+      const currentKeep = this.projectManager.readKeepFile();
+      const currentBaseKeepHash = getSyncKeepHash(this.projectManager.readSyncState(), branch);
+      if (!currentProject.initialized || currentProject.organizationId !== projectState.organizationId
+        || currentProject.projectId !== projectState.projectId || currentProject.activeBranch !== branch
+        || currentProject.userId !== userId || !currentKeep) {
+        throw new CapyError('The reviewed push target changed before submission.', ERROR_CODES.SYNC_CONFLICT);
+      }
+      const currentReview = buildPushReview({
+        ...reviewInput,
+        keep: currentKeep,
+        baseKeepHash: currentBaseKeepHash,
+        localRaw: this.fileManager.readEnvFile(),
+      });
+      if (currentReview.plan_hash !== review.plan_hash) {
+        throw new CapyError('The reviewed push changed before submission.', ERROR_CODES.SYNC_CONFLICT);
+      }
+    };
 
     // Push to Keep. `baseKeepHash` is this branch's last-known keep_hash
     // (sync-state, when this machine has recorded one) — the CAS
@@ -257,7 +360,7 @@ export class PushCommand {
     });
     const confirmOverwrite = async (changedNames: string[], contextLines: string[]): Promise<boolean> => {
       if (authPolicy.nonInteractive || !process.stdin.isTTY) return false;
-      pushSpinner.stop();
+      pushSpinner?.stop();
       for (const line of contextLines) console.log(line);
       const inquirer = (await import('inquirer')).default;
       const { ok } = await inquirer.prompt([
@@ -268,10 +371,10 @@ export class PushCommand {
           default: false,
         },
       ]);
-      if (ok) pushSpinner.start();
+      if (ok) pushSpinner?.start();
       return ok;
     };
-    const baseKeepHash = getSyncKeepHash(this.projectManager.readSyncState(), branch);
+    await assertReviewedTargetUnchanged();
     const pushOutcome = localMode
       ? { result: null, finalKeep: buildUpdatedKeep(keep), pushedEnvBlob: envBlob }
       : await pushKeepWithRetry({
@@ -285,6 +388,8 @@ export class PushCommand {
           buildFinalKeep: buildUpdatedKeep,
           primaryVarNames: Object.keys(rawLocal),
           confirmOverwrite,
+          beforePush: review ? assertReviewedTargetUnchanged : undefined,
+          maxRetries: review ? 0 : undefined,
         }).then((result) => ({ result, finalKeep: result.finalKeep, pushedEnvBlob: result.envBlob }));
     const { result: pushResult, finalKeep, pushedEnvBlob } = pushOutcome;
     // keep_hash is computed locally from what was actually pushed (after any
@@ -293,6 +398,7 @@ export class PushCommand {
     const localKeepHash = SyncEngine.computeKeepHash(finalKeep, branch);
     const cacheKeepHash = pushResult ? pushResult.keep_hash : localKeepHash;
     this.debug('push complete', { localMode, cacheKeepHash });
+    await assertReviewedTargetUnchanged();
 
     // Cache encrypted blob locally
     writeKeepCache(
@@ -318,7 +424,7 @@ export class PushCommand {
       keep_hash: setSyncKeepHash(existingSyncState, branch, localKeepHash),
     });
 
-    pushSpinner.succeed(
+    pushSpinner?.succeed(
       localMode
         ? `Stored ${Object.keys(rawLocal).length} secret(s) locally (local-only mode)`
         : `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
@@ -326,9 +432,13 @@ export class PushCommand {
 
     // The push is only visible to teammates' pins once keep.lock is in git.
     const { autoCommitKeep } = await import('../git/autoCommitKeep');
-    autoCommitKeep(branch);
+    if (review) autoCommitKeep(branch, undefined, () => undefined);
+    else autoCommitKeep(branch);
 
-    const { printExpiryWarnings } = await import('./connectors/shared');
-    printExpiryWarnings();
+    if (!review) {
+      const { printExpiryWarnings } = await import('./connectors/shared');
+      printExpiryWarnings();
+    }
+    if (review) return pushCompleted(review);
   }
 }

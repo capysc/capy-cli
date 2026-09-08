@@ -151,6 +151,17 @@ export function pushCompleted(review: PushReview) {
   } as const;
 }
 
+/** A reviewed merge with no local values is explicit, never a fabricated push. */
+export function pushNoop(review: PushReview) {
+  return {
+    ok: true,
+    code: "PUSH_NOOP",
+    plan: review,
+    message: "No local values were available to push. No project files or remote values were changed.",
+  } as const;
+}
+
 export type PushReviewResult =
   | NonNullable<ReturnType<typeof pushReviewDecision>>
-  | ReturnType<typeof pushCompleted>;
+  | ReturnType<typeof pushCompleted>
+  | ReturnType<typeof pushNoop>;
