@@ -186,7 +186,8 @@ async function finishPairing(state: PairCheckpoint, deps: PairExecutorDependenci
   const result = await deps.report({ action: 'complete', runtime_id: state.runtimeId,
     repo_fingerprint: state.repositoryFingerprint, connection_id: state.handoff.connection_id,
     credential_id: installed.credentialId!, receipt_id: state.receiptId });
-  if (result.phase !== 'paired' || result.user_id !== state.userId || result.receipt_id !== state.receiptId
+  if (result.phase !== 'paired' || result.flow_id !== state.flowId || result.user_id !== state.userId
+    || result.custody_org_id !== state.custodyOrgId || result.receipt_id !== state.receiptId
     || result.runtime_id !== state.runtimeId || result.repo_fingerprint !== state.repositoryFingerprint) {
     return reject('PAIR_COMPLETION_NOT_ACKNOWLEDGED');
   }
@@ -365,7 +366,7 @@ export async function executeLocalFlowPair(flowId: string, options: FlowPairOpti
         if (!source) return reject('PAIR_EXISTING_REQUIRES_PROOF');
         const reused = await request({ action: 'reuse', runtime_id: runtimeId(), repo_fingerprint: fingerprint,
           source_flow_id: source.flowId, receipt_id: source.receiptId });
-        if (reused.phase !== 'paired' || reused.user_id !== options.expectedUserId
+        if (reused.phase !== 'paired' || reused.flow_id !== flowId || reused.user_id !== options.expectedUserId
           || reused.runtime_id !== runtimeId() || reused.repo_fingerprint !== fingerprint
           || reused.receipt_id !== source.receiptId || reused.custody_org_id !== source.custodyOrgId) {
           return reject('PAIR_COMPLETION_NOT_ACKNOWLEDGED');

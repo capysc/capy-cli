@@ -57,11 +57,16 @@ describe('noninteractive Keep-owned runtime pairing executor', () => {
     [{ success: false, error_code: 'network' }, 'PAIR_AUTH_NETWORK_UNAVAILABLE'],
     [{ success: false, error_code: 'server_error' }, 'PAIR_AUTH_SERVICE_UNAVAILABLE'],
     [{ success: false }, 'PAIR_AUTH_SERVICE_UNAVAILABLE'],
-    [{ success: false, error_code: 'unrecognized_failure' }, 'PAIR_AUTH_SERVICE_UNAVAILABLE'],
     [{ success: false, error_code: 'org_not_found' }, 'PAIR_SIGNUP_REQUIRED'],
     [{ success: true, user_id: 'user_other' }, 'PAIR_ACCOUNT_MISMATCH'],
   ] as const)('classifies silent auth %j without starting a new device sign-in', (result, code) => {
     expect(() => requirePairSilentAuthentication(result, options.expectedUserId)).toThrow(code);
+  });
+  test('an unsupported runtime authentication code fails closed', () => {
+    expect(() => {
+      // @ts-expect-error Deliberately invalid provider data tests the runtime rejection boundary.
+      requirePairSilentAuthentication({ success: false, error_code: 'unrecognized_failure' }, options.expectedUserId);
+    }).toThrow('PAIR_AUTH_SERVICE_UNAVAILABLE');
   });
   test('checkpoints private connection before returning its public handoff and exits without polling', async () => {
     const h = harness();
@@ -167,6 +172,25 @@ describe('noninteractive Keep-owned runtime pairing executor', () => {
   test('completion acknowledgement mismatch preserves installed receipt and refuses success', async () => {
     const h = harness(); await executeFlowPair(flowId, options, h.deps);
     await expect(executeFlowPair(flowId, options, { ...h.deps, report: async () => h.view })).rejects.toThrow('PAIR_COMPLETION_NOT_ACKNOWLEDGED');
+    expect(h.read()?.installed).toBe(true);
+    expect(h.read()?.completed).toBeUndefined();
+  });
+
+  test.each([
+    ['flow', { flow_id: connectionId }],
+    ['custody organization', { custody_org_id: 'org_foreign' }],
+  ] as const)('foreign completion acknowledgement %s preserves the installed receipt', async (_field, override) => {
+    const h = harness(); await executeFlowPair(flowId, options, h.deps);
+    await expect(executeFlowPair(flowId, options, { ...h.deps,
+      report: async (body) => ({
+        ...h.view,
+        phase: body.action === 'complete' ? 'paired' : 'pairing',
+        runtime_id: body.runtime_id,
+        repo_fingerprint: body.repo_fingerprint,
+        receipt_id: body.action === 'complete' ? body.receipt_id : null,
+        ...(body.action === 'complete' ? override : {}),
+      }),
+    })).rejects.toThrow('PAIR_COMPLETION_NOT_ACKNOWLEDGED');
     expect(h.read()?.installed).toBe(true);
     expect(h.read()?.completed).toBeUndefined();
   });
