@@ -340,8 +340,19 @@ program
   .option('--protected', 'Mark as a protected branch (invite-only)')
   .option('--no-protected', 'Create it open to the project')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'switch an existing branch without prompts or browser authentication')
+  .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
+  .option('--expected-org-id <id>', 'require the repository organization bound by the hosted MCP')
+  .option('--expected-project-id <id>', 'require the repository project bound by the hosted MCP')
   .action(async (branch, options, command) => {
     assertNotLocalOnly('checkout');
+
+    const hosted = options.nonTty || [options.expectedUserId, options.expectedOrgId, options.expectedProjectId]
+      .some(value => value !== undefined);
+    if (hosted || (options.json && !options.create)) {
+      const { runCheckoutJsonCommand } = await import('./commands/checkoutJsonCommand');
+      process.exit(await runCheckoutJsonCommand(branch, { ...options, nonTty: hosted }));
+    }
 
     // `--json` on a create describes the route rather than travelling it: the
     // same stop array the browser screen is served, so a headless caller can

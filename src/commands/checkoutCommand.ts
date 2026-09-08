@@ -22,19 +22,12 @@ const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
  * count rather than as zero.
  */
 export function countVariablesPerBranch(keep: KeepFile | null): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const entries of Object.values(keep?.variables ?? {})) {
-    // Per VARIABLE, not per entry: the number the screen prints is "variables
-    // held on this branch", and a variable with two entries pinned to one
-    // branch is still one variable.
-    const seen = new Set<string>();
-    for (const entry of entries) {
-      if (!entry?.branch || seen.has(entry.branch)) continue;
-      seen.add(entry.branch);
-      counts[entry.branch] = (counts[entry.branch] ?? 0) + 1;
-    }
-  }
-  return counts;
+  // Count each variable once per branch, even when it has duplicate pins.
+  return Object.values(keep?.variables ?? {}).reduce<Record<string, number>>(
+    (counts, entries) => [...new Set(entries.flatMap(entry => entry?.branch ? [entry.branch] : []))]
+      .reduce((result, branch) => ({ ...result, [branch]: (result[branch] ?? 0) + 1 }), counts),
+    {},
+  );
 }
 
 /**
@@ -54,19 +47,13 @@ export function findUncommittedEnvChange(
   variables: KeepFile['variables'],
   branch: string,
 ): string | null {
-  const pinnedKeys = new Set<string>();
-  for (const [varName, entries] of Object.entries(variables)) {
+  const pins = Object.entries(variables).flatMap(([name, entries]) => {
     const entry = entries.find(e => e.branch === branch);
-    if (!entry) continue;
-    pinnedKeys.add(varName);
-    const localValue = localPlaintext[varName];
-    if (localValue === undefined) return varName; // uncommitted deletion
-    if (hashValue(localValue) !== entry.value_hash) return varName; // uncommitted edit
-  }
-  for (const varName of Object.keys(localPlaintext)) {
-    if (!pinnedKeys.has(varName)) return varName; // uncommitted addition
-  }
-  return null;
+    return entry ? [{ name, valueHash: entry.value_hash }] : [];
+  });
+  const changed = pins.find(({ name, valueHash }) => localPlaintext[name] === undefined
+    || hashValue(localPlaintext[name]!) !== valueHash);
+  return changed?.name ?? Object.keys(localPlaintext).find(name => !pins.some(pin => pin.name === name)) ?? null;
 }
 
 /**
@@ -82,17 +69,17 @@ export function findUncommittedEnvChange(
  * either is instead a `BranchSyncOutcome` variant for the caller to render.
  */
 export interface BranchSyncOutcome {
-  kind: 'forbidden' | 'sync_error' | 'ok';
+  readonly kind: 'forbidden' | 'sync_error' | 'ok';
   /** Only on `sync_error` — the original error's message, for the TTY caller's existing print. */
-  errorMessage?: string;
-  varCount: number;
-  seededFromCurrent: boolean;
+  readonly errorMessage?: string;
+  readonly varCount: number;
+  readonly seededFromCurrent: boolean;
 }
 
 export interface BranchSyncDeps {
-  serviceClient: ServiceClient;
-  projectManager: ProjectManager;
-  fileManager: FileManager;
+  readonly serviceClient: Pick<ServiceClient, 'getDecryptData'>;
+  readonly projectManager: ProjectManager;
+  readonly fileManager: FileManager;
 }
 
 export async function syncAndWriteBranch(
@@ -166,14 +153,14 @@ export async function syncAndWriteBranch(
   const written = ((): { varCount: number; seededFromCurrent: boolean } => {
     if (decryptData.env_content) {
       const remoteEnv = deps.fileManager.parseEnvContent(decryptData.env_content);
-      const decrypted: Record<string, string> = {};
-      for (const [key, value] of Object.entries(remoteEnv)) {
+      const decrypted = Object.fromEntries(Object.entries(remoteEnv).flatMap(([key, value]) => {
         try {
-          decrypted[key] = deps.fileManager.decryptValue(value, encryptionKey);
+          return [[key, deps.fileManager.decryptValue(value, encryptionKey)]];
         } catch {
           // Skip undecryptable
+          return [];
         }
-      }
+      }));
       deps.fileManager.writeEncryptedEnvFile(decrypted, encryptionKey, undefined, keepForWrite, branchName);
       return { varCount: Object.keys(decrypted).length, seededFromCurrent: false };
     }

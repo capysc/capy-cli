@@ -320,7 +320,25 @@ program
   .option('-b, --create', 'Create the branch if it does not exist')
   .option('--refresh', 'Replace local .env and sync-state from the current keep.lock')
   .option('--protected', 'Mark as a protected branch (invite-only)')
+  .option('--no-protected', 'Create it open to the project')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--non-tty', 'switch an existing branch without prompts or browser authentication')
+  .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
+  .option('--expected-org-id <id>', 'require the repository organization bound by the hosted MCP')
+  .option('--expected-project-id <id>', 'require the repository project bound by the hosted MCP')
   .action(async (branch, options, command) => {
+    const hosted = options.nonTty || [options.expectedUserId, options.expectedOrgId, options.expectedProjectId]
+      .some(value => value !== undefined);
+    if (hosted || (options.json && !options.create)) {
+      const { runCheckoutJsonCommand } = await import('./commands/checkoutJsonCommand');
+      process.exit(await runCheckoutJsonCommand(branch, { ...options, nonTty: hosted }, true));
+    }
+    if (options.json && options.create) {
+      const { branchCreatePlan, unansweredStops } = await import('./core/branchCreatePlan');
+      const stops = branchCreatePlan({ branchName: branch, isProtected: options.protected });
+      console.log(JSON.stringify({ stops, unanswered: unansweredStops(stops) }, null, 2));
+      return;
+    }
     const { CheckoutCommand } = await import('./commands/checkoutCommand');
     const cmd = new CheckoutCommand(true);
     await cmd.execute(branch, {
