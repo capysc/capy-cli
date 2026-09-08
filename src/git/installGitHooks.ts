@@ -1,5 +1,6 @@
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'fs';
+import { planHookCleanup } from './planHookCleanup';
 
 /**
  * Install git hooks (post-checkout, post-merge) that run `capy status` after
@@ -31,7 +32,7 @@ export function installGitHooks(devMode: boolean): void {
     const escEnd = END_MARKER.replace(/[()]/g, '\\$&');
     const cmd = devMode ? 'capy-dev' : 'capy';
 
-    const hooks: Record<string, string> = {
+    const hooks: Readonly<Record<string, string>> = {
       'post-checkout': [
         MARKER,
         'if [ "$3" = "1" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-merge" ] && [ ! -d "$(git rev-parse --git-dir)/rebase-apply" ]; then',
@@ -50,10 +51,9 @@ export function installGitHooks(devMode: boolean): void {
     const prePushPath = `${hooksDir}/pre-push`;
     if (existsSync(prePushPath)) {
       const prePushContent = readFileSync(prePushPath, 'utf-8');
-      if (prePushContent.includes(MARKER)) {
-        const re = new RegExp(`${escMarker}[\\s\\S]*?${escEnd}\\n?`);
-        const updated = prePushContent.replace(re, '');
-        writeFileSync(prePushPath, updated, 'utf-8');
+      const cleanup = planHookCleanup(prePushContent);
+      if (cleanup.kind === 'changed') {
+        writeFileSync(prePushPath, cleanup.content, 'utf-8');
       }
     }
 

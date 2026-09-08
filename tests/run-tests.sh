@@ -41,6 +41,7 @@ fi
 
 # Files that use mock.module() — must run in isolation
 ISOLATED_FILES=(
+  tests/git/installGitHooksCleanup.test.ts
   tests/auth/authService.test.ts
   tests/auth/deviceAuth.test.ts
   tests/auth/authServiceKeepScreens.test.ts
