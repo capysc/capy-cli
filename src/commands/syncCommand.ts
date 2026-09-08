@@ -32,7 +32,7 @@ import { AuthService } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { installGitHooks } from '../git/installGitHooks';
-import { resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
+import type { KeyServiceOps } from '../crypto/keyResolver';
 import { resolveBranchFromLocalState, branchesFromKeep } from '../core/branchResolver';
 import { writeKeepCache } from '../config/globalConfig';
 import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
@@ -330,7 +330,13 @@ export class SyncCommand {
     const projectId = projectState.projectId!;
     const orgName = authResult.organizations?.find((o) => o.id === orgId)?.name ?? orgId;
 
-    const encryptionKey = await resolveProjectKey(orgId, projectId, authResult.user_id, this.keyServiceOps());
+    // Pairing custody is independent of billing mode. Use the same configured
+    // grant-aware resolver as setup/free sync; only unpaired runtimes use its
+    // legacy disk-key path. A missing configured grant must never fall back.
+    const encryptionKey = await resolveFreeSyncProjectKey(
+      orgId, projectId, authResult.user_id, this.keyServiceOps(),
+      createGrantResolutionOps(this.serviceClient, this.authService),
+    );
     const decryptData = await this.serviceClient.getDecryptData(projectId, branch, undefined, true);
 
     const serverKeep: KeepFile = decryptData.keep_file

@@ -116,6 +116,7 @@ ISOLATED_FILES=(
   # docs/cli-setup-json.md plan/confirm and sync surfaces.
   tests/commands/setupCommand.test.ts
   tests/commands/syncCommand.test.ts
+  tests/commands/paidSyncRuntimeCustody.test.ts
   tests/ui/recoveryPhrase.test.ts
   tests/auth/authServiceKeepLoginBridge.test.ts
   # doctorCommand.test.ts mocks os.homedir() the same way (getGlobalCapyDir).
