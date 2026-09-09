@@ -281,8 +281,16 @@ const serviceCodes: readonly string[] = [
   'ONBOARD_RUNTIME_ATTACH_REQUIRED', 'ONBOARD_PAIRING_UNAVAILABLE', 'ONBOARD_PAIRING_HANDOFF_INVALID',
   'ONBOARD_PAIRING_CONFLICT', 'ONBOARD_PAIRING_EXPIRED', 'ONBOARD_PAIRING_NOT_DELIVERED',
   'ONBOARD_PAIRING_CREDENTIAL_UNAVAILABLE', 'ONBOARD_PAIRING_RECEIPT_CONFLICT', 'ONBOARD_RUNTIME_CONFLICT',
-  'ONBOARD_FLOW_EXPIRED',
+  'ONBOARD_PAIRING_REUSE_UNAVAILABLE', 'ONBOARD_FLOW_EXPIRED',
 ];
+export function servicePairingErrorCode(code: unknown): string {
+  return typeof code === 'string' && serviceCodes.includes(code) ? code : 'PAIR_SERVICE_REFUSED';
+}
+export async function parsePairingServiceResponse(response: Response): Promise<PairRuntimeView> {
+  if (response.ok) return response.json() as Promise<PairRuntimeView>;
+  const body = await response.json().catch(() => ({})) as { readonly code?: unknown };
+  return reject(servicePairingErrorCode(body.code));
+}
 function errorMessage(code: string): string {
   if (['PAIR_CEREMONY_EXPIRED', 'ONBOARD_PAIRING_EXPIRED', 'ONBOARD_FLOW_EXPIRED', 'PAIR_ANSWER_LOST_RESTART_REQUIRED'].includes(code)) {
     return 'This pairing request can no longer be completed. Ask your agent to start a fresh pairing request.';
@@ -291,6 +299,9 @@ function errorMessage(code: string): string {
     return 'Ask your agent to resume sign-in for this session, then retry connecting this machine.';
   }
   if (code === 'PAIR_EXISTING_REQUIRES_PROOF') return 'This machine is already paired. Ask your agent to resume its original onboarding request.';
+  if (code === 'ONBOARD_PAIRING_REUSE_UNAVAILABLE') {
+    return 'The saved pairing could not be verified for this device session. Your local pairing data and existing custody were preserved; ask your agent to check the original onboarding request and sign-in session before retrying.';
+  }
   if (code === 'PAIR_APPROVAL_CANCELLED') return 'Pairing was cancelled. Your account is unchanged.';
   if (code === 'PAIR_CUSTODY_APPROVAL_REQUIRED') return 'The browser did not approve persistent pairing. Ask your agent to start a fresh pairing request and review its storage disclosure.';
   return 'Pairing could not finish. Ask your agent to check this request and retry; your account is unchanged.';
@@ -345,11 +356,7 @@ export async function executeLocalFlowPair(flowId: string, options: FlowPairOpti
           headers: { Authorization: `Bearer ${await token()}`, 'Content-Type': 'application/json' },
           ...(body ? { body: JSON.stringify(body) } : {}),
         });
-        if (!response.ok) {
-          const body = await response.json().catch(() => ({})) as { readonly code?: unknown };
-          return reject(typeof body.code === 'string' && serviceCodes.includes(body.code) ? body.code : 'PAIR_SERVICE_REFUSED');
-        }
-        return response.json() as Promise<PairRuntimeView>;
+        return parsePairingServiceResponse(response);
       };
       const existingCredential = async () => {
         const record = readRuntimePairing();

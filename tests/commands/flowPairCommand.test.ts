@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { executeFlowPair, requirePairSilentAuthentication, type PairCheckpoint, type PairExecutorDependencies, type PairRuntimeView } from '../../src/commands/flowPairCommand';
+import { executeFlowPair, parsePairingServiceResponse, requirePairSilentAuthentication, servicePairingErrorCode, type PairCheckpoint, type PairExecutorDependencies, type PairRuntimeView } from '../../src/commands/flowPairCommand';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
 import { deriveDeviceKeyKek, deviceKeyWrapAAD, wrapKLocal, DEVICE_KEY_KDF_VERSION } from '../../src/auth/deviceKey/crypto';
 import type { KeyWrapperMetadata, KeyWrapperPayload } from '../../src/service/serviceClient';
@@ -167,6 +167,17 @@ describe('noninteractive Keep-owned runtime pairing executor', () => {
     expect(h.read()?.answer?.credentialId).toBe(credentialId);
     expect(h.read()?.installed).toBeUndefined();
     expect(h.report.mock.calls.some(([body]) => body.action === 'complete')).toBe(false);
+  });
+
+  test('service reuse refusal preserves its code and unknown codes remain generic', () => {
+    expect(servicePairingErrorCode('ONBOARD_PAIRING_REUSE_UNAVAILABLE')).toBe('ONBOARD_PAIRING_REUSE_UNAVAILABLE');
+    expect(servicePairingErrorCode('ONBOARD_PAIRING_CREDENTIAL_UNAVAILABLE')).toBe('ONBOARD_PAIRING_CREDENTIAL_UNAVAILABLE');
+    expect(servicePairingErrorCode('unrecognized_service_error')).toBe('PAIR_SERVICE_REFUSED');
+  });
+
+  test('HTTP reuse refusal is mapped at the response boundary', async () => {
+    await expect(parsePairingServiceResponse(new Response(JSON.stringify({ code: 'ONBOARD_PAIRING_REUSE_UNAVAILABLE' }), { status: 403 })))
+      .rejects.toThrow('ONBOARD_PAIRING_REUSE_UNAVAILABLE');
   });
 
   test('completion acknowledgement mismatch preserves installed receipt and refuses success', async () => {

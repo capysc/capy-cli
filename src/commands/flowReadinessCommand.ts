@@ -114,7 +114,10 @@ export async function runFlowReadinessCommand(options: FlowReadinessOptions): Pr
   } catch (error) {
     const code = error instanceof AuthenticationExecutorError || error instanceof PairExecutorError
       ? error.code : 'READINESS_EXECUTOR_FAILED';
-    console.log(JSON.stringify({ ok: false, flow_id: options.flowId, code }));
+    const message = code === 'ONBOARD_PAIRING_REUSE_UNAVAILABLE'
+      ? 'The saved pairing could not be verified for this device session. Your local pairing data and existing custody were preserved; ask your agent to check the original onboarding request and sign-in session before retrying.'
+      : undefined;
+    console.log(JSON.stringify({ ok: false, flow_id: options.flowId, code, ...(message === undefined ? {} : { message }) }));
     return 1;
   }
 }
