@@ -27,7 +27,7 @@ type ReadinessResult =
 
 export interface FlowReadinessDependencies {
   readonly authenticate: (flowId: string, options: FlowAuthenticationOptions) => ReturnType<typeof executeLocalFlowAuthentication>;
-  readonly pair: (flowId: string, options: FlowPairOptions) => ReturnType<typeof executeLocalFlowPair>;
+  readonly pair: (flowId: string, options: FlowPairOptions, devMode: boolean) => ReturnType<typeof executeLocalFlowPair>;
 }
 
 const localDependencies: FlowReadinessDependencies = {
@@ -76,10 +76,11 @@ function validate(options: FlowReadinessOptions): void {
 export async function executeFlowReadiness(
   options: FlowReadinessOptions,
   dependencies: FlowReadinessDependencies = localDependencies,
+  devMode = false,
 ): Promise<ReadinessResult> {
   validate(options);
   const pairing = await (async () => {
-    try { return await dependencies.pair(options.flowId, pairingOptions(options)); }
+    try { return await dependencies.pair(options.flowId, pairingOptions(options), devMode); }
     catch (error) {
       if (error instanceof PairExecutorError && error.code === 'PAIR_AUTHENTICATION_REQUIRED') return null;
       throw error;
@@ -99,7 +100,7 @@ export async function executeFlowReadiness(
       continuation: continuation(options, authentication.handoff),
     };
   }
-  const paired = await dependencies.pair(options.flowId, pairingOptions(options));
+  const paired = await dependencies.pair(options.flowId, pairingOptions(options), devMode);
   return {
     ok: true, flow_id: options.flowId, authentication_flow_id: options.authenticationFlowId,
     stage: paired.stage,
@@ -107,9 +108,9 @@ export async function executeFlowReadiness(
   };
 }
 
-export async function runFlowReadinessCommand(options: FlowReadinessOptions): Promise<number> {
+export async function runFlowReadinessCommand(options: FlowReadinessOptions, devMode = false): Promise<number> {
   try {
-    console.log(JSON.stringify(await executeFlowReadiness(options)));
+    console.log(JSON.stringify(await executeFlowReadiness(options, localDependencies, devMode)));
     return 0;
   } catch (error) {
     const code = error instanceof AuthenticationExecutorError || error instanceof PairExecutorError

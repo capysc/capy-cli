@@ -554,7 +554,7 @@ program
       const { runFlowReadinessCommand } = await import('./commands/flowReadinessCommand');
       const code = await runFlowReadinessCommand({ flowId: options.flowId, authenticationFlowId: options.authenticationFlowId,
         expectedUserId: options.expectedUserId, serviceOrigin: options.serviceOrigin,
-        runtimeOnly: options.runtimeOnly === true, continuationTool: options.runtimeOnly ? 'capy_pair' : 'capy_onboard' });
+        runtimeOnly: options.runtimeOnly === true, continuationTool: options.runtimeOnly ? 'capy_pair' : 'capy_onboard' }, true);
       if (code !== 0) process.exit(code);
       return;
     }

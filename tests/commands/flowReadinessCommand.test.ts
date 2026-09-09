@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { describe, expect, mock, test } from 'bun:test';
 import { executeFlowReadiness, type FlowReadinessOptions } from '../../src/commands/flowReadinessCommand';
 import { PairExecutorError } from '../../src/commands/flowPairCommand';
@@ -58,4 +59,41 @@ describe('instrumented readiness', () => {
     expect(authenticate).not.toHaveBeenCalled();
     expect(pair).toHaveBeenCalledTimes(1);
   });
+});
+
+// A separate process supplies an isolated state home without mutating this test process.
+test('custom state home keeps dev readiness custody consistent with dev setup on both pairing attempts', () => {
+  const result = spawnSync(process.execPath, ['-e', `
+    import { expect, mock } from 'bun:test';
+    import { executeFlowReadiness } from './src/commands/flowReadinessCommand';
+    import { PairExecutorError } from './src/commands/flowPairCommand';
+    import { runtimePairingEnvironment } from './src/auth/pairing/runtimePairingEnvironment';
+    const options = ${JSON.stringify(options)};
+    for (const devMode of [true, false]) {
+      const pair = mock(async (_flowId, _options, receivedMode) => {
+        expect(receivedMode).toBe(devMode);
+        expect(runtimePairingEnvironment(receivedMode)).toBe(devMode ? 'development' : 'production');
+        return { ok: true, flow_id: options.flowId, stage: 'paired' };
+      });
+      pair.mockImplementationOnce(async (_flowId, _options, receivedMode) => {
+        expect(receivedMode).toBe(devMode);
+        expect(runtimePairingEnvironment(receivedMode)).toBe(runtimePairingEnvironment(devMode));
+        throw new PairExecutorError('PAIR_AUTHENTICATION_REQUIRED');
+      });
+      const dependencies = {
+        pair,
+        authenticate: async () => ({ ok: true, stage: 'authenticated' }),
+      };
+      const result = devMode
+        ? await executeFlowReadiness(options, dependencies, true)
+        : await executeFlowReadiness(options, dependencies);
+      expect(result.stage).toBe('paired');
+      expect(pair).toHaveBeenCalledTimes(2);
+    }
+  `], {
+    cwd: process.cwd(),
+    env: { ...process.env, CAPY_GLOBAL_DIR_NAME: '.capy-dev-readiness-regression' },
+    encoding: 'utf8',
+  });
+  expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: '' });
 });
