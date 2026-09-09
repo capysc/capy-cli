@@ -487,7 +487,7 @@ export class SetupCommand {
 
     const resolved = await this.resolveOrCreateProject(plan);
     if (!resolved.ok) {
-      this.refuse(resolved.code, resolved.detail, { env_rewritten: false });
+      this.refuse(resolved.code, resolved.detail, { env_rewritten: false, failure_stage: 'resolve_project' });
       return;
     }
     const { project, keep: baseKeep } = resolved;
@@ -496,7 +496,7 @@ export class SetupCommand {
       .then((key) => ({ ok: true as const, key }))
       .catch((err: unknown) => ({ ok: false as const, err }));
     if (!encryptionKeyOutcome.ok) {
-      this.refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
+      this.refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false, failure_stage: 'resolve_key' });
       return;
     }
     const encryptionKey = encryptionKeyOutcome.key;
@@ -578,7 +578,7 @@ export class SetupCommand {
       }
     })();
     if (!pushed.ok) {
-      this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false });
+      this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false, failure_stage: 'push' });
       return;
     }
 
@@ -639,7 +639,7 @@ export class SetupCommand {
     const userId = authResult.user_id!;
     const resolved = await this.resolveOrCreateProject(plan);
     if (!resolved.ok) {
-      this.refuse(resolved.code, resolved.detail, { env_rewritten: false });
+      this.refuse(resolved.code, resolved.detail, { env_rewritten: false, failure_stage: 'resolve_project' });
       return;
     }
 
@@ -647,7 +647,7 @@ export class SetupCommand {
       .then((key) => ({ ok: true as const, key }))
       .catch((err: unknown) => ({ ok: false as const, err }));
     if (!encryptionKeyOutcome.ok) {
-      this.refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false });
+      this.refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false, failure_stage: 'resolve_key' });
       return;
     }
     const encryptionKey = encryptionKeyOutcome.key;
@@ -762,7 +762,7 @@ export class SetupCommand {
     ).then((value) => ({ ok: true as const, value }))
       .catch((err: unknown) => ({ ok: false as const, err }));
     if (!pushed.ok) {
-      this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false });
+      this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false, failure_stage: 'push' });
       return;
     }
 

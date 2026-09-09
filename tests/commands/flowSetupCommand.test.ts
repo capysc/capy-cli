@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { executeFlowSetup, type RepositoryView, type RepositoryReceipt, type SetupExecutorDependencies } from '../../src/commands/flowSetupCommand';
+import { setupFailureResult, executeFlowSetup, type RepositoryView, type RepositoryReceipt, type SetupExecutorDependencies } from '../../src/commands/flowSetupCommand';
 
 const FLOW = 'c41107c9-5646-4bb6-8f90-694ca5c3d836';
 const USER = 'user_test';
@@ -130,5 +130,34 @@ describe('Keep-owned repository executor', () => {
     expect(await executeFlowSetup(FLOW, options, deps)).toEqual({ ok: true, flow_id: FLOW, stage: 'done', message: 'Capy is ready for this repository.',
       continuation: { tool: 'capy_onboard', args: { flow_id: FLOW } } });
     expect(deps.apply).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('sanitized setup failure diagnostics', () => {
+  for (const stage of ['resolve_project', 'resolve_key', 'push'] as const) {
+    test(`preserves ${stage} without exposing raw failure content`, async () => {
+      const deps = harness();
+      const result = await executeFlowSetup(FLOW, options, {
+        ...deps,
+        apply: async () => ({ ok: false, code: 'PERMISSION_DENIED', failure_stage: stage,
+          detail: 'PRIVATE_TOKEN', body: { key: 'PRIVATE_KEY' }, unknown: 'PRIVATE_BODY' }),
+      }).catch((error: unknown) => setupFailureResult(FLOW, error));
+      expect(result).toMatchObject({ ok: false, code: 'PERMISSION_DENIED', failure_stage: stage });
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+      expect(deps.save.mock.calls.map(([saved]) => saved.phase)).toEqual(['applying']);
+      expect(deps.report).not.toHaveBeenCalled();
+    });
+  }
+  test('drops unrecognized stages and arbitrary error contents', async () => {
+    const result = await executeFlowSetup(FLOW, options, {
+      ...harness(),
+      apply: async () => ({ ok: false, code: 'PERMISSION_DENIED', failure_stage: 'PRIVATE_STAGE', detail: 'PRIVATE_DETAIL' }),
+    }).catch((error: unknown) => setupFailureResult(FLOW, error));
+    expect(result).not.toHaveProperty('failure_stage');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+    const unknown = setupFailureResult(FLOW, new Error('PRIVATE_TOKEN'));
+    expect(unknown.code).toBe('SETUP_EXECUTOR_FAILED');
+    expect(JSON.stringify(unknown)).not.toContain('PRIVATE_');
   });
 });

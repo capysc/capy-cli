@@ -51,15 +51,33 @@ export interface SetupExecutorDependencies {
   readonly localDigest: () => string;
   readonly verify: (target: RepositoryTarget) => Promise<{ readonly remote_keep_hash: string | null }>;
 }
-class SetupFlowError extends Error { constructor(readonly code: string) { super(code); } }
+type SetupFailureStage = 'resolve_project' | 'resolve_key' | 'push';
+class SetupFlowError extends Error {
+  constructor(readonly code: string, readonly failureStage?: SetupFailureStage) { super(code); }
+}
 const reject = (code: string): never => { throw new SetupFlowError(code); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const output = (view: RepositoryView) => ({ ok: true, flow_id: view.flow_id,
   stage: view.next_action === 'done' ? 'done' : 'repository_pending',
   ...(view.next_action === 'done' ? { message: 'Capy is ready for this repository.' } : {}),
   continuation: { tool: 'capy_onboard', args: { flow_id: view.flow_id } } });
-const requireResult = (result: JsonResult): JsonResult => result.ok === true ? result : reject(
-  typeof result.code === 'string' && /^[A-Z0-9_]+$/.test(result.code) ? result.code : 'SETUP_OPERATION_FAILED');
+const requireResult = (result: JsonResult): JsonResult => {
+  if (result.ok === true) return result;
+  const code = typeof result.code === 'string' && /^[A-Z0-9_]+$/.test(result.code)
+    ? result.code : 'SETUP_OPERATION_FAILED';
+  const stage = result.failure_stage;
+  throw new SetupFlowError(code,
+    stage === 'resolve_project' || stage === 'resolve_key' || stage === 'push' ? stage : undefined);
+};
+
+/** Only coded failures and allowlisted stages cross the public JSON boundary. */
+export function setupFailureResult(flowId: string, error: unknown): JsonResult {
+  const code = error instanceof SetupFlowError || error instanceof RepositoryPreparationError ? error.code : 'SETUP_EXECUTOR_FAILED';
+  return { ok: false, flow_id: flowId, code,
+    ...(error instanceof SetupFlowError && error.failureStage ? { failure_stage: error.failureStage } : {}),
+    message: code === 'SETUP_APPLY_INTERRUPTED' ? 'Setup was interrupted while applying. Ask your agent to check the repository before retrying; no changes were repeated.'
+      : 'Setup could not finish. Ask your agent to check the reported issue and resume this request.' };
+}
 const sameTarget = (left: RepositoryTarget, right: RepositoryTarget): boolean =>
   left.org_id === right.org_id && left.project_id === right.project_id && left.project_name === right.project_name
   && left.branch === right.branch && left.sync_mode === right.sync_mode;
@@ -215,10 +233,7 @@ export async function runFlowSetupCommand(flowId: string, options: FlowSetupOpti
     });
     console.log(JSON.stringify(result)); return 0;
   } catch (error) {
-    const code = error instanceof SetupFlowError || error instanceof RepositoryPreparationError ? error.code : 'SETUP_EXECUTOR_FAILED';
-    console.log(JSON.stringify({ ok: false, flow_id: flowId, code,
-      message: code === 'SETUP_APPLY_INTERRUPTED' ? 'Setup was interrupted while applying. Ask your agent to check the repository before retrying; no changes were repeated.'
-        : 'Setup could not finish. Ask your agent to check the reported issue and resume this request.' }));
+    console.log(JSON.stringify(setupFailureResult(flowId, error)));
     return 1;
   }
 }
