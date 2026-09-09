@@ -6,11 +6,27 @@ import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:t
 
 const registerFilesystemPairing = mock(async (..._args: readonly unknown[]) => undefined);
 mock.module('../../src/config/profileConfig', () => ({ resolveActiveUrl: () => 'https://api.test.invalid' }));
+const assertRuntimePairingUserImpl = mock((_userId: string): unknown => null);
 mock.module('../../src/auth/pairing/runtimePairing', () => ({
+  assertRuntimePairingUser: assertRuntimePairingUserImpl,
   readActiveRuntimePairing: async () => null,
   readRuntimePairing: () => null,
   recoverFilesystemRuntimePairingWhileLeaseHeld: async () => null,
   registerFilesystemRuntimePairing: registerFilesystemPairing,
+}));
+// `capy pair` now probes the ordinary silent path before any ceremony
+// (CAP-646). The default answer is "no session", which is what every
+// device-authorization test below assumes; the reuse tests override it.
+const silentAuthImpl = mock(async (_organizationId?: string): Promise<any> => ({
+  success: false, error_code: 'no_session', error: 'Not signed in',
+}));
+const sessionOrgIdImpl = mock((): string | null => null);
+mock.module('../../src/auth/authService', () => ({
+  AuthService: class {
+    constructor(..._args: readonly unknown[]) {}
+    authenticateSilent(organizationId?: string) { return silentAuthImpl(organizationId); }
+    getOrganizationId() { return sessionOrgIdImpl(); }
+  },
 }));
 mock.module('../../src/auth/pairing/pairAttemptLease', () => ({
   acquirePairAttemptLease: () => ({ version: 1, pid: 4242, startedAt: '2026-09-01T00:00:00.000Z',
@@ -100,7 +116,13 @@ const VALID_ANSWER = {
 
 beforeEach(() => {
   for (const call of [ceremonyImpl, authorizeImpl, installImpl, resolveKeyMaterialImpl, spawnImpl,
-    registerFilesystemPairing, logSpy, errorSpy]) call.mockClear();
+    registerFilesystemPairing, silentAuthImpl, sessionOrgIdImpl, assertRuntimePairingUserImpl,
+    logSpy, errorSpy]) call.mockClear();
+  silentAuthImpl.mockImplementation(async () => ({
+    success: false, error_code: 'no_session', error: 'Not signed in',
+  }));
+  sessionOrgIdImpl.mockImplementation(() => null);
+  assertRuntimePairingUserImpl.mockImplementation(() => null);
   authorizeImpl.mockImplementation(async () => AUTHORIZATION);
   installImpl.mockImplementation(async () => ({ orgId: 'org_1', orgName: 'Org One', orgTokenReady: true }));
   resolveKeyMaterialImpl.mockImplementation(async () => ({
@@ -755,5 +777,152 @@ describe('PairCommand — terminal QR (CAP-409 follow-up)', () => {
 
       expect(logs().join('\n')).not.toContain('CAPY_EVENT_V1');
     }
+  });
+});
+
+describe('PairCommand — CAP-646 existing CLI authentication is reused', () => {
+  const SIGNED_IN = {
+    success: true,
+    user_id: 'user_1',
+    user_email: 'u@example.com',
+    organization_id: 'org_1',
+    organizations: [{ id: 'org_1', workos_org_id: 'wos_1', name: 'Org One' }],
+  };
+
+  test('a usable session pairs the runtime without any device ceremony', async () => {
+    silentAuthImpl.mockImplementation(async () => SIGNED_IN);
+
+    const exitCode = await new PairCommand().execute({ json: true });
+
+    expect(exitCode).toBe(0);
+    // The whole point: no user code was ever minted, so nothing was asked of
+    // the human who is already signed in on this machine.
+    expect(ceremonyCalls()).toEqual([]);
+    expect(authorizeImpl.mock.calls.length).toBe(0);
+    expect(logs().join('\n')).not.toContain('ABCD-1234');
+    // A reused session is already on disk; writing it again is exactly the
+    // clobbering risk this path exists to avoid.
+    expect(installCalls()).toEqual([]);
+    // Custody still runs in full: the grant ceremony, the daemon, and the
+    // durable runtime record.
+    expect(resolveKeyMaterialCalls().length).toBe(1);
+    expect(spawnCalls().length).toBe(1);
+    expect(registerFilesystemPairing.mock.calls.length).toBe(1);
+    expect(JSON.parse(logs().join('\n'))).toEqual({
+      ok: true,
+      userCode: null,
+      userId: 'user_1',
+      userEmail: 'u@example.com',
+      orgId: 'org_1',
+      orgName: 'Org One',
+      orgTokenReady: true,
+      socketPath: '/tmp/fake.sock',
+      envVar: 'CAPY_DEVICE_KEY_GRANT_SOCKET',
+    });
+  });
+
+  test('the probe is scoped to the org the session already activated', async () => {
+    silentAuthImpl.mockImplementation(async () => SIGNED_IN);
+    sessionOrgIdImpl.mockImplementation(() => 'org_1');
+
+    await new PairCommand().execute({ json: true });
+
+    expect(silentAuthImpl.mock.calls).toEqual([['org_1']]);
+  });
+
+  test('a single-org account without an activated org still resolves its custody org', async () => {
+    silentAuthImpl.mockImplementation(async () => ({
+      success: true,
+      user_id: 'user_1',
+      user_email: 'u@example.com',
+      organizations: [{ id: 'org_1', workos_org_id: 'wos_1', name: 'Org One' }],
+    }));
+
+    const exitCode = await new PairCommand().execute({ json: true });
+
+    expect(exitCode).toBe(0);
+    const parsed = JSON.parse(logs().join('\n'));
+    expect(parsed.orgId).toBe('org_1');
+    // Inferred, not exchanged — the caller must not read this as a live token.
+    expect(parsed.orgTokenReady).toBe(false);
+    expect(resolveKeyMaterialCalls()[0]?.opts.authOrgId).toBe('org_1');
+  });
+
+  test.each([
+    ['no_session'],
+    ['session_ended'],
+  ])('%s is the only kind of failure that sends the human to device authorization', async (code) => {
+    silentAuthImpl.mockImplementation(async () => ({ success: false, error_code: code, error: 'nope' }));
+    ceremonyImpl.mockImplementation(async () => ({ status: 'complete', session: VALID_ANSWER.session }));
+
+    const exitCode = await new PairCommand().execute({ json: true });
+
+    expect(exitCode).toBe(0);
+    expect(ceremonyCalls().length).toBe(1);
+    expect(installCalls().length).toBe(1);
+    // The device block prints above the result, so start at the JSON object.
+    const jsonStart = logs().findIndex((line) => line.trim().startsWith('{'));
+    expect(JSON.parse(logs().slice(jsonStart).join('\n')).userCode).toBe('ABCD-1234');
+  });
+
+  test.each([
+    ['network', ERROR_CODES.NETWORK_ERROR],
+    ['server_error', ERROR_CODES.SERVICE_ERROR],
+    ['org_not_found', ERROR_CODES.ORG_NOT_FOUND],
+  ])('%s fails with its own code instead of asking for a redundant login', async (code, expected) => {
+    silentAuthImpl.mockImplementation(async () => ({ success: false, error_code: code, error: 'nope' }));
+
+    const exitCode = await new PairCommand().execute({ json: true });
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(logs().join('\n')).code).toBe(expected);
+    // Opening a browser cannot repair a transport failure, so nothing is
+    // started and the session on disk is left exactly as it was.
+    expect(ceremonyCalls()).toEqual([]);
+    expect(installCalls()).toEqual([]);
+    expect(spawnCalls()).toEqual([]);
+  });
+
+  test('a session that resolves no account is a failure, not a pairing', async () => {
+    silentAuthImpl.mockImplementation(async () => ({ success: true, user_email: 'u@example.com' }));
+
+    const exitCode = await new PairCommand().execute({ json: true });
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(logs().join('\n')).code).toBe(ERROR_CODES.AUTH_FAILED);
+    expect(spawnCalls()).toEqual([]);
+  });
+
+  test('the runtime single-account binding is enforced on the reused path too', async () => {
+    silentAuthImpl.mockImplementation(async () => SIGNED_IN);
+    const { CapyError } = await import('../../src/types/index');
+    assertRuntimePairingUserImpl.mockImplementation(() => {
+      throw new CapyError('paired to another account', ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+    });
+
+    const exitCode = await new PairCommand().execute({ json: true });
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(logs().join('\n')).code).toBe(ERROR_CODES.RUNTIME_PAIR_USER_MISMATCH);
+    // Refused before any key material is fetched or any daemon is spawned.
+    expect(resolveKeyMaterialCalls()).toEqual([]);
+    expect(spawnCalls()).toEqual([]);
+    expect(registerFilesystemPairing.mock.calls).toEqual([]);
+  });
+
+  test('a runtime whose custody is already live never reaches the probe', async () => {
+    silentAuthImpl.mockImplementation(async () => SIGNED_IN);
+    const readActivePairing = async () => ({
+      userId: 'user_1', userEmail: 'u@example.com', socketPath: '/tmp/already-active.sock', expiresAt: 0,
+    });
+    const ensureActiveSession = async () => ({ kind: 'ready' as const });
+
+    const exitCode = await new PairCommand(undefined, false, { readActivePairing, ensureActiveSession })
+      .execute({ json: true });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(logs().join('\n')).alreadyActive).toBe(true);
+    expect(silentAuthImpl.mock.calls).toEqual([]);
+    expect(spawnCalls()).toEqual([]);
   });
 });

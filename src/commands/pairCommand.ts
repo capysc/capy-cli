@@ -44,7 +44,7 @@
  * `device-key grant` already gives, instead of a surprise ten minutes later.
  */
 import { hostname } from 'os';
-import { CapyError, ERROR_CODES, type AuthResult } from '../types/index';
+import { CapyError, ERROR_CODES, type AuthResult, type SilentAuthFailureCode } from '../types/index';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
@@ -55,7 +55,7 @@ import {
   type DeviceAuthorization,
   type DevicePollResult,
 } from '../auth/pairing/deviceAuth';
-import { installPairedSession } from '../auth/pairing/installPairedSession';
+import { installPairedSession, type InstallPairedSessionResult } from '../auth/pairing/installPairedSession';
 import { grantKeyMaterialForPairedMachine } from '../auth/pairing/pairDeviceGrant';
 import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR } from '../auth/deviceKey/grantHolder';
@@ -63,6 +63,7 @@ import { keepOrigin } from '../ui/screens/keepScreens';
 import { openScreen } from '../ui/openScreen';
 import { renderTerminalQr } from '../ui/terminalQr';
 import {
+  assertRuntimePairingUser,
   readActiveRuntimePairing,
   readRuntimePairing,
   recoverFilesystemRuntimePairingWhileLeaseHeld,
@@ -115,6 +116,18 @@ type ActivePairingSessionAuthFactory = (
 ) => ActivePairingSessionAuth;
 
 /**
+ * Map a silent-auth failure onto the CLI's own error vocabulary. Extracted as
+ * an early-return function rather than a ternary chain (house style), and
+ * shared by both silent-auth callers below so the two paths cannot drift.
+ */
+function silentAuthFailureCode(code: SilentAuthFailureCode | undefined): string {
+  if (code === 'network') return ERROR_CODES.NETWORK_ERROR;
+  if (code === 'server_error') return ERROR_CODES.SERVICE_ERROR;
+  if (code === 'org_not_found') return ERROR_CODES.ORG_NOT_FOUND;
+  return ERROR_CODES.AUTH_FAILED;
+}
+
+/**
  * A live runtime-pair daemon proves that key custody is still available; it
  * does not make an expired WorkOS session immortal. Before treating `pair`
  * as a no-op, use the persisted refresh token through the ordinary silent
@@ -142,17 +155,133 @@ export async function ensureActiveRuntimePairingSession(
   if (result.error_code === 'session_ended' || result.error_code === 'no_session') {
     return { kind: 'reauthenticate' };
   }
-  const code = result.error_code === 'network'
-    ? ERROR_CODES.NETWORK_ERROR
-    : result.error_code === 'server_error'
-      ? ERROR_CODES.SERVICE_ERROR
-      : result.error_code === 'org_not_found'
-        ? ERROR_CODES.ORG_NOT_FOUND
-        : ERROR_CODES.AUTH_FAILED;
   return {
     kind: 'failed',
-    code,
+    code: silentAuthFailureCode(result.error_code),
     detail: result.error || 'Could not refresh the paired runtime session.',
+  };
+}
+
+/** The account half of a pairing, from either authentication path. */
+export interface PairedAccount {
+  readonly id: string;
+  readonly email?: string;
+}
+
+export type ReusableCliSessionOutcome =
+  /** A usable session is already on this machine; no human ceremony is owed. */
+  | {
+      readonly kind: 'reuse';
+      readonly user: PairedAccount;
+      readonly organizations: readonly { readonly id: string; readonly name: string }[];
+      readonly install: InstallPairedSessionResult;
+    }
+  /** No session at all, or it has ended — device authorization is required. */
+  | { readonly kind: 'authorize' }
+  | { readonly kind: 'failed'; readonly code: string; readonly detail: string };
+
+interface ReusableCliSessionAuth {
+  readonly authenticateSilent: (organizationId?: string) => Promise<AuthResult>;
+  readonly getOrganizationId: () => string | null;
+}
+
+type ReusableCliSessionAuthFactory = (
+  apiUrl: string | undefined,
+  devMode: boolean,
+  sessionUserId: string | undefined,
+) => ReusableCliSessionAuth;
+
+/** Only reached when the lifecycle produced no sentence of its own. */
+function reuseFailureFallbackDetail(code: SilentAuthFailureCode | undefined): string {
+  if (code === 'org_not_found') {
+    return 'The session organization is no longer available. Check your organization access and retry capy pair.';
+  }
+  return 'Could not reuse CLI authentication. Check your connection and retry capy pair; the session has been preserved.';
+}
+
+/**
+ * CAP-646. `capy pair` is reached with a session already on this machine far
+ * more often than the headless-container story in this file's header suggests:
+ * onboarding authenticates first and only then connects the runtime. Sending
+ * that human back through device authorization asks them to prove an identity
+ * the CLI is already holding, so probe the ordinary silent path first and only
+ * fall through to the ceremony for the two typed failures that genuinely need
+ * a human — a missing session and an ended one. An expired access token is not
+ * one of them: the lifecycle refreshes it before returning here.
+ *
+ * `readActiveRuntimePairing` (above) answers a narrower question — is custody
+ * still live — and deliberately says no when metadata is stale or no runtime
+ * has ever been paired. Those are exactly the cases this probe covers, so the
+ * two are complementary rather than alternatives.
+ *
+ * Nothing is written here: a reused session is already installed, and copying
+ * it through the session writer again would only risk clobbering it.
+ */
+export async function reuseExistingCliSession(
+  apiUrl: string | undefined,
+  devMode: boolean,
+  createAuth: ReusableCliSessionAuthFactory = (resolvedApiUrl, resolvedDevMode, sessionUserId) =>
+    new AuthService(resolvedApiUrl, resolvedDevMode, sessionUserId),
+): Promise<ReusableCliSessionOutcome> {
+  const probe = await (async () => {
+    try {
+      // A stale binding still names the account whose session this runtime is
+      // allowed to read, so the probe is scoped to it rather than to whatever
+      // session happens to be lying around.
+      const binding = readRuntimePairing();
+      const auth = createAuth(apiUrl, devMode, binding?.userId);
+      return { ok: true as const, result: await auth.authenticateSilent(auth.getOrganizationId() ?? undefined) };
+    } catch (error) {
+      return { ok: false as const, error };
+    }
+  })();
+  if (!probe.ok) {
+    return {
+      kind: 'failed',
+      code: probe.error instanceof CapyError ? probe.error.code : ERROR_CODES.AUTH_FAILED,
+      detail: probe.error instanceof Error
+        ? probe.error.message
+        : 'Could not read this runtime\'s existing authentication.',
+    };
+  }
+  const result = probe.result;
+  if (!result.success) {
+    if (result.error_code === 'no_session' || result.error_code === 'session_ended') {
+      return { kind: 'authorize' };
+    }
+    // The cause the lifecycle already produced, exactly as
+    // ensureActiveRuntimePairingSession reports it above; the typed code
+    // carries the remedy, so nothing here reads the sentence.
+    return {
+      kind: 'failed',
+      code: silentAuthFailureCode(result.error_code),
+      detail: result.error || reuseFailureFallbackDetail(result.error_code),
+    };
+  }
+  if (!result.user_id) {
+    return {
+      kind: 'failed',
+      code: ERROR_CODES.AUTH_FAILED,
+      detail: 'Authentication did not resolve an account. Retry capy pair.',
+    };
+  }
+  const organizations = (result.organizations ?? []).map((org) => ({ id: org.id, name: org.name }));
+  // A single-org account has nothing to choose; a multi-org one without an
+  // activated org stays null, exactly as installPairedSession leaves it on the
+  // non-interactive device path, and `finish` falls back to the first org for
+  // the custody fetch alone.
+  const orgId = result.organization_id ?? (organizations.length === 1 ? organizations[0].id : null);
+  return {
+    kind: 'reuse',
+    user: { id: result.user_id, email: result.user_email },
+    organizations,
+    install: {
+      orgId,
+      orgName: organizations.find((org) => org.id === orgId)?.name,
+      // Only an activated org token is ready; one merely inferred from a
+      // single-org account has not been exchanged yet.
+      orgTokenReady: Boolean(result.organization_id),
+    },
   };
 }
 
@@ -160,6 +289,7 @@ export interface PairCommandDependencies {
   readonly restorePairing?: (lease: PairAttemptLease) => Promise<void>;
   readonly readActivePairing?: () => Promise<ActiveRuntimePairing | null>;
   readonly ensureActiveSession?: (active: ActiveRuntimePairing) => Promise<ActivePairingSessionOutcome>;
+  readonly reuseCliSession?: () => Promise<ReusableCliSessionOutcome>;
   readonly acquirePairAttempt?: () => PairAttemptLease;
   readonly releasePairAttempt?: (lease: PairAttemptLease) => boolean;
 }
@@ -255,6 +385,20 @@ export class PairCommand {
     lease: PairAttemptLease,
     active: ActiveRuntimePairing | null,
   ): Promise<PairCommandExitCode> {
+    // A runtime whose custody is still live was already answered by the
+    // caller; what is left here is the "authenticated but not yet paired"
+    // case, where a ceremony would ask the human to prove an identity this
+    // CLI is already holding (CAP-646). The probe runs under the same lease
+    // that serializes the browser ceremony because it can rotate the
+    // persisted refresh token.
+    const reusable = active
+      ? { kind: 'authorize' as const }
+      : await (this.dependencies.reuseCliSession ?? (() => reuseExistingCliSession(this.apiUrl, this.devMode)))();
+    if (reusable.kind === 'failed') return this.reportActiveSessionFailure(reusable, options);
+    if (reusable.kind === 'reuse') {
+      return this.completePairing(reusable.user, reusable.organizations, reusable.install, null, options);
+    }
+
     const serviceUrl = resolveActiveUrl(this.devMode);
 
     // Extracted so the outcome is a single const rather than a reassigned
@@ -527,26 +671,52 @@ export class PairCommand {
       return 1;
     }
 
-    // The session is on disk now — fetch this account's own wrapped_k_local
-    // over the authenticated API and unwrap it locally (see this file's
-    // header and pairKeyMaterial.ts). Doors are org-less server-side, so
-    // ANY org this account belongs to authenticates the fetch: prefer the
-    // org the session just activated, falling back to answer.keyMaterial.orgId
-    // (the org the browser had active at approval time) for the
-    // non-interactive multi-org case where install.orgId is deliberately
-    // null (installPairedSession.ts's own doc explains why).
+    return this.completePairing(session.user, session.organizations, installed.value, userCode, options);
+  }
+
+  /**
+   * The half of pairing that both authentication paths share: the session is
+   * usable on this machine, so grant its key material and register the
+   * runtime. Neither path writes the session here — the device path installed
+   * it just above, and a reused one was already on disk.
+   */
+  private async completePairing(
+    user: PairedAccount,
+    organizations: readonly { readonly id: string; readonly name: string }[],
+    install: InstallPairedSessionResult,
+    userCode: string | null,
+    options: PairCommandOptions,
+  ): Promise<PairCommandExitCode> {
+    // The device path asserts this inside installPairedSession, before it
+    // writes anything. A reused session skips that writer, so the runtime's
+    // single-account binding is enforced here instead: a stale record still
+    // refuses a different account.
+    const bound = (() => {
+      try {
+        assertRuntimePairingUser(user.id);
+        return { ok: true as const };
+      } catch (error) { return { ok: false as const, error }; }
+    })();
+    if (!bound.ok) return this.reportPairingFailure(bound.error, options);
+
+    // Fetch this account's own wrapped_k_local over the authenticated API and
+    // unwrap it locally (see this file's header and pairKeyMaterial.ts). Doors
+    // are org-less server-side, so ANY org this account belongs to
+    // authenticates the fetch: prefer the org the session activated, falling
+    // back to the first known org for the non-interactive multi-org case where
+    // install.orgId is deliberately null (installPairedSession.ts's own doc
+    // explains why).
     // The session belongs to THIS machine now, so the key-material half runs
     // the ordinary CAP-384 grant ceremony over it rather than unwrapping a
     // PRF output sealed by the approver. The PRF itself still happens on the
     // human's own device, reached through the broker transport — nothing
     // WebAuthn-shaped is attempted on this headless box.
-    const install = installed.value;
-    const authOrgId = install.orgId ?? session.organizations[0]?.id ?? null;
+    const authOrgId = install.orgId ?? organizations[0]?.id ?? null;
     const resolved = await grantKeyMaterialForPairedMachine({
       apiUrl: this.apiUrl,
       devMode: this.devMode,
       authOrgId,
-      userId: session.user.id,
+      userId: user.id,
       serviceUrl: resolveActiveUrl(this.devMode),
     });
     if (!resolved.ok) {
@@ -583,8 +753,8 @@ export class PairCommand {
           {
             ok: true,
             userCode,
-            userId: session.user.id,
-            userEmail: session.user.email,
+            userId: user.id,
+            userEmail: user.email,
             orgId: install.orgId,
             orgName: install.orgName ?? null,
             orgTokenReady: install.orgTokenReady,
@@ -599,10 +769,10 @@ export class PairCommand {
     }
 
     console.log('');
-    console.log(`  \x1b[32mPaired as ${B(session.user.email)}.\x1b[0m`);
+    console.log(`  \x1b[32mPaired as ${B(user.email ?? user.id)}.\x1b[0m`);
     if (install.orgId) {
       console.log(`  Active organization: ${B(install.orgName || install.orgId)}`);
-    } else if (session.organizations.length === 0) {
+    } else if (organizations.length === 0) {
       console.log(`  No organizations yet — run ${B('capy')} to create one.`);
     } else {
       console.log(`  Multiple organizations available — run ${B('capy org')} to pick one.`);
