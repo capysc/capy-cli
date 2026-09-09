@@ -51,12 +51,14 @@ import { createConnection } from 'net';
 import {
   closeSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -270,6 +272,32 @@ function fakeAccessToken(): string {
     JSON.stringify({ org_id: WORKOS_ORG_ID, capy_org_id: ORG_ID }),
   ).toString('base64url');
   return `${header}.${payload}.test-signature`;
+}
+
+/**
+ * Writes the session file `pair` itself leaves behind — same path, same v2
+ * shape, same 0600 mode the assertions further down already pin. Written
+ * directly rather than through `writeFakeSession` because this file drives
+ * real subprocesses instead of mocking `homedir`, so the test process's own
+ * home is not the one under test.
+ */
+function installSessionInHome(home: string): void {
+  const dir = join(home, '.capy', 'auth', 'sessions');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(dir, `${USER_ID}.json`),
+    JSON.stringify({
+      version: 2,
+      user_id: USER_ID,
+      user_email: USER_EMAIL,
+      refresh_token: 'refresh-e2e-reuse',
+      organizations: [{ id: ORG_ID, workos_org_id: WORKOS_ORG_ID, name: ORG_NAME }],
+      sessions: {
+        [ORG_ID]: { access_token: fakeAccessToken(), expires_at: Date.now() + 3_600_000 },
+      },
+    }),
+    { mode: 0o600 },
+  );
 }
 
 function projectDirWithSecret(masterKey: Buffer, secretValue: string): string {
@@ -579,4 +607,79 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     expect(existsSync(join(home, '.capy', 'auth'))).toBe(false);
     });
   }, 20_000);
+  it('CAP-646: a machine that is already signed in pairs without any device authorization', async () => {
+    const masterKey = randomBytes(32);
+    const projectDir = projectDirWithSecret(masterKey, 'shh-pair-e2e-reused');
+    try {
+      await withPairE2EFixture(async ({ home, service }) => {
+        const kLocal = randomBytes(32);
+        const innerWrapped = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(USER_ID, ORG_ID));
+        service.keyEncRows.push({ organizationId: ORG_ID, keyEnc: kmsWrap(innerWrapped) });
+
+        const prfSalt = randomBytes(32);
+        const prfOutput = randomBytes(32);
+        const kek = deriveDeviceKeyKek(prfOutput, prfSalt, DEVICE_KEY_KDF_VERSION);
+        const wrapped = wrapKLocal(kLocal, kek, deviceKeyWrapAAD(USER_ID, CRED_ID));
+        service.doorRows.push({
+          credentialId: CRED_ID,
+          wrappedKLocal: wrapped.wrappedKLocal,
+          iv: wrapped.iv,
+          prfSalt: prfSalt.toString('base64'),
+          kdfVersion: DEVICE_KEY_KDF_VERSION,
+        });
+
+        // The whole difference from the test above: this machine already has
+        // a usable session and has never paired, which is what onboarding
+        // actually hands `pair`.
+        installSessionInHome(home);
+
+        const pair = spawnCli(['pair', '--json'], home, home, service.url);
+
+        // Only PHASE 2 runs. There is no device code to answer, so nothing
+        // stands in for a human at the identity provider's page.
+        await driveGrantCeremonyOverSubprocess(pair.stdoutSoFar, service, (candidates) => {
+          const c = candidates.find((cand) => cand.credentialId === CRED_ID);
+          if (!c) return { ok: false as const, code: 'no_credential' };
+          return { ok: true as const, credentialId: CRED_ID, prfOutput: prfOutput.toString('base64') };
+        });
+        const pairResult = await pair.done;
+
+        expect(pairResult.exitCode).toBe(0);
+        // THE PROOF: the identity provider was never asked to authorize this
+        // device, and no code was ever put in front of a human.
+        expect(service.devices.size).toBe(0);
+        expect(pairResult.stdout).not.toContain('enter:');
+        expect(pairResult.stdout).not.toContain('matches:');
+
+        const announced = JSON.parse(pairResult.stdout.slice(pairResult.stdout.lastIndexOf('{')));
+        expect(announced.ok).toBe(true);
+        expect(announced.userCode).toBe(null);
+        expect(announced.userId).toBe(USER_ID);
+        expect(announced.userEmail).toBe(USER_EMAIL);
+        expect(announced.orgId).toBe(ORG_ID);
+        expect(typeof announced.socketPath).toBe('string');
+
+        // The reused session is left exactly as it was — not rewritten, not
+        // reissued, still carrying its own refresh token.
+        const session = JSON.parse(
+          readFileSync(join(home, '.capy', 'auth', 'sessions', `${USER_ID}.json`), 'utf8'),
+        );
+        expect(session.refresh_token).toBe('refresh-e2e-reuse');
+
+        // Custody really works, rather than merely reporting a socket: the
+        // real secret decrypts through the grant this pairing established.
+        const run = spawnCli(
+          ['run', '--', 'node', '-e', 'console.log(process.env.SECRET_VAR)'],
+          projectDir,
+          home,
+          service.url,
+        );
+        const runResult = await run.done;
+        expect(runResult.exitCode).toBe(0);
+        expect(runResult.stdout.trim()).toBe('shh-pair-e2e-reused');
+      });
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
