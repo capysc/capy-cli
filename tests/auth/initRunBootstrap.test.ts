@@ -801,7 +801,18 @@ describe('hosted init-run bootstrap', () => {
       ...fixture.authorizedStatus,
       status: 'terminal',
       first_connection_id: '22222222-2222-4222-8222-222222222222',
-      terminal_receipt: receipt,
+      // PostgreSQL jsonb does not preserve the submitted object's key order.
+      terminal_receipt: {
+        completed_at: receipt.completed_at,
+        effects: receipt.effects,
+        custody_verified: receipt.custody_verified,
+        repository_verified: receipt.repository_verified,
+        code: receipt.code,
+        status: receipt.status,
+        receipt_id: receipt.receipt_id,
+        run_id: receipt.run_id,
+        v: receipt.v,
+      },
       expires_at: '2026-09-11T05:20:00.000Z',
     } as const;
     const fetcher = jest.fn(async () => json(terminal)) as unknown as typeof fetch;
@@ -821,5 +832,48 @@ describe('hosted init-run bootstrap', () => {
       binding: fixture.binding,
       terminal_receipt: receipt,
     });
+  });
+
+  it('rejects a changed terminal receipt without retrying the continuation', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const authorized = {
+      auth: { success: true, user_id: 'user_expected' },
+      authService: unselectedAuthService(),
+      binding: fixture.binding,
+      authEpoch: 1,
+      credentialReceipt: fixture.receipt,
+      brokerAccessToken: 'broker.fixture.token',
+      runSecret: RUN_SECRET,
+      expiresAt: '2026-09-10T07:00:00.000Z',
+    } as const;
+    const receipt = {
+      v: 1,
+      run_id: RUN_ID,
+      receipt_id: '33333333-3333-4333-8333-333333333333',
+      status: 'succeeded',
+      code: null,
+      repository_verified: true,
+      custody_verified: true,
+      effects: 'complete',
+      completed_at: '2026-09-10T05:20:00.000Z',
+    } as const;
+    const fetcher = jest.fn(async () => json({
+      ...fixture.authorizedStatus,
+      status: 'terminal',
+      first_connection_id: '22222222-2222-4222-8222-222222222222',
+      terminal_receipt: { ...receipt, custody_verified: false },
+      expires_at: '2026-09-11T05:20:00.000Z',
+    })) as unknown as typeof fetch;
+
+    const error = await recordInitRunTerminal({
+      bootstrap: prepared,
+      authorized,
+      receipt,
+      transport: transport(fetcher),
+    }).catch((cause) => cause);
+
+    expect(error.code).toBe('INIT_DELIVERY_INDETERMINATE');
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });

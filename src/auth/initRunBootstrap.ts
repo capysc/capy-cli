@@ -379,7 +379,16 @@ function sameTerminalReceipt(
   left: InitRunTerminalReceipt | null,
   right: InitRunTerminalReceipt,
 ): boolean {
-  return left !== null && JSON.stringify(left) === JSON.stringify(right);
+  return left !== null
+    && left.v === right.v
+    && left.run_id === right.run_id
+    && left.receipt_id === right.receipt_id
+    && left.status === right.status
+    && left.code === right.code
+    && left.repository_verified === right.repository_verified
+    && left.custody_verified === right.custody_verified
+    && left.effects === right.effects
+    && left.completed_at === right.completed_at;
 }
 
 async function continueInitRun(
