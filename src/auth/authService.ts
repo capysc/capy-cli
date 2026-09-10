@@ -25,11 +25,45 @@ import {
   initRunSessionAuthorityDigest,
   prepareInitRunSessionInstallation,
 } from './initRunSessionInstaller';
+import {
+  INIT_RUN_ORGANIZATION_INDETERMINATE,
+  INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH,
+  parseInitRunCreatedOrganizationResponse,
+  prepareInitRunCreatedOrganizationInstallation,
+} from './initRunOrganizationInstaller';
 
 export interface InstalledExchangeResponse {
   readonly auth: AuthResult;
   readonly authService: AuthService;
 }
+
+export interface InstalledInitRunOrganization {
+  readonly organization: Organization;
+  readonly auth: AuthResult;
+  readonly authService: AuthService;
+}
+
+const INIT_RUN_ORGANIZATION_RESPONSE_LIMIT = 131_072;
+const INIT_RUN_ORGANIZATION_TIMEOUT_MS = 15_000;
+
+const exactInitRunServiceOrigin = (value: string): string | null => {
+  try {
+    const url = new URL(value);
+    const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    return url.origin === value && (url.protocol === 'https:' || (url.protocol === 'http:' && loopback))
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const initRunOrganizationFailure = (message: string): CapyError =>
+  new CapyError(message, INIT_RUN_ORGANIZATION_INDETERMINATE);
+
+const parseJsonText = (value: string): unknown => {
+  try { return JSON.parse(value); } catch { return null; }
+};
 
 // Session mechanics live in src/auth/session/ (CAP-377 phase 1). The names
 // below have always been importable from this module — keep them so, with the
@@ -612,6 +646,116 @@ export class AuthService {
       `${this.serviceApiUrl}/auth/check-org-name`,
       { name },
     );
+  }
+
+  /**
+   * Install the single response from the hosted fresh-user organization
+   * endpoint without mutating this AuthService. The request is bound to this
+   * instance's configured service and current persisted zero-org authority.
+   */
+  async createInitRunOrganization(
+    name: string,
+    expected: Readonly<{ userId: string; deadline: number }>,
+  ): Promise<InstalledInitRunOrganization> {
+    const serviceOrigin = exactInitRunServiceOrigin(this.serviceApiUrl);
+    const trimmedName = name.trim();
+    const before = (() => {
+      try { return this.storageBackend.load(expected.userId); } catch { return null; }
+    })();
+    const beforeDigest = initRunSessionAuthorityDigest(before);
+    const baselineMatches = before !== null
+      && before.user_id === expected.userId
+      && /^\S+$/u.test(before.refresh_token)
+      && before.organizations.length === 0
+      && Object.keys(before.sessions).length === 0
+      && this.currentOrgId === null
+      && this.initialSessionUserId === expected.userId
+      && beforeDigest !== null
+      && beforeDigest === this.initialSessionAuthorityDigest;
+    if (!serviceOrigin || trimmedName.length === 0 || trimmedName.length > 100 || !baselineMatches) {
+      throw initRunOrganizationFailure('The hosted organization request authority was invalid');
+    }
+    if (!Number.isFinite(expected.deadline)) {
+      throw initRunOrganizationFailure('The hosted initialization deadline was invalid');
+    }
+    const remaining = expected.deadline - Date.now();
+    if (remaining <= 0) throw new CapyError('The hosted initialization run expired', 'INIT_RUN_EXPIRED');
+    const response = await (async () => {
+      try {
+        return await fetch(`${serviceOrigin}/auth/create-org`, {
+          method: 'POST',
+          redirect: 'error',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: trimmedName, refresh_token: before.refresh_token }),
+          signal: AbortSignal.timeout(Math.max(1, Math.min(INIT_RUN_ORGANIZATION_TIMEOUT_MS, remaining))),
+        });
+      } catch {
+        throw initRunOrganizationFailure('The hosted organization response was not confirmed');
+      }
+    })();
+    const bodyText = await (async () => {
+      try { return await response.text(); } catch { throw initRunOrganizationFailure('The hosted organization response was not confirmed'); }
+    })();
+    if (bodyText.length > INIT_RUN_ORGANIZATION_RESPONSE_LIMIT) {
+      throw initRunOrganizationFailure('The hosted organization response was invalid');
+    }
+    const body = parseJsonText(bodyText);
+    if (!response.ok) {
+      const coded = body && typeof body === 'object' && !Array.isArray(body)
+        && 'code' in body && body.code === INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH;
+      if (response.status === 409 && coded) {
+        throw new CapyError('The organization name is already reserved', INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH);
+      }
+      throw initRunOrganizationFailure('The hosted organization outcome was not confirmed');
+    }
+    const parsed = parseInitRunCreatedOrganizationResponse(body);
+    if (!parsed || Date.now() >= expected.deadline) {
+      throw initRunOrganizationFailure('The hosted organization response was invalid or expired');
+    }
+    const prepared = prepareInitRunCreatedOrganizationInstallation({
+      response: parsed,
+      expectedUserId: expected.userId,
+      requestedName: trimmedName,
+      previousSession: before,
+      expiresAt: resolveExpiresAt(parsed.expires_in),
+      now: Date.now(),
+    });
+    const unchanged = (() => {
+      try { return this.storageBackend.load(expected.userId); } catch { return null; }
+    })();
+    if (initRunSessionAuthorityDigest(unchanged) !== beforeDigest || Date.now() >= expected.deadline) {
+      throw initRunOrganizationFailure('The auth session changed during hosted organization creation');
+    }
+    try {
+      this.storageBackend.save(prepared.session, expected.userId);
+    } catch {
+      throw initRunOrganizationFailure('Could not persist the hosted organization session');
+    }
+    const preparedDigest = initRunSessionAuthorityDigest(prepared.session);
+    const replacement = (() => {
+      try {
+        const authService = new AuthService(
+          this.serviceApiUrl,
+          this.devMode,
+          expected.userId,
+          this.storageBackend,
+          prepared.currentOrgId,
+        );
+        return { authService, token: authService.getToken() };
+      } catch {
+        return null;
+      }
+    })();
+    if (!replacement
+      || replacement.authService.initialSessionUserId !== expected.userId
+      || replacement.authService.initialSessionAuthorityDigest !== preparedDigest
+      || replacement.authService.currentOrgId !== prepared.currentOrgId
+      || replacement.token?.user_id !== expected.userId
+      || replacement.token.organization_id !== prepared.organization.id
+      || replacement.token.access_token !== parsed.access_token) {
+      throw initRunOrganizationFailure('Could not confirm the persisted hosted organization session');
+    }
+    return { organization: prepared.organization, auth: prepared.auth, authService: replacement.authService };
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {

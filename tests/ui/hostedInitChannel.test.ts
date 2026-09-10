@@ -166,3 +166,27 @@ test('a screen-specific rejected projection replaces data exactly on the fresh q
   expect(decoded(h.broker.sendRequest.mock.calls[2])).toMatchObject({ kind: 'progress', sequence: 2, data: rejectedData });
   expect(nameData).toEqual({ nonce: '', view: 'name', name: 'Beta', maxNameLength: 100 });
 });
+
+test('a secret-bearing question can send a sanitized progress projection exactly once', async () => {
+  const h = harness();
+  const phraseData = {
+    nonce: '', view: 'phrase' as const, name: 'Beta', maxNameLength: 100,
+    phraseWords: ['secret', 'words'],
+  };
+  const progressData = {
+    nonce: '', view: 'creating' as const, name: 'Beta', maxNameLength: 100,
+  };
+  const result = await askHostedInitChannel({
+    channel: await h.open(),
+    screen: 'create-organization',
+    data: phraseData,
+    progressData,
+    decide: () => ({ value: true }),
+  });
+  expect(result.kind).toBe('accepted');
+  expect(h.broker.sendRequest).toHaveBeenCalledTimes(2);
+  const frames = h.broker.sendRequest.mock.calls.map((call) => decoded(call));
+  expect(frames[0]).toMatchObject({ kind: 'view', data: phraseData });
+  expect(frames[1]).toMatchObject({ kind: 'progress', data: progressData });
+  expect(frames.filter((frame) => JSON.stringify(frame).includes('secret'))).toHaveLength(1);
+});

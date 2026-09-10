@@ -112,6 +112,8 @@ type QuestionResult<T> =
  */
 export async function askHostedInitChannel<T, D extends object>(input: Readonly<{
   channel: HostedInitChannel; screen: InitWizardScreen; data: D;
+  /** Optional sanitized projection for the post-answer progress frame. */
+  progressData?: D;
   decide: (payload: Readonly<Record<string, unknown>>) => Verdict<T, D>;
 }>): Promise<QuestionResult<T>> {
   const channel = input.channel;
@@ -147,6 +149,7 @@ export async function askHostedInitChannel<T, D extends object>(input: Readonly<
     const progressChannel = { ...next, successor: afterProgress };
     const progress: InitWizardFrame<D> = {
       ...frame, kind: 'progress', sequence: next.sequence, attempt_id: channel.attemptId(),
+      data: input.progressData ?? input.data,
       next_connection_id: afterProgress.connectionId,
     };
     try {

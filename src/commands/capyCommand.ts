@@ -100,6 +100,7 @@ import {
 } from '../ui/initRunEvent';
 import type { InitRunTerminalReceipt } from '../auth/initRunContract';
 import { openScreen } from '../ui/openScreen';
+import { createHostedFreshOrganization } from './hostedFreshOrganization';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -122,6 +123,7 @@ class InitWizardFlowError extends CapyError {
   constructor(
     readonly original: unknown,
     readonly initWizard: InitWizardTransport | null,
+    readonly authService: AuthService | null = null,
   ) {
     super(
       original instanceof Error ? original.message : 'Initialization failed',
@@ -135,6 +137,7 @@ class InitWizardPostConsentError extends CapyError {
   constructor(
     readonly failure: import('../ui/screens/contract').InitEncryptFailure,
     readonly initWizard: InitWizardTransport,
+    readonly authService: AuthService | null = null,
   ) {
     super(failure.reason, failure.code);
   }
@@ -144,10 +147,28 @@ class InitWizardCancelledError extends CapyError {
   constructor(
     readonly initWizard: InitWizardTransport | null,
     readonly effects: 'none' | 'indeterminate',
+    readonly authService: AuthService | null = null,
   ) {
     super('Initialization cancelled', ERROR_CODES.AUTH_FAILED);
   }
 }
+
+const bindInitWizardAuthority = (
+  error: unknown,
+  authService: AuthService,
+  fallbackWizard: InitWizardTransport | null,
+): InitWizardFlowError | InitWizardPostConsentError | InitWizardCancelledError => {
+  if (error instanceof InitWizardPostConsentError) {
+    return new InitWizardPostConsentError(error.failure, error.initWizard, authService);
+  }
+  if (error instanceof InitWizardCancelledError) {
+    return new InitWizardCancelledError(error.initWizard, error.effects, authService);
+  }
+  if (error instanceof InitWizardFlowError) {
+    return new InitWizardFlowError(error.original, error.initWizard, authService);
+  }
+  return new InitWizardFlowError(error, fallbackWizard, authService);
+};
 
 class HostedInitTerminalError extends Error {
   constructor(readonly original: unknown) {
@@ -190,6 +211,10 @@ type InitCommandContext = Readonly<{
 type PreparedInitAuthentication = Readonly<{
   context: InitCommandContext;
   auth: AuthResult;
+  rebindHostedSession?: (
+    session: import('../ui/hostedInitWizardSession').HostedInitWizardSession,
+    authService: AuthService,
+  ) => import('../ui/hostedInitWizardSession').HostedInitWizardSession;
 }>;
 
 type InitRepositoryTarget = Readonly<{
@@ -204,6 +229,7 @@ type InitWorkflowResult = Readonly<{
   wizard: InitWizardTransport | null;
   target: InitRepositoryTarget;
   status: 'succeeded' | 'cancelled' | 'failed-after-consent';
+  context: InitCommandContext;
 }>;
 
 type InitVerification = Readonly<{
@@ -829,6 +855,16 @@ export class CapyCommand {
     const initialized = await capture(() => this.runInitialization(execution.wizard, {
       context: execution.context,
       auth: execution.authorized.auth,
+      rebindHostedSession: (session, authService) => ({
+        ...session,
+        channel: {
+          ...session.channel,
+          broker: new BrokerClient(serviceOrigin, () => resolveInitRunBrokerAccessToken({
+            ...authorized.value,
+            authService,
+          })),
+        },
+      }),
     }));
     if (!initialized.ok) {
       const failedWizard = initialized.error instanceof InitWizardFlowError
@@ -836,14 +872,30 @@ export class CapyCommand {
         || initialized.error instanceof InitWizardCancelledError
         ? initialized.error.initWizard
         : execution.wizard;
+      const failureAuthService = initialized.error instanceof InitWizardFlowError
+        || initialized.error instanceof InitWizardPostConsentError
+        || initialized.error instanceof InitWizardCancelledError
+        ? initialized.error.authService
+        : null;
       return this.failHostedInitialization(
-        { ...execution, wizard: failedWizard },
+        {
+          ...execution,
+          authorized: failureAuthService
+            ? { ...execution.authorized, authService: failureAuthService }
+            : execution.authorized,
+          wizard: failedWizard,
+        },
         initialized.error,
         'indeterminate',
       );
     }
     await this.completeHostedInitialization(
-      { ...execution, wizard: initialized.value.wizard },
+      {
+        ...execution,
+        authorized: { ...execution.authorized, authService: initialized.value.context.authService },
+        context: initialized.value.context,
+        wizard: initialized.value.wizard,
+      },
       initialized.value,
     );
   }
@@ -1117,9 +1169,66 @@ export class CapyCommand {
       selectedOrg: Organization;
       wizard: InitWizardTransport | null;
       effectsStarted: boolean;
+      context: InitCommandContext;
+      auth: AuthResult;
+      custodyDeclined: boolean;
     }>> => {
       if (orgs.length === 0) {
-      human('\nNo organization found. Let\'s create one.');
+        human('\nNo organization found. Let\'s create one.');
+        if (context.transport === 'hosted') {
+          if (wizardAfterAuth?.kind !== 'hosted' || context.operationDeadline === null
+            || !preparedAuthentication?.rebindHostedSession) {
+            throw new InitWizardFlowError(
+              new CapyError('Hosted organization transport was unavailable', 'INIT_RUN_INVALID'),
+              wizardAfterAuth,
+            );
+          }
+          const created = await createHostedFreshOrganization({
+            auth: authResult,
+            authService: context.authService,
+            deadline: context.operationDeadline,
+            serviceOrigin: context.authService.getServiceApiUrl(),
+            session: wizardAfterAuth.session,
+            rebindSession: preparedAuthentication.rebindHostedSession,
+          });
+          const createdWizard: InitWizardTransport = { kind: 'hosted', session: created.session };
+          if (created.kind === 'cancelled') {
+            throw new InitWizardCancelledError(createdWizard, created.effects, created.authService ?? null);
+          }
+          if (created.kind === 'failed') {
+            throw new InitWizardFlowError(created.error, createdWizard, created.authService ?? null);
+          }
+          if (!created.enrollment.ok
+            && created.enrollment.code === ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE) {
+            throw new InitWizardFlowError(
+              new CapyError('Device-key enrollment did not complete', created.enrollment.code),
+              createdWizard,
+              created.authService,
+            );
+          }
+          const replacementContext: InitCommandContext = {
+            transport: 'hosted',
+            operationDeadline: context.operationDeadline,
+            authService: created.authService,
+            serviceClient: created.serviceClient,
+          };
+          const recorded = await capture(() => recordWizard(createdWizard, {
+            organization: { kind: 'new', name: created.organization.name },
+            recoveryShown: true,
+            hasOrgKey: hasOrgKey(created.organization.id, created.auth.user_id!),
+          }));
+          if (!recorded.ok) {
+            throw new InitWizardFlowError(recorded.error, createdWizard, created.authService);
+          }
+          return {
+            selectedOrg: created.organization,
+            wizard: recorded.value,
+            effectsStarted: true,
+            context: replacementContext,
+            auth: created.auth,
+            custodyDeclined: !created.enrollment.ok,
+          };
+        }
       // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
       // Wave-B org-less token — flag-gated, and a no-op (org creation is
       // byte-identical) when the flag is off or no such token was captured.
@@ -1137,7 +1246,7 @@ export class CapyCommand {
       return { selectedOrg, wizard: recordWizard(wizardAfterAuth, {
         organization: { kind: 'new', name: selectedOrg.name },
         recoveryShown: true,
-      }), effectsStarted: true };
+      }), effectsStarted: true, context, auth: authResult, custodyDeclined: false };
 
     }
       const choice = await askWizard(
@@ -1225,9 +1334,15 @@ export class CapyCommand {
             selectedOrg.id,
           ), context.operationDeadline);
         }
-        return { selectedOrg, wizard: wizardAfterCreate, effectsStarted: true };
+        return {
+          selectedOrg, wizard: wizardAfterCreate, effectsStarted: true,
+          context, auth: authResult, custodyDeclined: false,
+        };
       } else if (currentOrg && orgId === currentOrg.id) {
-        return { selectedOrg: currentOrg, wizard: choice.wizard, effectsStarted: false };
+        return {
+          selectedOrg: currentOrg, wizard: choice.wizard, effectsStarted: false,
+          context, auth: authResult, custodyDeclined: false,
+        };
 
       } else {
         const selectedOrg = orgs.find(o => o.id === orgId)!;
@@ -1266,16 +1381,22 @@ export class CapyCommand {
           return { auth: authenticated, spinner: retrySpinner };
         })();
         authAttempt.spinner.succeed(`Organization: ${selectedOrg.name}`);
-        return { selectedOrg, wizard: choice.wizard, effectsStarted: false };
+        return {
+          selectedOrg, wizard: choice.wizard, effectsStarted: false,
+          context, auth: authAttempt.auth, custodyDeclined: false,
+        };
       }
     })();
     const selectedOrg = organizationSelection.selectedOrg;
     const wizardAfterOrganization = organizationSelection.wizard;
+    const selectedContext = organizationSelection.context;
+    const selectedAuth = organizationSelection.auth;
+    try {
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
-    const initiallyHasOrgKey = hasOrgKey(selectedOrg.id, authResult.user_id!);
-    if (context.transport === 'hosted' && !initiallyHasOrgKey) {
+    const initiallyHasOrgKey = hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
+    if (selectedContext.transport === 'hosted' && !initiallyHasOrgKey) {
       throw new InitWizardFlowError(
         new CapyError(
           'Hosted device-key ceremony is not available in this build',
@@ -1294,10 +1415,10 @@ export class CapyCommand {
       ? await (async () => {
           const unlock = await withWizard(
             wizardAfterOrganization,
-            () => attemptCaseCUnlock(this.deviceKeyWiringContext(context, authResult, selectedOrg.id)),
-            context.operationDeadline,
+            () => attemptCaseCUnlock(this.deviceKeyWiringContext(selectedContext, selectedAuth, selectedOrg.id)),
+            selectedContext.operationDeadline,
           );
-          return unlock.ok && hasOrgKey(selectedOrg.id, authResult.user_id!);
+          return unlock.ok && hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
         })()
       : initiallyHasOrgKey;
 
@@ -1313,10 +1434,10 @@ export class CapyCommand {
       ? await (async () => {
           const pickup = await withWizard(
             wizardAfterOrganization,
-            () => attemptPickupConsumption(this.deviceKeyWiringContext(context, authResult, selectedOrg.id)),
-            context.operationDeadline,
+            () => attemptPickupConsumption(this.deviceKeyWiringContext(selectedContext, selectedAuth, selectedOrg.id)),
+            selectedContext.operationDeadline,
           );
-          return pickup.ok && hasOrgKey(selectedOrg.id, authResult.user_id!);
+          return pickup.ok && hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
         })()
       : afterUnlockHasOrgKey;
 
@@ -1334,12 +1455,12 @@ export class CapyCommand {
           try {
             await withWizard(wizardAfterOrganization, () => mintMasterKeyForOrg({
               orgId: selectedOrg.id,
-              userId: authResult.user_id!,
-              serviceClient: context.serviceClient,
-              keyServiceOps: this.keyServiceOps(context.serviceClient),
+              userId: selectedAuth.user_id!,
+              serviceClient: selectedContext.serviceClient,
+              keyServiceOps: this.keyServiceOps(selectedContext.serviceClient),
               web: this.options.web,
-            }), context.operationDeadline);
-            return hasOrgKey(selectedOrg.id, authResult.user_id!);
+            }), selectedContext.operationDeadline);
+            return hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
           } catch {
             // KEY_ALREADY_MINTED / KEY_MINT_IN_PROGRESS / unsafe-surface — fall
             // through to the existing "no key on this device" remedy below.
@@ -1383,8 +1504,8 @@ export class CapyCommand {
     // interrupted sync. Best-effort, flag-gated, never blocks this run.
     if (deviceKeysEnabled()) {
       await withWizard(wizardAfterOrgKey, () => runPendingSyncBestEffort(
-        this.deviceKeyWiringContext(context, authResult, selectedOrg.id),
-      ), context.operationDeadline);
+        this.deviceKeyWiringContext(selectedContext, selectedAuth, selectedOrg.id),
+      ), selectedContext.operationDeadline);
 
       // Final-gate MAJOR-5: the ordinary-run on-ramp into enrollment. Only
       // fires when this machine has a local root but the account holds zero
@@ -1392,13 +1513,13 @@ export class CapyCommand {
       // under --web/MCP/CI), and shown at most once per machine — see
       // maybeNudgeDeviceKeyEnrollment's own doc for the eligibility check
       // and the decline-persistence marker.
-      if (context.transport === 'hosted') {
+      if (selectedContext.transport === 'hosted') {
         const readiness = await withWizard(
           wizardAfterOrgKey,
-          () => context.serviceClient.getSignupReadiness(selectedOrg.id),
-          context.operationDeadline,
+          () => selectedContext.serviceClient.getSignupReadiness(selectedOrg.id),
+          selectedContext.operationDeadline,
         );
-        if (!readiness.signup_complete) {
+        if (!readiness.signup_complete && !organizationSelection.custodyDeclined) {
           throw new InitWizardFlowError(
             new CapyError(
               'Hosted device-key ceremony is required before initialization can continue',
@@ -1409,9 +1530,9 @@ export class CapyCommand {
         }
       } else {
         await withWizard(wizardAfterOrgKey, () => maybeNudgeDeviceKeyEnrollment(
-          this.deviceKeyWiringContext(context, authResult, selectedOrg.id),
+          this.deviceKeyWiringContext(selectedContext, selectedAuth, selectedOrg.id),
           selectedOrg.name,
-        ), context.operationDeadline);
+        ), selectedContext.operationDeadline);
       }
     }
 
@@ -1430,8 +1551,8 @@ export class CapyCommand {
         const listSpinner = ora('Looking for existing projects...').start();
         const projects = await withWizard(
           wizardAfterOrgKey,
-          () => context.serviceClient.listProjects(),
-          context.operationDeadline,
+          () => selectedContext.serviceClient.listProjects(),
+          selectedContext.operationDeadline,
         );
         listSpinner.stop();
         this.debug('listProjects response', projects);
@@ -1482,9 +1603,9 @@ export class CapyCommand {
         await withWizard(choice.wizard, () => this.bootstrapExistingProject(
           picked,
           selectedOrg.id,
-          authResult.user_id!,
-          context,
-        ), context.operationDeadline);
+          selectedAuth.user_id!,
+          selectedContext,
+        ), selectedContext.operationDeadline);
         return {
           wizard: choice.wizard,
           target: {
@@ -1495,23 +1616,28 @@ export class CapyCommand {
             branch: 'development',
           },
           status: 'succeeded',
+          context: selectedContext,
         };
       }
       return await this.initializeNewProject(
-        context,
-        authResult,
+        selectedContext,
+        selectedAuth,
         selectedOrg,
         choice.wizard,
         organizationSelection.effectsStarted,
       );
     }
     return await this.initializeNewProject(
-      context,
-      authResult,
+      selectedContext,
+      selectedAuth,
       selectedOrg,
       wizardAfterProjects,
       organizationSelection.effectsStarted,
     );
+    } catch (error) {
+      if (selectedContext.transport !== 'hosted') throw error;
+      throw bindInitWizardAuthority(error, selectedContext.authService, wizardAfterOrganization);
+    }
   }
 
   private async initializeNewProject(
@@ -1771,6 +1897,7 @@ export class CapyCommand {
               branch: initBranch,
             },
             status: 'cancelled',
+            context,
           };
         }
 
@@ -1814,6 +1941,7 @@ export class CapyCommand {
               branch: initBranch,
             },
             status: 'failed-after-consent',
+            context,
           };
         }
         syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
@@ -1827,6 +1955,7 @@ export class CapyCommand {
             branch: initBranch,
           },
           status: 'succeeded',
+          context,
         };
       } else {
         human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
@@ -1844,6 +1973,7 @@ export class CapyCommand {
             branch: initialBranchName,
           },
           status: 'succeeded',
+          context,
         };
       }
     } else {
@@ -1863,6 +1993,7 @@ export class CapyCommand {
           branch: initialBranchName,
         },
         status: 'succeeded',
+        context,
       };
     }
   }
