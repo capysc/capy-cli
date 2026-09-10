@@ -59,6 +59,16 @@ export interface KeepVariableEntry {
 
 export interface KeepFile {
   version: string;
+  /**
+   * Count of forced redeploys. Absent until `capy deploy --force` sets it.
+   *
+   * Exists so a forced redeploy can produce a real keep.lock diff — and so it
+   * stops doing that by bumping `changed_at`, which meant "this value last
+   * changed at T" about values that had not changed. Excluded from
+   * `computeKeepHash` like every other file-level field, so it cannot perturb
+   * client/server hash agreement.
+   */
+  deploy_revision?: number;
   org_id: string;
   project_id: string;
   project_name: string;

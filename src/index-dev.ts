@@ -397,7 +397,7 @@ program
   .description('Invite a teammate to your organization')
   .option('--role <role>', 'invitee role: member | project-admin | admin')
   .option('--project <id|name>', 'grant project access (repeatable, comma-ok)', collectProjects, [])
-  .option('--ttl <duration>', 'invite lifetime, e.g. 30m, 24h, 7d (or seconds)')
+  .option('--ttl <duration>', 'invite lifetime, max 12h, e.g. 30m, 2h, 12h (or seconds)')
   .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')

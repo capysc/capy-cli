@@ -7,6 +7,7 @@
  * deploy with other uncommitted code changes.
  */
 import { spawnSync } from 'child_process';
+import { resolveGh, GH_SEARCHED } from '../utils/gh';
 
 export interface GitStatusEntry {
   /** Two-character short status from `git status --porcelain`. */
@@ -356,18 +357,18 @@ export function createPr(
   body: string,
   base: string = 'main',
 ): { ok: boolean; url?: string; manualHint?: string; error?: string } {
-  const which = spawnSync('which', ['gh'], { encoding: 'utf-8' });
-  if (which.status !== 0) {
+  const gh = resolveGh();
+  if (!gh) {
     return {
       ok: false,
       manualHint:
-        `gh CLI not installed. Open the PR manually:\n` +
+        `gh CLI not found (searched ${GH_SEARCHED.join(', ')}). Open the PR manually:\n` +
         `  https://github.com/<owner>/<repo>/compare/${base}...$(git rev-parse --abbrev-ref HEAD)?expand=1\n` +
         `Title: ${title}`,
     };
   }
   const r = spawnSync(
-    'gh',
+    gh,
     ['pr', 'create', '--base', base, '--title', title, '--body', body],
     { cwd, encoding: 'utf-8' },
   );

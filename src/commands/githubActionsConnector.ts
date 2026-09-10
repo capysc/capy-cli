@@ -15,6 +15,7 @@
  * blob is inert.
  */
 import { spawnSync } from 'child_process';
+import { resolveGh, ghInstalled } from '../utils/gh';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import inquirer from 'inquirer';
@@ -69,16 +70,15 @@ export function readCliVersion(): string {
   }
 }
 
-function ghInstalled(): boolean {
-  return spawnSync('gh', ['--version'], { stdio: 'ignore' }).status === 0;
-}
-
 function ghAuthed(): boolean {
-  return spawnSync('gh', ['auth', 'status'], { stdio: 'ignore' }).status === 0;
+  const gh = resolveGh();
+  return gh !== null && spawnSync(gh, ['auth', 'status'], { stdio: 'ignore' }).status === 0;
 }
 
 function getRepoInfo(): GhRepoInfo | null {
-  const r = spawnSync('gh', ['repo', 'view', '--json', 'nameWithOwner'], {
+  const gh = resolveGh();
+  if (!gh) return null;
+  const r = spawnSync(gh, ['repo', 'view', '--json', 'nameWithOwner'], {
     encoding: 'utf-8',
   });
   if (r.status !== 0) return null;
@@ -91,8 +91,10 @@ function getRepoInfo(): GhRepoInfo | null {
 
 function listEnvironments(repo: string): GhEnvironment[] | null {
   // gh api returns { total_count, environments: [{ name, ... }] }
+  const gh = resolveGh();
+  if (!gh) return null;
   const r = spawnSync(
-    'gh',
+    gh,
     ['api', `/repos/${repo}/environments`, '--jq', '.environments // []'],
     { encoding: 'utf-8' },
   );
@@ -107,8 +109,10 @@ function listEnvironments(repo: string): GhEnvironment[] | null {
 
 function createEnvironment(repo: string, name: string): boolean {
   // PUT /repos/{owner}/{repo}/environments/{name} is idempotent.
+  const gh = resolveGh();
+  if (!gh) return false;
   const r = spawnSync(
-    'gh',
+    gh,
     ['api', '--method', 'PUT', `/repos/${repo}/environments/${name}`],
     { stdio: 'ignore' },
   );
@@ -118,7 +122,9 @@ function createEnvironment(repo: string, name: string): boolean {
 function setSecret(name: string, value: string, env: string | null): { ok: boolean; stderr: string } {
   const args = ['secret', 'set', name, '--body', value];
   if (env) args.push('--env', env);
-  const r = spawnSync('gh', args, { encoding: 'utf-8' });
+  const gh = resolveGh();
+  if (!gh) return { ok: false, stderr: 'gh CLI not found' };
+  const r = spawnSync(gh, args, { encoding: 'utf-8' });
   return { ok: r.status === 0, stderr: r.stderr ?? '' };
 }
 
@@ -292,8 +298,11 @@ export async function runGithubActionsConnector(
   // gh exits non-zero if the secret doesn't exist, so we list to check.
   const listArgs = ['secret', 'list', '--json', 'name'];
   if (envName) listArgs.push('--env', envName);
-  const listR = spawnSync('gh', listArgs, { encoding: 'utf-8' });
-  if (listR.status === 0) {
+  const ghBin = resolveGh();
+  const listR = ghBin
+    ? spawnSync(ghBin, listArgs, { encoding: 'utf-8' })
+    : null;
+  if (listR && listR.status === 0) {
     try {
       const existing = JSON.parse(listR.stdout) as Array<{ name: string }>;
       const names = new Set(existing.map((e) => e.name));

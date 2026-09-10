@@ -8,6 +8,7 @@ import {
   innerWrap,
   buildRedeemCode,
   resolveInviteTtlMs,
+  MAX_INVITE_TTL_MS,
 } from '../crypto/inviteCrypto';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import {
@@ -34,7 +35,7 @@ export interface InviteOpts {
   role?: string;
   /** Project access by id or name; repeatable. Required for member/project-admin. */
   projects?: string[];
-  /** Invite lifetime, e.g. "30m", "24h", "7d", or bare seconds. Overrides CAPY_INVITE_TTL_SECONDS. */
+  /** Invite lifetime, max 12h, e.g. "30m", "2h", "12h", or bare seconds. Overrides CAPY_INVITE_TTL_SECONDS. */
   ttl?: string;
   /** Absolute expiry as an ISO date/time. Takes precedence over ttl. */
   expires?: string;
@@ -54,13 +55,13 @@ export interface InviteOpts {
   web?: boolean;
 }
 
-/** Parse "30s"/"10m"/"24h"/"7d" or bare seconds → ms. Exits on invalid input. */
+/** Parse "30s"/"10m"/"2h"/"12h" or bare seconds → ms. Exits on invalid input. */
 function parseTtlMs(raw: string): number {
   // The grammar lives in `invitePlan` so the flag and the browser's expiry step
   // accept exactly the same lifetimes. Only the exit is this command's.
   const ms = parseTtl(raw);
   if (ms === null) {
-    console.error(`\n  Invalid --ttl "${raw}". Use e.g. 30m, 24h, 7d, or a number of seconds.\n`);
+    console.error(`\n  Invalid --ttl "${raw}". Use e.g. 30m, 2h, 12h, or a number of seconds (max 12h).\n`);
     process.exit(1);
   }
   return ms;
@@ -86,11 +87,27 @@ function resolveNotAfter(opts: InviteOpts, chosenTtl?: string): number {
       console.error(`\n  --expires "${opts.expires}" is in the past.\n`);
       process.exit(1);
     }
-    return t;
+    return capAtCeiling(t, `--expires ${opts.expires}`);
   }
-  if (opts.ttl) return Date.now() + parseTtlMs(opts.ttl);
-  if (chosenTtl) return Date.now() + parseTtlMs(chosenTtl);
+  if (opts.ttl) return capAtCeiling(Date.now() + parseTtlMs(opts.ttl), `--ttl ${opts.ttl}`);
+  if (chosenTtl) return capAtCeiling(Date.now() + parseTtlMs(chosenTtl), `an expiry of ${chosenTtl}`);
   return Date.now() + resolveInviteTtlMs();
+}
+
+/**
+ * Cap a requested expiry at the ceiling, and say so.
+ *
+ * Warns rather than refusing so an existing script passing a longer lifetime
+ * keeps working, and warns rather than clamping in silence so nobody believes
+ * they issued a week-long invite that dies in twelve hours. Goes to stderr:
+ * `--json` callers parse stdout, and a notice does not belong in their payload.
+ */
+function capAtCeiling(notAfter: number, source: string): number {
+  if (notAfter - Date.now() <= MAX_INVITE_TTL_MS) return notAfter;
+  console.error(
+    `\n  ${source} exceeds the ${formatTtl(MAX_INVITE_TTL_MS)} maximum invite lifetime — using ${formatTtl(MAX_INVITE_TTL_MS)}.\n`,
+  );
+  return Date.now() + MAX_INVITE_TTL_MS;
 }
 
 /**
@@ -256,7 +273,7 @@ export class InviteCommand {
               : undefined,
         expiry: settledExpiry(opts),
         envTtl: envTtl(),
-        defaultTtl: envTtl() ?? '7d',
+        defaultTtl: envTtl() ?? '12h',
         canAskExpiry: opts.web === true,
       };
       const plan = invitePlan(planInput);
@@ -525,8 +542,8 @@ export class InviteCommand {
       console.log('');
 
       if (webParams) {
-        // The redeem code is a bearer credential carrying a double-wrapped copy
-        // of the organization key — recovery-equivalent material. `--web` is
+        // The redeem code carries a double-wrapped copy of the organization
+        // key, unwrappable only by the invited email. `--web` is
         // agent-only, and an agent shelling `capy` reads stdout, so under it the
         // code goes to a page and NOWHERE else: not printed, not logged, not
         // copied to the clipboard. The page it lands on is served with the
@@ -568,8 +585,8 @@ export class InviteCommand {
         console.log('');
         console.log(`    ${B('capy')} redeem ${redeemCode}`);
         console.log('');
-        console.log('  \x1b[90mThe code contains a double-wrapped copy of the org key.\x1b[0m');
-        console.log('  \x1b[90mIt cannot be decrypted without service co-decryption + authentication.\x1b[0m');
+        console.log('  \x1b[90mThis code is safe to share with your team member over email or your\x1b[0m');
+        console.log('  \x1b[90mteam messaging app. It can only be used by them.\x1b[0m');
         console.log(`  \x1b[90mExpires ${new Date(notAfter).toISOString()}.\x1b[0m`);
         console.log('');
       }

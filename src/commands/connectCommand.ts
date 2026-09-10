@@ -176,7 +176,7 @@ export class ConnectCommand {
     if (mod.precheck) mod.precheck();
 
     const ctx = await resolveContext({ devMode: this.devMode });
-    const { varName, value, entry } = await mod.connect(ctx, effective);
+    const { varName, value, entry, also } = await mod.connect(ctx, effective);
 
     // Belt-and-suspenders: if a provider returned mode:'live' (e.g. via an
     // interactive prompt rather than --live), still refuse in dev mode.
@@ -261,7 +261,7 @@ export class ConnectCommand {
     let outcome: ConnectOutcome = opts.noPush ? 'local-only' : 'pushed';
     let detail: string | undefined;
     try {
-      await writeAndSync(ctx, varName, value, { push: !opts.noPush, connector: entry });
+      await writeAndSync(ctx, varName, value, { push: !opts.noPush, connector: entry, alsoConnect: also });
     } catch (err) {
       if (!opts.web) throw err;
       outcome = opts.noPush ? 'write-failed' : 'push-failed';
