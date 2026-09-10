@@ -20,7 +20,7 @@
  * `inquirer` and `ui/editScreen.ts` are mocked too, since this file exercises
  * the interactive confirm paths directly.
  */
-import { mock, describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
+import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
@@ -660,9 +660,8 @@ describe('pushCommand — same-key CAS conflict now offers the addCommand-style 
     writeFileSync(join(TEST_DIR, '.env'), 'NEW_VAR=plaintext-value\n');
   }
 
-  // PushCommand.execute() wraps _execute() in a try/catch that routes any
-  // thrown error to `displayErrorAndExit`, which ends in `process.exit(1)` —
-  // there is no rethrow to catch from the caller. Same stub pattern
+  // Interactive PushCommand.execute() routes errors to displayErrorAndExit.
+  // Noninteractive callers receive the typed rejection instead. Same stub pattern
   // `decryptCommand.test.ts` uses for its own exit-on-refusal assertions:
   // replace `process.exit` with one that records the code and throws a
   // marker instead of actually tearing down the test process.
@@ -770,42 +769,34 @@ describe('pushCommand — same-key CAS conflict now offers the addCommand-style 
     );
   });
 
-  test('non-TTY: refuses without prompting at all', async () => {
+  test('non-TTY: refuses with a coded error without prompting or retrying', async () => {
     setUpLockFullProject();
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-push' }];
+    const { AuthService } = await import('../../../src/auth/authService');
+    const { ServiceClient } = await import('../../../src/service/serviceClient');
+    const { PushCommand } = await import('../../../src/commands/pushCommand');
+    const auth = spyOn(AuthService.prototype, 'authenticateSilent').mockResolvedValue({
+      success: true, user_id: 'user-1', organization_id: 'org-push',
+    });
     const serverKeep: KeepFile = {
-      version: '3.0',
-      org_id: 'org-push',
-      project_id: 'proj-push',
-      project_name: 'pushproj',
+      version: '3.0', org_id: 'org-push', project_id: 'proj-push', project_name: 'pushproj',
       variables: { NEW_VAR: [{ resource_id: 'r-someone-else', branch: 'development', value_hash: 'h-someone-else' }] },
     };
-    pushSecretsQueue = [
-      async () => {
-        throw new CapyError('stale', ERROR_CODES.STALE_KEEP_HASH, {
-          status: 409,
-          keep_hash: 'server-hash-1',
-          keep_file: JSON.stringify(serverKeep),
-        });
-      },
-    ];
-
-    const saved = process.stdin.isTTY;
-    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
-    const { exitCode, restore: restoreExit } = stubProcessExit();
+    const push = spyOn(ServiceClient.prototype, 'pushSecrets').mockRejectedValue(
+      new CapyError('stale', ERROR_CODES.STALE_KEEP_HASH, {
+        status: 409, keep_hash: 'server-hash-1', keep_file: JSON.stringify(serverKeep),
+      }),
+    );
     try {
-      const { PushCommand } = await import('../../../src/commands/pushCommand');
-      await new PushCommand(true).execute();
-    } catch (err: any) {
-      if (err?.message !== '__STUBBED_EXIT__') throw err;
+      await expect(new PushCommand(true).execute({ nonInteractive: true })).rejects.toMatchObject({
+        code: ERROR_CODES.STALE_KEEP_HASH,
+      });
+      expect(promptCalls).toHaveLength(0);
+      expect(push).toHaveBeenCalledTimes(1);
+      expect(push.mock.calls[0]?.[4]).toBe('base-hash-1');
     } finally {
-      Object.defineProperty(process.stdin, 'isTTY', { value: saved, configurable: true });
-      restoreExit();
+      push.mockRestore();
+      auth.mockRestore();
     }
-
-    expect(exitCode()).toBe(1);
-    expect(promptCalls.length).toBe(0);
-    expect(serviceCalls.filter((c) => c[0] === 'pushSecrets').length).toBe(1);
   });
 });
 
