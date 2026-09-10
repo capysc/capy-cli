@@ -80,6 +80,7 @@ import {
   createInitRunBootstrap,
   publishInitRunConnection,
   recordInitRunTerminal,
+  resolveInitRunBrokerAccessToken,
   type InitRunAuthorizedContext,
   type InitRunBootstrap,
 } from '../auth/initRunBootstrap';
@@ -800,7 +801,7 @@ export class CapyCommand {
       ),
     };
     const channel = await capture(() => openHostedInitChannel({
-      broker: new BrokerClient(serviceOrigin, () => authorized.value.brokerAccessToken),
+      broker: new BrokerClient(serviceOrigin, () => resolveInitRunBrokerAccessToken(authorized.value)),
       binding: authorized.value.binding,
       deadline: Date.parse(authorized.value.expiresAt),
       publish: (firstConnectionId) => publishInitRunConnection({

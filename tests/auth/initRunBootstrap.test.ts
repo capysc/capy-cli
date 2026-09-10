@@ -7,6 +7,7 @@ import {
   createInitRunBootstrap,
   publishInitRunConnection,
   recordInitRunTerminal,
+  resolveInitRunBrokerAccessToken,
   type InitRunBootstrap,
   type InitRunBootstrapTransport,
 } from '../../src/auth/initRunBootstrap';
@@ -53,6 +54,13 @@ function installedContext(): Readonly<{
     auth: { success: true, user_id: 'user_expected', organizations: [] },
     authService: {} as AuthService,
   };
+}
+
+function unselectedAuthService(): AuthService {
+  return {
+    getOrganizationId: () => null,
+    getToken: jest.fn(() => null),
+  } as unknown as AuthService;
 }
 
 function storage(): Readonly<{
@@ -528,7 +536,7 @@ describe('hosted init-run bootstrap', () => {
     const connectionId = '22222222-2222-4222-8222-222222222222';
     const authorized = {
       auth: { success: true, user_id: 'user_expected' },
-      authService: {} as AuthService,
+      authService: unselectedAuthService(),
       binding: fixture.binding,
       authEpoch: 1,
       credentialReceipt: fixture.receipt,
@@ -563,12 +571,214 @@ describe('hosted init-run bootstrap', () => {
     });
   });
 
+  it('uses the original broker token only before organization selection', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const getToken = jest.fn(() => ({
+      access_token: 'unexpected-refreshed-token',
+      expires_at: NOW + 60_000,
+      organization_id: 'org-1',
+      user_id: fixture.binding.subject_user_id,
+    }));
+    const token = await resolveInitRunBrokerAccessToken({
+      auth: { success: true, user_id: fixture.binding.subject_user_id },
+      authService: {
+        getOrganizationId: () => null,
+        getToken,
+      } as unknown as AuthService,
+      binding: fixture.binding,
+      authEpoch: 1,
+      credentialReceipt: fixture.receipt,
+      brokerAccessToken: 'broker.fixture.token',
+      runSecret: RUN_SECRET,
+      expiresAt: EXPIRES_AT,
+    }, () => NOW);
+
+    expect(token).toBe('broker.fixture.token');
+    expect(getToken).not.toHaveBeenCalled();
+  });
+
+  it('uses the selected organization session for continuation requests', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const connectionId = '22222222-2222-4222-8222-222222222222';
+    const running = {
+      ...fixture.authorizedStatus,
+      status: 'running',
+      first_connection_id: connectionId,
+    } as const;
+    const getToken = jest.fn(() => ({
+      access_token: 'refreshed.fixture.token',
+      expires_at: NOW + 60_000,
+      organization_id: 'org-1',
+      user_id: fixture.binding.subject_user_id,
+    }));
+    const getValidToken = jest.fn(async () => null);
+    const fetcher = jest.fn(async () => json(running)) as unknown as typeof fetch;
+    await publishInitRunConnection({
+      bootstrap: prepared,
+      authorized: {
+        auth: { success: true, user_id: fixture.binding.subject_user_id },
+        authService: {
+          getOrganizationId: () => 'org-1',
+          getToken,
+          getValidToken,
+        } as unknown as AuthService,
+        binding: fixture.binding,
+        authEpoch: 1,
+        credentialReceipt: fixture.receipt,
+        brokerAccessToken: 'expired.fixture.token',
+        runSecret: RUN_SECRET,
+        expiresAt: EXPIRES_AT,
+      },
+      firstConnectionId: connectionId,
+      transport: transport(fetcher),
+    });
+
+    expect(getToken).toHaveBeenCalledTimes(1);
+    expect(getValidToken).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: 'Bearer refreshed.fixture.token' });
+  });
+
+  it('never falls back to the exchange token when the selected session has no cached token', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const fetcher = jest.fn(async () => json(fixture.authorizedStatus)) as unknown as typeof fetch;
+    const authorized = {
+      auth: { success: true, user_id: fixture.binding.subject_user_id },
+      authService: {
+        getOrganizationId: () => 'org-1',
+        getToken: jest.fn(() => null),
+      } as unknown as AuthService,
+      binding: fixture.binding,
+      authEpoch: 1,
+      credentialReceipt: fixture.receipt,
+      brokerAccessToken: 'expired.fixture.token',
+      runSecret: RUN_SECRET,
+      expiresAt: EXPIRES_AT,
+    } as const;
+    const error = await publishInitRunConnection({
+      bootstrap: prepared,
+      authorized,
+      firstConnectionId: '22222222-2222-4222-8222-222222222222',
+      transport: transport(fetcher),
+    }).catch((cause) => cause);
+
+    expect(error.code).toBe('INIT_DELIVERY_INDETERMINATE');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('refuses an expired selected-session token without starting a refresh or request', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const getValidToken = jest.fn(async () => ({ access_token: 'must-not-be-used' }));
+    const fetcher = jest.fn(async () => json(fixture.authorizedStatus)) as unknown as typeof fetch;
+    const error = await publishInitRunConnection({
+      bootstrap: prepared,
+      authorized: {
+        auth: { success: true, user_id: fixture.binding.subject_user_id },
+        authService: {
+          getOrganizationId: () => 'org-1',
+          getToken: () => ({
+            access_token: 'expired.selected.token',
+            expires_at: NOW,
+            organization_id: 'org-1',
+            user_id: fixture.binding.subject_user_id,
+          }),
+          getValidToken,
+        } as unknown as AuthService,
+        binding: fixture.binding,
+        authEpoch: 1,
+        credentialReceipt: fixture.receipt,
+        brokerAccessToken: 'exchange.token',
+        runSecret: RUN_SECRET,
+        expiresAt: EXPIRES_AT,
+      },
+      firstConnectionId: '22222222-2222-4222-8222-222222222222',
+      transport: transport(fetcher),
+    }).catch((cause) => cause);
+
+    expect(error.code).toBe('INIT_DELIVERY_INDETERMINATE');
+    expect(getValidToken).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('maps a selected-session getter failure to a fixed code before any request', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const fetcher = jest.fn(async () => json(fixture.authorizedStatus)) as unknown as typeof fetch;
+    const error = await publishInitRunConnection({
+      bootstrap: prepared,
+      authorized: {
+        auth: { success: true, user_id: fixture.binding.subject_user_id },
+        authService: {
+          getOrganizationId: () => 'org-1',
+          getToken: () => { throw new Error('fixture getter failure'); },
+        } as unknown as AuthService,
+        binding: fixture.binding,
+        authEpoch: 1,
+        credentialReceipt: fixture.receipt,
+        brokerAccessToken: 'exchange.token',
+        runSecret: RUN_SECRET,
+        expiresAt: EXPIRES_AT,
+      },
+      firstConnectionId: '22222222-2222-4222-8222-222222222222',
+      transport: transport(fetcher),
+    }).catch((cause) => cause);
+
+    expect(error.code).toBe('INIT_DELIVERY_INDETERMINATE');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('rejects selected-session metadata for a different subject before continuation', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const fetcher = jest.fn(async () => json(fixture.authorizedStatus)) as unknown as typeof fetch;
+    const authorized = {
+      auth: { success: true, user_id: fixture.binding.subject_user_id },
+      authService: {
+        getOrganizationId: () => 'org-1',
+        getToken: jest.fn(() => ({
+          access_token: 'wrong-subject.fixture.token',
+          expires_at: NOW + 60_000,
+          organization_id: 'org-1',
+          user_id: 'user_other',
+        })),
+      } as unknown as AuthService,
+      binding: fixture.binding,
+      authEpoch: 1,
+      credentialReceipt: fixture.receipt,
+      brokerAccessToken: 'expired.fixture.token',
+      runSecret: RUN_SECRET,
+      expiresAt: EXPIRES_AT,
+    } as const;
+    const error = await recordInitRunTerminal({
+      bootstrap: prepared,
+      authorized,
+      receipt: {
+        v: 1,
+        run_id: RUN_ID,
+        receipt_id: '33333333-3333-4333-8333-333333333333',
+        status: 'failed',
+        code: 'INIT_DELIVERY_INDETERMINATE',
+        repository_verified: false,
+        custody_verified: false,
+        effects: 'indeterminate',
+        completed_at: '2026-09-10T05:20:00.000Z',
+      },
+      transport: transport(fetcher),
+    }).catch((cause) => cause);
+
+    expect(error.code).toBe('INIT_DELIVERY_INDETERMINATE');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('accepts terminal authority only when the service returns the identical receipt', async () => {
     const prepared = bootstrap();
     const fixture = completionFixture(prepared);
     const authorized = {
       auth: { success: true, user_id: 'user_expected' },
-      authService: {} as AuthService,
+      authService: unselectedAuthService(),
       binding: fixture.binding,
       authEpoch: 1,
       credentialReceipt: fixture.receipt,

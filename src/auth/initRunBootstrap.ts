@@ -78,6 +78,44 @@ export interface InitRunBootstrapTransport {
   readonly requestTimeoutMs?: number;
 }
 
+/**
+ * Keep the exchange token only until the hosted workflow selects an
+ * organization. From that point on the installed AuthService's current,
+ * already-refreshed session is authoritative; broker delivery never starts
+ * its own refresh and never falls back to the now-stale exchange token.
+ */
+export function resolveInitRunBrokerAccessToken(
+  authorized: InitRunAuthorizedContext,
+  now: () => number = Date.now,
+): string {
+  const organizationId = (() => {
+    try {
+      return authorized.authService.getOrganizationId();
+    } catch {
+      throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+    }
+  })();
+  if (organizationId === null) return authorized.brokerAccessToken;
+  const token = (() => {
+    try {
+      return authorized.authService.getToken();
+    } catch {
+      return null;
+    }
+  })();
+  if (
+    !token
+    || token.user_id !== authorized.binding.subject_user_id
+    || token.organization_id !== organizationId
+    || token.access_token.length === 0
+    || !Number.isFinite(token.expires_at)
+    || token.expires_at <= now()
+  ) {
+    throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  }
+  return token.access_token;
+}
+
 const defaultTransport: InitRunBootstrapTransport = {
   fetch,
   now: Date.now,
@@ -354,13 +392,14 @@ async function continueInitRun(
   const deadline = Date.parse(authorized.expiresAt);
   const attempt = await (async () => {
     try {
+      const accessToken = resolveInitRunBrokerAccessToken(authorized, transport.now);
       return {
         ok: true as const,
         response: await post(
           transport,
           `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/continue`,
           body,
-          authorized.brokerAccessToken,
+          accessToken,
           deadline,
         ),
       };
