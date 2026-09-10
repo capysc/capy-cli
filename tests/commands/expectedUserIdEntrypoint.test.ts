@@ -1,0 +1,128 @@
+import { describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, relative, resolve } from 'node:path';
+
+const AUTHENTICATION_FLOW_ID = '22222222-2222-4222-8222-222222222222';
+const EXPECTED_USER_ID = 'user_entrypointfixture';
+const SERVICE_ORIGIN = 'http://127.0.0.1:9';
+
+function invoke(
+  entrypoint: 'index.ts' | 'index-dev.ts',
+  args: readonly string[],
+  extraEnv: Readonly<Record<string, string>> = {},
+) {
+  const globalDirectory = mkdtempSync(join(tmpdir(), 'capy-expected-user-entrypoint-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'capy-expected-user-project-'));
+  try {
+    const result = spawnSync(process.execPath, [resolve(import.meta.dir, '../../src', entrypoint), ...args], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 15_000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: homedir(),
+        CAPY_GLOBAL_DIR_NAME: relative(homedir(), globalDirectory),
+        CAPY_API_URL: SERVICE_ORIGIN,
+        CAPY_KEEP_ORIGIN: 'http://127.0.0.1:8',
+        CAPY_WEB_NO_OPEN: '1',
+        NO_COLOR: '1',
+        ...extraEnv,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr } as const;
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(globalDirectory, { recursive: true, force: true });
+  }
+}
+
+function parseSingleJson(stdout: string): Readonly<Record<string, unknown>> {
+  return JSON.parse(stdout) as Readonly<Record<string, unknown>>;
+}
+
+for (const entrypoint of ['index.ts', 'index-dev.ts'] as const) {
+  describe(`${entrypoint} repeated expected-user-id option`, () => {
+    const pairArguments = [
+      'pair', '--json', '--flow-id', 'invalid-flow-id',
+      '--authentication-flow-id', AUTHENTICATION_FLOW_ID,
+      '--expected-user-id', EXPECTED_USER_ID,
+      '--service-origin', SERVICE_ORIGIN,
+      '--runtime-only',
+    ] as const;
+
+    test('delivers the post-subcommand identity to readiness validation', () => {
+      const result = invoke(entrypoint, pairArguments);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe('');
+      expect(parseSingleJson(result.stdout)).toEqual({
+        ok: false,
+        flow_id: 'invalid-flow-id',
+        code: 'READINESS_ARGUMENT_INVALID',
+      });
+    });
+
+    test('preserves a late global web flag while delivering the child identity', () => {
+      const result = invoke(entrypoint, [...pairArguments, '--web']);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe('');
+      expect(parseSingleJson(result.stdout)).toEqual({
+        ok: false,
+        flow_id: 'invalid-flow-id',
+        code: 'READINESS_ARGUMENT_INVALID',
+      });
+    });
+
+    test.each([
+      ['setup', 'SETUP_ARGUMENT_INVALID'],
+      ['add', 'INTAKE_ARGUMENT_INVALID'],
+    ] as const)('refuses flow %s without an identity before its executor', (subcommand, code) => {
+      const result = invoke(entrypoint, [
+        'flow', subcommand, AUTHENTICATION_FLOW_ID,
+        '--service-origin', SERVICE_ORIGIN,
+        '--json',
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe('');
+      expect(parseSingleJson(result.stdout)).toEqual({
+        ok: false,
+        flow_id: AUTHENTICATION_FLOW_ID,
+        code,
+      });
+    });
+
+    test.each([
+      ['setup', 'SETUP_EXECUTOR_FAILED'],
+      ['add', 'INTAKE_EXECUTOR_FAILED'],
+    ] as const)('delivers a post-subcommand identity to flow %s', (subcommand, code) => {
+      // The owned empty cwd fails the repository-root preflight before session or network access.
+      const result = invoke(entrypoint, [
+        'flow', subcommand, AUTHENTICATION_FLOW_ID,
+        '--expected-user-id', EXPECTED_USER_ID,
+        '--service-origin', SERVICE_ORIGIN,
+        '--json',
+      ]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe('');
+      expect(parseSingleJson(result.stdout)).toEqual(expect.objectContaining({
+        ok: false,
+        flow_id: AUTHENTICATION_FLOW_ID,
+        code,
+        message: expect.any(String),
+      }));
+    });
+
+    test('keeps expected-user-id after the run delimiter in child arguments', () => {
+      const result = invoke(
+        entrypoint,
+        ['run', '--', 'echo', '--expected-user-id', 'child-value'],
+        { _CAPY_DEPLOY_KEY: 'fixture-half-pair' },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain('ambiguous deploy credentials');
+    });
+  });
+}

@@ -20,6 +20,12 @@ function collectProjects(val: string, acc: string[]): string[] {
   return acc.concat(val.split(',').map((s) => s.trim()).filter(Boolean));
 }
 
+/** Resolve a repeated child option after Commander's non-positional parent parse. */
+function expectedUserIdFor(command: Command): string | undefined {
+  const value = (command.optsWithGlobals() as Readonly<Record<string, unknown>>).expectedUserId;
+  return typeof value === 'string' ? value : undefined;
+}
+
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
 process.on('uncaughtException', (error: any) => {
   if (error?.name === 'ExitPromptError') {
@@ -88,7 +94,7 @@ program
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
-  .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a browser instead of TTY prompts')
   .option('--expected-user-id <id>', 'require the account bound by the hosted launcher')
   // Record `--web` once, before any handler runs, for the code that has no way
   // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
@@ -178,7 +184,7 @@ program
     }
     const { SyncCommand } = await import('./commands/syncCommand');
     const globalOpts = command.optsWithGlobals();
-    const cmd = new SyncCommand({ envPath: globalOpts.envPath, expectedUserId: options.expectedUserId }, true);
+    const cmd = new SyncCommand({ envPath: globalOpts.envPath, expectedUserId: expectedUserIdFor(command) }, true);
     await cmd.execute();
   });
 
@@ -330,11 +336,12 @@ program
   .option('--expected-project-id <id>', 'require the repository project bound by the hosted MCP')
   .option('--expected-branch-id <id>', 'require the branch identity selected through the hosted MCP')
   .action(async (branch, options, command) => {
-    const hosted = options.nonTty || [options.expectedUserId, options.expectedOrgId, options.expectedProjectId, options.expectedBranchId]
+    const mergedOptions = { ...options, expectedUserId: expectedUserIdFor(command) };
+    const hosted = mergedOptions.nonTty || [mergedOptions.expectedUserId, mergedOptions.expectedOrgId, mergedOptions.expectedProjectId, mergedOptions.expectedBranchId]
       .some(value => value !== undefined);
-    if (hosted || (options.json && !options.create)) {
+    if (hosted || (mergedOptions.json && !mergedOptions.create)) {
       const { runCheckoutJsonCommand } = await import('./commands/checkoutJsonCommand');
-      process.exit(await runCheckoutJsonCommand(branch, { ...options, nonTty: hosted }, true));
+      process.exit(await runCheckoutJsonCommand(branch, { ...mergedOptions, nonTty: hosted }, true));
     }
     if (options.json && options.create) {
       const { branchCreatePlan, unansweredStops } = await import('./core/branchCreatePlan');
@@ -363,7 +370,8 @@ program
   .option('--service-origin <origin>', 'require the active CLI service environment')
   .action(async (options: Readonly<{
     json?: boolean; plan?: boolean; confirm?: string; nonTty?: boolean; expectedUserId?: string; serviceOrigin?: string;
-  }>) => {
+  }>, command) => {
+    const expectedUserId = expectedUserIdFor(command);
     if (options.plan || options.confirm) {
       const { runPushJsonCommand } = await import('./commands/pushJsonCommand');
       if (!options.json) {
@@ -371,7 +379,7 @@ program
         process.exit(1);
       }
       process.exit(await runPushJsonCommand({ plan: options.plan, confirm: options.confirm,
-        expectedUserId: options.expectedUserId, serviceOrigin: options.serviceOrigin }, true));
+        expectedUserId, serviceOrigin: options.serviceOrigin }, true));
     }
     if (options.json) {
       console.log(JSON.stringify({ ok: false, code: 'PUSH_REVIEW_ARGUMENT_INVALID' }));
@@ -379,7 +387,7 @@ program
     }
     const { PushCommand } = await import('./commands/pushCommand');
     const cmd = new PushCommand(true);
-    await cmd.execute({ nonInteractive: options.nonTty, expectedUserId: options.expectedUserId });
+    await cmd.execute({ nonInteractive: options.nonTty, expectedUserId });
   });
 
 program
@@ -389,7 +397,7 @@ program
   .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
   .action(async (options, command) => {
     const { StatusCommand } = await import('./commands/statusCommand');
-    const cmd = new StatusCommand(false, true, options.expectedUserId);
+    const cmd = new StatusCommand(false, true, expectedUserIdFor(command));
     await cmd.execute({ json: options.json, web: command.optsWithGlobals().web === true });
   });
 
@@ -545,17 +553,18 @@ program
   .option('--expected-user-id <id>', 'the account bound by the hosted MCP')
   .option('--service-origin <origin>', 'must match this CLI environment')
   .option('--runtime-only', 'pair outside a repository through a standalone runtime handle')
-  .action(async (options) => {
+  .action(async (options, command) => {
+    const expectedUserId = expectedUserIdFor(command);
     const instrumented = options.flowId !== undefined || options.authenticationFlowId !== undefined
-      || options.expectedUserId !== undefined || options.serviceOrigin !== undefined || options.runtimeOnly === true;
+      || expectedUserId !== undefined || options.serviceOrigin !== undefined || options.runtimeOnly === true;
     if (instrumented) {
-      if (!options.json || !options.flowId || !options.authenticationFlowId || !options.expectedUserId || !options.serviceOrigin) {
+      if (!options.json || !options.flowId || !options.authenticationFlowId || !expectedUserId || !options.serviceOrigin) {
         console.log(JSON.stringify({ ok: false, code: 'READINESS_ARGUMENT_INVALID' }));
         process.exit(1);
       }
       const { runFlowReadinessCommand } = await import('./commands/flowReadinessCommand');
       const code = await runFlowReadinessCommand({ flowId: options.flowId, authenticationFlowId: options.authenticationFlowId,
-        expectedUserId: options.expectedUserId, serviceOrigin: options.serviceOrigin,
+        expectedUserId, serviceOrigin: options.serviceOrigin,
         runtimeOnly: options.runtimeOnly === true, continuationTool: options.runtimeOnly ? 'capy_pair' : 'capy_onboard' }, true);
       if (code !== 0) process.exit(code);
       return;
@@ -582,12 +591,17 @@ const flow = program
 flow
   .command('setup <id>')
   .description('Execute or resume approved repository setup for a Keep-owned onboarding flow')
-  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
+  .option('--expected-user-id <id>', 'the account bound by the hosted MCP')
   .requiredOption('--service-origin <origin>', 'must match this CLI environment')
   .option('--json', 'emit the public continuation and coded outcome')
-  .action(async (id: string, options: import('./commands/flowSetupCommand').FlowSetupOptions) => {
+  .action(async (id: string, options: import('./commands/flowSetupCommand').FlowSetupOptions, command) => {
+    const expectedUserId = expectedUserIdFor(command);
+    if (expectedUserId === undefined) {
+      console.log(JSON.stringify({ ok: false, flow_id: id, code: 'SETUP_ARGUMENT_INVALID' }));
+      process.exit(1);
+    }
     const { runFlowSetupCommand } = await import('./commands/flowSetupCommand');
-    const code = await runFlowSetupCommand(id, options, true);
+    const code = await runFlowSetupCommand(id, { ...options, expectedUserId }, true);
     if (code !== 0) process.exit(code);
   });
 
@@ -595,12 +609,17 @@ flow
   .command('add <id>')
   .option('--cancel', 'Cancel this secret request before any application')
   .description('Resume a Keep-owned secure secret intake on this paired runtime')
-  .requiredOption('--expected-user-id <id>', 'the account bound by the hosted MCP')
+  .option('--expected-user-id <id>', 'the account bound by the hosted MCP')
   .requiredOption('--service-origin <origin>', 'must match this CLI environment')
   .option('--json', 'emit only the public handoff and coded outcome')
-  .action(async (id: string, options: import('./commands/flowAddCommand').FlowAddOptions) => {
+  .action(async (id: string, options: import('./commands/flowAddCommand').FlowAddOptions, command) => {
+    const expectedUserId = expectedUserIdFor(command);
+    if (expectedUserId === undefined) {
+      console.log(JSON.stringify({ ok: false, flow_id: id, code: 'INTAKE_ARGUMENT_INVALID' }));
+      process.exit(1);
+    }
     const { runFlowAddCommand } = await import('./commands/flowAddCommand');
-    const code = await runFlowAddCommand(id, options, true);
+    const code = await runFlowAddCommand(id, { ...options, expectedUserId }, true);
     if (code !== 0) process.exit(code);
   });
 
@@ -753,10 +772,10 @@ program
   .description('List variable names + connector metadata for the active branch (no values)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { ListCommand } = await import('./commands/listCommand');
     const cmd = new ListCommand(true);
-    await cmd.execute({ json: options.json, expectedUserId: options.expectedUserId });
+    await cmd.execute({ json: options.json, expectedUserId: expectedUserIdFor(command) });
   });
 
 program
@@ -943,8 +962,9 @@ program
     const { runCommand } = await import('./commands/runCommand');
     const dashIdx = process.argv.indexOf('--');
     const childArgs = dashIdx >= 0 ? process.argv.slice(dashIdx + 1) : cmd.args;
-    const code = cmd.opts().expectedUserId !== undefined
-      ? await (await import('./commands/runHostedCommand')).runHostedCommand(childArgs, cmd.opts().expectedUserId, true)
+    const expectedUserId = expectedUserIdFor(cmd);
+    const code = expectedUserId !== undefined
+      ? await (await import('./commands/runHostedCommand')).runHostedCommand(childArgs, expectedUserId, true)
       : await runCommand(childArgs, true);
     process.exit(code);
   });
