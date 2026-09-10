@@ -328,21 +328,20 @@ export class BrokerClient {
     const pollGapMs = opts.pollGapMs ?? DEFAULT_POLL_GAP_MS;
 
     while (Date.now() < deadline) {
-      let headers: Record<string, string>;
-      try {
-        headers = await this.headers();
-      } catch {
-        return { kind: 'network', detail: 'no session token' };
-      }
-      let res: Response;
-      try {
-        res = await fetch(
-          `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${waitSeconds}`,
-          { method: 'GET', headers },
-        );
-      } catch (error: any) {
-        return { kind: 'network', detail: error?.message };
-      }
+      const headers = await this.headers().catch(() => null);
+      if (!headers) return { kind: 'network', detail: 'no session token' };
+      const response = await (async () => {
+        try {
+          return { ok: true as const, value: await fetch(
+            `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${waitSeconds}`,
+            { method: 'GET', headers },
+          ) };
+        } catch (error: any) {
+          return { ok: false as const, detail: error?.message };
+        }
+      })();
+      if (!response.ok) return { kind: 'network', detail: response.detail };
+      const res = response.value;
 
       if (res.ok) {
         const body = await readBody(res);
@@ -424,6 +423,7 @@ export class BrokerClient {
     try {
       await fetch(`${this.serviceUrl}/connections/${connectionId}`, {
         method: 'DELETE',
+        signal: AbortSignal.timeout(2_000),
         headers: await this.headers(),
       });
     } catch {

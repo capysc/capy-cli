@@ -10,6 +10,7 @@ import { debugLine } from '../ui/debug';
 import { existsSync, unlinkSync, rmSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import inquirer from 'inquirer';
 import {
   CliOptions,
@@ -39,6 +40,7 @@ import {
 import { shouldAttemptMint } from '../auth/masterKeyMint';
 import { writeKeepCache, fetchSecretsWithCache, readSecretsLocal, LOCAL_ORG_ID, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly } from '../config/profileConfig';
+import { resolveActiveUrl } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
@@ -54,39 +56,330 @@ import {
 } from '../auth/deviceKey/wiring';
 import type { DeviceKeyEnrollmentOptions } from './orgCreation';
 import { installGitHooks as installGitHooksShared } from '../git/installGitHooks';
+import {
+  abortInitWizard,
+  askInitWizard,
+  blockInitWizard,
+  finishInitWizard,
+  recordInitWizard,
+  reportInitWizardEncryptFailure,
+  type InitWizardTransport,
+} from '../ui/initWizardTransport';
+import {
+  branchChoiceQuestion,
+  branchNameQuestion,
+  encryptQuestion,
+  organizationQuestion,
+  projectNameQuestion,
+  projectQuestion,
+  type InitQuestion,
+  type InitWizardRecord,
+} from '../ui/initWizardQuestions';
+import {
+  completeInitRunAuthentication,
+  createInitRunBootstrap,
+  publishInitRunConnection,
+  recordInitRunTerminal,
+  type InitRunAuthorizedContext,
+  type InitRunBootstrap,
+} from '../auth/initRunBootstrap';
+import { resolveInitRunIdentity } from '../auth/initRunIdentity';
+import { resolveInitRunTransportMode } from '../auth/initRunTransportMode';
+import { BrokerClient } from '../service/brokerClient';
+import { HostedInitChannelError, openHostedInitChannel } from '../ui/hostedInitChannel';
+import { createHostedInitWizardSession, closeHostedInitWizard } from '../ui/hostedInitWizardSession';
+import { keepOrigin } from '../ui/screens/keepScreens';
+import {
+  emitInitRunEvent,
+  initRunHandoffEvent,
+  initRunReceiptEvent,
+  initRunUnconfirmedEvent,
+  recordInitRunCreated,
+  type InitRunEventState,
+} from '../ui/initRunEvent';
+import type { InitRunTerminalReceipt } from '../auth/initRunContract';
+import { openScreen } from '../ui/openScreen';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+const recordWizard = (
+  wizard: InitWizardTransport | null,
+  patch: InitWizardRecord,
+): InitWizardTransport | null => wizard ? recordInitWizard(wizard, patch) : null;
+
+async function askWizard<T>(
+  wizard: InitWizardTransport | null,
+  question: InitQuestion<T>,
+  terminal: () => Promise<T>,
+): Promise<Readonly<{ value: T | null; wizard: InitWizardTransport | null }>> {
+  if (!wizard) return { value: await terminal(), wizard: null };
+  const result = await askInitWizard(wizard, question);
+  return { value: result.value, wizard: result.transport };
+}
+
+class InitWizardFlowError extends CapyError {
+  constructor(
+    readonly original: unknown,
+    readonly initWizard: InitWizardTransport | null,
+  ) {
+    super(
+      original instanceof Error ? original.message : 'Initialization failed',
+      original instanceof CapyError ? original.code : ERROR_CODES.SERVICE_ERROR,
+      original instanceof CapyError ? original.details : undefined,
+    );
+  }
+}
+
+class InitWizardPostConsentError extends CapyError {
+  constructor(
+    readonly failure: import('../ui/screens/contract').InitEncryptFailure,
+    readonly initWizard: InitWizardTransport,
+  ) {
+    super(failure.reason, failure.code);
+  }
+}
+
+class InitWizardCancelledError extends CapyError {
+  constructor(
+    readonly initWizard: InitWizardTransport | null,
+    readonly effects: 'none' | 'indeterminate',
+  ) {
+    super('Initialization cancelled', ERROR_CODES.AUTH_FAILED);
+  }
+}
+
+class HostedInitTerminalError extends Error {
+  constructor(readonly original: unknown) {
+    super('Hosted initialization ended with a terminal failure');
+  }
+}
+
+async function withWizard<T>(
+  wizard: InitWizardTransport | null,
+  operation: () => Promise<T> | T,
+  deadline: number | null = null,
+): Promise<T> {
+  if (deadline !== null && Date.now() >= deadline) {
+    throw new InitWizardFlowError(
+      new CapyError('Hosted initialization expired', 'INIT_RUN_EXPIRED'),
+      wizard,
+    );
+  }
+  const result = await capture(operation);
+  if (result.ok) return result.value;
+  throw new InitWizardFlowError(result.error, wizard);
+}
+
+type Captured<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: unknown }>;
+async function capture<T>(operation: () => Promise<T> | T): Promise<Captured<T>> {
+  try {
+    return { ok: true, value: await operation() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+type InitCommandContext = Readonly<{
+  transport: 'local' | 'hosted';
+  operationDeadline: number | null;
+  authService: AuthService;
+  serviceClient: ServiceClient;
+}>;
+
+type PreparedInitAuthentication = Readonly<{
+  context: InitCommandContext;
+  auth: AuthResult;
+}>;
+
+type InitRepositoryTarget = Readonly<{
+  orgId: string;
+  orgName: string;
+  projectId: string;
+  projectName: string;
+  branch: string;
+}>;
+
+type InitWorkflowResult = Readonly<{
+  wizard: InitWizardTransport | null;
+  target: InitRepositoryTarget;
+  status: 'succeeded' | 'cancelled' | 'failed-after-consent';
+}>;
+
+type InitVerification = Readonly<{
+  repositoryVerified: boolean;
+  custodyVerified: boolean;
+}>;
+
+type HostedCompletionPlan = Readonly<{
+  status: InitRunTerminalReceipt['status'];
+  code: string | null;
+  effects: InitRunTerminalReceipt['effects'];
+  delivery: 'finish' | 'abort';
+  failureCode: string | null;
+}>;
+
+type HostedInitExecution = Readonly<{
+  bootstrap: InitRunBootstrap;
+  authorized: InitRunAuthorizedContext;
+  eventState: InitRunEventState;
+  context: InitCommandContext;
+  wizard: InitWizardTransport | null;
+}>;
+
+const terminalCode = (error: unknown): string => {
+  const code = error instanceof CapyError || error instanceof HostedInitChannelError
+    ? error.code
+    : ERROR_CODES.SERVICE_ERROR;
+  return /^[A-Z][A-Z0-9_]{0,127}$/u.test(code) ? code : ERROR_CODES.SERVICE_ERROR;
+};
+
+const terminalReceipt = (input: Readonly<{
+  runId: string;
+  status: InitRunTerminalReceipt['status'];
+  code: string | null;
+  verification: InitVerification;
+  effects: InitRunTerminalReceipt['effects'];
+}>): InitRunTerminalReceipt => ({
+  v: 1,
+  run_id: input.runId,
+  receipt_id: randomUUID(),
+  status: input.status,
+  code: input.code,
+  repository_verified: input.verification.repositoryVerified,
+  custody_verified: input.verification.custodyVerified,
+  effects: input.effects,
+  completed_at: new Date().toISOString(),
+});
+
+export const buildHostedCompletionPlan = (
+  status: InitWorkflowResult['status'],
+  verification: InitVerification,
+): HostedCompletionPlan => {
+  if (status === 'cancelled') {
+    return {
+      status: 'cancelled',
+      code: 'INIT_RUN_CANCELLED',
+      effects: 'indeterminate',
+      delivery: 'abort',
+      failureCode: null,
+    };
+  }
+  if (status === 'failed-after-consent') {
+    return {
+      status: 'failed',
+      code: ERROR_CODES.SERVICE_ERROR,
+      effects: 'indeterminate',
+      delivery: 'abort',
+      failureCode: ERROR_CODES.SERVICE_ERROR,
+    };
+  }
+  if (!verification.repositoryVerified) {
+    return {
+      status: 'failed',
+      code: 'INIT_REPOSITORY_VERIFICATION_FAILED',
+      effects: 'indeterminate',
+      delivery: 'abort',
+      failureCode: 'INIT_REPOSITORY_VERIFICATION_FAILED',
+    };
+  }
+  return {
+    status: 'succeeded',
+    code: null,
+    effects: 'complete',
+    delivery: 'finish',
+    failureCode: null,
+  };
+};
+
+const parseRemoteKeep = (value: string): KeepFile | null => {
+  const parsed = (() => {
+    try {
+      return JSON.parse(value) as unknown;
+    } catch {
+      return null;
+    }
+  })();
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const candidate = parsed as Readonly<Record<string, unknown>>;
+  if (candidate.version !== '3.0'
+    || typeof candidate.org_id !== 'string'
+    || typeof candidate.project_id !== 'string'
+    || typeof candidate.project_name !== 'string'
+    || !candidate.variables
+    || typeof candidate.variables !== 'object'
+    || Array.isArray(candidate.variables)) return null;
+  const variables = candidate.variables as Readonly<Record<string, unknown>>;
+  const validEntries = Object.values(variables).every((entries) => Array.isArray(entries)
+    && entries.every((entry) => entry !== null
+      && typeof entry === 'object'
+      && !Array.isArray(entry)
+      && typeof (entry as Readonly<Record<string, unknown>>).resource_id === 'string'
+      && typeof (entry as Readonly<Record<string, unknown>>).value_hash === 'string'
+      && ((entry as Readonly<Record<string, unknown>>).branch === undefined
+        || typeof (entry as Readonly<Record<string, unknown>>).branch === 'string')));
+  return validEntries ? parsed as KeepFile : null;
+};
+
+const exactConfiguredOrigin = (value: string): string => {
+  const parsed = (() => {
+    try {
+      return new URL(value);
+    } catch {
+      return null;
+    }
+  })();
+  if (!parsed || parsed.origin !== value || parsed.username || parsed.password) {
+    throw new CapyError('Hosted initialization origin is invalid', 'INIT_RUN_CONFIGURATION');
+  }
+  return value;
+};
+
+async function presentInitRunHandoff(bootstrap: InitRunBootstrap): Promise<void> {
+  if (!process.stdout.isTTY) return;
+  human(`Open ${bootstrap.handoff.entryUrl}`);
+  human(`Claim code: ${bootstrap.handoff.claimCode}`);
+  await openScreen(bootstrap.handoff.entryUrl, { kind: 'handoff' });
+}
+
+async function flushHostedTerminalOutput(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, 2000);
+    process.stdout.write('', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
 export class CapyCommand {
-  private projectManager: ProjectManager;
-  private fileManager: FileManager;
-  private authService: AuthService;
-  private serviceClient: ServiceClient;
-  private syncEngine: SyncEngine;
-  private promptEngine: PromptEngine;
-  private options: CliOptions;
-  private devMode: boolean;
+  private readonly projectManager: ProjectManager;
+  private readonly fileManager: FileManager;
+  private readonly authService: AuthService;
+  private readonly serviceClient: ServiceClient;
+  private readonly syncEngine: SyncEngine;
+  private readonly promptEngine: PromptEngine;
+  private readonly options: CliOptions;
+  private readonly devMode: boolean;
 
   constructor(options: CliOptions = {}, devMode: boolean = false) {
+    const authService = new AuthService(undefined, devMode);
     this.options = options;
     this.devMode = devMode;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
-    this.authService = new AuthService(undefined, devMode);
-    this.serviceClient = new ServiceClient(undefined, devMode);
+    this.authService = authService;
+    this.serviceClient = new ServiceClient(undefined, devMode, () => authService.getValidToken());
     this.syncEngine = new SyncEngine();
     this.promptEngine = new PromptEngine();
-
-    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
   /**
    * Bridge ServiceClient to the KeyServiceOps interface for key resolution.
    */
-  private keyServiceOps(): KeyServiceOps {
+  private keyServiceOps(serviceClient: ServiceClient = this.serviceClient): KeyServiceOps {
     return {
-      coDecrypt: (orgId, ciphertext) => this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
-      wrapOuterLayer: (orgId, plaintext) => this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
+      coDecrypt: (orgId, ciphertext) => serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
+      wrapOuterLayer: (orgId, plaintext) => serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
     };
   }
 
@@ -121,17 +414,23 @@ export class CapyCommand {
   async execute(): Promise<void> {
     try {
       // Detect project state
-      const projectState = await this.projectManager.detectProjectState();
+      const detectedProjectState = await this.projectManager.detectProjectState();
+      const envMeta = detectedProjectState.initialized
+        ? {}
+        : this.fileManager.readEnvMeta(this.options.envPath);
+      const projectState = !detectedProjectState.initialized && envMeta.org_id && envMeta.project_id
+        ? {
+            ...detectedProjectState,
+            initialized: true,
+            organizationId: envMeta.org_id,
+            projectId: envMeta.project_id,
+            activeBranch: envMeta.branch ?? null,
+          }
+        : detectedProjectState;
 
       if (!projectState.initialized) {
         // Check if .env has metadata we can recover from (e.g. keep.lock was deleted)
-        const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
-        if (envMeta.org_id && envMeta.project_id) {
-          projectState.initialized = true;
-          projectState.organizationId = envMeta.org_id;
-          projectState.projectId = envMeta.project_id;
-          projectState.activeBranch = envMeta.branch ?? null;
-        } else if (isLocalOnly()) {
+        if (isLocalOnly()) {
           // Local-only mode: bootstrap a project entirely on this machine
           // (synthetic org, generated projectId) instead of server onboarding.
           await this.initializeProjectLocal();
@@ -146,9 +445,14 @@ export class CapyCommand {
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
     } catch (error: any) {
-      this.debugError('execute caught error', error);
+      const original = error instanceof HostedInitTerminalError ? error.original : error;
+      this.debugError('execute caught error', original);
+      if (error instanceof HostedInitTerminalError) {
+        await flushHostedTerminalOutput();
+        process.exit(1);
+      }
       const { displayErrorAndExit } = await import('../ui/errorScreen');
-      await displayErrorAndExit(error);
+      await displayErrorAndExit(original);
     }
   }
 
@@ -341,7 +645,6 @@ export class CapyCommand {
    */
   private async initializeProjectLocal(): Promise<void> {
     this.debug('initializeProjectLocal start', { cwd: process.cwd() });
-    const { randomUUID } = await import('crypto');
     const { basename } = await import('path');
 
     // Unlock now so a missing/locked key fails before we write keep.lock.
@@ -372,32 +675,380 @@ export class CapyCommand {
    * page claiming to still be working on it.
    */
   private async initializeProject(): Promise<void> {
+    const mode = this.options.web
+      ? await (async () => {
+          const selected = await capture(() => resolveInitRunTransportMode(process.env.CAPY_INIT_TRANSPORT));
+          if (selected.ok) return selected.value;
+          emitInitRunEvent(
+            { phase: 'new' },
+            initRunUnconfirmedEvent({ kind: 'pre-run', code: terminalCode(selected.error) }),
+          );
+          throw new HostedInitTerminalError(selected.error);
+        })()
+      : null;
+    if (mode === 'hosted') {
+      const result = await capture(() => this.initializeProjectHosted());
+      if (!result.ok) throw new HostedInitTerminalError(result.error);
+      return;
+    }
+    await this.initializeProjectWithLocalWizard();
+  }
+
+  /** Explicit rollback transport and the unchanged terminal workflow. */
+  private async initializeProjectWithLocalWizard(): Promise<void> {
     // Imported only on the `--web` path: the module pulls in every compiled
     // screen, and a terminal run has no use for them.
     //
     // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless
     // verification drive the loopback without hijacking a real browser.
-    const wizard = this.options.web
-      ? new (await import('../ui/initWizardScreen')).InitWizardSession({
+    const wizard: InitWizardTransport | null = this.options.web
+      ? { kind: 'local', session: new (await import('../ui/initWizardScreen')).InitWizardSession({
           open: !process.env.CAPY_WEB_NO_OPEN,
-        })
+        }) }
       : null;
     try {
-      await this.runInitialization(wizard);
-      await wizard?.finish();
+      const completed = await this.runInitialization(wizard);
+      if (completed.wizard?.kind === 'local') await completed.wizard.session.finish();
     } catch (err) {
+      if (err instanceof InitWizardPostConsentError) {
+        if (err.initWizard.kind === 'local') {
+          await err.initWizard.session.reportEncryptFailure(err.failure);
+          return;
+        }
+        throw err;
+      }
       // The browser is holding a submit at this point, and it must not be told
       // that submit worked. `abort` replaces the question with what stopped
       // the run — carrying the error's CODE, and the remedy any call site that
       // knew one declared with `willBlock` just before it threw.
-      await wizard?.abort(err);
-      throw err;
+      const failedWizard = err instanceof InitWizardFlowError || err instanceof InitWizardCancelledError
+        ? err.initWizard
+        : wizard;
+      if (failedWizard?.kind === 'local') await failedWizard.session.abort(err);
+      throw err instanceof InitWizardFlowError ? err.original : err;
     }
   }
 
-  private async runInitialization(
-    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+  private async initializeProjectHosted(): Promise<void> {
+    const preparation = await capture(() => ({
+      serviceOrigin: exactConfiguredOrigin(resolveActiveUrl(this.devMode)),
+      keepOrigin: exactConfiguredOrigin(keepOrigin()),
+      identity: resolveInitRunIdentity(),
+    }));
+    if (!preparation.ok) {
+      emitInitRunEvent(
+        { phase: 'new' },
+        initRunUnconfirmedEvent({ kind: 'pre-run', code: terminalCode(preparation.error) }),
+      );
+      throw preparation.error;
+    }
+    const serviceOrigin = preparation.value.serviceOrigin;
+    const keep = preparation.value.keepOrigin;
+    const identity = preparation.value.identity;
+
+    const created = await capture(() => createInitRunBootstrap({
+      serviceOrigin,
+      keepOrigin: keep,
+      runtimeId: identity.runtimeId,
+      repositoryFingerprint: identity.repositoryFingerprint,
+      machineName: identity.machineName,
+      expectedUserId: this.options.expectedUserId ?? null,
+    }));
+    if (!created.ok) {
+      emitInitRunEvent(
+        { phase: 'new' },
+        initRunUnconfirmedEvent({ kind: 'pre-run', code: terminalCode(created.error) }),
+      );
+      throw created.error;
+    }
+
+    const createdEventState = recordInitRunCreated({ phase: 'new' }, created.value.handoff.runId);
+    const eventState = emitInitRunEvent(createdEventState, initRunHandoffEvent(created.value.handoff));
+    await presentInitRunHandoff(created.value);
+    const authorized = await capture(() => completeInitRunAuthentication({
+      bootstrap: created.value,
+      authService: this.authService,
+    }));
+    if (!authorized.ok) {
+      const code = terminalCode(authorized.error);
+      const noEffects = [
+        'INIT_RUN_DENIED',
+        'INIT_AUTH_SUBJECT_MISMATCH',
+      ].includes(code);
+      emitInitRunEvent(eventState, initRunUnconfirmedEvent(noEffects ? {
+        kind: 'no-effects',
+        runId: created.value.handoff.runId,
+        status: 'failed',
+        code,
+      } : {
+        kind: 'indeterminate',
+        runId: created.value.handoff.runId,
+        repositoryVerified: false,
+        custodyVerified: false,
+      }));
+      throw authorized.error;
+    }
+
+    const context = {
+      transport: 'hosted' as const,
+      operationDeadline: Date.parse(authorized.value.expiresAt),
+      authService: authorized.value.authService,
+      serviceClient: new ServiceClient(
+        serviceOrigin,
+        this.devMode,
+        () => authorized.value.authService.getValidToken(),
+      ),
+    };
+    const channel = await capture(() => openHostedInitChannel({
+      broker: new BrokerClient(serviceOrigin, () => authorized.value.brokerAccessToken),
+      binding: authorized.value.binding,
+      deadline: Date.parse(authorized.value.expiresAt),
+      publish: (firstConnectionId) => publishInitRunConnection({
+        bootstrap: created.value,
+        authorized: authorized.value,
+        firstConnectionId,
+      }).then(() => undefined),
+    }));
+    if (!channel.ok) {
+      return this.failHostedInitialization({
+        bootstrap: created.value,
+        authorized: authorized.value,
+        eventState,
+        context,
+        wizard: null,
+      }, channel.error, 'none');
+    }
+    const execution: HostedInitExecution = {
+      bootstrap: created.value,
+      authorized: authorized.value,
+      eventState,
+      context,
+      wizard: { kind: 'hosted', session: createHostedInitWizardSession(channel.value) },
+    };
+    const initialized = await capture(() => this.runInitialization(execution.wizard, {
+      context: execution.context,
+      auth: execution.authorized.auth,
+    }));
+    if (!initialized.ok) {
+      const failedWizard = initialized.error instanceof InitWizardFlowError
+        || initialized.error instanceof InitWizardPostConsentError
+        || initialized.error instanceof InitWizardCancelledError
+        ? initialized.error.initWizard
+        : execution.wizard;
+      return this.failHostedInitialization(
+        { ...execution, wizard: failedWizard },
+        initialized.error,
+        'indeterminate',
+      );
+    }
+    await this.completeHostedInitialization(
+      { ...execution, wizard: initialized.value.wizard },
+      initialized.value,
+    );
+  }
+
+  private async failHostedInitialization(
+    execution: HostedInitExecution,
+    error: unknown,
+    effects: 'none' | 'indeterminate',
+  ): Promise<never> {
+    const original = error instanceof InitWizardFlowError ? error.original : error;
+    const cancelled = original instanceof InitWizardCancelledError;
+    const terminalEffects = cancelled ? original.effects : effects;
+    const receipt = terminalReceipt({
+      runId: execution.bootstrap.response.run_id,
+      status: cancelled ? 'cancelled' : 'failed',
+      code: cancelled ? 'INIT_RUN_CANCELLED' : terminalCode(original),
+      verification: { repositoryVerified: false, custodyVerified: false },
+      effects: terminalEffects,
+    });
+    const persisted = await capture(() => recordInitRunTerminal({
+      bootstrap: execution.bootstrap,
+      authorized: execution.authorized,
+      receipt,
+    }));
+    if (persisted.ok) {
+      emitInitRunEvent(execution.eventState, initRunReceiptEvent(receipt));
+      const delivery = execution.wizard
+        ? await (error instanceof InitWizardPostConsentError
+          ? capture(() => reportInitWizardEncryptFailure(
+              execution.wizard!,
+              error.failure,
+              receipt,
+            ))
+          : capture(() => abortInitWizard(execution.wizard!, original, receipt)))
+        : { ok: true as const, value: null };
+      if (!delivery.ok && execution.wizard?.kind === 'hosted') {
+        const hosted = execution.wizard.session;
+        await capture(() => closeHostedInitWizard(hosted));
+      }
+    } else {
+      emitInitRunEvent(execution.eventState, initRunUnconfirmedEvent({
+        kind: 'indeterminate',
+        runId: execution.bootstrap.response.run_id,
+        repositoryVerified: false,
+        custodyVerified: false,
+      }));
+      if (execution.wizard?.kind === 'hosted') {
+        const hosted = execution.wizard.session;
+        await capture(() => closeHostedInitWizard(hosted));
+      }
+    }
+    throw original;
+  }
+
+  private async completeHostedInitialization(
+    execution: HostedInitExecution,
+    result: InitWorkflowResult,
   ): Promise<void> {
+    const verificationAttempt = await capture(() => this.verifyHostedInitialization(
+      execution.context,
+      result.target,
+    ));
+    if (!verificationAttempt.ok) {
+      return this.failHostedInitialization(execution, verificationAttempt.error, 'indeterminate');
+    }
+    const verification = verificationAttempt.value;
+    const plan = buildHostedCompletionPlan(result.status, verification);
+    const receipt = terminalReceipt({
+      runId: execution.bootstrap.response.run_id,
+      status: plan.status,
+      code: plan.code,
+      verification,
+      effects: plan.effects,
+    });
+    const persisted = await capture(() => recordInitRunTerminal({
+      bootstrap: execution.bootstrap,
+      authorized: execution.authorized,
+      receipt,
+    }));
+    if (!persisted.ok) {
+      emitInitRunEvent(execution.eventState, initRunUnconfirmedEvent({
+        kind: 'indeterminate',
+        runId: execution.bootstrap.response.run_id,
+        repositoryVerified: verification.repositoryVerified,
+        custodyVerified: verification.custodyVerified,
+      }));
+      if (execution.wizard?.kind === 'hosted') {
+        const hosted = execution.wizard.session;
+        await capture(() => closeHostedInitWizard(hosted));
+      }
+      throw persisted.error;
+    }
+    emitInitRunEvent(execution.eventState, initRunReceiptEvent(receipt));
+    if (execution.wizard) {
+      const finalDelivery = plan.delivery === 'abort'
+        ? await capture(() => abortInitWizard(
+            execution.wizard!,
+            new CapyError(
+              plan.status === 'cancelled' ? 'Initialization cancelled' : 'Initialization verification failed',
+              plan.code ?? ERROR_CODES.SERVICE_ERROR,
+            ),
+            receipt,
+          ))
+        : await capture(() => finishInitWizard(execution.wizard!, receipt));
+      if (!finalDelivery.ok && execution.wizard.kind === 'hosted') {
+        const hosted = execution.wizard.session;
+        await capture(() => closeHostedInitWizard(hosted));
+      }
+    }
+    if (plan.failureCode) {
+      throw new CapyError('Initialization effects could not be verified', plan.failureCode);
+    }
+  }
+
+  private async verifyHostedInitialization(
+    context: InitCommandContext,
+    target: InitRepositoryTarget,
+  ): Promise<InitVerification> {
+    if (context.operationDeadline !== null && Date.now() >= context.operationDeadline) {
+      throw new CapyError('Hosted initialization expired', 'INIT_RUN_EXPIRED');
+    }
+    const keep = this.projectManager.readKeepFile();
+    const branch = keep ? this.projectManager.deriveActiveBranch() : null;
+    const projects = await context.serviceClient.listProjects();
+    const branches = await context.serviceClient.listBranches(target.projectId);
+    const remote = await (async () => {
+      try {
+        return await context.serviceClient.getDecryptData(
+          target.projectId,
+          target.branch,
+          undefined,
+          true,
+        );
+      } catch (error) {
+        if (error instanceof CapyError && error.code === ERROR_CODES.NO_SECRETS) return null;
+        throw error;
+      }
+    })();
+    const remoteSnapshot = remote === null || remote.keep_file === undefined || remote.keep_file === ''
+      ? { kind: 'empty' as const }
+      : typeof remote.keep_file === 'string'
+        ? (() => {
+            const parsed = parseRemoteKeep(remote.keep_file!);
+            return parsed
+              ? { kind: 'keep' as const, keep: parsed }
+              : { kind: 'invalid' as const };
+          })()
+        : { kind: 'invalid' as const };
+    const remoteKeep = remoteSnapshot.kind === 'keep' ? remoteSnapshot.keep : null;
+    const localHash = keep ? SyncEngine.computeKeepHash(keep, target.branch) : null;
+    const remoteHash = remoteKeep
+      ? SyncEngine.computeKeepHash(remoteKeep, target.branch)
+      : null;
+    const targetMatches = keep?.version === '3.0'
+      && keep.org_id === target.orgId
+      && keep.project_id === target.projectId
+      && keep.project_name === target.projectName
+      && branch === target.branch;
+    const expectedEntries = keep
+      ? Object.entries(keep.variables).flatMap(([name, entries]) => entries
+          .filter((entry) => entry.branch === target.branch)
+          .map((entry) => ({ name, resourceId: entry.resource_id })))
+      : [];
+    const localValues = this.fileManager.readEnvFile(this.options.envPath);
+    const localNames = Object.keys(localValues);
+    const expectedNames = expectedEntries.map((entry) => entry.name);
+    const localMetadata = this.fileManager.readEnvMeta(this.options.envPath);
+    const localEnvironmentVerified = localNames.length === expectedNames.length
+      && localNames.every((name) => expectedNames.includes(name))
+      && expectedEntries.every((entry) => localValues[entry.name]?.startsWith(`capy:${entry.resourceId}:`))
+      && (expectedEntries.length === 0 || (
+        localMetadata.org_id === target.orgId
+        && localMetadata.project_id === target.projectId
+        && localMetadata.branch === target.branch
+      ));
+    const remoteTargetMatches = remoteSnapshot.kind === 'empty' || (remoteSnapshot.kind === 'keep' &&
+      remoteSnapshot.keep.version === '3.0'
+      && remoteSnapshot.keep.org_id === target.orgId
+      && remoteSnapshot.keep.project_id === target.projectId
+      && remoteSnapshot.keep.project_name === target.projectName
+    );
+    const repositoryVerified = targetMatches
+      && localEnvironmentVerified
+      && projects.some((project) => project.id === target.projectId
+        && project.name === target.projectName
+        && project.organization_id === target.orgId)
+      && branches.some((candidate) => (candidate.project_id === undefined || candidate.project_id === target.projectId)
+        && candidate.name === target.branch
+        && candidate.is_protected === false)
+      && remoteTargetMatches
+      && (remoteSnapshot.kind === 'keep'
+        ? localHash === remoteHash && (remote?.keep_hash === undefined || remote.keep_hash === remoteHash)
+        : remoteSnapshot.kind === 'empty' && keep !== null && Object.keys(keep.variables).length === 0);
+    const readiness = await context.serviceClient.getSignupReadiness(target.orgId);
+    const custodyVerified = readiness.signup_complete === true
+      && readiness.retryable === false
+      && readiness.custody.key_state === 'minted'
+      && readiness.custody.ceremony_pending === false
+      && readiness.custody.has_live_wrapped_k_local === true;
+    return { repositoryVerified, custodyVerified };
+  }
+
+  private async runInitialization(
+    wizard: InitWizardTransport | null,
+    preparedAuthentication?: PreparedInitAuthentication,
+  ): Promise<InitWorkflowResult> {
     this.debug('initializeProject start', { cwd: process.cwd() });
     human('Welcome to Capy\n');
 
@@ -406,8 +1057,14 @@ export class CapyCommand {
     const orgHint = syncState?.org_id;
 
     // Authenticate — pass org hint so session scopes to the right org
+    const context = preparedAuthentication?.context ?? {
+      transport: 'local' as const,
+      operationDeadline: null,
+      authService: this.authService,
+      serviceClient: this.serviceClient,
+    };
     const spinner = ora('Logging in...').start();
-    const authResult = await this.authService.authenticate(orgHint);
+    const authResult = preparedAuthentication?.auth ?? await context.authService.authenticate(orgHint);
     this.debug('init authResult', {
       success: authResult.success,
       user_id: authResult.user_id,
@@ -429,7 +1086,7 @@ export class CapyCommand {
 
     // The first stop is settled before anything opens: the browser is only
     // reached once there is a session, so `auth` is drawn done from the start.
-    wizard?.record({
+    const wizardAfterAuth = recordWizard(wizard, {
       signedInAs: authResult.user_email || authResult.user_first_name || undefined,
       orgCount: authResult.organizations?.length ?? 0,
     });
@@ -440,50 +1097,56 @@ export class CapyCommand {
     // undefined, AuthService loads from the unscoped path and finds nothing,
     // and the user is sent through OAuth again.
     if (authResult.user_id) {
-      this.projectManager.writeSyncStateUserId(authResult.user_id);
+      await withWizard(
+        wizardAfterAuth,
+        () => this.projectManager.writeSyncStateUserId(authResult.user_id!),
+        context.operationDeadline,
+      );
     }
 
     // Resolve organization
     const orgs = authResult.organizations || [];
-    let selectedOrg: Organization;
     const CREATE_NEW_ORG = '__create_new__';
-    const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
+    const refreshToken = authResult._refresh_token || context.authService.getToken()?.refresh_token;
 
     const currentOrgId = authResult.organization_id;
     const currentOrg = orgs.find(o => o.id === currentOrgId);
 
-    if (orgs.length === 0) {
+    const organizationSelection = await (async (): Promise<Readonly<{
+      selectedOrg: Organization;
+      wizard: InitWizardTransport | null;
+      effectsStarted: boolean;
+    }>> => {
+      if (orgs.length === 0) {
       human('\nNo organization found. Let\'s create one.');
       // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
       // Wave-B org-less token — flag-gated, and a no-op (org creation is
       // byte-identical) when the flag is off or no such token was captured.
       const deviceKeyEnrollment = deviceKeysEnabled()
         ? {
-            ctx: this.deviceKeyWiringContext(authResult, undefined),
+            ctx: this.deviceKeyWiringContext(context, authResult, undefined),
             orglessToken: authResult._orgless_access_token,
           }
         : undefined;
-      selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!, deviceKeyEnrollment);
-      wizard?.record({
+      const selectedOrg = await withWizard(
+        wizardAfterAuth,
+        () => this.createNewOrganization(context, refreshToken!, authResult.user_id!, deviceKeyEnrollment),
+        context.operationDeadline,
+      );
+      return { selectedOrg, wizard: recordWizard(wizardAfterAuth, {
         organization: { kind: 'new', name: selectedOrg.name },
         recoveryShown: true,
-      });
+      }), effectsStarted: true };
 
-    } else {
-      let orgId: string;
-      if (wizard) {
+    }
+      const choice = await askWizard(
+        wizardAfterAuth,
+        organizationQuestion(orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId }))),
+        async () => {
         // No TTY under --web (e.g. driven through the MCP): the picker is the
         // wizard's `organization` stop, which carries the same list and the
         // same "create new" row an inquirer prompt would have shown — and, on
         // the rail beside it, the five stops that come after.
-        const chosen = await wizard.askOrganization(
-          orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId })),
-        );
-        if (chosen === null) {
-          throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
-      } else {
         // CAP-567. The org picker is a human-only stop, and until now it was
         // the ONLY one on this path with no non-interactive guard. With stdin
         // piped — which is how every agent runs this, including the hosted MCP
@@ -510,7 +1173,7 @@ export class CapyCommand {
             'Re-run with --web to answer it in a browser — the same picker, on a page you can open from any device.',
           );
         }
-        ({ orgId } = await inquirer.prompt([{
+        const answer = await inquirer.prompt([{
           type: 'list',
           name: 'orgId',
           message: 'Select organization for project:',
@@ -522,15 +1185,25 @@ export class CapyCommand {
             { name: 'Create new organization +', value: CREATE_NEW_ORG },
           ],
           default: currentOrgId,
-        }]));
+        }]);
+        return String(answer.orgId);
+      },
+    );
+      if (choice.value === null) {
+        throw new InitWizardCancelledError(choice.wizard, 'none');
       }
+      const orgId = choice.value === 'create' ? CREATE_NEW_ORG : choice.value;
 
       if (orgId === CREATE_NEW_ORG) {
-        selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+        const selectedOrg = await withWizard(
+          choice.wizard,
+          () => this.createNewOrganization(context, refreshToken!, authResult.user_id!),
+          context.operationDeadline,
+        );
         // Naming it and being shown the phrase both happened, elsewhere. The
         // rail settles those two stops rather than leaving them ◌ behind a
         // fork this run has already taken.
-        wizard?.record({
+        const wizardAfterCreate = recordWizard(choice.wizard, {
           organization: { kind: 'new', name: selectedOrg.name },
           recoveryShown: true,
         });
@@ -546,52 +1219,86 @@ export class CapyCommand {
         // prompt: nothing new is being decided), best-effort, and a no-op
         // when nothing is enrolled anywhere yet.
         if (deviceKeysEnabled()) {
-          await syncOrgOntoDeviceKeyIfEnrolled(this.deviceKeyWiringContext(authResult, selectedOrg.id), selectedOrg.id);
+          await withWizard(wizardAfterCreate, () => syncOrgOntoDeviceKeyIfEnrolled(
+            this.deviceKeyWiringContext(context, authResult, selectedOrg.id),
+            selectedOrg.id,
+          ), context.operationDeadline);
         }
-
+        return { selectedOrg, wizard: wizardAfterCreate, effectsStarted: true };
       } else if (currentOrg && orgId === currentOrg.id) {
-        selectedOrg = currentOrg;
+        return { selectedOrg: currentOrg, wizard: choice.wizard, effectsStarted: false };
 
       } else {
-        selectedOrg = orgs.find(o => o.id === orgId)!;
+        const selectedOrg = orgs.find(o => o.id === orgId)!;
 
         const orgSpinner = ora('Switching organization...').start();
-        let scopedAuth = await this.authService.refreshWithCredentials(
+        const refreshed = await withWizard(choice.wizard, () => context.authService.refreshWithCredentials(
           refreshToken!,
           selectedOrg.id,
           authResult.user_id,
-        );
-        if (!scopedAuth.success) {
-          orgSpinner.text = 'Re-authenticating...';
-          this.authService.clearToken();
-          scopedAuth = await this.authService.authenticate(selectedOrg.id);
-          if (!scopedAuth.success) {
-            orgSpinner.fail('Failed to authenticate with organization');
+        ), context.operationDeadline);
+        const authAttempt = refreshed.success ? { auth: refreshed, spinner: orgSpinner } : await (async () => {
+          orgSpinner.stop();
+          if (context.transport === 'hosted') {
+            throw new InitWizardFlowError(
+              new CapyError(
+                refreshed.error || 'Organization authentication failed',
+                'INIT_AUTH_REAUTH_REQUIRED',
+              ),
+              choice.wizard,
+            );
+          }
+          const retrySpinner = ora('Re-authenticating...').start();
+          context.authService.clearToken();
+          const authenticated = await withWizard(
+            choice.wizard,
+            () => context.authService.authenticate(selectedOrg.id),
+            context.operationDeadline,
+          );
+          if (!authenticated.success) {
+            retrySpinner.fail('Failed to authenticate with organization');
             throw new CapyError(
-              scopedAuth.error || 'Organization authentication failed',
+              authenticated.error || 'Organization authentication failed',
               ERROR_CODES.AUTH_FAILED
             );
           }
-        }
-        orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
+          return { auth: authenticated, spinner: retrySpinner };
+        })();
+        authAttempt.spinner.succeed(`Organization: ${selectedOrg.name}`);
+        return { selectedOrg, wizard: choice.wizard, effectsStarted: false };
       }
-    }
+    })();
+    const selectedOrg = organizationSelection.selectedOrg;
+    const wizardAfterOrganization = organizationSelection.wizard;
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
-    let orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
+    const initiallyHasOrgKey = hasOrgKey(selectedOrg.id, authResult.user_id!);
+    if (context.transport === 'hosted' && !initiallyHasOrgKey) {
+      throw new InitWizardFlowError(
+        new CapyError(
+          'Hosted device-key ceremony is not available in this build',
+          'INIT_HOSTED_DEVICE_CEREMONY_REQUIRED',
+        ),
+        wizardAfterOrganization,
+      );
+    }
 
     // CAP-382 Case C: exactly the purpose program's marquee failure signal
     // — a new machine, already enrolled elsewhere, that today dead-ends
     // into "run capy redeem". Try the device-key unlock ceremony before
     // falling through to that message. Flag-gated; no enrolled device key,
     // a decline, or any ceremony failure leaves this branch unchanged.
-    if (!orgKeyPresent && deviceKeysEnabled()) {
-      const unlock = await attemptCaseCUnlock(this.deviceKeyWiringContext(authResult, selectedOrg.id));
-      if (unlock.ok) {
-        orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
-      }
-    }
+    const afterUnlockHasOrgKey = !initiallyHasOrgKey && deviceKeysEnabled()
+      ? await (async () => {
+          const unlock = await withWizard(
+            wizardAfterOrganization,
+            () => attemptCaseCUnlock(this.deviceKeyWiringContext(context, authResult, selectedOrg.id)),
+            context.operationDeadline,
+          );
+          return unlock.ok && hasOrgKey(selectedOrg.id, authResult.user_id!);
+        })()
+      : initiallyHasOrgKey;
 
     // A brand-new invitee who already pasted their code into Keep
     // has a pending pickup row waiting server-side. Case C above no-ops for
@@ -601,12 +1308,16 @@ export class CapyCommand {
     // attemptPickupConsumption never throws, and a caller with no pending
     // pickup (the overwhelming common case) gets `{ ok: false }` and this
     // run continues exactly as it does today.
-    if (!orgKeyPresent && deviceKeysEnabled()) {
-      const pickup = await attemptPickupConsumption(this.deviceKeyWiringContext(authResult, selectedOrg.id));
-      if (pickup.ok) {
-        orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
-      }
-    }
+    const afterPickupHasOrgKey = !afterUnlockHasOrgKey && deviceKeysEnabled()
+      ? await (async () => {
+          const pickup = await withWizard(
+            wizardAfterOrganization,
+            () => attemptPickupConsumption(this.deviceKeyWiringContext(context, authResult, selectedOrg.id)),
+            context.operationDeadline,
+          );
+          return pickup.ok && hasOrgKey(selectedOrg.id, authResult.user_id!);
+        })()
+      : afterUnlockHasOrgKey;
 
     // Master-key mint chokepoint: an auto-provisioned personal org has no
     // key for ANY device until an owner first mints one — still true after
@@ -615,25 +1326,28 @@ export class CapyCommand {
     // hand) says nobody has minted M yet, and this run can safely show a
     // recovery phrase, mint it here instead of falling straight to the
     // invite-code remedy below.
-    if (!orgKeyPresent && shouldAttemptMint(orgs.find(o => o.id === selectedOrg.id)?.key_state, this.options.web)) {
-      const { mintMasterKeyForOrg } = await import('../auth/masterKeyMint');
-      try {
-        await mintMasterKeyForOrg({
-          orgId: selectedOrg.id,
-          userId: authResult.user_id!,
-          serviceClient: this.serviceClient,
-          keyServiceOps: this.keyServiceOps(),
-          web: this.options.web,
-        });
-        orgKeyPresent = hasOrgKey(selectedOrg.id, authResult.user_id!);
-      } catch {
-        // KEY_ALREADY_MINTED / KEY_MINT_IN_PROGRESS / unsafe-surface — fall
-        // through to the existing "no key on this device" remedy below,
-        // unchanged.
-      }
-    }
+    const orgKeyPresent = !afterPickupHasOrgKey
+      && shouldAttemptMint(orgs.find(o => o.id === selectedOrg.id)?.key_state, this.options.web)
+      ? await (async () => {
+          const { mintMasterKeyForOrg } = await import('../auth/masterKeyMint');
+          try {
+            await withWizard(wizardAfterOrganization, () => mintMasterKeyForOrg({
+              orgId: selectedOrg.id,
+              userId: authResult.user_id!,
+              serviceClient: context.serviceClient,
+              keyServiceOps: this.keyServiceOps(context.serviceClient),
+              web: this.options.web,
+            }), context.operationDeadline);
+            return hasOrgKey(selectedOrg.id, authResult.user_id!);
+          } catch {
+            // KEY_ALREADY_MINTED / KEY_MINT_IN_PROGRESS / unsafe-surface — fall
+            // through to the existing "no key on this device" remedy below.
+            return false;
+          }
+        })()
+      : afterPickupHasOrgKey;
 
-    wizard?.record({ hasOrgKey: orgKeyPresent });
+    const wizardAfterOrgKey = recordWizard(wizardAfterOrganization, { hasOrgKey: orgKeyPresent });
     if (!orgKeyPresent) {
       // The most common way this run stops, and it stops one step after the
       // browser answered a question — so the page would otherwise be told the
@@ -643,34 +1357,33 @@ export class CapyCommand {
       // Stated in fields rather than left for the message below to be mined
       // for: the remedy is a command, not a sentence that happens to contain
       // one.
-      wizard?.willBlock(
-        'redeem',
-        {
+      const blockedWizard = wizardAfterOrgKey ? blockInitWizard(wizardAfterOrgKey, 'redeem', {
           code: ERROR_CODES.AUTH_FAILED,
           title: 'This device does not hold this organization\'s key',
           detail:
             'You have access to the organization, but the shared encryption key has never been transferred to this device. An owner can send you an invite code; redeeming it moves the key here. Then run capy again in this directory.',
           remedy: 'capy redeem <code>',
-        },
-        { facts: [{ label: 'Organization', value: selectedOrg.name }] },
-      );
+        }, { facts: [{ label: 'Organization', value: selectedOrg.name }] }) : null;
       // Its own code, not AUTH_FAILED: signing in again cannot fix this, and a
       // caller that has to tell the two apart must not do it by reading the
       // sentence. The message is unchanged.
-      throw new CapyError(
+      const error = new CapyError(
         `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
         '  Ask your org owner for an invite code, then run:\n\n' +
         '    capy redeem <code>\n\n' +
         '  This will securely transfer the shared encryption key to your device.',
         ERROR_CODES.KEY_NOT_ON_DEVICE
       );
+      throw new InitWizardFlowError(error, blockedWizard);
     }
 
     // CAP-382: this machine is enrollment-aware (orgKeyPresent is true, one
     // way or another) — retry any owed key.enc upload left by a previous
     // interrupted sync. Best-effort, flag-gated, never blocks this run.
     if (deviceKeysEnabled()) {
-      await runPendingSyncBestEffort(this.deviceKeyWiringContext(authResult, selectedOrg.id));
+      await withWizard(wizardAfterOrgKey, () => runPendingSyncBestEffort(
+        this.deviceKeyWiringContext(context, authResult, selectedOrg.id),
+      ), context.operationDeadline);
 
       // Final-gate MAJOR-5: the ordinary-run on-ramp into enrollment. Only
       // fires when this machine has a local root but the account holds zero
@@ -678,30 +1391,59 @@ export class CapyCommand {
       // under --web/MCP/CI), and shown at most once per machine — see
       // maybeNudgeDeviceKeyEnrollment's own doc for the eligibility check
       // and the decline-persistence marker.
-      await maybeNudgeDeviceKeyEnrollment(this.deviceKeyWiringContext(authResult, selectedOrg.id), selectedOrg.name);
+      if (context.transport === 'hosted') {
+        const readiness = await withWizard(
+          wizardAfterOrgKey,
+          () => context.serviceClient.getSignupReadiness(selectedOrg.id),
+          context.operationDeadline,
+        );
+        if (!readiness.signup_complete) {
+          throw new InitWizardFlowError(
+            new CapyError(
+              'Hosted device-key ceremony is required before initialization can continue',
+              'INIT_HOSTED_DEVICE_CEREMONY_REQUIRED',
+            ),
+            wizardAfterOrgKey,
+          );
+        }
+      } else {
+        await withWizard(wizardAfterOrgKey, () => maybeNudgeDeviceKeyEnrollment(
+          this.deviceKeyWiringContext(context, authResult, selectedOrg.id),
+          selectedOrg.name,
+        ), context.operationDeadline);
+      }
     }
 
     // Discover existing projects in the org. If any exist, give the user the
     // choice to bootstrap one of them OR create a new project. This is the path
     // a teammate hits when cloning a repo with no committed keep.lock.
     const CREATE_NEW_PROJECT = '__create_new_project__';
-    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
     // "The lookup failed" and "this org has none" both end up as an empty list
     // here, and they are not the same fact: one walks the user into creating a
     // second project alongside one they already have. The rail says which.
-    let projectsUnavailable = false;
-    try {
-      const listSpinner = ora('Looking for existing projects...').start();
-      existingProjects = await this.serviceClient.listProjects();
-      listSpinner.stop();
-      this.debug('listProjects response', existingProjects);
-    } catch (err) {
-      this.debugError('listProjects failed', err);
-      // Network or auth issue — fall through to new-project flow
-      existingProjects = [];
-      projectsUnavailable = true;
-    }
-    wizard?.record({ projectCount: existingProjects.length, projectsUnavailable });
+    const projectLookup = await (async (): Promise<Readonly<{
+      projects: readonly Readonly<{ id: string; name: string; organization_id: string }>[];
+      unavailable: boolean;
+    }>> => {
+      try {
+        const listSpinner = ora('Looking for existing projects...').start();
+        const projects = await withWizard(
+          wizardAfterOrgKey,
+          () => context.serviceClient.listProjects(),
+          context.operationDeadline,
+        );
+        listSpinner.stop();
+        this.debug('listProjects response', projects);
+        return { projects, unavailable: false };
+      } catch (err) {
+        if (err instanceof InitWizardFlowError) throw err;
+        this.debugError('listProjects failed', err);
+        return { projects: [], unavailable: true };
+      }
+    })();
+    const existingProjects = projectLookup.projects;
+    const projectsUnavailable = projectLookup.unavailable;
+    const wizardAfterProjects = recordWizard(wizardAfterOrgKey, { projectCount: existingProjects.length, projectsUnavailable });
 
     if (existingProjects.length > 0) {
       const choices = [
@@ -712,69 +1454,105 @@ export class CapyCommand {
         })),
       ];
 
-      let projectChoice: string;
-      if (wizard) {
-        const chosen = await wizard.askProject(
-          existingProjects.map(p => ({ id: p.id, name: p.name })),
-        );
-        if (chosen === null) {
-          throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        projectChoice = chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
-      } else {
-        ({ projectChoice } = await inquirer.prompt([{
+      const choice = await askWizard(
+        wizardAfterProjects,
+        projectQuestion(existingProjects.map(p => ({ id: p.id, name: p.name }))),
+        async () => {
+          const answer = await inquirer.prompt([{
           type: 'list',
           name: 'projectChoice',
           message: 'Which project do you want to use?',
           choices,
           default: CREATE_NEW_PROJECT,
-        }]));
+          }]);
+          return String(answer.projectChoice);
+        },
+      );
+      if (choice.value === null) {
+        throw new InitWizardCancelledError(
+          choice.wizard,
+          organizationSelection.effectsStarted ? 'indeterminate' : 'none',
+        );
       }
+      const projectChoice = choice.value === 'new' ? CREATE_NEW_PROJECT : choice.value;
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
-        await this.bootstrapExistingProject(
+        await withWizard(choice.wizard, () => this.bootstrapExistingProject(
           picked,
           selectedOrg.id,
           authResult.user_id!,
-        );
-        return;
+          context,
+        ), context.operationDeadline);
+        return {
+          wizard: choice.wizard,
+          target: {
+            orgId: selectedOrg.id,
+            orgName: selectedOrg.name,
+            projectId: picked.id,
+            projectName: picked.name,
+            branch: 'development',
+          },
+          status: 'succeeded',
+        };
       }
+      return await this.initializeNewProject(
+        context,
+        authResult,
+        selectedOrg,
+        choice.wizard,
+        organizationSelection.effectsStarted,
+      );
     }
+    return await this.initializeNewProject(
+      context,
+      authResult,
+      selectedOrg,
+      wizardAfterProjects,
+      organizationSelection.effectsStarted,
+    );
+  }
 
+  private async initializeNewProject(
+    context: InitCommandContext,
+    authResult: AuthResult,
+    selectedOrg: Organization,
+    wizard: InitWizardTransport | null,
+    priorEffectsStarted = false,
+  ): Promise<InitWorkflowResult> {
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
-    let projectName: string;
-    if (wizard) {
-      // Same two refusals the TTY validator makes, in the same words — the
-      // screen holds its button on both, so either arriving here means the
-      // submit did not come from the screen.
-      const entered = await wizard.askProjectName(defaultName);
-      if (entered === null) {
-        throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
-      }
-      projectName = entered;
-    } else {
-      projectName = await this.promptEngine.promptForProjectName(defaultName);
+    const named = await askWizard(
+      wizard,
+      projectNameQuestion(defaultName),
+      () => this.promptEngine.promptForProjectName(defaultName),
+    );
+    if (named.value === null) {
+      throw new InitWizardCancelledError(
+        named.wizard,
+        priorEffectsStarted ? 'indeterminate' : 'none',
+      );
     }
+    const projectName = named.value;
+    const wizardAfterProjectName = named.wizard;
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();
-    const projectResult = await this.serviceClient.initializeProject(
+    const projectResult = await withWizard(wizardAfterProjectName, () => context.serviceClient.initializeProject(
       projectName,
-      selectedOrg.id
-    );
+      selectedOrg.id,
+    ), context.operationDeadline);
     initSpinner.succeed(`Project created: ${projectName} (development)`);
 
     const keySpinner = ora('Generating encryption keys...').start();
 
     // Derive project encryption key from master key (requires server co-decrypt)
-    const encryptionKey = await resolveProjectKey(
+    const encryptionKey = await withWizard(wizardAfterProjectName, () => resolveProjectKey(
       selectedOrg.id,
       projectResult.project_id,
       authResult.user_id!,
-      this.keyServiceOps(),
-    );
+      this.keyServiceOps(context.serviceClient),
+    ), context.operationDeadline);
 
     // Create keep file (v3 format)
     const keep: KeepFile = {
@@ -785,7 +1563,11 @@ export class CapyCommand {
       variables: {}
     };
 
-    this.fileManager.writeKeepFile(keep);
+    await withWizard(
+      wizardAfterProjectName,
+      () => this.fileManager.writeKeepFile(keep),
+      context.operationDeadline,
+    );
 
     keySpinner.succeed('keep.lock created (0 secrets)');
 
@@ -793,17 +1575,11 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
-    let initialBranchChoice: string;
-    if (wizard) {
-      // No TTY under --web: without a browser screen here, init dies one step
-      // before createBranch/writeActiveBranch and leaves a branchless project.
-      const chosen = await wizard.askBranchChoice();
-      if (chosen === null) {
-        throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
-      }
-      initialBranchChoice = chosen;
-    } else {
-      ({ initialBranchChoice } = await inquirer.prompt([{
+    const branchChoice = await askWizard(
+      wizardAfterProjectName,
+      branchChoiceQuestion(),
+      async () => {
+        const answer = await inquirer.prompt([{
         type: 'list',
         name: 'initialBranchChoice',
         message: 'What branch should this project start with?',
@@ -811,38 +1587,44 @@ export class CapyCommand {
           { name: 'development (default)', value: 'development' },
           { name: 'another branch', value: 'other' },
         ],
-      }]));
+        }]);
+        return answer.initialBranchChoice as 'development' | 'other';
+      },
+    );
+    if (branchChoice.value === null) {
+      throw new InitWizardCancelledError(branchChoice.wizard, 'indeterminate');
     }
+    const initialBranchChoice = branchChoice.value;
 
-    let initialBranchName: string;
-    if (initialBranchChoice === 'other') {
-      if (wizard) {
-        const entered = await wizard.askBranchName();
-        if (entered === null) {
-          throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        initialBranchName = entered;
-      } else {
-        const { branchName } = await inquirer.prompt([{
+    const branchName = initialBranchChoice === 'other'
+      ? await askWizard(
+        branchChoice.wizard,
+        branchNameQuestion(),
+        async () => {
+          const answer = await inquirer.prompt([{
           type: 'input',
           name: 'branchName',
           message: 'Branch name:',
           validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-        }]);
-        initialBranchName = String(branchName).trim();
-      }
-    } else {
-      initialBranchName = 'development';
+          }]);
+          return String(answer.branchName).trim();
+        },
+      )
+      : { value: 'development' as const, wizard: branchChoice.wizard };
+    if (branchName.value === null) {
+      throw new InitWizardCancelledError(branchName.wizard, 'indeterminate');
     }
+    const initialBranchName = branchName.value;
+    const wizardAfterBranch = branchName.wizard;
     const initialBranchProtected = false;
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
     try {
-      await this.serviceClient.createBranch(
+      await withWizard(wizardAfterBranch, () => context.serviceClient.createBranch(
         projectResult.project_id,
         initialBranchName,
         initialBranchProtected,
-      );
+      ), context.operationDeadline);
     } catch (err) {
       branchSpinner.fail(`Failed to create branch ${initialBranchName}`);
       throw err;
@@ -854,10 +1636,18 @@ export class CapyCommand {
     );
 
     // The initial branch is what this project is "on" locally going forward.
-    this.projectManager.writeActiveBranch(initialBranchName);
+    await withWizard(
+      wizardAfterBranch,
+      () => this.projectManager.writeActiveBranch(initialBranchName),
+      context.operationDeadline,
+    );
 
     // Update gitignore
-    this.fileManager.ensureCapyGitignore();
+    await withWizard(
+      wizardAfterBranch,
+      () => this.fileManager.ensureCapyGitignore(),
+      context.operationDeadline,
+    );
     human('> .gitignore updated (added .env, .capy/)');
 
     // Stage keep.lock in git so collaborators don't hit "untracked file" errors on pull
@@ -872,29 +1662,28 @@ export class CapyCommand {
     const hasLocalEnv = existsSync(localEnvPath);
 
     if (hasLocalEnv) {
-      const localEnv = this.fileManager.readEnvFile(this.options.envPath);
-      const localVarCount = Object.keys(localEnv).length;
+      const storedLocalEnv = this.fileManager.readEnvFile(this.options.envPath);
+      const localVarCount = Object.keys(storedLocalEnv).length;
       // The last stop stops being a blank the moment the directory is read: an
       // empty .env is a stop this run will not visit, and the rail says so
       // rather than leaving it looking outstanding.
-      wizard?.record({ localEnvCount: localVarCount });
+      const wizardAfterEnvCount = recordWizard(wizardAfterBranch, { localEnvCount: localVarCount });
 
       if (localVarCount > 0) {
         // Cross-org exfiltration guard
-        const encryptedEntries = Object.entries(localEnv)
+        const encryptedEntries = Object.entries(storedLocalEnv)
           .filter(([_, value]) => value.startsWith('capy:'));
 
-        if (encryptedEntries.length > 0) {
-          const foreignKeys: string[] = [];
-          for (const [key, value] of encryptedEntries) {
-            try {
-              this.fileManager.decryptValue(value, encryptionKey);
-            } catch {
-              foreignKeys.push(key);
-            }
+        const foreignKeys = encryptedEntries.flatMap(([key, value]) => {
+          try {
+            this.fileManager.decryptValue(value, encryptionKey);
+            return [];
+          } catch {
+            return [key];
           }
+        });
 
-          if (foreignKeys.length > 0) {
+        if (foreignKeys.length > 0) {
             console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted with a different project's key:`);
             for (const key of foreignKeys) {
               console.error(`  ${key}`);
@@ -905,29 +1694,25 @@ export class CapyCommand {
             // draws them as a list of things to go and find in a file, rather
             // than as a count inside a red sentence. Names only: these values
             // cannot be read by this key, which is the problem.
-            wizard?.willBlock(
-              'encrypt',
-              {
+            const blockedWizard = wizardAfterEnvCount ? blockInitWizard(wizardAfterEnvCount, 'encrypt', {
                 code: ERROR_CODES.PERMISSION_DENIED,
                 title: 'This .env holds values encrypted to a different project',
                 detail:
                   'These variables cannot be read with this organization\'s key, so they cannot be pushed to it. Delete the .env file, or replace those values with plaintext, and run capy again.',
                 remedy: 'capy',
-              },
-              { names: foreignKeys },
-            );
-            throw new CapyError(
+              }, { names: foreignKeys }) : null;
+            throw new InitWizardFlowError(new CapyError(
               'Cannot push secrets encrypted with a different project\'s key to a new org',
               ERROR_CODES.PERMISSION_DENIED,
               { foreignKeys }
-            );
-          }
-
-          // Values are encrypted but belong to this project — decrypt them for push
-          for (const [key, value] of encryptedEntries) {
-            localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
-          }
+            ), blockedWizard);
         }
+
+        // Values encrypted to this project are decrypted in a fresh record.
+        const localEnv = Object.fromEntries(Object.entries(storedLocalEnv).map(([key, value]) => [
+          key,
+          value.startsWith('capy:') ? this.fileManager.decryptValue(value, encryptionKey) : value,
+        ]));
 
         // Show found variables (max 5 names, "etc." for 6+)
         const varNames = Object.keys(localEnv);
@@ -947,8 +1732,13 @@ export class CapyCommand {
         // Confirm before encrypting + pushing — user may not be in the
         // right project on first setup. After this step .env is rewritten
         // with ciphertext, so getting it wrong is painful to recover from.
-        let confirmEncrypt: boolean;
-        if (wizard) {
+        const consent = await askWizard(
+          wizardAfterEnvCount,
+          encryptQuestion(
+            { count: localVarCount, names: varNames },
+            { projectName, orgName: selectedOrg.name, branch: initBranch },
+          ),
+          async () => {
           // NAMES and a count reach the page — never a value, and not even a
           // snippet of one. The whole question this stop asks is whether these
           // may stop being plaintext, and showing more than the terminal shows
@@ -956,110 +1746,49 @@ export class CapyCommand {
           //
           // A closed window is a "no": `askEncrypt` resolves false on cancel,
           // which is the same thing `chosen === 'yes'` already meant.
-          confirmEncrypt = await wizard.askEncrypt(
-            { count: localVarCount, names: varNames },
-            { projectName, orgName: selectedOrg.name, branch: initBranch },
-          );
-        } else {
-          ({ confirmEncrypt } = await inquirer.prompt([{
+          const answer = await inquirer.prompt([{
             type: 'confirm',
             name: 'confirmEncrypt',
             message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
             default: true,
-          }]));
-        }
+          }]);
+          return answer.confirmEncrypt === true;
+        },
+      );
+        const confirmEncrypt = consent.value === true;
 
         if (!confirmEncrypt) {
           human(`\nSkipped. Your .env was not modified.`);
           human(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
-          return;
+          return {
+            wizard: consent.wizard,
+            target: {
+              orgId: selectedOrg.id,
+              orgName: selectedOrg.name,
+              projectId: projectResult.project_id,
+              projectName,
+              branch: initBranch,
+            },
+            status: 'cancelled',
+          };
         }
 
         const syncSpinner = ora('Syncing local variables...').start();
 
-        // What this actually got done, for the report a failure has to make.
-        // Read off the writes themselves rather than inferred afterwards: the
-        // three facts that matter are whether the values reached Keep, whether
-        // the plaintext copy was kept, and whether the .env in this directory
-        // is now ciphertext — and the third one is the reason this cannot be
-        // answered by looking at the error.
-        let pushedToKeep = false;
-        let backupWritten = false;
-        let envRewritten = false;
-
-        try {
-          const { createHash } = await import('crypto');
-          const { deriveResourceId } = await import('../crypto/resourceId');
-          const { Encryptor } = await import('../crypto/encryptor');
-
-          // Build encrypted env blob and keep.lock hashes
-          const encrypted: Record<string, string> = {};
-          const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-          for (const [key, value] of Object.entries(localEnv)) {
-            const resourceId = deriveResourceId(initBranch, key);
-            const enc = Encryptor.encrypt(value, encryptionKey);
-            encrypted[key] = `capy:${resourceId}:${enc}`;
-            pushedVars[key] = {
-              resource_id: resourceId,
-              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-            };
-          }
-
-          const envBlob = Object.entries(encrypted)
-            .map(([k, v]) => `${k}=${v}`)
-            .join('\n');
-
-          const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
-          const keepJson = JSON.stringify(updatedKeep);
-
-          const initPushResult = await this.serviceClient.pushSecrets(
-            projectResult.project_id,
-            keepJson,
-            envBlob,
-            initBranch,
-          );
-          pushedToKeep = true;
-
-          // Prefer the server's copy — it carries server-assigned changed_at
-          this.fileManager.writeKeepFile(
-            SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep, initBranch),
-          );
-
-          // Cache encrypted blob locally
-          const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
-          writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
-
-          this.fileManager.writeSyncState({
-            last_sync: new Date().toISOString(),
-            synced_variables: Object.keys(localEnv),
-            user_id: authResult.user_id,
-            keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
-          });
-
-          // Backup plaintext .env before encrypting
-          this.fileManager.backupPlaintextEnv(this.options.envPath);
-          backupWritten = true;
-
-          // Encrypt the local .env file
-          this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
-          envRewritten = true;
-
-          syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
-
-          // The freshly created pin only reaches teammates once committed —
-          // this is how "main was never committed" incidents start.
-          const { autoCommitKeep } = await import('../git/autoCommitKeep');
-          autoCommitKeep(initBranch);
-
-          // Install git hooks
-          this.installGitHooks();
-
-          human(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
-          human(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
-          human(`See: https://docs.capy.sc/using/running-your-app`);
-          human(`\nRun ${B('capy push')} to share your secrets with teammates.`);
-        } catch (syncError: any) {
-          syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
+        const syncResult = await withWizard(consent.wizard, () => this.syncInitialEnvironment({
+          context,
+          authResult,
+          encryptionKey,
+          initBranch,
+          keep,
+          localEnv,
+          localVarCount,
+          projectResult,
+        }), context.operationDeadline);
+        if (!syncResult.ok) {
+          const syncError = syncResult.error;
+          const reason = syncError instanceof Error && syncError.message ? syncError.message : 'The push failed.';
+          syncSpinner.fail(`Failed to sync variables: ${reason}`);
           human(`You can run ${B('capy')} again to retry syncing`);
           // This is the one failure that happens after the last question, and
           // the terminal path swallows it and carries on — which under --web
@@ -1068,29 +1797,174 @@ export class CapyCommand {
           // same three facts the terminal cannot state: whether the values
           // reached Keep, whether the plaintext copy was kept, and whether the
           // .env in this directory is ciphertext now.
-          await wizard?.reportEncryptFailure({
+          const failure = {
             code: syncError instanceof CapyError ? syncError.code : ERROR_CODES.SERVICE_ERROR,
-            reason: syncError?.message ? String(syncError.message) : 'The push failed.',
-            envRewritten,
-            backupWritten,
-            pushed: pushedToKeep,
-          });
+            reason,
+            ...syncResult.effects,
+          };
+          if (consent.wizard) throw new InitWizardPostConsentError(failure, consent.wizard);
+          return {
+            wizard: null,
+            target: {
+              orgId: selectedOrg.id,
+              orgName: selectedOrg.name,
+              projectId: projectResult.project_id,
+              projectName,
+              branch: initBranch,
+            },
+            status: 'failed-after-consent',
+          };
         }
+        syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
+        return {
+          wizard: consent.wizard,
+          target: {
+            orgId: selectedOrg.id,
+            orgName: selectedOrg.name,
+            projectId: projectResult.project_id,
+            projectName,
+            branch: initBranch,
+          },
+          status: 'succeeded',
+        };
       } else {
         human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
         human('to share them with your team.');
 
         // Install git hooks
         this.installGitHooks();
+        return {
+          wizard: wizardAfterEnvCount,
+          target: {
+            orgId: selectedOrg.id,
+            orgName: selectedOrg.name,
+            projectId: projectResult.project_id,
+            projectName,
+            branch: initialBranchName,
+          },
+          status: 'succeeded',
+        };
       }
     } else {
-      wizard?.record({ localEnvCount: 0 });
+      const wizardWithoutEnv = recordWizard(wizardAfterBranch, { localEnvCount: 0 });
       human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
       human('to share them with your team.');
 
       // Install git hooks
       this.installGitHooks();
+      return {
+        wizard: wizardWithoutEnv,
+        target: {
+          orgId: selectedOrg.id,
+          orgName: selectedOrg.name,
+          projectId: projectResult.project_id,
+          projectName,
+          branch: initialBranchName,
+        },
+        status: 'succeeded',
+      };
     }
+  }
+
+  private async syncInitialEnvironment(input: Readonly<{
+    context: InitCommandContext;
+    authResult: AuthResult;
+    encryptionKey: string;
+    initBranch: string;
+    keep: KeepFile;
+    localEnv: Readonly<Record<string, string>>;
+    localVarCount: number;
+    projectResult: Readonly<{ org_id: string; project_id: string }>;
+  }>): Promise<Readonly<
+    | { ok: true }
+    | {
+      ok: false;
+      error: unknown;
+      effects: Readonly<{ pushed: boolean; backupWritten: boolean; envRewritten: boolean }>;
+    }
+  >> {
+    const prepared = await capture(async () => {
+      const { createHash } = await import('crypto');
+      const { deriveResourceId } = await import('../crypto/resourceId');
+      const { Encryptor } = await import('../crypto/encryptor');
+      const encryptedRows = Object.entries(input.localEnv).map(([key, value]) => {
+        const resourceId = deriveResourceId(input.initBranch, key);
+        return {
+          key,
+          encrypted: `capy:${resourceId}:${Encryptor.encrypt(value, input.encryptionKey)}`,
+          metadata: {
+            resource_id: resourceId,
+            value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+          },
+        } as const;
+      });
+      const encrypted = Object.fromEntries(encryptedRows.map((row) => [row.key, row.encrypted]));
+      const pushedVars = Object.fromEntries(encryptedRows.map((row) => [row.key, row.metadata]));
+      const envBlob = Object.entries(encrypted).map(([key, value]) => `${key}=${value}`).join('\n');
+      const updatedKeep = this.syncEngine.mergeWithKeep(input.keep, pushedVars, input.initBranch);
+      return { envBlob, updatedKeep };
+    });
+    if (!prepared.ok) {
+      return { ok: false, error: prepared.error, effects: { pushed: false, backupWritten: false, envRewritten: false } };
+    }
+
+    const pushed = await capture(() => input.context.serviceClient.pushSecrets(
+      input.projectResult.project_id,
+      JSON.stringify(prepared.value.updatedKeep),
+      prepared.value.envBlob,
+      input.initBranch,
+    ));
+    if (!pushed.ok) {
+      return { ok: false, error: pushed.error, effects: { pushed: false, backupWritten: false, envRewritten: false } };
+    }
+
+    const localMetadata = await capture(() => {
+      this.fileManager.writeKeepFile(
+        SyncEngine.adoptServerKeep(pushed.value.keep_file, prepared.value.updatedKeep, input.initBranch),
+      );
+      const initKeepHash = SyncEngine.computeKeepHash(prepared.value.updatedKeep, input.initBranch);
+      writeKeepCache(input.projectResult.org_id, input.projectResult.project_id, initKeepHash, prepared.value.envBlob);
+      this.fileManager.writeSyncState({
+        last_sync: new Date().toISOString(),
+        synced_variables: Object.keys(input.localEnv),
+        user_id: input.authResult.user_id,
+        keep_hash: setSyncKeepHash(null, input.initBranch, initKeepHash),
+      });
+    });
+    if (!localMetadata.ok) {
+      return { ok: false, error: localMetadata.error, effects: { pushed: true, backupWritten: false, envRewritten: false } };
+    }
+
+    const backup = await capture(() => this.fileManager.backupPlaintextEnv(this.options.envPath));
+    if (!backup.ok) {
+      return { ok: false, error: backup.error, effects: { pushed: true, backupWritten: false, envRewritten: false } };
+    }
+
+    const rewritten = await capture(() => {
+      this.fileManager.writeEncryptedEnvFile(
+        { ...input.localEnv },
+        input.encryptionKey,
+        undefined,
+        prepared.value.updatedKeep,
+        input.initBranch,
+      );
+    });
+    if (!rewritten.ok) {
+      return { ok: false, error: rewritten.error, effects: { pushed: true, backupWritten: true, envRewritten: false } };
+    }
+
+    const localFinish = await capture(async () => {
+      const { autoCommitKeep } = await import('../git/autoCommitKeep');
+      autoCommitKeep(input.initBranch);
+      this.installGitHooks();
+      human(`\nYour .env is now encrypted. To run your app with decrypted secrets,`);
+      human(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
+      human(`See: https://docs.capy.sc/using/running-your-app`);
+      human(`\nRun ${B('capy push')} to share your secrets with teammates.`);
+    });
+    return localFinish.ok
+      ? { ok: true }
+      : { ok: false, error: localFinish.error, effects: { pushed: true, backupWritten: true, envRewritten: true } };
   }
 
   /**
@@ -1106,15 +1980,21 @@ export class CapyCommand {
     project: { id: string; name: string; organization_id: string },
     orgId: string,
     userId: string,
+    context: InitCommandContext = {
+      transport: 'local',
+      operationDeadline: null,
+      authService: this.authService,
+      serviceClient: this.serviceClient,
+    },
   ): Promise<void> {
     const branch = 'development';
-    const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps());
+    const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps(context.serviceClient));
 
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
 
     const decryptData = await (async () => {
       try {
-        return await this.serviceClient.getDecryptData(
+        return await context.serviceClient.getDecryptData(
           project.id,
           branch,
           undefined, // ask for latest
@@ -2388,14 +3268,21 @@ export class CapyCommand {
   }
 
   private async createNewOrganization(
+    context: InitCommandContext,
     refreshToken: string,
     userId: string,
     deviceKeyEnrollment?: DeviceKeyEnrollmentOptions,
   ): Promise<Organization> {
+    if (context.transport === 'hosted') {
+      throw new CapyError(
+        'Hosted organization ceremony is not available in this build',
+        'INIT_HOSTED_ORGANIZATION_CEREMONY_REQUIRED',
+      );
+    }
     const { createNewOrganization } = await import('./orgCreation');
     return createNewOrganization(
-      this.authService,
-      this.serviceClient,
+      context.authService,
+      context.serviceClient,
       refreshToken,
       userId,
       this.options.web,
@@ -2404,10 +3291,14 @@ export class CapyCommand {
   }
 
   /** Shared context the device-key wiring (CAP-382) builds ceremony deps from. */
-  private deviceKeyWiringContext(authResult: AuthResult, activeOrgId?: string | null): DeviceKeyWiringContext {
+  private deviceKeyWiringContext(
+    context: InitCommandContext,
+    authResult: AuthResult,
+    activeOrgId?: string | null,
+  ): DeviceKeyWiringContext {
     return {
-      authService: this.authService,
-      serviceClient: this.serviceClient,
+      authService: context.authService,
+      serviceClient: context.serviceClient,
       devMode: this.devMode,
       userId: authResult.user_id!,
       userEmail: authResult.user_email,

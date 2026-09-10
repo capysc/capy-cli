@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "files": [
+    {
+      "output": "src/auth/initRunContract.ts",
+      "source": "service/src/initRuns/contract.ts",
+      "sha256": "6c58469bdb3d019877bc0d2d6e2e0a68b12dab88308b3f0f10a4c97685a58757"
+    },
+    {
+      "output": "tests/fixtures/initRunContract.corpus.json",
+      "source": "service/src/initRuns/contract.corpus.json",
+      "sha256": "0dfab19303d0e5c5c8c952e3cb272dc786f45d8df7f5d3493f3021cdc0c57fe5"
+    },
+    {
+      "output": "scripts/sync-init-run-contract.ts",
+      "source": "scripts/sync-init-run-contract.ts",
+      "sha256": "c2d6ff8dab2590901331c6eed6da42d954048e59dc71341802792f2ad4f48a76"
+    }
+  ]
+}

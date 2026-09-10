@@ -1,23 +1,13 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { createHash, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import { URL } from 'url';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { openScreen } from '../ui/openScreen';
 import { renderScreen, screenHeaders } from '../ui/screens/serve';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
+import { generatePKCE } from './pkce';
 
 const CALLBACK_PORTS = [19420, 19421, 19422, 19423, 19424];
-
-/**
- * Generate a PKCE code verifier and S256 code challenge.
- * The verifier stays on the CLI; only the challenge is sent to the server.
- */
-function generatePKCE(): { codeVerifier: string; codeChallenge: string } {
-  // RFC 7636: 43-128 unreserved characters
-  const codeVerifier = randomBytes(32).toString('base64url');
-  const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
-  return { codeVerifier, codeChallenge };
-}
 
 /**
  * How a deferred callback response is finally answered (CAPY_KEEP_SCREENS).

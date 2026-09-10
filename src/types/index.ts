@@ -290,6 +290,8 @@ export interface CliOptions {
    *  in a local browser instead of TTY prompts. Lazy: the browser only opens when an
    *  interactive decision is actually reached (a clean sync stays terminal-only). */
   web?: boolean;
+  /** Account identity supplied by an authenticated hosted launcher. */
+  readonly expectedUserId?: string;
 }
 
 export interface ProjectInitResult {

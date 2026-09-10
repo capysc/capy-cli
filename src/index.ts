@@ -53,6 +53,7 @@ program
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
   .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a local browser instead of TTY prompts')
+  .option('--expected-user-id <id>', 'require the account bound by the hosted launcher')
   // Record `--web` once, before any handler runs, for the code that has no way
   // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
   // resolver, a service client, a crypto path — none of which is handed the
@@ -99,7 +100,8 @@ program
       verbose: options.verbose,
       force: options.force,
       dryRun: options.dryRun,
-      web: options.web
+      web: options.web,
+      expectedUserId: options.expectedUserId,
     };
 
     const command = new CapyCommand(cliOptions);

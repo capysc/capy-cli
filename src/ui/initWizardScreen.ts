@@ -36,6 +36,7 @@ import { runBrowserWizard, type WizardDecision } from './browserWizard';
 import { renderScreen } from './screens/serve';
 import { initWizardPlan, type InitWizardInput } from '../core/initWizardPlan';
 import { CapyError, ERROR_CODES } from '../types';
+import type { InitQuestion } from './initWizardQuestions';
 import type {
   Blocked,
   InitEncryptFailure,
@@ -63,26 +64,26 @@ export const CREATE_NEW_PROJECT = '__create_new_project__';
 
 /** Everything one render of the wizard needs: which step, and the run so far. */
 export interface InitWizardView {
-  step: InitStep;
+  readonly step: InitStep;
   /** What has been answered and discovered. The rail is derived from this. */
-  input: InitWizardInput;
-  orgs?: InitOrg[];
-  projects?: InitProject[];
-  projectsUnavailable?: boolean;
-  localEnv?: InitLocalEnv;
-  target?: InitTarget;
+  readonly input: Readonly<InitWizardInput>;
+  readonly orgs?: readonly Readonly<InitOrg>[];
+  readonly projects?: readonly Readonly<InitProject>[];
+  readonly projectsUnavailable?: boolean;
+  readonly localEnv?: Readonly<{ count: number; names: readonly string[] }>;
+  readonly target?: Readonly<InitTarget>;
   /** Prefill for a text step — the directory-derived default project name. */
-  value?: string;
+  readonly value?: string;
   /** Why the previous answer was refused, in the CLI's own words. */
-  rejected?: string;
+  readonly rejected?: string;
   /** The run cannot go past this stop. Replaces the question with the reason. */
-  blocked?: Blocked;
+  readonly blocked?: Blocked;
   /** Identifiers the block is about — the variables under a foreign key. */
-  blockedNames?: string[];
+  readonly blockedNames?: readonly string[];
   /** Labelled singletons the block is about — the organization, the branch. */
-  blockedFacts?: { label: string; value: string }[];
+  readonly blockedFacts?: readonly { readonly label: string; readonly value: string }[];
   /** Consent was given and the push failed. What it had done by then. */
-  encryptFailure?: InitEncryptFailure;
+  readonly encryptFailure?: InitEncryptFailure;
 }
 
 /**
@@ -134,49 +135,60 @@ const NON_TTY: Record<InitStep, { command: string; why: string }> = {
 };
 
 export function buildInitWizardData(v: InitWizardView, nonce: string): InitWizardData {
-  const data: InitWizardData = {
+  const base: InitWizardData = {
     nonce,
     step: v.step,
-    stops: initWizardPlan(v.input),
+    stops: initWizardPlan({ ...v.input }),
     nonTty: NON_TTY[v.step],
   };
-
-  if (v.orgs) data.orgs = v.orgs.map((o) => ({ ...o, name: stripAnsi(o.name) }));
-  if (v.projects) data.projects = v.projects.map((p) => ({ ...p, name: stripAnsi(p.name) }));
-  if (v.projectsUnavailable) data.projectsUnavailable = true;
-  if (v.localEnv) {
-    // Names, and a count. Never a value, and never a snippet of one: this is
-    // the payload of the page that asks whether these may be encrypted at all.
-    data.localEnv = { count: v.localEnv.count, names: v.localEnv.names.map(stripAnsi) };
-  }
-  if (v.target) {
-    data.target = {
-      projectName: stripAnsi(v.target.projectName),
-      orgName: stripAnsi(v.target.orgName),
-      branch: stripAnsi(v.target.branch),
-    };
-  }
-  if (v.value !== undefined) data.value = stripAnsi(v.value);
-  if (v.rejected !== undefined) data.rejected = v.rejected;
-  if (v.blocked) {
-    // `detail` is prose the CLI also prints, and printing is where the bold
-    // comes from. An escape that renders as `[1m` in a browser turns the one
-    // sentence explaining why a run stopped into gibberish.
-    data.blocked = {
-      ...v.blocked,
-      title: stripAnsi(v.blocked.title),
-      detail: stripAnsi(v.blocked.detail),
-      ...(v.blocked.remedy === undefined ? {} : { remedy: stripAnsi(v.blocked.remedy) }),
-    };
-  }
-  if (v.blockedNames?.length) data.blockedNames = v.blockedNames.map(stripAnsi);
-  if (v.blockedFacts?.length) {
-    data.blockedFacts = v.blockedFacts.map((f) => ({ label: f.label, value: stripAnsi(f.value) }));
-  }
-  if (v.encryptFailure) {
-    data.encryptFailure = { ...v.encryptFailure, reason: stripAnsi(v.encryptFailure.reason) };
-  }
-  return data;
+  return {
+    ...base,
+    ...(v.orgs === undefined ? {} : { orgs: v.orgs.map(org => ({ ...org, name: stripAnsi(org.name) })) }),
+    ...(v.projects === undefined
+      ? {}
+      : { projects: v.projects.map(project => ({ ...project, name: stripAnsi(project.name) })) }),
+    ...(v.projectsUnavailable ? { projectsUnavailable: true } : {}),
+    ...(v.localEnv === undefined
+      ? {}
+      : {
+          // Names, and a count. Never a value, and never a snippet of one:
+          // this is the payload of the page that asks whether these may be
+          // encrypted at all.
+          localEnv: { count: v.localEnv.count, names: v.localEnv.names.map(stripAnsi) },
+        }),
+    ...(v.target === undefined
+      ? {}
+      : {
+          target: {
+            projectName: stripAnsi(v.target.projectName),
+            orgName: stripAnsi(v.target.orgName),
+            branch: stripAnsi(v.target.branch),
+          },
+        }),
+    ...(v.value === undefined ? {} : { value: stripAnsi(v.value) }),
+    ...(v.rejected === undefined ? {} : { rejected: v.rejected }),
+    ...(v.blocked === undefined
+      ? {}
+      : {
+          // `detail` is prose the CLI also prints, and printing is where the
+          // bold comes from. An escape that renders as `[1m` in a browser
+          // turns the one sentence explaining why a run stopped into
+          // gibberish.
+          blocked: {
+            ...v.blocked,
+            title: stripAnsi(v.blocked.title),
+            detail: stripAnsi(v.blocked.detail),
+            ...(v.blocked.remedy === undefined ? {} : { remedy: stripAnsi(v.blocked.remedy) }),
+          },
+        }),
+    ...(v.blockedNames?.length ? { blockedNames: v.blockedNames.map(stripAnsi) } : {}),
+    ...(v.blockedFacts?.length
+      ? { blockedFacts: v.blockedFacts.map(fact => ({ label: fact.label, value: stripAnsi(fact.value) })) }
+      : {}),
+    ...(v.encryptFailure === undefined
+      ? {}
+      : { encryptFailure: { ...v.encryptFailure, reason: stripAnsi(v.encryptFailure.reason) } }),
+  };
 }
 
 /**
@@ -212,17 +224,7 @@ export function blockedFromError(err: unknown): Blocked {
  * screen holds its button on both, so either arriving over the wire means the
  * submit did not come from the screen.
  */
-export function projectNameProblem(name: string): string | undefined {
-  const trimmed = name.trim();
-  if (trimmed.length === 0) return 'Project name cannot be empty';
-  if (!/^[a-zA-Z0-9-_]+$/.test(trimmed)) {
-    return 'Project name can only contain letters, numbers, hyphens, and underscores';
-  }
-  return undefined;
-}
-
-/** A step's verdict: refuse inline, or take the answer. */
-type Verdict<T> = { error: string } | { value: T };
+export { initProjectNameProblem as projectNameProblem } from './initWizardQuestions';
 
 export interface InitWizardOptions {
   /** Open the browser automatically (false in tests; the URL is still printed). */
@@ -255,346 +257,257 @@ export interface InitWizardOptions {
  * NO, which is the same thing `confirmEncrypt = chosen === 'yes'` already
  * meant. Nothing here ever turns silence into agreement.
  */
+type InitWizardAnswer<T> = Readonly<{
+  value: T | null;
+  record: Readonly<Partial<InitWizardInput>>;
+  terminal: boolean;
+}>;
+type InitDeferred<T> = Readonly<{
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+}>;
+
+type InitWizardTerminal = Readonly<{ kind: 'terminal'; decision: WizardDecision }>;
+type InitWizardContinuation = InitWizardQuestionNode | InitWizardTerminal;
+type InitWizardQuestionNode = Readonly<{
+  index: number;
+  question: InitQuestion<unknown>;
+  view: InitWizardView;
+  answer: InitDeferred<InitWizardAnswer<unknown>>;
+  next: InitDeferred<InitWizardContinuation>;
+}>;
+type InitWizardChannel = Readonly<{
+  wizard: Promise<unknown>;
+  nonce: Promise<string>;
+  failure: InitDeferred<unknown>;
+}>;
+type InitWizardBlock = Readonly<{
+  step: InitStep;
+  view: Omit<InitWizardView, 'input' | 'step'>;
+}>;
+type InitWizardState = Readonly<{
+  input: InitWizardInput;
+  channel?: InitWizardChannel;
+  last?: InitWizardQuestionNode;
+  block?: InitWizardBlock;
+  terminal: boolean;
+}>;
+
+const initialState = (): InitWizardState => ({ input: {}, terminal: false });
+
+const deferred = <T>(): InitDeferred<T> => Promise.withResolvers<T>();
+
+const nodeFor = <T>(question: InitQuestion<T>, input: InitWizardInput, index: number): InitWizardQuestionNode => ({
+  index,
+  question: question as InitQuestion<unknown>,
+  view: { ...question.view, input },
+  answer: deferred<InitWizardAnswer<unknown>>(),
+  next: deferred<InitWizardContinuation>(),
+});
+
+const renderNode = (node: InitWizardQuestionNode, nonce: string): string =>
+  renderScreen('init-wizard', buildInitWizardData(node.view, nonce));
+
+const followNode = async (
+  node: InitWizardQuestionNode,
+  payload: Record<string, unknown>,
+  nonce: Promise<string>,
+): Promise<WizardDecision> => {
+  if (payload.__action === 'cancel') {
+    node.answer.resolve({ value: null, record: {}, terminal: true });
+    return { done: true, result: { cancelled: true } };
+  }
+  const verdict = node.question.decide(payload);
+  if ('error' in verdict) return verdict;
+  node.answer.resolve({ value: verdict.value, record: verdict.record, terminal: false });
+  const continuation = await node.next.promise;
+  if ('kind' in continuation) return continuation.decision;
+  return {
+    screen: { html: renderNode(continuation, await nonce), standalone: true },
+  };
+};
+
+const nodeAt = async (node: InitWizardQuestionNode, index: number): Promise<InitWizardQuestionNode> => {
+  if (node.index === index) return node;
+  const continuation = await node.next.promise;
+  if ('kind' in continuation) {
+    throw new CapyError('The setup window has already closed.', ERROR_CODES.SERVICE_ERROR);
+  }
+  return nodeAt(continuation, index);
+};
+
+const startChannel = (first: InitWizardQuestionNode, options: InitWizardOptions): InitWizardChannel => {
+  const nonce = deferred<string>();
+  const failure = deferred<unknown>();
+  const wizard = runBrowserWizard(
+    {
+      title: 'Set up this directory',
+      flow: 'init',
+      firstScreen: { html: '', standalone: true },
+      open: options.open ?? true,
+      onListen: options.onListen,
+      timeoutMs: options.timeoutMs,
+      finalGraceMs: options.finalGraceMs,
+      doneMessage: 'Set up — back to your terminal.',
+      renderFirst: value => {
+        nonce.resolve(value);
+        return renderNode(first, value);
+      },
+    },
+    async (step, payload) => followNode(await nodeAt(first, step), payload, nonce.promise),
+  );
+  void wizard.then(
+    () => undefined,
+    error => failure.resolve(error),
+  );
+  return { wizard, nonce: nonce.promise, failure };
+};
+
+const answerOrFailure = async <T>(
+  node: InitWizardQuestionNode,
+  channel: InitWizardChannel,
+): Promise<InitWizardAnswer<T>> => {
+  const result = await Promise.race([
+    node.answer.promise.then(answer => ({ kind: 'answer' as const, answer })),
+    channel.failure.promise.then(error => ({ kind: 'failure' as const, error })),
+  ]);
+  if (result.kind === 'failure') throw result.error;
+  return result.answer as InitWizardAnswer<T>;
+};
+
+const terminalSession = (state: InitWizardState): InitWizardState => ({ ...state, terminal: true });
+
+const encryptContext = (node: InitWizardQuestionNode | undefined): Omit<InitWizardView, 'input' | 'step'> => {
+  if (node?.view.step !== 'encrypt') return {};
+  return {
+    ...(node.view.localEnv === undefined ? {} : { localEnv: node.view.localEnv }),
+    ...(node.view.target === undefined ? {} : { target: node.view.target }),
+  };
+};
+
+/**
+ * One browser window, held open across the CLI's first run.
+ *
+ * The session is a persistent immutable value. Each question returns the next
+ * session with the accepted record folded in; while the CLI does its work, the
+ * browser's answer POST waits on that next value's linked successor node.
+ */
 export class InitWizardSession {
-  private nonce = '';
-  private wizard: Promise<unknown> | null = null;
-  private pending: {
-    view: InitWizardView;
-    decide: (payload: Record<string, unknown>) => Verdict<unknown>;
-    resolve: (value: unknown) => void;
-    reject: (err: unknown) => void;
-  } | null = null;
-  /** Releases the POST the reducer is holding open, once there is a next step. */
-  private handoff: ((d: WizardDecision) => void) | null = null;
-  private input: InitWizardInput = {};
-  private ended = false;
-  /** True once the wizard promise has settled, however it settled. */
-  private settled = false;
-  /** The stop the browser is on. What a blocked page redraws itself as. */
-  private step: InitStep = 'organization';
-  /** Declared by the call site that is about to throw. See `willBlock`. */
-  private block: { step: InitStep; view: Omit<InitWizardView, 'input' | 'step'> } | null = null;
-  /** What the consent gate was asked ABOUT, for the page a failure redraws. */
-  private encryptView: { localEnv: InitLocalEnv; target: InitTarget } | null = null;
+  constructor(
+    private readonly options: InitWizardOptions = {},
+    private readonly state: InitWizardState = initialState(),
+  ) {}
 
-  constructor(private opts: InitWizardOptions = {}) {}
-
-  /** Fold a fact or an answer into the run, so the rail redraws from one place. */
-  record(patch: Partial<InitWizardInput>): void {
-    this.input = { ...this.input, ...patch };
+  /** Fold a fact into the run so the rail redraws from one immutable input. */
+  record(patch: Readonly<Partial<InitWizardInput>>): InitWizardSession {
+    return new InitWizardSession(this.options, {
+      ...this.state,
+      input: { ...this.state.input, ...patch },
+    });
   }
 
-  /**
-   * State, in fields, why the run is about to stop.
-   *
-   * Called immediately before the `throw`, by the one caller that knows what
-   * the condition IS: which stop it belongs to, the code behind it, and the
-   * command that clears it. Without this the browser gets `abort`'s generic
-   * page, which can carry the error's code and its sentence and cannot invent
-   * a remedy out of prose — see `blockedFromError`.
-   */
+  /** State why the caller is about to stop before it throws. */
   willBlock(
     step: InitStep,
     blocked: Blocked,
-    extra: { names?: string[]; facts?: { label: string; value: string }[] } = {},
-  ): void {
-    this.block = {
-      step,
-      view: { blocked, blockedNames: extra.names, blockedFacts: extra.facts },
+    extra: Readonly<{ names?: readonly string[]; facts?: readonly { readonly label: string; readonly value: string }[] }> = {},
+  ): InitWizardSession {
+    return new InitWizardSession(this.options, {
+      ...this.state,
+      block: {
+        step,
+        view: {
+          blocked,
+          ...(extra.names === undefined ? {} : { blockedNames: [...extra.names] }),
+          ...(extra.facts === undefined ? {} : { blockedFacts: extra.facts.map(fact => ({ ...fact })) }),
+        },
+      },
+    });
+  }
+
+  async askQuestion<T>(question: InitQuestion<T>): Promise<Readonly<{ value: T | null; session: InitWizardSession }>> {
+    if (this.state.terminal) {
+      throw new CapyError('The setup window has already closed.', ERROR_CODES.SERVICE_ERROR);
+    }
+    const node = nodeFor(question, this.state.input, (this.state.last?.index ?? -1) + 1);
+    const channel = this.state.channel ?? startChannel(node, this.options);
+    this.state.last?.next.resolve(node);
+    const answer = await answerOrFailure<T>(node, channel);
+    return {
+      value: answer.value,
+      session: new InitWizardSession(this.options, {
+        ...this.state,
+        channel,
+        last: node,
+        input: { ...this.state.input, ...answer.record },
+        terminal: answer.terminal,
+      }),
     };
   }
 
-  private render(view: InitWizardView): string {
-    return renderScreen('init-wizard', buildInitWizardData({ ...view, input: this.input }, this.nonce));
+  /** Nothing more will be asked: release the held POST and finish the browser flow. */
+  async finish(): Promise<InitWizardSession> {
+    return this.end({ done: true, result: { cancelled: false } });
   }
 
-  private async ask<T>(
-    view: Omit<InitWizardView, 'input'>,
-    decide: (payload: Record<string, unknown>) => Verdict<T>,
-  ): Promise<T | null> {
-    if (this.ended) {
-      // A code, not a bare Error: this reaches the same handler every other
-      // failure does, and "the window closed" is a thing callers may want to
-      // tell apart from a service that refused them.
-      throw new CapyError('The setup window has already closed.', ERROR_CODES.SERVICE_ERROR);
-    }
-    this.step = view.step;
-    const full: InitWizardView = { ...view, input: this.input };
-
-    const answer = new Promise<T | null>((resolve, reject) => {
-      this.pending = {
-        view: full,
-        decide: decide as (p: Record<string, unknown>) => Verdict<unknown>,
-        resolve: resolve as (v: unknown) => void,
-        reject,
-      };
-    });
-
-    if (!this.wizard) {
-      this.wizard = runBrowserWizard(
-        {
-          title: 'Set up this directory',
-          flow: 'init',
-          // Rendered per-request so the nonce the page echoes is the one this
-          // server minted. `standalone` because a compiled screen is a whole
-          // document and cannot be dropped into the wizard shell.
-          firstScreen: { html: '', standalone: true },
-          open: this.opts.open ?? true,
-          onListen: this.opts.onListen,
-          timeoutMs: this.opts.timeoutMs,
-          finalGraceMs: this.opts.finalGraceMs,
-          doneMessage: 'Set up — back to your terminal.',
-          renderFirst: (n) => {
-            this.nonce = n;
-            return this.render(this.pending!.view);
-          },
-        },
-        async (_step, payload) => this.onSubmit(payload),
-      );
-      // A window that times out, or a Ctrl+C, must not leave the CLI waiting on
-      // an answer that can no longer arrive.
-      this.wizard.catch((err) => {
-        this.ended = true;
-        const p = this.pending;
-        this.pending = null;
-        p?.reject(err);
-      });
-      // Whether the window is still there decides whether an ending has
-      // anywhere to be delivered — see `end`.
-      void this.wizard.then(
-        () => (this.settled = true),
-        () => (this.settled = true),
-      );
-    } else {
-      // The reducer is holding the previous answer's POST open. Releasing it
-      // with this step is what makes the browser reload into it.
-      this.release({ screen: { html: this.render(full), standalone: true } });
-    }
-
-    return answer;
-  }
-
-  private release(decision: WizardDecision): void {
-    const h = this.handoff;
-    this.handoff = null;
-    h?.(decision);
-  }
-
-  private onSubmit(payload: Record<string, unknown>): Promise<WizardDecision> | WizardDecision {
-    const p = this.pending;
-    if (!p) {
-      // Nothing is outstanding, so no step asked this. Refusing keeps a stray
-      // submit from answering a question the CLI never put.
-      return { error: 'There is nothing left to answer on this run.' };
-    }
-
-    if (payload.__action === 'cancel') {
-      this.pending = null;
-      this.ended = true;
-      p.resolve(null);
-      return { done: true, result: { cancelled: true } };
-    }
-
-    const verdict = p.decide(payload);
-    // An inline refusal keeps the user on the step with the reason on screen,
-    // rather than applying a guess: an answer the screen could not have
-    // produced did not come from the screen.
-    if ('error' in verdict) return verdict;
-
-    this.pending = null;
-    p.resolve(verdict.value);
-    // Hold this POST until the CLI reaches its next question — or finishes.
-    return new Promise<WizardDecision>((resolve) => {
-      this.handoff = resolve;
-    });
-  }
-
-  // -------------------------------------------------------------------------
-  // the six questions, in the order `initializeProject` asks them
-  // -------------------------------------------------------------------------
-
-  /** `Select organization for project:` — or the "create new" row. */
-  async askOrganization(orgs: InitOrg[]): Promise<string | 'create' | null> {
-    return this.ask<string | 'create'>({ step: 'organization', orgs }, (payload) => {
-      if (payload.createOrganization === true) {
-        // The name is not known yet — `capy` asks for it in the org-creation
-        // flow that follows — so the fork is recorded and the name is not.
-        this.record({ organization: { kind: 'new' } });
-        return { value: 'create' as const };
-      }
-      const id = typeof payload.organizationId === 'string' ? payload.organizationId : '';
-      // The page offers only what this session can reach, so anything else is a
-      // malformed submit — and picking the wrong organization decides which key
-      // this directory's secrets get encrypted to.
-      const org = orgs.find((o) => o.id === id);
-      if (!org) return { error: 'That organization is not one this session can reach.' };
-      this.record({ organization: { kind: 'existing', name: org.name } });
-      return { value: id };
-    });
-  }
-
-  /** `Which project do you want to use?` — or the "New project" row. */
-  async askProject(projects: InitProject[]): Promise<string | 'new' | null> {
-    return this.ask<string | 'new'>({ step: 'project', projects }, (payload) => {
-      if (payload.newProject === true) {
-        this.record({ project: { kind: 'new' } });
-        return { value: 'new' as const };
-      }
-      const id = typeof payload.projectId === 'string' ? payload.projectId : '';
-      const project = projects.find((p) => p.id === id);
-      if (!project) return { error: 'That project is not in this organization.' };
-      this.record({ project: { kind: 'existing', name: project.name } });
-      return { value: id };
-    });
-  }
-
-  /** `Project name (default: "…")` — the CLI's own validator, verbatim. */
-  async askProjectName(defaultName: string): Promise<string | null> {
-    return this.ask<string>({ step: 'project-name', value: defaultName }, (payload) => {
-      const name = typeof payload.projectName === 'string' ? payload.projectName.trim() : '';
-      const problem = projectNameProblem(name);
-      if (problem) return { error: problem };
-      this.record({ project: { kind: 'new', name } });
-      return { value: name };
-    });
-  }
-
-  /** `What branch should this project start with?` */
-  async askBranchChoice(): Promise<'development' | 'other' | null> {
-    return this.ask<'development' | 'other'>({ step: 'branch' }, (payload) => {
-      const choice = payload.branchChoice;
-      if (choice !== 'development' && choice !== 'other') {
-        return { error: 'That is not a branch this step offers.' };
-      }
-      this.record({ branchChoice: choice });
-      return { value: choice };
-    });
-  }
-
-  /**
-   * `Branch name:` — the CLI's own validator, in the CLI's own words.
-   *
-   * `input.trim().length > 0`, which is all the terminal prompt this replaces
-   * checks. It used to borrow `capy checkout`'s stricter validator, which also
-   * refuses whitespace and a leading hyphen — and a channel that accepts a
-   * different set of names than the terminal is not a rendering change, it is
-   * a change of what the product does. (The screen holds its own button on a
-   * name with a space. That is a rendering difference and stays one: it is the
-   * page being more careful, not this flow being pickier.)
-   */
-  async askBranchName(): Promise<string | null> {
-    return this.ask<string>({ step: 'branch-name' }, (payload) => {
-      const name = typeof payload.branchName === 'string' ? payload.branchName.trim() : '';
-      if (name.length === 0) return { error: 'Branch name cannot be empty' };
-      this.record({ branchName: name });
-      return { value: name };
-    });
-  }
-
-  /**
-   * The consent gate: `Encrypt these N secrets and push to <project> (<org>)
-   * on <branch>?`
-   *
-   * Answers `false` for a closed window, because that is what the terminal
-   * already does — `confirmEncrypt = chosen === 'yes'` — and because after
-   * this step the .env in the directory is ciphertext. Nothing about leaving
-   * may look like agreement to that.
-   */
-  async askEncrypt(localEnv: InitLocalEnv, target: InitTarget): Promise<boolean> {
-    // Kept for the failure page, which redraws this step: its checklist says
-    // how many secrets reached Keep, and a page rebuilt without the count
-    // would report a successful push of zero of them.
-    this.encryptView = { localEnv, target };
-    const answer = await this.ask<boolean>({ step: 'encrypt', localEnv, target }, (payload) => {
-      if (typeof payload.encrypt !== 'boolean') {
-        return { error: 'That is not an answer the encrypt step can produce.' };
-      }
-      this.record({ encrypt: payload.encrypt });
-      return { value: payload.encrypt };
-    });
-    return answer === true;
-  }
-
-  /** Nothing more will be asked: release the browser and let the CLI finish. */
-  async finish(): Promise<void> {
-    if (!this.wizard) return;
-    if (this.ended) {
-      // Already over — cancelled, blocked, or a window that closed. `finish`
-      // runs on the way out of every successful path, and a run that ended
-      // badly still comes back through here.
-      await this.wizard.catch(() => undefined);
-      return;
-    }
-    this.ended = true;
-    this.release({ done: true, result: { cancelled: false } });
-    await this.wizard.catch(() => undefined);
-  }
-
-  /**
-   * The run stopped between two questions.
-   *
-   * The page is holding a submit at this moment, and the compiled screen draws
-   * its ending from the control that was pressed — so `{ done }` here would
-   * print "Done. You can close this tab." over a run that just died. It gets
-   * the reason instead: the same rail, with the question replaced by what
-   * stopped it, the code behind it, and (when a call site declared one with
-   * `willBlock`) the command that clears it.
-   *
-   * The error is still the terminal's to report. This decides only what the
-   * browser is left looking at.
-   */
-  async abort(err?: unknown): Promise<void> {
-    if (!this.wizard) return;
-    const declared = this.block;
-    await this.end(
-      declared?.step ?? this.step,
-      declared?.view ?? { blocked: blockedFromError(err) },
-    );
-  }
-
-  /**
-   * Consent was given, and the push that followed failed.
-   *
-   * The one failure that happens AFTER the last question, which is why it is
-   * not an `abort`: by this point the answer was yes, some of it may have
-   * happened, and what is on disk right now is the only thing worth saying.
-   * The CLI states that in fields — `pushed`, `backupWritten`, `envRewritten`,
-   * and the code — and the screen draws them as the checklist it already has.
-   *
-   * The consent stop goes back to being the stop this run is STANDING at: it
-   * was answered and it did not complete, and a rail that ticks it off would
-   * be claiming the thing that failed is done.
-   */
-  async reportEncryptFailure(failure: InitEncryptFailure): Promise<void> {
-    if (!this.wizard) return;
-    this.record({ encrypt: undefined });
-    await this.end('encrypt', { ...(this.encryptView ?? {}), encryptFailure: failure });
-  }
-
-  /**
-   * Serve one last page and stop.
-   *
-   * A held POST is what an ending is delivered THROUGH: the page reloads out
-   * of it. With nothing held there is nowhere to put one, and there is nothing
-   * to say either — the flow settled on its own (cancelled, timed out, Ctrl+C)
-   * and the page drew that itself, or no question was ever asked. The CLI is
-   * on its way out with an error to print, so that case returns rather than
-   * waiting on a window that has already answered.
-   */
-  private async end(step: InitStep, view: Omit<InitWizardView, 'input' | 'step'>): Promise<void> {
-    const wizard = this.wizard;
-    if (!wizard) return;
-    const holding = this.handoff !== null;
-    this.ended = true;
-    this.pending = null;
-    if (!holding) {
-      if (this.settled) await wizard.catch(() => undefined);
-      return;
-    }
-    this.release({
-      screen: { html: this.render({ ...view, step, input: this.input }), standalone: true, final: true },
+  /** Serve the declared block (or generic coded error) as the final page. */
+  async abort(err?: unknown): Promise<InitWizardSession> {
+    const block = this.state.block;
+    return this.end(nonce => ({
+      screen: {
+        html: renderScreen(
+          'init-wizard',
+          buildInitWizardData(
+            {
+              ...(block?.view ?? { blocked: blockedFromError(err) }),
+              step: block?.step ?? this.state.last?.view.step ?? 'organization',
+              input: this.state.input,
+            },
+            nonce,
+          ),
+        ),
+        standalone: true,
+        final: true,
+      },
       result: { cancelled: true },
-    });
-    await wizard.catch(() => undefined);
+    }));
+  }
+
+  /** Redraw the consent stop with the immutable facts from its failed push. */
+  async reportEncryptFailure(failure: InitEncryptFailure): Promise<InitWizardSession> {
+    const state = {
+      ...this.state,
+      input: { ...this.state.input, encrypt: undefined },
+    };
+    return new InitWizardSession(this.options, state).end(nonce => ({
+      screen: {
+        html: renderScreen(
+          'init-wizard',
+          buildInitWizardData(
+            { ...encryptContext(this.state.last), step: 'encrypt', input: state.input, encryptFailure: failure },
+            nonce,
+          ),
+        ),
+        standalone: true,
+        final: true,
+      },
+      result: { cancelled: true },
+    }));
+  }
+
+  private async end(
+    decision: WizardDecision | ((nonce: string) => WizardDecision),
+  ): Promise<InitWizardSession> {
+    const terminal = new InitWizardSession(this.options, terminalSession(this.state));
+    if (this.state.channel === undefined) return terminal;
+    if (this.state.terminal || this.state.last === undefined) {
+      await this.state.channel.wizard.catch(() => undefined);
+      return terminal;
+    }
+    const resolved = typeof decision === 'function' ? decision(await this.state.channel.nonce) : decision;
+    this.state.last.next.resolve({ kind: 'terminal', decision: resolved });
+    await this.state.channel.wizard.catch(() => undefined);
+    return terminal;
   }
 }

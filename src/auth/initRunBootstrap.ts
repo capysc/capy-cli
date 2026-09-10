@@ -1,0 +1,512 @@
+import { createHash } from 'crypto';
+import { setTimeout as delay } from 'timers/promises';
+import { AuthService } from './authService';
+import {
+  isInitRunOrigin,
+  normalizeRepositoryFingerprint,
+  parseInitRunAuthResult,
+  parseInitRunContinueResponse,
+  parseInitRunCreateResponse,
+  parseInitRunExchangeResponse,
+  sameInitRunBinding,
+  type InitRunBinding,
+  type InitRunCreateResponse,
+  type InitRunStatusResponse,
+  type InitRunTerminalReceipt,
+} from './initRunContract';
+import {
+  initRunCliKeyFingerprint,
+  mintInitRunDeliveryKeypair,
+  openInitRunAuthResult,
+  type InitRunDeliveryKeypair,
+} from './initRunEnvelope';
+import { generatePKCE, type PkcePair } from './pkce';
+import { AuthResult, CapyError, ERROR_CODES } from '../types/index';
+
+const MAX_RESPONSE_BYTES = 300 * 1024;
+const REQUEST_TIMEOUT_MS = 15 * 1000;
+const MAX_EXCHANGE_NETWORK_FAILURES = 5;
+const EXCHANGE_RETRY_AFTER_MS = 1000;
+
+export interface InitRunBootstrapRequest {
+  readonly serviceOrigin: string;
+  readonly keepOrigin: string;
+  readonly runtimeId: string;
+  readonly repositoryFingerprint: string;
+  readonly machineName: string;
+  readonly expectedUserId: string | null;
+}
+
+export interface InitRunBootstrapHandoff {
+  readonly runId: string;
+  readonly entryUrl: string;
+  readonly claimCode: string;
+  readonly expiresAt: string;
+}
+
+export interface InitRunBootstrap {
+  readonly request: Readonly<{
+    serviceOrigin: string;
+    keepOrigin: string;
+    runtimeId: string;
+    repositoryFingerprint: string;
+    machineName: string;
+    expectedUserId: string | null;
+  }>;
+  readonly response: InitRunCreateResponse;
+  readonly handoff: InitRunBootstrapHandoff;
+  readonly pkce: PkcePair;
+  readonly deliveryKeypair: InitRunDeliveryKeypair;
+  readonly cliKeyFingerprint: string;
+}
+
+export interface InitRunAuthorizedContext {
+  readonly auth: AuthResult;
+  readonly authService: AuthService;
+  readonly binding: InitRunBinding;
+  readonly authEpoch: number;
+  readonly credentialReceipt: string;
+  readonly brokerAccessToken: string;
+  readonly runSecret: string;
+  readonly expiresAt: string;
+}
+
+export interface InitRunBootstrapTransport {
+  readonly fetch: typeof fetch;
+  readonly now: () => number;
+  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly requestTimeoutMs?: number;
+}
+
+const defaultTransport: InitRunBootstrapTransport = {
+  fetch,
+  now: Date.now,
+  sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+};
+
+function initRunFailure(code: string): CapyError {
+  return new CapyError('Hosted init authentication failed', code);
+}
+
+function exactJson(value: string): unknown {
+  if (Buffer.byteLength(value, 'utf8') > MAX_RESPONSE_BYTES) {
+    throw initRunFailure('INIT_RUN_INVALID');
+  }
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw initRunFailure('INIT_RUN_INVALID');
+  }
+}
+
+function responseErrorCode(value: unknown): string {
+  if (!value || typeof value !== 'object') return ERROR_CODES.SERVICE_ERROR;
+  const code = (value as Readonly<Record<string, unknown>>).code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/u.test(code)
+    ? code
+    : ERROR_CODES.SERVICE_ERROR;
+}
+
+function isConfiguredInitRunOrigin(value: unknown): value is string {
+  if (!isInitRunOrigin(value)) return false;
+  const url = new URL(value);
+  return url.protocol === 'https:'
+    || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname));
+}
+
+async function withRequestDeadline<T>(
+  transport: InitRunBootstrapTransport,
+  operationDeadline: number,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const requestDeadline = Math.min(
+    operationDeadline,
+    transport.now() + (transport.requestTimeoutMs ?? REQUEST_TIMEOUT_MS),
+  );
+  const remaining = requestDeadline - transport.now();
+  if (remaining <= 0) throw initRunFailure(ERROR_CODES.NETWORK_ERROR);
+  const operationAbort = new AbortController();
+  const timerAbort = new AbortController();
+  const timeout = delay(remaining, undefined, { signal: timerAbort.signal }).then(() => {
+    operationAbort.abort();
+    throw initRunFailure(ERROR_CODES.NETWORK_ERROR);
+  });
+  try {
+    return await Promise.race([operation(operationAbort.signal), timeout]);
+  } finally {
+    timerAbort.abort();
+  }
+}
+
+async function post(
+  transport: InitRunBootstrapTransport,
+  url: string,
+  body: Readonly<Record<string, unknown>>,
+  bearer?: string,
+  operationDeadline = transport.now() + (transport.requestTimeoutMs ?? REQUEST_TIMEOUT_MS),
+): Promise<unknown> {
+  return withRequestDeadline(transport, operationDeadline, async (signal) => {
+    const response = await transport.fetch(url, {
+      method: 'POST',
+      redirect: 'error',
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+      },
+      body: JSON.stringify(body),
+    }).catch(() => {
+      throw initRunFailure(ERROR_CODES.NETWORK_ERROR);
+    });
+    const text = await response.text().catch(() => {
+      throw initRunFailure(ERROR_CODES.NETWORK_ERROR);
+    });
+    const parsed = exactJson(text);
+    if (!response.ok) throw initRunFailure(responseErrorCode(parsed));
+    return parsed;
+  });
+}
+
+function validateOrigins(input: InitRunBootstrapRequest): Readonly<{
+  serviceOrigin: string;
+  keepOrigin: string;
+}> {
+  if (!isConfiguredInitRunOrigin(input.serviceOrigin) || !isConfiguredInitRunOrigin(input.keepOrigin)) {
+    throw initRunFailure('INIT_RUN_CONFIGURATION');
+  }
+  return { serviceOrigin: input.serviceOrigin, keepOrigin: input.keepOrigin };
+}
+
+export async function createInitRunBootstrap(
+  input: InitRunBootstrapRequest,
+  transport: InitRunBootstrapTransport = defaultTransport,
+): Promise<InitRunBootstrap> {
+  const origins = validateOrigins(input);
+  const repositoryFingerprint = normalizeRepositoryFingerprint(input.repositoryFingerprint);
+  if (!repositoryFingerprint) throw initRunFailure('INIT_RUN_INVALID');
+  const pkce = generatePKCE();
+  const deliveryKeypair = mintInitRunDeliveryKeypair();
+  const cliKeyFingerprint = initRunCliKeyFingerprint(deliveryKeypair.publicKeyB64);
+  if (!cliKeyFingerprint) throw initRunFailure('INIT_RUN_INVALID');
+  const parsed = parseInitRunCreateResponse(await post(
+    transport,
+    `${origins.serviceOrigin}/init-runs`,
+    {
+      v: 1,
+      pkce_method: 'S256',
+      pkce_challenge: pkce.codeChallenge,
+      cli_pubkey: deliveryKeypair.publicKeyB64,
+      expected_user_id: input.expectedUserId,
+      service_origin: origins.serviceOrigin,
+      runtime_id: input.runtimeId,
+      repository_fingerprint: repositoryFingerprint,
+      machine_name: input.machineName,
+    },
+  ));
+  if (!parsed || new URL(parsed.entry_url).origin !== origins.keepOrigin || Date.parse(parsed.expires_at) <= transport.now()) {
+    throw initRunFailure('INIT_RUN_INVALID');
+  }
+  return {
+    request: {
+      serviceOrigin: origins.serviceOrigin,
+      keepOrigin: origins.keepOrigin,
+      runtimeId: input.runtimeId,
+      repositoryFingerprint,
+      machineName: input.machineName,
+      expectedUserId: input.expectedUserId,
+    },
+    response: parsed,
+    handoff: {
+      runId: parsed.run_id,
+      entryUrl: parsed.entry_url,
+      claimCode: parsed.claim_code,
+      expiresAt: parsed.expires_at,
+    },
+    pkce,
+    deliveryKeypair,
+    cliKeyFingerprint,
+  };
+}
+
+function validateExchangeBinding(bootstrap: InitRunBootstrap, binding: InitRunBinding): void {
+  const expectedSubjectMatches = bootstrap.request.expectedUserId === null
+    || bootstrap.request.expectedUserId === binding.subject_user_id;
+  if (
+    binding.run_id !== bootstrap.response.run_id
+    || binding.service_origin !== bootstrap.request.serviceOrigin
+    || binding.runtime_id !== bootstrap.request.runtimeId
+    || binding.repository_fingerprint !== bootstrap.request.repositoryFingerprint
+    || binding.cli_key_fingerprint !== bootstrap.cliKeyFingerprint
+    || !expectedSubjectMatches
+  ) {
+    throw initRunFailure('INIT_BINDING_MISMATCH');
+  }
+}
+
+function credentialReceipt(sealedAuthResult: string): string {
+  return `sha256:${createHash('sha256').update(sealedAuthResult, 'utf8').digest('hex')}`;
+}
+
+async function awaitExchange(
+  bootstrap: InitRunBootstrap,
+  transport: InitRunBootstrapTransport,
+  networkFailures = 0,
+): Promise<Exclude<ReturnType<typeof parseInitRunExchangeResponse>, null> & { readonly status: 'complete' }> {
+  const expiresAt = Date.parse(bootstrap.response.expires_at);
+  if (transport.now() >= expiresAt) {
+    throw initRunFailure('INIT_RUN_EXPIRED');
+  }
+  const attempt = await (async () => {
+    try {
+      return {
+        ok: true as const,
+        value: await post(
+          transport,
+          `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/exchange`,
+          {
+            v: 1,
+            run_secret: bootstrap.response.run_secret,
+            pkce_verifier: bootstrap.pkce.codeVerifier,
+          },
+          undefined,
+          expiresAt,
+        ),
+      };
+    } catch (error) {
+      if (error instanceof CapyError && error.code === ERROR_CODES.NETWORK_ERROR) {
+        return { ok: false as const, error };
+      }
+      throw error;
+    }
+  })();
+  if (!attempt.ok) {
+    if (networkFailures + 1 >= MAX_EXCHANGE_NETWORK_FAILURES) throw attempt.error;
+    const remaining = expiresAt - transport.now();
+    if (remaining <= 0) throw initRunFailure('INIT_RUN_EXPIRED');
+    await transport.sleep(Math.min(EXCHANGE_RETRY_AFTER_MS, remaining));
+    return awaitExchange(bootstrap, transport, networkFailures + 1);
+  }
+  const parsed = parseInitRunExchangeResponse(attempt.value);
+  if (!parsed) throw initRunFailure('INIT_RUN_INVALID');
+  if (parsed.status === 'pending') {
+    const remaining = expiresAt - transport.now();
+    if (remaining <= 0) throw initRunFailure('INIT_RUN_EXPIRED');
+    await transport.sleep(Math.min(parsed.retry_after_ms, remaining));
+    return awaitExchange(bootstrap, transport, 0);
+  }
+  return parsed;
+}
+
+function isAcknowledgedBinding(
+  bootstrap: InitRunBootstrap,
+  binding: InitRunBinding,
+  authEpoch: number,
+  status: Exclude<ReturnType<typeof parseInitRunContinueResponse>, null>,
+  now: number,
+): boolean {
+  return status.status === 'authorized'
+    && status.run_id === binding.run_id
+    && status.expected_user_id === bootstrap.request.expectedUserId
+    && status.subject_user_id === binding.subject_user_id
+    && status.service_origin === binding.service_origin
+    && status.runtime_id === binding.runtime_id
+    && status.repository_fingerprint === binding.repository_fingerprint
+    && status.cli_key_fingerprint === binding.cli_key_fingerprint
+    && status.machine_name === bootstrap.request.machineName
+    && status.entry_url === bootstrap.response.entry_url
+    && status.auth_epoch === authEpoch
+    && Date.parse(status.expires_at) > now
+    && status.first_connection_id === null
+    && status.terminal_receipt === null;
+}
+
+function sameRunProjection(
+  bootstrap: InitRunBootstrap,
+  authorized: InitRunAuthorizedContext,
+  status: InitRunStatusResponse,
+): boolean {
+  return status.run_id === authorized.binding.run_id
+    && status.expected_user_id === bootstrap.request.expectedUserId
+    && status.subject_user_id === authorized.binding.subject_user_id
+    && status.service_origin === authorized.binding.service_origin
+    && status.runtime_id === authorized.binding.runtime_id
+    && status.repository_fingerprint === authorized.binding.repository_fingerprint
+    && status.cli_key_fingerprint === authorized.binding.cli_key_fingerprint
+    && status.machine_name === bootstrap.request.machineName
+    && status.entry_url === bootstrap.response.entry_url
+    && status.auth_epoch === authorized.authEpoch;
+}
+
+function sameTerminalReceipt(
+  left: InitRunTerminalReceipt | null,
+  right: InitRunTerminalReceipt,
+): boolean {
+  return left !== null && JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function continueInitRun(
+  bootstrap: InitRunBootstrap,
+  authorized: InitRunAuthorizedContext,
+  body: Readonly<Record<string, unknown>>,
+  transport: InitRunBootstrapTransport,
+  networkFailures = 0,
+): Promise<InitRunStatusResponse> {
+  const deadline = Date.parse(authorized.expiresAt);
+  const attempt = await (async () => {
+    try {
+      return {
+        ok: true as const,
+        response: await post(
+          transport,
+          `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/continue`,
+          body,
+          authorized.brokerAccessToken,
+          deadline,
+        ),
+      };
+    } catch (error) {
+      if (!(error instanceof CapyError) || error.code !== ERROR_CODES.NETWORK_ERROR) throw error;
+      return { ok: false as const };
+    }
+  })();
+  if (!attempt.ok) {
+    if (networkFailures + 1 >= MAX_EXCHANGE_NETWORK_FAILURES || transport.now() >= deadline) {
+      throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+    }
+    await transport.sleep(Math.min(EXCHANGE_RETRY_AFTER_MS, deadline - transport.now()));
+    return continueInitRun(bootstrap, authorized, body, transport, networkFailures + 1);
+  }
+  const parsed = parseInitRunContinueResponse(attempt.response);
+  if (!parsed || !sameRunProjection(bootstrap, authorized, parsed)) {
+    throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  }
+  return parsed;
+}
+
+/** Publish C0 only after it is owned by the authenticated run subject. */
+export async function publishInitRunConnection(input: Readonly<{
+  bootstrap: InitRunBootstrap;
+  authorized: InitRunAuthorizedContext;
+  firstConnectionId: string;
+  transport?: InitRunBootstrapTransport;
+}>): Promise<InitRunStatusResponse> {
+  const status = await continueInitRun(input.bootstrap, input.authorized, {
+    v: 1,
+    action: 'publish',
+    run_secret: input.authorized.runSecret,
+    binding: input.authorized.binding,
+    first_connection_id: input.firstConnectionId,
+  }, input.transport ?? defaultTransport);
+  if (status.status !== 'running' || status.first_connection_id !== input.firstConnectionId
+    || status.terminal_receipt !== null) {
+    throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  }
+  return status;
+}
+
+/** Persist the authoritative receipt before attempting final browser delivery. */
+export async function recordInitRunTerminal(input: Readonly<{
+  bootstrap: InitRunBootstrap;
+  authorized: InitRunAuthorizedContext;
+  receipt: InitRunTerminalReceipt;
+  transport?: InitRunBootstrapTransport;
+}>): Promise<InitRunStatusResponse> {
+  if (input.receipt.run_id !== input.authorized.binding.run_id) {
+    throw initRunFailure('INIT_BINDING_MISMATCH');
+  }
+  const status = await continueInitRun(input.bootstrap, input.authorized, {
+    v: 1,
+    action: 'terminal',
+    run_secret: input.authorized.runSecret,
+    binding: input.authorized.binding,
+    terminal_receipt: input.receipt,
+  }, input.transport ?? defaultTransport);
+  if (status.status !== 'terminal' || !sameTerminalReceipt(status.terminal_receipt, input.receipt)) {
+    throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  }
+  return status;
+}
+
+export async function completeInitRunAuthentication(
+  input: Readonly<{
+    bootstrap: InitRunBootstrap;
+    authService: AuthService;
+    transport?: InitRunBootstrapTransport;
+  }>,
+): Promise<InitRunAuthorizedContext> {
+  const transport = input.transport ?? defaultTransport;
+  const exchange = await awaitExchange(input.bootstrap, transport);
+  if (transport.now() >= Date.parse(input.bootstrap.response.expires_at)) {
+    throw initRunFailure('INIT_RUN_EXPIRED');
+  }
+  validateExchangeBinding(input.bootstrap, exchange.binding);
+  if (credentialReceipt(exchange.sealed_auth_result) !== exchange.credential_receipt) {
+    throw initRunFailure('INIT_BINDING_MISMATCH');
+  }
+  const opened = openInitRunAuthResult({
+    sealedAuthResult: exchange.sealed_auth_result,
+    binding: exchange.binding,
+    keypair: input.bootstrap.deliveryKeypair,
+  });
+  if (!opened.ok) throw initRunFailure('INIT_BINDING_MISMATCH');
+  const plaintext = (() => {
+    try {
+      return parseInitRunAuthResult(JSON.parse(opened.plaintext) as unknown);
+    } catch {
+      return null;
+    }
+  })();
+  if (
+    !plaintext
+    || exchange.auth_epoch !== plaintext.auth_epoch
+    || !sameInitRunBinding(exchange.binding, plaintext.binding)
+    || plaintext.response.user.id !== exchange.binding.subject_user_id
+  ) {
+    throw initRunFailure('INIT_BINDING_MISMATCH');
+  }
+  const installed = await input.authService.installExchangeResponse(
+    plaintext.response,
+    { userId: exchange.binding.subject_user_id },
+  );
+  const auth = installed.auth;
+  if (!auth.success || auth.user_id !== exchange.binding.subject_user_id) {
+    throw initRunFailure(ERROR_CODES.AUTH_FAILED);
+  }
+  const acknowledged = await (async () => {
+    try {
+      return parseInitRunContinueResponse(await post(
+        transport,
+        `${input.bootstrap.request.serviceOrigin}/init-runs/${input.bootstrap.response.run_id}/continue`,
+        {
+          v: 1,
+          action: 'acknowledge',
+          run_secret: input.bootstrap.response.run_secret,
+          binding: exchange.binding,
+          credential_receipt: exchange.credential_receipt,
+        },
+        plaintext.broker_access_token,
+      ));
+    } catch {
+      throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+    }
+  })();
+  if (!acknowledged || !isAcknowledgedBinding(
+    input.bootstrap,
+    exchange.binding,
+    exchange.auth_epoch,
+    acknowledged,
+    transport.now(),
+  )) {
+    throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  }
+  return {
+    auth,
+    authService: installed.authService,
+    binding: exchange.binding,
+    authEpoch: exchange.auth_epoch,
+    credentialReceipt: exchange.credential_receipt,
+    brokerAccessToken: plaintext.broker_access_token,
+    runSecret: input.bootstrap.response.run_secret,
+    expiresAt: acknowledged.expires_at,
+  };
+}

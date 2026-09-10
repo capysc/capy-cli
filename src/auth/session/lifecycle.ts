@@ -110,8 +110,10 @@ export class SessionLifecycle {
     private readonly storage: SessionStorageBackend,
     private readonly serviceApiUrl: string,
     sessionUserId?: string,
+    initialCurrentOrgId: string | null = null,
   ) {
     this.sessionUserId = sessionUserId;
+    this.currentOrgId = initialCurrentOrgId;
   }
 
   /**

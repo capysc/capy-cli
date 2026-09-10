@@ -25,7 +25,7 @@
     "bin/capy"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "bun run check:init-run-contract && tsc",
     "build:deploy-assets": "node scripts/build-deploy-assets.mjs",
     "build:screens": "node scripts/build-screen-assets.mjs",
     "check:screens": "node scripts/check-screens.mjs",
@@ -38,7 +38,7 @@
     "postpack": "npm pkg set bin.capy-dev=bin/capy-dev bin.capy-staging=bin/capy-staging",
     "test:package": "node scripts/check-package.mjs",
     "test": "bash tests/run-tests.sh",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun run check:init-run-contract && tsc --noEmit",
     "test:e2e": "bun test tests/e2e/",
     "test:plugins": "bash tests/plugins/run-plugin-tests.sh",
     "test:plugins:cloudflare-workers": "bash tests/plugins/run-plugin-tests.sh cloudflare-workers",
@@ -46,7 +46,9 @@
     "test:plugins:vercel": "bash tests/plugins/run-plugin-tests.sh vercel",
     "clean": "rm -rf dist build bin-pkg",
     "bundle": "node build.esbuild.mjs",
-    "build:binary": "node scripts/build-binary.mjs"
+    "build:binary": "node scripts/build-binary.mjs",
+    "sync:init-run-contract": "bun run scripts/sync-init-run-contract.ts",
+    "check:init-run-contract": "bun run scripts/sync-init-run-contract.ts --check"
   },
   "dependencies": {
     "commander": "^11.0.0",

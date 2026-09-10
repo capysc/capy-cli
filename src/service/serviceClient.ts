@@ -123,6 +123,16 @@ export interface MemberDetail {
   projects: MemberProject[];
 }
 
+export interface SignupReadiness {
+  readonly signup_complete: boolean;
+  readonly retryable: boolean;
+  readonly custody: Readonly<{
+    key_state: string;
+    ceremony_pending: boolean;
+    has_live_wrapped_k_local: boolean;
+  }>;
+}
+
 /** Billing is the only authority for choosing the keepless free-sync corpus. */
 export interface BillingStatus {
   readonly tier: 'free' | 'business';
@@ -145,7 +155,7 @@ export class ServiceClient {
   private apiUrl: string;
   private tokenProvider: TokenProvider | null = null;
 
-  constructor(apiUrl?: string, devMode: boolean = false) {
+  constructor(apiUrl?: string, devMode: boolean = false, tokenProvider: TokenProvider | null = null) {
     // Explicit apiUrl wins (call-site override / tests). Otherwise resolve
     // through the profile chain: CAPY_API_URL → CAPY_PROFILE → config.default
     // → built-in default. See src/config/profileConfig.ts for the precedence
@@ -170,6 +180,7 @@ export class ServiceClient {
       const { isLocalOnly } = require('../config/profileConfig') as typeof import('../config/profileConfig');
       if (!isLocalOnly()) debug(`[dev] ServiceClient → ${this.apiUrl}`);
     }
+    this.tokenProvider = tokenProvider;
   }
 
   /**
@@ -544,6 +555,14 @@ export class ServiceClient {
       projects: Array<{ id: string; name: string; organization_id: string }>;
     }>('GET', '/projects');
     return data.projects;
+  }
+
+  /** Authoritative non-secret custody boundary for a completed signup. */
+  async getSignupReadiness(orgId: string): Promise<SignupReadiness> {
+    return this.request<SignupReadiness>(
+      'GET',
+      `/orgs/${encodeURIComponent(orgId)}/signup-readiness`,
+    );
   }
 
   /** Authenticated, organization-scoped billing verdict. Never derive this from local files. */

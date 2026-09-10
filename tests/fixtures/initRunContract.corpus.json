@@ -1,0 +1,1251 @@
+[
+  {
+    "name": "valid-CreateRequest-0",
+    "parser": "parseInitRunCreateRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "pkce_method": "S256",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+      "expected_user_id": null,
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev"
+    }
+  },
+  {
+    "name": "valid-CreateResponse-1",
+    "parser": "parseInitRunCreateResponse",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "claim_code": "7KM2-W9QD-R4TX",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "valid-Binding-2",
+    "parser": "parseInitRunBinding",
+    "valid": true,
+    "value": {
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "subject_user_id": "user_demo",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  {
+    "name": "valid-TerminalReceipt-3",
+    "parser": "parseInitRunTerminalReceipt",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "receipt_id": "33333333-3333-4333-8333-333333333333",
+      "status": "succeeded",
+      "code": null,
+      "repository_verified": true,
+      "custody_verified": true,
+      "effects": "complete",
+      "completed_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "valid-StatusResponse-4",
+    "parser": "parseInitRunStatusResponse",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "subject_user_id": "user_demo",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "running",
+      "expected_user_id": null,
+      "machine_name": "capy-dev",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z",
+      "auth_epoch": 1,
+      "authorization_pending": false,
+      "auth_error_code": null,
+      "first_connection_id": "22222222-2222-4222-8222-222222222222",
+      "terminal_receipt": null
+    }
+  },
+  {
+    "name": "valid-ClaimRequest-5",
+    "parser": "parseInitRunClaimRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "decision": "approve",
+      "claim_code": "7km2w9qdr4tx"
+    }
+  },
+  {
+    "name": "valid-AuthorizationRequest-6",
+    "parser": "parseInitRunAuthorizationRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "restart": false
+    }
+  },
+  {
+    "name": "valid-AuthorizationResponse-7",
+    "parser": "parseInitRunAuthorizationResponse",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "auth_epoch": 1,
+      "authorization_url": "https://api.workos.test/user_management/authorize?state=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "callback_marker": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "expires_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "valid-CallbackRequest-8",
+    "parser": "parseInitRunCallbackRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "auth_epoch": 1,
+      "callback_marker": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "code": "synthetic-authorization-code",
+      "state": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+    }
+  },
+  {
+    "name": "valid-ExchangeRequest-9",
+    "parser": "parseInitRunExchangeRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "pkce_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    }
+  },
+  {
+    "name": "valid-ExchangeResponse-10",
+    "parser": "parseInitRunExchangeResponse",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "status": "pending",
+      "retry_after_ms": 1000
+    }
+  },
+  {
+    "name": "valid-ExchangeResponse-11",
+    "parser": "parseInitRunExchangeResponse",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "status": "complete",
+      "credential_receipt": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sealed_auth_result": "synthetic-envelope-structural-parser-only",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1
+    }
+  },
+  {
+    "name": "valid-ContinueRequest-12",
+    "parser": "parseInitRunContinueRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "action": "acknowledge",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "credential_receipt": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  },
+  {
+    "name": "valid-ContinueRequest-13",
+    "parser": "parseInitRunContinueRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "action": "publish",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "first_connection_id": "22222222-2222-4222-8222-222222222222"
+    }
+  },
+  {
+    "name": "valid-ContinueRequest-14",
+    "parser": "parseInitRunContinueRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "action": "terminal",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "terminal_receipt": {
+        "v": 1,
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "receipt_id": "33333333-3333-4333-8333-333333333333",
+        "status": "succeeded",
+        "code": null,
+        "repository_verified": true,
+        "custody_verified": true,
+        "effects": "complete",
+        "completed_at": "2026-09-10T05:00:00.000Z"
+      }
+    }
+  },
+  {
+    "name": "valid-LaunchPresentationRequest-15",
+    "parser": "parseInitRunLaunchPresentationRequest",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "claim_code_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "name": "valid-LaunchPresentationResponse-16",
+    "parser": "parseInitRunLaunchPresentationResponse",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "expected_user_id": "user_demo",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "valid-AuthResult-17",
+    "parser": "parseInitRunAuthResult",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1,
+      "response": {
+        "token": {
+          "access_token": "synthetic.access.token",
+          "refresh_token": "synthetic-refresh-token",
+          "expires_in": 300,
+          "scope": "user"
+        },
+        "user": {
+          "id": "user_demo",
+          "email": "person@example.test",
+          "first_name": null,
+          "last_name": null
+        },
+        "organizations": []
+      },
+      "broker_access_token": "synthetic.broker.token"
+    }
+  },
+  {
+    "name": "unknown-secret-field-CreateRequest-0",
+    "parser": "parseInitRunCreateRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_method": "S256",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+      "expected_user_id": null,
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-CreateResponse-1",
+    "parser": "parseInitRunCreateResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "claim_code": "7KM2-W9QD-R4TX",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-Binding-2",
+    "parser": "parseInitRunBinding",
+    "valid": false,
+    "value": {
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "subject_user_id": "user_demo",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-TerminalReceipt-3",
+    "parser": "parseInitRunTerminalReceipt",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "receipt_id": "33333333-3333-4333-8333-333333333333",
+      "status": "succeeded",
+      "code": null,
+      "repository_verified": true,
+      "custody_verified": true,
+      "effects": "complete",
+      "completed_at": "2026-09-10T05:00:00.000Z",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-StatusResponse-4",
+    "parser": "parseInitRunStatusResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "subject_user_id": "user_demo",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "running",
+      "expected_user_id": null,
+      "machine_name": "capy-dev",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z",
+      "auth_epoch": 1,
+      "authorization_pending": false,
+      "auth_error_code": null,
+      "first_connection_id": "22222222-2222-4222-8222-222222222222",
+      "terminal_receipt": null,
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-ClaimRequest-5",
+    "parser": "parseInitRunClaimRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "decision": "approve",
+      "claim_code": "7km2w9qdr4tx",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-AuthorizationRequest-6",
+    "parser": "parseInitRunAuthorizationRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "restart": false,
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-AuthorizationResponse-7",
+    "parser": "parseInitRunAuthorizationResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "auth_epoch": 1,
+      "authorization_url": "https://api.workos.test/user_management/authorize?state=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "callback_marker": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "expires_at": "2026-09-10T05:00:00.000Z",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-CallbackRequest-8",
+    "parser": "parseInitRunCallbackRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "auth_epoch": 1,
+      "callback_marker": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "code": "synthetic-authorization-code",
+      "state": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-ExchangeRequest-9",
+    "parser": "parseInitRunExchangeRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "pkce_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-ExchangeResponse-10",
+    "parser": "parseInitRunExchangeResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "status": "pending",
+      "retry_after_ms": 1000,
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-ExchangeResponse-11",
+    "parser": "parseInitRunExchangeResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "status": "complete",
+      "credential_receipt": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sealed_auth_result": "synthetic-envelope-structural-parser-only",
+      "browser_session": "never-accepted",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1
+    }
+  },
+  {
+    "name": "unknown-secret-field-ContinueRequest-12",
+    "parser": "parseInitRunContinueRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "action": "acknowledge",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "credential_receipt": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-ContinueRequest-13",
+    "parser": "parseInitRunContinueRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "action": "publish",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "first_connection_id": "22222222-2222-4222-8222-222222222222",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-ContinueRequest-14",
+    "parser": "parseInitRunContinueRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "action": "terminal",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "terminal_receipt": {
+        "v": 1,
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "receipt_id": "33333333-3333-4333-8333-333333333333",
+        "status": "succeeded",
+        "code": null,
+        "repository_verified": true,
+        "custody_verified": true,
+        "effects": "complete",
+        "completed_at": "2026-09-10T05:00:00.000Z"
+      },
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-LaunchPresentationRequest-15",
+    "parser": "parseInitRunLaunchPresentationRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "claim_code_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-LaunchPresentationResponse-16",
+    "parser": "parseInitRunLaunchPresentationResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "expected_user_id": "user_demo",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "unknown-secret-field-AuthResult-17",
+    "parser": "parseInitRunAuthResult",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1,
+      "response": {
+        "token": {
+          "access_token": "synthetic.access.token",
+          "refresh_token": "synthetic-refresh-token",
+          "expires_in": 300,
+          "scope": "user"
+        },
+        "user": {
+          "id": "user_demo",
+          "email": "person@example.test",
+          "first_name": null,
+          "last_name": null
+        },
+        "organizations": []
+      },
+      "broker_access_token": "synthetic.broker.token",
+      "browser_session": "never-accepted"
+    }
+  },
+  {
+    "name": "wrong-pkce",
+    "parser": "parseInitRunCreateRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_method": "plain",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+      "expected_user_id": null,
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev"
+    }
+  },
+  {
+    "name": "raw-fingerprint-on-wire",
+    "parser": "parseInitRunCreateRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_method": "S256",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+      "expected_user_id": null,
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev"
+    }
+  },
+  {
+    "name": "origin-with-path",
+    "parser": "parseInitRunCreateRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_method": "S256",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+      "expected_user_id": null,
+      "service_origin": "https://api.dev.example/a",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev"
+    }
+  },
+  {
+    "name": "origin-with-userinfo",
+    "parser": "parseInitRunCreateRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_method": "S256",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+      "expected_user_id": null,
+      "service_origin": "https://user:password@api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev"
+    }
+  },
+  {
+    "name": "invalid-ec-length",
+    "parser": "parseInitRunCreateRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_method": "S256",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BBBB",
+      "expected_user_id": null,
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev"
+    }
+  },
+  {
+    "name": "missing-expected-subject",
+    "parser": "parseInitRunCreateRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_method": "S256",
+      "pkce_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+      "cli_pubkey": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "machine_name": "capy-dev"
+    }
+  },
+  {
+    "name": "claim-in-url",
+    "parser": "parseInitRunCreateResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "claim_code": "7KM2-W9QD-R4TX",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111&code=7KM2-W9QD-R4TX",
+      "expires_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "ungrouped-output",
+    "parser": "parseInitRunCreateResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "claim_code": "7KM2W9QDR4TX",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "bad-date",
+    "parser": "parseInitRunCreateResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "claim_code": "7KM2-W9QD-R4TX",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-02-31T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "forbidden-crockford-U",
+    "parser": "parseInitRunClaimRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "decision": "approve",
+      "claim_code": "UKM2-W9QD-R4TX"
+    }
+  },
+  {
+    "name": "extra-space",
+    "parser": "parseInitRunClaimRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "decision": "approve",
+      "claim_code": " 7KM2-W9QD-R4TX"
+    }
+  },
+  {
+    "name": "subject-mismatch",
+    "parser": "parseInitRunAuthResult",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_different",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1,
+      "response": {
+        "token": {
+          "access_token": "synthetic.access.token",
+          "refresh_token": "synthetic-refresh-token",
+          "expires_in": 300,
+          "scope": "user"
+        },
+        "user": {
+          "id": "user_demo",
+          "email": "person@example.test",
+          "first_name": null,
+          "last_name": null
+        },
+        "organizations": []
+      },
+      "broker_access_token": "synthetic.broker.token"
+    }
+  },
+  {
+    "name": "secret-in-public-status",
+    "parser": "parseInitRunStatusResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "subject_user_id": "user_demo",
+      "service_origin": "https://api.dev.example",
+      "runtime_id": "77777777-7777-4777-8777-777777777777",
+      "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "status": "running",
+      "expected_user_id": null,
+      "machine_name": "capy-dev",
+      "entry_url": "https://keep.dev.example/flow/init-wizard?run=11111111-1111-4111-8111-111111111111",
+      "expires_at": "2026-09-10T05:00:00.000Z",
+      "auth_epoch": 1,
+      "authorization_pending": false,
+      "auth_error_code": null,
+      "first_connection_id": "22222222-2222-4222-8222-222222222222",
+      "terminal_receipt": null,
+      "sealed_auth_result": "must-not-project"
+    }
+  },
+  {
+    "name": "success-without-repository-proof",
+    "parser": "parseInitRunTerminalReceipt",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "receipt_id": "33333333-3333-4333-8333-333333333333",
+      "status": "succeeded",
+      "code": null,
+      "repository_verified": false,
+      "custody_verified": true,
+      "effects": "complete",
+      "completed_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "receipt-id-required",
+    "parser": "parseInitRunTerminalReceipt",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "status": "succeeded",
+      "code": null,
+      "repository_verified": true,
+      "custody_verified": true,
+      "effects": "complete",
+      "completed_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "terminal-other-run",
+    "parser": "parseInitRunContinueRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "action": "terminal",
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "terminal_receipt": {
+        "v": 1,
+        "run_id": "77777777-7777-4777-8777-777777777777",
+        "receipt_id": "33333333-3333-4333-8333-333333333333",
+        "status": "succeeded",
+        "code": null,
+        "repository_verified": true,
+        "custody_verified": true,
+        "effects": "complete",
+        "completed_at": "2026-09-10T05:00:00.000Z"
+      }
+    }
+  },
+  {
+    "name": "invalid-verifier",
+    "parser": "parseInitRunExchangeRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_secret": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "pkce_verifier": "too-short"
+    }
+  },
+  {
+    "name": "missing-run-secret",
+    "parser": "parseInitRunExchangeRequest",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "pkce_verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    }
+  },
+  {
+    "name": "valid-auth-one-org-scoped",
+    "parser": "parseInitRunAuthResult",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1,
+      "response": {
+        "token": {
+          "access_token": "synthetic.org.scoped.token",
+          "refresh_token": "synthetic-refreshed-token",
+          "expires_in": 300
+        },
+        "user": {
+          "id": "user_demo",
+          "email": "person@example.test",
+          "first_name": null,
+          "last_name": null
+        },
+        "organizations": [
+          {
+            "id": "org_a",
+            "workos_org_id": "org_workos_a",
+            "name": "Organization a",
+            "key_state": "minted"
+          }
+        ]
+      },
+      "broker_access_token": "synthetic.broker.token"
+    }
+  },
+  {
+    "name": "valid-auth-multi-org-choice",
+    "parser": "parseInitRunAuthResult",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1,
+      "response": {
+        "token": {
+          "access_token": null,
+          "refresh_token": "synthetic-refresh-token",
+          "expires_in": 0
+        },
+        "user": {
+          "id": "user_demo",
+          "email": "person@example.test",
+          "first_name": null,
+          "last_name": null
+        },
+        "organizations": [
+          {
+            "id": "org_a",
+            "workos_org_id": "org_workos_a",
+            "name": "Organization a",
+            "key_state": "minted"
+          },
+          {
+            "id": "org_b",
+            "workos_org_id": "org_workos_b",
+            "name": "Organization b",
+            "key_state": "minted"
+          }
+        ]
+      },
+      "broker_access_token": "synthetic.broker.token"
+    }
+  },
+  {
+    "name": "valid-auth-multi-org-existing-scope",
+    "parser": "parseInitRunAuthResult",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 1,
+      "response": {
+        "token": {
+          "access_token": "synthetic.org.scoped.token",
+          "refresh_token": "synthetic-refresh-token",
+          "expires_in": 300
+        },
+        "user": {
+          "id": "user_demo",
+          "email": "person@example.test",
+          "first_name": null,
+          "last_name": null
+        },
+        "organizations": [
+          {
+            "id": "org_a",
+            "workos_org_id": "org_workos_a",
+            "name": "Organization a",
+            "key_state": "minted"
+          },
+          {
+            "id": "org_b",
+            "workos_org_id": "org_workos_b",
+            "name": "Organization b",
+            "key_state": "minted"
+          }
+        ]
+      },
+      "broker_access_token": "synthetic.broker.token"
+    }
+  },
+  {
+    "name": "valid-frame-answer",
+    "parser": "parseInitWizardAnswer",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "flow": "init-wizard",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sequence": 0,
+      "attempt_id": "attempt_demo_01",
+      "kind": "answer",
+      "answer": {
+        "organizationId": "org_demo_b"
+      }
+    }
+  },
+  {
+    "name": "invalid-frame-answer-version",
+    "parser": "parseInitWizardAnswer",
+    "valid": false,
+    "value": {
+      "v": 2,
+      "flow": "init-wizard",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sequence": 0,
+      "attempt_id": "attempt_demo_01",
+      "kind": "answer",
+      "answer": {
+        "organizationId": "org_demo_b"
+      }
+    }
+  },
+  {
+    "name": "valid-frame-cancel",
+    "parser": "parseInitWizardAnswer",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "flow": "init-wizard",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sequence": 0,
+      "attempt_id": "attempt_demo_01",
+      "kind": "cancel"
+    }
+  },
+  {
+    "name": "invalid-frame-cancel-version",
+    "parser": "parseInitWizardAnswer",
+    "valid": false,
+    "value": {
+      "v": 2,
+      "flow": "init-wizard",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sequence": 0,
+      "attempt_id": "attempt_demo_01",
+      "kind": "cancel"
+    }
+  },
+  {
+    "name": "valid-frame-progress-ack",
+    "parser": "parseInitWizardAnswer",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "flow": "init-wizard",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sequence": 0,
+      "attempt_id": "attempt_demo_01",
+      "kind": "progress-ack"
+    }
+  },
+  {
+    "name": "invalid-frame-progress-ack-version",
+    "parser": "parseInitWizardAnswer",
+    "valid": false,
+    "value": {
+      "v": 2,
+      "flow": "init-wizard",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sequence": 0,
+      "attempt_id": "attempt_demo_01",
+      "kind": "progress-ack"
+    }
+  },
+  {
+    "name": "invalid-frame-negative-sequence",
+    "parser": "parseInitWizardAnswer",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "flow": "init-wizard",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "sequence": -1,
+      "attempt_id": "attempt_demo_01",
+      "kind": "answer",
+      "answer": {}
+    }
+  },
+  {
+    "name": "exchange-binding-required-for-subject-bound-kdf",
+    "parser": "parseInitRunExchangeResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "status": "complete",
+      "credential_receipt": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sealed_auth_result": "synthetic-envelope-structural-parser-only",
+      "auth_epoch": 1
+    }
+  },
+  {
+    "name": "exchange-positive-epoch-required",
+    "parser": "parseInitRunExchangeResponse",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "status": "complete",
+      "credential_receipt": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "sealed_auth_result": "synthetic-envelope-structural-parser-only",
+      "binding": {
+        "run_id": "11111111-1111-4111-8111-111111111111",
+        "subject_user_id": "user_demo",
+        "service_origin": "https://api.dev.example",
+        "runtime_id": "77777777-7777-4777-8777-777777777777",
+        "repository_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "cli_key_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "auth_epoch": 0
+    }
+  },
+  {
+    "name": "valid-existing-cli-block-code",
+    "parser": "parseInitRunTerminalReceipt",
+    "valid": true,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "receipt_id": "33333333-3333-4333-8333-333333333333",
+      "status": "failed",
+      "code": "ORG_MASTER_KEY_MISSING",
+      "repository_verified": true,
+      "custody_verified": true,
+      "effects": "indeterminate",
+      "completed_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "invalid-failed-terminal-without-code",
+    "parser": "parseInitRunTerminalReceipt",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "receipt_id": "33333333-3333-4333-8333-333333333333",
+      "status": "failed",
+      "code": null,
+      "repository_verified": true,
+      "custody_verified": true,
+      "effects": "complete",
+      "completed_at": "2026-09-10T05:00:00.000Z"
+    }
+  },
+  {
+    "name": "invalid-prose-as-terminal-code",
+    "parser": "parseInitRunTerminalReceipt",
+    "valid": false,
+    "value": {
+      "v": 1,
+      "run_id": "11111111-1111-4111-8111-111111111111",
+      "receipt_id": "33333333-3333-4333-8333-333333333333",
+      "status": "failed",
+      "code": "Cannot find your key; please retry",
+      "repository_verified": true,
+      "custody_verified": true,
+      "effects": "complete",
+      "completed_at": "2026-09-10T05:00:00.000Z"
+    }
+  }
+]

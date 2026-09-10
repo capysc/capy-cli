@@ -19,6 +19,17 @@ import { SessionStorageBackend } from './session/backend';
 import { FileSessionStorageBackend } from './session/fileBackend';
 import { HttpStatusError, postJson } from './session/http';
 import { SessionLifecycle, resolveExpiresAt, RefreshFailure } from './session/lifecycle';
+import type { AuthResponseWire } from './initRunContract';
+
+import {
+  initRunSessionAuthorityDigest,
+  prepareInitRunSessionInstallation,
+} from './initRunSessionInstaller';
+
+export interface InstalledExchangeResponse {
+  readonly auth: AuthResult;
+  readonly authService: AuthService;
+}
 
 // Session mechanics live in src/auth/session/ (CAP-377 phase 1). The names
 // below have always been importable from this module — keep them so, with the
@@ -51,12 +62,16 @@ export class AuthService {
   private serviceApiUrl: string;
   private devMode: boolean;
   private readonly lifecycle: SessionLifecycle;
+  private readonly storageBackend: SessionStorageBackend;
+  private readonly initialSessionUserId: string | null;
+  private readonly initialSessionAuthorityDigest: string | null;
 
   constructor(
     serviceApiUrl?: string,
     devMode: boolean = false,
     sessionUserId?: string,
     storage?: SessionStorageBackend,
+    initialCurrentOrgId: string | null = null,
   ) {
     this.devMode = devMode;
     // Honor CAPY_API_URL / active profile in BOTH modes (same resolution as
@@ -73,12 +88,17 @@ export class AuthService {
     // Session lifecycle is delegated; the ~/.capy file backend is the default
     // and an injected backend (Phase 2: MCP-supplied credentials) replaces it
     // without this class knowing the difference.
+    const storageBackend = storage ?? new FileSessionStorageBackend();
+    this.storageBackend = storageBackend;
     this.lifecycle = new SessionLifecycle(
-      storage ?? new FileSessionStorageBackend(),
+      storageBackend,
       this.serviceApiUrl,
       sessionUserId,
+      initialCurrentOrgId,
     );
     this.lifecycle.load();
+    this.initialSessionUserId = this.lifecycle.session?.user_id ?? null;
+    this.initialSessionAuthorityDigest = initRunSessionAuthorityDigest(this.lifecycle.session);
   }
 
   // Session state is owned by the lifecycle module; these accessors keep the
@@ -343,6 +363,54 @@ export class AuthService {
   /**
    * Shared session-storage logic used by both OAuth and password auth flows.
    */
+  async installExchangeResponse(
+    response: AuthResponseWire,
+    expected: Readonly<{ userId: string }>,
+  ): Promise<InstalledExchangeResponse> {
+    const prepared = prepareInitRunSessionInstallation(response, expected);
+    const currentSession = (() => {
+      try {
+        return this.storageBackend.load(response.user.id);
+      } catch {
+        throw new CapyError('Could not verify the current auth session', 'INIT_DELIVERY_INDETERMINATE');
+      }
+    })();
+    const currentDigest = initRunSessionAuthorityDigest(currentSession);
+    const preparedDigest = initRunSessionAuthorityDigest(prepared.session);
+    const baselineDigest = this.initialSessionUserId === response.user.id
+      ? this.initialSessionAuthorityDigest
+      : null;
+    const alreadyInstalled = currentDigest !== null && currentDigest === preparedDigest;
+    if (!alreadyInstalled && currentDigest !== baselineDigest) {
+      throw new CapyError('The auth session changed during hosted sign-in', 'INIT_DELIVERY_INDETERMINATE');
+    }
+    if (!alreadyInstalled) {
+      try {
+        this.storageBackend.save(prepared.session, response.user.id);
+      } catch {
+        throw new CapyError('Could not persist the hosted auth session', 'INIT_DELIVERY_INDETERMINATE');
+      }
+    }
+    const replacement = new AuthService(
+      this.serviceApiUrl,
+      this.devMode,
+      response.user.id,
+      this.storageBackend,
+      prepared.currentOrgId,
+    );
+    if (
+      replacement.initialSessionUserId !== response.user.id
+      || replacement.initialSessionAuthorityDigest !== preparedDigest
+      || replacement.currentOrgId !== prepared.currentOrgId
+    ) {
+      throw new CapyError('Could not confirm the persisted hosted auth session', 'INIT_DELIVERY_INDETERMINATE');
+    }
+    return {
+      auth: prepared.auth,
+      authService: replacement,
+    };
+  }
+
   private async processExchangeResponse(
     token: { access_token: string | null; refresh_token: string; expires_in: number },
     user: { id: string; email: string; first_name: string | null; last_name: string | null },
