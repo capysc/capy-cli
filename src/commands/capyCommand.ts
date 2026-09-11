@@ -89,6 +89,7 @@ import { resolveInitRunTransportMode } from '../auth/initRunTransportMode';
 import { BrokerClient } from '../service/brokerClient';
 import { HostedInitChannelError, openHostedInitChannel } from '../ui/hostedInitChannel';
 import { createHostedInitWizardSession, closeHostedInitWizard } from '../ui/hostedInitWizardSession';
+import { unlockHostedOrganization } from './hostedOrganizationUnlock';
 import { keepOrigin } from '../ui/screens/keepScreens';
 import {
   emitInitRunEvent,
@@ -1425,30 +1426,47 @@ export class CapyCommand {
       }
     })();
     const selectedOrg = organizationSelection.selectedOrg;
-    const wizardAfterOrganization = organizationSelection.wizard;
+    const initialOrganizationWizard = organizationSelection.wizard;
     const selectedContext = organizationSelection.context;
     const selectedAuth = organizationSelection.auth;
+    const initiallyHasOrgKey = hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
+    const hostedUnlock = selectedContext.transport === 'hosted' && !initiallyHasOrgKey
+      && initialOrganizationWizard?.kind === 'hosted'
+      ? await unlockHostedOrganization({
+          auth: selectedAuth,
+          authService: selectedContext.authService,
+          serviceClient: selectedContext.serviceClient,
+          organizationId: selectedOrg.id,
+          session: initialOrganizationWizard.session,
+        }).catch((error: unknown) => ({
+          kind: 'failed' as const, session: initialOrganizationWizard.session, error,
+        }))
+      : null;
+    const wizardAfterOrganization: InitWizardTransport | null = hostedUnlock
+      ? { kind: 'hosted', session: hostedUnlock.session }
+      : initialOrganizationWizard;
+    const initializationEffectsStarted = organizationSelection.effectsStarted
+      || (hostedUnlock?.kind === 'finished' && hostedUnlock.effectsStarted);
     try {
 
-    // User has access to an existing org but no local key — they were invited
-    // and need to redeem their invite code to receive the shared master key.
-    const initiallyHasOrgKey = hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
-    if (selectedContext.transport === 'hosted' && !initiallyHasOrgKey) {
-      throw new InitWizardFlowError(
-        new CapyError(
-          'Hosted device-key ceremony is not available in this build',
-          'INIT_HOSTED_DEVICE_CEREMONY_REQUIRED',
-        ),
-        wizardAfterOrganization,
-      );
+    if (hostedUnlock?.kind === 'cancelled') {
+      throw new InitWizardCancelledError(wizardAfterOrganization, 'none');
+    }
+    if (hostedUnlock?.kind === 'failed') {
+      throw new InitWizardFlowError(hostedUnlock.error, wizardAfterOrganization, selectedContext.authService);
     }
 
-    // CAP-382 Case C: exactly the purpose program's marquee failure signal
-    // — a new machine, already enrolled elsewhere, that today dead-ends
-    // into "run capy redeem". Try the device-key unlock ceremony before
-    // falling through to that message. Flag-gated; no enrolled device key,
-    // a decline, or any ceremony failure leaves this branch unchanged.
-    const afterUnlockHasOrgKey = !initiallyHasOrgKey && deviceKeysEnabled()
+    // A browser assertion alone does not prove that the selected org's key
+    // was installed. Require the engine outcome and the actual local file.
+    const hasKeyAfterHostedUnlock = initiallyHasOrgKey
+      || (hostedUnlock?.kind === 'finished' && hostedUnlock.installedCurrentOrg
+        && hasOrgKey(selectedOrg.id, selectedAuth.user_id!));
+
+    // Hosted unlock has already used the current encrypted init channel.
+    // Keep the existing flag-gated browser ceremony for local transport.
+    const afterUnlockHasOrgKey = selectedContext.transport === 'hosted'
+      ? hasKeyAfterHostedUnlock
+      : !initiallyHasOrgKey && deviceKeysEnabled()
       ? await (async () => {
           const unlock = await withWizard(
             wizardAfterOrganization,
@@ -1467,7 +1485,8 @@ export class CapyCommand {
     // attemptPickupConsumption never throws, and a caller with no pending
     // pickup (the overwhelming common case) gets `{ ok: false }` and this
     // run continues exactly as it does today.
-    const afterPickupHasOrgKey = !afterUnlockHasOrgKey && deviceKeysEnabled()
+    const afterPickupHasOrgKey = selectedContext.transport !== 'hosted'
+      && !afterUnlockHasOrgKey && deviceKeysEnabled()
       ? await (async () => {
           const pickup = await withWizard(
             wizardAfterOrganization,
@@ -1485,7 +1504,7 @@ export class CapyCommand {
     // hand) says nobody has minted M yet, and this run can safely show a
     // recovery phrase, mint it here instead of falling straight to the
     // invite-code remedy below.
-    const orgKeyPresent = !afterPickupHasOrgKey
+    const orgKeyPresent = selectedContext.transport !== 'hosted' && !afterPickupHasOrgKey
       && shouldAttemptMint(orgs.find(o => o.id === selectedOrg.id)?.key_state, this.options.web)
       ? await (async () => {
           const { mintMasterKeyForOrg } = await import('../auth/masterKeyMint');
@@ -1630,7 +1649,7 @@ export class CapyCommand {
       if (choice.value === null) {
         throw new InitWizardCancelledError(
           choice.wizard,
-          organizationSelection.effectsStarted ? 'indeterminate' : 'none',
+          initializationEffectsStarted ? 'indeterminate' : 'none',
         );
       }
       const projectChoice = choice.value === 'new' ? CREATE_NEW_PROJECT : choice.value;
@@ -1661,7 +1680,7 @@ export class CapyCommand {
         selectedAuth,
         selectedOrg,
         choice.wizard,
-        organizationSelection.effectsStarted,
+        initializationEffectsStarted,
       );
     }
     return await this.initializeNewProject(
@@ -1669,7 +1688,7 @@ export class CapyCommand {
       selectedAuth,
       selectedOrg,
       wizardAfterProjects,
-      organizationSelection.effectsStarted,
+      initializationEffectsStarted,
     );
     } catch (error) {
       if (selectedContext.transport !== 'hosted') throw error;
