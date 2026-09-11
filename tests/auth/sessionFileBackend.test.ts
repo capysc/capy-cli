@@ -1,6 +1,9 @@
 import { mock, describe, test, expect, beforeEach, afterAll } from 'bun:test';
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from 'fs';
 import { join } from 'path';
+import { createHash } from 'crypto';
 
 // Pin HOME to a per-suite tmpdir BEFORE the modules under test resolve paths
 // via os.homedir() — same pattern as logoutCleanup.test.ts. Never touches the
@@ -17,11 +20,13 @@ afterAll(() => {
 });
 
 import { FileSessionStorageBackend } from '../../src/auth/session/fileBackend';
+import { AuthService } from '../../src/auth/authService';
 import { SessionStore } from '../../src/types/index';
 
 const CAPY_DIR = join(tempHome, '.capy');
 const SESSIONS_DIR = join(CAPY_DIR, 'auth', 'sessions');
 const LEGACY_PATH = join(CAPY_DIR, 'auth', 'session.json');
+const backend = new FileSessionStorageBackend();
 
 function makeSession(userId: string, orgId = 'org-1'): SessionStore {
   return {
@@ -36,6 +41,11 @@ function makeSession(userId: string, orgId = 'org-1'): SessionStore {
   };
 }
 
+const authorityDigest = (refreshToken: string): string =>
+  createHash('sha256').update(refreshToken).digest('hex');
+const fakeJwt = (value: Readonly<Record<string, unknown>>): string =>
+  `${Buffer.from('{}').toString('base64url')}.${Buffer.from(JSON.stringify(value)).toString('base64url')}.fixture`;
+
 /**
  * The on-disk contract of the extracted file backend. sessionIsolation.test.ts
  * pins the same shape from the outside; this suite pins it at the backend
@@ -43,10 +53,7 @@ function makeSession(userId: string, orgId = 'org-1'): SessionStore {
  * CLIs have on disk.
  */
 describe('FileSessionStorageBackend', () => {
-  let backend: FileSessionStorageBackend;
-
   beforeEach(() => {
-    backend = new FileSessionStorageBackend();
     rmSync(CAPY_DIR, { recursive: true, force: true });
   });
 
@@ -90,6 +97,19 @@ describe('FileSessionStorageBackend', () => {
       writeFileSync(join(SESSIONS_DIR, 'user-a.json'), 'not json', { mode: 0o600 });
       expect(() => backend.load('user-a')).toThrow();
     });
+
+    test('refuses an ordinary stale writer after the refresh authority changed', () => {
+      const original = makeSession('user-a');
+      const current = { ...original, refresh_token: 'rt_current' };
+      expect(backend.saveIfRefreshAuthorityMatches(
+        current,
+        'user-a',
+        authorityDigest(original.refresh_token),
+      )).toBe(false);
+      backend.save(original, 'user-a');
+      expect(() => backend.save(current, 'user-a')).toThrow('AUTH_REFRESH_AUTHORITY_CHANGED');
+      expect(backend.load('user-a')).toEqual(original);
+    });
   });
 
   describe('clear', () => {
@@ -101,6 +121,20 @@ describe('FileSessionStorageBackend', () => {
 
     test('is a no-op when nothing is stored', () => {
       expect(() => backend.clear('user-a')).not.toThrow();
+    });
+
+    test('explicit logout clears an uncertain fence before a fresh login', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      await expect(backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+        beginRotation();
+        throw new Error('provider outcome lost');
+      })).rejects.toThrow('provider outcome lost');
+      expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+
+      backend.clear('user-a');
+      const replacement = { ...makeSession('user-a'), refresh_token: 'rt_fresh_login' };
+      backend.save(replacement, 'user-a');
+      expect(backend.load('user-a')).toEqual(replacement);
     });
   });
 
@@ -131,22 +165,15 @@ describe('FileSessionStorageBackend', () => {
   });
 
   describe('withRefreshLock', () => {
-    // FOUND BUG, PRESERVED VERBATIM (see fileBackend.ts): the pre-extraction
-    // code passed `retries` to proper-lockfile's lockSync, which the sync API
-    // rejects — the throw was swallowed, so production has never held the
-    // refresh lock and never re-read fresh state. This refactor must not
-    // change CLI behavior, so these tests pin what the backend actually does
-    // today. The adopt-fresher dance the interface exists for is exercised in
-    // sessionLifecycle.test.ts through a backend that can express it.
-    test('hands fn null even when a session is stored — the sync lock call always fails', async () => {
-      backend.save(makeSession('user-a'), 'user-a');
+    test('hands fn the fresh stored authority under a reliable lock', async () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
       const seen = await backend.withRefreshLock('user-a', async fresh => fresh);
-      expect(seen).toBeNull();
+      expect(seen).toEqual(stored);
     });
 
-    test('hands fn null when nothing is stored (proceed-without-lock semantics)', async () => {
-      const seen = await backend.withRefreshLock('user-a', async fresh => fresh);
-      expect(seen).toBeNull();
+    test('fails closed when no persisted authority can be locked', async () => {
+      await expect(backend.withRefreshLock('user-a', async fresh => fresh)).rejects.toThrow();
     });
 
     test('returns fn\'s result', async () => {
@@ -158,18 +185,211 @@ describe('FileSessionStorageBackend', () => {
     test('propagates fn\'s errors (the lifecycle classifies them)', async () => {
       backend.save(makeSession('user-a'), 'user-a');
       await expect(
-        backend.withRefreshLock('user-a', async () => { throw new Error('refresh exploded'); }),
+        backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+          beginRotation();
+          throw new Error('refresh exploded');
+        }),
       ).rejects.toThrow('refresh exploded');
-      // And the backend stays usable afterwards.
-      const result = await backend.withRefreshLock('user-a', async () => 'ok');
-      expect(result).toBe('ok');
+      expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      expect(() => backend.save(makeSession('user-a'), 'user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+    });
+
+    test('persists a rotated authority and clears the fence only after readback', async () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+      const rotated = { ...stored, refresh_token: 'rt_rotated' };
+      const result = await backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+        beginRotation();
+        backend.save(rotated, 'user-a');
+        return 'rotated';
+      });
+      expect(result).toBe('rotated');
+      expect(backend.load('user-a')?.refresh_token).toBe('rt_rotated');
+      expect(existsSync(join(SESSIONS_DIR, 'user-a.json.refresh-in-flight'))).toBe(false);
     });
 
     test('leaves no lock artifacts behind', async () => {
       backend.save(makeSession('user-a'), 'user-a');
       await backend.withRefreshLock('user-a', async () => undefined);
-      // No <file>.lock directory — the lock never engages today.
+      // A completed non-rotating adoption releases both lock and fence.
       expect(existsSync(join(SESSIONS_DIR, 'user-a.json.lock'))).toBe(false);
+      expect(existsSync(join(SESSIONS_DIR, 'user-a.json.refresh-in-flight'))).toBe(false);
+    });
+
+    test('refuses a dangling refresh-fence symlink instead of treating it as absent', () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      const fence = join(SESSIONS_DIR, 'user-a.json.refresh-in-flight');
+      symlinkSync(join(SESSIONS_DIR, 'missing-fence-target'), fence);
+      expect(() => backend.load('user-a')).toThrow();
+      expect(() => backend.save(makeSession('user-a'), 'user-a')).toThrow();
+    });
+
+    test('binds cached-authority refusal to constructor and switched user scopes', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      backend.save(makeSession('user-b'), 'user-b');
+      await expect(backend.withRefreshLock('user-b', async (_fresh, beginRotation) => {
+        beginRotation();
+        throw new Error('provider outcome lost');
+      })).rejects.toThrow('provider outcome lost');
+
+      const fencedAtConstruction = new AuthService('https://service.example.test', false, 'user-b', backend);
+      expect(() => fencedAtConstruction.getToken()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+
+      const switched = new AuthService('https://service.example.test', false, 'user-a', backend);
+      switched.setSessionUserId('user-b');
+      expect(() => switched.getToken()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+    });
+  });
+
+  describe('compare-and-save', () => {
+    test('refuses a stale hosted install without overwriting the rotated authority', () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+      const staleDigest = authorityDigest('rt_stale');
+      const replacement = { ...stored, refresh_token: 'rt_replacement' };
+      expect(backend.saveIfRefreshAuthorityMatches(replacement, 'user-a', staleDigest)).toBe(false);
+      expect(backend.load('user-a')?.refresh_token).toBe(stored.refresh_token);
+    });
+
+    test('serializes the first install and refuses a second null-baseline writer', () => {
+      const first = makeSession('user-a');
+      const second = { ...first, refresh_token: 'rt_second' };
+      expect(backend.saveIfRefreshAuthorityMatches(first, 'user-a', null)).toBe(true);
+      expect(backend.saveIfRefreshAuthorityMatches(second, 'user-a', null)).toBe(false);
+      expect(backend.load('user-a')).toEqual(first);
+    });
+
+    test('checks explicit provider-authenticated replacement and refuses swallowed or missing saves', async () => {
+      const original = makeSession('user-a');
+      const replacement = { ...original, refresh_token: 'rt_verified_login' };
+      backend.save(original, 'user-a');
+      const installed = await backend.withVerifiedAuthInstallation(
+        'user-a',
+        authorityDigest(original.refresh_token),
+        async () => {
+          backend.save(replacement, 'user-a');
+          return 'installed';
+        },
+      );
+      expect(installed).toBe('installed');
+      expect(backend.load('user-a')).toEqual(replacement);
+
+      await expect(backend.withVerifiedAuthInstallation(
+        'user-a',
+        authorityDigest(original.refresh_token),
+        async () => {
+          try { backend.save({ ...replacement, refresh_token: 'rt_stale_login' }, 'user-a'); } catch { /* legacy save swallows */ }
+          return 'must-not-escape';
+        },
+      )).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      await expect(backend.withVerifiedAuthInstallation(
+        'user-a',
+        authorityDigest(replacement.refresh_token),
+        async () => 'missing-save',
+      )).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      expect(backend.load('user-a')).toEqual(replacement);
+    });
+
+    test('persists an explicit sign-in replacement and detects drift despite the legacy swallowed save', async () => {
+      const original = makeSession('user-a');
+      backend.save(original, 'user-a');
+      const auth = new AuthService('https://service.example.test', false, 'user-a', backend);
+      const verified = auth as unknown as Readonly<{
+        captureExplicitAuthInstallationBaseline: () => Readonly<{
+          userId: string | null;
+          refreshAuthoritySha256: string | null;
+        }>;
+        processVerifiedExchangeResponse: (
+          token: Readonly<{ access_token: string; refresh_token: string; expires_in: number }>,
+          user: Readonly<{ id: string; email: string; first_name: null; last_name: null }>,
+          organizations: readonly [],
+          baseline: Readonly<{ userId: string | null; refreshAuthoritySha256: string | null }>,
+        ) => Promise<Readonly<{ success: boolean }>>;
+      }>;
+      const user = { id: 'user-a', email: 'user-a@test.com', first_name: null, last_name: null } as const;
+      const baseline = verified.captureExplicitAuthInstallationBaseline();
+      const first = await verified.processVerifiedExchangeResponse({
+        access_token: fakeJwt({ sub: 'user-a' }), refresh_token: 'rt_verified_login', expires_in: 600,
+      }, user, [], baseline);
+      expect(first.success).toBeTrue();
+      expect(backend.load('user-a')?.refresh_token).toBe('rt_verified_login');
+
+      await expect(verified.processVerifiedExchangeResponse({
+        access_token: fakeJwt({ sub: 'user-a' }), refresh_token: 'rt_stale_login', expires_in: 600,
+      }, user, [], baseline)).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      expect(backend.load('user-a')?.refresh_token).toBe('rt_verified_login');
+    });
+
+    test('freezes a new explicit-login baseline after clear on the same AuthService', async () => {
+      const original = makeSession('user-a');
+      backend.save(original, 'user-a');
+      const auth = new AuthService('https://service.example.test', false, 'user-a', backend);
+      const verified = auth as unknown as Readonly<{
+        captureExplicitAuthInstallationBaseline: () => Readonly<{
+          userId: string | null;
+          refreshAuthoritySha256: string | null;
+        }>;
+        processVerifiedExchangeResponse: (
+          token: Readonly<{ access_token: string; refresh_token: string; expires_in: number }>,
+          user: Readonly<{ id: string; email: string; first_name: null; last_name: null }>,
+          organizations: readonly [],
+          baseline: Readonly<{ userId: string | null; refreshAuthoritySha256: string | null }>,
+        ) => Promise<Readonly<{ success: boolean }>>;
+      }>;
+      auth.clearToken();
+      const baseline = verified.captureExplicitAuthInstallationBaseline();
+      const result = await verified.processVerifiedExchangeResponse({
+        access_token: fakeJwt({ sub: 'user-a' }), refresh_token: 'rt_after_clear', expires_in: 600,
+      }, { id: 'user-a', email: 'user-a@test.com', first_name: null, last_name: null }, [], baseline);
+
+      expect(baseline).toEqual({ userId: 'user-a', refreshAuthoritySha256: null });
+      expect(result.success).toBeTrue();
+      expect(backend.load('user-a')?.refresh_token).toBe('rt_after_clear');
+    });
+
+    test('does not let an unknown login subject adopt an existing user authority', async () => {
+      const existing = makeSession('user-b');
+      const auth = new AuthService('https://service.example.test', false, undefined, backend);
+      const verified = auth as unknown as Readonly<{
+        captureExplicitAuthInstallationBaseline: () => Readonly<{
+          userId: string | null;
+          refreshAuthoritySha256: string | null;
+        }>;
+        processVerifiedExchangeResponse: (
+          token: Readonly<{ access_token: string; refresh_token: string; expires_in: number }>,
+          user: Readonly<{ id: string; email: string; first_name: null; last_name: null }>,
+          organizations: readonly [],
+          baseline: Readonly<{ userId: string | null; refreshAuthoritySha256: string | null }>,
+        ) => Promise<Readonly<{ success: boolean }>>;
+      }>;
+      const baseline = verified.captureExplicitAuthInstallationBaseline();
+      backend.save(existing, 'user-b');
+
+      await expect(verified.processVerifiedExchangeResponse({
+        access_token: fakeJwt({ sub: 'user-b' }), refresh_token: 'rt_unrelated_login', expires_in: 600,
+      }, { id: 'user-b', email: 'user-b@test.com', first_name: null, last_name: null }, [], baseline))
+        .rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      expect(baseline).toEqual({ userId: null, refreshAuthoritySha256: null });
+      expect(backend.load('user-b')).toEqual(existing);
+    });
+
+    test('refuses explicit auth when a nested scoped refresh leaves authority fenced', async () => {
+      const original = makeSession('user-a');
+      const signedIn = { ...original, refresh_token: 'rt_verified_login' };
+      backend.save(original, 'user-a');
+      await expect(backend.withVerifiedAuthInstallation(
+        'user-a',
+        authorityDigest(original.refresh_token),
+        async () => {
+          backend.save(signedIn, 'user-a');
+          await backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+            beginRotation();
+            throw new Error('nested refresh response lost');
+          }).catch(() => undefined);
+          return 'must-not-escape';
+        },
+      )).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      expect(existsSync(join(SESSIONS_DIR, 'user-a.json.refresh-in-flight'))).toBeTrue();
     });
   });
 

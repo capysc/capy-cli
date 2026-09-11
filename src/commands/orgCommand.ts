@@ -49,17 +49,21 @@ export interface OrgCommandOptions {
 }
 
 export class OrgCommand {
-  private projectManager: ProjectManager;
-  private fileManager: FileManager;
-  private authService: AuthService;
-  private serviceClient: ServiceClient;
-  private web: boolean;
+  private readonly projectManager: ProjectManager;
+  private readonly fileManager: FileManager;
+  private readonly authService: AuthService;
+  private readonly serviceClient: ServiceClient;
+  private readonly apiUrl: string | undefined;
+  private readonly devMode: boolean;
+  private readonly web: boolean;
 
   constructor(apiUrl?: string, devMode: boolean = false, options: OrgCommandOptions = {}) {
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
     this.authService = new AuthService(apiUrl, devMode);
     this.serviceClient = new ServiceClient(apiUrl, devMode);
+    this.apiUrl = apiUrl;
+    this.devMode = devMode;
     this.web = options.web === true;
 
     this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
@@ -85,9 +89,7 @@ export class OrgCommand {
     if (projectState.userId) {
       this.authService.setSessionUserId(projectState.userId);
     }
-    let authResult = await this.authService.authenticateSilent(currentOrgId);
-    if (!authResult.success) authResult = await this.authService.authenticateSilent();
-    if (!authResult.success) authResult = await this.authService.authenticate(currentOrgId);
+    const authResult = await this.authenticateForOrganization(currentOrgId);
     if (!authResult.success) {
       // THROW, never console.error + process.exit. The catch in `execute()`
       // routes to `displayErrorAndExit`, which serves the command-error page
@@ -147,50 +149,61 @@ export class OrgCommand {
       );
     }
 
-    let selectedOrg: Organization;
-    if (orgId === CREATE_NEW_ORG) {
-      selectedOrg = await createNewOrganization(
-        this.authService,
-        this.serviceClient,
-        refreshToken,
-        authResult.user_id!,
-      );
-
-      const scopedAuth = await this.authService.refreshWithCredentials(
-        refreshToken,
-        selectedOrg.id,
-        authResult.user_id,
-      );
-      if (!scopedAuth.success) {
-        throw new CapyError(
-          scopedAuth.error || 'Organization switch failed',
-          ERROR_CODES.AUTH_FAILED,
+    const selected = await (async () => {
+      if (orgId === CREATE_NEW_ORG) {
+        const selectedOrg = await createNewOrganization(
+          this.authService,
+          this.serviceClient,
+          refreshToken,
+          authResult.user_id!,
         );
+
+        const installed = await this.authService.refreshWithCredentials(
+          refreshToken,
+          selectedOrg.id,
+          authResult.user_id,
+        );
+        if (!installed.auth.success) {
+          throw new CapyError(
+            installed.auth.error || 'Organization switch failed',
+            ERROR_CODES.AUTH_FAILED,
+          );
+        }
+        return {
+          organization: selectedOrg,
+          authService: installed.authService,
+          serviceClient: this.serviceClientFor(installed.authService),
+        } as const;
       }
-    } else {
-      selectedOrg = orgs.find(o => o.id === orgId)!;
+
+      const selectedOrg = orgs.find(o => o.id === orgId)!;
 
       const orgSpinner = ora('Switching organization...').start();
-      const scopedAuth = await this.authService.refreshWithCredentials(
+      const installed = await this.authService.refreshWithCredentials(
         refreshToken,
         selectedOrg.id,
         authResult.user_id,
       );
 
-      if (!scopedAuth.success) {
+      if (!installed.auth.success) {
         orgSpinner.fail('Failed to switch organization');
         throw new CapyError(
-          scopedAuth.error || 'Organization switch failed',
+          installed.auth.error || 'Organization switch failed',
           ERROR_CODES.AUTH_FAILED,
         );
       }
       orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
-    }
+      return {
+        organization: selectedOrg,
+        authService: installed.authService,
+        serviceClient: this.serviceClientFor(installed.authService),
+      } as const;
+    })();
 
     // Check for org master key
-    if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
+    if (!hasOrgKey(selected.organization.id, authResult.user_id!)) {
       throw new CapyError(
-        `You have access to "${selectedOrg.name}" but no encryption key on this device.\n\n` +
+        `You have access to "${selected.organization.name}" but no encryption key on this device.\n\n` +
         '  Ask your org owner for an invite code, then run:\n\n' +
         '    capy redeem <code>\n\n' +
         '  This will securely transfer the shared encryption key to your device.',
@@ -199,11 +212,16 @@ export class OrgCommand {
     }
 
     // List projects in the new org
-    const projects = await this.serviceClient.listProjects();
-    const orgProjects = projects.filter(p => p.organization_id === selectedOrg.id);
+    const projects = await selected.serviceClient.listProjects();
+    const orgProjects = projects.filter(p => p.organization_id === selected.organization.id);
 
     if (orgProjects.length === 0) {
-      await this.createFirstProjectInOrg(selectedOrg, authResult.user_id!, hasProject);
+      await this.createFirstProjectInOrg(
+        selected.organization,
+        authResult.user_id!,
+        hasProject,
+        selected.serviceClient,
+      );
       return;
     }
 
@@ -219,7 +237,20 @@ export class OrgCommand {
     }]);
 
     const selectedProject = orgProjects.find(p => p.id === projectId)!;
-    this.bindToProject(selectedOrg, selectedProject, authResult.user_id, hasProject);
+    this.bindToProject(selected.organization, selectedProject, authResult.user_id, hasProject);
+  }
+
+  private async authenticateForOrganization(currentOrgId: string | undefined): Promise<AuthResult> {
+    const scoped = await this.authService.authenticateSilent(currentOrgId);
+    if (scoped.success) return scoped;
+    const unscoped = await this.authService.authenticateSilent();
+    return unscoped.success ? unscoped : this.authService.authenticate(currentOrgId);
+  }
+
+  private serviceClientFor(authService: AuthService): ServiceClient {
+    const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+    return serviceClient;
   }
 
   /** Point this directory at the chosen org+project and say so. */
@@ -302,26 +333,34 @@ export class OrgCommand {
       firstBranchName: FIRST_BRANCH,
     };
 
-    let switchedTo: Organization | undefined;
+    const selectedContexts = new Map(orgs.map((organization) => [
+      organization.id,
+      Promise.withResolvers<Readonly<{
+        organization: Organization;
+        authService: AuthService;
+        serviceClient: ServiceClient;
+      }>>(),
+    ] as const));
     const picked = await switchOrganizationInBrowser({
       ...facts,
       onOrgChosen: async (orgId: string) => {
         const org = orgs.find(o => o.id === orgId)!;
-        const scopedAuth = await this.authService.refreshWithCredentials(
+        const installed = await this.authService.refreshWithCredentials(
           refreshToken,
           org.id,
           userId,
         );
-        if (!scopedAuth.success) {
-          return { ok: false as const, reason: scopedAuth.error || 'Organization switch failed' };
+        if (!installed.auth.success) {
+          return { ok: false as const, reason: installed.auth.error || 'Organization switch failed' };
         }
-        switchedTo = org;
-        const projects = await this.serviceClient.listProjects();
+        const serviceClient = this.serviceClientFor(installed.authService);
+        const projects = await serviceClient.listProjects();
         const orgProjects = projects.filter(p => p.organization_id === org.id);
         if (orgProjects.length === 0) {
           const refusal = this.firstProjectRefusal(org, hasProject);
           if (refusal) return { ok: false as const, reason: refusal };
         }
+        selectedContexts.get(org.id)?.resolve({ organization: org, authService: installed.authService, serviceClient });
         return {
           ok: true as const,
           projects: orgProjects.map(p => ({ id: p.id, name: p.name })),
@@ -343,17 +382,18 @@ export class OrgCommand {
         userId,
         true,
       );
-      const scopedAuth = await this.authService.refreshWithCredentials(
+      const installed = await this.authService.refreshWithCredentials(
         refreshToken,
         created.id,
         userId,
       );
-      if (!scopedAuth.success) {
+      if (!installed.auth.success) {
         throw new CapyError(
-          scopedAuth.error || 'Organization switch failed',
+          installed.auth.error || 'Organization switch failed',
           ERROR_CODES.AUTH_FAILED,
         );
       }
+      const serviceClient = this.serviceClientFor(installed.authService);
       // A brand-new org has no projects, so the only route on is the first one.
       console.log(`\n  ${B(created.name)} has no projects yet.`);
       const refusal = this.firstProjectRefusal(created, hasProject);
@@ -369,11 +409,19 @@ export class OrgCommand {
         console.log(`\n  Switch cancelled. Run ${B('capy')} in a fresh directory to create a project in ${B(created.name)}.\n`);
         return;
       }
-      await this.bootstrapFirstProject(created, userId, name);
+      await this.bootstrapFirstProject(created, userId, name, serviceClient);
       return;
     }
 
-    const selectedOrg = switchedTo!;
+    const selectedContext = selectedContexts.get(picked.orgId);
+    if (!selectedContext) {
+      throw new CapyError('Organization switch failed', ERROR_CODES.AUTH_FAILED);
+    }
+    const selected = await selectedContext.promise;
+    if (selected.organization.id !== picked.orgId) {
+      throw new CapyError('Organization switch failed', ERROR_CODES.AUTH_FAILED);
+    }
+    const selectedOrg = selected.organization;
     if (!hasOrgKey(selectedOrg.id, userId)) {
       // Unreachable through the screen, which disables a row with no key —
       // and still checked, because the throw is what stops a switch this
@@ -388,21 +436,21 @@ export class OrgCommand {
     }
 
     if (picked.action === 'create-project') {
-      await this.bootstrapFirstProject(selectedOrg, userId, picked.projectName);
+      await this.bootstrapFirstProject(selectedOrg, userId, picked.projectName, selected.serviceClient);
       return;
     }
 
-    const projects = await this.serviceClient.listProjects();
+    const projects = await selected.serviceClient.listProjects();
     const selectedProject = projects.find(p => p.id === picked.projectId)!;
     this.bindToProject(selectedOrg, selectedProject, userId, hasProject);
   }
 
-  private keyServiceOps(): KeyServiceOps {
+  private keyServiceOps(serviceClient: ServiceClient): KeyServiceOps {
     return {
       coDecrypt: (orgId, ciphertext) =>
-        this.serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
+        serviceClient.coDecrypt(orgId, ciphertext).then(r => r.plaintext),
       wrapOuterLayer: (orgId, plaintext) =>
-        this.serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
+        serviceClient.wrapOuterLayer(orgId, plaintext).then(r => r.ciphertext),
     };
   }
 
@@ -416,6 +464,7 @@ export class OrgCommand {
     selectedOrg: Organization,
     userId: string,
     hasProject: boolean,
+    serviceClient: ServiceClient,
   ): Promise<void> {
     console.log(`\n  ${B(selectedOrg.name)} has no projects yet.`);
 
@@ -442,7 +491,7 @@ export class OrgCommand {
       validate: (input: string) => input.trim().length > 0 || 'Project name cannot be empty',
     }]);
 
-    await this.bootstrapFirstProject(selectedOrg, userId, projectName);
+    await this.bootstrapFirstProject(selectedOrg, userId, projectName, serviceClient);
   }
 
   /**
@@ -473,9 +522,10 @@ export class OrgCommand {
     selectedOrg: Organization,
     userId: string,
     projectName: string,
+    serviceClient: ServiceClient,
   ): Promise<void> {
     const initSpinner = ora('Creating project...').start();
-    const projectResult = await this.serviceClient.initializeProject(
+    const projectResult = await serviceClient.initializeProject(
       projectName.trim(),
       selectedOrg.id,
     );
@@ -486,14 +536,14 @@ export class OrgCommand {
       selectedOrg.id,
       projectResult.project_id,
       userId,
-      this.keyServiceOps(),
+      this.keyServiceOps(serviceClient),
     );
     keySpinner.succeed('Project key ready');
 
     const branchName = FIRST_BRANCH;
     const branchSpinner = ora(`Creating branch ${branchName}...`).start();
     try {
-      await this.serviceClient.createBranch(projectResult.project_id, branchName, false);
+      await serviceClient.createBranch(projectResult.project_id, branchName, false);
       branchSpinner.succeed(`Created branch ${branchName}`);
     } catch (err) {
       branchSpinner.fail(`Failed to create branch ${branchName}`);

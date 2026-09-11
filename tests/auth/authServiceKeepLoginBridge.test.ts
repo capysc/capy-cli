@@ -14,24 +14,34 @@
  * same convention as authServiceKeepScreens.test.ts.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import type { SessionStorageBackend } from '../../src/auth/session/backend';
+import type { SessionStore } from '../../src/types/index';
 
-const store: { session: unknown } = { session: null };
-const forceLoginState = { pending: false };
+const saveSession = mock((session: SessionStore, _userId: string | undefined) =>
+  structuredClone(session));
+const latestSession = (): SessionStore | null => {
+  const saved = saveSession.mock.results.at(-1)?.value as SessionStore | undefined;
+  return saved ? structuredClone(saved) : null;
+};
+const memorySessionBackend: SessionStorageBackend = {
+  load: mock(() => latestSession()),
+  save: saveSession,
+  clear: mock(() => undefined),
+  discover: mock(() => null),
+  withRefreshLock: async (_userId, run) => run(latestSession(), () => undefined),
+};
+const forceLoginPending = mock(() => false);
 mock.module('../../src/config/globalConfig', () => ({
-  readAuthSession: mock(() => store.session),
-  saveAuthSession: mock((session: unknown) => {
-    store.session = session;
-  }),
   getAuthSessionPath: mock(() => '/tmp/capy-keepbridge-test/session.json'),
   getGlobalCapyDir: mock(() => '/tmp/capy-keepbridge-test-nonexistent'),
-  consumeForceLoginMarker: mock(() => forceLoginState.pending),
-  isForceLoginMarkerPending: mock(() => forceLoginState.pending),
+  consumeForceLoginMarker: mock(() => forceLoginPending()),
+  isForceLoginMarkerPending: mock(() => forceLoginPending()),
 }));
 
-const opened: { urls: string[] } = { urls: [] };
+const captureOpenedUrl = mock((url: string) => url);
 mock.module('../../src/ui/openScreen', () => ({
   openScreen: mock(async (url: string) => {
-    opened.urls.push(url);
+    captureOpenedUrl(url);
     return { via: 'suppressed' };
   }),
 }));
@@ -56,16 +66,18 @@ const ORG = { id: 'org1', workos_org_id: 'wos1', name: 'Acme' };
 const USER = { id: 'user_1', email: 'v@example.test', first_name: 'V', last_name: 'C' };
 const ACCESS_TOKEN = fakeJwt({ sub: USER.id, org_id: ORG.workos_org_id });
 
-const wire = {
-  initiateCalls: [] as Array<{ state: string; redirect_uri: string; organization_id?: string }>,
-};
+const captureInitiate = mock((value: Readonly<{
+  state: string;
+  redirect_uri: string;
+  organization_id?: string;
+}>) => value);
 
 async function serviceFetch(url: string, init?: RequestInit): Promise<Response> {
   const body = init?.body ? JSON.parse(String(init.body)) : null;
   const path = url.slice(SVC.length);
 
   if (path === '/auth/initiate') {
-    wire.initiateCalls.push({
+    captureInitiate({
       state: body.state,
       redirect_uri: body.redirect_uri,
       organization_id: body.organization_id,
@@ -82,12 +94,13 @@ async function serviceFetch(url: string, init?: RequestInit): Promise<Response> 
   return Response.json({ error: 'unexpected', code: 'NOT_FOUND' }, { status: 404 });
 }
 
-const savedEnv: Record<string, string | undefined> = {};
+const savedEnv = {
+  CAPY_WEB_NO_OPEN: process.env.CAPY_WEB_NO_OPEN,
+  CAPY_KEEP_LOGIN_BRIDGE: process.env.CAPY_KEEP_LOGIN_BRIDGE,
+  CAPY_KEEP_ORIGIN: process.env.CAPY_KEEP_ORIGIN,
+} as const;
 
 beforeAll(() => {
-  savedEnv.CAPY_WEB_NO_OPEN = process.env.CAPY_WEB_NO_OPEN;
-  savedEnv.CAPY_KEEP_LOGIN_BRIDGE = process.env.CAPY_KEEP_LOGIN_BRIDGE;
-  savedEnv.CAPY_KEEP_ORIGIN = process.env.CAPY_KEEP_ORIGIN;
   process.env.CAPY_WEB_NO_OPEN = '1';
 });
 
@@ -100,10 +113,9 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  store.session = null;
-  forceLoginState.pending = false;
-  wire.initiateCalls = [];
-  opened.urls = [];
+  [saveSession, forceLoginPending, captureInitiate, captureOpenedUrl]
+    .forEach((candidate) => candidate.mockClear());
+  forceLoginPending.mockReturnValue(false);
   delete process.env.CAPY_KEEP_LOGIN_BRIDGE;
   delete process.env.CAPY_KEEP_ORIGIN;
   globalThis.fetch = ((url: any, init?: any) => {
@@ -128,15 +140,15 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep reachable, plain sign-in', () => {
       process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
       process.env.CAPY_KEEP_ORIGIN = `http://127.0.0.1:${keepStub.port}`;
 
-      const auth = new AuthService(SVC, false);
+      const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
       const authP = auth.authenticate();
 
       const deadline = Date.now() + 2_000;
-      while (opened.urls.length === 0 && Date.now() < deadline) {
+      while (captureOpenedUrl.mock.calls.length === 0 && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 5));
       }
-      expect(opened.urls.length).toBe(1);
-      const bridgeUrl = new URL(opened.urls[0]);
+      expect(captureOpenedUrl).toHaveBeenCalledTimes(1);
+      const bridgeUrl = new URL(captureOpenedUrl.mock.calls[0]![0]);
       expect(bridgeUrl.origin).toBe(`http://127.0.0.1:${keepStub.port}`);
       expect(bridgeUrl.pathname).toBe('/auth/start');
       const cliRedirect = bridgeUrl.searchParams.get('cli_redirect')!;
@@ -148,7 +160,7 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep reachable, plain sign-in', () => {
 
       // The direct /auth/initiate call never happened — keep is the one
       // fronting the FIRST hop, not this process.
-      expect(wire.initiateCalls.length).toBe(0);
+      expect(captureInitiate).not.toHaveBeenCalled();
 
       // Simulate keep's silent second round trip landing back here with a
       // code bound to THIS server's own state (the only one it will accept).
@@ -169,18 +181,18 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep unreachable: loopback fallback', () => 
     process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
     process.env.CAPY_KEEP_ORIGIN = 'http://127.0.0.1:9'; // discard port, refuses connections
 
-    const auth = new AuthService(SVC, false);
+    const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
 
     const deadline = Date.now() + 2_000;
-    while (wire.initiateCalls.length === 0 && Date.now() < deadline) {
+    while (captureInitiate.mock.calls.length === 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 5));
     }
-    expect(wire.initiateCalls.length).toBe(1);
+    expect(captureInitiate).toHaveBeenCalledTimes(1);
     // The opened URL is the AuthKit URL the service returned, NOT a keep URL.
-    expect(opened.urls[0]).toBe('https://authkit.example.test/authorize');
+    expect(captureOpenedUrl.mock.calls[0]?.[0]).toBe('https://authkit.example.test/authorize');
 
-    const init = wire.initiateCalls[0];
+    const init = captureInitiate.mock.calls[0]![0];
     const cbRes = await landOnLoopback(init.redirect_uri, init.state, 'fake-code-2');
     expect(cbRes.status).toBe(200);
 
@@ -196,17 +208,17 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with an organization_id: falls back to direct
       process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
       process.env.CAPY_KEEP_ORIGIN = `http://127.0.0.1:${keepStub.port}`;
 
-      const auth = new AuthService(SVC, false);
+      const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
       const authP = auth.authenticate(ORG.id);
 
       const deadline = Date.now() + 2_000;
-      while (wire.initiateCalls.length === 0 && Date.now() < deadline) {
+      while (captureInitiate.mock.calls.length === 0 && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 5));
       }
-      expect(wire.initiateCalls.length).toBe(1);
-      expect(wire.initiateCalls[0].organization_id).toBe(ORG.id);
+      expect(captureInitiate).toHaveBeenCalledTimes(1);
+      expect(captureInitiate.mock.calls[0]?.[0].organization_id).toBe(ORG.id);
 
-      const init = wire.initiateCalls[0];
+      const init = captureInitiate.mock.calls[0]![0];
       await landOnLoopback(init.redirect_uri, init.state, 'fake-code-3');
       const result = await authP;
       expect(result.success).toBe(true);
@@ -222,18 +234,18 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker: falls back
     try {
       process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
       process.env.CAPY_KEEP_ORIGIN = `http://127.0.0.1:${keepStub.port}`;
-      forceLoginState.pending = true;
+      forceLoginPending.mockReturnValue(true);
 
-      const auth = new AuthService(SVC, false);
+      const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
       const authP = auth.authenticate();
 
       const deadline = Date.now() + 2_000;
-      while (wire.initiateCalls.length === 0 && Date.now() < deadline) {
+      while (captureInitiate.mock.calls.length === 0 && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 5));
       }
-      expect(wire.initiateCalls.length).toBe(1);
+      expect(captureInitiate).toHaveBeenCalledTimes(1);
 
-      const init = wire.initiateCalls[0];
+      const init = captureInitiate.mock.calls[0]![0];
       await landOnLoopback(init.redirect_uri, init.state, 'fake-code-4');
       const result = await authP;
       expect(result.success).toBe(true);
@@ -245,16 +257,16 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker: falls back
 
 describe('CAPY_KEEP_LOGIN_BRIDGE unset (default): unchanged direct behavior', () => {
   test('never probes keep, calls /auth/initiate directly', async () => {
-    const auth = new AuthService(SVC, false);
+    const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
 
     const deadline = Date.now() + 2_000;
-    while (wire.initiateCalls.length === 0 && Date.now() < deadline) {
+    while (captureInitiate.mock.calls.length === 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 5));
     }
-    expect(wire.initiateCalls.length).toBe(1);
+    expect(captureInitiate).toHaveBeenCalledTimes(1);
 
-    const init = wire.initiateCalls[0];
+    const init = captureInitiate.mock.calls[0]![0];
     await landOnLoopback(init.redirect_uri, init.state, 'fake-code-5');
     const result = await authP;
     expect(result.success).toBe(true);

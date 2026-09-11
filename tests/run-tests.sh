@@ -51,6 +51,7 @@ ISOLATED_FILES=(
   tests/auth/sessionLifecycle.test.ts
   tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts
+  tests/commands/orgCommandRefreshReplacement.test.ts
   tests/commands/readOnlyRun.int.test.ts
   tests/commands/kickCommand.test.ts
   tests/commands/inviteCommand.test.ts

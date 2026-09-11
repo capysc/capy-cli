@@ -24,6 +24,7 @@ import type { AuthResponseWire } from './initRunContract';
 import {
   initRunSessionAuthorityDigest,
   prepareInitRunSessionInstallation,
+  refreshTokenAuthorityDigest,
 } from './initRunSessionInstaller';
 import {
   INIT_RUN_ORGANIZATION_INDETERMINATE,
@@ -31,6 +32,11 @@ import {
   parseInitRunCreatedOrganizationResponse,
   prepareInitRunCreatedOrganizationInstallation,
 } from './initRunOrganizationInstaller';
+import {
+  currentIdentityAccessToken,
+  prepareIdentityRefresh,
+  requestIdentityRefresh,
+} from './identityRefresh';
 
 export interface InstalledExchangeResponse {
   readonly auth: AuthResult;
@@ -42,6 +48,17 @@ export interface InstalledInitRunOrganization {
   readonly auth: AuthResult;
   readonly authService: AuthService;
 }
+
+export interface RenewedInitRunIdentity {
+  readonly auth: AuthResult;
+  readonly authService: AuthService;
+  readonly accessToken: string;
+}
+
+type ExplicitAuthInstallationBaseline = Readonly<{
+  userId: string | null;
+  refreshAuthoritySha256: string | null;
+}>;
 
 const INIT_RUN_ORGANIZATION_RESPONSE_LIMIT = 131_072;
 const INIT_RUN_ORGANIZATION_TIMEOUT_MS = 15_000;
@@ -99,6 +116,8 @@ export class AuthService {
   private readonly storageBackend: SessionStorageBackend;
   private readonly initialSessionUserId: string | null;
   private readonly initialSessionAuthorityDigest: string | null;
+  private readonly initialRefreshAuthorityDigest: string | null;
+  private readonly initialRefreshLineageDigest: string | null;
 
   constructor(
     serviceApiUrl?: string,
@@ -133,6 +152,9 @@ export class AuthService {
     this.lifecycle.load();
     this.initialSessionUserId = this.lifecycle.session?.user_id ?? null;
     this.initialSessionAuthorityDigest = initRunSessionAuthorityDigest(this.lifecycle.session);
+    this.initialRefreshAuthorityDigest = refreshTokenAuthorityDigest(this.lifecycle.session);
+    this.initialRefreshLineageDigest = this.lifecycle.session?.identity_session?.root_authority_sha256
+      ?? this.initialRefreshAuthorityDigest;
   }
 
   // Session state is owned by the lifecycle module; these accessors keep the
@@ -159,6 +181,7 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
+      this.assertRefreshAuthorityAvailable();
       // Cached or refreshed token first — same path authenticateSilent uses
       const method = await this.lifecycle.acquireSilent(organizationId);
       if (method) {
@@ -200,6 +223,7 @@ export class AuthService {
     // screen bound to a broker connection. Flag unset = today's loopback
     // behavior, unchanged.
     const keepScreens = keepScreensEnabled();
+    const installationBaseline = this.captureExplicitAuthInstallationBaseline();
     const oauthServer = new OAuthServer({ deferCompletion: keepScreens });
     await oauthServer.bind();
 
@@ -220,32 +244,31 @@ export class AuthService {
     const useKeepBridge =
       canUseKeepBridge && (await isKeepReachable(keepOrigin()));
 
-    let auth_url: string;
-    if (useKeepBridge) {
-      auth_url = oauthServer.getKeepBridgeUrl(keepOrigin());
-    } else {
-      const redirectUri = oauthServer.getRedirectUri();
-      const state = oauthServer.getState();
+    const auth_url = useKeepBridge
+      ? oauthServer.getKeepBridgeUrl(keepOrigin())
+      : await (async () => {
+        const redirectUri = oauthServer.getRedirectUri();
+        const state = oauthServer.getState();
 
-      // If `capy logout` left a marker, ask the service to add prompt=login
-      // to the WorkOS auth URL so AuthKit re-prompts instead of silently
-      // reusing its SSO cookie. Consume the marker now — even if the OAuth
-      // round-trip fails later, "force_login" was the user's intent for
-      // this attempt and we don't want it sticking forever.
-      const forceLogin = consumeForceLoginMarker();
+        // If `capy logout` left a marker, ask the service to add prompt=login
+        // to the WorkOS auth URL so AuthKit re-prompts instead of silently
+        // reusing its SSO cookie. Consume the marker now — even if the OAuth
+        // round-trip fails later, "force_login" was the user's intent for
+        // this attempt and we don't want it sticking forever.
+        const forceLogin = consumeForceLoginMarker();
 
-      const response = await postJson<{ auth_url: string }>(
-        `${this.serviceApiUrl}/auth/initiate`,
-        {
-          state,
-          redirect_uri: redirectUri,
-          organization_id: organizationId,
-          code_challenge: oauthServer.getCodeChallenge(),
-          ...(forceLogin ? { force_login: true } : {}),
-        },
-      );
-      auth_url = response.auth_url;
-    }
+        const response = await postJson<{ auth_url: string }>(
+          `${this.serviceApiUrl}/auth/initiate`,
+          {
+            state,
+            redirect_uri: redirectUri,
+            organization_id: organizationId,
+            code_challenge: oauthServer.getCodeChallenge(),
+            ...(forceLogin ? { force_login: true } : {}),
+          },
+        );
+        return response.auth_url;
+      })();
 
     const code = await oauthServer.startAuthFlow(auth_url);
 
@@ -259,7 +282,9 @@ export class AuthService {
         code_verifier: oauthServer.getCodeVerifier(),
       });
 
-      return this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+      return this.processVerifiedExchangeResponse(
+        response.token, response.user, response.organizations, installationBaseline, organizationId,
+      );
     }
 
     // Keep-screens path: the callback response is still held open. Finish the
@@ -275,7 +300,9 @@ export class AuthService {
         code_verifier: oauthServer.getCodeVerifier(),
       });
 
-      const result = await this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+      const result = await this.processVerifiedExchangeResponse(
+        response.token, response.user, response.organizations, installationBaseline, organizationId,
+      );
       await this.relayAuthScreenViaKeep(oauthServer, result);
       return result;
     } catch (error: any) {
@@ -380,6 +407,7 @@ export class AuthService {
     const email = process.env.CAPY_TEST_EMAIL;
     const password = process.env.CAPY_TEST_PASSWORD;
     if (!email || !password) return null;
+    const installationBaseline = this.captureExplicitAuthInstallationBaseline();
 
     const response = await postJson<{
       token: { access_token: string | null; refresh_token: string; expires_in: number };
@@ -391,7 +419,39 @@ export class AuthService {
       ...(organizationId ? { organization_id: organizationId } : {}),
     });
 
-    return this.processExchangeResponse(response.token, response.user, response.organizations, organizationId);
+    return this.processVerifiedExchangeResponse(
+      response.token, response.user, response.organizations, installationBaseline, organizationId,
+    );
+  }
+
+  private captureExplicitAuthInstallationBaseline(): ExplicitAuthInstallationBaseline {
+    this.assertRefreshAuthorityAvailable();
+    const scopedUserId = this.lifecycle.sessionUserId ?? this.initialSessionUserId ?? this.session?.user_id ?? null;
+    const stored = scopedUserId === null ? null : this.storageBackend.load(scopedUserId);
+    return {
+      userId: stored?.user_id ?? scopedUserId,
+      refreshAuthoritySha256: refreshTokenAuthorityDigest(stored),
+    };
+  }
+
+  private processVerifiedExchangeResponse(
+    token: { access_token: string | null; refresh_token: string; expires_in: number },
+    user: { id: string; email: string; first_name: string | null; last_name: string | null },
+    organizations: Organization[],
+    baseline: ExplicitAuthInstallationBaseline,
+    organizationId?: string,
+  ): Promise<AuthResult> {
+    if (baseline.userId !== null && baseline.userId !== user.id) {
+      return Promise.reject(new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'));
+    }
+    const process = () => this.processExchangeResponse(token, user, organizations, organizationId);
+    return this.storageBackend.withVerifiedAuthInstallation
+      ? this.storageBackend.withVerifiedAuthInstallation(
+        user.id,
+        baseline.refreshAuthoritySha256,
+        process,
+      )
+      : process();
   }
 
   /**
@@ -420,7 +480,14 @@ export class AuthService {
     }
     if (!alreadyInstalled) {
       try {
-        this.storageBackend.save(prepared.session, response.user.id);
+        const saved = this.storageBackend.saveIfRefreshAuthorityMatches
+          ? this.storageBackend.saveIfRefreshAuthorityMatches(
+            prepared.session,
+            response.user.id,
+            refreshTokenAuthorityDigest(currentSession),
+          )
+          : (this.storageBackend.save(prepared.session, response.user.id), true);
+        if (!saved) throw new Error('authority changed');
       } catch {
         throw new CapyError('Could not persist the hosted auth session', 'INIT_DELIVERY_INDETERMINATE');
       }
@@ -554,6 +621,7 @@ export class AuthService {
   }
 
   async refreshToken(): Promise<boolean> {
+    this.assertRefreshAuthorityAvailable();
     if (!this.session?.refresh_token || !this.currentOrgId) {
       return false;
     }
@@ -569,29 +637,76 @@ export class AuthService {
     refreshToken: string,
     organizationId: string,
     userId?: string,
-  ): Promise<AuthResult> {
-    // Bootstrap session if needed
-    if (!this.session) {
-      this.session = {
+  ): Promise<InstalledExchangeResponse> {
+    this.assertRefreshAuthorityAvailable();
+    const failure = (authService: AuthService): InstalledExchangeResponse => ({
+      auth: {
+        success: false,
+        error: 'Failed to refresh token for organization',
+      },
+      authService,
+    });
+    const expectedUserId = userId ?? this.lifecycle.sessionUserId ?? this.initialSessionUserId
+      ?? this.session?.user_id ?? null;
+    if (!expectedUserId || !refreshToken || !organizationId) return failure(this);
+    const loaded = (() => {
+      try {
+        this.storageBackend.assertRefreshAuthorityAvailable?.(expectedUserId);
+        return { ok: true as const, session: this.storageBackend.load(expectedUserId) };
+      } catch {
+        return { ok: false as const };
+      }
+    })();
+    if (!loaded.ok) return failure(this);
+    const current = loaded.session;
+    if (current && current.user_id !== expectedUserId) return failure(this);
+    const authority = current ?? {
         version: 2,
-        user_id: userId || '',
+        user_id: expectedUserId,
         refresh_token: refreshToken,
         organizations: [],
         sessions: {},
-      };
-    } else {
-      this.session.refresh_token = refreshToken;
+      } as const satisfies SessionStore;
+    if (!current) {
+      const saved = (() => {
+        try {
+          return this.storageBackend.saveIfRefreshAuthorityMatches
+            ? this.storageBackend.saveIfRefreshAuthorityMatches(authority, expectedUserId, null)
+            : (this.storageBackend.save(authority, expectedUserId), true);
+        } catch {
+          return false;
+        }
+      })();
+      if (!saved) return failure(this);
     }
-
-    const success = await this.lifecycle.refreshForOrg(organizationId);
-    if (success) {
-      return this.buildAuthResult('refreshed');
+    const candidate = new AuthService(
+      this.serviceApiUrl,
+      this.devMode,
+      expectedUserId,
+      this.storageBackend,
+      null,
+    );
+    const refreshed = await candidate.lifecycle.refreshForOrg(organizationId);
+    if (!refreshed) return failure(candidate);
+    const replacement = new AuthService(
+      this.serviceApiUrl,
+      this.devMode,
+      expectedUserId,
+      this.storageBackend,
+      organizationId,
+    );
+    const selected = (() => {
+      try { return replacement.getToken(); } catch { return null; }
+    })();
+    if (!selected
+      || selected.user_id !== expectedUserId
+      || selected.organization_id !== organizationId
+      || !/^\S+$/u.test(selected.access_token)
+      || !Number.isFinite(selected.expires_at)
+      || selected.expires_at <= Date.now()) {
+      return failure(replacement);
     }
-
-    return {
-      success: false,
-      error: 'Failed to refresh token for organization',
-    };
+    return { auth: replacement.buildAuthResult('refreshed'), authService: replacement };
   }
 
   /**
@@ -609,6 +724,7 @@ export class AuthService {
   }
 
   getToken(): ServiceToken | null {
+    this.assertRefreshAuthorityAvailable();
     return this.lifecycle.getToken();
   }
 
@@ -622,6 +738,7 @@ export class AuthService {
    * Callers typically surface that as "you need to re-authenticate".
    */
   async getValidToken(): Promise<ServiceToken | null> {
+    this.assertRefreshAuthorityAvailable();
     return this.lifecycle.getValidToken();
   }
 
@@ -639,6 +756,12 @@ export class AuthService {
    */
   getServiceApiUrl(): string {
     return this.serviceApiUrl;
+  }
+
+  assertRefreshAuthorityAvailable(): void {
+    this.storageBackend.assertRefreshAuthorityAvailable?.(
+      this.lifecycle.sessionUserId ?? this.initialSessionUserId ?? this.session?.user_id,
+    );
   }
 
   async checkOrgName(name: string): Promise<{ available: boolean; reason?: string }> {
@@ -659,27 +782,30 @@ export class AuthService {
   ): Promise<InstalledInitRunOrganization> {
     const serviceOrigin = exactInitRunServiceOrigin(this.serviceApiUrl);
     const trimmedName = name.trim();
-    const before = (() => {
-      try { return this.storageBackend.load(expected.userId); } catch { return null; }
-    })();
-    const beforeDigest = initRunSessionAuthorityDigest(before);
-    const baselineMatches = before !== null
-      && before.user_id === expected.userId
-      && /^\S+$/u.test(before.refresh_token)
-      && before.organizations.length === 0
-      && Object.keys(before.sessions).length === 0
-      && this.currentOrgId === null
-      && this.initialSessionUserId === expected.userId
-      && beforeDigest !== null
-      && beforeDigest === this.initialSessionAuthorityDigest;
-    if (!serviceOrigin || trimmedName.length === 0 || trimmedName.length > 100 || !baselineMatches) {
+    if (!serviceOrigin || trimmedName.length === 0 || trimmedName.length > 100) {
       throw initRunOrganizationFailure('The hosted organization request authority was invalid');
     }
     if (!Number.isFinite(expected.deadline)) {
       throw initRunOrganizationFailure('The hosted initialization deadline was invalid');
     }
+    const installed = await this.storageBackend.withRefreshLock(expected.userId, async (before, beginRotation) => {
+      const beforeDigest = initRunSessionAuthorityDigest(before);
+      const baselineMatches = before !== null
+        && before.user_id === expected.userId
+        && /^\S+$/u.test(before.refresh_token)
+        && before.organizations.length === 0
+        && Object.keys(before.sessions).length === 0
+        && this.currentOrgId === null
+        && this.initialSessionUserId === expected.userId
+        && beforeDigest !== null
+        && (beforeDigest === this.initialSessionAuthorityDigest
+          || before.identity_session?.root_authority_sha256 === this.initialRefreshLineageDigest);
+      if (!before || !baselineMatches) {
+        throw initRunOrganizationFailure('The hosted organization request authority was invalid');
+      }
     const remaining = expected.deadline - Date.now();
     if (remaining <= 0) throw new CapyError('The hosted initialization run expired', 'INIT_RUN_EXPIRED');
+    beginRotation();
     const response = await (async () => {
       try {
         return await fetch(`${serviceOrigin}/auth/create-org`, {
@@ -720,10 +846,7 @@ export class AuthService {
       expiresAt: resolveExpiresAt(parsed.expires_in),
       now: Date.now(),
     });
-    const unchanged = (() => {
-      try { return this.storageBackend.load(expected.userId); } catch { return null; }
-    })();
-    if (initRunSessionAuthorityDigest(unchanged) !== beforeDigest || Date.now() >= expected.deadline) {
+    if (Date.now() >= expected.deadline) {
       throw initRunOrganizationFailure('The auth session changed during hosted organization creation');
     }
     try {
@@ -731,7 +854,9 @@ export class AuthService {
     } catch {
       throw initRunOrganizationFailure('Could not persist the hosted organization session');
     }
-    const preparedDigest = initRunSessionAuthorityDigest(prepared.session);
+    return { prepared, parsed };
+    });
+    const preparedDigest = initRunSessionAuthorityDigest(installed.prepared.session);
     const replacement = (() => {
       try {
         const authService = new AuthService(
@@ -739,7 +864,7 @@ export class AuthService {
           this.devMode,
           expected.userId,
           this.storageBackend,
-          prepared.currentOrgId,
+          installed.prepared.currentOrgId,
         );
         return { authService, token: authService.getToken() };
       } catch {
@@ -749,13 +874,96 @@ export class AuthService {
     if (!replacement
       || replacement.authService.initialSessionUserId !== expected.userId
       || replacement.authService.initialSessionAuthorityDigest !== preparedDigest
-      || replacement.authService.currentOrgId !== prepared.currentOrgId
+      || replacement.authService.currentOrgId !== installed.prepared.currentOrgId
       || replacement.token?.user_id !== expected.userId
-      || replacement.token.organization_id !== prepared.organization.id
-      || replacement.token.access_token !== parsed.access_token) {
+      || replacement.token.organization_id !== installed.prepared.organization.id
+      || replacement.token.access_token !== installed.parsed.access_token) {
       throw initRunOrganizationFailure('Could not confirm the persisted hosted organization session');
     }
-    return { organization: prepared.organization, auth: prepared.auth, authService: replacement.authService };
+    return {
+      organization: installed.prepared.organization,
+      auth: installed.prepared.auth,
+      authService: replacement.authService,
+    };
+  }
+
+  /**
+   * Renew the provider identity without choosing an organization. The file
+   * backend keeps its durable fence from immediately before the provider call
+   * through replacement persistence and readback.
+   */
+  async renewInitRunIdentity(expected: Readonly<{
+    userId: string;
+    deadline: number;
+  }>): Promise<RenewedInitRunIdentity> {
+    const serviceOrigin = exactInitRunServiceOrigin(this.serviceApiUrl);
+    if (!serviceOrigin || !Number.isFinite(expected.deadline)) {
+      throw initRunOrganizationFailure('The identity refresh configuration was invalid');
+    }
+    const renewed = await this.storageBackend.withRefreshLock(expected.userId, async (fresh, beginRotation) => {
+      const freshAuthorityDigest = refreshTokenAuthorityDigest(fresh);
+      const lineageMatches = freshAuthorityDigest !== null
+        && this.initialRefreshAuthorityDigest !== null
+        && (freshAuthorityDigest === this.initialRefreshAuthorityDigest
+          || fresh?.identity_session?.root_authority_sha256 === this.initialRefreshLineageDigest);
+      if (!fresh || fresh.user_id !== expected.userId || this.currentOrgId !== null || !lineageMatches) {
+        throw initRunOrganizationFailure('The identity refresh authority was invalid');
+      }
+      const cached = currentIdentityAccessToken(fresh, expected.userId, Date.now());
+      if (!cached) beginRotation();
+      const prepared = cached ? null : prepareIdentityRefresh({
+        response: await requestIdentityRefresh({
+          serviceOrigin,
+          refreshToken: fresh.refresh_token,
+          deadline: expected.deadline,
+        }),
+        previous: fresh,
+        currentOrgId: this.currentOrgId,
+        expectedUserId: expected.userId,
+        now: Date.now(),
+      });
+      if (prepared) this.storageBackend.save(prepared.session, expected.userId);
+      return {
+        auth: prepared?.auth ?? null,
+        currentOrgId: prepared?.currentOrgId ?? this.currentOrgId,
+        accessToken: prepared?.accessToken ?? cached,
+      };
+    });
+    const replacement = new AuthService(
+      this.serviceApiUrl,
+      this.devMode,
+      expected.userId,
+      this.storageBackend,
+      renewed.currentOrgId,
+    );
+    const replacementSession = (() => {
+      try { return this.storageBackend.load(expected.userId); } catch { return null; }
+    })();
+    const accessToken = replacementSession
+      ? currentIdentityAccessToken(replacementSession, expected.userId, Date.now())
+      : null;
+    if (!replacementSession || replacementSession.user_id !== expected.userId
+      || !accessToken || accessToken !== renewed.accessToken) {
+      throw initRunOrganizationFailure('The renewed identity was not confirmed');
+    }
+    const selected = renewed.currentOrgId === null
+      ? null
+      : replacementSession.organizations.find((organization) => organization.id === renewed.currentOrgId) ?? null;
+    const auth = renewed.auth ?? {
+      success: true as const,
+      organization_id: selected?.id ?? '',
+      organization_name: selected?.name,
+      user_id: replacementSession.user_id,
+      user_email: replacementSession.user_email,
+      user_first_name: replacementSession.user_first_name,
+      user_last_name: replacementSession.user_last_name,
+      organizations: replacementSession.organizations,
+      ...(selected ? {} : {
+        _refresh_token: replacementSession.refresh_token,
+        _orgless_access_token: accessToken,
+      }),
+    };
+    return { auth, authService: replacement, accessToken };
   }
 
   async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
@@ -828,6 +1036,7 @@ export class AuthService {
   }
 
   private buildAuthResult(method: 'cached' | 'refreshed' | 'refreshed_orgless'): AuthResult {
+    this.assertRefreshAuthorityAvailable();
     // CAP-451 §7.1.1: the org-less silent-refresh branch has no
     // `currentOrgId` (there is no org to scope into) and reports its bearer
     // through `_orgless_access_token`, the same field the exchange-time

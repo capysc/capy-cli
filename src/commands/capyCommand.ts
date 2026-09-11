@@ -1353,22 +1353,32 @@ export class CapyCommand {
           selectedOrg.id,
           authResult.user_id,
         ), context.operationDeadline);
-        const authAttempt = refreshed.success ? { auth: refreshed, spinner: orgSpinner } : await (async () => {
+        const refreshedContext: InitCommandContext = {
+          ...context,
+          authService: refreshed.authService,
+          serviceClient: new ServiceClient(
+            refreshed.authService.getServiceApiUrl(),
+            this.devMode,
+            () => refreshed.authService.getValidToken(),
+          ),
+        };
+        const authAttempt = refreshed.auth.success ? { auth: refreshed.auth, spinner: orgSpinner } : await (async () => {
           orgSpinner.stop();
           if (context.transport === 'hosted') {
             throw new InitWizardFlowError(
               new CapyError(
-                refreshed.error || 'Organization authentication failed',
+                refreshed.auth.error || 'Organization authentication failed',
                 'INIT_AUTH_REAUTH_REQUIRED',
               ),
               choice.wizard,
+              refreshed.authService,
             );
           }
           const retrySpinner = ora('Re-authenticating...').start();
-          context.authService.clearToken();
+          refreshed.authService.clearToken();
           const authenticated = await withWizard(
             choice.wizard,
-            () => context.authService.authenticate(selectedOrg.id),
+            () => refreshed.authService.authenticate(selectedOrg.id),
             context.operationDeadline,
           );
           if (!authenticated.success) {
@@ -1380,10 +1390,25 @@ export class CapyCommand {
           }
           return { auth: authenticated, spinner: retrySpinner };
         })();
+        const refreshedWizard = (() => {
+          if (choice.wizard?.kind !== 'hosted') return choice.wizard;
+          const rebindHostedSession = preparedAuthentication?.rebindHostedSession;
+          if (!rebindHostedSession) {
+            throw new InitWizardFlowError(
+              new CapyError('Could not bind the selected organization session', 'INIT_DELIVERY_INDETERMINATE'),
+              choice.wizard,
+              refreshed.authService,
+            );
+          }
+          return {
+            ...choice.wizard,
+            session: rebindHostedSession(choice.wizard.session, refreshed.authService),
+          };
+        })();
         authAttempt.spinner.succeed(`Organization: ${selectedOrg.name}`);
         return {
-          selectedOrg, wizard: choice.wizard, effectsStarted: false,
-          context, auth: authAttempt.auth, custodyDeclined: false,
+          selectedOrg, wizard: refreshedWizard, effectsStarted: false,
+          context: refreshedContext, auth: authAttempt.auth, custodyDeclined: false,
         };
       }
     })();

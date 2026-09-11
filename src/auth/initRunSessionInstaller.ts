@@ -121,6 +121,13 @@ export function initRunSessionAuthorityDigest(session: SessionStore | null): str
       organizationId,
       { access_token: value.access_token },
     ])),
+    identity_session: session.identity_session ?? null,
   };
   return createHash('sha256').update(JSON.stringify(authority)).digest('hex');
+}
+
+export function refreshTokenAuthorityDigest(session: SessionStore | null): string | null {
+  return session?.refresh_token
+    ? createHash('sha256').update(session.refresh_token).digest('hex')
+    : null;
 }

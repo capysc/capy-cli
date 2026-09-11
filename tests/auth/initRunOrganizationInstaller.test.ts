@@ -59,7 +59,7 @@ const storage = (initial: SessionStore = initialSession()): Readonly<{
       save,
       clear: jest.fn(),
       discover: jest.fn(() => null),
-      withRefreshLock: async (_userId, operation) => operation(null),
+      withRefreshLock: async (_userId, operation) => operation(initial, () => undefined),
     },
   };
 };
@@ -281,7 +281,7 @@ describe('hosted init-run organization installation', () => {
       save: driftSave,
       clear: jest.fn(),
       discover: jest.fn(() => null),
-      withRefreshLock: async (_userId, operation) => operation(null),
+      withRefreshLock: async (_userId, operation) => operation(original, () => undefined),
     };
     const fetcher = jest.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(response(), 201));
     const driftService = new AuthService(SERVICE_ORIGIN, false, USER_ID, driftBackend);
@@ -289,7 +289,10 @@ describe('hosted init-run organization installation', () => {
       userId: USER_ID, deadline: Date.now() + 60_000,
     }).catch((cause) => cause);
     expect(driftError.code).toBe(INIT_RUN_ORGANIZATION_INDETERMINATE);
-    expect(driftSave).not.toHaveBeenCalled();
+    // The operation is serialized around the fresh session supplied by the
+    // backend; a later replacement-read mismatch is indeterminate after the
+    // single persistence attempt.
+    expect(driftSave).toHaveBeenCalledTimes(1);
 
     fetcher.mockRestore();
     const writeTarget = storage();
@@ -313,7 +316,7 @@ describe('hosted init-run organization installation', () => {
       save: readbackSave,
       clear: jest.fn(),
       discover: jest.fn(() => null),
-      withRefreshLock: async (_userId, operation) => operation(null),
+      withRefreshLock: async (_userId, operation) => operation(original, () => undefined),
     };
     jest.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(response(), 201));
     const readbackService = new AuthService(SERVICE_ORIGIN, false, USER_ID, readbackBackend);
@@ -334,7 +337,7 @@ describe('hosted init-run organization installation', () => {
       save: throwingReadbackSave,
       clear: jest.fn(),
       discover: jest.fn(() => null),
-      withRefreshLock: async (_userId, operation) => operation(null),
+      withRefreshLock: async (_userId, operation) => operation(original, () => undefined),
     };
     jest.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(response(), 201));
     const throwingReadbackService = new AuthService(SERVICE_ORIGIN, false, USER_ID, throwingReadbackBackend);

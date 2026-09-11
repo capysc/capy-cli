@@ -35,6 +35,23 @@ export interface SessionStorageBackend {
   /** Persist the session under `userId`'s scope. */
   save(session: SessionStore, userId: string | undefined): void;
 
+  /** Atomically refuse a hosted install when the persisted refresh authority changed. */
+  saveIfRefreshAuthorityMatches?(
+    session: SessionStore,
+    userId: string | undefined,
+    expectedRefreshAuthoritySha256: string | null,
+  ): boolean;
+
+  /** Refuse cached authority while a prior refresh outcome remains fenced. */
+  assertRefreshAuthorityAvailable?(userId: string | undefined): void;
+
+  /** Verify a provider-authenticated authority replacement was durably installed. */
+  withVerifiedAuthInstallation?<T>(
+    userId: string,
+    expectedRefreshAuthoritySha256: string | null,
+    run: () => Promise<T>,
+  ): Promise<T>;
+
   /** Remove the persisted session for `userId`. A missing session is a no-op. */
   clear(userId: string | undefined): void;
 
@@ -51,19 +68,19 @@ export interface SessionStorageBackend {
    * Serialize a token refresh against concurrent writers, then run `fn`.
    *
    * `fn` receives the freshest persisted session re-read under mutual
-   * exclusion, or null when no exclusive re-read was possible (lock
-   * unavailable, nothing persisted yet). The lifecycle uses that fresh copy
-   * for the adopt-don't-race dance: if another process already refreshed the
-   * org, its work is adopted instead of burning the rotated refresh token.
+   * exclusion and an idempotent callback that must run immediately before a
+   * provider request can rotate its refresh authority. Missing persistence or
+   * an unavailable lock is a refusal. The lifecycle uses the fresh copy for
+   * the adopt-don't-race dance: if another process already refreshed the org,
+   * its work is adopted instead of burning the rotated refresh token.
    *
-   * The file backend implements this with proper-lockfile on the session
-   * path, exactly as the pre-extraction code did. A lock-free backend (one
-   * process, in-memory) may simply pass its current session to `fn` — or null
-   * to skip adoption entirely. The lock, if any, must be released whether
-   * `fn` resolves or throws.
+   * The file backend implements this with proper-lockfile on a stable session
+   * path even before the session file exists. An in-memory backend may pass
+   * its current session directly. The lock must be released whether `fn`
+   * resolves or throws.
    */
   withRefreshLock<T>(
     userId: string | undefined,
-    fn: (fresh: SessionStore | null) => Promise<T>,
+    fn: (fresh: SessionStore | null, beginRotation: () => void) => Promise<T>,
   ): Promise<T>;
 }

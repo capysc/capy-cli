@@ -12,14 +12,23 @@
  * ISOLATED (mock.module + global.fetch swap): registered in run-tests.sh.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import type { SessionStorageBackend } from '../../src/auth/session/backend';
+import type { SessionStore } from '../../src/types/index';
 
-// In-memory session store — the real one reads/writes ~/.capy.
-const store: { session: unknown } = { session: null };
+const saveSession = mock((session: SessionStore, _userId: string | undefined) =>
+  structuredClone(session));
+const latestSession = (): SessionStore | null => {
+  const saved = saveSession.mock.results.at(-1)?.value as SessionStore | undefined;
+  return saved ? structuredClone(saved) : null;
+};
+const memorySessionBackend: SessionStorageBackend = {
+  load: mock(() => latestSession()),
+  save: saveSession,
+  clear: mock(() => undefined),
+  discover: mock(() => null),
+  withRefreshLock: async (_userId, run) => run(latestSession(), () => undefined),
+};
 mock.module('../../src/config/globalConfig', () => ({
-  readAuthSession: mock(() => store.session),
-  saveAuthSession: mock((session: unknown) => {
-    store.session = session;
-  }),
   getAuthSessionPath: mock(() => '/tmp/capy-keepscreens-test/session.json'),
   getGlobalCapyDir: mock(() => '/tmp/capy-keepscreens-test-nonexistent'),
   consumeForceLoginMarker: mock(() => false),
@@ -48,26 +57,25 @@ const USER = { id: 'user_1', email: 'v@example.test', first_name: 'V', last_name
 const ACCESS_TOKEN = fakeJwt({ sub: USER.id, org_id: ORG.workos_org_id });
 
 /** Per-test wire behavior + capture. */
-const wire = {
-  exchangeStatus: 200,
-  createStatus: 201,
-  initiate: null as null | { state: string; redirect_uri: string },
-  createBody: null as null | Record<string, unknown>,
-  resultPolls: 0,
-  deletes: 0,
-};
+const exchangeStatus = mock(() => 200);
+const createStatus = mock(() => 201);
+const captureInitiate = mock((value: Readonly<{ state: string; redirect_uri: string }>) => value);
+const captureCreateBody = mock((value: Readonly<Record<string, unknown>>) => value);
+const captureResultPoll = mock(() => undefined);
+const captureDelete = mock(() => undefined);
 
 async function serviceFetch(url: string, init?: RequestInit): Promise<Response> {
   const body = init?.body ? JSON.parse(String(init.body)) : null;
   const path = url.slice(SVC.length);
 
   if (path === '/auth/initiate') {
-    wire.initiate = { state: body.state, redirect_uri: body.redirect_uri };
+    captureInitiate({ state: body.state, redirect_uri: body.redirect_uri });
     return Response.json({ auth_url: 'https://authkit.example.test/authorize' });
   }
   if (path === '/auth/exchange') {
-    if (wire.exchangeStatus !== 200) {
-      return Response.json({ error: 'refused', code: 'AUTH_EXCHANGE_FAILED' }, { status: wire.exchangeStatus });
+    const status = exchangeStatus();
+    if (status !== 200) {
+      return Response.json({ error: 'refused', code: 'AUTH_EXCHANGE_FAILED' }, { status });
     }
     return Response.json({
       token: { access_token: ACCESS_TOKEN, refresh_token: 'refresh-1', expires_in: 600 },
@@ -76,37 +84,41 @@ async function serviceFetch(url: string, init?: RequestInit): Promise<Response> 
     });
   }
   if (path === '/connections' && init?.method === 'POST') {
-    if (wire.createStatus !== 201) {
-      return Response.json({ error: 'down', code: 'SERVICE_ERROR' }, { status: wire.createStatus });
+    const status = createStatus();
+    if (status !== 201) {
+      return Response.json({ error: 'down', code: 'SERVICE_ERROR' }, { status });
     }
-    wire.createBody = body;
+    captureCreateBody(body);
     return Response.json(
       { connection_id: 'conn-1', status: 'pending', expires_at: new Date(Date.now() + 600_000).toISOString() },
       { status: 201 },
     );
   }
   if (path.startsWith('/connections/conn-1/result')) {
-    wire.resultPolls += 1;
+    captureResultPoll();
+    const createBody = captureCreateBody.mock.calls.at(-1)?.[0];
+    if (!createBody) throw new Error('connection body was not captured');
     const sealed = await sealEnvelopePageSide({
       plaintext: JSON.stringify({ v: 1, flow: 'auth-success', signal: 'acknowledged' }),
       connectionId: 'conn-1',
-      clientPubkeyB64: wire.createBody!.client_pubkey as string,
+      clientPubkeyB64: createBody.client_pubkey as string,
     });
     return Response.json({ status: 'answered', ciphertext: sealed });
   }
   if (path === '/connections/conn-1' && init?.method === 'DELETE') {
-    wire.deletes += 1;
+    captureDelete();
     return Response.json({ status: 'cancelled' });
   }
   return Response.json({ error: 'unexpected', code: 'NOT_FOUND' }, { status: 404 });
 }
 
-const savedEnv: Record<string, string | undefined> = {};
+const savedEnv = {
+  CAPY_WEB_NO_OPEN: process.env.CAPY_WEB_NO_OPEN,
+  CAPY_KEEP_SCREENS: process.env.CAPY_KEEP_SCREENS,
+  CAPY_KEEP_ORIGIN: process.env.CAPY_KEEP_ORIGIN,
+} as const;
 
 beforeAll(() => {
-  savedEnv.CAPY_WEB_NO_OPEN = process.env.CAPY_WEB_NO_OPEN;
-  savedEnv.CAPY_KEEP_SCREENS = process.env.CAPY_KEEP_SCREENS;
-  savedEnv.CAPY_KEEP_ORIGIN = process.env.CAPY_KEEP_ORIGIN;
   process.env.CAPY_WEB_NO_OPEN = '1';
   delete process.env.CAPY_KEEP_ORIGIN;
 
@@ -126,23 +138,28 @@ afterAll(() => {
 });
 
 beforeEach(() => {
-  store.session = null;
-  wire.exchangeStatus = 200;
-  wire.createStatus = 201;
-  wire.initiate = null;
-  wire.createBody = null;
-  wire.resultPolls = 0;
-  wire.deletes = 0;
+  [
+    saveSession,
+    exchangeStatus,
+    createStatus,
+    captureInitiate,
+    captureCreateBody,
+    captureResultPoll,
+    captureDelete,
+  ].forEach((candidate) => candidate.mockClear());
+  exchangeStatus.mockReturnValue(200);
+  createStatus.mockReturnValue(201);
 });
 
 /** Wait for the flow to reach the point where the provider would redirect. */
 async function initiateCaptured(): Promise<{ state: string; redirect_uri: string }> {
   const deadline = Date.now() + 2_000;
-  while (!wire.initiate && Date.now() < deadline) {
+  while (captureInitiate.mock.calls.length === 0 && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5));
   }
-  if (!wire.initiate) throw new Error('initiate never captured');
-  return wire.initiate;
+  const captured = captureInitiate.mock.calls.at(-1)?.[0];
+  if (!captured) throw new Error('initiate never captured');
+  return captured;
 }
 
 function callbackUrl(init: { state: string; redirect_uri: string }, params: string): string {
@@ -152,7 +169,7 @@ function callbackUrl(init: { state: string; redirect_uri: string }, params: stri
 describe('CAPY_KEEP_SCREENS=1', () => {
   test('callback 303s to a keep URL bound to a fresh broker connection; ack is collected', async () => {
     process.env.CAPY_KEEP_SCREENS = '1';
-    const auth = new AuthService(SVC, false);
+    const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
 
     const init = await initiateCaptured();
@@ -167,17 +184,18 @@ describe('CAPY_KEEP_SCREENS=1', () => {
     expect(cbRes.headers.get('location')).toBe('https://keep.capy.sc/flow/auth-success?c=conn-1');
 
     // The connection was created with the documented shape…
-    expect(wire.createBody?.purpose).toBe('auth-success');
-    expect(typeof wire.createBody?.machine_name).toBe('string');
-    expect(Buffer.from(wire.createBody?.client_pubkey as string, 'base64').length).toBe(65);
+    const createBody = captureCreateBody.mock.calls.at(-1)?.[0];
+    expect(createBody?.purpose).toBe('auth-success');
+    expect(typeof createBody?.machine_name).toBe('string');
+    expect(Buffer.from(createBody?.client_pubkey as string, 'base64').length).toBe(65);
     // …and the sealed acknowledgement round-tripped.
-    expect(wire.resultPolls).toBeGreaterThanOrEqual(1);
+    expect(captureResultPoll).toHaveBeenCalled();
   });
 
   test('broker unavailable → loopback auth-success fallback; sign-in still succeeds', async () => {
     process.env.CAPY_KEEP_SCREENS = '1';
-    wire.createStatus = 503;
-    const auth = new AuthService(SVC, false);
+    createStatus.mockReturnValue(503);
+    const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
 
     const init = await initiateCaptured();
@@ -189,13 +207,13 @@ describe('CAPY_KEEP_SCREENS=1', () => {
     const cbRes = await cbResP;
     expect(cbRes.status).toBe(200);
     expect(await cbRes.text()).toContain('"autoCloseSeconds":3');
-    expect(wire.resultPolls).toBe(0);
+    expect(captureResultPoll).not.toHaveBeenCalled();
   });
 
   test('exchange failure → held response gets the loopback error screen', async () => {
     process.env.CAPY_KEEP_SCREENS = '1';
-    wire.exchangeStatus = 500;
-    const auth = new AuthService(SVC, false);
+    exchangeStatus.mockReturnValue(500);
+    const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
 
     const init = await initiateCaptured();
@@ -206,14 +224,14 @@ describe('CAPY_KEEP_SCREENS=1', () => {
 
     const cbRes = await cbResP;
     expect(cbRes.status).toBe(400);
-    expect(wire.createBody).toBeNull();
+    expect(captureCreateBody).not.toHaveBeenCalled();
   });
 });
 
 describe('flag unset (default)', () => {
   test('callback serves the loopback auth-success screen; zero broker traffic', async () => {
     delete process.env.CAPY_KEEP_SCREENS;
-    const auth = new AuthService(SVC, false);
+    const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
 
     const init = await initiateCaptured();
@@ -226,8 +244,8 @@ describe('flag unset (default)', () => {
     expect(result.success).toBe(true);
     expect(result.organization_id).toBe(ORG.id);
 
-    expect(wire.createBody).toBeNull();
-    expect(wire.resultPolls).toBe(0);
-    expect(wire.deletes).toBe(0);
+    expect(captureCreateBody).not.toHaveBeenCalled();
+    expect(captureResultPoll).not.toHaveBeenCalled();
+    expect(captureDelete).not.toHaveBeenCalled();
   });
 });

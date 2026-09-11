@@ -279,6 +279,12 @@ export interface SessionStore {
   refresh_token: string;
   organizations: Organization[];
   sessions: Record<string, OrgSession>;
+  /** Latest provider identity bearer; never selects an organization. */
+  identity_session?: Readonly<{
+    access_token: string;
+    expires_at: number;
+    root_authority_sha256: string;
+  }>;
 }
 
 export interface CliOptions {

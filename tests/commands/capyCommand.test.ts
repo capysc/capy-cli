@@ -752,20 +752,26 @@ describe('CapyCommand', () => {
         expires_at: Date.now() + 3600000, organization_id: 'org-A',
         user_id: 'user-456',
       });
+      const replacementToken = { access_token: 'selected-org-token' };
+      const getReplacementToken = mock(async () => replacementToken);
+      const replacementAuthService = {
+        ...mockAuthService,
+        getServiceApiUrl: () => 'https://selected-service.example',
+        getValidToken: getReplacementToken,
+      };
       mockAuthService.refreshWithCredentials.mockResolvedValue({
-        success: true, organization_id: 'org-A', user_id: 'user-456',
+        auth: { success: true, organization_id: 'org-A', user_id: 'user-456' },
+        authService: replacementAuthService,
       });
       mockServiceClient.initializeProject.mockResolvedValue({
         org_id: 'org-A', project_id: 'proj-1', project_name: 'test', created: true,
       });
       mockServiceClient.listProjects.mockResolvedValue([]);
 
-      // Capture prompt calls to verify choices
-      const promptCalls: any[] = [];
       const inquirer = (await import('inquirer')).default;
-      const origPrompt = inquirer.prompt;
-      (inquirer as any).prompt = async (questions: any) => {
-        promptCalls.push(questions);
+      const promptMock = inquirer.prompt as ReturnType<typeof mock>;
+      const originalPromptImplementation = promptMock.getMockImplementation();
+      const promptSpy = promptMock.mockImplementation(async (questions: any) => {
         const q = Array.isArray(questions) ? questions[0] : questions;
         // Org picker: select org-A
         if (q.name === 'orgId') return { orgId: 'org-A' };
@@ -774,31 +780,36 @@ describe('CapyCommand', () => {
         // Branch
         if (q.name === 'initChoice') return { initChoice: 'development' };
         return {};
-      };
+      }).mockClear();
 
       const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
       try {
-        await (capyCommand as any).initializeProject();
-      } catch {
-        // May throw due to incomplete mock chain — we only care about the prompt
+        await (capyCommand as any).initializeProject().catch(() => undefined);
+        // The later repository mocks are incomplete; verify the selection
+        // boundary and its actual replacement token provider independently.
+        const orgPrompt = promptSpy.mock.calls.map(([questions]) => questions).find((q: any) => {
+          const question = Array.isArray(q) ? q[0] : q;
+          return question.name === 'orgId';
+        });
+        const question = Array.isArray(orgPrompt) ? orgPrompt[0] : orgPrompt;
+        const orgNames = question?.choices
+          ?.filter((c: any) => typeof c === 'object' && c.name)
+          .map((c: any) => c.name);
+        expect(orgNames).toContain('Org Alpha');
+        expect(orgNames).toContain('Org Beta');
+        const scopedClientCall = MockServiceClient.mock.calls.find(
+          (args: readonly unknown[]) => args[0] === 'https://selected-service.example',
+        );
+        expect(scopedClientCall).toBeDefined();
+        const tokenProvider = scopedClientCall?.[2] as (() => Promise<unknown>) | undefined;
+        expect(await tokenProvider?.()).toBe(replacementToken);
+        expect(getReplacementToken).toHaveBeenCalledTimes(1);
+      } finally {
+        consoleSpy.mockRestore();
+        if (originalPromptImplementation) promptSpy.mockImplementation(originalPromptImplementation);
+        else promptSpy.mockReset();
       }
-
-      // Find the org picker prompt (the one with 'orgId' as name)
-      const orgPrompt = promptCalls.find((q: any) => {
-        const question = Array.isArray(q) ? q[0] : q;
-        return question.name === 'orgId';
-      });
-      const question = Array.isArray(orgPrompt) ? orgPrompt[0] : orgPrompt;
-      const orgNames = question?.choices
-        ?.filter((c: any) => typeof c === 'object' && c.name)
-        .map((c: any) => c.name);
-
-      expect(orgNames).toContain('Org Alpha');
-      expect(orgNames).toContain('Org Beta');
-
-      consoleSpy.mockRestore();
-      (inquirer as any).prompt = origPrompt;
     });
   });
 

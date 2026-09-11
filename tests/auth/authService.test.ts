@@ -1,12 +1,17 @@
 import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll, jest } from 'bun:test';
 
+const mockReadAuthSession = mock(() => null);
+const mockSaveAuthSession = mock(() => undefined);
+const mockGetAuthSessionPath = mock(() => '/home/test/.capy/auth/session.json');
+const mockUnlinkFile = mock(() => undefined);
+
 // Mock dependencies - must come BEFORE imports that use them
 mock.module('fs', () => ({
   existsSync: mock(() => false),
   readFileSync: mock(() => ''),
   writeFileSync: mock(() => undefined),
   mkdirSync: mock(() => undefined),
-  unlinkSync: mock(() => undefined),
+  unlinkSync: mockUnlinkFile,
   readdirSync: mock(() => []),
 }));
 
@@ -15,14 +20,44 @@ mock.module('proper-lockfile', () => ({
   unlockSync: mock(() => undefined),
 }));
 
+mock.module('../../src/auth/session/fileBackend', () => ({
+  FileSessionStorageBackend: class TestFileSessionStorageBackend {
+    load(userId: string | undefined): any { return mockReadAuthSession(userId); }
+    save(session: any, userId: string | undefined): void {
+      mockSaveAuthSession(session, userId);
+    }
+    saveIfRefreshAuthorityMatches(
+      session: any,
+      userId: string | undefined,
+      expected: string | null,
+    ): boolean {
+      const current = this.load(userId);
+      const currentDigest = current?.refresh_token
+        ? require('crypto').createHash('sha256').update(current.refresh_token).digest('hex')
+        : null;
+      if (currentDigest !== expected) return false;
+      this.save(session, userId);
+      return true;
+    }
+    assertRefreshAuthorityAvailable(): void {}
+    clear(userId: string | undefined): void {
+      mockUnlinkFile(mockGetAuthSessionPath(userId));
+    }
+    discover(): null { return null; }
+    withRefreshLock<T>(
+      userId: string | undefined,
+      fn: (fresh: any, beginRotation: () => void) => Promise<T>,
+    ): Promise<T> {
+      return fn(null, () => undefined);
+    }
+  },
+}));
+
 const mockOAuthServerConstructor = mock(() => ({}));
 mock.module('../../src/auth/oauthServer', () => ({
   OAuthServer: mockOAuthServerConstructor,
 }));
 
-const mockReadAuthSession = mock(() => null);
-const mockSaveAuthSession = mock(() => undefined);
-const mockGetAuthSessionPath = mock(() => '/home/test/.capy/auth/session.json');
 mock.module('../../src/config/globalConfig', () => ({
   readAuthSession: mockReadAuthSession,
   saveAuthSession: mockSaveAuthSession,
@@ -44,6 +79,7 @@ import { existsSync, unlinkSync } from 'fs';
 import { AuthService } from '../../src/auth/authService';
 import { OAuthServer } from '../../src/auth/oauthServer';
 import { SessionStore } from '../../src/types/index';
+import type { SessionStorageBackend } from '../../src/auth/session/backend';
 
 const mockExistsSync = existsSync as any;
 const MockOAuthServer = OAuthServer as any;
@@ -94,6 +130,33 @@ function makeSession(overrides: Partial<SessionStore> = {}): SessionStore {
     ...overrides,
   };
 }
+
+const memoryBackend = (initial: SessionStore | null): Readonly<{
+  backend: SessionStorageBackend;
+  save: ReturnType<typeof mock>;
+}> => {
+  const save = mock((_session: SessionStore, _userId: string | undefined) => undefined);
+  const load = mock(() => (save.mock.calls.at(-1)?.[0] as SessionStore | undefined) ?? initial);
+  return {
+    save,
+    backend: {
+      load,
+      save,
+      clear: mock(() => undefined),
+      discover: mock(() => null),
+      saveIfRefreshAuthorityMatches: (session, userId, expected) => {
+        const current = load();
+        const currentDigest = current?.refresh_token
+          ? require('crypto').createHash('sha256').update(current.refresh_token).digest('hex')
+          : null;
+        if (currentDigest !== expected) return false;
+        save(session, userId);
+        return true;
+      },
+      withRefreshLock: async (_userId, operation) => operation(load(), () => undefined),
+    },
+  };
+};
 
 describe('AuthService', () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -374,30 +437,106 @@ describe('AuthService', () => {
 
   describe('refreshWithCredentials', () => {
     test('should bootstrap session and refresh for org', async () => {
+      const target = memoryBackend(null);
       mockFetch.mockResolvedValueOnce(mockFetchResponse({
         access_token: fakeJwt({ org_id: 'workos-org-abc' }),
         refresh_token: 'new-refresh',
         expires_in: 3600,
         user: { id: 'user-456', email: 'test@example.com', first_name: 'Test', last_name: 'User' },
+        organization: { id: 'org-abc', workos_org_id: 'workos-org-abc', name: 'Example' },
       }));
 
-      const service = new AuthService();
+      const service = new AuthService(undefined, false, undefined, target.backend);
       const result = await service.refreshWithCredentials('some-refresh', 'org-abc', 'user-456');
 
-      expect(result.success).toBe(true);
-      expect(result.organization_id).toBe('org-abc');
+      expect(result.auth.success).toBe(true);
+      expect(result.auth.organization_id).toBe('org-abc');
+      expect(result.auth._auth_method).toBe('refreshed');
+      expect(result.authService).not.toBe(service);
 
-      const token = service.getToken();
+      const token = result.authService.getToken();
       expect(token?.organization_id).toBe('org-abc');
     });
 
     test('should return failure when refresh fails', async () => {
+      const target = memoryBackend(null);
       mockFetch.mockRejectedValueOnce(new Error('Network error'));
 
-      const service = new AuthService();
-      const result = await service.refreshWithCredentials('bad-refresh', 'org-abc');
+      const service = new AuthService(undefined, false, undefined, target.backend);
+      const result = await service.refreshWithCredentials('bad-refresh', 'org-abc', 'user-456');
 
-      expect(result.success).toBe(false);
+      expect(result.auth.success).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('refuses a selected replacement whose token is already expired', async () => {
+      const target = memoryBackend(null);
+      mockFetch.mockResolvedValueOnce(mockFetchResponse({
+        access_token: fakeJwt({ org_id: 'workos-org-abc' }),
+        refresh_token: 'new-refresh',
+        expires_in: -1,
+        user: { id: 'user-456', email: 'test@example.com', first_name: 'Test', last_name: 'User' },
+        organization: { id: 'org-abc', workos_org_id: 'workos-org-abc', name: 'Example' },
+      }));
+
+      const service = new AuthService(undefined, false, undefined, target.backend);
+      const result = await service.refreshWithCredentials('some-refresh', 'org-abc', 'user-456');
+
+      expect(result.auth.success).toBeFalse();
+      expect(result.authService).not.toBe(service);
+    });
+
+    test('adopts the latest persisted scoped authority without using a stale supplied refresh', async () => {
+      const latest = makeSession({
+        refresh_token: 'latest-refresh',
+        organizations: [{ id: 'org-abc', workos_org_id: 'workos-org-abc', name: 'Example' }],
+        sessions: {
+          'org-abc': {
+            access_token: fakeJwt({ org_id: 'workos-org-abc' }),
+            expires_at: Date.now() + 60_000,
+          },
+        },
+      });
+      const target = memoryBackend(latest);
+      const service = new AuthService(undefined, false, 'user-456', target.backend);
+      const result = await service.refreshWithCredentials('stale-refresh', 'org-abc', 'user-456');
+
+      expect(result.auth.success).toBeTrue();
+      expect(result.authService.getToken()?.access_token).toBe(latest.sessions['org-abc'].access_token);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    test('fails before provider dispatch when the missing-session bootstrap cannot persist', async () => {
+      const target = memoryBackend(null);
+      const refusing: SessionStorageBackend = {
+        ...target.backend,
+        saveIfRefreshAuthorityMatches: () => false,
+      };
+      const service = new AuthService(undefined, false, undefined, refusing);
+      const result = await service.refreshWithCredentials('refresh', 'org-abc', 'user-456');
+
+      expect(result.auth.success).toBeFalse();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    test('does not bootstrap when the explicit user session cannot be read', async () => {
+      const save = mock(() => undefined);
+      const unreadable: SessionStorageBackend = {
+        load: (userId) => {
+          if (userId === 'user-target') throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+          return null;
+        },
+        save,
+        clear: () => undefined,
+        discover: () => null,
+        withRefreshLock: (_userId, run) => run(null, () => undefined),
+      };
+      const service = new AuthService(undefined, false, undefined, unreadable);
+      const result = await service.refreshWithCredentials('refresh', 'org-abc', 'user-target');
+
+      expect(result.auth.success).toBeFalse();
+      expect(save).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

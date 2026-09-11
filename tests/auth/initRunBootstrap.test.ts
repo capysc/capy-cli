@@ -31,6 +31,9 @@ function fakeJwt(payload: Readonly<Record<string, unknown>>): string {
   return `${encode({ alg: 'none' })}.${encode(payload)}.fixture`;
 }
 
+const brokerToken = (): string => fakeJwt({ sub: 'user_expected', exp: (NOW + 60_000) / 1000 });
+const failedRenewal = jest.fn(async () => { throw new Error('renewal unavailable'); });
+
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -74,7 +77,7 @@ function storage(): Readonly<{
       save,
       clear: jest.fn(),
       discover: jest.fn(() => null),
-      withRefreshLock: async (_userId, fn) => fn(null),
+      withRefreshLock: async (_userId, fn) => fn(null, () => undefined),
     },
     save,
   };
@@ -209,7 +212,7 @@ describe('hosted init-run bootstrap', () => {
       save,
       clear: jest.fn(),
       discover: jest.fn(() => null),
-      withRefreshLock: async (_userId, fn) => fn(null),
+      withRefreshLock: async (_userId, fn) => fn(null, () => undefined),
     };
     const auth = new AuthService(SERVICE_ORIGIN, false, 'user_expected', backend);
     const error = await auth.installExchangeResponse({
@@ -245,7 +248,7 @@ describe('hosted init-run bootstrap', () => {
       save,
       clear: jest.fn(),
       discover: jest.fn(() => null),
-      withRefreshLock: async (_userId, fn) => fn(null),
+      withRefreshLock: async (_userId, fn) => fn(null, () => undefined),
     };
     const auth = new AuthService(SERVICE_ORIGIN, false, 'user_expected', backend);
     const error = await auth.installExchangeResponse({
@@ -540,7 +543,7 @@ describe('hosted init-run bootstrap', () => {
       binding: fixture.binding,
       authEpoch: 1,
       credentialReceipt: fixture.receipt,
-      brokerAccessToken: 'broker.fixture.token',
+      brokerAccessToken: brokerToken(),
       runSecret: RUN_SECRET,
       expiresAt: '2026-09-10T07:00:00.000Z',
     } as const;
@@ -589,12 +592,12 @@ describe('hosted init-run bootstrap', () => {
       binding: fixture.binding,
       authEpoch: 1,
       credentialReceipt: fixture.receipt,
-      brokerAccessToken: 'broker.fixture.token',
+      brokerAccessToken: brokerToken(),
       runSecret: RUN_SECRET,
       expiresAt: EXPIRES_AT,
     }, () => NOW);
 
-    expect(token).toBe('broker.fixture.token');
+    expect(token).toBe(brokerToken());
     expect(getToken).not.toHaveBeenCalled();
   });
 
@@ -646,9 +649,10 @@ describe('hosted init-run bootstrap', () => {
     const fetcher = jest.fn(async () => json(fixture.authorizedStatus)) as unknown as typeof fetch;
     const authorized = {
       auth: { success: true, user_id: fixture.binding.subject_user_id },
-      authService: {
-        getOrganizationId: () => 'org-1',
-        getToken: jest.fn(() => null),
+        authService: {
+          getOrganizationId: () => 'org-1',
+          getToken: jest.fn(() => null),
+          renewInitRunIdentity: failedRenewal,
       } as unknown as AuthService,
       binding: fixture.binding,
       authEpoch: 1,
@@ -668,7 +672,7 @@ describe('hosted init-run bootstrap', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('refuses an expired selected-session token without starting a refresh or request', async () => {
+  it('refuses an expired selected-session token when the single coordinated renewal fails', async () => {
     const prepared = bootstrap();
     const fixture = completionFixture(prepared);
     const getValidToken = jest.fn(async () => ({ access_token: 'must-not-be-used' }));
@@ -686,6 +690,7 @@ describe('hosted init-run bootstrap', () => {
             user_id: fixture.binding.subject_user_id,
           }),
           getValidToken,
+          renewInitRunIdentity: failedRenewal,
         } as unknown as AuthService,
         binding: fixture.binding,
         authEpoch: 1,
@@ -703,6 +708,40 @@ describe('hosted init-run bootstrap', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('renews an expired selected authority once for continuation without replaying the workflow request', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const connectionId = '22222222-2222-4222-8222-222222222222';
+    const running = { ...fixture.authorizedStatus, status: 'running', first_connection_id: connectionId } as const;
+    const renewedToken = fakeJwt({ sub: fixture.binding.subject_user_id, exp: (NOW + 60_000) / 1000 });
+    const expired = {
+      access_token: 'expired.selected.token', expires_at: NOW,
+      organization_id: 'org-1', user_id: fixture.binding.subject_user_id,
+    };
+    const renewed = { ...expired, access_token: renewedToken, expires_at: NOW + 60_000 };
+    const getToken = jest.fn(() => renewed).mockReturnValueOnce(expired);
+    const refreshToken = jest.fn(async () => true);
+    const fetcher = jest.fn(async () => json(running)) as unknown as typeof fetch;
+    await publishInitRunConnection({
+      bootstrap: prepared,
+      authorized: {
+        auth: { success: true, user_id: fixture.binding.subject_user_id },
+        authService: {
+          getOrganizationId: () => 'org-1',
+          getToken,
+          refreshToken,
+        } as unknown as AuthService,
+        binding: fixture.binding, authEpoch: 1, credentialReceipt: fixture.receipt,
+        brokerAccessToken: 'expired.exchange.token', runSecret: RUN_SECRET, expiresAt: EXPIRES_AT,
+      },
+      firstConnectionId: connectionId,
+      transport: transport(fetcher),
+    });
+    expect(refreshToken).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: `Bearer ${renewedToken}` });
+  });
+
   it('maps a selected-session getter failure to a fixed code before any request', async () => {
     const prepared = bootstrap();
     const fixture = completionFixture(prepared);
@@ -714,6 +753,7 @@ describe('hosted init-run bootstrap', () => {
         authService: {
           getOrganizationId: () => 'org-1',
           getToken: () => { throw new Error('fixture getter failure'); },
+          renewInitRunIdentity: failedRenewal,
         } as unknown as AuthService,
         binding: fixture.binding,
         authEpoch: 1,
@@ -744,6 +784,7 @@ describe('hosted init-run bootstrap', () => {
           organization_id: 'org-1',
           user_id: 'user_other',
         })),
+        renewInitRunIdentity: failedRenewal,
       } as unknown as AuthService,
       binding: fixture.binding,
       authEpoch: 1,
@@ -782,7 +823,7 @@ describe('hosted init-run bootstrap', () => {
       binding: fixture.binding,
       authEpoch: 1,
       credentialReceipt: fixture.receipt,
-      brokerAccessToken: 'broker.fixture.token',
+      brokerAccessToken: brokerToken(),
       runSecret: RUN_SECRET,
       expiresAt: '2026-09-10T07:00:00.000Z',
     } as const;
@@ -843,7 +884,7 @@ describe('hosted init-run bootstrap', () => {
       binding: fixture.binding,
       authEpoch: 1,
       credentialReceipt: fixture.receipt,
-      brokerAccessToken: 'broker.fixture.token',
+      brokerAccessToken: brokerToken(),
       runSecret: RUN_SECRET,
       expiresAt: '2026-09-10T07:00:00.000Z',
     } as const;

@@ -1,3 +1,5 @@
+import { beginRefreshRotationIfPresent } from './refreshContext';
+
 /**
  * Auth-service HTTP transport helpers, shared by the interactive flows in
  * AuthService and the refresh path in SessionLifecycle. Moved verbatim from
@@ -16,6 +18,7 @@ export class HttpStatusError extends Error {
 }
 
 export async function postJson<T>(url: string, body: Record<string, unknown>): Promise<T> {
+  beginRefreshRotationIfPresent();
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

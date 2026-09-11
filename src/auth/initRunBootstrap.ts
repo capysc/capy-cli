@@ -84,10 +84,10 @@ export interface InitRunBootstrapTransport {
  * already-refreshed session is authoritative; broker delivery never starts
  * its own refresh and never falls back to the now-stale exchange token.
  */
-export function resolveInitRunBrokerAccessToken(
+export async function resolveInitRunBrokerAccessToken(
   authorized: InitRunAuthorizedContext,
   now: () => number = Date.now,
-): string {
+): Promise<string> {
   const organizationId = (() => {
     try {
       return authorized.authService.getOrganizationId();
@@ -95,7 +95,23 @@ export function resolveInitRunBrokerAccessToken(
       throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
     }
   })();
-  if (organizationId === null) return authorized.brokerAccessToken;
+  try {
+    authorized.authService.assertRefreshAuthorityAvailable?.();
+  } catch {
+    throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  }
+  const tokenExpiry = (value: string): number | null => {
+    try {
+      const payload = JSON.parse(Buffer.from(value.split('.')[1], 'base64').toString()) as Readonly<Record<string, unknown>>;
+      return Number.isFinite(payload.exp) ? Number(payload.exp) * 1000 : null;
+    } catch {
+      return null;
+    }
+  };
+  if (organizationId === null) {
+    const expiry = tokenExpiry(authorized.brokerAccessToken);
+    if (expiry !== null && expiry > now()) return authorized.brokerAccessToken;
+  }
   const token = (() => {
     try {
       return authorized.authService.getToken();
@@ -103,17 +119,33 @@ export function resolveInitRunBrokerAccessToken(
       return null;
     }
   })();
-  if (
-    !token
-    || token.user_id !== authorized.binding.subject_user_id
-    || token.organization_id !== organizationId
-    || token.access_token.length === 0
-    || !Number.isFinite(token.expires_at)
-    || token.expires_at <= now()
-  ) {
-    throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  if (organizationId !== null && token
+    && token.user_id === authorized.binding.subject_user_id
+    && token.organization_id === organizationId
+    && token.access_token.length > 0
+    && Number.isFinite(token.expires_at)
+    && token.expires_at > now()) {
+    return token.access_token;
   }
-  return token.access_token;
+  if (organizationId !== null) {
+    const refreshed = await Promise.resolve().then(() => authorized.authService.refreshToken()).catch(() => false);
+    const replacement = refreshed ? authorized.authService.getToken() : null;
+    if (!replacement || replacement.user_id !== authorized.binding.subject_user_id
+      || replacement.organization_id !== organizationId
+      || !Number.isFinite(replacement.expires_at) || replacement.expires_at <= now()) {
+      throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+    }
+    return replacement.access_token;
+  }
+  const renewed = await authorized.authService.renewInitRunIdentity({
+    userId: authorized.binding.subject_user_id,
+    deadline: Date.parse(authorized.expiresAt),
+  }).catch(() => null);
+  if (!renewed || renewed.auth.user_id !== authorized.binding.subject_user_id
+    || renewed.authService.getOrganizationId() !== null
+    || tokenExpiry(renewed.accessToken) === null
+    || Number(tokenExpiry(renewed.accessToken)) <= now()) throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
+  return renewed.accessToken;
 }
 
 const defaultTransport: InitRunBootstrapTransport = {
@@ -401,7 +433,7 @@ async function continueInitRun(
   const deadline = Date.parse(authorized.expiresAt);
   const attempt = await (async () => {
     try {
-      const accessToken = resolveInitRunBrokerAccessToken(authorized, transport.now);
+      const accessToken = await resolveInitRunBrokerAccessToken(authorized, transport.now);
       return {
         ok: true as const,
         response: await post(
