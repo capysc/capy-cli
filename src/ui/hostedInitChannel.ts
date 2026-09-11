@@ -64,7 +64,7 @@ export async function openHostedInitChannel(input: Readonly<{
 
 async function pageKey(channel: HostedInitChannel, connection: BrokerConnection): Promise<string> {
   checkDeadline(channel, connection);
-  const result = await channel.broker.pollExchange(connection, 20);
+  const result = await channel.broker.pollExchange(connection, 20, 'page_key');
   if (result.kind === 'expired') return refuse('INIT_CONNECTION_EXPIRED');
   if (result.kind !== 'pending') return refuse('INIT_DELIVERY_INDETERMINATE');
   if (result.pagePubkeyB64) return result.pagePubkeyB64;

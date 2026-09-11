@@ -234,14 +234,14 @@ export class BrokerClient {
    * handing out the URL. Delivery remains single-use: CONNECTION_CONSUMED
    * without a saved answer requires a new ceremony, not a successful retry.
    */
-  async pollExchange(connection: BrokerConnection, waitSeconds: number = 20): Promise<PollExchangeResult> {
+  async pollExchange(connection: BrokerConnection, waitSeconds: number = 20, waitFor: 'answer' | 'page_key' = 'answer'): Promise<PollExchangeResult> {
     const boundedWait = Number.isFinite(waitSeconds) ? Math.max(0, Math.min(Math.floor(waitSeconds), 25)) : 20;
     const headers = await this.headers().catch(() => null);
     if (!headers) return { kind: 'network', detail: 'no session token' };
     const response = await (async () => {
       try {
         return { ok: true as const, value: await fetch(
-          `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${boundedWait}`,
+          `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${boundedWait}${waitFor === 'page_key' ? '&wait_for=page_key' : ''}`,
           { method: 'GET', headers, redirect: 'error', signal: AbortSignal.timeout((boundedWait + 5) * 1000) },
         ) };
       } catch (error) {
