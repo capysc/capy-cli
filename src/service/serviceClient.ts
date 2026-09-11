@@ -133,6 +133,63 @@ export interface SignupReadiness {
   }>;
 }
 
+export type FinalizedSignupCustody = SignupReadiness & Readonly<{
+  key_state: 'minted';
+  already?: true;
+}>;
+
+const SIGNUP_CREDENTIAL_ID_MAX_LENGTH = 1400;
+
+const exactKeys = (value: Readonly<Record<string, unknown>>, expected: readonly string[]): boolean => {
+  const actual = Object.keys(value);
+  return actual.length === expected.length && actual.every((key) => expected.includes(key));
+};
+
+const record = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const serviceIdentifier = (value: string): boolean =>
+  value.length > 0 && value.length <= 255 && value.trim() === value && /^\S+$/u.test(value);
+
+const credentialIdentifier = (value: string): boolean =>
+  value.length > 0
+  && value.length <= SIGNUP_CREDENTIAL_ID_MAX_LENGTH
+  && /^[A-Za-z0-9_-]+$/u.test(value);
+
+const parseFinalizedSignupCustody = (value: unknown): FinalizedSignupCustody | null => {
+  if (!record(value)) return null;
+  const expected = value.already === undefined
+    ? ['key_state', 'signup_complete', 'retryable', 'custody']
+    : ['key_state', 'already', 'signup_complete', 'retryable', 'custody'];
+  const custody = record(value.custody) ? value.custody : null;
+  const custodyComplete = custody?.key_state === 'minted'
+    && custody.ceremony_pending === false
+    && custody.has_live_wrapped_k_local === true;
+  if (!exactKeys(value, expected)
+    || value.key_state !== 'minted'
+    || (value.already !== undefined && value.already !== true)
+    || typeof value.signup_complete !== 'boolean'
+    || typeof value.retryable !== 'boolean'
+    || !custody
+    || !exactKeys(custody, ['key_state', 'ceremony_pending', 'has_live_wrapped_k_local'])
+    || custody.key_state !== 'minted'
+    || typeof custody.ceremony_pending !== 'boolean'
+    || typeof custody.has_live_wrapped_k_local !== 'boolean'
+    || value.signup_complete !== custodyComplete
+    || value.retryable !== !value.signup_complete) return null;
+  return {
+    key_state: 'minted',
+    ...(value.already === true ? { already: true as const } : {}),
+    signup_complete: value.signup_complete,
+    retryable: value.retryable,
+    custody: {
+      key_state: custody.key_state,
+      ceremony_pending: custody.ceremony_pending,
+      has_live_wrapped_k_local: custody.has_live_wrapped_k_local,
+    },
+  };
+};
+
 /** Billing is the only authority for choosing the keepless free-sync corpus. */
 export interface BillingStatus {
   readonly tier: 'free' | 'business';
@@ -739,6 +796,35 @@ export class ServiceClient {
    */
   async finalizeKeyMint(orgId: string): Promise<{ key_state: 'minted' } | { already: true }> {
     return this.request('POST', `/orgs/${orgId}/key-mint/finalize`);
+  }
+
+  /**
+   * Complete signup custody against the exact live device-key door created by
+   * this ceremony. This is deliberately separate from finalizeKeyMint: the
+   * legacy no-body finalizer remains available for non-signup mint recovery,
+   * while signup must bind the transition to its credential and retain the
+   * service's authoritative readiness verdict unchanged.
+   */
+  async finalizeSignupCustody(orgId: string, credentialId: string): Promise<FinalizedSignupCustody> {
+    if (!serviceIdentifier(orgId) || !credentialIdentifier(credentialId)) {
+      throw new CapyError(
+        'Invalid signup custody finalization request',
+        ERROR_CODES.INVALID_FORMAT,
+      );
+    }
+    const response = await this.request<unknown>(
+      'POST',
+      `/orgs/${encodeURIComponent(orgId)}/key-mint/finalize`,
+      { wrapped_k_local_credential_id: credentialId },
+    );
+    const finalized = parseFinalizedSignupCustody(response);
+    if (!finalized) {
+      throw new CapyError(
+        'The signup custody finalization response was invalid',
+        ERROR_CODES.SERVICE_ERROR,
+      );
+    }
+    return finalized;
   }
 
   /**
