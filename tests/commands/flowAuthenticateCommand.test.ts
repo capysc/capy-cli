@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, mock } from 'bun:test';
 import { executeFlowAuthentication, projectAuthenticationResult, type AuthenticationCheckpoint, type AuthenticationExecutorDependencies } from '../../src/commands/flowAuthenticateCommand';
 import { createHash } from 'crypto';
 
@@ -6,17 +6,23 @@ const flowId = '11111111-1111-4111-8111-111111111111';
 const options = { expectedUserId: 'user_test', serviceOrigin: 'https://dev.invalid' };
 const deviceCode = 'PRIVATE_DEVICE_CODE';
 const now = Date.parse('2026-09-05T23:00:00Z');
+const installationBaseline = {
+  userId: options.expectedUserId,
+  refreshAuthoritySha256: createHash('sha256').update('PRIVATE_OLD_REFRESH_TOKEN').digest('hex'),
+} as const;
 const state: AuthenticationCheckpoint = {
   version: 1, flowId, userId: options.expectedUserId, apiUrl: options.serviceOrigin,
   deviceCode, intervalMs: 5000, pollAfter: now,
   handoff: { attemptId: flowId, deviceCodeHash: createHash('sha256').update(deviceCode).digest('hex'),
     url: 'https://dev.authkit.app/device?user_code=ABCD-EFGH', userCode: 'ABCD-EFGH',
     expiresAt: new Date(now + 300_000).toISOString() },
+  installationBaseline,
 };
 const fail = (): never => { throw new Error('unexpected dependency'); };
 const deps: AuthenticationExecutorDependencies = {
   now: () => now, wait: async () => {}, request: fail, start: fail,
   read: () => null, save: () => {}, remove: fail, assertUser: () => {}, install: fail,
+  captureInstallationBaseline: () => installationBaseline, assertInstalled: fail,
 };
 const session = { user: { id: 'user_test', email: 'test@example.invalid', first_name: null, last_name: null },
   refresh_token: 'PRIVATE_REFRESH_TOKEN', organizations: [], sessions: undefined };
@@ -62,13 +68,28 @@ describe('non-interactive authentication executor', () => {
     })).rejects.toThrow(code);
   });
   it('returns at the link without polling or installing and saves private state separately', async () => {
+    const captureInstallationBaseline = mock(() => installationBaseline);
+    const start = mock(async () => ({
+      device_code: deviceCode,
+      user_code: 'ABCD-EFGH',
+      verification_uri: 'https://dev.authkit.app/device',
+      expires_in: 300,
+      interval: 5,
+    }));
     const result = await executeFlowAuthentication(flowId, options, { ...deps,
-      start: async () => ({ device_code: deviceCode, user_code: 'ABCD-EFGH', verification_uri: 'https://dev.authkit.app/device', expires_in: 300, interval: 5 }),
-      save: (saved) => { expect(saved.deviceCode).toBe(deviceCode); expect(saved.userId).toBe('user_test'); },
+      captureInstallationBaseline,
+      start,
+      save: (saved) => {
+        expect(saved.deviceCode).toBe(deviceCode);
+        expect(saved.userId).toBe('user_test');
+        expect(saved.installationBaseline).toEqual(installationBaseline);
+      },
     });
     expect(result.stage).toBe('approval_pending');
     expect(JSON.stringify(result)).not.toContain(deviceCode);
     expect(result.continuation.tool).toBe('capy_authenticate');
+    expect(captureInstallationBaseline.mock.invocationCallOrder[0]!)
+      .toBeLessThan(start.mock.invocationCallOrder[0]!);
   });
 
   it('resumes an issued credential without exchanging the device code again', async () => {
@@ -89,6 +110,7 @@ describe('non-interactive authentication executor', () => {
   it('does not install the session twice after an interrupted acknowledgement', async () => {
     const result = await executeFlowAuthentication(flowId, options, { ...deps,
       read: () => ({ ...state, installed: true, issued: { session, bearer: 'PRIVATE_ACCESS_TOKEN' } }),
+      assertInstalled: (installed) => { expect(installed).toEqual(session); },
       remove: () => {}, request: (async () => Response.json({ stage: 'authenticated', user_id: 'user_test' })) as typeof fetch,
     });
     expect(result.stage).toBe('authenticated');
@@ -108,6 +130,18 @@ describe('non-interactive authentication executor', () => {
     expect(result.stage).toBe('approval_pending');
   });
 
+  it('rejects a legacy checkpoint without an authority baseline before redeeming again', async () => {
+    const request = (() => { throw new Error('device grant must not be redeemed'); }) as typeof fetch;
+    const legacy = Object.fromEntries(
+      Object.entries(state).filter(([key]) => key !== 'installationBaseline'),
+    ) as AuthenticationCheckpoint;
+    await expect(executeFlowAuthentication(flowId, options, {
+      ...deps,
+      read: () => legacy,
+      request,
+    })).rejects.toThrow('AUTH_LOCAL_STATE_INVALID');
+  });
+
   it('replays a completed receipt without opening another device grant', async () => {
     const result = await executeFlowAuthentication(flowId, options, { ...deps,
       read: () => ({ ...state, deviceCode: '', completed: true }), hasInstalledSession: () => true,
@@ -116,6 +150,21 @@ describe('non-interactive authentication executor', () => {
     await expect(executeFlowAuthentication(flowId, options, { ...deps,
       read: () => ({ ...state, deviceCode: '', completed: true }), hasInstalledSession: () => false,
     })).rejects.toThrow('AUTH_LOCAL_SESSION_MISSING');
+  });
+
+  it('preserves a completed legacy receipt that no longer carries issued credentials', async () => {
+    const completedLegacy = Object.fromEntries(
+      Object.entries({ ...state, deviceCode: '', completed: true as const })
+        .filter(([key]) => key !== 'installationBaseline'),
+    ) as AuthenticationCheckpoint;
+    const result = await executeFlowAuthentication(flowId, options, {
+      ...deps,
+      read: () => completedLegacy,
+      hasInstalledSession: () => true,
+      request: fail,
+      start: fail,
+    });
+    expect(result.stage).toBe('authenticated');
   });
 
   it('accepts org-less identity credentials without creating an organization', async () => {

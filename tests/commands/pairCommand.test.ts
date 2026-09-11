@@ -58,6 +58,11 @@ mock.module('../../src/auth/pairing/deviceAuth', () => ({
 }));
 const installImpl = mock(async (_session: any, _opts: any): Promise<any> => ({ orgId: null, orgTokenReady: false }));
 mock.module('../../src/auth/pairing/installPairedSession', () => ({ installPairedSession: installImpl }));
+const installationBaseline = { expectedUserId: null, authorities: [] } as const;
+const captureInstallationImpl = mock((_userId: string | null) => installationBaseline);
+mock.module('../../src/auth/pairing/pairedSessionInstallation', () => ({
+  capturePairedSessionInstallationBaseline: captureInstallationImpl,
+}));
 const resolveKeyMaterialImpl = mock(async (_answer: any, _opts: any): Promise<any> => ({
   ok: true, material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) },
 }));
@@ -115,7 +120,7 @@ const VALID_ANSWER = {
 
 
 beforeEach(() => {
-  for (const call of [ceremonyImpl, authorizeImpl, installImpl, resolveKeyMaterialImpl, spawnImpl,
+  for (const call of [ceremonyImpl, authorizeImpl, installImpl, captureInstallationImpl, resolveKeyMaterialImpl, spawnImpl,
     registerFilesystemPairing, silentAuthImpl, sessionOrgIdImpl, assertRuntimePairingUserImpl,
     logSpy, errorSpy]) call.mockClear();
   silentAuthImpl.mockImplementation(async () => ({
@@ -124,6 +129,7 @@ beforeEach(() => {
   sessionOrgIdImpl.mockImplementation(() => null);
   assertRuntimePairingUserImpl.mockImplementation(() => null);
   authorizeImpl.mockImplementation(async () => AUTHORIZATION);
+  captureInstallationImpl.mockImplementation(() => installationBaseline);
   installImpl.mockImplementation(async () => ({ orgId: 'org_1', orgName: 'Org One', orgTokenReady: true }));
   resolveKeyMaterialImpl.mockImplementation(async () => ({
     ok: true, material: { userId: 'user_1', credentialId: 'cred_1', kLocal: Buffer.alloc(32, 9) },
@@ -131,6 +137,25 @@ beforeEach(() => {
   registerFilesystemPairing.mockImplementation(async () => undefined);
   mockEnvironment({ CAPY_DEVICE_KEYS: '1' });
   stdoutSpy.mockReturnValue(originalStdout);
+});
+
+test('captures the installation baseline before provider authorization and passes the identical baseline to install', async () => {
+  authorizeImpl.mockImplementation(async () => {
+    expect(captureInstallationImpl).toHaveBeenCalledTimes(1);
+    return AUTHORIZATION;
+  });
+  ceremonyImpl.mockImplementation(async () => ({ status: 'complete', session: VALID_ANSWER.session }));
+  expect(await new PairCommand().execute({ json: true })).toBe(0);
+  expect(installCalls()[0].opts.installationBaseline).toBe(installationBaseline);
+});
+
+test('refuses unavailable authority before starting the device provider', async () => {
+  captureInstallationImpl.mockImplementation(() => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); });
+  expect(await new PairCommand().execute({ json: true })).toBe(1);
+  expect(authorizeImpl).not.toHaveBeenCalled();
+  expect(installImpl).not.toHaveBeenCalled();
+  expect(resolveKeyMaterialImpl).not.toHaveBeenCalled();
+  expect(spawnImpl).not.toHaveBeenCalled();
 });
 
 describe('PairCommand — rail always on', () => {
@@ -265,6 +290,8 @@ describe('PairCommand — already-active runtime', () => {
       sessionRefreshed: true,
     });
     expect(logs().join('\n')).toContain('updated-address@example.com');
+    expect(captureInstallationImpl).toHaveBeenCalledWith('user_1');
+    expect(installCalls()[0].opts.installationBaseline).toBe(installationBaseline);
     expect(ceremonyCalls().length).toBe(1);
     expect(installCalls().length).toBe(1);
     expect(resolveKeyMaterialCalls()).toEqual([]);
@@ -328,6 +355,8 @@ describe('PairCommand — already-active runtime', () => {
 
     const jsonStart = logs().findIndex((line) => line.trim().startsWith('{'));
     const parsed = JSON.parse(logs().slice(jsonStart).join('\n'));
+    expect(captureInstallationImpl).toHaveBeenCalledWith('user_1');
+    expect(installCalls()[0].opts.installationBaseline).toBe(installationBaseline);
     expect(parsed).toMatchObject({
       ok: true,
       userId: 'user_1',

@@ -1,7 +1,7 @@
 /**
  * CAP-409 — install `PairMachineAnswer.session` onto ~/.capy through the
  * SAME session-file writer every other login path uses
- * (`FileSessionStorageBackend.save` -> `globalConfig.saveAuthSession`), then
+ * (the protected FileSessionStorageBackend writer), then
  * resolve which org is active.
  *
  * Org selection deliberately mirrors `core/orgContext.ts`'s
@@ -18,7 +18,7 @@
  */
 import inquirer from 'inquirer';
 import { SessionStore } from '../../types/index';
-import { FileSessionStorageBackend } from '../session/fileBackend';
+import { installDeviceAuthenticatedSession, type PairedSessionInstallationBaseline } from './pairedSessionInstallation';
 import { AuthService } from '../authService';
 import { isInteractive } from '../../ui/interactive';
 import type { PairMachineAnswerSession } from './pairContract';
@@ -56,18 +56,19 @@ export function buildSessionStoreFromAnswer(session: PairMachineAnswerSession): 
 }
 
 export interface InstallPairedSessionResult {
-  orgId: string | null;
-  orgName?: string;
+  readonly orgId: string | null;
+  readonly orgName?: string;
   /** True when we hold a usable, unexpired access token for `orgId` — either
    *  supplied directly in the payload, or freshly refreshed. */
-  orgTokenReady: boolean;
+  readonly orgTokenReady: boolean;
 }
 
 export interface InstallPairedSessionOptions {
-  apiUrl?: string;
-  devMode?: boolean;
+  readonly apiUrl?: string;
+  readonly devMode?: boolean;
+  readonly installationBaseline?: PairedSessionInstallationBaseline;
   /** Overridable for tests; defaults to a real interactive list prompt. */
-  selectOrg?: (orgs: SessionStore['organizations']) => Promise<string | null>;
+  readonly selectOrg?: (orgs: SessionStore['organizations']) => Promise<string | null>;
 }
 
 async function defaultSelectOrg(orgs: SessionStore['organizations']): Promise<string | null> {
@@ -100,8 +101,7 @@ export async function installPairedSession(
   assertRuntimePairingUser(answerSession.user.id);
   const session = buildSessionStoreFromAnswer(answerSession);
 
-  // The one write site: FileSessionStorageBackend.save -> saveAuthSession.
-  new FileSessionStorageBackend().save(session, session.user_id);
+  await installDeviceAuthenticatedSession(session, opts.installationBaseline);
 
   const orgs = session.organizations;
   const orgId = orgs.length === 1

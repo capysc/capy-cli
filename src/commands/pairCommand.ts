@@ -56,6 +56,7 @@ import {
   type DevicePollResult,
 } from '../auth/pairing/deviceAuth';
 import { installPairedSession, type InstallPairedSessionResult } from '../auth/pairing/installPairedSession';
+import { capturePairedSessionInstallationBaseline, type PairedSessionInstallationBaseline } from '../auth/pairing/pairedSessionInstallation';
 import { grantKeyMaterialForPairedMachine } from '../auth/pairing/pairDeviceGrant';
 import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
 import { spawnGrantDaemon, GRANT_SOCKET_ENV_VAR } from '../auth/deviceKey/grantHolder';
@@ -403,10 +404,15 @@ export class PairCommand {
 
     // Extracted so the outcome is a single const rather than a reassigned
     // binding (codebase immutability rule).
-    const runDeviceFlow = async (): Promise<{ authorization: DeviceAuthorization; result: DevicePollResult }> => {
+    const runDeviceFlow = async (): Promise<Readonly<{
+      authorization: DeviceAuthorization;
+      result: DevicePollResult;
+      installationBaseline: PairedSessionInstallationBaseline;
+    }>> => {
+      const installationBaseline = capturePairedSessionInstallationBaseline(active?.userId ?? null);
       const authorization = await startDeviceAuthorization(serviceUrl);
       await this.printPairingBlock(authorization);
-      return { authorization, result: await awaitDeviceApproval(serviceUrl, authorization) };
+      return { authorization, result: await awaitDeviceApproval(serviceUrl, authorization), installationBaseline };
     };
 
     const flow = await (async () => {
@@ -432,15 +438,15 @@ export class PairCommand {
       return 1;
     }
 
-    const { authorization, result } = flow.value;
+    const { authorization, result, installationBaseline } = flow.value;
     const userCode = authorization.user_code;
 
     switch (result.status) {
       case 'complete':
         if (active) {
-          return this.finishSessionRefresh(result.session, userCode, options);
+          return this.finishSessionRefresh(result.session, userCode, options, installationBaseline);
         }
-        return this.finish(result.session, userCode, options);
+        return this.finish(result.session, userCode, options, installationBaseline);
       case 'denied': {
         // `expired_token` keeps its own exit code and remedy: the code simply
         // ran out, which is a retry, not a refusal.
@@ -537,6 +543,7 @@ export class PairCommand {
     session: PairMachineAnswerSession,
     userCode: string,
     options: PairCommandOptions,
+    installationBaseline: PairedSessionInstallationBaseline,
   ): Promise<PairCommandExitCode> {
     // The device flow can outlive its starting daemon (logout, crash, or a
     // same-user replacement). Re-read the runtime authority before choosing
@@ -545,7 +552,7 @@ export class PairCommand {
     // socket; when it changed, bind the result to the current record.
     const current = await (this.dependencies.readActivePairing ?? readActiveRuntimePairing)();
     if (!current) {
-      return this.finish(session, userCode, options);
+      return this.finish(session, userCode, options, installationBaseline);
     }
 
     if (session.user.id !== current.userId) {
@@ -569,7 +576,7 @@ export class PairCommand {
       try {
         return {
           ok: true as const,
-          value: await installPairedSession(session, { apiUrl: this.apiUrl, devMode: this.devMode }),
+          value: await installPairedSession(session, { apiUrl: this.apiUrl, devMode: this.devMode, installationBaseline }),
         };
       } catch (error) {
         return { ok: false as const, error };
@@ -645,11 +652,12 @@ export class PairCommand {
     session: PairMachineAnswerSession,
     userCode: string,
     options: PairCommandOptions,
+    installationBaseline: PairedSessionInstallationBaseline,
   ): Promise<PairCommandExitCode> {
     // Single const rather than a reassigned binding (immutability rule).
     const installed = await (async () => {
       try {
-        return { ok: true as const, value: await installPairedSession(session, { apiUrl: this.apiUrl, devMode: this.devMode }) };
+        return { ok: true as const, value: await installPairedSession(session, { apiUrl: this.apiUrl, devMode: this.devMode, installationBaseline }) };
       } catch (err) {
         return { ok: false as const, err };
       }

@@ -7,7 +7,6 @@ import { dirname, join } from 'path';
 import { lock, lockSync } from 'proper-lockfile';
 import { SessionStore } from '../../types/index';
 import {
-  readAuthSession,
   getAuthSessionPath,
   getGlobalCapyDir,
 } from '../../config/globalConfig';
@@ -32,6 +31,42 @@ type RefreshFence = Readonly<{
 }>;
 const digest = (token: string): string => createHash('sha256').update(token).digest('hex');
 const fencePath = (userId: string | undefined): string => `${getAuthSessionPath(userId)}.refresh-in-flight`;
+
+const readProtectedSession = (userId: string | undefined): SessionStore | null => {
+  const path = getAuthSessionPath(userId);
+  const descriptor = (() => {
+    try {
+      return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      const code = error !== null && typeof error === 'object' && 'code' in error
+        ? (error as Readonly<{ code?: unknown }>).code
+        : null;
+      if (code === 'ENOENT') return null;
+      throw error;
+    }
+  })();
+  if (descriptor === null) return null;
+  try {
+    const metadata = fstatSync(descriptor);
+    const expectedUser = typeof process.getuid === 'function' ? process.getuid() : metadata.uid;
+    if (!metadata.isFile() || metadata.uid !== expectedUser || (metadata.mode & 0o777) !== 0o600
+      || !Number.isSafeInteger(metadata.size) || metadata.size <= 0) {
+      throw new Error('AUTH_SESSION_FILE_INVALID');
+    }
+    const bytes = Buffer.alloc(metadata.size + 1);
+    const count = readSync(descriptor, bytes, 0, bytes.length, 0);
+    if (count !== metadata.size) throw new Error('AUTH_SESSION_FILE_INVALID');
+    const parsed = (() => {
+      try { return JSON.parse(bytes.subarray(0, count).toString('utf8')) as unknown; } catch { return null; }
+    })();
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('AUTH_SESSION_FILE_INVALID');
+    }
+    return parsed as SessionStore;
+  } finally {
+    closeSync(descriptor);
+  }
+};
 
 const validFence = (value: unknown): value is RefreshFence => {
   const record = value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -175,7 +210,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
   load(userId: string | undefined): SessionStore | null {
     return withStableSessionLockSync(userId, () => {
       if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
-      return readAuthSession(userId) as SessionStore | null;
+      return readProtectedSession(userId);
     });
   }
 
@@ -190,7 +225,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
       }
       writeFence(userId, { ...fence, phase: 'persisting' });
       saveSessionDurably(session, userId);
-      const readback = readAuthSession(userId) as SessionStore | null;
+      const readback = readProtectedSession(userId);
       if (!sessionMatches(readback, session)) {
         throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
       }
@@ -202,7 +237,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
         if (currentRefreshRotationContext()) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
         withStableSessionLockSync(userId, () => {
           if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
-          const current = readAuthSession(userId) as SessionStore | null;
+          const current = readProtectedSession(userId);
           const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
           if (verifiedInstallation) {
             if (userId !== verifiedInstallation.userId || session.user_id !== verifiedInstallation.userId
@@ -213,7 +248,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
             throw new Error('AUTH_REFRESH_AUTHORITY_CHANGED');
           }
           saveSessionDurably(session, userId);
-          if (!sessionMatches(readAuthSession(userId) as SessionStore | null, session)) {
+          if (!sessionMatches(readProtectedSession(userId), session)) {
             throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
           }
         });
@@ -246,11 +281,11 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
   ): boolean {
     return withStableSessionLockSync(userId, () => {
       if (readFence(userId)) return false;
-      const current = readAuthSession(userId) as SessionStore | null;
+      const current = readProtectedSession(userId);
       const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
       if (currentDigest !== expectedRefreshAuthoritySha256) return false;
       saveSessionDurably(session, userId);
-      const readback = readAuthSession(userId) as SessionStore | null;
+      const readback = readProtectedSession(userId);
       return sessionMatches(readback, session);
     });
   }
@@ -303,7 +338,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
     });
     try {
       if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
-      const fresh = readAuthSession(userId) as SessionStore | null;
+      const fresh = readProtectedSession(userId);
       if (!fresh?.refresh_token) throw new Error('AUTH_REFRESH_AUTHORITY_MISSING');
       const fence: RefreshFence = {
         v: 1,

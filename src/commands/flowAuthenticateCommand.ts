@@ -10,6 +10,7 @@ import { assertRuntimePairingUser } from '../auth/pairing/runtimePairing';
 import { acquirePairAttemptLease, releasePairAttemptLease } from '../auth/pairing/pairAttemptLease';
 import { startDeviceAuthorization, deviceVerificationHandoff, toAnswerSession } from '../auth/pairing/deviceAuth';
 import type { PairMachineAnswerSession } from '../auth/pairing/pairContract';
+import type { SessionStore } from '../types/index';
 
 export interface FlowAuthenticationOptions {
   readonly expectedUserId: string;
@@ -33,9 +34,14 @@ export interface AuthenticationCheckpoint {
   readonly deviceCode: string;
   readonly intervalMs: number;
   readonly pollAfter: number;
+  readonly installationBaseline: AuthenticationInstallationBaseline;
   readonly issued?: { readonly session: PairMachineAnswerSession; readonly bearer: string };
   readonly installed?: true;
   readonly completed?: true;
+}
+export interface AuthenticationInstallationBaseline {
+  readonly userId: string;
+  readonly refreshAuthoritySha256: string | null;
 }
 export interface AuthenticationExecutorDependencies {
   readonly now: () => number;
@@ -46,16 +52,37 @@ export interface AuthenticationExecutorDependencies {
   readonly save: (state: AuthenticationCheckpoint) => void;
   readonly remove: () => void;
   readonly assertUser: (userId: string) => void;
-  readonly install: (session: PairMachineAnswerSession) => void;
+  readonly captureInstallationBaseline: (userId: string) => AuthenticationInstallationBaseline;
+  readonly install: (
+    session: PairMachineAnswerSession,
+    baseline: AuthenticationInstallationBaseline,
+  ) => void;
+  readonly assertInstalled: (session: PairMachineAnswerSession) => void;
   readonly hasInstalledSession?: (userId: string) => boolean;
 }
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SHA256 = /^[0-9a-f]{64}$/u;
+const SESSION_INSTALLATION_REFUSED = 'AUTH_SESSION_INSTALLATION_REFUSED';
 export class AuthenticationExecutorError extends Error {
   constructor(readonly code: string) { super(code); }
 }
 const reject = (code: string): never => { throw new AuthenticationExecutorError(code); };
+const validInstallationBaseline = (
+  value: unknown,
+  expectedUserId: string,
+): value is AuthenticationInstallationBaseline => {
+  const baseline = value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : null;
+  return baseline !== null
+    && Object.keys(baseline).length === 2
+    && baseline.userId === expectedUserId
+    && (baseline.refreshAuthoritySha256 === null
+      || (typeof baseline.refreshAuthoritySha256 === 'string'
+        && SHA256.test(baseline.refreshAuthoritySha256)));
+};
 
 /** Deliberate projection: never serialize a checkpoint, device code, or token. */
 function awaiting(state: AuthenticationCheckpoint) {
@@ -68,10 +95,20 @@ async function finish(state: AuthenticationCheckpoint, deps: AuthenticationExecu
   const issued = state.issued;
   if (!issued || issued.session.user.id !== state.userId) return reject('AUTH_ACCOUNT_MISMATCH');
   deps.assertUser(state.userId);
-  if (!state.installed) {
-    deps.install(issued.session);
-    deps.save({ ...state, installed: true });
-  }
+  const installation = (() => {
+    try {
+      if (state.installed) {
+        deps.assertInstalled(issued.session);
+        return { ok: true as const };
+      }
+      deps.install(issued.session, state.installationBaseline);
+      deps.save({ ...state, installed: true });
+      return { ok: true as const };
+    } catch {
+      return { ok: false as const };
+    }
+  })();
+  if (!installation.ok) return reject(SESSION_INSTALLATION_REFUSED);
   const response = await deps.request(`${state.apiUrl}/flows/authentication/${state.flowId}/complete`, {
     redirect: 'error', signal: AbortSignal.timeout(10_000),
     method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${issued.bearer}` },
@@ -138,16 +175,23 @@ export async function executeFlowAuthentication(flowId: string, options: FlowAut
   const existing = deps.read();
   if (existing) {
     if (existing.version !== 1 || existing.flowId !== flowId || existing.userId !== options.expectedUserId
-      || existing.apiUrl !== apiUrl || !existing.handoff) return reject('AUTH_LOCAL_STATE_INVALID');
+      || existing.apiUrl !== apiUrl || !existing.handoff) {
+      return reject('AUTH_LOCAL_STATE_INVALID');
+    }
     if (existing.completed) {
       if (!deps.hasInstalledSession?.(existing.userId)) return reject('AUTH_LOCAL_SESSION_MISSING');
       return { ok: true, flow_id: flowId, stage: 'authenticated' as const, user_id: existing.userId,
         continuation: { tool: 'capy_authenticate' as const, args: { flow_id: flowId } } };
     }
-    if (!Number.isFinite(existing.pollAfter)
+    if (!validInstallationBaseline(existing.installationBaseline, options.expectedUserId)
+      || !Number.isFinite(existing.pollAfter)
       || !Number.isFinite(existing.intervalMs) || existing.intervalMs < 1000
       || existing.handoff.deviceCodeHash !== hash(existing.deviceCode)) return reject('AUTH_LOCAL_STATE_INVALID');
     return poll(existing, deps, deps.now() + 20_000);
+  }
+  const installationBaseline = deps.captureInstallationBaseline(options.expectedUserId);
+  if (!validInstallationBaseline(installationBaseline, options.expectedUserId)) {
+    return reject(SESSION_INSTALLATION_REFUSED);
   }
   const authorization = await deps.start(apiUrl);
   if (!authorization.device_code || !Number.isFinite(authorization.expires_in) || authorization.expires_in <= 0
@@ -161,6 +205,7 @@ export async function executeFlowAuthentication(flowId: string, options: FlowAut
       url: handoff.url, userCode: handoff.userCode, expiresAt: new Date(deps.now() + authorization.expires_in * 1000).toISOString() },
     deviceCode: authorization.device_code, intervalMs: authorization.interval * 1000,
     pollAfter: deps.now() + authorization.interval * 1000,
+    installationBaseline,
   };
   deps.save(state);
   return awaiting(state);
@@ -168,11 +213,71 @@ export async function executeFlowAuthentication(flowId: string, options: FlowAut
 
 function assertLocalUser(userId: string): void {
   assertRuntimePairingUser(userId);
-  const backend = new FileSessionStorageBackend();
-  const existing = backend.discover();
-  const legacy = backend.load(undefined);
+  const local = (() => {
+    try {
+      const backend = new FileSessionStorageBackend();
+      return { existing: backend.discover(), legacy: backend.load(undefined) } as const;
+    } catch {
+      return reject(SESSION_INSTALLATION_REFUSED);
+    }
+  })();
+  const { existing, legacy } = local;
   if ((existing && existing.userId !== userId) || (legacy && legacy.user_id !== userId)) reject('AUTH_LOCAL_ACCOUNT_MISMATCH');
 }
+
+const sessionAuthorityDigest = (session: SessionStore | null): string | null =>
+  session?.refresh_token ? hash(session.refresh_token) : null;
+
+const exactSession = (left: SessionStore | null, right: SessionStore): boolean =>
+  left !== null && JSON.stringify(left) === JSON.stringify(right);
+
+const captureLocalInstallationBaseline = (userId: string): AuthenticationInstallationBaseline => {
+  try {
+    const backend = new FileSessionStorageBackend();
+    backend.assertRefreshAuthorityAvailable(userId);
+    const current = backend.load(userId);
+    if (current && current.user_id !== userId) return reject(SESSION_INSTALLATION_REFUSED);
+    return { userId, refreshAuthoritySha256: sessionAuthorityDigest(current) };
+  } catch {
+    return reject(SESSION_INSTALLATION_REFUSED);
+  }
+};
+
+const installLocalSession = (
+  answer: PairMachineAnswerSession,
+  baseline: AuthenticationInstallationBaseline,
+): void => {
+  try {
+    const session = buildSessionStoreFromAnswer(answer);
+    if (session.user_id !== baseline.userId) return reject(SESSION_INSTALLATION_REFUSED);
+    const backend = new FileSessionStorageBackend();
+    const current = backend.load(session.user_id);
+    if (!exactSession(current, session)) {
+      const saved = backend.saveIfRefreshAuthorityMatches(
+        session,
+        session.user_id,
+        baseline.refreshAuthoritySha256,
+      );
+      if (!saved) return reject(SESSION_INSTALLATION_REFUSED);
+    }
+    if (!exactSession(backend.load(session.user_id), session)) {
+      return reject(SESSION_INSTALLATION_REFUSED);
+    }
+  } catch {
+    return reject(SESSION_INSTALLATION_REFUSED);
+  }
+};
+
+const assertLocalSessionInstalled = (answer: PairMachineAnswerSession): void => {
+  try {
+    const expected = buildSessionStoreFromAnswer(answer);
+    if (!exactSession(new FileSessionStorageBackend().load(answer.user.id), expected)) {
+      return reject(SESSION_INSTALLATION_REFUSED);
+    }
+  } catch {
+    return reject(SESSION_INSTALLATION_REFUSED);
+  }
+};
 
 /** Local protected-state adapter reused by the single instrumented readiness command. */
 export async function executeLocalFlowAuthentication(flowId: string, options: FlowAuthenticationOptions) {
@@ -188,10 +293,16 @@ export async function executeLocalFlowAuthentication(flowId: string, options: Fl
       now: Date.now, wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)), request: fetch,
       start: startDeviceAuthorization, assertUser: assertLocalUser,
       hasInstalledSession: (userId) => {
-        const session = new FileSessionStorageBackend().load(userId);
-        return session?.user_id === userId && Boolean(session.refresh_token);
+        try {
+          const session = new FileSessionStorageBackend().load(userId);
+          return session?.user_id === userId && Boolean(session.refresh_token);
+        } catch {
+          return reject(SESSION_INSTALLATION_REFUSED);
+        }
       },
-      install: (session) => new FileSessionStorageBackend().save(buildSessionStoreFromAnswer(session), session.user.id),
+      captureInstallationBaseline: captureLocalInstallationBaseline,
+      install: installLocalSession,
+      assertInstalled: assertLocalSessionInstalled,
       read: () => {
         if (!existsSync(path)) return null;
         const stat = lstatSync(path);
