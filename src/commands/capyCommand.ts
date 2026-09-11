@@ -909,6 +909,16 @@ export class CapyCommand {
     effects: 'none' | 'indeterminate',
   ): Promise<never> {
     const original = error instanceof InitWizardFlowError ? error.original : error;
+    if (this.devMode) {
+      console.error(JSON.stringify({
+        v: 1,
+        event: 'capy:init-run-diagnostic',
+        phase: 'hosted-initialization',
+        error_name: original instanceof Error ? original.name : 'UnknownError',
+        error_code: terminalCode(original),
+        error_message: original instanceof Error ? original.message : 'Initialization failed',
+      }));
+    }
     const cancelled = original instanceof InitWizardCancelledError;
     const terminalEffects = cancelled ? original.effects : effects;
     const receipt = terminalReceipt({
