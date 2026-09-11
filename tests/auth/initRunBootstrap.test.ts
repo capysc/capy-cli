@@ -425,6 +425,94 @@ describe('hosted init-run bootstrap', () => {
     expect(install).toHaveBeenCalledTimes(1);
   });
 
+  it('waits through exact exchange and acknowledgement throttles without replacing the run or session', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const throttle = () => new Response(JSON.stringify({ code: 'INIT_RUN_RATE_LIMITED' }), {
+      status: 429, headers: { 'Retry-After': '2' },
+    });
+    const fetcher = jest.fn()
+      .mockResolvedValueOnce(json({ v: 1, status: 'pending', retry_after_ms: 1000 }))
+      .mockImplementationOnce(async () => throttle())
+      .mockResolvedValueOnce(json({
+        v: 1, status: 'complete', binding: fixture.binding, auth_epoch: 1,
+        credential_receipt: fixture.receipt, sealed_auth_result: fixture.sealed.sealed_auth_result,
+      }))
+      .mockImplementationOnce(async () => throttle())
+      .mockResolvedValueOnce(json(fixture.authorizedStatus)) as unknown as typeof fetch;
+    const sleep = jest.fn(async (_milliseconds: number) => undefined);
+    const install = jest.fn(async () => installedContext());
+    const result = await completeInitRunAuthentication({
+      bootstrap: prepared, authService: { installExchangeResponse: install } as unknown as AuthService,
+      transport: { ...transport(fetcher), sleep },
+    });
+    expect(result.binding).toEqual(fixture.binding);
+    expect(sleep.mock.calls).toEqual([[1000], [2000], [2000]]);
+    expect(fetcher.mock.calls.slice(0, 3).map((call) => call[0])).toEqual(Array.from({ length: 3 }, () => `${SERVICE_ORIGIN}/init-runs/${RUN_ID}/exchange`));
+    expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[2][1]?.body);
+    expect(fetcher.mock.calls[3][1]?.body).toBe(fetcher.mock.calls[4][1]?.body);
+    expect(install).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops repeated throttles at the original expiry without fetching or installing after it', async () => {
+    const prepared = bootstrap();
+    const deadline = NOW + 1500;
+    const fetcher = jest.fn(async () => new Response(JSON.stringify({ code: 'INIT_RUN_RATE_LIMITED' }), {
+      status: 429, headers: { 'Retry-After': '1' },
+    })) as unknown as typeof fetch;
+    const sleep = jest.fn(async (_milliseconds: number) => undefined);
+    const install = jest.fn();
+    const error = await completeInitRunAuthentication({
+      bootstrap: { ...prepared, response: { ...prepared.response, expires_at: new Date(deadline).toISOString() } },
+      authService: { installExchangeResponse: install } as unknown as AuthService,
+      transport: { fetch: fetcher, sleep, now: () => NOW + sleep.mock.calls.reduce((sum, call) => sum + call[0], 0) },
+    }).catch((cause) => cause);
+    expect(error.code).toBe('INIT_RUN_EXPIRED');
+    expect(sleep.mock.calls).toEqual([[1000], [500]]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it.each([null, '', '0', '-1', '1.5', '61', '999999999999', 'Fri, 11 Sep 2026 05:00:00 GMT'])('fails closed on unsupported rate-limit delay %s', async (retryAfter) => {
+    const fetcher = jest.fn(async () => new Response(JSON.stringify({ code: 'INIT_RUN_RATE_LIMITED' }), {
+      status: 429, headers: retryAfter === null ? {} : { 'Retry-After': retryAfter },
+    })) as unknown as typeof fetch;
+    const activeTransport = transport(fetcher);
+    const install = jest.fn();
+    const error = await completeInitRunAuthentication({
+      bootstrap: bootstrap(), authService: { installExchangeResponse: install } as unknown as AuthService,
+      transport: activeTransport,
+    }).catch((cause) => cause);
+    expect(error.code).toBe('INIT_RUN_RATE_LIMITED');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(activeTransport.sleep).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it.each([[503, 'INIT_RUN_RATE_LIMITED'], [429, 'INIT_AUTH_FAILED']] as const)('does not retry unrecognized throttle status %s code %s', async (status, code) => {
+    const fetcher = jest.fn(async () => new Response(JSON.stringify({ code }), {
+      status, headers: { 'Retry-After': '1' },
+    })) as unknown as typeof fetch;
+    const activeTransport = transport(fetcher);
+    const error = await completeInitRunAuthentication({
+      bootstrap: bootstrap(), authService: {} as AuthService, transport: activeTransport,
+    }).catch((cause) => cause);
+    expect(error.code).toBe(code);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(activeTransport.sleep).not.toHaveBeenCalled();
+  });
+
+  it('does not retry run creation on a rate-limit response', async () => {
+    const fetcher = jest.fn(async () => new Response(JSON.stringify({ code: 'INIT_RUN_RATE_LIMITED' }), {
+      status: 429, headers: { 'Retry-After': '1' },
+    })) as unknown as typeof fetch;
+    const activeTransport = transport(fetcher);
+    const error = await createInitRunBootstrap(bootstrap().request, activeTransport).catch((cause) => cause);
+    expect(error.code).toBe('INIT_RUN_RATE_LIMITED');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(activeTransport.sleep).not.toHaveBeenCalled();
+  });
+
   it('refuses an exchange that arrives after the frozen pre-auth deadline before session installation', async () => {
     const prepared = bootstrap();
     const { binding, sealed, receipt } = completionFixture(prepared);
@@ -770,6 +858,39 @@ describe('hosted init-run bootstrap', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it('rechecks session authority after a throttle wait before retrying the same continuation', async () => {
+    const prepared = bootstrap();
+    const fixture = completionFixture(prepared);
+    const sleep = jest.fn(async (_milliseconds: number) => undefined);
+    const oldToken = { access_token: 'old.fixture.token', expires_at: NOW + 30_000, organization_id: 'org-1', user_id: 'user_expected' } as const;
+    const newToken = { ...oldToken, access_token: 'renewed.fixture.token', expires_at: NOW + 120_000 } as const;
+    const getToken = jest.fn().mockReturnValueOnce(oldToken).mockReturnValueOnce(oldToken).mockReturnValueOnce(newToken);
+    const refreshToken = jest.fn(async () => true);
+    const connectionId = '22222222-2222-4222-8222-222222222222';
+    const fetcher = jest.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 'INIT_RUN_RATE_LIMITED' }), {
+        status: 429, headers: { 'Retry-After': '60' },
+      }))
+      .mockResolvedValueOnce(json({ ...fixture.authorizedStatus, status: 'running', first_connection_id: connectionId })) as unknown as typeof fetch;
+    const result = await publishInitRunConnection({
+      bootstrap: prepared,
+      authorized: {
+        auth: { success: true, user_id: 'user_expected' },
+        authService: { getOrganizationId: () => 'org-1', getToken, refreshToken } as unknown as AuthService,
+        binding: fixture.binding, authEpoch: 1, credentialReceipt: fixture.receipt,
+        brokerAccessToken: 'exchange.token', runSecret: RUN_SECRET, expiresAt: EXPIRES_AT,
+      },
+      firstConnectionId: connectionId,
+      transport: { fetch: fetcher, sleep, now: () => NOW + sleep.mock.calls.reduce((sum, call) => sum + call[0], 0) },
+    });
+    expect(result.first_connection_id).toBe(connectionId);
+    expect(sleep.mock.calls).toEqual([[60_000]]);
+    expect(refreshToken).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][1]?.headers).toEqual({ 'Content-Type': 'application/json', Authorization: 'Bearer old.fixture.token' });
+    expect(fetcher.mock.calls[1][1]?.headers).toEqual({ 'Content-Type': 'application/json', Authorization: 'Bearer renewed.fixture.token' });
+    expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[1][1]?.body);
+  });
+
   it('rejects selected-session metadata for a different subject before continuation', async () => {
     const prepared = bootstrap();
     const fixture = completionFixture(prepared);
@@ -856,7 +977,11 @@ describe('hosted init-run bootstrap', () => {
       },
       expires_at: '2026-09-11T05:20:00.000Z',
     } as const;
-    const fetcher = jest.fn(async () => json(terminal)) as unknown as typeof fetch;
+    const fetcher = jest.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 'INIT_RUN_RATE_LIMITED' }), {
+        status: 429, headers: { 'Retry-After': '1' },
+      }))
+      .mockResolvedValueOnce(json(terminal)) as unknown as typeof fetch;
 
     const result = await recordInitRunTerminal({
       bootstrap: prepared,
@@ -866,6 +991,8 @@ describe('hosted init-run bootstrap', () => {
     });
 
     expect(result.terminal_receipt).toEqual(receipt);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[1][1]?.body);
     expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({
       v: 1,
       action: 'terminal',

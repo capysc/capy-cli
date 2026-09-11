@@ -27,6 +27,13 @@ const MAX_RESPONSE_BYTES = 300 * 1024;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
 const MAX_EXCHANGE_NETWORK_FAILURES = 5;
 const EXCHANGE_RETRY_AFTER_MS = 1000;
+const MAX_RATE_LIMIT_RETRY_SECONDS = 60;
+
+class InitRunRateLimitError extends CapyError {
+  constructor(readonly retryAfterMs: number) {
+    super('Hosted init request was rate limited', 'INIT_RUN_RATE_LIMITED');
+  }
+}
 
 export interface InitRunBootstrapRequest {
   readonly serviceOrigin: string;
@@ -232,9 +239,41 @@ async function post(
       throw initRunFailure(ERROR_CODES.NETWORK_ERROR);
     });
     const parsed = exactJson(text);
-    if (!response.ok) throw initRunFailure(responseErrorCode(parsed));
+    if (!response.ok) {
+      const code = responseErrorCode(parsed);
+      const retryAfter = response.headers.get('Retry-After');
+      if (response.status === 429 && code === 'INIT_RUN_RATE_LIMITED'
+        && retryAfter !== null && /^[1-9][0-9]{0,2}$/u.test(retryAfter)
+        && Number(retryAfter) <= MAX_RATE_LIMIT_RETRY_SECONDS) {
+        throw new InitRunRateLimitError(Number(retryAfter) * 1000);
+      }
+      throw initRunFailure(code);
+    }
     return parsed;
   });
+}
+
+/** Only repeat-safe exchange/continuation calls opt into pre-handler throttling. */
+async function postAfterRateLimit(
+  transport: InitRunBootstrapTransport,
+  url: string,
+  body: Readonly<Record<string, unknown>>,
+  bearer: string | undefined | (() => Promise<string>),
+  operationDeadline: number,
+): Promise<unknown> {
+  if (transport.now() >= operationDeadline) throw initRunFailure('INIT_RUN_EXPIRED');
+  const accessToken = typeof bearer === 'function' ? await bearer() : bearer;
+  const attempt = await post(transport, url, body, accessToken, operationDeadline)
+    .then((value) => ({ ok: true as const, value }))
+    .catch((error: unknown) => {
+      if (!(error instanceof InitRunRateLimitError)) throw error;
+      return { ok: false as const, retryAfterMs: error.retryAfterMs };
+    });
+  if (attempt.ok) return attempt.value;
+  const remaining = operationDeadline - transport.now();
+  if (remaining <= 0) throw initRunFailure('INIT_RUN_EXPIRED');
+  await transport.sleep(Math.min(attempt.retryAfterMs, remaining));
+  return postAfterRateLimit(transport, url, body, bearer, operationDeadline);
 }
 
 function validateOrigins(input: InitRunBootstrapRequest): Readonly<{
@@ -330,7 +369,7 @@ async function awaitExchange(
     try {
       return {
         ok: true as const,
-        value: await post(
+        value: await postAfterRateLimit(
           transport,
           `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/exchange`,
           {
@@ -433,14 +472,13 @@ async function continueInitRun(
   const deadline = Date.parse(authorized.expiresAt);
   const attempt = await (async () => {
     try {
-      const accessToken = await resolveInitRunBrokerAccessToken(authorized, transport.now);
       return {
         ok: true as const,
-        response: await post(
+        response: await postAfterRateLimit(
           transport,
           `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/continue`,
           body,
-          accessToken,
+          () => resolveInitRunBrokerAccessToken(authorized, transport.now),
           deadline,
         ),
       };
@@ -554,7 +592,7 @@ export async function completeInitRunAuthentication(
   }
   const acknowledged = await (async () => {
     try {
-      return parseInitRunContinueResponse(await post(
+      return parseInitRunContinueResponse(await postAfterRateLimit(
         transport,
         `${input.bootstrap.request.serviceOrigin}/init-runs/${input.bootstrap.response.run_id}/continue`,
         {
@@ -565,6 +603,7 @@ export async function completeInitRunAuthentication(
           credential_receipt: exchange.credential_receipt,
         },
         plaintext.broker_access_token,
+        Date.parse(input.bootstrap.response.expires_at),
       ));
     } catch {
       throw initRunFailure('INIT_DELIVERY_INDETERMINATE');
