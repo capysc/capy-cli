@@ -1,5 +1,8 @@
-import type { AuthService, InstalledInitRunOrganization } from '../auth/authService';
-import { INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH } from '../auth/initRunOrganizationInstaller';
+import type {
+  AuthService,
+  InstalledExchangeResponse,
+  RenewedInitRunIdentity,
+} from '../auth/authService';
 import type {
   CeremonyFailure,
   CeremonyFailureCode,
@@ -12,26 +15,26 @@ import { generatePrfSalt, isWellFormedPrfOutput } from '../auth/deviceKey/crypto
 import { runNewUserEnrollment } from '../auth/deviceKey/onboarding';
 import { createDeviceKeyServiceOps } from '../auth/deviceKey/serviceOps';
 import { CURRENT_KDF_VERSION, generateSeedPhrase, seedPhraseToMasterKey } from '../crypto/keyManager';
-import { ServiceClient } from '../service/serviceClient';
-import type { AuthResult } from '../types';
-import { CapyError } from '../types';
+import { ServiceClient, type FinalizedSignupCustody } from '../service/serviceClient';
+import type { AuthResult, Organization, ServiceToken } from '../types';
+import { CapyError, ERROR_CODES } from '../types';
 import { askHostedInitChannel, HostedInitChannelError } from '../ui/hostedInitChannel';
 import type { HostedInitWizardSession } from '../ui/hostedInitWizardSession';
-import { buildCreateOrganizationData } from '../ui/onboardingWeb';
+import { SEED_PHRASE_WORDS } from '../ui/onboardingWeb';
 import type { CreateOrganizationData } from '../ui/screens/contract';
-import {
-  MAX_ORG_NAME_LENGTH,
-  ORG_PHRASE_NOTES,
-  ZERO_TRUST_URL,
-} from './orgCreation';
+import { MAX_ORG_NAME_LENGTH, ORG_PHRASE_NOTES, ZERO_TRUST_URL } from './orgCreation';
 
-const NAME_CHECK_TIMEOUT_MS = 10_000;
-const NAME_CHECK_RESPONSE_LIMIT = 8_192;
 const CEREMONY_FAILURES: readonly CeremonyFailureCode[] = [
   'cancelled', 'no_credential', 'prf_unsupported', 'webauthn_unavailable', 'transport_error',
 ];
 
 type EnrollmentOutcome = Awaited<ReturnType<typeof runNewUserEnrollment>>;
+
+export type HostedPersonalMint = Readonly<{
+  organization: Organization & Readonly<{ key_state: 'minting' }>;
+  projectId: string;
+  mintClaim: Readonly<{ key_state: 'minting'; expires_at: string }>;
+}>;
 
 export type HostedFreshOrganizationResult =
   | Readonly<{
@@ -39,8 +42,11 @@ export type HostedFreshOrganizationResult =
       auth: AuthResult;
       authService: AuthService;
       serviceClient: ServiceClient;
-      organization: InstalledInitRunOrganization['organization'];
+      organization: HostedPersonalMint['organization'];
+      projectId: string;
+      mintClaim: HostedPersonalMint['mintClaim'];
       enrollment: EnrollmentOutcome;
+      readiness: FinalizedSignupCustody;
       session: HostedInitWizardSession;
     }>
   | Readonly<{
@@ -65,35 +71,55 @@ export type HostedFreshOrganizationDependencies = Readonly<{
   generateSeed: () => string;
   generateSalt: () => Buffer;
   now: () => number;
-  checkName: (name: string) => Promise<'available' | 'taken' | 'unreachable'>;
+  renewIdentity: (authService: AuthService, expected: Readonly<{
+    userId: string;
+    deadline: number;
+  }>) => Promise<RenewedInitRunIdentity>;
+  createOrglessServiceClient: (identity: RenewedInitRunIdentity, deadline: number) => ServiceClient;
+  mintPersonalOrganization: (serviceClient: ServiceClient) => Promise<unknown>;
+  installOrganization: (input: Readonly<{
+    authService: AuthService;
+    refreshToken: string;
+    organizationId: string;
+    userId: string;
+  }>) => Promise<InstalledExchangeResponse>;
   createServiceClient: (authService: AuthService) => ServiceClient;
+  finalizeSignupCustody: (
+    serviceClient: ServiceClient,
+    organizationId: string,
+    credentialId: string,
+  ) => Promise<FinalizedSignupCustody>;
   enroll: typeof runNewUserEnrollment;
 }>;
 
-class HostedOrganizationCreationError extends CapyError {
-  constructor(
-    readonly original: unknown,
-    readonly session: HostedInitWizardSession,
-  ) {
-    super('The hosted organization outcome was not confirmed', 'INIT_RUN_ORGANIZATION_INDETERMINATE');
-  }
-}
-
-class HostedOrganizationQuestionError extends Error {
-  constructor(
-    readonly original: unknown,
-    readonly session: HostedInitWizardSession,
-  ) {
-    super('INIT_RUN_ORGANIZATION_QUESTION_FAILED');
-  }
-}
-
-const defaultDependencies = (serviceOrigin: string, deadline: number): HostedFreshOrganizationDependencies => ({
+const defaultDependencies = (serviceOrigin: string): HostedFreshOrganizationDependencies => ({
   generateSeed: generateSeedPhrase,
   generateSalt: generatePrfSalt,
   now: Date.now,
-  checkName: (name) => checkNameAvailability({ serviceOrigin, deadline, name }),
+  renewIdentity: (authService, expected) => authService.renewInitRunIdentity(expected),
+  createOrglessServiceClient: (identity, deadline) => {
+    const token: ServiceToken = {
+      access_token: identity.accessToken,
+      refresh_token: identity.auth._refresh_token ?? '',
+      expires_at: deadline,
+      organization_id: '',
+      user_id: identity.auth.user_id ?? '',
+      user_email: identity.auth.user_email,
+      user_first_name: identity.auth.user_first_name,
+      user_last_name: identity.auth.user_last_name,
+      organizations: [],
+    };
+    return new ServiceClient(serviceOrigin, false, async () => token);
+  },
+  mintPersonalOrganization: (serviceClient) => serviceClient.mintPersonalOrgCeremony(),
+  installOrganization: (input) => input.authService.refreshWithCredentials(
+    input.refreshToken,
+    input.organizationId,
+    input.userId,
+  ),
   createServiceClient: (authService) => new ServiceClient(serviceOrigin, false, () => authService.getValidToken()),
+  finalizeSignupCustody: (serviceClient, organizationId, credentialId) =>
+    serviceClient.finalizeSignupCustody(organizationId, credentialId),
   enroll: runNewUserEnrollment,
 });
 
@@ -119,40 +145,37 @@ const exactServiceOrigin = (value: string): string | null => {
   }
 };
 
-const checkNameAvailability = async (input: Readonly<{
-  serviceOrigin: string;
-  deadline: number;
-  name: string;
-}>): Promise<'available' | 'taken' | 'unreachable'> => {
-  const remaining = input.deadline - Date.now();
-  if (remaining <= 0) throw new HostedInitChannelError('INIT_RUN_EXPIRED');
-  const response = await (async () => {
-    try {
-      return await fetch(`${input.serviceOrigin}/auth/check-org-name`, {
-        method: 'POST',
-        redirect: 'error',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: input.name }),
-        signal: AbortSignal.timeout(Math.max(1, Math.min(NAME_CHECK_TIMEOUT_MS, remaining))),
-      });
-    } catch {
-      return null;
-    }
-  })();
-  if (!response?.ok) return 'unreachable';
-  const body = await (async () => {
-    try {
-      const text = await response.text();
-      return text.length <= NAME_CHECK_RESPONSE_LIMIT ? JSON.parse(text) as unknown : null;
-    } catch {
-      return null;
-    }
-  })();
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'unreachable';
-  const record = body as Readonly<Record<string, unknown>>;
-  return exactKeys(record, ['available']) && typeof record.available === 'boolean'
-    ? record.available ? 'available' : 'taken'
-    : 'unreachable';
+const record = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const serviceIdentifier = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= 255
+  && value.trim() === value && /^\S+$/u.test(value);
+
+const opaqueCredential = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= 65_536 && /^\S+$/u.test(value);
+
+export const parseHostedPersonalMint = (value: unknown, now: number): HostedPersonalMint | null => {
+  if (!record(value) || !exactKeys(value, ['org_id', 'project_id', 'mint_claim', 'organization'])
+    || !serviceIdentifier(value.org_id) || !serviceIdentifier(value.project_id)
+    || !record(value.mint_claim) || !exactKeys(value.mint_claim, ['key_state', 'expires_at'])
+    || value.mint_claim.key_state !== 'minting' || typeof value.mint_claim.expires_at !== 'string'
+    || !record(value.organization) || !exactKeys(value.organization, ['id', 'workos_org_id', 'name'])
+    || value.organization.id !== value.org_id
+    || !serviceIdentifier(value.organization.workos_org_id)
+    || !serviceIdentifier(value.organization.name)) return null;
+  const expiresAt = Date.parse(value.mint_claim.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return null;
+  return {
+    organization: {
+      id: value.org_id,
+      workos_org_id: value.organization.workos_org_id,
+      name: value.organization.name,
+      key_state: 'minting',
+    },
+    projectId: value.project_id,
+    mintClaim: { key_state: 'minting', expires_at: value.mint_claim.expires_at },
+  };
 };
 
 const parseEnrollmentAnswer = (
@@ -186,155 +209,106 @@ const parseEnrollmentAnswer = (
   };
 };
 
-const createOrganizationData = (input: Readonly<{
-  phrase: string;
-  name?: string;
-  nameError?: CreateOrganizationData['nameError'];
-  nameOnly?: boolean;
-}>): CreateOrganizationData => buildCreateOrganizationData({
-  phrase: input.phrase,
+const automaticPhraseData = (phrase: string): CreateOrganizationData => ({
+  nonce: '',
+  stops: [
+    { id: 'phrase', label: 'Recovery phrase', state: 'current' },
+    { id: 'device-key', label: 'Device key', state: 'upcoming' },
+  ],
+  view: 'phrase',
+  maxNameLength: MAX_ORG_NAME_LENGTH,
+  phraseWords: phrase.split(/\s+/u).filter(Boolean),
   bodyLines: ORG_PHRASE_NOTES,
   learnMoreUrl: ZERO_TRUST_URL,
-  maxNameLength: MAX_ORG_NAME_LENGTH,
-  name: input.name,
-  nameError: input.nameError === 'RACE_409' ? input.nameError : undefined,
-  nameOnly: input.nameOnly,
-  state: {
-    name: input.name,
-    nameError: input.nameError,
+  nonTty: {
+    command: '',
+    why: 'The recovery phrase must be shown to its owner.',
   },
-}, '');
+});
 
-async function askName(input: Readonly<{
-  checkName: HostedFreshOrganizationDependencies['checkName'];
-  phrase: string;
-  session: HostedInitWizardSession;
-  name?: string;
-  nameError?: CreateOrganizationData['nameError'];
-  nameOnly?: boolean;
-}>): Promise<Readonly<{ kind: 'cancelled'; session: HostedInitWizardSession }> | Readonly<{
-  kind: 'named'; name: string; session: HostedInitWizardSession;
-}>> {
-  const data = createOrganizationData(input);
-  const response = await (async () => {
-    try {
-      return await askHostedInitChannel<string, CreateOrganizationData>({
-        channel: input.session.channel,
-        screen: 'create-organization',
-        data,
-        decide: (payload) => {
-          if (!exactKeys(payload, ['name']) || typeof payload.name !== 'string') return invalidFrame();
-          const name = payload.name.trim();
-          if (name.length === 0) return {
-            error: 'EMPTY',
-            rejectedData: createOrganizationData({ ...input, name, nameError: 'EMPTY' }),
-          };
-          if (name.length > MAX_ORG_NAME_LENGTH) return {
-            error: 'TOO_LONG',
-            rejectedData: createOrganizationData({ ...input, name, nameError: 'TOO_LONG' }),
-          };
-          return { value: name };
-        },
-      });
-    } catch (error) {
-      throw new HostedOrganizationQuestionError(error, input.session);
-    }
-  })();
-  const session = { ...input.session, channel: response.channel };
-  if (response.kind === 'cancelled') return { kind: 'cancelled', session: { ...session, ended: true } };
-  const availability = await (async () => {
-    try { return await input.checkName(response.value); }
-    catch (error) { throw new HostedOrganizationQuestionError(error, session); }
-  })();
-  return availability === 'taken'
-    ? askName({ ...input, session, name: response.value, nameError: 'TAKEN' })
-    : { kind: 'named', name: response.value, session };
-}
+const automaticPhraseProgressData = (): CreateOrganizationData => ({
+  nonce: '',
+  stops: [
+    { id: 'phrase', label: 'Recovery phrase', state: 'done', answer: 'written down' },
+    { id: 'device-key', label: 'Device key', state: 'upcoming' },
+  ],
+  view: 'creating',
+  maxNameLength: MAX_ORG_NAME_LENGTH,
+  bodyLines: ORG_PHRASE_NOTES,
+  learnMoreUrl: ZERO_TRUST_URL,
+  nonTty: {
+    command: '',
+    why: 'The recovery phrase must be shown to its owner.',
+  },
+});
 
 async function confirmPhrase(input: Readonly<{
   phrase: string;
-  name: string;
   session: HostedInitWizardSession;
 }>): Promise<Readonly<{ kind: 'cancelled'; session: HostedInitWizardSession }> | Readonly<{
   kind: 'confirmed'; session: HostedInitWizardSession;
 }>> {
-  const data = createOrganizationData(input);
-  const progressData: CreateOrganizationData = {
-    ...createOrganizationData({ ...input, nameOnly: true }),
-    view: 'creating',
-  };
-  const response = await (async () => {
-    try {
-      return await askHostedInitChannel<true, CreateOrganizationData>({
-        channel: input.session.channel,
-        screen: 'create-organization',
-        data,
-        progressData,
-        decide: (payload) => exactKeys(payload, ['confirmed']) && payload.confirmed === true
-          ? { value: true }
-          : invalidFrame(),
-      });
-    } catch (error) {
-      throw new HostedOrganizationQuestionError(error, input.session);
-    }
-  })();
+  const words = input.phrase.split(/\s+/u).filter(Boolean);
+  if (words.length !== SEED_PHRASE_WORDS) return invalidFrame();
+  const response = await askHostedInitChannel<true, CreateOrganizationData>({
+    channel: input.session.channel,
+    screen: 'create-organization',
+    data: automaticPhraseData(input.phrase),
+    progressData: automaticPhraseProgressData(),
+    decide: (payload) => exactKeys(payload, ['confirmed']) && payload.confirmed === true
+      ? { value: true }
+      : invalidFrame(),
+  });
   const session = { ...input.session, channel: response.channel };
   return response.kind === 'cancelled'
     ? { kind: 'cancelled', session: { ...session, ended: true } }
     : { kind: 'confirmed', session };
 }
 
-async function nameAndConfirm(input: Readonly<{
-  checkName: HostedFreshOrganizationDependencies['checkName'];
-  phrase: string;
-  session: HostedInitWizardSession;
-  racedName?: string;
-}>): Promise<Readonly<{ kind: 'cancelled'; session: HostedInitWizardSession }> | Readonly<{
-  kind: 'confirmed'; name: string; session: HostedInitWizardSession;
-}>> {
-  const named = await askName({
-    ...input,
-    name: input.racedName,
-    nameError: input.racedName ? 'RACE_409' : undefined,
-    nameOnly: input.racedName !== undefined,
-  });
-  if (named.kind === 'cancelled') return named;
-  if (input.racedName !== undefined) return { kind: 'confirmed', name: named.name, session: named.session };
-  const confirmed = await confirmPhrase({ phrase: input.phrase, name: named.name, session: named.session });
-  return confirmed.kind === 'cancelled'
-    ? confirmed
-    : { kind: 'confirmed', name: named.name, session: confirmed.session };
-}
+const unsupportedCeremony = async (_request: UnlockRequest): Promise<never> => {
+  throw new HostedInitChannelError('INIT_RUN_INVALID');
+};
 
-const createOrganization = async (input: Readonly<{
-  authService: AuthService;
-  checkName: HostedFreshOrganizationDependencies['checkName'];
-  deadline: number;
-  phrase: string;
-  session: HostedInitWizardSession;
+const exactRenewedIdentity = (input: Readonly<{
+  renewed: RenewedInitRunIdentity;
+  serviceOrigin: string;
   userId: string;
-  racedName?: string;
-}>): Promise<Readonly<{ kind: 'cancelled'; session: HostedInitWizardSession }> | Readonly<{
-  kind: 'created'; installed: InstalledInitRunOrganization; session: HostedInitWizardSession;
-}>> => {
-  const confirmed = await nameAndConfirm(input);
-  if (confirmed.kind === 'cancelled') return confirmed;
+}>): boolean => {
   try {
-    const installed = await input.authService.createInitRunOrganization(confirmed.name, {
-      userId: input.userId,
-      deadline: input.deadline,
-    });
-    return { kind: 'created', installed, session: confirmed.session };
-  } catch (error) {
-    if (error instanceof CapyError && error.code === INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH) {
-      return createOrganization({ ...input, session: confirmed.session, racedName: confirmed.name });
-    }
-    throw new HostedOrganizationCreationError(error, confirmed.session);
+    return input.renewed.auth.success
+      && input.renewed.auth.user_id === input.userId
+      && input.renewed.auth.organization_id === ''
+      && (input.renewed.auth.organizations?.length ?? 0) === 0
+      && input.renewed.auth._orgless_access_token === input.renewed.accessToken
+      && opaqueCredential(input.renewed.auth._refresh_token)
+      && opaqueCredential(input.renewed.accessToken)
+      && input.renewed.authService.getOrganizationId() === null
+      && input.renewed.authService.getServiceApiUrl() === input.serviceOrigin;
+  } catch {
+    return false;
   }
 };
 
-const unsupportedCeremony = async (_request: UnlockRequest): Promise<never> => {
-  throw new HostedInitChannelError('INIT_RUN_INVALID');
+const exactInstalledOrganization = (input: Readonly<{
+  installed: InstalledExchangeResponse;
+  minted: HostedPersonalMint;
+  serviceOrigin: string;
+  userId: string;
+}>): boolean => {
+  try {
+    const organizations = input.installed.auth.organizations ?? [];
+    const selected = organizations.find((organization) => organization.id === input.minted.organization.id);
+    return input.installed.auth.success
+      && input.installed.auth.user_id === input.userId
+      && input.installed.auth.organization_id === input.minted.organization.id
+      && organizations.length === 1
+      && selected?.workos_org_id === input.minted.organization.workos_org_id
+      && selected.name === input.minted.organization.name
+      && input.installed.authService.getOrganizationId() === input.minted.organization.id
+      && input.installed.authService.getServiceApiUrl() === input.serviceOrigin;
+  } catch {
+    return false;
+  }
 };
 
 export async function createHostedFreshOrganization(input: Readonly<{
@@ -348,57 +322,111 @@ export async function createHostedFreshOrganization(input: Readonly<{
 }>): Promise<HostedFreshOrganizationResult> {
   const userId = input.auth.user_id;
   const serviceOrigin = exactServiceOrigin(input.serviceOrigin);
-  const configuredServiceOrigin = (() => {
-    try { return input.authService.getServiceApiUrl(); } catch { return null; }
-  })();
-  if (!input.auth.success || !userId || (input.auth.organizations?.length ?? 0) !== 0
-    || !serviceOrigin || serviceOrigin !== configuredServiceOrigin) {
-    return { kind: 'failed', effects: 'none', error: new HostedInitChannelError('INIT_RUN_INVALID'), session: input.session };
-  }
-  const dependencies = input.dependencies ?? defaultDependencies(serviceOrigin, input.deadline);
-  const phrase = dependencies.generateSeed();
-  const created = await (async () => {
+  const initialAuthority = (() => {
     try {
-      return await createOrganization({
-        authService: input.authService,
-        checkName: dependencies.checkName,
-        deadline: input.deadline,
-        phrase,
-        session: input.session,
-        userId,
-      });
-    } catch (error) {
-      const session = error instanceof HostedOrganizationCreationError
-        || error instanceof HostedOrganizationQuestionError
-        ? error.session
-        : input.session;
       return {
-        kind: 'failed' as const,
-        effects: error instanceof HostedOrganizationCreationError ? 'indeterminate' as const : 'none' as const,
-        error: error instanceof HostedOrganizationQuestionError ? error.original : error,
-        session,
+        serviceOrigin: input.authService.getServiceApiUrl(),
+        organizationId: input.authService.getOrganizationId(),
       };
+    } catch {
+      return null;
     }
   })();
-  if (created.kind === 'cancelled') return { ...created, effects: 'none' };
-  if (created.kind === 'failed') return created;
+  if (!input.auth.success || !userId || (input.auth.organizations?.length ?? 0) !== 0
+    || (input.auth.organization_id !== undefined && input.auth.organization_id !== '')
+    || !serviceOrigin || serviceOrigin !== initialAuthority?.serviceOrigin
+    || initialAuthority?.organizationId !== null
+    || input.session.ended
+    || input.session.channel.binding.subject_user_id !== userId
+    || input.session.channel.binding.service_origin !== serviceOrigin
+    || !Number.isFinite(input.deadline)) {
+    return { kind: 'failed', effects: 'none', error: new HostedInitChannelError('INIT_RUN_INVALID'), session: input.session };
+  }
+  const dependencies = input.dependencies ?? defaultDependencies(serviceOrigin);
+  const phrase = dependencies.generateSeed();
+  const confirmed = await (async () => {
+    try {
+      checkOperationDeadline(input.deadline, dependencies.now);
+      return await confirmPhrase({ phrase, session: input.session });
+    } catch (error) {
+      return { kind: 'failed' as const, error, session: input.session };
+    }
+  })();
+  if (confirmed.kind === 'cancelled') return { ...confirmed, effects: 'none' };
+  if (confirmed.kind === 'failed') return { ...confirmed, effects: 'none' };
 
-  const replacement = created.installed;
+  const renewed = await (async () => {
+    try {
+      checkOperationDeadline(input.deadline, dependencies.now);
+      const value = await dependencies.renewIdentity(input.authService, { userId, deadline: input.deadline });
+      checkOperationDeadline(input.deadline, dependencies.now);
+      return exactRenewedIdentity({ renewed: value, serviceOrigin, userId })
+        ? { kind: 'ready' as const, value }
+        : { kind: 'failed' as const, error: new HostedInitChannelError('INIT_RUN_INVALID') };
+    } catch (error) {
+      return { kind: 'failed' as const, error };
+    }
+  })();
+  if (renewed.kind === 'failed') {
+    return { kind: 'failed', effects: 'none', error: renewed.error, session: confirmed.session };
+  }
+  const minted = await (async () => {
+    try {
+      checkOperationDeadline(input.deadline, dependencies.now);
+      const orglessClient = dependencies.createOrglessServiceClient(renewed.value, input.deadline);
+      const raw = await dependencies.mintPersonalOrganization(orglessClient);
+      checkOperationDeadline(input.deadline, dependencies.now);
+      const value = parseHostedPersonalMint(raw, dependencies.now());
+      return value
+        ? { kind: 'created' as const, value }
+        : { kind: 'failed' as const, error: new HostedInitChannelError('INIT_RUN_INVALID') };
+    } catch (error) {
+      return { kind: 'failed' as const, error };
+    }
+  })();
+  if (minted.kind === 'failed') {
+    return {
+      kind: 'failed', effects: 'indeterminate', error: minted.error,
+      session: confirmed.session, authService: renewed.value.authService,
+    };
+  }
+  const installed = await (async () => {
+    try {
+      const refreshToken = renewed.value.auth._refresh_token;
+      if (!opaqueCredential(refreshToken)) return invalidFrame();
+      checkOperationDeadline(input.deadline, dependencies.now);
+      const value = await dependencies.installOrganization({
+        authService: renewed.value.authService,
+        refreshToken,
+        organizationId: minted.value.organization.id,
+        userId,
+      });
+      checkOperationDeadline(input.deadline, dependencies.now);
+      return exactInstalledOrganization({ installed: value, minted: minted.value, serviceOrigin, userId })
+        ? { kind: 'ready' as const, value }
+        : { kind: 'failed' as const, error: new HostedInitChannelError('INIT_RUN_INVALID') };
+    } catch (error) {
+      return { kind: 'failed' as const, error };
+    }
+  })();
+  if (installed.kind === 'failed') {
+    return {
+      kind: 'failed', effects: 'indeterminate', error: installed.error,
+      session: confirmed.session, authService: renewed.value.authService,
+    };
+  }
+  const replacement = installed.value;
   const rebound = (() => {
     try {
-      const organizations = replacement.auth.organizations ?? [];
-      const valid = replacement.auth.success
-        && replacement.auth.user_id === userId
-        && replacement.auth.organization_id === replacement.organization.id
-        && organizations.length === 1
-        && organizations[0]?.id === replacement.organization.id
-        && organizations[0]?.workos_org_id === replacement.organization.workos_org_id
-        && replacement.authService.getServiceApiUrl() === serviceOrigin
-        && dependencies.now() < input.deadline;
+      checkOperationDeadline(input.deadline, dependencies.now);
+      const session = input.rebindSession(confirmed.session, replacement.authService);
+      const valid = !session.ended
+        && session.channel.binding.subject_user_id === userId
+        && session.channel.binding.service_origin === serviceOrigin;
       if (!valid) return { kind: 'failed' as const, error: new HostedInitChannelError('INIT_RUN_INVALID') };
       return {
         kind: 'ready' as const,
-        session: input.rebindSession(created.session, replacement.authService),
+        session,
       };
     } catch (error) {
       return { kind: 'failed' as const, error };
@@ -407,7 +435,7 @@ export async function createHostedFreshOrganization(input: Readonly<{
   if (rebound.kind === 'failed') {
     return {
       kind: 'failed', effects: 'indeterminate', error: rebound.error,
-      session: created.session, authService: replacement.authService,
+      session: confirmed.session, authService: replacement.authService,
     };
   }
   const reboundSession = rebound.session;
@@ -508,12 +536,12 @@ export async function createHostedFreshOrganization(input: Readonly<{
       return { kind: 'settled' as const, value: await dependencies.enroll({
         userId,
         userEmail: replacement.auth.user_email,
-        organizations: replacement.auth.organizations ?? [replacement.organization],
-        activeOrgId: replacement.organization.id,
+        organizations: replacement.auth.organizations ?? [minted.value.organization],
+        activeOrgId: minted.value.organization.id,
         ceremony,
         ...ops,
       }, {
-        orgId: replacement.organization.id,
+        orgId: minted.value.organization.id,
         masterKey: seedPhraseToMasterKey(phrase, CURRENT_KDF_VERSION),
         presetPrfSalt: prfSalt,
       }) };
@@ -536,13 +564,55 @@ export async function createHostedFreshOrganization(input: Readonly<{
       session, authService: replacement.authService,
     };
   }
+  if (!enrollment.value.ok || !('credentialId' in enrollment.value)) {
+    return {
+      kind: 'failed', effects: 'indeterminate',
+      error: new CapyError(
+        'Device-key enrollment did not complete',
+        enrollment.value.code,
+        'ceremonyCode' in enrollment.value
+          ? { ceremonyCode: enrollment.value.ceremonyCode }
+          : 'reason' in enrollment.value ? { reason: enrollment.value.reason } : undefined,
+      ),
+      session, authService: replacement.authService,
+    };
+  }
+  const successfulEnrollment = enrollment.value;
+  const finalized = await (async () => {
+    try {
+      checkOperationDeadline(input.deadline, dependencies.now);
+      const readiness = await dependencies.finalizeSignupCustody(
+        serviceClient,
+        minted.value.organization.id,
+        successfulEnrollment.credentialId,
+      );
+      checkOperationDeadline(input.deadline, dependencies.now);
+      return readiness.signup_complete
+        ? { kind: 'ready' as const, readiness }
+        : {
+            kind: 'failed' as const,
+            error: new CapyError('Signup custody did not complete', ERROR_CODES.SERVICE_ERROR),
+          };
+    } catch (error) {
+      return { kind: 'failed' as const, error };
+    }
+  })();
+  if (finalized.kind === 'failed') {
+    return {
+      kind: 'failed', effects: 'indeterminate', error: finalized.error,
+      session, authService: replacement.authService,
+    };
+  }
   return {
     kind: 'created',
-    organization: replacement.organization,
+    organization: minted.value.organization,
+    projectId: minted.value.projectId,
+    mintClaim: minted.value.mintClaim,
     auth: replacement.auth,
     authService: replacement.authService,
     serviceClient,
-    enrollment: enrollment.value,
+    enrollment: successfulEnrollment,
+    readiness: finalized.readiness,
     session,
   };
 }

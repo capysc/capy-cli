@@ -102,6 +102,7 @@ import {
 import type { InitRunTerminalReceipt } from '../auth/initRunContract';
 import { openScreen } from '../ui/openScreen';
 import { createHostedFreshOrganization } from './hostedFreshOrganization';
+import { runHostedFreeRepositorySetup } from './hostedFreeRepositorySetup';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -224,6 +225,7 @@ type InitRepositoryTarget = Readonly<{
   projectId: string;
   projectName: string;
   branch: string;
+  syncMode?: 'free';
 }>;
 
 type InitWorkflowResult = Readonly<{
@@ -1019,8 +1021,11 @@ export class CapyCommand {
       throw new CapyError('Hosted initialization expired', 'INIT_RUN_EXPIRED');
     }
     const keep = this.projectManager.readKeepFile();
-    const branch = keep ? this.projectManager.deriveActiveBranch() : null;
+    const free = target.syncMode === 'free';
+    const syncState = free ? this.projectManager.readSyncState() : null;
+    const branch = free ? this.projectManager.readActiveBranch() : keep ? this.projectManager.deriveActiveBranch() : null;
     const projects = await context.serviceClient.listProjects();
+    const billing = free ? await context.serviceClient.getBillingStatus() : null;
     const branches = await context.serviceClient.listBranches(target.projectId);
     const remote = await (async () => {
       try {
@@ -1046,17 +1051,27 @@ export class CapyCommand {
           })()
         : { kind: 'invalid' as const };
     const remoteKeep = remoteSnapshot.kind === 'keep' ? remoteSnapshot.keep : null;
-    const localHash = keep ? SyncEngine.computeKeepHash(keep, target.branch) : null;
+    const localHash = free ? getSyncKeepHash(syncState, target.branch) ?? null
+      : keep ? SyncEngine.computeKeepHash(keep, target.branch) : null;
     const remoteHash = remoteKeep
       ? SyncEngine.computeKeepHash(remoteKeep, target.branch)
       : null;
-    const targetMatches = keep?.version === '3.0'
+    const targetMatches = free ? keep === null
+      && syncState?.sync_mode === 'free'
+      && syncState.user_id === context.authService.getToken()?.user_id
+      && syncState.org_id === target.orgId
+      && syncState.project_id === target.projectId
+      && syncState.project_name === target.projectName
+      && target.projectName === 'default' && target.branch === 'development'
+      && branch === target.branch
+      : keep?.version === '3.0'
       && keep.org_id === target.orgId
       && keep.project_id === target.projectId
       && keep.project_name === target.projectName
       && branch === target.branch;
-    const expectedEntries = keep
-      ? Object.entries(keep.variables).flatMap(([name, entries]) => entries
+    const expectedKeep = free ? remoteKeep : keep;
+    const expectedEntries = expectedKeep
+      ? Object.entries(expectedKeep.variables).flatMap(([name, entries]) => entries
           .filter((entry) => entry.branch === target.branch)
           .map((entry) => ({ name, resourceId: entry.resource_id })))
       : [];
@@ -1071,7 +1086,9 @@ export class CapyCommand {
         localMetadata.org_id === target.orgId
         && localMetadata.project_id === target.projectId
         && localMetadata.branch === target.branch
-      ));
+      ))
+      && (!free || (syncState?.synced_variables.length === expectedNames.length
+        && syncState.synced_variables.every(name => expectedNames.includes(name))));
     const remoteTargetMatches = remoteSnapshot.kind === 'empty' || (remoteSnapshot.kind === 'keep' &&
       remoteSnapshot.keep.version === '3.0'
       && remoteSnapshot.keep.org_id === target.orgId
@@ -1080,6 +1097,7 @@ export class CapyCommand {
     );
     const repositoryVerified = targetMatches
       && localEnvironmentVerified
+      && (!free || (billing?.tier === 'free' && billing.grandfathered === false && projects.length === 1))
       && projects.some((project) => project.id === target.projectId
         && project.name === target.projectName
         && project.organization_id === target.orgId)
@@ -1089,13 +1107,20 @@ export class CapyCommand {
       && remoteTargetMatches
       && (remoteSnapshot.kind === 'keep'
         ? localHash === remoteHash && (remote?.keep_hash === undefined || remote.keep_hash === remoteHash)
-        : remoteSnapshot.kind === 'empty' && keep !== null && Object.keys(keep.variables).length === 0);
+        : !free && remoteSnapshot.kind === 'empty' && keep !== null && Object.keys(keep.variables).length === 0);
     const readiness = await context.serviceClient.getSignupReadiness(target.orgId);
     const custodyVerified = readiness.signup_complete === true
       && readiness.retryable === false
       && readiness.custody.key_state === 'minted'
       && readiness.custody.ceremony_pending === false
       && readiness.custody.has_live_wrapped_k_local === true;
+    if (context.operationDeadline !== null && Date.now() >= context.operationDeadline) {
+      throw new CapyError('Hosted initialization expired', 'INIT_RUN_EXPIRED');
+    }
+    context.authService.assertRefreshAuthorityAvailable();
+    if (context.authService.getOrganizationId() !== target.orgId) {
+      throw new CapyError('Hosted initialization target changed', 'INIT_BINDING_MISMATCH');
+    }
     return { repositoryVerified, custodyVerified };
   }
 
@@ -1173,6 +1198,7 @@ export class CapyCommand {
       context: InitCommandContext;
       auth: AuthResult;
       custodyDeclined: boolean;
+      defaultProjectId?: string;
     }>> => {
       if (orgs.length === 0) {
         human('\nNo organization found. Let\'s create one.');
@@ -1199,10 +1225,12 @@ export class CapyCommand {
           if (created.kind === 'failed') {
             throw new InitWizardFlowError(created.error, createdWizard, created.authService ?? null);
           }
-          if (!created.enrollment.ok
-            && created.enrollment.code === ERROR_CODES.DEVICE_KEY_EPHEMERAL_MINT_INCOMPLETE) {
+          if (!created.enrollment.ok || !created.readiness?.signup_complete
+            || created.readiness.retryable || created.readiness.custody.key_state !== 'minted'
+            || created.readiness.custody.ceremony_pending || !created.readiness.custody.has_live_wrapped_k_local) {
             throw new InitWizardFlowError(
-              new CapyError('Device-key enrollment did not complete', created.enrollment.code),
+              new CapyError('Device-key enrollment did not complete',
+                !created.enrollment.ok ? created.enrollment.code : 'INIT_HOSTED_DEVICE_CEREMONY_REQUIRED'),
               createdWizard,
               created.authService,
             );
@@ -1228,6 +1256,7 @@ export class CapyCommand {
             context: replacementContext,
             auth: created.auth,
             custodyDeclined: !created.enrollment.ok,
+            defaultProjectId: created.projectId,
           };
         }
       // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
@@ -1590,6 +1619,24 @@ export class CapyCommand {
           selectedOrg.name,
         ), selectedContext.operationDeadline);
       }
+    }
+
+    if (selectedContext.transport === 'hosted' && organizationSelection.defaultProjectId) {
+      if (wizardAfterOrgKey?.kind !== 'hosted') {
+        throw new InitWizardFlowError(new CapyError('Hosted repository transport was unavailable', 'INIT_RUN_INVALID'), wizardAfterOrgKey);
+      }
+      const target = {
+        orgId: selectedOrg.id, orgName: selectedOrg.name,
+        projectId: organizationSelection.defaultProjectId, projectName: 'default', branch: 'development',
+      } as const;
+      const setup = await runHostedFreeRepositorySetup({
+        target, authService: selectedContext.authService, serviceClient: selectedContext.serviceClient,
+        session: wizardAfterOrgKey.session, devMode: this.devMode, envPath: this.options.envPath,
+      });
+      const setupWizard: InitWizardTransport = { kind: 'hosted', session: setup.session };
+      if (setup.kind === 'cancelled') throw new InitWizardCancelledError(setupWizard, 'indeterminate', selectedContext.authService);
+      if (setup.kind === 'failed') throw new InitWizardFlowError(setup.error, setupWizard, selectedContext.authService);
+      return { wizard: setupWizard, target: { ...target, syncMode: 'free' }, status: 'succeeded', context: selectedContext };
     }
 
     // Discover existing projects in the org. If any exist, give the user the

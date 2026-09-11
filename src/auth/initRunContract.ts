@@ -215,7 +215,7 @@ export const parseInitRunAuthResult = (value: unknown): InitRunAuthResult | null
   && (value.binding as InitRunBinding).subject_user_id === (value.response as AuthResponseWire).user.id ? value as InitRunAuthResult : null;
 
 /** The encrypted broker carries presentation bytes; the CLI owns their meaning. */
-export type InitWizardScreen = 'init-wizard' | 'create-organization' | 'device-key';
+export type InitWizardScreen = 'init-wizard' | 'create-organization' | 'device-key' | 'flow-confirm';
 type InitWizardCorrelation = Readonly<{ v: 1; flow: 'init-wizard'; binding: InitRunBinding; sequence: number; attempt_id: string }>;
 export type InitWizardFrame<T> = InitWizardCorrelation & (
   | Readonly<{ kind: 'view' | 'progress' | 'ceremony'; screen: InitWizardScreen; data: T; next_connection_id: string }>
@@ -230,7 +230,7 @@ const correlation = (value: RecordValue): boolean => version(value) && value.flo
 const correlationKeys = ['v', 'flow', 'binding', 'sequence', 'attempt_id'] as const;
 /** Data validation is screen-specific and injected by each presentation consumer. */
 export function parseInitWizardFrame<T>(value: unknown, parseData: (screen: InitWizardScreen, value: unknown) => T | null): InitWizardFrame<T> | null {
-  if (!record(value) || !correlation(value) || !['init-wizard', 'create-organization', 'device-key'].includes(String(value.screen))) return null;
+  if (!record(value) || !correlation(value) || !['init-wizard', 'create-organization', 'device-key', 'flow-confirm'].includes(String(value.screen))) return null;
   const screen = value.screen as InitWizardScreen;
   const data = parseData(screen, value.data);
   if (data === null) return null;

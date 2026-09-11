@@ -53,6 +53,15 @@ export interface SetupCommandOptions {
   readonly project?: string;
   readonly createProject?: string;
   readonly expectedUserId?: string;
+  /** Hosted onboarding has already selected the server's free default target. */
+  readonly expectedSyncMode?: 'free';
+}
+
+export interface SetupCommandRuntime {
+  readonly authService: AuthService;
+  readonly serviceClient: ServiceClient;
+  /** Recheck hosted authority before starting the next operation; never abandons an in-flight call. */
+  readonly checkOperation?: () => void;
 }
 
 /** The apply command must stay inside the same environment-specific binary
@@ -223,31 +232,41 @@ export class SetupCommand {
   private readonly syncEngine: SyncEngine;
   private readonly devMode: boolean;
   private readonly cliOptions: { readonly envPath?: string };
+  private readonly checkOperation: () => void;
 
-  constructor(cliOptions: { readonly envPath?: string } = {}, devMode: boolean = false, private readonly reporter?: (body: Readonly<Record<string, unknown>>) => void) {
+  constructor(cliOptions: { readonly envPath?: string } = {}, devMode: boolean = false, private readonly reporter?: (body: Readonly<Record<string, unknown>>) => void, runtime?: SetupCommandRuntime) {
     this.cliOptions = cliOptions;
+    this.checkOperation = runtime?.checkOperation ?? (() => undefined);
     this.devMode = devMode;
     this.projectManager = new ProjectManager();
     this.fileManager = new FileManager();
-    this.authService = new AuthService(undefined, devMode);
-    this.serviceClient = new ServiceClient(undefined, devMode);
+    this.authService = runtime?.authService ?? new AuthService(undefined, devMode);
+    this.serviceClient = runtime?.serviceClient ?? new ServiceClient(undefined, devMode);
     this.syncEngine = new SyncEngine();
-    this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
+    if (!runtime) this.serviceClient.setTokenProvider(() => this.authService.getValidToken());
   }
 
   private keyServiceOps(): KeyServiceOps {
     return {
-      coDecrypt: (orgId, ciphertext) => this.serviceClient.coDecrypt(orgId, ciphertext).then((r) => r.plaintext),
-      wrapOuterLayer: (orgId, plaintext) => this.serviceClient.wrapOuterLayer(orgId, plaintext).then((r) => r.ciphertext),
+      coDecrypt: (orgId, ciphertext) => {
+        this.checkOperation();
+        return this.serviceClient.coDecrypt(orgId, ciphertext).then((r) => r.plaintext);
+      },
+      wrapOuterLayer: (orgId, plaintext) => {
+        this.checkOperation();
+        return this.serviceClient.wrapOuterLayer(orgId, plaintext).then((r) => r.ciphertext);
+      },
     };
   }
 
   async execute(cmdOptions: SetupCommandOptions): Promise<void> {
+    this.checkOperation();
     if (cmdOptions.project && cmdOptions.createProject) {
       this.refuse('SETUP_CHOICES_INVALID', 'Choose either --project or --create-project, not both.');
       return;
     }
     const projectState = await this.projectManager.detectProjectState();
+    this.checkOperation();
     if (projectState.initialized) {
       this.refuse(ERROR_CODES.SETUP_ALREADY_INITIALIZED, 'keep.lock already exists in this directory', { remedy: 'capy sync --json' });
       return;
@@ -255,6 +274,7 @@ export class SetupCommand {
 
     if (cmdOptions.expectedUserId) this.authService.setSessionUserId(cmdOptions.expectedUserId);
     const identity = await resolveIdentity(this.authService, cmdOptions.org);
+    this.checkOperation();
     if (!identity.ok) {
       this.refuse(identity.code, identity.detail, {}, identity.needsInput ? EXIT_NEEDS_INPUT : 1);
       return;
@@ -276,6 +296,7 @@ export class SetupCommand {
       return;
     }
     const projects = existingProjects.value;
+    this.checkOperation();
 
     const billingOutcome = await this.serviceClient.getBillingStatus()
       .then((value) => ({ ok: true as const, value }))
@@ -285,6 +306,12 @@ export class SetupCommand {
       return;
     }
     const isFree = billingOutcome.value.tier === 'free' && !billingOutcome.value.grandfathered;
+    this.checkOperation();
+
+    if (cmdOptions.expectedSyncMode === 'free' && !isFree) {
+      this.refuse(ERROR_CODES.PLAN_CHANGED, 'The account no longer has the approved free setup target.');
+      return;
+    }
 
     if (isFree && (projects.length !== 1 || projects[0]?.name !== 'default')) {
       this.refuse(
@@ -341,6 +368,7 @@ export class SetupCommand {
     const remoteKeep = remoteObservation.value?.keep_file
       ? JSON.parse(remoteObservation.value.keep_file) as KeepFile
       : undefined;
+    this.checkOperation();
     const remoteVariableNames = sortedStrings(Object.keys(remoteKeep?.variables ?? {}));
     const rootEnvExists = this.cliOptions.envPath
       ? existsSync(this.cliOptions.envPath)
@@ -405,9 +433,11 @@ export class SetupCommand {
 
   /** Resolve the plan's project into a `KeepFile` baseline ready to write — create it, or pull the existing one's current keep.json for `branch`. */
   private async resolveOrCreateProject(plan: SetupPlanFacts): Promise<ProjectResolution> {
+    this.checkOperation();
     if (plan.project.status === 'new') {
       try {
         const created = await this.serviceClient.initializeProject(plan.project.name, plan.org.id);
+        this.checkOperation();
         await this.serviceClient.createBranch(created.project_id, plan.branch, false);
         const keep: KeepFile = {
           version: '3.0',
@@ -477,6 +507,7 @@ export class SetupCommand {
   }
 
   private async apply(plan: SetupPlanFacts, authResult: AuthResult, localEnv: Readonly<Record<string, string>>): Promise<void> {
+    this.checkOperation();
     if (plan.syncMode === 'free') {
       await this.applyFree(plan, authResult, localEnv);
       return;
@@ -638,6 +669,7 @@ export class SetupCommand {
   ): Promise<void> {
     const userId = authResult.user_id!;
     const resolved = await this.resolveOrCreateProject(plan);
+    this.checkOperation();
     if (!resolved.ok) {
       this.refuse(resolved.code, resolved.detail, { env_rewritten: false, failure_stage: 'resolve_project' });
       return;
@@ -651,6 +683,7 @@ export class SetupCommand {
       return;
     }
     const encryptionKey = encryptionKeyOutcome.key;
+    this.checkOperation();
     const projectKeep: KeepFile = {
       ...resolved.keep,
       org_id: plan.org.id,
@@ -670,6 +703,7 @@ export class SetupCommand {
         this.refuse(ERROR_CODES.PLAN_CHANGED, 'remote state changed since this plan was computed — re-run capy setup --json');
         return;
       }
+      this.checkOperation();
 
       const remoteKeep = {
         ...(JSON.parse(remote.value.keep_file) as KeepFile),
@@ -687,6 +721,7 @@ export class SetupCommand {
             }
           }),
       );
+      this.checkOperation();
       this.projectManager.writeActiveBranch(plan.branch);
       this.fileManager.ensureCapyGitignore();
       if (Object.keys(remotePlaintext).length > 0 || existsSync(this.projectManager.getEnvPath(this.cliOptions.envPath))) {
@@ -754,6 +789,7 @@ export class SetupCommand {
     );
     const envBlob = Object.entries(built.encrypted).map(([name, value]) => `${name}=${value}`).join('\n');
     const updatedKeep = this.syncEngine.mergeWithKeep(projectKeep, built.pushedVars, plan.branch);
+    this.checkOperation();
     const pushed = await this.serviceClient.pushSecrets(
       resolved.project.id,
       JSON.stringify(updatedKeep),
@@ -765,6 +801,7 @@ export class SetupCommand {
       this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false, failure_stage: 'push' });
       return;
     }
+    this.checkOperation();
 
     const adoptedKeep = SyncEngine.adoptServerKeep(pushed.value.keep_file, updatedKeep, plan.branch);
     const keepHash = SyncEngine.computeKeepHash(adoptedKeep, plan.branch);

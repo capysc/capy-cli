@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { buildHostedCompletionPlan, CapyCommand } from '../../src/commands/capyCommand';
 import { SyncEngine } from '../../src/sync/syncEngine';
-import type { KeepFile } from '../../src/types';
+import type { KeepFile, SyncState } from '../../src/types';
 
 const target = {
   orgId: 'org-one',
@@ -42,7 +42,7 @@ type VerifyHostedInitialization = (
     authService: object;
     serviceClient: object;
   }>,
-  target: typeof target,
+  target: Readonly<{ orgId: string; orgName: string; projectId: string; projectName: string; branch: string; syncMode?: 'free' }>,
 ) => Promise<Readonly<{ repositoryVerified: boolean; custodyVerified: boolean }>>;
 
 const verifyHostedInitialization = (
@@ -84,6 +84,8 @@ function context(input: Readonly<{
   readiness?: typeof readiness;
   branchId?: string;
   branchProjectId?: string | null;
+  projectName?: string;
+  free?: boolean;
 }> = {}): Readonly<{
   transport: 'hosted';
   operationDeadline: number | null;
@@ -95,11 +97,15 @@ function context(input: Readonly<{
   return {
     transport: 'hosted',
     operationDeadline: null,
-    authService: {},
+    authService: {
+      assertRefreshAuthorityAvailable: () => undefined,
+      getOrganizationId: () => target.orgId,
+      getToken: () => ({ user_id: 'user_test', organization_id: target.orgId }),
+    },
     serviceClient: {
       listProjects: async () => [{
         id: target.projectId,
-        name: target.projectName,
+        name: input.projectName ?? target.projectName,
         organization_id: target.orgId,
       }],
       listBranches: async () => [{
@@ -124,6 +130,7 @@ function context(input: Readonly<{
             : {}),
       }),
       getSignupReadiness: async () => input.readiness ?? readiness,
+      getBillingStatus: async () => ({ tier: input.free ? 'free' : 'business', grandfathered: false }),
     },
   };
 }
@@ -215,5 +222,35 @@ describe('CapyCommand hosted terminal verification', () => {
       delivery: 'abort',
       failureCode: null,
     });
+  });
+
+  test('free completion requires exact runtime metadata, remote hash and ciphertext without keep.lock', async () => {
+    const freeTarget = { ...target, projectName: 'default', syncMode: 'free' } as const;
+    const freeKeep = { ...keep, project_name: 'default' };
+    const sync: SyncState = {
+      last_sync: '2026-09-11T17:00:00.000Z', synced_variables: ['SENTINEL'], user_id: 'user_test',
+      org_id: target.orgId, project_id: target.projectId, project_name: 'default', sync_mode: 'free',
+      keep_hash: { development: SyncEngine.computeKeepHash(freeKeep, target.branch) },
+    };
+    const freeSubject = (input: Readonly<{ state?: SyncState; localKeep?: KeepFile; values?: Readonly<Record<string, string>> }> = {}) => ({
+      options: {},
+      projectManager: { readKeepFile: () => input.localKeep ?? null, readActiveBranch: () => target.branch,
+        readSyncState: () => input.state ?? sync },
+      fileManager: { readEnvFile: () => input.values ?? { SENTINEL: 'capy:development:SENTINEL:sealed' },
+        readEnvMeta: () => ({ org_id: target.orgId, project_id: target.projectId, branch: target.branch }) },
+    });
+    const remote = context({ free: true, projectName: 'default', remoteKeep: freeKeep });
+    expect(await verifyHostedInitialization.call(freeSubject(), remote, freeTarget))
+      .toEqual({ repositoryVerified: true, custodyVerified: true });
+    for (const invalid of [
+      { state: { ...sync, project_id: 'other' } },
+      { state: { ...sync, keep_hash: { development: 'stale' } } },
+      { state: { ...sync, synced_variables: [] } },
+      { localKeep: freeKeep }, { values: { SENTINEL: 'plaintext' } },
+    ]) expect((await verifyHostedInitialization.call(freeSubject(invalid), remote, freeTarget)).repositoryVerified).toBe(false);
+    expect((await verifyHostedInitialization.call(freeSubject(),
+      context({ free: false, projectName: 'default', remoteKeep: freeKeep }), freeTarget)).repositoryVerified).toBe(false);
+    expect((await verifyHostedInitialization.call(freeSubject(),
+      context({ free: true, projectName: 'default', remoteKeep: null }), freeTarget)).repositoryVerified).toBe(false);
   });
 });

@@ -1,17 +1,23 @@
 import { expect, mock, test } from 'bun:test';
-import type { AuthService, InstalledInitRunOrganization } from '../../src/auth/authService';
-import { INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH } from '../../src/auth/initRunOrganizationInstaller';
-import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
+import type {
+  AuthService,
+  InstalledExchangeResponse,
+  RenewedInitRunIdentity,
+} from '../../src/auth/authService';
 import type { BrokerConnection } from '../../src/service/brokerClient';
-import { CapyError, type AuthResult } from '../../src/types';
+import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
+import type { ServiceClient } from '../../src/service/serviceClient';
+import type { AuthResult } from '../../src/types';
 import type { InitRunBinding, InitWizardFrame } from '../../src/auth/initRunContract';
 import type { HostedInitWizardSession } from '../../src/ui/hostedInitWizardSession';
 import {
   createHostedFreshOrganization,
+  parseHostedPersonalMint,
   type HostedFreshOrganizationDependencies,
 } from '../../src/commands/hostedFreshOrganization';
 
 const now = Date.parse('2026-09-10T05:00:00.000Z');
+const deadline = now + 7_200_000;
 const binding: InitRunBinding = {
   run_id: '11111111-1111-4111-8111-111111111111',
   subject_user_id: 'user_demo',
@@ -23,22 +29,68 @@ const binding: InitRunBinding = {
 const organization = {
   id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
   workos_org_id: 'org_provider',
-  name: 'Northwind',
+  name: 'quiet-river-a1b2c3',
+  key_state: 'minting' as const,
+};
+const projectId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const mintClaim = {
+  key_state: 'minting' as const,
+  expires_at: new Date(now + 900_000).toISOString(),
+};
+const mintResponse = {
+  org_id: organization.id,
+  project_id: projectId,
+  mint_claim: mintClaim,
+  organization: {
+    id: organization.id,
+    workos_org_id: organization.workos_org_id,
+    name: organization.name,
+  },
 } as const;
 const auth: AuthResult = {
   success: true,
+  organization_id: '',
   user_id: binding.subject_user_id,
   user_email: 'person@example.test',
   organizations: [],
   _refresh_token: 'refresh_initial',
+  _orgless_access_token: 'identity_initial',
+};
+const renewedAuth: AuthResult = {
+  ...auth,
+  _refresh_token: `refresh_${'r'.repeat(512)}`,
+  _orgless_access_token: `header.payload.${'s'.repeat(512)}`,
 };
 const replacementAuth: AuthResult = {
-  ...auth,
+  success: true,
   organization_id: organization.id,
   organization_name: organization.name,
+  user_id: binding.subject_user_id,
+  user_email: auth.user_email,
   organizations: [organization],
-  _refresh_token: 'refresh_replaced',
 };
+const readiness = {
+  key_state: 'minted' as const,
+  signup_complete: true,
+  retryable: false,
+  custody: {
+    key_state: 'minted',
+    ceremony_pending: false,
+    has_live_wrapped_k_local: true,
+  },
+} as const;
+const successAnswer = {
+  v: 1,
+  flow: 'device-key',
+  ceremony: 'enroll',
+  ok: true,
+  credentialId: 'credential_demo',
+  prfOutput: Buffer.alloc(32, 9).toString('base64'),
+  backupEligible: true,
+  backupState: false,
+} as const;
+
+type Answer = Readonly<Record<string, unknown>> | 'cancel';
 
 const connection = (index: number): BrokerConnection => ({
   connectionId: `${String(index).padStart(8, '0')}-1111-4111-8111-111111111111`,
@@ -46,9 +98,7 @@ const connection = (index: number): BrokerConnection => ({
   keypair: mintConnectionKeypair(),
 });
 
-type Answer = Readonly<Record<string, unknown>> | 'cancel';
-
-const channelHarness = (answers: readonly Answer[]) => {
+const channelHarness = (answers: readonly Answer[], inputBinding: InitRunBinding = binding) => {
   const connections = Array.from({ length: 12 }, (_, index) => connection(index + 1));
   const createConnection = mock(async () => connections[0]);
   connections.forEach((item) => createConnection.mockImplementationOnce(async () => item));
@@ -59,12 +109,10 @@ const channelHarness = (answers: readonly Answer[]) => {
     plaintext: JSON.stringify({
       v: 1,
       flow: 'init-wizard',
-      binding,
+      binding: inputBinding,
       sequence: index * 2,
       attempt_id: 'attempt_1',
-      ...(answer === 'cancel'
-        ? { kind: 'cancel' }
-        : { kind: 'answer', answer }),
+      ...(answer === 'cancel' ? { kind: 'cancel' } : { kind: 'answer', answer }),
     }),
   })));
   const sendRequest = mock(async () => ({ kind: 'sent' as const }));
@@ -75,16 +123,14 @@ const channelHarness = (answers: readonly Answer[]) => {
     sendRequest,
     cancel: mock(async () => undefined),
   };
-  const current = connections[0];
-  const successor = connections[1];
   const session: HostedInitWizardSession = {
     channel: {
       broker,
-      binding,
-      current,
-      successor,
+      binding: inputBinding,
+      current: connections[0],
+      successor: connections[1],
       sequence: 0,
-      deadline: now + 7200000,
+      deadline,
       now: () => now,
       attemptId: () => 'attempt_1',
       pause: async () => undefined,
@@ -99,40 +145,45 @@ const channelHarness = (answers: readonly Answer[]) => {
   return { broker, session };
 };
 
-const installed = (authService: AuthService): InstalledInitRunOrganization => ({
-  organization,
-  auth: replacementAuth,
-  authService,
-});
-
-const authHarness = (outcomes: readonly ('success' | 'safe-conflict' | 'unknown')[]) => {
-  const replacement = {
-    getValidToken: mock(async () => null),
-    getServiceApiUrl: () => binding.service_origin,
-  } as unknown as AuthService;
-  const create = mock(async () => installed(replacement));
-  outcomes.forEach((outcome) => create.mockImplementationOnce(async () => {
-    if (outcome === 'safe-conflict') {
-      throw new CapyError('reserved', INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH);
-    }
-    if (outcome === 'unknown') throw new CapyError('provider conflict', 'INIT_RUN_ORGANIZATION_INDETERMINATE');
-    return installed(replacement);
-  }));
+const authServices = () => {
   const initial = {
+    getOrganizationId: () => null,
     getServiceApiUrl: () => binding.service_origin,
-    createInitRunOrganization: create,
   } as unknown as AuthService;
-  return { create, initial, replacement };
+  const renewed = {
+    getOrganizationId: () => null,
+    getServiceApiUrl: () => binding.service_origin,
+  } as unknown as AuthService;
+  const replacement = {
+    getOrganizationId: () => organization.id,
+    getServiceApiUrl: () => binding.service_origin,
+    getValidToken: mock(async () => null),
+  } as unknown as AuthService;
+  const identity: RenewedInitRunIdentity = {
+    auth: renewedAuth,
+    authService: renewed,
+    accessToken: renewedAuth._orgless_access_token!,
+  };
+  const installed: InstalledExchangeResponse = { auth: replacementAuth, authService: replacement };
+  return { initial, renewed, replacement, identity, installed };
 };
 
-const frame = (call: readonly unknown[]): InitWizardFrame<Record<string, unknown>> =>
-  JSON.parse(call[2] as string) as InitWizardFrame<Record<string, unknown>>;
-
-const dependencies = (input: Readonly<{
-  checkName?: HostedFreshOrganizationDependencies['checkName'];
-  ceremonyOutcome?: 'success' | 'failure';
+const dependencyHarness = (input: Readonly<{
+  services?: ReturnType<typeof authServices>;
+  mint?: unknown;
+  enrollment?: 'success' | 'failure';
+  finalized?: typeof readiness | Readonly<{ signup_complete: false }>;
+  now?: () => number;
 }> = {}) => {
-  const salt = Buffer.alloc(32, 7);
+  const services = input.services ?? authServices();
+  const orglessClient = {} as ServiceClient;
+  const serviceClient = {} as ServiceClient;
+  const renewIdentity = mock(async () => services.identity);
+  const createOrglessServiceClient = mock(() => orglessClient);
+  const mintPersonalOrganization = mock(async () => input.mint ?? mintResponse);
+  const installOrganization = mock(async () => services.installed);
+  const createServiceClient = mock(() => serviceClient);
+  const finalizeSignupCustody = mock(async () => input.finalized ?? readiness);
   const enrollmentRequest = mock(async () => undefined);
   const enroll: HostedFreshOrganizationDependencies['enroll'] = mock(async (deps, args) => {
     enrollmentRequest(deps, args);
@@ -141,8 +192,9 @@ const dependencies = (input: Readonly<{
       userEmail: deps.userEmail,
       prfSalt: args.presetPrfSalt!.toString('base64'),
     });
-    return ceremony.ok
-      ? {
+    return input.enrollment === 'failure' || !ceremony.ok
+      ? { ok: false, code: 'DEVICE_KEY_CEREMONY_FAILED', ceremonyCode: ceremony.ok ? 'transport_error' : ceremony.code }
+      : {
           ok: true,
           credentialId: ceremony.credentialId,
           wrapperId: 'wrapper_demo',
@@ -150,228 +202,228 @@ const dependencies = (input: Readonly<{
           backupEligible: ceremony.backupEligible,
           backupState: ceremony.backupState,
           orgs: [{ orgId: organization.id, status: 'uploaded' }],
-        }
-      : { ok: false, code: 'DEVICE_KEY_CEREMONY_FAILED', ceremonyCode: ceremony.code };
+        };
   });
-  const serviceClient = {} as never;
   const value: HostedFreshOrganizationDependencies = {
     generateSeed: mock(() => 'abandon '.repeat(23) + 'about'),
-    generateSalt: mock(() => salt),
-    now: () => now,
-    checkName: input.checkName ?? mock(async () => 'available' as const),
-    createServiceClient: mock(() => serviceClient),
+    generateSalt: mock(() => Buffer.alloc(32, 7)),
+    now: input.now ?? (() => now),
+    renewIdentity,
+    createOrglessServiceClient,
+    mintPersonalOrganization,
+    installOrganization,
+    createServiceClient,
+    finalizeSignupCustody: finalizeSignupCustody as HostedFreshOrganizationDependencies['finalizeSignupCustody'],
     enroll,
   };
-  return { value, salt, enrollmentRequest };
+  return {
+    value,
+    services,
+    orglessClient,
+    serviceClient,
+    renewIdentity,
+    createOrglessServiceClient,
+    mintPersonalOrganization,
+    installOrganization,
+    createServiceClient,
+    finalizeSignupCustody,
+    enrollmentRequest,
+  };
 };
 
-const successAnswer = {
-  v: 1,
-  flow: 'device-key',
-  ceremony: 'enroll',
-  ok: true,
-  credentialId: 'credential_demo',
-  prfOutput: Buffer.alloc(32, 9).toString('base64'),
-  backupEligible: true,
-  backupState: false,
-} as const;
+const frame = (call: readonly unknown[]): InitWizardFrame<Record<string, unknown>> =>
+  JSON.parse(call[2] as string) as InitWizardFrame<Record<string, unknown>>;
 
-test('shows the phrase once, sanitizes accepted progress and feeds the same salt through enrollment', async () => {
-  const channel = channelHarness([{ name: organization.name }, { confirmed: true }, successAnswer]);
-  const authority = authHarness(['success']);
-  const deps = dependencies();
-  const rebindSession = mock((session: HostedInitWizardSession) => session);
-  const result = await createHostedFreshOrganization({
-    auth,
-    authService: authority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: channel.session,
-    rebindSession,
-    dependencies: deps.value,
-  });
-  expect(result.kind).toBe('created');
-  expect(authority.create).toHaveBeenCalledTimes(1);
-  expect(rebindSession).toHaveBeenCalledWith(expect.any(Object), authority.replacement);
-  expect(deps.enrollmentRequest).toHaveBeenCalledTimes(1);
-  expect(deps.enrollmentRequest.mock.calls[0][1].presetPrfSalt).toEqual(deps.salt);
-  const frames = channel.broker.sendRequest.mock.calls.map(frame);
-  expect(frames.filter((item) => JSON.stringify(item).includes('abandon'))).toHaveLength(1);
-  expect(frames.find((item) => item.screen === 'device-key')?.data).toEqual({
-    v: 1,
-    ceremony: 'enroll',
-    prfSalt: deps.salt.toString('base64'),
-  });
-  const phraseProgress = frames.find((item) => item.kind === 'progress' && item.screen === 'create-organization'
-    && (item.data as { view?: string }).view === 'creating');
-  expect(phraseProgress?.data).not.toHaveProperty('phraseWords');
+const run = (
+  channel: ReturnType<typeof channelHarness>,
+  dependencies: ReturnType<typeof dependencyHarness>,
+  inputAuth: AuthResult = auth,
+) => createHostedFreshOrganization({
+  auth: inputAuth,
+  authService: dependencies.services.initial,
+  deadline,
+  serviceOrigin: binding.service_origin,
+  session: channel.session,
+  rebindSession: (session) => session,
+  dependencies: dependencies.value,
 });
 
-test('retries only the coded pre-refresh conflict with the same phrase and no second phrase view', async () => {
-  const channel = channelHarness([
-    { name: organization.name },
-    { confirmed: true },
-    { name: 'Northwind Labs' },
-    successAnswer,
-  ]);
-  const authority = authHarness(['safe-conflict', 'success']);
-  const deps = dependencies();
-  const result = await createHostedFreshOrganization({
-    auth,
-    authService: authority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: channel.session,
-    rebindSession: (session) => session,
-    dependencies: deps.value,
+test('confirms the nameless phrase before mint, adopts the default project, and finalizes exact custody', async () => {
+  const channel = channelHarness([{ confirmed: true }, successAnswer]);
+  const dependencies = dependencyHarness();
+  dependencies.mintPersonalOrganization.mockImplementationOnce(async () => {
+    expect(channel.broker.sendRequest.mock.calls.length).toBeGreaterThan(0);
+    expect(channel.broker.pollAnswer).toHaveBeenCalledTimes(1);
+    return mintResponse;
   });
-  expect(result.kind).toBe('created');
-  expect(authority.create).toHaveBeenCalledTimes(2);
-  expect(authority.create.mock.calls.map((call) => call[0])).toEqual([organization.name, 'Northwind Labs']);
-  expect(deps.value.generateSeed).toHaveBeenCalledTimes(1);
-  const frames = channel.broker.sendRequest.mock.calls.map(frame);
-  expect(frames.filter((item) => JSON.stringify(item).includes('abandon'))).toHaveLength(1);
-  expect(frames.some((item) => item.kind === 'view'
-    && item.screen === 'create-organization'
-    && (item.data as { nameError?: string }).nameError === 'RACE_409')).toBe(true);
-});
 
-test('does not replay an uncoded conflict or unknown create outcome', async () => {
-  const channel = channelHarness([{ name: organization.name }, { confirmed: true }]);
-  const authority = authHarness(['unknown', 'success']);
-  const deps = dependencies();
-  const result = await createHostedFreshOrganization({
-    auth,
-    authService: authority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: channel.session,
-    rebindSession: (session) => session,
-    dependencies: deps.value,
-  });
-  expect(result).toMatchObject({ kind: 'failed', effects: 'indeterminate' });
-  expect(authority.create).toHaveBeenCalledTimes(1);
-  expect(deps.value.enroll).not.toHaveBeenCalled();
-});
+  const result = await run(channel, dependencies);
 
-test('preserves the advanced channel cursor when the bounded name check fails', async () => {
-  const channel = channelHarness([{ name: organization.name }]);
-  const authority = authHarness(['success']);
-  const deps = dependencies({ checkName: mock(async () => {
-    throw new CapyError('expired', 'INIT_RUN_EXPIRED');
-  }) });
-  const result = await createHostedFreshOrganization({
-    auth,
-    authService: authority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: channel.session,
-    rebindSession: (session) => session,
-    dependencies: deps.value,
-  });
   expect(result).toMatchObject({
-    kind: 'failed',
-    effects: 'none',
-    error: { code: 'INIT_RUN_EXPIRED' },
-    session: { channel: { sequence: 2 } },
+    kind: 'created',
+    organization,
+    projectId,
+    mintClaim,
+    enrollment: { ok: true, credentialId: successAnswer.credentialId },
+    readiness,
   });
-  expect(authority.create).not.toHaveBeenCalled();
+  expect(dependencies.renewIdentity).toHaveBeenCalledWith(dependencies.services.initial, {
+    userId: binding.subject_user_id,
+    deadline,
+  });
+  expect(renewedAuth._refresh_token!.length).toBeGreaterThan(255);
+  expect(renewedAuth._orgless_access_token!.length).toBeGreaterThan(255);
+  expect(dependencies.mintPersonalOrganization).toHaveBeenCalledWith(dependencies.orglessClient);
+  expect(dependencies.installOrganization).toHaveBeenCalledWith({
+    authService: dependencies.services.renewed,
+    refreshToken: renewedAuth._refresh_token,
+    organizationId: organization.id,
+    userId: binding.subject_user_id,
+  });
+  expect(dependencies.finalizeSignupCustody).toHaveBeenCalledWith(
+    dependencies.serviceClient,
+    organization.id,
+    successAnswer.credentialId,
+  );
+  const frames = channel.broker.sendRequest.mock.calls.map(frame);
+  const phrase = frames[0]?.data as Readonly<Record<string, unknown>>;
+  expect(phrase).not.toHaveProperty('name');
+  expect(phrase).not.toHaveProperty('nameStatus');
+  expect(phrase).not.toHaveProperty('nameError');
+  expect(phrase.stops).toEqual([
+    { id: 'phrase', label: 'Recovery phrase', state: 'current' },
+    { id: 'device-key', label: 'Device key', state: 'upcoming' },
+  ]);
+  const progress = frames.find((item) => item.kind === 'progress'
+    && item.screen === 'create-organization')?.data;
+  expect(progress).not.toHaveProperty('name');
+  expect(progress).not.toHaveProperty('phraseWords');
+  expect(progress).not.toHaveProperty('phraseRevealed');
+  expect(progress?.stops).toEqual([
+    { id: 'phrase', label: 'Recovery phrase', state: 'done', answer: 'written down' },
+    { id: 'device-key', label: 'Device key', state: 'upcoming' },
+  ]);
+  expect(frames.every((item) => !JSON.stringify(item).includes('abandon')
+    || item.screen === 'create-organization')).toBe(true);
 });
 
-test('passes a definitive nested refusal through the enrollment engine and preserves outer cancellation', async () => {
-  const nested = channelHarness([
-    { name: organization.name },
+test('cancellation before the mint transition has no effects', async () => {
+  const channel = channelHarness(['cancel']);
+  const dependencies = dependencyHarness();
+
+  await expect(run(channel, dependencies)).resolves.toMatchObject({ kind: 'cancelled', effects: 'none' });
+  expect(dependencies.renewIdentity).not.toHaveBeenCalled();
+  expect(dependencies.mintPersonalOrganization).not.toHaveBeenCalled();
+  expect(dependencies.installOrganization).not.toHaveBeenCalled();
+  expect(dependencies.value.enroll).not.toHaveBeenCalled();
+});
+
+test('identity renewal refusal before mint remains effects-none', async () => {
+  const channel = channelHarness([{ confirmed: true }]);
+  const dependencies = dependencyHarness();
+  dependencies.renewIdentity.mockRejectedValueOnce(new Error('renewal refused'));
+
+  await expect(run(channel, dependencies)).resolves.toMatchObject({ kind: 'failed', effects: 'none' });
+  expect(dependencies.renewIdentity).toHaveBeenCalledTimes(1);
+  expect(dependencies.mintPersonalOrganization).not.toHaveBeenCalled();
+  expect(dependencies.installOrganization).not.toHaveBeenCalled();
+});
+
+test('strictly validates the personal mint identities and lease', async () => {
+  const malformed = [
+    null,
+    [],
+    { ...mintResponse, project_id: '' },
+    { ...mintResponse, extra: true },
+    { ...mintResponse, organization: { ...mintResponse.organization, id: 'other' } },
+    { ...mintResponse, mint_claim: { ...mintClaim, key_state: 'minted' } },
+    { ...mintResponse, mint_claim: { ...mintClaim, expires_at: new Date(now).toISOString() } },
+  ] as const;
+
+  expect(parseHostedPersonalMint(mintResponse, now)).toEqual({ organization, projectId, mintClaim });
+  expect(malformed.map((value) => parseHostedPersonalMint(value, now))).toEqual(malformed.map(() => null));
+});
+
+test('a malformed mint response is indeterminate and never installs or enrolls', async () => {
+  const channel = channelHarness([{ confirmed: true }]);
+  const dependencies = dependencyHarness({ mint: { ...mintResponse, project_id: '' } });
+
+  await expect(run(channel, dependencies)).resolves.toMatchObject({
+    kind: 'failed',
+    effects: 'indeterminate',
+    authService: dependencies.services.renewed,
+  });
+  expect(dependencies.installOrganization).not.toHaveBeenCalled();
+  expect(dependencies.value.enroll).not.toHaveBeenCalled();
+  expect(dependencies.finalizeSignupCustody).not.toHaveBeenCalled();
+});
+
+test('rejects replacement authority drift after one mint without starting custody', async () => {
+  const channel = channelHarness([{ confirmed: true }]);
+  const services = authServices();
+  const dependencies = dependencyHarness({ services: {
+    ...services,
+    installed: {
+      ...services.installed,
+      auth: { ...replacementAuth, user_id: 'other_user' },
+    },
+  } });
+
+  await expect(run(channel, dependencies)).resolves.toMatchObject({ kind: 'failed', effects: 'indeterminate' });
+  expect(dependencies.mintPersonalOrganization).toHaveBeenCalledTimes(1);
+  expect(dependencies.installOrganization).toHaveBeenCalledTimes(1);
+  expect(dependencies.value.enroll).not.toHaveBeenCalled();
+});
+
+test('blocks repository continuation on definitive device refusal without calling the custody finalizer', async () => {
+  const channel = channelHarness([
     { confirmed: true },
     { v: 1, flow: 'device-key', ceremony: 'enroll', ok: false, code: 'webauthn_unavailable' },
   ]);
-  const nestedAuthority = authHarness(['success']);
-  const nestedDeps = dependencies({ ceremonyOutcome: 'failure' });
-  const nestedResult = await createHostedFreshOrganization({
-    auth,
-    authService: nestedAuthority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: nested.session,
-    rebindSession: (session) => session,
-    dependencies: nestedDeps.value,
-  });
-  expect(nestedResult).toMatchObject({ kind: 'created', enrollment: { ok: false, ceremonyCode: 'webauthn_unavailable' } });
-  expect(nestedDeps.enrollmentRequest).toHaveBeenCalledTimes(1);
+  const dependencies = dependencyHarness({ enrollment: 'failure' });
 
-  const cancelled = channelHarness([{ name: organization.name }, { confirmed: true }, 'cancel']);
-  const cancelledAuthority = authHarness(['success']);
-  const cancelledDeps = dependencies();
-  const cancelledResult = await createHostedFreshOrganization({
-    auth,
-    authService: cancelledAuthority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: cancelled.session,
-    rebindSession: (session) => session,
-    dependencies: cancelledDeps.value,
-  });
-  expect(cancelledResult).toMatchObject({ kind: 'cancelled', effects: 'indeterminate' });
-  expect(cancelledDeps.enrollmentRequest).toHaveBeenCalledTimes(1);
-});
-
-test('retains replacement authority and starts no enrollment operation after the run deadline', async () => {
-  const channel = channelHarness([{ name: organization.name }, { confirmed: true }]);
-  const authority = authHarness(['success']);
-  const deps = dependencies();
-  const deadlineNow = mock(() => now)
-    .mockImplementationOnce(() => now)
-    .mockImplementationOnce(() => now + 7200000);
-  const result = await createHostedFreshOrganization({
-    auth,
-    authService: authority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: channel.session,
-    rebindSession: (session) => session,
-    dependencies: { ...deps.value, now: deadlineNow },
-  });
-  expect(result).toMatchObject({
+  await expect(run(channel, dependencies)).resolves.toMatchObject({
     kind: 'failed',
     effects: 'indeterminate',
-    authService: authority.replacement,
+    error: { code: 'DEVICE_KEY_CEREMONY_FAILED', details: { ceremonyCode: 'webauthn_unavailable' } },
+    authService: dependencies.services.replacement,
+    session: { channel: { sequence: 4 } },
   });
-  expect(deps.value.generateSalt).not.toHaveBeenCalled();
-  expect(deps.value.enroll).not.toHaveBeenCalled();
+  expect(dependencies.finalizeSignupCustody).not.toHaveBeenCalled();
 });
 
-test('deadline guards forward enrollment operations while preserving the replacement authority', async () => {
-  const channel = channelHarness([{ name: organization.name }, { confirmed: true }]);
-  const authority = authHarness(['success']);
-  const base = dependencies();
-  const deadlineNow = mock(() => now)
-    .mockImplementationOnce(() => now)
-    .mockImplementationOnce(() => now)
-    .mockImplementationOnce(() => now + 7200000);
-  const enroll: HostedFreshOrganizationDependencies['enroll'] = mock(async (deps) => {
-    await deps.ops.uploadDoorWrapper({
-      wrapped_k_local: 'ciphertext',
-      iv: 'iv',
-      prf_salt: Buffer.alloc(32).toString('base64'),
-      credential_id: 'credential_demo',
-      kdf_version: 1,
-    });
-    throw new Error('unreachable');
+test('device-custody cancellation after mint is indeterminate', async () => {
+  const channel = channelHarness([{ confirmed: true }, 'cancel']);
+  const dependencies = dependencyHarness();
+
+  await expect(run(channel, dependencies)).resolves.toMatchObject({
+    kind: 'cancelled',
+    effects: 'indeterminate',
   });
-  const result = await createHostedFreshOrganization({
-    auth,
-    authService: authority.initial,
-    deadline: now + 7200000,
-    serviceOrigin: binding.service_origin,
-    session: channel.session,
-    rebindSession: (session) => session,
-    dependencies: { ...base.value, now: deadlineNow, enroll },
-  });
-  expect(result).toMatchObject({
+  expect(dependencies.mintPersonalOrganization).toHaveBeenCalledTimes(1);
+  expect(dependencies.value.enroll).toHaveBeenCalledTimes(1);
+  expect(dependencies.finalizeSignupCustody).not.toHaveBeenCalled();
+});
+
+test('fails indeterminate when authoritative finalization remains incomplete', async () => {
+  const channel = channelHarness([{ confirmed: true }, successAnswer]);
+  const dependencies = dependencyHarness({ finalized: { signup_complete: false } });
+
+  await expect(run(channel, dependencies)).resolves.toMatchObject({
     kind: 'failed',
     effects: 'indeterminate',
-    authService: authority.replacement,
-    error: { code: 'INIT_RUN_EXPIRED' },
+    error: { code: 'SERVICE_ERROR' },
   });
-  expect(enroll).toHaveBeenCalledTimes(1);
-  expect(channel.broker.pollAnswer).toHaveBeenCalledTimes(2);
+  expect(dependencies.finalizeSignupCustody).toHaveBeenCalledTimes(1);
+});
+
+test('rejects initial subject and origin drift before phrase or identity work', async () => {
+  const driftedBinding = { ...binding, subject_user_id: 'other_user' };
+  const channel = channelHarness([], driftedBinding);
+  const dependencies = dependencyHarness();
+
+  await expect(run(channel, dependencies)).resolves.toMatchObject({ kind: 'failed', effects: 'none' });
+  expect(channel.broker.sendRequest).not.toHaveBeenCalled();
+  expect(dependencies.renewIdentity).not.toHaveBeenCalled();
+  expect(dependencies.mintPersonalOrganization).not.toHaveBeenCalled();
 });

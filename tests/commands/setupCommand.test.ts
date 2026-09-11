@@ -532,6 +532,60 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
     expect(mockFileManager().writeKeepFile).not.toHaveBeenCalled();
   });
 
+  test('hosted free target cannot become paid before apply', async () => {
+    await new SetupCommand().execute({ expectedSyncMode: 'free', org: ORG.id, project: 'project_default' });
+    expect(parsedOutput().code).toBe(ERROR_CODES.PLAN_CHANGED);
+    expect(mockServiceClient().pushSecrets).not.toHaveBeenCalled();
+    expect(mockFileManager().writeKeepFile).not.toHaveBeenCalled();
+  });
+
+  test('hosted deadline after planning reads prevents any apply', async () => {
+    useFreeDefaultProject();
+    const hash = await planHash();
+    const service = mockServiceClient();
+    const auth = mockAuthService();
+    const command = new SetupCommand({}, false, undefined, {
+      authService: auth, serviceClient: service,
+      checkOperation: () => {
+        if (service.getDecryptData.mock.calls.length >= 2) throw new CapyError('Expired', 'INIT_RUN_EXPIRED');
+      },
+    });
+    await expect(command.execute({ confirm: hash })).rejects.toMatchObject({ code: 'INIT_RUN_EXPIRED' });
+    expect(service.pushSecrets).not.toHaveBeenCalled();
+    expect(mockFileManager().writeSyncState).not.toHaveBeenCalled();
+  });
+
+  test('hosted authority loss after key resolution prevents push and local writes', async () => {
+    useFreeDefaultProject();
+    const hash = await planHash();
+    const service = mockServiceClient();
+    const command = new SetupCommand({}, false, undefined, {
+      authService: mockAuthService(), serviceClient: service,
+      checkOperation: () => {
+        if (MockResolveFreeSyncProjectKey.mock.calls.length > 0) throw new CapyError('Authority changed', 'INIT_BINDING_MISMATCH');
+      },
+    });
+    await expect(command.execute({ confirm: hash })).rejects.toMatchObject({ code: 'INIT_BINDING_MISMATCH' });
+    expect(service.pushSecrets).not.toHaveBeenCalled();
+    expect(mockFileManager().writeSyncState).not.toHaveBeenCalled();
+  });
+
+  test('hosted expiry after an in-flight push prevents subsequent local effects', async () => {
+    useFreeDefaultProject();
+    const hash = await planHash();
+    const service = mockServiceClient();
+    const command = new SetupCommand({}, false, undefined, {
+      authService: mockAuthService(), serviceClient: service,
+      checkOperation: () => {
+        if (service.pushSecrets.mock.calls.length > 0) throw new CapyError('Expired', 'INIT_RUN_EXPIRED');
+      },
+    });
+    await expect(command.execute({ confirm: hash })).rejects.toMatchObject({ code: 'INIT_RUN_EXPIRED' });
+    expect(service.pushSecrets).toHaveBeenCalledTimes(1);
+    expect(mockFileManager().writeSyncState).not.toHaveBeenCalled();
+    expect(mockFileManager().writeEncryptedEnvFile).not.toHaveBeenCalled();
+  });
+
   test('grandfathered free billing delegates to the unchanged paid manifest executor', async () => {
     mockServiceClient().getBillingStatus.mockImplementation(async () => ({
       tier: 'free',
