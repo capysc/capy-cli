@@ -1612,10 +1612,25 @@ describe('CapyCommand', () => {
         user_id: 'user-456',
       });
 
+      const createdOrganization = { id: 'org-new', workos_org_id: 'workos-new', name: 'New Org' };
+      const createdAuth = {
+        success: true,
+        organization_id: createdOrganization.id,
+        organization_name: createdOrganization.name,
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [createdOrganization],
+      };
+      const createdAuthService = {
+        ...mockAuthService,
+        getServiceApiUrl: () => 'https://service.example.test',
+        getValidToken: async () => mockAuthService.getToken(),
+        authenticateSilent: async () => createdAuth,
+      };
       mockAuthService.createOrganization.mockResolvedValue({
-        id: 'org-new',
-        workos_org_id: 'workos-new',
-        name: 'New Org',
+        organization: createdOrganization,
+        auth: createdAuth,
+        authService: createdAuthService,
       });
 
       mockServiceClient.initializeProject.mockResolvedValue({
@@ -1729,10 +1744,25 @@ describe('CapyCommand', () => {
         organization_id: 'org-existing',
         user_id: 'user-456',
       });
+      const createdOrganization = { id: 'org-second', workos_org_id: 'workos-second', name: 'Second Org' };
+      const createdAuth = {
+        success: true,
+        organization_id: createdOrganization.id,
+        organization_name: createdOrganization.name,
+        user_id: 'user-456',
+        user_email: 'test@example.com',
+        organizations: [createdOrganization],
+      };
+      const createdAuthService = {
+        ...mockAuthService,
+        getServiceApiUrl: () => 'https://service.example.test',
+        getValidToken: async () => mockAuthService.getToken(),
+        authenticateSilent: async () => createdAuth,
+      };
       mockAuthService.createOrganization.mockResolvedValue({
-        id: 'org-second',
-        workos_org_id: 'workos-second',
-        name: 'Second Org',
+        organization: createdOrganization,
+        auth: createdAuth,
+        authService: createdAuthService,
       });
       mockServiceClient.initializeProject.mockResolvedValue({
         org_id: 'org-second',

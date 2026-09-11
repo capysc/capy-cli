@@ -1238,15 +1238,21 @@ export class CapyCommand {
             orglessToken: authResult._orgless_access_token,
           }
         : undefined;
-      const selectedOrg = await withWizard(
+      const created = await withWizard(
         wizardAfterAuth,
         () => this.createNewOrganization(context, refreshToken!, authResult.user_id!, deviceKeyEnrollment),
         context.operationDeadline,
       );
+      const selectedOrg = created.organization;
+      const createdContext: InitCommandContext = {
+        ...context,
+        authService: created.authService,
+        serviceClient: created.serviceClient,
+      };
       return { selectedOrg, wizard: recordWizard(wizardAfterAuth, {
         organization: { kind: 'new', name: selectedOrg.name },
         recoveryShown: true,
-      }), effectsStarted: true, context, auth: authResult, custodyDeclined: false };
+      }), effectsStarted: true, context: createdContext, auth: created.auth, custodyDeclined: false };
 
     }
       const choice = await askWizard(
@@ -1305,11 +1311,17 @@ export class CapyCommand {
       const orgId = choice.value === 'create' ? CREATE_NEW_ORG : choice.value;
 
       if (orgId === CREATE_NEW_ORG) {
-        const selectedOrg = await withWizard(
+        const created = await withWizard(
           choice.wizard,
           () => this.createNewOrganization(context, refreshToken!, authResult.user_id!),
           context.operationDeadline,
         );
+        const selectedOrg = created.organization;
+        const createdContext: InitCommandContext = {
+          ...context,
+          authService: created.authService,
+          serviceClient: created.serviceClient,
+        };
         // Naming it and being shown the phrase both happened, elsewhere. The
         // rail settles those two stops rather than leaving them ◌ behind a
         // fork this run has already taken.
@@ -1330,13 +1342,13 @@ export class CapyCommand {
         // when nothing is enrolled anywhere yet.
         if (deviceKeysEnabled()) {
           await withWizard(wizardAfterCreate, () => syncOrgOntoDeviceKeyIfEnrolled(
-            this.deviceKeyWiringContext(context, authResult, selectedOrg.id),
+            this.deviceKeyWiringContext(createdContext, created.auth, selectedOrg.id),
             selectedOrg.id,
           ), context.operationDeadline);
         }
         return {
           selectedOrg, wizard: wizardAfterCreate, effectsStarted: true,
-          context, auth: authResult, custodyDeclined: false,
+          context: createdContext, auth: created.auth, custodyDeclined: false,
         };
       } else if (currentOrg && orgId === currentOrg.id) {
         return {
@@ -3429,7 +3441,7 @@ export class CapyCommand {
     refreshToken: string,
     userId: string,
     deviceKeyEnrollment?: DeviceKeyEnrollmentOptions,
-  ): Promise<Organization> {
+  ): Promise<import('./orgCreation').CreatedOrganizationContext> {
     if (context.transport === 'hosted') {
       throw new CapyError(
         'Hosted organization ceremony is not available in this build',
@@ -3439,7 +3451,11 @@ export class CapyCommand {
     const { createNewOrganization } = await import('./orgCreation');
     return createNewOrganization(
       context.authService,
-      context.serviceClient,
+      (authService) => new ServiceClient(
+        authService.getServiceApiUrl(),
+        this.devMode,
+        () => authService.getValidToken(),
+      ),
       refreshToken,
       userId,
       this.options.web,

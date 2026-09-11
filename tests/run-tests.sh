@@ -44,6 +44,7 @@ ISOLATED_FILES=(
   tests/commands/cleanupCommand.test.ts
   tests/git/installGitHooksCleanup.test.ts
   tests/auth/authService.test.ts
+  tests/auth/createOrganizationInstallation.test.ts
   tests/auth/deviceAuth.test.ts
   tests/auth/authServiceKeepScreens.test.ts
   tests/auth/oauthServer.test.ts
@@ -53,6 +54,7 @@ ISOLATED_FILES=(
   tests/commands/branchKeepFile.test.ts
   tests/commands/capyCommand.test.ts
   tests/commands/flowAuthenticateFileBackend.test.ts
+  tests/commands/orgCreationInstallation.test.ts
   tests/commands/orgCommandRefreshReplacement.test.ts
   tests/commands/readOnlyRun.int.test.ts
   tests/commands/kickCommand.test.ts

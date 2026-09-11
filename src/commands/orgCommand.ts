@@ -151,28 +151,16 @@ export class OrgCommand {
 
     const selected = await (async () => {
       if (orgId === CREATE_NEW_ORG) {
-        const selectedOrg = await createNewOrganization(
+        const created = await createNewOrganization(
           this.authService,
-          this.serviceClient,
+          (authService) => this.serviceClientFor(authService),
           refreshToken,
           authResult.user_id!,
         );
-
-        const installed = await this.authService.refreshWithCredentials(
-          refreshToken,
-          selectedOrg.id,
-          authResult.user_id,
-        );
-        if (!installed.auth.success) {
-          throw new CapyError(
-            installed.auth.error || 'Organization switch failed',
-            ERROR_CODES.AUTH_FAILED,
-          );
-        }
         return {
-          organization: selectedOrg,
-          authService: installed.authService,
-          serviceClient: this.serviceClientFor(installed.authService),
+          organization: created.organization,
+          authService: created.authService,
+          serviceClient: created.serviceClient,
         } as const;
       }
 
@@ -375,25 +363,15 @@ export class OrgCommand {
     }
 
     if (picked.action === 'create') {
-      const created = await createNewOrganization(
+      const installed = await createNewOrganization(
         this.authService,
-        this.serviceClient,
+        (authService) => this.serviceClientFor(authService),
         refreshToken,
         userId,
         true,
       );
-      const installed = await this.authService.refreshWithCredentials(
-        refreshToken,
-        created.id,
-        userId,
-      );
-      if (!installed.auth.success) {
-        throw new CapyError(
-          installed.auth.error || 'Organization switch failed',
-          ERROR_CODES.AUTH_FAILED,
-        );
-      }
-      const serviceClient = this.serviceClientFor(installed.authService);
+      const created = installed.organization;
+      const serviceClient = installed.serviceClient;
       // A brand-new org has no projects, so the only route on is the first one.
       console.log(`\n  ${B(created.name)} has no projects yet.`);
       const refusal = this.firstProjectRefusal(created, hasProject);

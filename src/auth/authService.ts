@@ -75,6 +75,19 @@ const exactInitRunServiceOrigin = (value: string): string | null => {
   }
 };
 
+const exactConfiguredServiceBase = (value: string): string | null => {
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      return null;
+    }
+    const path = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/u, '');
+    return `${url.origin}${path}`;
+  } catch {
+    return null;
+  }
+};
+
 const initRunOrganizationFailure = (message: string): CapyError =>
   new CapyError(message, INIT_RUN_ORGANIZATION_INDETERMINATE);
 
@@ -966,64 +979,138 @@ export class AuthService {
     return { auth, authService: replacement, accessToken };
   }
 
-  async createOrganization(name: string, refreshToken: string, userId: string): Promise<Organization> {
-    let data: Organization & {
-      access_token?: string;
-      refresh_token?: string;
-      expires_in?: number;
-      user?: { id: string; email: string; first_name: string | null; last_name: string | null };
+  async createOrganization(name: string, refreshToken: string, userId: string): Promise<InstalledInitRunOrganization> {
+    const serviceBase = exactConfiguredServiceBase(this.serviceApiUrl);
+    const requestedName = name.trim();
+    const callerAuthorityDigest = refreshTokenAuthorityDigest(this.session);
+    const acceptedLineageDigest = this.initialRefreshLineageDigest;
+    if (!serviceBase || !/^\S+$/u.test(userId) || userId.length > 255
+      || !/^\S+$/u.test(refreshToken) || requestedName.length === 0 || requestedName.length > 100) {
+      throw initRunOrganizationFailure('The organization request authority was invalid');
+    }
+    const requestDeadline = Date.now() + INIT_RUN_ORGANIZATION_TIMEOUT_MS;
+    const requestController = new AbortController();
+    const bounded = async <T>(run: () => Promise<T>): Promise<T> => {
+      const remaining = requestDeadline - Date.now();
+      if (remaining <= 0) throw initRunOrganizationFailure('The organization response was not confirmed');
+      const timeout = Promise.withResolvers<never>();
+      const timer = setTimeout(() => {
+        requestController.abort();
+        timeout.reject(initRunOrganizationFailure('The organization response was not confirmed'));
+      }, remaining);
+      return Promise.race([Promise.resolve().then(run), timeout.promise])
+        .finally(() => clearTimeout(timer));
     };
-    try {
-      data = await postJson(
-        `${this.serviceApiUrl}/auth/create-org`,
-        { name, refresh_token: refreshToken },
+    const installed = await this.storageBackend.withRefreshLock(userId, async (before, beginRotation) => {
+      const beforeDigest = refreshTokenAuthorityDigest(before);
+      const lineageMatches = beforeDigest !== null && (
+        beforeDigest === callerAuthorityDigest
+        || (acceptedLineageDigest !== null
+          && before?.identity_session?.root_authority_sha256 === acceptedLineageDigest)
       );
-    } catch (err: any) {
-      // Translate quota responses into a CapyError so renderError can show the
-      // upgrade screen — and so the createNewOrganization retry loop does not
-      // mistake a 402 for a name conflict (409) and keep re-prompting.
-      if (err instanceof HttpStatusError && err.status === 402 && err.body?.code === 'QUOTA_EXCEEDED') {
-        throw new CapyError(
-          err.body.error || 'Account quota exceeded',
-          ERROR_CODES.QUOTA_EXCEEDED,
-          { status: 402, kind: err.body.kind, limit: err.body.limit, upgrade_url: err.body.upgrade_url },
+      if (!before || before.user_id !== userId || before.refresh_token !== refreshToken || !lineageMatches) {
+        throw initRunOrganizationFailure('The organization request authority was invalid');
+      }
+      beginRotation();
+      const response = await bounded(() => {
+        try {
+          return fetch(`${serviceBase}/auth/create-org`, {
+            method: 'POST',
+            redirect: 'error',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ name: requestedName, refresh_token: before.refresh_token }),
+            signal: requestController.signal,
+          });
+        } catch {
+          return Promise.reject(initRunOrganizationFailure('The organization response was not confirmed'));
+        }
+      }).catch(() => {
+        throw initRunOrganizationFailure('The organization response was not confirmed');
+      });
+      const bodyText = await bounded(() => response.text()).catch(() => {
+        throw initRunOrganizationFailure('The organization response was not confirmed');
+      });
+      if (bodyText.length > INIT_RUN_ORGANIZATION_RESPONSE_LIMIT) {
+        throw initRunOrganizationFailure('The organization response was invalid');
+      }
+      const body = parseJsonText(bodyText);
+      const responseBody = body !== null && typeof body === 'object' && !Array.isArray(body)
+        ? body as Readonly<Record<string, unknown>>
+        : null;
+      if (!response.ok) {
+        if (response.status === 409 && responseBody?.code === INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH) {
+          throw new CapyError('The organization name is already reserved', INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH);
+        }
+        if (response.status === 402 && responseBody?.code === ERROR_CODES.QUOTA_EXCEEDED) {
+          throw new CapyError(
+            typeof responseBody.error === 'string' ? responseBody.error : 'Account quota exceeded',
+            ERROR_CODES.QUOTA_EXCEEDED,
+            {
+              status: 402,
+              kind: responseBody.kind,
+              limit: responseBody.limit,
+              upgrade_url: responseBody.upgrade_url,
+            },
+          );
+        }
+        throw initRunOrganizationFailure('The organization outcome was not confirmed');
+      }
+      const parsed = parseInitRunCreatedOrganizationResponse(body);
+      if (!parsed) throw initRunOrganizationFailure('The organization response was invalid');
+      const prepared = prepareInitRunCreatedOrganizationInstallation({
+        response: parsed,
+        expectedUserId: userId,
+        requestedName,
+        previousSession: before,
+        expiresAt: resolveExpiresAt(parsed.expires_in),
+        now: Date.now(),
+      });
+      try {
+        this.storageBackend.save(prepared.session, userId);
+      } catch {
+        throw initRunOrganizationFailure('Could not persist the organization session');
+      }
+      return { prepared, parsed };
+    }).catch((error: unknown) => {
+      const code = error instanceof CapyError ? error.code : null;
+      if (code === INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH
+        || code === ERROR_CODES.QUOTA_EXCEEDED
+        || code === INIT_RUN_ORGANIZATION_INDETERMINATE) throw error;
+      throw initRunOrganizationFailure('The organization outcome was not confirmed');
+    });
+    const preparedDigest = initRunSessionAuthorityDigest(installed.prepared.session);
+    const replacement = (() => {
+      try {
+        const authService = new AuthService(
+          this.serviceApiUrl,
+          this.devMode,
+          userId,
+          this.storageBackend,
+          installed.prepared.currentOrgId,
         );
+        const readback = this.storageBackend.load(userId);
+        return { authService, readback, token: authService.getToken() };
+      } catch {
+        return null;
       }
-      throw err;
+    })();
+    if (!replacement
+      || JSON.stringify(replacement.authService.session) !== JSON.stringify(installed.prepared.session)
+      || JSON.stringify(replacement.readback) !== JSON.stringify(installed.prepared.session)
+      || initRunSessionAuthorityDigest(replacement.readback) !== preparedDigest
+      || replacement.authService.initialSessionUserId !== userId
+      || replacement.authService.initialSessionAuthorityDigest !== preparedDigest
+      || replacement.authService.currentOrgId !== installed.prepared.currentOrgId
+      || replacement.token?.user_id !== userId
+      || replacement.token.organization_id !== installed.prepared.organization.id
+      || replacement.token.access_token !== installed.parsed.access_token) {
+      throw initRunOrganizationFailure('Could not confirm the persisted organization session');
     }
-
-    const newOrg: Organization = { id: data.id, workos_org_id: data.workos_org_id, name: data.name };
-
-    let session = this.session;
-    if (!session) {
-      session = {
-        version: 2,
-        user_id: data.user?.id || userId,
-        user_email: data.user?.email,
-        user_first_name: data.user?.first_name,
-        user_last_name: data.user?.last_name,
-        refresh_token: data.refresh_token || refreshToken,
-        organizations: [newOrg],
-        sessions: {},
-      };
-      this.session = session;
-    } else {
-      session.organizations = [...session.organizations, newOrg];
-      if (data.refresh_token) {
-        session.refresh_token = data.refresh_token;
-      }
-    }
-
-    if (data.access_token) {
-      session.sessions[data.id] = {
-        access_token: data.access_token,
-        expires_at: resolveExpiresAt(data.expires_in || 86400),
-      };
-      this.currentOrgId = data.id;
-    }
-
-    this.lifecycle.save();
-    return data;
+    return {
+      organization: installed.prepared.organization,
+      auth: installed.prepared.auth,
+      authService: replacement.authService,
+    };
   }
 
   clearSession(): void {

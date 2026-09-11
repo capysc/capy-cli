@@ -157,12 +157,17 @@ describe('org command selected-authority replacement', () => {
   test('terminal creation carries the returned replacement into project selection', async () => {
     prompt.mockImplementation(async (questions: readonly Readonly<{ name?: string }>[]) =>
       questions[0]?.name === 'orgId' ? { orgId: '__create_new__' } : { projectId: CREATED_PROJECT.id });
-    createNewOrganization.mockResolvedValue(CREATED_ORG);
+    createNewOrganization.mockImplementation(async (_auth, serviceClientFor) => ({
+      organization: CREATED_ORG,
+      auth: { ...successfulAuth, organization_id: CREATED_ORG.id, organization_name: CREATED_ORG.name },
+      authService: replacementAuthService,
+      serviceClient: serviceClientFor(replacementAuthService),
+    }));
     scopedListProjects.mockResolvedValue([CREATED_PROJECT]);
 
     await new OrgCommand('https://service.example.test').execute();
 
-    expect(refreshWithCredentials).toHaveBeenCalledWith('refresh-before', CREATED_ORG.id, USER_ID);
+    expect(refreshWithCredentials).not.toHaveBeenCalled();
     expect(scopedListProjects).toHaveBeenCalledTimes(1);
     expect(writeKeepFile).toHaveBeenCalledWith(expect.objectContaining({
       org_id: CREATED_ORG.id,
@@ -194,12 +199,17 @@ describe('org command selected-authority replacement', () => {
 
   test('web creation binds the replacement without reusing the original client', async () => {
     switchOrganizationInBrowser.mockResolvedValue({ action: 'create', cancelled: false });
-    createNewOrganization.mockResolvedValue(CREATED_ORG);
+    createNewOrganization.mockImplementation(async (_auth, serviceClientFor) => ({
+      organization: CREATED_ORG,
+      auth: { ...successfulAuth, organization_id: CREATED_ORG.id, organization_name: CREATED_ORG.name },
+      authService: replacementAuthService,
+      serviceClient: serviceClientFor(replacementAuthService),
+    }));
     nameFirstProjectInBrowser.mockResolvedValue(null);
 
     await new OrgCommand('https://service.example.test', false, { web: true }).execute();
 
-    expect(refreshWithCredentials).toHaveBeenCalledWith('refresh-before', CREATED_ORG.id, USER_ID);
+    expect(refreshWithCredentials).not.toHaveBeenCalled();
     expect(scopedListProjects).not.toHaveBeenCalled();
     await assertReplacementBinding();
   });

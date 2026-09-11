@@ -1,8 +1,7 @@
 import inquirer from 'inquirer';
 import ora from '../ui/spinner';
-import { AuthService } from '../auth/authService';
+import { AuthService, type InstalledInitRunOrganization } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
-import { Organization } from '../types/index';
 import {
   generateSeedPhrase,
   seedPhraseToMasterKey,
@@ -14,6 +13,7 @@ import { attemptCaseAEnrollment, DeviceKeyWiringContext } from '../auth/deviceKe
 // Type-only: erased at compile time, so the TTY path does not pull the browser
 // wizard into its module graph just to name an organization.
 import type { OrgNameVerdict } from '../ui/onboardingWeb';
+import { INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH } from '../auth/initRunOrganizationInstaller';
 
 /** The CLI's cap. One definition; the browser screen is handed this value. */
 export const MAX_ORG_NAME_LENGTH = 100;
@@ -112,76 +112,89 @@ const ORG_PHRASE_BOX = [...ORG_PHRASE_NOTES, '', 'To learn more about zero-trust
  * byte-identical to before CAP-382 existed.
  */
 export interface DeviceKeyEnrollmentOptions {
-  ctx: DeviceKeyWiringContext;
-  orglessToken: string | null | undefined;
+  readonly ctx: DeviceKeyWiringContext;
+  readonly orglessToken: string | null | undefined;
 }
+
+export type CreatedOrganizationContext = InstalledInitRunOrganization & Readonly<{
+  serviceClient: ServiceClient;
+}>;
 
 export async function createNewOrganization(
   authService: AuthService,
-  serviceClient: ServiceClient,
+  serviceClientFor: (authService: AuthService) => ServiceClient,
   refreshToken: string,
   userId: string,
   web = false,
   deviceKeyEnrollment?: DeviceKeyEnrollmentOptions,
-): Promise<Organization> {
+): Promise<CreatedOrganizationContext> {
   // ONE phrase for the whole run, generated before the first question. A 409
   // sends the name step round again and the same words have to key whatever
   // name is picked next — regenerating would hand the user a second phrase
   // after they had already written the first one down.
   const seedPhrase = generateSeedPhrase();
 
-  let orgName: string;
-  if (web) {
+  const orgName = await (async () => {
+    if (web) {
     // SECURITY: under --web the phrase must render in the browser only. The TTY
     // path prints all 24 words to stdout, which an MCP-driven run captures — so
     // the agent would see a recovery-equivalent secret. Name and phrase are one
     // wizard in the loopback page; the phrase stays in this process's memory.
-    orgName = await nameAndConfirmInBrowser(authService, seedPhrase);
-  } else {
-    orgName = await promptForAvailableOrgName(authService);
+      return nameAndConfirmInBrowser(authService, seedPhrase);
+    }
+    const name = await promptForAvailableOrgName(authService);
     // SECURITY (CAP-402): displayAndConfirmRecoveryPhrase itself refuses
     // (coded RECOVERY_PHRASE_UNSAFE_SURFACE) when there is no real TTY to
     // read the phrase from — see its docblock. Not re-checked here: the gate
     // lives in the one function every recovery-phrase caller shares, so it
     // cannot be bypassed by a future call site that forgets to ask.
     await displayAndConfirmRecoveryPhrase(seedPhrase, ORG_PHRASE_BOX);
-  }
+    return name;
+  })();
 
-  while (true) {
+  const createWithName = async (name: string): Promise<InstalledInitRunOrganization> => {
     const orgSpinner = ora('Creating organization...').start();
     try {
-      const org = await authService.createOrganization(orgName, refreshToken, userId);
-      orgSpinner.succeed(`Organization "${org.name}" created`);
-
-      // New orgs derive M under the current (strongest) KDF version. This is
-      // what binds the org to v2; legacy orgs created before this stay on v1 and
-      // are detected by trial decryption at the phrase→M boundaries.
-      const masterKey = seedPhraseToMasterKey(seedPhrase, CURRENT_KDF_VERSION);
-      await wrapAndSaveMasterKey(masterKey, org.id, userId, keyServiceOpsFromClient(serviceClient));
-
-      if (deviceKeyEnrollment) {
-        await attemptCaseAEnrollment({
-          ctx: deviceKeyEnrollment.ctx,
-          orgId: org.id,
-          orgName: org.name,
-          masterKey,
-          orglessToken: deviceKeyEnrollment.orglessToken,
-        });
-      }
-
-      return org;
-    } catch (err: any) {
+      const installed = await authService.createOrganization(name, refreshToken, userId);
+      orgSpinner.succeed(`Organization "${installed.organization.name}" created`);
+      return installed;
+    } catch (err: unknown) {
       orgSpinner.fail('Failed to create organization');
-      if (err && err.status === 409) {
+      if (err !== null && typeof err === 'object' && 'code' in err
+        && err.code === INIT_RUN_ORG_NAME_TAKEN_PRE_REFRESH) {
         console.log('');
-        orgName = web
-          ? await nameAndConfirmInBrowser(authService, seedPhrase, orgName)
+        const nextName = web
+          ? await nameAndConfirmInBrowser(authService, seedPhrase, name)
           : await promptForAvailableOrgName(authService, 'That name was claimed while you were setting up. Pick another:');
-        continue;
+        return createWithName(nextName);
       }
       throw err;
     }
+  };
+  const installed = await createWithName(orgName);
+  const org = installed.organization;
+  const serviceClient = serviceClientFor(installed.authService);
+  // Keep local wrapping and enrollment outside the name retry boundary.
+  // A later failure cannot repeat an organization that already exists.
+  const masterKey = seedPhraseToMasterKey(seedPhrase, CURRENT_KDF_VERSION);
+  await wrapAndSaveMasterKey(masterKey, org.id, userId, keyServiceOpsFromClient(serviceClient));
+
+  if (deviceKeyEnrollment) {
+    await attemptCaseAEnrollment({
+      ctx: {
+        ...deviceKeyEnrollment.ctx,
+        authService: installed.authService,
+        serviceClient,
+        organizations: installed.auth.organizations ?? [],
+        activeOrgId: org.id,
+      },
+      orgId: org.id,
+      orgName: org.name,
+      masterKey,
+      orglessToken: deviceKeyEnrollment.orglessToken,
+    });
   }
+  return { ...installed, serviceClient };
 }
 
 /**
@@ -221,4 +234,3 @@ async function nameAndConfirmInBrowser(
   }
   return result.name;
 }
-
