@@ -30,7 +30,7 @@
   <a href="https://github.com/capysc/capy-cli/actions/workflows/ci.yml"><img alt="Continuous integration status" src="https://github.com/capysc/capy-cli/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/capysc/capy-cli/actions/workflows/ci.yml"><img alt="Test suite status" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fcapysc%2Fcapy-badges%2Fmain%2Fcapy-cli-tests.json"></a>
   <a href="https://www.npmjs.com/package/@capysc/cli"><img alt="Latest npm package version" src="https://img.shields.io/npm/v/@capysc/cli"></a>
-  <a href="https://nodejs.org"><img alt="Minimum Node.js version: 18" src="https://img.shields.io/badge/node-%3E%3D18-brightgreen"></a>
+  <a href="https://nodejs.org"><img alt="Minimum Node.js version: 22" src="https://img.shields.io/badge/node-%3E%3D22-brightgreen"></a>
   <a href="./LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 

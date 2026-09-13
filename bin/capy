@@ -1,4 +1,11 @@
 #!/usr/bin/env node
 
 // Simple wrapper that requires the built CLI
-require('../dist/index.js');
+const major = Number.parseInt(process.versions.node.split('.')[0] ?? '', 10);
+
+if (!Number.isInteger(major) || major < 22) {
+  console.error(`capy requires Node.js 22 or later; found ${process.versions.node}.`);
+  process.exitCode = 1;
+} else {
+  require('../dist/index.js');
+}

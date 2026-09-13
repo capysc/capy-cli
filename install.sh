@@ -176,7 +176,7 @@ install_binary() {
 install_via_npm() {
   if ! command -v npm >/dev/null 2>&1; then
     err "npm not installed and no native binary is available for your platform."
-    err "install Node.js (https://nodejs.org) then re-run, or set CAPY_VERSION to a release with a binary for your platform."
+    err "install Node.js 22 or later (https://nodejs.org) then re-run, or set CAPY_VERSION to a release with a binary for your platform."
     return 1
   fi
   log "no native binary — falling back to: npm install -g $NPM_PKG"
