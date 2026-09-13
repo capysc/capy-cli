@@ -66,7 +66,83 @@ describe('buildInitWizardData', () => {
     expect(data.nonce).toBe('n');
   });
 
+  test('a failed project lookup is a different fact from an empty organization', () => {
+    // The CLI swallows the error and proceeds as if the org had none, which
+    // walks the user into a second project alongside the one they have.
+    const d = buildInitWizardData(
+      { step: 'project-name', input: { projectCount: 0, projectsUnavailable: true }, projectsUnavailable: true },
+      'n',
+    );
+    expect(d.projectsUnavailable).toBe(true);
+  });
+
+  test('every step says how it is answered without a browser', () => {
+    const steps = ['organization', 'project', 'project-name', 'branch', 'branch-name', 'encrypt'] as const;
+    for (const step of steps) {
+      const d = buildInitWizardData({ step, input: {} }, 'n');
+      expect(d.nonTty?.command).toBeTruthy();
+      expect(d.nonTty?.why).toBeTruthy();
+    }
+    // The invite code is key material, so its escape is a REFUSAL to take one
+    // from argv rather than a flag that would leak it.
+    expect(buildInitWizardData({ step: 'redeem', input: {} }, 'n').nonTty!.command).toBe('capy redeem <code>');
+  });
+
+  test('a refused answer is re-served with the CLI\'s own sentence', () => {
+    const d = buildInitWizardData(
+      { step: 'project-name', input: {}, value: 'mikes market', rejected: 'Project name can only contain letters, numbers, hyphens, and underscores' },
+      'n',
+    );
+    expect(d.value).toBe('mikes market');
+    expect(d.rejected).toContain('letters, numbers, hyphens, and underscores');
+  });
+});
+
+describe('blockedFromError', () => {
+  test('carries the error\'s CODE and never mines its sentence for a remedy', () => {
+    const b = blockedFromError(
+      new CapyError(
+        'You have access to "hq" but no encryption key on this device.\n\n  run:\n\n    capy redeem <code>',
+        ERROR_CODES.AUTH_FAILED,
+      ),
+    );
+    expect(b.code).toBe(ERROR_CODES.AUTH_FAILED);
+    // The command inside that sentence is not lifted out of it: prose is not a
+    // contract, and a call site that knows the remedy states it in fields.
+    expect(b.remedy).toBe('capy');
+  });
+
+  test('an error with no code is not given one that means something else', () => {
+    expect(blockedFromError(new Error('socket hang up')).code).toBe('UNKNOWN');
+    expect(blockedFromError(undefined).detail).toContain('without saying why');
+  });
+
+  test('the bold the CLI prints does not reach the browser as [1m', () => {
+    const data = buildInitWizardData(
+      {
+        step: 'redeem',
+        input: {},
+        blocked: {
+          code: 'AUTH_FAILED',
+          title: '\x1b[1mNo key\x1b[0m',
+          detail: 'Ask for \x1b[1mcapy redeem\x1b[0m',
+          remedy: '\x1b[1mcapy redeem <code>\x1b[0m',
+        },
+        blockedNames: ['\x1b[1mSTRIPE_SECRET_KEY\x1b[0m'],
+        blockedFacts: [{ label: 'Organization', value: '\x1b[1mhq\x1b[0m' }],
+      },
+      'n',
+    );
+    expect(JSON.stringify(data)).not.toContain('\u001b');
+    expect(data.blocked!.title).toBe('No key');
+    expect(data.blockedNames).toEqual(['STRIPE_SECRET_KEY']);
+    expect(data.blockedFacts).toEqual([{ label: 'Organization', value: 'hq' }]);
+  });
+});
+
+describe('projectNameProblem', () => {
   test('uses the shared project-name validator verbatim', () => {
+    expect(projectNameProblem('  ')).toBe('Project name cannot be empty');
     expect(projectNameProblem('mikes market')).toBe(
       'Project name can only contain letters, numbers, hyphens, and underscores',
     );

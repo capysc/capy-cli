@@ -179,3 +179,15 @@ describe('Invite Flow E2E', () => {
     });
   });
 });
+
+describe('invite lifetime ceiling', () => {
+  test('a --ttl past the ceiling is capped rather than refused', () => {
+    // Warn-and-cap, not refuse: an existing script passing a longer lifetime
+    // keeps working, and the notice is what stops the caller believing they
+    // issued something that outlives the cap.
+    const { parseTtl } = require('../../src/core/invitePlan');
+    const { MAX_INVITE_TTL_MS } = require('../../src/crypto/inviteCrypto');
+    expect(parseTtl('7d')).toBeGreaterThan(MAX_INVITE_TTL_MS);
+    expect(MAX_INVITE_TTL_MS).toBe(12 * 60 * 60 * 1000);
+  });
+});

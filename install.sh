@@ -16,7 +16,7 @@
 #   3. Verifies its sha256 against the release's checksums file
 #   4. Installs to $CAPY_PREFIX/bin and prints shell rc instructions
 #   5. If no matching binary exists (or download fails), falls back to
-#      `npm install -g @capy/cli` when npm is available
+#      `npm install -g @capysc/cli` when npm is available
 
 set -euo pipefail
 

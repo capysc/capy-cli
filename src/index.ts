@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Imported first, and applied below before any other statement: the pin has to
+// land before a single Capy module reads configuration.
+import { applyProdPins, formatPinNotice } from './config/prodPins';
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
 import { CapyError, CliOptions, ERROR_CODES } from './types/index';
@@ -6,6 +9,12 @@ import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { GRANT_DAEMON_SUBCOMMAND } from './auth/deviceKey/grantHolder';
+
+// Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
+// attempts to move it before anything can read them — see config/prodPins.ts
+// for why an ambient CAPY_API_URL is a foot-gun rather than a feature. Keep
+// this the first statement in the file.
+const strippedPins = applyProdPins();
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -45,6 +54,11 @@ process.on('unhandledRejection', (error: any) => {
 if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
   process.env.CAPY_VERBOSE = '1';
 }
+
+// Say so when an override was ignored. The bug this pin fixes was invisible:
+// the CLI silently spoke to a URL the user never chose.
+const pinNotice = formatPinNotice(strippedPins);
+if (pinNotice) console.error(pinNotice);
 
 const program = new Command();
 
@@ -621,7 +635,7 @@ program
   .description('Invite a teammate to this organization')
   .option('--role <role>', 'invitee role: member | project-admin | admin')
   .option('--project <id|name>', 'grant project access (repeatable, comma-ok)', collectProjects, [])
-  .option('--ttl <duration>', 'invite lifetime, e.g. 30m, 24h, 7d (or seconds)')
+  .option('--ttl <duration>', 'invite lifetime, max 12h, e.g. 30m, 2h, 12h (or seconds)')
   .option('--expires <iso>', 'absolute expiry (ISO date); overrides --ttl')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')

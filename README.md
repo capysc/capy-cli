@@ -299,3 +299,5 @@ You can fork this repo and create pull requests:
 AGPL-3.0-only. Copyright © Incentv Technologies Inc.
 
 See [LICENSE](./LICENSE) for the full text. For what AGPL means for your team in practice — when it imposes obligations and when it doesn't — see [docs.capy.sc/using/license](https://docs.capy.sc/using/license).
+
+The prebuilt binaries embed their dependencies; those packages' licenses and copyright notices are reproduced in [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).

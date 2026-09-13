@@ -1952,7 +1952,7 @@ export async function deployCommand(
       baseKeep = { ...local, variables: {} };
     }
     const nowIso = new Date().toISOString();
-    const built = buildDeployKeep(baseKeep, env, target.vars, target.branch, nowIso);
+    const built = buildDeployKeep(baseKeep, env, target.vars, target.branch);
     keepLockChanged = built.changed;
     deployKeepContent = built.content;
 
@@ -1992,7 +1992,7 @@ export async function deployCommand(
         force = !!ans.force;
       }
       if (force) {
-        deployKeepContent = touchDeployKeep(baseKeep, target.vars, target.branch, nowIso);
+        deployKeepContent = touchDeployKeep(baseKeep, target.vars, target.branch);
         keepLockChanged = true;
       }
     }

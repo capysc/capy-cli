@@ -2781,7 +2781,7 @@ describeBrowser('capy invite, driven by a real browser', () => {
       { id: 'p1', name: 'storefront', isCwd: true },
       { id: 'p2', name: 'warehouse', isCwd: false },
     ],
-    plan: { defaultTtl: '7d', canAskExpiry: true },
+    plan: { defaultTtl: '12h', canAskExpiry: true },
     open: false,
     now: new Date('2026-07-30T00:00:00Z'),
   };
@@ -2829,16 +2829,16 @@ describeBrowser('capy invite, driven by a real browser', () => {
 
     await untilSettled(page, says('How long should it last?'), 'the expiry stop');
     // The service's silent ceiling, said out loud.
-    expect(await evaluate<boolean>(page, says('caps invites at 30 days'))).toBe(true);
+    expect(await evaluate<boolean>(page, says('caps invites at 12 hours'))).toBe(true);
     expect(await evaluate<boolean>(page, hasCancel)).toBe(true);
 
-    await chooseOption(page, '24h');
+    await chooseOption(page, '2h');
     await press(page, 'Create invite');
 
     expect(await done).toEqual({
       role: 'member',
       projectIds: ['p1', 'p2'],
-      ttl: '24h',
+      ttl: '2h',
       cancelled: false,
     });
   }, 60_000);
@@ -2857,10 +2857,10 @@ describeBrowser('capy invite, driven by a real browser', () => {
     await untilSettled(page, says('How long should it last?'), 'the expiry stop');
     expect(await evaluate<boolean>(page, says('Which projects?'))).toBe(false);
 
-    await chooseOption(page, '7d');
+    await chooseOption(page, '12h');
     await press(page, 'Create invite');
 
-    expect(await done).toEqual({ role: 'admin', projectIds: [], ttl: '7d', cancelled: false });
+    expect(await done).toEqual({ role: 'admin', projectIds: [], ttl: '12h', cancelled: false });
   }, 60_000);
 
   test('the projects step holds its button until something is ticked', async () => {

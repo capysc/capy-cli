@@ -8,10 +8,18 @@
  *
  * Resolution precedence at every CLI invocation:
  *   1. explicit apiUrl arg to ServiceClient        (call-site override)
- *   2. CAPY_API_URL env var                        (CI / scripts)
- *   3. CAPY_PROFILE env var                        (per-invocation override)
+ *   2. CAPY_API_URL env var                        (dev/staging builds only)
+ *   3. CAPY_PROFILE env var                        (dev/staging builds only)
  *   4. config.default profile                      (what `capy use` writes)
  *   5. built-in default (https://api.capy.sc)      (no config = cloud user)
+ *
+ * Steps 2 and 3 are unreachable in the production binary: its entrypoint
+ * deletes both variables before this module can read them (config/prodPins.ts),
+ * so prod resolves profile-then-default and nothing in the ambient environment
+ * can retarget it. The env steps remain live for `capy-dev` and `capy-staging`,
+ * which is where retargeting now belongs. Profiles are unaffected either way —
+ * `capy byoc` and `capy use` are still how a BYOC operator points prod at their
+ * own instance.
  *
  * v1 NOTE: every profile shares the existing ~/.capy/ session/cache/key
  * layout. Per-profile state subdirectories (~/.capy/profiles/<name>/...)

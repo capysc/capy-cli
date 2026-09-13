@@ -4,8 +4,8 @@
  * WHAT THIS FILE IS FOR, in order of what would hurt most if it broke:
  *
  *   1. THE REDEEM CODE STOPS BEING PRINTED UNDER `--web`. It carries a
- *      double-wrapped copy of the organization key: whoever holds it can join
- *      the org until it expires. `--web` is agent-only and an agent shelling
+ *      double-wrapped copy of the organization key, unwrappable only by the
+ *      invited email. `--web` is agent-only and an agent shelling
  *      `capy` reads stdout, so under it the code goes to a page and NOWHERE
  *      else — not stdout, not stderr, not the clipboard prompt. That is the
  *      load-bearing claim of this whole path and it was pinned by nothing:
@@ -177,7 +177,7 @@ describe('InviteCommand', () => {
       mockAskInBrowser.mockResolvedValue({
         role: 'member',
         projectIds: ['p1'],
-        ttl: '24h',
+        ttl: '6h',
         cancelled: false,
       });
 
@@ -221,7 +221,7 @@ describe('InviteCommand', () => {
         await new InviteCommand().execute('bob@example.com', {
           json: true,
           role: 'admin',
-          ttl: '24h',
+          ttl: '6h',
         });
       } finally {
         cap.restore();
@@ -298,7 +298,7 @@ describe('InviteCommand', () => {
       // `--project` settles the projects stop, so the browser never serves it
       // and its answer comes back empty. Read as "no projects", this run grants
       // nothing and reports success.
-      mockAskInBrowser.mockResolvedValue({ role: 'member', projectIds: [], ttl: '7d', cancelled: false });
+      mockAskInBrowser.mockResolvedValue({ role: 'member', projectIds: [], ttl: '6h', cancelled: false });
 
       const cap = captureOutput();
       try {
@@ -327,16 +327,16 @@ describe('InviteCommand', () => {
       const cap = captureOutput();
       const before = Date.now();
       try {
-        await new InviteCommand().execute('bob@example.com', { web: true, json: true, ttl: '24h' });
+        await new InviteCommand().execute('bob@example.com', { web: true, json: true, ttl: '6h' });
       } finally {
         cap.restore();
       }
 
       const parsed = JSON.parse(cap.out());
       const lifetimeMs = Date.parse(parsed.expiresAt) - before;
-      expect(lifetimeMs).toBeGreaterThan(23 * 60 * 60 * 1000);
-      expect(lifetimeMs).toBeLessThanOrEqual(24 * 60 * 60 * 1000 + 5_000);
-      expect(parsed.stops.find((s: any) => s.id === 'expiry').flag).toBe('--ttl 24h');
+      expect(lifetimeMs).toBeGreaterThan(5 * 60 * 60 * 1000);
+      expect(lifetimeMs).toBeLessThanOrEqual(6 * 60 * 60 * 1000 + 5_000);
+      expect(parsed.stops.find((s: any) => s.id === 'expiry').flag).toBe('--ttl 6h');
     });
 
     test('never opens the developer\'s real browser when CAPY_WEB_NO_OPEN is set', async () => {
@@ -360,7 +360,7 @@ describe('InviteCommand', () => {
         await new InviteCommand().execute('bob@example.com', {
           web: true,
           role: 'admin',
-          ttl: '24h',
+          ttl: '6h',
         });
       } finally {
         cap.restore();
@@ -495,7 +495,7 @@ describe('InviteCommand', () => {
       mockAskInBrowser.mockResolvedValue({
         role: 'member',
         projectIds: ['p1', 'p2'],
-        ttl: '24h',
+        ttl: '6h',
         cancelled: false,
       });
 
@@ -542,7 +542,7 @@ describe('InviteCommand', () => {
           web: true,
           json: true,
           role: 'admin',
-          ttl: '24h',
+          ttl: '6h',
         });
       } finally {
         cap2.restore();
@@ -551,7 +551,7 @@ describe('InviteCommand', () => {
         JSON.parse(cap2.out()).stops.map((s: any) => [s.id, s]),
       );
       expect(flagged.role.flag).toBe('--role admin');
-      expect(flagged.expiry.flag).toBe('--ttl 24h');
+      expect(flagged.expiry.flag).toBe('--ttl 6h');
     });
   });
 

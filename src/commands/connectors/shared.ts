@@ -423,6 +423,8 @@ export async function writeAndSync(
      * question it asks; never itself part of the question text.
      */
     confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
+    /** Additional (varName, connector) pairs to mark managed in the same write. */
+    alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
   },
   warningState: PersonalEnvWarningState = initialPersonalEnvWarningState(),
 ): Promise<PersonalEnvWarningState> {
@@ -438,8 +440,8 @@ export async function writeAndSync(
     // lock-less mode there is no keep.lock to write — the connector-attached
     // keep is still handed to writeEncryptedEnvFile so the `.env` identity
     // header stays correct, but nothing lands on disk as keep.lock.
-    if (opts.connector) {
-      const merged = attachConnector(ctx.keep, varName, ctx.branch, opts.connector);
+    if (opts.connector || opts.alsoConnect) {
+      const merged = applyConnectors(ctx.keep, ctx.branch, varName, opts.connector, opts.alsoConnect);
       if (!ctx.lockless) ctx.fileManager.writeKeepFile(merged);
       ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, merged, ctx.branch);
     } else {
@@ -451,6 +453,7 @@ export async function writeAndSync(
   await syncResolvedSnapshot(ctx, finalEnv, {
     primaryVarNames: [varName],
     connector: opts.connector ? { varName, metadata: opts.connector } : undefined,
+    alsoConnect: opts.alsoConnect,
     confirmOverwrite: opts.confirmOverwrite,
   });
   return nextWarningState;
@@ -462,6 +465,7 @@ export interface SyncResolvedSnapshotOptions {
     readonly varName: string;
     readonly metadata: ConnectorMetadata;
   };
+  readonly alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
   readonly confirmOverwrite?: (varNames: string[], contextLines: string[]) => Promise<boolean>;
   readonly cacheRemote?: typeof writeKeepCache;
   /** Revalidate a reviewed target before request and before local persistence. */
@@ -534,9 +538,13 @@ export async function syncResolvedSnapshot(
       finalVariableNames,
       ctx.branch,
     );
-    return opts.connector
-      ? attachConnector(merged, opts.connector.varName, ctx.branch, opts.connector.metadata)
-      : merged;
+    return applyConnectors(
+      merged,
+      ctx.branch,
+      opts.connector?.varName ?? '',
+      opts.connector?.metadata,
+      opts.alsoConnect,
+    );
   };
 
   const pushed = await pushKeepWithRetry({
@@ -858,6 +866,26 @@ export async function pushKeepWithRetry(
   };
 
   return attemptPush({ baseKeep: opts.baseKeep, baseHash: opts.baseHash, extraLines: [], attempt: 0 });
+}
+
+/**
+ * Attach the primary connector and any extras in one pass.
+ *
+ * Returns `keep` unchanged when there is nothing to attach, so the local-only
+ * path can skip rewriting keep.lock exactly as it did before.
+ */
+function applyConnectors(
+  keep: KeepFile,
+  branch: string,
+  varName: string,
+  connector: ConnectorMetadata | undefined,
+  also: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }> | undefined,
+): KeepFile {
+  const withPrimary = connector ? attachConnector(keep, varName, branch, connector) : keep;
+  return (also ?? []).reduce(
+    (acc, extra) => attachConnector(acc, extra.varName, branch, extra.entry),
+    withPrimary,
+  );
 }
 
 /** Return a deep-cloned KeepFile with `connector` set on the (varName, branch) entry. */

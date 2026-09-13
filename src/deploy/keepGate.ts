@@ -40,15 +40,19 @@ function entryFor(keep: KeepFile, name: string, branch: string): Entry | undefin
  * Fold the current decrypted values for `vars` (on the Capy `branch`) into a
  * clone of `baseKeep`, then report whether anything actually changed.
  *
- * `nowIso` is injected (not read from the clock) so the result is deterministic
- * and testable.
+ * SETS NO `changed_at`. That field is the service's to assign — it derives the
+ * value by diffing against stored state and discards whatever a client sends.
+ * The deploy path writes keep.lock straight into a git worktree and never goes
+ * through the service, so stamping here minted timestamps nothing had
+ * authority over, and they collided with server-assigned ones on merge. A new
+ * entry is written without the field; the next push through the service fills
+ * it in.
  */
 export function buildDeployKeep(
   baseKeep: KeepFile,
   envValues: Record<string, string>,
   vars: string[],
   branch: string,
-  nowIso: string,
 ): DeployKeep {
   const keep: KeepFile = JSON.parse(JSON.stringify(baseKeep));
   if (!keep.variables) keep.variables = {};
@@ -64,11 +68,9 @@ export function buildDeployKeep(
         resource_id: deriveResourceId(branch, name),
         branch,
         value_hash: hash,
-        changed_at: nowIso,
       });
     } else if (entry.value_hash !== hash) {
       entry.value_hash = hash;
-      entry.changed_at = nowIso;
     }
   }
 
@@ -78,21 +80,25 @@ export function buildDeployKeep(
 
 /**
  * `--force`: produce a keep.lock that differs from the base even when no value
- * changed, so a redeploy can re-trigger CI. We bump `changed_at` on the deployed
- * vars (meaningful: "re-shipped at T") rather than injecting a throwaway nonce.
+ * changed, so a redeploy can re-trigger CI.
+ *
+ * IT BUMPS A DEPLOY COUNTER, NOT `changed_at`. Bumping `changed_at` was the
+ * obvious trick and it was a lie: the field means "when this value last
+ * changed", and on a forced redeploy no value changed. Everything downstream
+ * inherited it — the UPDATED column, relative-time copy, and every keep.lock
+ * merge, where a deploy-stamped timestamp met a server-stamped one over an
+ * identical `value_hash` and conflicted for no reason.
+ *
+ * `deploy_revision` says the true thing instead: this lockfile has been
+ * deployed N times. A top-level field is safe here — `computeKeepHash` covers
+ * only `key:resource_id:value_hash` per variable, so this cannot perturb
+ * client/server hash agreement, and the service preserves unknown file-level
+ * fields through its `changed_at` rewrite.
  */
-export function touchDeployKeep(
-  baseKeep: KeepFile,
-  vars: string[],
-  branch: string,
-  nowIso: string,
-): string {
-  const keep: KeepFile = JSON.parse(JSON.stringify(baseKeep));
-  for (const name of vars) {
-    const entry = entryFor(keep, name, branch);
-    if (entry) entry.changed_at = nowIso;
-  }
-  return serializeKeep(keep);
+export function touchDeployKeep(baseKeep: KeepFile, _vars: string[], _branch: string): string {
+  const keep = JSON.parse(JSON.stringify(baseKeep)) as KeepFile & { deploy_revision?: unknown };
+  const current = typeof keep.deploy_revision === 'number' ? keep.deploy_revision : 0;
+  return serializeKeep({ ...keep, deploy_revision: current + 1 } as KeepFile);
 }
 
 /**

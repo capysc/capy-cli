@@ -3,12 +3,29 @@
 // whose `pkg` block is what @yao-pkg/pkg actually consumes.
 import { build } from 'esbuild';
 import { mkdir, rm, stat, writeFile, readFile } from 'fs/promises';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import path from 'path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(here, 'build');
 const outFile = path.join(outDir, 'index.cjs');
+
+// Shared with scripts/gen-third-party-notices.mjs, which runs the same build
+// with a metafile to learn exactly which packages end up inside the binary.
+export const bundleOptions = {
+  entryPoints: [path.join(here, 'src/index.ts')],
+  bundle: true,
+  platform: 'node',
+  target: 'node22',
+  format: 'cjs',
+  sourcemap: false,
+  minify: false,
+  // Keep bundled dependencies' copyright/license comments — the binary
+  // redistributes their code, so their notices ride along with it.
+  // THIRD-PARTY-NOTICES.md is the human-readable copy shipped beside it.
+  legalComments: 'eof',
+  logOverride: { 'direct-eval': 'silent' },
+};
 
 async function emptyDir(dir) {
   await rm(dir, { recursive: true, force: true });
@@ -25,18 +42,7 @@ async function main() {
 
   await emptyDir(outDir);
 
-  await build({
-    entryPoints: [path.join(here, 'src/index.ts')],
-    bundle: true,
-    platform: 'node',
-    target: 'node22',
-    format: 'cjs',
-    outfile: outFile,
-    sourcemap: false,
-    minify: false,
-    legalComments: 'none',
-    logOverride: { 'direct-eval': 'silent' },
-  });
+  await build({ ...bundleOptions, outfile: outFile });
 
   await printSize(outFile);
 
@@ -62,7 +68,9 @@ async function main() {
   console.log(`Wrote ${outFile} and ${path.join(outDir, 'package.json')}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

@@ -230,3 +230,75 @@ describe('the local-state refusals carry what the caller needs to correct itself
     }
   });
 });
+
+/**
+ * The paid org gate has to reach the user with a way to pay.
+ *
+ * Creating an org used to be a hard one-per-account cap, so both renderers
+ * special-cased `kind: 'organization'`: they said "each account can own one
+ * organization", pointed the user at `capy invite`, and deliberately withheld
+ * the upgrade link — an offer that could not be taken. CAP-550/CAP-592 turned
+ * that cap into a Team-tier paywall, which inverted the requirement: the link
+ * IS the way out now, and withholding it strands a user who is willing to pay.
+ *
+ * Both surfaces are asserted because they are separate code paths that used to
+ * carry the same mistake independently.
+ */
+describe('QUOTA_EXCEEDED on organization is a paywall, not a hard cap', () => {
+  const paidGate = () =>
+    new CapyError('Creating an organization requires a Team plan.', ERROR_CODES.QUOTA_EXCEEDED, {
+      status: 402,
+      kind: 'organization',
+      limit: 1,
+      upgrade_url: 'https://admin.staging.capy.sc/billing',
+    });
+
+  test('the terminal render offers the upgrade URL the service sent', () => {
+    const out = strip(renderError(paidGate()));
+    expect(out).toContain('https://admin.staging.capy.sc/billing');
+    // The retired tier name must not come back, and the old dead-end line
+    // must not be the whole answer.
+    expect(out).not.toContain('Capy Business');
+    expect(out).not.toContain('Each Capy account can own one organization');
+  });
+
+  test('the page render carries the upgrade URL as a fact', () => {
+    const data = buildCommandErrorData(paidGate());
+    expect(data.context).toContainEqual({
+      label: 'Upgrade',
+      value: 'https://admin.staging.capy.sc/billing',
+    });
+    // Paying is offered first; being invited is the alternative, not the
+    // only route out.
+    expect(data.remedies?.[0].text).toMatch(/upgrade/i);
+  });
+
+  test('it uses the SERVICE message rather than inventing its own reason', () => {
+    // The builder decides on the code, never the sentence — same property the
+    // rest of this file pins. Vince approves the service strings; the CLI must
+    // not paper over them with copy of its own.
+    expect(strip(renderError(paidGate()))).toContain(
+      'Creating an organization requires a Team plan.',
+    );
+    expect(buildCommandErrorData(paidGate()).detail).toBe(
+      'Creating an organization requires a Team plan.',
+    );
+  });
+
+  test('project and member refusals still surface the upgrade URL too', () => {
+    for (const kind of ['project', 'member'] as const) {
+      const err = new CapyError('nope', ERROR_CODES.QUOTA_EXCEEDED, {
+        status: 402,
+        kind,
+        limit: 5,
+        upgrade_url: 'https://admin.staging.capy.sc/billing',
+      });
+      expect(strip(renderError(err))).toContain('https://admin.staging.capy.sc/billing');
+      expect(buildCommandErrorData(err).context).toContainEqual({
+        label: 'Upgrade',
+        value: 'https://admin.staging.capy.sc/billing',
+      });
+      expect(strip(renderError(err))).not.toContain('Capy Business');
+    }
+  });
+});
