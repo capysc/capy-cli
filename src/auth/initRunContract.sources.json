@@ -4,7 +4,7 @@
     {
       "output": "src/auth/initRunContract.ts",
       "source": "service/src/initRuns/contract.ts",
-      "sha256": "5d64ebad1539e40570d6519a4cf8513e0beda9a2c9bb3352e6f457fc0e2a240f"
+      "sha256": "d8079dc43ec576c211bf9149ec6bce0936827ee31f5d2598e95b81bbb05eef32"
     },
     {
       "output": "tests/fixtures/initRunContract.corpus.json",

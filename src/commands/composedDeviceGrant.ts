@@ -318,7 +318,7 @@ const acknowledgeAuthentication = async (path: string, state: Checkpoint): Promi
   }
   if (body?.stage !== 'authenticated' || body.user_id !== issued.session.user.id
     || body.flow_id !== state.grant.flow_id) return reject('AUTH_COMPLETION_INVALID');
-  const authenticated = { ...state, authenticated: true };
+  const authenticated = { ...state, authenticated: true } as const;
   saveCheckpoint(path, authenticated);
   return authenticated;
 };
