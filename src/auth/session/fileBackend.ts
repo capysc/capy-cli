@@ -219,7 +219,9 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
     const verifiedInstallation = currentVerifiedAuthInstallationContext();
     if (fence) {
       const context = currentRefreshRotationContext();
-      if (!context || context.fenceId !== fence.id || digest(session.refresh_token) === fence.authority_sha256) {
+      // WorkOS may return the same refresh token. The held refresh context,
+      // durable write and readback establish completion, not token inequality.
+      if (!context || context.fenceId !== fence.id || !session.refresh_token) {
         verifiedInstallation?.settle({ ok: false });
         throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
       }

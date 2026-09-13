@@ -678,6 +678,12 @@ program
   .action(async (options, command) => {
     assertNotLocalOnly('pair');
     const expectedUserId = expectedUserIdFor(command);
+    if (command.optsWithGlobals().web === true && options.flowId === undefined) {
+      const { runComposedDeviceGrant } = await import('./commands/composedDeviceGrant');
+      const code = await runComposedDeviceGrant(options.authenticationFlowId, expectedUserId);
+      if (code !== 0) process.exit(code);
+      return;
+    }
     const instrumented = options.flowId !== undefined || options.authenticationFlowId !== undefined
       || expectedUserId !== undefined || options.serviceOrigin !== undefined || options.runtimeOnly === true;
     if (instrumented) {
