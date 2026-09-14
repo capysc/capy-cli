@@ -70,6 +70,7 @@ const captureInitiate = mock((value: Readonly<{
   state: string;
   redirect_uri: string;
   organization_id?: string;
+  force_login?: boolean;
 }>) => value);
 
 async function serviceFetch(url: string, init?: RequestInit): Promise<Response> {
@@ -81,6 +82,7 @@ async function serviceFetch(url: string, init?: RequestInit): Promise<Response> 
       state: body.state,
       redirect_uri: body.redirect_uri,
       organization_id: body.organization_id,
+      force_login: body.force_login,
     });
     return Response.json({
       auth_url: 'https://authkit.example.test/authorize',
@@ -250,6 +252,7 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker', () => {
       expect(bridgeUrl.pathname).toBe('/auth/start');
       expect(bridgeUrl.searchParams.get('cli_transport')).toBe('loopback-direct');
       expect(bridgeUrl.searchParams.get('switch')).toBe('1');
+      expect(captureInitiate.mock.calls[0]?.[0].force_login).toBeUndefined();
 
       const init = captureInitiate.mock.calls[0]![0];
       await landOnLoopback(init.redirect_uri, init.state, 'fake-code-4');

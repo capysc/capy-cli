@@ -255,7 +255,9 @@ export class AuthService {
         redirect_uri: redirectUri,
         organization_id: organizationId,
         code_challenge: oauthServer.getCodeChallenge(),
-        ...(forceLogin ? { force_login: true } : {}),
+        // Keep performs the forced account switch itself. Its signed callback
+        // must remain silent after that authenticated browser session exists.
+        ...(forceLogin && !useKeepBridge ? { force_login: true } : {}),
       },
     );
     const auth_url = useKeepBridge
