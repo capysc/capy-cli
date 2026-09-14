@@ -15,7 +15,7 @@ const target = { name: 'fixture', kind: 'cf-worker', mode: 'direct' as const, br
 const fixture = (connected: boolean): KeepFile => ({ version: '3.0', org_id: 'org_fixture', project_id: 'project_fixture', project_name: 'Fixture', variables: Object.fromEntries(
   ['KEY_ONE', 'KEY_TWO'].map(name => [name, [{ resource_id: name, branch: 'development', value_hash: 'hash_fixture', ...(connected ? { connector } : {}) }]])) });
 
-type Scenario = Readonly<{ unconnected?: boolean; fatal?: boolean; failSync?: boolean; failDeploy?: boolean; decline?: boolean; noPush?: boolean; foreign?: boolean; missingProject?: boolean; connectDeclined?: boolean }>;
+type Scenario = Readonly<{ unconnected?: boolean; noDeployment?: boolean; fatal?: boolean; failSync?: boolean; failDeploy?: boolean; decline?: boolean; noPush?: boolean; foreign?: boolean; missingProject?: boolean; connectDeclined?: boolean }>;
 async function journey(options: Scenario = {}) {
   const event = mock((_name: string) => undefined);
   const output = mock((_event: unknown) => undefined);
@@ -39,7 +39,7 @@ async function journey(options: Scenario = {}) {
   });
   const load = spyOn(registry, 'loadProvider').mockImplementation(async () => ({ name: 'workos', description: 'Fixture', rotate,
     connect: async () => { throw new Error('unused'); } }));
-  const targets = spyOn(config, 'listTargets').mockReturnValue([target]);
+  const targets = spyOn(config, 'listTargets').mockReturnValue(options.noDeployment ? [] : [target]);
   const inspect = spyOn(readiness, 'inspectRotateDeployment').mockResolvedValue({ checks: [], choices: [] });
   const ship = spyOn(deploy, 'deployCommand').mockImplementation(async () => { event('deploy'); return options.failDeploy ? 1 : 0; });
   const interaction: Interaction = { output, progress: output, goal,
@@ -54,7 +54,7 @@ async function journey(options: Scenario = {}) {
   try {
     await runWithInteraction(interaction, () => new RotateCommand().execute(options.fatal ? undefined : 'KEY_ONE', {
       all: options.fatal, provider: 'workos', nonTty: true, web: false, noPush: options.noPush,
-      deployTarget: 'fixture', expectedUserId: 'user_fixture', flowProvider: 'workos',
+      deployTarget: options.noDeployment ? undefined : 'fixture', expectedUserId: 'user_fixture', flowProvider: 'workos',
     }));
     expect(goal).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(output.mock.calls)).not.toContain('synthetic-secret-do-not-persist');
@@ -71,6 +71,15 @@ describe('ordinary rotate using shared Interaction with fake providers', () => {
     const result = await journey();
     expect(result.events).toEqual(['approve', 'create:KEY_ONE', 'expire:KEY_ONE', 'write-sync', 'deploy']);
     expect(result.outcome.status).toBe('succeeded');
+  });
+  test('zero deployment targets rotates and syncs without opening deployment setup', async () => {
+    const ensure = spyOn(deploy, 'ensureDeployTarget').mockImplementation(async () => { throw new Error('Unrequested deployment setup'); });
+    try {
+      const result = await journey({ noDeployment: true });
+      expect(result.events).toEqual(['approve', 'create:KEY_ONE', 'expire:KEY_ONE', 'write-sync']);
+      expect(result.outcome.status).toBe('succeeded');
+      expect(ensure).not.toHaveBeenCalled();
+    } finally { ensure.mockRestore(); }
   });
   test('unconnected credential composes Connect and then the same rotation', async () => {
     const result = await journey({ unconnected: true });

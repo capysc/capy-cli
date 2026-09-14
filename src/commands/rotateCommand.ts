@@ -646,7 +646,8 @@ export class RotateCommand {
     const { listTargets } = await import('../deploy/config');
     const configuredTargets = listTargets(process.cwd());
     const resolvedDeployTarget = await (async (): Promise<TargetConfig | null> => {
-    if (opts.noPush) {
+    if (opts.noPush || (configuredTargets.length === 0 && !opts.deployTarget && !opts.deployKind)) {
+      // No configured or explicitly requested deployment means rotate + sync only.
       // `--no-push` ships nothing, so there is no target to resolve. The plan
       // is still drawn for that run — the destructive half is unchanged — with
       // the stops it will not travel struck through.
