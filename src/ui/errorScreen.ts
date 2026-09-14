@@ -1,3 +1,4 @@
+import { currentInteraction } from './interaction';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { FlowHttpError } from '../flows/client';
@@ -114,6 +115,7 @@ export async function displayErrorAndExit(
   error: any,
   context: ErrorContext = {},
 ): Promise<never> {
+  if (currentInteraction()) throw error;
   if (error?.name === 'ExitPromptError') {
     process.exit(0);
   }

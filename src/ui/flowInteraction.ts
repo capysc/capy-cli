@@ -19,7 +19,7 @@ const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.m
   : JSON.stringify(value);
 
 /** Adapter only: executes the ordinary command under the encrypted Flow I/O boundary. */
-export async function runWithFlowInteraction(operation: () => Promise<void>, devMode: boolean): Promise<void> {
+export async function runWithFlowInteraction(operation: () => Promise<void>, devMode: boolean, descriptor: Readonly<{ command: 'capy' | 'rotate'; continuationTool: 'capy_onboard_continue' | 'capy_rotate_continue'; expectedUserId?: string }> = { command: 'capy', continuationTool: 'capy_onboard_continue' }): Promise<void> {
   const project = await new ProjectManager().detectProjectState();
   const auth = (() => {
     try { return new AuthService(undefined, devMode, project.userId); }
@@ -31,6 +31,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   const identity = await auth.authenticateSilent();
   if (!identity.success || !identity.user_id || !identity.organization_id
     || !readLocalRoot(identity.organization_id, identity.user_id)) throw new Error('PAIR_REQUIRED');
+  if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new Error('AUTH_ACCOUNT_MISMATCH');
   const binding = resolveInitRunIdentity();
   const runtimeId = randomUUID();
   const keys = mintConnectionKeypair();
@@ -60,13 +61,13 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     return result;
   };
   const created = await request<{ readonly flow_id: string; readonly client_pubkey: string }>('/flows/conversation', signed('create', runtimeId, 'create', {
-    command: 'capy', runtime_id: runtimeId, repo_fingerprint: binding.repositoryFingerprint, client_pubkey: keys.publicKeyB64, machine_name: binding.machineName,
+    command: descriptor.command, runtime_id: runtimeId, repo_fingerprint: binding.repositoryFingerprint, client_pubkey: keys.publicKeyB64, machine_name: binding.machineName,
   }));
   if (created.client_pubkey !== keys.publicKeyB64) throw new Error('CONVERSATION_BINDING_MISMATCH');
   const flowId = created.flow_id;
   const url = `${keepOrigin()}/flow/conversation?f=${encodeURIComponent(flowId)}`;
   // Only the public handoff goes to stdout. Workflow content always uses the encrypted adapter.
-  process.stdout.write(`${JSON.stringify({ ok: true, command: 'capy', flow_id: flowId, url, continuation: {tool: 'capy_onboard_continue', args: {command: 'capy', flow_id: flowId, wait: true}} })}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, command: descriptor.command, flow_id: flowId, url, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: true}} })}\n`);
   const detach = async (): Promise<void> => {
     try {
       const token = await auth.getValidToken();
@@ -126,7 +127,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       const boundary = item.type === 'prompt' || item.type === 'goal';
       await append(item.type, boundary ? { type: 'turn', messages: items,
         ...(item.type === 'prompt' ? { question: item.data.question } : { outcome: item.data }) } : item.data, item.correlation);
-      if (item.type === 'goal') process.stdout.write(`${JSON.stringify({ok: true, command: 'capy', flow_id: flowId, outcome: item.data.status, continuation: {tool: 'capy_onboard_continue', args: {command: 'capy', flow_id: flowId, wait: false}}})}\n`);
+      if (item.type === 'goal') process.stdout.write(`${JSON.stringify({ok: true, command: descriptor.command, flow_id: flowId, outcome: item.data.status, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: false}}})}\n`);
       item.resolve();
       return consume(boundary ? [] : items);
     } catch (error) {
@@ -169,14 +170,17 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     await emit('prompt', { question: question.view }, id);
     const payload = await answer;
     const decision = question.decide(payload);
-    if ('error' in decision) { await emit('output', { message: decision.error }); return ask(question); }
+    if ('error' in decision) { await emit('output', { message: decision.error, level: 'error' }); return ask(question); }
     const view = question.view as Readonly<{ input?: Readonly<{ choices?: readonly Readonly<{value: unknown; label: string}>[] }> }>;
-    const selectedLabel = view.input?.choices?.find(choice => Object.is(choice.value, payload.value))?.label;
+    const submitted = payload.value;
+    const selectedLabel = Array.isArray(submitted)
+      ? view.input?.choices?.filter(choice => submitted.includes(choice.value)).map(choice => choice.label).join(', ')
+      : view.input?.choices?.find(choice => Object.is(choice.value, submitted))?.label;
     await emit('output', { message: selectedLabel ?? String(payload.value ?? ''), answer_to: id, value: payload.value });
     return decision.value;
   };
   const interaction: Interaction = {
-    output: event => emit('output', { text: event.text }),
+    output: event => emit('output', { ...event }),
     progress: event => emit('progress', { ...event }),
     prompt: ask,
     goal: outcome => emit('goal', { ...outcome }),

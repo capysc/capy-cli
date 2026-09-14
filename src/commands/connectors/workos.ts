@@ -1,3 +1,5 @@
+import { currentInteraction, prompt, commandExit, interactionOrTerminal, InteractionCommandError } from '../../ui/interaction';
+import { human, humanError, humanWarning } from '../../ui/webMode';
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -85,10 +87,10 @@ function workosCliInstalled(): boolean {
 
 function ensureWorkOSCliInstalled(): void {
   if (workosCliInstalled()) return;
-  console.error(`\n  ${B('workos')} CLI not found.`);
-  console.error(`  Install: ${WORKOS_CLI_MISSING.link!.url}`);
-  console.error(`  Or: ${B(WORKOS_CLI_MISSING.remedy!)}\n`);
-  process.exit(1);
+  humanError(`\n  ${B('workos')} CLI not found.`);
+  humanError(`  Install: ${WORKOS_CLI_MISSING.link!.url}`);
+  humanError(`  Or: ${B(WORKOS_CLI_MISSING.remedy!)}\n`);
+  commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
 }
 
 interface WorkOSCredentials {
@@ -120,7 +122,7 @@ const CREDENTIALS_FILE = () => join(homedir(), '.workos', 'credentials.json');
  * keychain read by an unfamiliar binary can raise a system dialog. Reaching
  * for the quiet path first means the common case never interrupts anyone.
  */
-function readStoredCredentials(): WorkOSCredentials | null {
+export function readStoredCredentials(): WorkOSCredentials | null {
   const fromFile = readCredentialsFile();
   if (fromFile) return fromFile;
   return readCredentialsKeyring();
@@ -249,6 +251,7 @@ async function loginAndReadToken(nonTty?: boolean): Promise<string> {
   // Wording covers both callers: never signed in, and signed in but stale.
   // Naming the wrong one sends the user looking for a session that was never
   // there, or makes them think they have to sign out first.
+  if (currentInteraction()) throw new InteractionCommandError('ROTATE_WORKOS_AUTH_REQUIRED', 'WorkOS authentication is required. Authenticate in the host shell, then retry.');
   if (!isInteractive(nonTty)) {
     refuseNonInteractive(
       'Capy needs a WorkOS session and getting one needs a browser sign-in',
@@ -256,18 +259,18 @@ async function loginAndReadToken(nonTty?: boolean): Promise<string> {
     );
   }
 
-  console.log(`\n  Capy needs a WorkOS session. Opening ${B('workos auth login')}.`);
+  human(`\n  Capy needs a WorkOS session. Opening ${B('workos auth login')}.`);
   const result = spawnSync('workos', ['auth', 'login'], { stdio: 'inherit' });
   if (result.status !== 0) {
-    console.error(`\n  ${B('workos auth login')} failed or was cancelled. Nothing was changed.\n`);
-    process.exit(1);
+    humanError(`\n  ${B('workos auth login')} failed or was cancelled. Nothing was changed.\n`);
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
   const renewed = readStoredCredentials();
   if (!renewed || renewed.expiresAt - Date.now() <= 0) {
-    console.error(`\n  Signed in, but Capy could not read a usable WorkOS session afterwards.`);
-    console.error(`  If you signed in with a different account, run ${B('workos auth status')} to check.\n`);
-    process.exit(1);
+    humanError(`\n  Signed in, but Capy could not read a usable WorkOS session afterwards.`);
+    humanError(`  If you signed in with a different account, run ${B('workos auth status')} to check.\n`);
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
   return renewed.accessToken;
 }
@@ -420,7 +423,7 @@ async function graphql<T>(
  * connector manages use `ExpireKeyInput { keyId, expiredAt }`. Different
  * field names, different noun, silently wrong results if crossed.
  */
-const TEAM_ENVIRONMENTS_QUERY = `
+export const TEAM_ENVIRONMENTS_QUERY = `
   query teamProjectsV2 {
     currentTeam {
       projectsV2 {
@@ -496,20 +499,20 @@ function failWorkOSRequest(err: unknown, context: WorkOSErrorContext): never {
   if (!(err instanceof WorkOSGraphQLError)) throw err;
 
   if (err.status === 403) {
-    console.error(`\n  Your WorkOS account cannot see this environment.`);
-    if (context.email) console.error(`  Signed in as ${B(context.email)}.`);
+    humanError(`\n  Your WorkOS account cannot see this environment.`);
+    if (context.email) humanError(`  Signed in as ${B(context.email)}.`);
     if (context.clientIdVar && context.clientId) {
-      console.error(`  ${B(context.clientIdVar)} is ${context.clientId}.`);
+      humanError(`  ${B(context.clientIdVar)} is ${context.clientId}.`);
     }
-    if (context.environmentName) console.error(`  Reaching for ${B(context.environmentName)}.`);
-    console.error(`\n  Check ${B('workos auth status')} — signing in as a different account is`);
-    console.error('  the usual fix.\n');
-    process.exit(1);
+    if (context.environmentName) humanError(`  Reaching for ${B(context.environmentName)}.`);
+    humanError(`\n  Check ${B('workos auth status')} — signing in as a different account is`);
+    humanError('  the usual fix.\n');
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
   const status = err.status ? ` (${err.status})` : '';
-  console.error(`\n  WorkOS request failed${status}. Try again.\n`);
-  process.exit(1);
+  humanError(`\n  WorkOS request failed${status}. Try again.\n`);
+  commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
 }
 
 interface WorkOSErrorContext {
@@ -613,7 +616,7 @@ export function findApiKeyCandidates(
   const matches = Object.entries(env)
     .filter(([, value]) => typeof value === 'string' && looksLikeWorkOSApiKey(value))
     .map(([name]) => ({ name, byName: looksLikeWorkOSKeyName(name) }));
-  return [...matches].sort(
+  return matches.toSorted(
     (a, b) => Number(b.byName) - Number(a.byName) || a.name.localeCompare(b.name),
   );
 }
@@ -626,9 +629,9 @@ async function chooseApiKeyVar(ctx: ResolvedContext, opts: ConnectOpts): Promise
   if (opts.var) {
     const requested = opts.var.trim();
     if (!(requested in ctx.localPlaintext)) {
-      console.error(`\n  ${B(requested)} is not in .env on branch ${ctx.branch}.`);
-      console.error('  `connect` links an existing variable to a provider; it does not create one.\n');
-      process.exit(1);
+      humanError(`\n  ${B(requested)} is not in .env on branch ${ctx.branch}.`);
+      humanError('  `connect` links an existing variable to a provider; it does not create one.\n');
+      commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
     }
     return requested;
   }
@@ -636,31 +639,30 @@ async function chooseApiKeyVar(ctx: ResolvedContext, opts: ConnectOpts): Promise
   const candidates = findApiKeyCandidates(ctx.localPlaintext);
 
   if (candidates.length === 0) {
-    console.error(`\n  No WorkOS API key found in .env on branch ${ctx.branch}.`);
-    console.error(`  Capy looked for a variable holding an ${B('sk_test_…')} or ${B('sk_live_…')} value`);
-    console.error(`  (conventionally ${B(DEFAULT_VAR)}). Add it, run ${B('capy')} to sync, then connect,`);
-    console.error(`  or name it explicitly with ${B('--var <NAME>')}.\n`);
-    process.exit(1);
+    humanError(`\n  No WorkOS API key found in .env on branch ${ctx.branch}.`);
+    humanError(`  Capy looked for a variable holding an ${B('sk_test_…')} or ${B('sk_live_…')} value`);
+    humanError(`  (conventionally ${B(DEFAULT_VAR)}). Add it, run ${B('capy')} to sync, then connect,`);
+    humanError(`  or name it explicitly with ${B('--var <NAME>')}.\n`);
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
   const named = candidates.filter((c) => c.byName);
   const unambiguous = named.length === 1 ? named[0] : candidates.length === 1 ? candidates[0] : undefined;
   if (unambiguous) {
     if (unambiguous.name !== DEFAULT_VAR) {
-      console.log(`  Using ${B(unambiguous.name)} as the WorkOS API key.`);
+      human(`  Using ${B(unambiguous.name)} as the WorkOS API key.`);
     }
     return unambiguous.name;
   }
 
-  if (!isInteractive(opts.nonTty)) {
+  if (!interactionOrTerminal(opts.nonTty)) {
     refuseNonInteractive(
       'which variable holds your WorkOS key is ambiguous without a prompt',
       `Pass --var <NAME> (candidates: ${candidates.map((c) => c.name).join(', ')}).`,
     );
   }
 
-  const inquirer = (await import('inquirer')).default;
-  const { picked } = await inquirer.prompt([
+  const { picked } = await prompt([
     {
       type: 'list',
       name: 'picked',
@@ -721,7 +723,7 @@ export function findClientIdCandidates(
     .filter(([, value]) => typeof value === 'string' && looksLikeWorkOSClientId(value))
     .map(([name, value]) => ({ name, value, byName: looksLikeClientIdName(name) }));
   // Sorting a freshly built array — nothing outside this function has seen it.
-  return [...matches].sort(
+  return matches.toSorted(
     (a, b) => Number(b.byName) - Number(a.byName) || a.name.localeCompare(b.name),
   );
 }
@@ -776,9 +778,9 @@ async function chooseClientId(
   const misshapen = findMisshapenClientIdVars(ctx.localPlaintext);
 
   if (candidates.length === 0 && misshapen.length > 0) {
-    console.log(`\n  ${B(misshapen.join(', '))} does not hold a WorkOS client ID`);
-    console.log(`  (expected a ${B('client_…')} value).`);
-    if (!isInteractive(nonTty)) {
+    human(`\n  ${B(misshapen.join(', '))} does not hold a WorkOS client ID`);
+    human(`  (expected a ${B('client_…')} value).`);
+    if (!interactionOrTerminal(nonTty)) {
       refuseNonInteractive(
         `${misshapen.join(', ')} does not hold a WorkOS client ID and there is no way to ask which environment this is`,
         `Set it to the client_… value for this project's WorkOS environment.`,
@@ -791,13 +793,13 @@ async function chooseClientId(
   // edited that variable expecting it to matter, and silently using a
   // different one rotates against an environment they did not choose.
   if (misshapen.length > 0) {
-    console.log(`  Ignoring ${B(misshapen.join(', '))} — not a ${B('client_…')} value.`);
+    human(`  Ignoring ${B(misshapen.join(', '))} — not a ${B('client_…')} value.`);
   }
 
   if (candidates.length === 0) {
-    console.log(`\n  No WorkOS client ID found in .env on branch ${ctx.branch}`);
-    console.log(`  (conventionally ${B(CLIENT_ID_VAR)}, holding a ${B('client_…')} value).`);
-    if (!isInteractive(nonTty)) {
+    human(`\n  No WorkOS client ID found in .env on branch ${ctx.branch}`);
+    human(`  (conventionally ${B(CLIENT_ID_VAR)}, holding a ${B('client_…')} value).`);
+    if (!interactionOrTerminal(nonTty)) {
       refuseNonInteractive(
         'no WorkOS client ID in .env and there is no way to ask which environment this is',
         `Add ${CLIENT_ID_VAR} with this project's client_… value, run \`capy\` to sync, then connect.`,
@@ -813,22 +815,21 @@ async function chooseClientId(
     // Say which variable was used whenever it is not the conventional name, so
     // a fuzzy match is never a silent one.
     if (unambiguous.name !== CLIENT_ID_VAR) {
-      console.log(`  Using ${B(unambiguous.name)} as the WorkOS client ID.`);
+      human(`  Using ${B(unambiguous.name)} as the WorkOS client ID.`);
     }
     return unambiguous;
   }
 
   // Genuinely ambiguous: a monorepo, or a staging/production pair in one file.
   // Ask, because the user knows which app this directory is and Capy does not.
-  if (!isInteractive(nonTty)) {
+  if (!interactionOrTerminal(nonTty)) {
     refuseNonInteractive(
       'more than one WorkOS client ID is present and picking one is ambiguous without a prompt',
       `Candidates: ${candidates.map((c) => c.name).join(', ')}. Leave only the one this project uses.`,
     );
   }
 
-  const inquirer = (await import('inquirer')).default;
-  const { picked } = await inquirer.prompt([
+  const { picked } = await prompt([
     {
       type: 'list',
       name: 'picked',
@@ -918,17 +919,17 @@ async function chooseEnvironment(
   recordedEnvironmentId?: string,
 ): Promise<TeamEnvironment> {
   if (environments.length === 0) {
-    console.error(`\n  The signed-in WorkOS account has no environments.`);
-    console.error(`  Check with ${B('workos auth status')} that this is the right account.\n`);
-    process.exit(1);
+    humanError(`\n  The signed-in WorkOS account has no environments.`);
+    humanError(`  Check with ${B('workos auth status')} that this is the right account.\n`);
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
-  if (!isInteractive(nonTty)) {
+  if (!interactionOrTerminal(nonTty)) {
     if (match) return match;
-    console.error(`\n  No WorkOS environment matches ${B(clientIdVar)} (${clientId ?? 'unset'}).`);
-    console.error('  Either the signed-in WorkOS account is not the one that owns this');
-    console.error(`  environment, or the environment no longer exists. Check with ${B('workos auth status')}.\n`);
-    process.exit(1);
+    humanError(`\n  No WorkOS environment matches ${B(clientIdVar)} (${clientId ?? 'unset'}).`);
+    humanError('  Either the signed-in WorkOS account is not the one that owns this');
+    humanError(`  environment, or the environment no longer exists. Check with ${B('workos auth status')}.\n`);
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
   /**
@@ -950,8 +951,8 @@ async function chooseEnvironment(
     // Still say it when `.env` disagrees — the client ID is what the running
     // app uses, so a silent divergence there is worth one line.
     if (match && match.id !== recorded.id) {
-      console.log(`\n  ${B(clientIdVar)} points at ${B(environmentLabel(match))}, but`);
-      console.log(`  keep.lock records ${B(environmentLabel(recorded))}. Using the recorded one.\n`);
+      human(`\n  ${B(clientIdVar)} points at ${B(environmentLabel(match))}, but`);
+      human(`  keep.lock records ${B(environmentLabel(recorded))}. Using the recorded one.\n`);
     }
     return recorded;
   }
@@ -961,16 +962,15 @@ async function chooseEnvironment(
     // had none to name. Both end at the same question, so both get asked it —
     // the environments are already in hand, and refusing while holding the
     // answer helps nobody.
-    console.log(
+    human(
       clientId
         ? `\n  ${B(clientIdVar)} (${clientId}) matches no environment on this account.`
         : `\n  Capy could not tell which WorkOS environment this project uses.`,
     );
-    console.log('  Pick the one this project uses, or cancel and check `workos auth status`.');
+    human('  Pick the one this project uses, or cancel and check `workos auth status`.');
   }
 
-  const inquirer = (await import('inquirer')).default;
-  const { picked } = await inquirer.prompt([
+  const { picked } = await prompt([
     {
       type: 'list',
       name: 'picked',
@@ -985,8 +985,8 @@ async function chooseEnvironment(
 
   const chosen = environments.find((e) => e.id === picked) ?? match ?? environments[0];
   if (match && chosen.id !== match.id) {
-    console.log(`\n  Heads up: ${B(environmentLabel(chosen))} is not what ${B(clientIdVar)} points at`);
-    console.log(`  (${B(environmentLabel(match))}). Rotating here changes a key that app is not using.\n`);
+    human(`\n  Heads up: ${B(environmentLabel(chosen))} is not what ${B(clientIdVar)} points at`);
+    human(`  (${B(environmentLabel(match))}). Rotating here changes a key that app is not using.\n`);
   }
   return chosen;
 }
@@ -1045,7 +1045,7 @@ export function findPreviousRotatedKey(
       (applicationId === null || k.applicationId === applicationId),
   );
   // Newest first. Sorting a freshly built array; nothing else has seen it.
-  const ordered = [...candidates].sort((a, b) => sortableTime(b) - sortableTime(a));
+  const ordered = candidates.toSorted((a, b) => sortableTime(b) - sortableTime(a));
   return ordered[0];
 }
 
@@ -1081,10 +1081,10 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
   const varName = await chooseApiKeyVar(ctx, opts);
 
   if (!(varName in ctx.localPlaintext)) {
-    console.error(`\n  ${B(varName)} is not in .env on branch ${ctx.branch}.`);
-    console.error('  `connect` links an existing variable to a provider; it does not create one.');
-    console.error(`  Add ${B(varName)} to .env, run ${B('capy')} to sync, then connect it.\n`);
-    process.exit(1);
+    humanError(`\n  ${B(varName)} is not in .env on branch ${ctx.branch}.`);
+    humanError('  `connect` links an existing variable to a provider; it does not create one.');
+    humanError(`  Add ${B(varName)} to .env, run ${B('capy')} to sync, then connect it.\n`);
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
   const token = await acquireToken(opts.nonTty);
@@ -1102,12 +1102,12 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
     // a production key whose plaintext WorkOS will not return (it is shown
     // once, at creation), and a connector that refused those would refuse
     // exactly the variables most worth rotating.
-    console.log(`\n  Linked ${B(varName)} to WorkOS (${target.environmentName}).`);
-    console.log('  Capy could not match the current value against a key WorkOS will show,');
-    console.log('  which is expected for a production key. Rotation will mint a new key');
-    console.log('  in this environment and expire the one it replaces.\n');
+    human(`\n  Linked ${B(varName)} to WorkOS (${target.environmentName}).`);
+    human('  Capy could not match the current value against a key WorkOS will show,');
+    human('  which is expected for a production key. Rotation will mint a new key');
+    human('  in this environment and expire the one it replaces.\n');
   } else {
-    console.log(`\n  Linked ${B(varName)} to WorkOS (${target.environmentName}).\n`);
+    human(`\n  Linked ${B(varName)} to WorkOS (${target.environmentName}).\n`);
   }
 
   const createdAt = Math.floor(Date.now() / 1000);
@@ -1152,7 +1152,7 @@ async function connect(ctx: ResolvedContext, opts: ConnectOpts): Promise<Connect
       ];
 
   if (alsoClientId) {
-    console.log(`  Also tracking ${B(target.clientIdVar)}.`);
+    human(`  Also tracking ${B(target.clientIdVar)}.`);
   }
 
   return {
@@ -1194,15 +1194,15 @@ async function rotate(
   const currentValue = ctx.localPlaintext[varName];
   const recordedAsClientId = previous.source === CLIENT_ID_SOURCE;
   if (recordedAsClientId || (currentValue && looksLikeWorkOSClientId(currentValue))) {
-    console.error(`\n  ${B(varName)} is a WorkOS client ID, which cannot be rotated.`);
+    humanError(`\n  ${B(varName)} is a WorkOS client ID, which cannot be rotated.`);
     if (recordedAsClientId && currentValue && !looksLikeWorkOSClientId(currentValue)) {
-      console.error(`  Its value no longer looks like one — an earlier rotate may have`);
-      console.error(`  overwritten it with an API key. Restore it from the WorkOS dashboard.`);
+      humanError(`  Its value no longer looks like one — an earlier rotate may have`);
+      humanError(`  overwritten it with an API key. Restore it from the WorkOS dashboard.`);
     }
-    console.error('  A client ID names an environment; it is not a secret and WorkOS does');
-    console.error('  not issue a replacement. Rotating would overwrite it with an API key.');
-    console.error(`\n  Rotate the key instead: ${B(`capy rotate ${DEFAULT_VAR}`)}\n`);
-    process.exit(1);
+    humanError('  A client ID names an environment; it is not a secret and WorkOS does');
+    humanError('  not issue a replacement. Rotating would overwrite it with an API key.');
+    humanError(`\n  Rotate the key instead: ${B(`capy rotate ${DEFAULT_VAR}`)}\n`);
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
   const token = await acquireToken(opts.nonTty);
@@ -1214,8 +1214,8 @@ async function rotate(
   // uses while leaving the live one alone.
   const target = await resolveTarget(ctx, token, opts.nonTty, previous.account_id);
   if (previous.account_id && previous.account_id !== target.environmentId) {
-    console.log(`\n  ${B(CLIENT_ID_VAR)} now points at ${target.environmentName}.`);
-    console.log('  Rotating there, and updating the recorded environment.\n');
+    human(`\n  ${B(CLIENT_ID_VAR)} now points at ${target.environmentName}.`);
+    human('  Rotating there, and updating the recorded environment.\n');
   }
 
   const current = ctx.localPlaintext[varName];
@@ -1231,9 +1231,9 @@ async function rotate(
 
   const created = await createKey(token, target.environmentId, applicationId, rotationKeyName());
   if (!created) {
-    console.error(`\n  WorkOS did not create a new key for ${B(varName)}.`);
-    console.error('  Nothing was changed. Try again, or check the WorkOS dashboard.\n');
-    process.exit(1);
+    humanError(`\n  WorkOS did not create a new key for ${B(varName)}.`);
+    humanError('  Nothing was changed. Try again, or check the WorkOS dashboard.\n');
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
   // Who gets expired. The key whose value is in `.env` when we could identify
@@ -1251,21 +1251,21 @@ async function rotate(
     ? await expireKey(token, superseded.id, new Date(Date.now() + OVERLAP_MS))
     : false;
 
-  console.log(`\n  Rotated ${B(varName)} in ${target.environmentName}.`);
+  human(`\n  Rotated ${B(varName)} in ${target.environmentName}.`);
   if (scheduled && superseded) {
     // Name the key when it was found by provenance rather than by value —
     // "the previous key" is precise when we matched `.env`, and a guess worth
     // showing the user when we matched a `capy-rotated-*` name instead.
     const via = outgoing ? 'The previous key' : `The previous Capy key (${superseded.name})`;
-    console.log(`  ${via} stops working in 1 hour — deploy before then.`);
+    humanWarning(`  ${via} stops working in 1 hour — deploy before then.`);
   } else if (superseded) {
-    console.log(`  Heads up: the new key is live, but Capy could not schedule the previous`);
-    console.log(`  one (${superseded.id}) to expire. Revoke it in the WorkOS dashboard.`);
+    humanWarning(`  Heads up: the new key is live, but Capy could not schedule the previous`);
+    humanWarning(`  one (${superseded.id}) to expire. Revoke it in the WorkOS dashboard.`);
   } else {
-    console.log(`  Capy could not identify the previous key, so nothing was expired.`);
-    console.log(`  Revoke the old key in the WorkOS dashboard once the new one is deployed.`);
+    humanWarning(`  Capy could not identify the previous key, so nothing was expired.`);
+    humanWarning(`  Revoke the old key in the WorkOS dashboard once the new one is deployed.`);
   }
-  console.log('');
+  human('');
 
   return {
     value: created.value,
@@ -1307,24 +1307,23 @@ async function chooseApplicationId(
   const applications = [...new Set(keys.flatMap((k) => (k.applicationId ? [k.applicationId] : [])))];
 
   if (applications.length === 0) {
-    console.error(`\n  ${target.environmentName} has no keys Capy can see, so there is no`);
-    console.error(`  application to mint ${B(varName)} into. Create the first key in the`);
-    console.error('  WorkOS dashboard, then connect.\n');
-    process.exit(1);
+    humanError(`\n  ${target.environmentName} has no keys Capy can see, so there is no`);
+    humanError(`  application to mint ${B(varName)} into. Create the first key in the`);
+    humanError('  WorkOS dashboard, then connect.\n');
+    commandExit(1, 'WorkOS could not complete this step. Review the preceding instructions before retrying.');
   }
 
-  if (!isInteractive(nonTty)) {
+  if (!interactionOrTerminal(nonTty)) {
     refuseNonInteractive(
       `which WorkOS application ${varName} belongs to is ambiguous without a prompt`,
       `${target.environmentName} has ${applications.length} applications and the current value matched none of its keys.`,
     );
   }
 
-  console.log(`\n  ${target.environmentName} has ${applications.length} applications, and the current`);
-  console.log(`  value of ${B(varName)} matched none of their keys — expected for a production key.`);
+  human(`\n  ${target.environmentName} has ${applications.length} applications, and the current`);
+  human(`  value of ${B(varName)} matched none of their keys — expected for a production key.`);
 
-  const inquirer = (await import('inquirer')).default;
-  const { picked } = await inquirer.prompt([
+  const { picked } = await prompt([
     {
       type: 'list',
       name: 'picked',

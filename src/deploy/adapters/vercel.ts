@@ -33,7 +33,8 @@ import {
 import { spawnSync, spawn } from 'child_process';
 import { homedir } from 'os';
 import { basename, join } from 'path';
-import inquirer from 'inquirer';
+import { prompt, currentInteraction } from '../../ui/interaction';
+import { human } from '../../ui/webMode';
 import { LIST_THEME } from '../../ui/promptStyle';
 import {
   DeployAdapter,
@@ -280,31 +281,35 @@ type PickerOutcome =
   /** The user asked for the wizard. */
   | { kind: 'declined' };
 
+const writeVercelMessage = (text: string): void => {
+  if (currentInteraction()) return human(text);
+  process.stdout.write(text);
+};
+
 async function linkByProjectPicker(projectDir: string): Promise<PickerOutcome> {
   const token = readVercelCliToken();
   if (!token) return { kind: 'no-token' };
 
-  let projects: PickableProject[];
-  try {
-    projects = await listAllVercelProjects(token);
-  } catch (e) {
-    return { kind: 'api-error', detail: e instanceof Error ? e.message : String(e) };
-  }
-  if (projects.length === 0) return { kind: 'no-projects' };
+  const loaded = await (async () => {
+    try { return { projects: await listAllVercelProjects(token) } as const; }
+    catch (error) { return { kind: 'api-error', detail: error instanceof Error ? error.message : String(error) } as const; }
+  })();
+  if (loaded.kind === 'api-error') return loaded;
+  if (loaded.projects.length === 0) return { kind: 'no-projects' };
 
   // Best guess first: a project named like the directory it lives in.
   const dirName = basename(projectDir);
-  projects.sort((a, b) => {
+  const projects = loaded.projects.toSorted((a, b) => {
     const aMatch = a.projectName === dirName;
     const bMatch = b.projectName === dirName;
     if (aMatch !== bMatch) return aMatch ? -1 : 1;
     return a.projectName.localeCompare(b.projectName);
   });
 
-  process.stdout.write(
+  writeVercelMessage(
     '\n\x1b[33m▸ This directory is not linked to a Vercel project yet.\x1b[0m\n',
   );
-  const ans: { picked: PickableProject | null } = (await inquirer.prompt([
+  const ans: { picked: PickableProject | null } = (await prompt([
     {
       type: 'list',
       name: 'picked',
@@ -322,7 +327,7 @@ async function linkByProjectPicker(projectDir: string): Promise<PickerOutcome> {
   if (!ans.picked) return { kind: 'declined' };
 
   writeVercelLink(projectDir, ans.picked);
-  process.stdout.write(
+  writeVercelMessage(
     `\x1b[32m✓\x1b[0m linked ${ans.picked.scopeLabel}/${ans.picked.projectName} ` +
       `\x1b[90m(.vercel/project.json)\x1b[0m\n`,
   );
@@ -344,6 +349,10 @@ async function linkByProjectPicker(projectDir: string): Promise<PickerOutcome> {
  * answered by the person at the keyboard, and has to be asked of them clearly.
  */
 async function runVercelLink(projectDir: string): Promise<boolean> {
+  if (currentInteraction()) {
+    human(`Link this project in a local terminal, then restart the flow: cd ${projectDir} && vercel link`);
+    return false;
+  }
   // ANSI: 33 = yellow, 90 = grey, 0 = reset.
   process.stdout.write(
     '\n\x1b[33m▸ Project not linked to Vercel. Running `vercel link`…\x1b[0m\n',
@@ -445,11 +454,11 @@ export const vercelAdapter: DeployAdapter = {
     // AND we're sitting at an interactive TTY, auto-run `vercel link` so the
     // user doesn't have to break flow. In CI/non-TTY we keep the original
     // hard fail with the install hint.
-    let linked = readVercelProjectId(projectDir);
+    const linked = readVercelProjectId(projectDir);
     const hasEnvIds =
       !!process.env.VERCEL_PROJECT_ID && !!process.env.VERCEL_ORG_ID;
     if (!linked.projectId && !hasEnvIds) {
-      const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
+      const interactive = currentInteraction() !== undefined || (!!process.stdin.isTTY && !!process.stdout.isTTY);
       if (!interactive) {
         return {
           ok: false,
@@ -499,8 +508,8 @@ export const vercelAdapter: DeployAdapter = {
           hint: `Re-run, or link manually: cd ${opts.projectDir} && vercel link`,
         };
       }
-      linked = readVercelProjectId(projectDir);
-      if (!linked.projectId) {
+      const relinked = readVercelProjectId(projectDir);
+      if (!relinked.projectId) {
         return {
           ok: false,
           reason: `${opts.projectDir} is still not linked after vercel link`,

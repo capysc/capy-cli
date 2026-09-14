@@ -3,6 +3,7 @@ import type { Blocked } from '../../ui/screens/contract';
 import { ResolvedContext } from './shared';
 
 export interface ConnectOpts {
+  readonly expectedUserId?: string;
   live?: boolean;
   var?: string;
   account?: string;
@@ -50,6 +51,11 @@ export interface ConnectOpts {
 }
 
 export interface RotateOpts {
+  /** Internal scope established by preflight; never a browser product rule. */
+  readonly flowProvider?: 'workos';
+  readonly expectedUserId?: string;
+  readonly deployTarget?: string;
+  readonly deployKind?: string;
   noPush?: boolean;
   /** Disable interactive prompts: resolve every choice from flags or fail fast. */
   nonTty?: boolean;

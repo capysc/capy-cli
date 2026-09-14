@@ -1,3 +1,4 @@
+import { currentInteraction, InteractionCommandError } from './interaction';
 /**
  * Interactivity detection for prompt sites.
  *
@@ -24,6 +25,7 @@ export const EXIT_NEEDS_INPUT = 3;
  * that would unblock it, then exits EXIT_NEEDS_INPUT.
  */
 export function refuseNonInteractive(reason: string, hint: string): never {
+  if (currentInteraction()) throw new InteractionCommandError('NEEDS_INPUT', `${reason}. ${hint}`);
   console.error(`\n  non-interactive: ${reason}`);
   console.error(`  ${hint}\n`);
   process.exit(EXIT_NEEDS_INPUT);
