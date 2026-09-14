@@ -53,3 +53,16 @@ export function human(...args: unknown[]): void {
   }
   console.log(...args);
 }
+
+/** Preserve stderr locally while delivering human-readable failures to an active Interaction. */
+export function humanError(...args: unknown[]): void {
+  const interaction = currentInteraction();
+  if (interaction) void interaction.output({ text: args.map(String).join(' '), level: 'error' });
+  else console.error(...args);
+}
+
+export function humanWarning(...args: unknown[]): void {
+  const interaction = currentInteraction();
+  if (interaction) void interaction.output({ text: args.map(String).join(' '), level: 'warning' });
+  else console.log(...args);
+}

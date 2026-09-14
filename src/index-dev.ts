@@ -1061,17 +1061,36 @@ program
   .option('--skip-prompts', 'alias for --yes')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
+  .option('--check-readiness', 'inspect target-machine prerequisites without opening a flow')
+  .option('--deploy-target <name>', 'deployment target to inspect and use')
+  .option('--deploy-kind <kind>', 'deployment destination to inspect before setup')
+  .option('--expected-user-id <id>', 'require the requesting Capy account')
   .action(async (varName, options, command) => {
+    const globals = command.optsWithGlobals();
+    const rotateOptions = {
+      web: globals.web === true, all: options.all, noPush: options.push === false,
+      skipPrompts: !!(options.yes || options.skipPrompts), nonTty: options.nonTty, provider: options.provider,
+      deployTarget: options.deployTarget, deployKind: options.deployKind, expectedUserId: expectedUserIdFor(command),
+    };
+    if (options.checkReadiness) {
+      const { inspectLocalRotateReadiness } = await import('./commands/rotateReadiness');
+      const readiness = await inspectLocalRotateReadiness({ ...rotateOptions, devMode: true });
+      console.log(JSON.stringify(readiness));
+      return;
+    }
+    if (globals.flow) {
+      const { runRotateFlow } = await import('./commands/rotateFlow');
+      await runRotateFlow(varName, rotateOptions, true);
+      return;
+    }
     const { RotateCommand } = await import('./commands/rotateCommand');
-    const cmd = new RotateCommand(true); // devMode: skips live entries
-    await cmd.execute(varName, {
-      web: command.optsWithGlobals().web === true,
-      all: options.all,
-      noPush: options.push === false,
-      skipPrompts: !!(options.yes || options.skipPrompts),
-      nonTty: options.nonTty,
-      provider: options.provider,
-    });
+    const execute = () => new RotateCommand(true).execute(varName, rotateOptions);
+    if (globals.json) {
+      const { runWithInteraction, createJsonLineInteraction } = await import('./ui/interaction');
+      await runWithInteraction(createJsonLineInteraction(process.stdin, process.stdout), execute);
+      return;
+    }
+    await execute();
   });
 
 program

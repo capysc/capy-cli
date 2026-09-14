@@ -1,7 +1,8 @@
+import { currentInteraction, prompt, interactionOrTerminal, ExitPromptError, InteractionCommandError } from '../ui/interaction';
+import { human, humanError } from '../ui/webMode';
 import { resolveContext, writeAndSync, listManagedKeys } from './connectors/shared';
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { connectPlan } from './connectors/plans';
-import { isInteractive } from '../ui/interactive';
 import { ProjectManager } from '../core/projectManager';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
 import type {
@@ -29,38 +30,23 @@ const shouldOpen = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
  * missing count is not a reason to refuse the list.
  */
 export async function describeConnectors(): Promise<ConnectorChoice[]> {
-  let managed: Record<string, number> = {};
-  try {
-    const pm = new ProjectManager();
-    const keep = pm.readKeepFile();
-    const branch = pm.deriveActiveBranch();
-    if (keep && branch) {
-      for (const { connector } of listManagedKeys(keep, branch)) {
-        managed[connector.provider] = (managed[connector.provider] ?? 0) + 1;
-      }
-    }
-  } catch {
-    managed = {};
-  }
-
-  const out: ConnectorChoice[] = [];
-  for (const p of listProviders()) {
-    const mod = await loadProvider(p.name);
-    const found = mod.toolInstalled ? mod.toolInstalled() : undefined;
-    out.push({
-      id: p.name,
-      description: p.description,
-      ...(mod.requiresAuth ? { requiresAuth: true } : {}),
-      ...(mod.requiresTool ? { requiresTool: mod.requiresTool } : {}),
-      ...(found === undefined ? {} : { toolFound: found }),
-      // The identical refusal `capy connect <id>` would run into, previewed
-      // here rather than discovered one command later. Same object, so the two
-      // cannot word one condition differently.
-      ...(found === false && mod.toolMissing ? { blocked: mod.toolMissing } : {}),
-      ...(managed[p.name] ? { managedCount: managed[p.name] } : {}),
-    });
-  }
-  return out;
+  const managed = (() => {
+    try {
+      const pm = new ProjectManager();
+      const keep = pm.readKeepFile();
+      const branch = pm.deriveActiveBranch();
+      return keep && branch ? listManagedKeys(keep, branch).reduce<Readonly<Record<string, number>>>((counts, { connector }) =>
+        ({ ...counts, [connector.provider]: (counts[connector.provider] ?? 0) + 1 }), {}) : {};
+    } catch { return {}; }
+  })();
+  return Promise.all(listProviders().map(async provider => {
+    const mod = await loadProvider(provider.name);
+    const found = mod.toolInstalled?.();
+    return { id: provider.name, description: provider.description,
+      ...(mod.requiresAuth ? { requiresAuth: true } : {}), ...(mod.requiresTool ? { requiresTool: mod.requiresTool } : {}),
+      ...(found === undefined ? {} : { toolFound: found }), ...(found === false && mod.toolMissing ? { blocked: mod.toolMissing } : {}),
+      ...(managed[provider.name] ? { managedCount: managed[provider.name] } : {}) };
+  }));
 }
 
 /**
@@ -80,11 +66,7 @@ export function pushOutcomeFor(outcome: ConnectOutcome): 'landed' | 'failed' | '
 }
 
 export class ConnectCommand {
-  private devMode: boolean;
-
-  constructor(devMode: boolean = false) {
-    this.devMode = devMode;
-  }
+  constructor(private readonly devMode: boolean = false) {}
 
   /**
    * `capy connect` with no provider.
@@ -97,19 +79,19 @@ export class ConnectCommand {
     if (opts.web) {
       const picked = await this.chooseProviderInBrowser(opts);
       if (!picked) {
-        console.log('\n  No connector selected — nothing changed.\n');
+        human('\n  No connector selected — nothing changed.\n');
         return;
       }
       await this.execute(picked, opts);
       return;
     }
 
-    console.log('');
-    console.log('  Available connectors:');
+    human('');
+    human('  Available connectors:');
     for (const p of listProviders()) {
-      console.log(`    ${B(p.name).padEnd(20)} ${p.description}`);
+      human(`    ${B(p.name).padEnd(20)} ${p.description}`);
     }
-    console.log('');
+    human('');
   }
 
   /** Serve the connector list and return the pick, or null on cancel. */
@@ -163,10 +145,9 @@ export class ConnectCommand {
     // exiting two screens later.
     const effective: ConnectOpts = { ...opts, devMode: this.devMode };
 
-    let mod: ConnectorModule;
-    try {
-      mod = await loadProvider(provider);
-    } catch (err) {
+    const loaded = await loadProvider(provider).then(mod => ({ mod }), error => ({ error }));
+    if (!('mod' in loaded)) {
+      const err = loaded.error;
       if (opts.web) {
         // The terminal answers a bad provider with `Unknown connector: x` and a
         // pointer back to the bare `capy connect`, which is a second command
@@ -197,9 +178,11 @@ export class ConnectCommand {
       return { linked: false };
     }
 
+    const mod: ConnectorModule = loaded.mod;
     if (mod.precheck) mod.precheck();
 
     const ctx = await resolveContext({ devMode: this.devMode });
+    if (opts.expectedUserId && ctx.userId !== opts.expectedUserId) throw new InteractionCommandError('AUTH_ACCOUNT_MISMATCH');
     const { varName, value, entry, also } = await mod.connect(ctx, effective);
 
     // Belt-and-suspenders: if a provider returned mode:'live' (e.g. via an
@@ -226,7 +209,7 @@ export class ConnectCommand {
     // ran `stripe login`, completing that browser pairing is the human-presence
     // proof. The typed confirmation only runs in an interactive terminal, or in
     // a browser when one was asked for.
-    if (!this.devMode && entry.mode === 'live' && (opts.web || isInteractive(opts.nonTty))) {
+    if (!this.devMode && entry.mode === 'live' && (opts.web || interactionOrTerminal(opts.nonTty))) {
       const ok = opts.web
         ? await confirmLiveActionInBrowser({
             action: 'connect',
@@ -273,9 +256,10 @@ export class ConnectCommand {
             keyPrefix: entry.key_prefix ?? '(unknown)',
           });
       if (!ok) {
-        console.log('  Cancelled.');
+        human('  Cancelled.');
         // The terminal path is unchanged: nothing was written, and the command
         // is over.
+        if (currentInteraction()) throw new ExitPromptError('Connection cancelled');
         if (!opts.web) process.exit(0);
         // Under `--web` the decline gets a page saying what it left behind —
         // and that page is served from THIS process, so the run ends by
@@ -296,47 +280,47 @@ export class ConnectCommand {
     // A push that fails after the local write leaves .env holding a key nobody
     // else has, and the terminal reports that as a stack trace. The two states
     // need different next moves, so the browser result names which one happened.
-    let outcome: ConnectOutcome = opts.noPush ? 'local-only' : 'pushed';
-    let detail: string | undefined;
-    try {
-      await writeAndSync(ctx, varName, value, { push: !opts.noPush, connector: entry, alsoConnect: also });
-    } catch (err) {
-      if (!opts.web) throw err;
-      outcome = opts.noPush ? 'write-failed' : 'push-failed';
-      detail = err instanceof Error ? err.message : String(err);
-    }
+    const { outcome, detail } = await (async (): Promise<{ outcome: ConnectOutcome; detail?: string }> => {
+      try {
+        await writeAndSync(ctx, varName, value, { push: !opts.noPush, connector: entry, alsoConnect: also });
+        return { outcome: opts.noPush ? 'local-only' : 'pushed' };
+      } catch (err) {
+        if (!opts.web) throw err;
+        return { outcome: opts.noPush ? 'write-failed' : 'push-failed', detail: err instanceof Error ? err.message : String(err) };
+      }
+    })();
 
     // The terminal's own lines first, then the page. The other order made the
     // whole summary wait on a human loading a browser tab, because the ending
     // page holds the run open until it has been delivered.
     const failed = outcome === 'push-failed' || outcome === 'write-failed';
-    console.log('');
+    human('');
     if (failed) {
-      console.error(`  ✗ ${B(varName)}: ${detail}`);
-      console.log('');
+      humanError(`  ✗ ${B(varName)}: ${detail}`);
+      human('');
     } else if (opts.noPush) {
       // Say what moved AND what did not. The old wording — "wrote VAR to .env"
       // — described a value write that no longer happens, and a success line
       // that overstates its own reach is how a user learns the wrong model of
       // the command.
-      console.log(`  ✓ ${B(varName)} is now managed by ${B(provider)} (not pushed).`);
-      console.log(
+      human(`  ✓ ${B(varName)} is now managed by ${B(provider)} (not pushed).`);
+      human(
         opts.subStep
           ? '  Its value is unchanged — rotating it now.'
           : `  Its value is unchanged. Run ${B('capy push')} to share the link with teammates.`,
       );
-      console.log('');
+      human('');
     } else {
-      console.log(`  ✓ ${B(varName)} is now managed by ${B(provider)} (branch: ${ctx.branch}).`);
+      human(`  ✓ ${B(varName)} is now managed by ${B(provider)} (branch: ${ctx.branch}).`);
       // Inside `capy rotate` the usual next step IS what is already running,
       // and telling someone to run the command they are inside is how a flow
       // reads as a loop.
-      console.log(
+      human(
         opts.subStep
           ? '  Its value is unchanged — rotating it now.'
           : `  Its value is unchanged — run ${B(`capy rotate ${varName}`)} to replace it.`,
       );
-      console.log('');
+      human('');
     }
 
     // No ending page for a step that is not the end. `showResult` serves a
@@ -482,20 +466,19 @@ export async function confirmLiveAction(args: {
   keyPrefix?: string;
 }): Promise<boolean> {
   const { action, varName, accountId, keyPrefix } = args;
-  console.log('');
-  console.log(`  \x1b[31m⚠⚠⚠ LIVE MODE — REAL STRIPE ACCOUNT\x1b[0m`);
-  console.log('');
-  console.log(`    Account:  ${accountId}`);
-  console.log(`    Action:   ${action} ${varName}`);
-  if (keyPrefix) console.log(`    Key type: ${keyPrefix}…`);
-  console.log('');
-  console.log('  This affects real customers and real money. Source-A rotation re-runs');
-  console.log('  `stripe login`, which invalidates your existing live key IMMEDIATELY —');
-  console.log('  anything currently using it will start failing within seconds.');
-  console.log('');
+  human('');
+  human(`  \x1b[31m⚠⚠⚠ LIVE MODE — REAL STRIPE ACCOUNT\x1b[0m`);
+  human('');
+  human(`    Account:  ${accountId}`);
+  human(`    Action:   ${action} ${varName}`);
+  if (keyPrefix) human(`    Key type: ${keyPrefix}…`);
+  human('');
+  human('  This affects real customers and real money. Source-A rotation re-runs');
+  human('  `stripe login`, which invalidates your existing live key IMMEDIATELY —');
+  human('  anything currently using it will start failing within seconds.');
+  human('');
 
-  const inquirer = (await import('inquirer')).default;
-  const { typed } = await inquirer.prompt([
+  const { typed } = await prompt([
     {
       type: 'input',
       name: 'typed',

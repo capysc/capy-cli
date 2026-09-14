@@ -1,10 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
-import type { InitQuestion } from './initWizardQuestions';
 import inquirer from 'inquirer';
 
-export type InteractionOutput = Readonly<{ readonly text: string }>;
+export type InteractionOutput = Readonly<{ readonly text: string; readonly level?: 'info' | 'warning' | 'error' }>;
 export type InteractionProgress = Readonly<{ readonly status: 'start' | 'success' | 'failure' | 'warning'; readonly text: string }>;
 export type InteractionGoal = Readonly<{
   readonly status: 'succeeded' | 'failed' | 'cancelled' | 'skipped';
@@ -55,7 +54,7 @@ export const emitInteractionGoal = (outcome: InteractionGoal): void => {
 };
 
 /** Returns undefined outside an interaction so callers can retain their TTY prompt. */
-export const askInteraction = <T>(question: InitQuestion<T>): Promise<T | null> | undefined =>
+export const askInteraction = <T>(question: InteractionQuestion<T>): Promise<T | null> | undefined =>
   currentInteraction()?.prompt(question);
 
 type JsonRecord = Readonly<Record<string, unknown>>;
@@ -118,43 +117,80 @@ export const createJsonLineInteraction = (input: Readable, output: Writable): In
 };
 
 type TerminalQuestion = Readonly<Record<string, unknown>>;
-class ExitPromptError extends Error {
+export class ExitPromptError extends Error {
   readonly name = 'ExitPromptError';
 }
-const choiceValue = (choice: unknown): unknown => typeof choice === 'object' && choice !== null
-  && 'value' in choice ? (choice as Readonly<{ readonly value: unknown }>).value : choice;
-const choiceLabel = (choice: unknown): string => typeof choice === 'object' && choice !== null
-  && 'name' in choice ? String((choice as Readonly<{ readonly name: unknown }>).name) : String(choice);
+/** Fatal command failures must escape per-item batch catches. */
+export class InteractionCommandError extends Error {
+  constructor(readonly code: string, message: string = code) { super(message); }
+}
+export const interactionOrTerminal = (nonTty?: boolean): boolean =>
+  currentInteraction() !== undefined || (!nonTty && process.stdin.isTTY === true);
+export function commandExit(code: number, message = 'The command could not complete this step.'): never {
+  if (currentInteraction()) throw new InteractionCommandError(`COMMAND_EXIT_${code}`, message);
+  process.exit(code);
+};
+const choiceRecord = (choice: unknown): TerminalQuestion | undefined =>
+  typeof choice === 'object' && choice !== null ? choice as TerminalQuestion : undefined;
+const choiceValue = (choice: unknown): unknown => {
+  const record = choiceRecord(choice);
+  return record && 'value' in record ? record.value : record && 'name' in record ? record.name : choice;
+};
+const choiceLabel = (choice: unknown): string => String(choiceRecord(choice)?.name ?? choice);
+const resolveSetting = (value: unknown, answers: TerminalQuestion): unknown =>
+  typeof value === 'function' ? value(answers) : value;
 
-const askTerminalQuestion = async <T>(question: TerminalQuestion): Promise<T> => {
+const askTerminalQuestion = async (question: TerminalQuestion, answers: TerminalQuestion): Promise<TerminalQuestion> => {
   const interaction = currentInteraction();
-  if (!interaction) return (await inquirer.prompt([question as any])) as T;
+  if (!interaction) return await inquirer.prompt([question as any], answers);
   const name = String(question.name);
-  const choices = Array.isArray(question.choices)
-    ? question.choices.map(choice => ({ label: choiceLabel(choice), value: choiceValue(choice) })) : undefined;
-  const answer = await interaction.prompt<unknown>({
-    view: {
-      text: String(question.message ?? ''),
-      input: { kind: String(question.type ?? 'input'), choices, default: question.default },
-    },
+  const kind = String(question.type ?? 'input');
+  const offered = resolveSetting(question.choices, answers);
+  const choices = Array.isArray(offered) ? offered.flatMap((choice, index) => {
+    const record = choiceRecord(choice);
+    if (record?.type === 'separator') return [];
+    return [{ label: choiceLabel(choice), value: `choice:${index}`, original: choiceValue(choice),
+      disabled: Boolean(resolveSetting(record?.disabled, answers)), checked: record?.checked === true }];
+  }) : undefined;
+  const defaultValue = resolveSetting(question.default, answers);
+  const initial = choices ? kind === 'checkbox'
+    ? choices.filter(choice => !choice.disabled && (Array.isArray(defaultValue)
+      ? defaultValue.some(value => Object.is(value, choice.original)) : choice.checked)).map(choice => choice.value)
+    : choices.find(choice => Object.is(choice.original, defaultValue))?.value
+    : defaultValue;
+  const answer = await interaction.prompt<Readonly<{ answer: unknown }>>({
+    view: { text: String(resolveSetting(question.message, answers) ?? ''),
+      input: { kind, ...(choices ? { choices: choices.map(({ label, value, disabled }) => ({ label, value, disabled })) } : {}),
+        ...(initial === undefined ? {} : { default: initial }) } },
     decide: payload => {
-      const value = payload.value;
-      const offered = choices?.some(choice => Object.is(choice.value, value));
-      if (choices !== undefined && !offered) return { error: 'That is not one of the available choices.' };
-      const validate = typeof question.validate === 'function' ? question.validate as (input: unknown) => unknown : null;
-      const validation = validate ? validate(value) : true;
-      return validation === true || validation === undefined
-        ? { value, record: {} } : { error: String(validation) };
+      const raw = payload.value;
+      const decode = (token: unknown) => choices?.find(choice => choice.value === token && !choice.disabled);
+      if (choices && (kind === 'checkbox'
+        ? !Array.isArray(raw) || raw.some(token => !decode(token)) || new Set(raw).size !== raw.length
+        : !decode(raw))) return { error: 'That is not one of the available choices.' };
+      if (!choices && (kind === 'confirm' ? typeof raw !== 'boolean' : typeof raw !== 'string')) {
+        return { error: kind === 'confirm' ? 'Choose yes or no.' : 'Enter a text response.' };
+      }
+      const decoded = choices ? kind === 'checkbox'
+        ? (raw as readonly unknown[]).map(token => decode(token)!.original) : decode(raw)!.original : raw;
+      const value = typeof question.filter === 'function' ? question.filter(decoded, answers) : decoded;
+      const validation = typeof question.validate === 'function' ? question.validate(value, answers) : true;
+      if (validation instanceof Promise) return { error: 'This question requires synchronous validation.' };
+      return validation === true || validation === undefined ? { value: { answer: value } } : { error: String(validation) };
     },
   });
-  if (answer === null) {
-    throw new ExitPromptError('Interaction cancelled');
-  }
-  return { [name]: answer } as T;
+  if (answer === null) throw new ExitPromptError('Interaction cancelled');
+  return { ...answers, [name]: answer.answer };
 };
 
-/** A small inquirer-compatible boundary: question objects remain CLI-owned. */
+/** Questions and value objects stay CLI-owned; remote choices contain opaque IDs only. */
 export const prompt = async <T = any>(questions: readonly TerminalQuestion[]): Promise<T> => {
-  const first = questions[0];
-  return first === undefined ? {} as T : askTerminalQuestion<T>(first);
+  if (!currentInteraction()) return await inquirer.prompt(questions as any) as T;
+  const ask = async (index: number, answers: TerminalQuestion): Promise<TerminalQuestion> => {
+    const question = questions[index];
+    if (!question) return answers;
+    const enabled = question.when === undefined || resolveSetting(question.when, answers) !== false;
+    return ask(index + 1, enabled ? await askTerminalQuestion(question, answers) : answers);
+  };
+  return await ask(0, {}) as T;
 };
