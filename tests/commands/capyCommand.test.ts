@@ -147,6 +147,7 @@ import { ServiceClient } from '../../src/service/serviceClient';
 import { SyncEngine } from '../../src/sync/syncEngine';
 import { PromptEngine } from '../../src/ui/promptEngine';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
+import { runWithInteraction } from '../../src/ui/interaction';
 import * as fs from 'fs';
 
 const MockProjectManager = ProjectManager as any;
@@ -221,6 +222,7 @@ describe('CapyCommand', () => {
       coDecrypt: mock(() => Promise.resolve({ plaintext: '' })),
       wrapOuterLayer: mock(() => Promise.resolve({ ciphertext: '' })),
       listProjects: mock(() => Promise.resolve([])),
+      getBillingStatus: mock(() => Promise.resolve({ tier: 'business', grandfathered: false })),
     } as any;
 
     mockSyncEngine = {
@@ -368,6 +370,56 @@ describe('CapyCommand', () => {
 
       consoleSpy.mockRestore();
       exitSpy.mockRestore();
+    });
+
+    test('does not treat a failed remote first-sync read as an absent marker', async () => {
+      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
+      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
+      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
+      mockServiceClient.getDecryptData.mockRejectedValue(new CapyError('unavailable', ERROR_CODES.NETWORK_ERROR));
+      await expect((capyCommand as any).recoverFreeFirstSync({
+        initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1',
+      })).rejects.toMatchObject({ code: ERROR_CODES.NETWORK_ERROR });
+    });
+
+    test('keeps an initialized free checkout on its existing path when the remote marker exists', async () => {
+      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
+      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
+      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
+      mockServiceClient.getDecryptData.mockResolvedValue({ keep_file: '{}' });
+      const plan = spyOn(capyCommand as any, 'planFreeSetup');
+      await expect((capyCommand as any).recoverFreeFirstSync({ initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1' })).resolves.toBe(false);
+      expect(plan).not.toHaveBeenCalled();
+    });
+
+    test('a matching empty free stub with no remote marker reaches the setup executor', async () => {
+      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
+      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
+      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
+      mockServiceClient.getDecryptData.mockResolvedValue({});
+      spyOn(capyCommand as any, 'planFreeSetup').mockResolvedValue({ hash: 'sha256:test', names: [], syncAction: 'create_empty_remote_marker' });
+      const apply = spyOn(capyCommand as any, 'applyFreeSetup').mockResolvedValue(undefined);
+      await expect((capyCommand as any).recoverFreeFirstSync({ initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1' })).resolves.toBe(true);
+      expect(apply).toHaveBeenCalledWith('org_1', 'project_default', 'user_1', 'sha256:test');
+    });
+
+    test('declining first-sync encryption never applies the prepared plan', async () => {
+      mockProjectManager.readKeepFile.mockReturnValue({ version: '3.0', org_id: 'org_1', project_id: 'project_default', project_name: 'default', variables: {} });
+      mockFileManager.readEnvFile.mockReturnValue({ SECRET: 'plain' });
+      mockAuthService.authenticateSilent.mockResolvedValue({ success: true, user_id: 'user_1' });
+      mockServiceClient.getBillingStatus.mockImplementation(async () => ({ tier: 'free', grandfathered: false }));
+      mockServiceClient.listProjects.mockResolvedValue([{ id: 'project_default', name: 'default', organization_id: 'org_1' }]);
+      mockServiceClient.getDecryptData.mockResolvedValue({});
+      spyOn(capyCommand as any, 'planFreeSetup').mockResolvedValue({ hash: 'sha256:test', names: ['SECRET'], syncAction: 'push_root_env' });
+      const apply = spyOn(capyCommand as any, 'applyFreeSetup').mockResolvedValue(undefined);
+      await runWithInteraction({ output: () => undefined, progress: () => undefined, goal: () => undefined,
+        prompt: async () => ({ answer: false }) }, async () => {
+        await expect((capyCommand as any).recoverFreeFirstSync({ initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1' })).rejects.toMatchObject({ message: 'The initial secret sync was skipped.' });
+      });
+      expect(apply).not.toHaveBeenCalled();
     });
   });
 
