@@ -163,15 +163,16 @@ export async function attemptCaseAEnrollment(opts: {
 }
 
 /**
- * Case C / C′: this machine has no local key material for the current org,
- * but the account has live device-key doors server-side. Attempts the
- * unlock ceremony and installs every reachable org's key.enc. Returns
+ * Restore device-key-protected local custody on a new machine. The account
+ * has live device-key doors server-side, but this machine has no local key
+ * material for the current org. Attempts the unlock ceremony and installs
+ * every reachable org's key.enc. Returns
  * `installedCurrentOrg: true` only when the caller's `ctx.activeOrgId` ended
  * up provisioned — the caller re-checks `hasOrgKey` itself rather than
  * trusting this alone, since installOrgFromServer's per-org outcome is the
  * source of truth.
  */
-export async function attemptCaseCUnlock(
+export async function restoreLocalCustodyWithDeviceKey(
   ctx: DeviceKeyWiringContext,
 ): Promise<{ ok: boolean; installedCurrentOrg: boolean }> {
   try {
@@ -182,7 +183,7 @@ export async function attemptCaseCUnlock(
 
     const result = await runUnlock(deps, detection.inventory);
     if (!result.ok) {
-      debug(`[device-key] Case C ceremony not completed (${result.ceremonyCode})`);
+      debug(`[device-key] local custody restoration did not complete (${result.ceremonyCode})`);
       return { ok: false, installedCurrentOrg: false };
     }
 
@@ -196,7 +197,7 @@ export async function attemptCaseCUnlock(
     console.log('');
     return { ok: true, installedCurrentOrg };
   } catch (err) {
-    debug(`[device-key] Case C unlock skipped: ${describeError(err)}`);
+    debug(`[device-key] local custody restoration skipped: ${describeError(err)}`);
     return { ok: false, installedCurrentOrg: false };
   }
 }
@@ -211,7 +212,7 @@ export async function attemptCaseCUnlock(
  * means no re-entered code and no terminal ceremony, not that the passkey
  * touch itself is skipped — it still happens).
  *
- * Mirrors `attemptCaseCUnlock` exactly in shape: never throws outward — any
+ * Mirrors `restoreLocalCustodyWithDeviceKey` exactly in shape: never throws outward — any
  * ceremony decline, missing pickup, or server failure degrades to
  * `{ ok: false }` and a debug log, leaving the caller's fallback (today's
  * `KEY_NOT_ON_DEVICE` message) completely unchanged. `ctx.activeOrgId` is
@@ -220,7 +221,7 @@ export async function attemptCaseCUnlock(
  * (see auth/invitePickup/serviceOps.ts's docblock) — so this call is safe to
  * make even when the caller's active org differs from the invite's org; the
  * caller re-checks `hasOrgKey(activeOrgId, ...)` itself afterward, same
- * pattern as Case C.
+ * re-check pattern as local custody restoration.
  */
 export async function attemptPickupConsumption(
   ctx: DeviceKeyWiringContext,

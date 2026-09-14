@@ -47,7 +47,7 @@ import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 import { deviceKeysEnabled } from '../auth/deviceKey/flag';
 import {
-  attemptCaseCUnlock,
+  restoreLocalCustodyWithDeviceKey,
   attemptPickupConsumption,
   runPendingSyncBestEffort,
   syncOrgOntoDeviceKeyIfEnrolled,
@@ -1654,7 +1654,7 @@ export class CapyCommand {
       ? await (async () => {
           const unlock = await withWizard(
             wizardAfterOrganization,
-            () => attemptCaseCUnlock(this.deviceKeyWiringContext(selectedContext, selectedAuth, selectedOrg.id)),
+            () => restoreLocalCustodyWithDeviceKey(this.deviceKeyWiringContext(selectedContext, selectedAuth, selectedOrg.id)),
             selectedContext.operationDeadline,
           );
           return unlock.ok && hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
@@ -1662,7 +1662,7 @@ export class CapyCommand {
       : initiallyHasOrgKey;
 
     // A brand-new invitee who already pasted their code into Keep
-    // has a pending pickup row waiting server-side. Case C above no-ops for
+    // has a pending pickup row waiting server-side. Local custody restoration above no-ops for
     // them (no live doors yet, so detectOnboardingCase never reaches
     // 'unlock') and would otherwise dead-end into the KEY_NOT_ON_DEVICE
     // message below. Additive and side-effect-free on every other user:
@@ -1683,7 +1683,7 @@ export class CapyCommand {
 
     // Master-key mint chokepoint: an auto-provisioned personal org has no
     // key for ANY device until an owner first mints one — still true after
-    // the Case C unlock attempt above, since there is nothing to unlock. If
+    // the local custody restoration attempt above, since there is nothing to unlock. If
     // this org's own key_state (from the auth-response org list already in
     // hand) says nobody has minted M yet, and this run can safely show a
     // recovery phrase, mint it here instead of falling straight to the

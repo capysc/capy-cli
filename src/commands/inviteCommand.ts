@@ -251,12 +251,12 @@ export class InviteCommand {
       // this situation; this command used to hard-exit before any fallback
       // could run, and told an org owner that only the org owner may invite.
       //
-      // attemptCaseCUnlock does its own "does this account have live doors"
+      // restoreLocalCustodyWithDeviceKey does its own "does this account have live doors"
       // detection internally and is a safe no-op — never a throw — when there
       // is nothing to unlock with, so an account that genuinely has no key
       // still lands on the refusal below.
       if (!hasOrgKey(orgId, userId)) {
-        const { attemptCaseCUnlock } = await import('../auth/deviceKey/wiring');
+        const { restoreLocalCustodyWithDeviceKey } = await import('../auth/deviceKey/wiring');
         const { deviceKeysEnabled } = await import('../auth/deviceKey/flag');
         if (deviceKeysEnabled()) {
           // `organizations` is read from the auth result rather than passed as
@@ -264,7 +264,7 @@ export class InviteCommand {
           // a list that merely looks valid is the kind of assumption that
           // fails quietly.
           const authResult = await authService.authenticateSilent(orgId);
-          await attemptCaseCUnlock({
+          await restoreLocalCustodyWithDeviceKey({
             authService,
             serviceClient,
             devMode: this.devMode,

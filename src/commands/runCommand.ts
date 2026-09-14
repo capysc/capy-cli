@@ -394,7 +394,7 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
         let unlocked = false;
         if (enabled) {
           // CAP-384: a sandbox that has an active per-chat grant MUST NOT
-          // fall through to attemptCaseCUnlock below — that path durably
+          // fall through to restoreLocalCustodyWithDeviceKey below — that path durably
           // writes local.key + key.enc for every org this account belongs
           // to, exactly the persistent-key-on-ephemeral-infra defect the
           // grant exists to prevent (final-gate.md §1.4 item 5). So when the
@@ -426,11 +426,11 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
             projectKeyHex = await resolveProjectKeyFromGrant(grant.kLocal, orgId, projectId, result.user_id, grantOps);
             unlocked = true;
           } else {
-            // attemptCaseCUnlock does its own "does this account have live
+            // restoreLocalCustodyWithDeviceKey does its own "does this account have live
             // doors" detection internally (via detectOnboardingCase) — it is
             // a safe no-op, never a throw, when there is nothing to unlock
             // with.
-            const { attemptCaseCUnlock, attemptPickupConsumption } = await import('../auth/deviceKey/wiring');
+            const { restoreLocalCustodyWithDeviceKey, attemptPickupConsumption } = await import('../auth/deviceKey/wiring');
             const wiringCtx = {
               authService: auth,
               serviceClient: svc,
@@ -440,7 +440,7 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
               organizations: result.organizations || [],
               activeOrgId: orgId,
             };
-            const unlock = await attemptCaseCUnlock(wiringCtx);
+            const unlock = await restoreLocalCustodyWithDeviceKey(wiringCtx);
             if (unlock.ok) {
               try {
                 // Retry once now that the unlock ceremony may have installed
@@ -451,12 +451,12 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
                 unlocked = false;
               }
             }
-            // attemptCaseCUnlock above is a no-op for a brand-new
+            // restoreLocalCustodyWithDeviceKey above is a no-op for a brand-new
             // invitee (no live doors yet) — exactly the account state a Keep
             // pickup paste leaves them in. Try consuming any pending pickup
             // before falling through to missingKeyRemediation below. Additive
             // and side-effect-free when there is nothing pending: same
-            // never-throws contract as attemptCaseCUnlock (see wiring.ts).
+            // never-throws contract as restoreLocalCustodyWithDeviceKey (see wiring.ts).
             if (!unlocked) {
               const pickup = await attemptPickupConsumption(wiringCtx);
               if (pickup.ok) {

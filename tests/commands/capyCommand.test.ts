@@ -56,20 +56,20 @@ mock.module('../../src/ui/clipboard', () => ({
 // already covers its actual decision logic against a fake wrapper server).
 // Every test in this file leaves CAPY_DEVICE_KEYS unset, so none of these
 // are ever called except by the tests that explicitly opt in below.
-const deviceKeyWiringCalls: { attemptCaseCUnlock: unknown[]; attemptPickupConsumption: unknown[]; runPendingSyncBestEffort: unknown[]; syncOrgOntoDeviceKeyIfEnrolled: unknown[]; maybeNudgeDeviceKeyEnrollment: unknown[] } = {
-  attemptCaseCUnlock: [],
+const deviceKeyWiringCalls: { restoreLocalCustodyWithDeviceKey: unknown[]; attemptPickupConsumption: unknown[]; runPendingSyncBestEffort: unknown[]; syncOrgOntoDeviceKeyIfEnrolled: unknown[]; maybeNudgeDeviceKeyEnrollment: unknown[] } = {
+  restoreLocalCustodyWithDeviceKey: [],
   attemptPickupConsumption: [],
   runPendingSyncBestEffort: [],
   syncOrgOntoDeviceKeyIfEnrolled: [],
   maybeNudgeDeviceKeyEnrollment: [],
 };
 mock.module('../../src/auth/deviceKey/wiring', () => ({
-  attemptCaseCUnlock: mock(async (ctx: unknown) => {
-    deviceKeyWiringCalls.attemptCaseCUnlock.push(ctx);
+  restoreLocalCustodyWithDeviceKey: mock(async (ctx: unknown) => {
+    deviceKeyWiringCalls.restoreLocalCustodyWithDeviceKey.push(ctx);
     return { ok: false, installedCurrentOrg: false };
   }),
   // Same "thin spy, real decision logic covered elsewhere" contract
-  // as attemptCaseCUnlock above — tests/auth/deviceKey/wiring.test.ts covers
+  // as restoreLocalCustodyWithDeviceKey above — tests/auth/deviceKey/wiring.test.ts covers
   // attemptPickupConsumption's actual behavior against fakes. Always
   // `{ ok: false }` here (no pending pickup) so every existing test in this
   // file keeps taking exactly the path it took before this export existed.
@@ -1773,7 +1773,7 @@ describe('CapyCommand', () => {
 
     beforeEach(() => {
       Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-      deviceKeyWiringCalls.attemptCaseCUnlock.length = 0;
+      deviceKeyWiringCalls.restoreLocalCustodyWithDeviceKey.length = 0;
       deviceKeyWiringCalls.attemptPickupConsumption.length = 0;
       deviceKeyWiringCalls.runPendingSyncBestEffort.length = 0;
       deviceKeyWiringCalls.syncOrgOntoDeviceKeyIfEnrolled.length = 0;

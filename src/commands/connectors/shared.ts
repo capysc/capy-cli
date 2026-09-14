@@ -8,6 +8,7 @@ import { AuthService } from '../../auth/authService';
 import { ServiceClient } from '../../service/serviceClient';
 import { SyncEngine } from '../../sync/syncEngine';
 import { Encryptor } from '../../crypto/encryptor';
+import { hasOrgKey } from '../../crypto/keyResolver';
 import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
 import { formatRelativeTime } from '../../ui/relativeTime';
@@ -90,6 +91,34 @@ async function authenticateContext(authService: AuthService, orgId?: string): Pr
   return authService.authenticate(orgId);
 }
 
+/**
+ * An authenticated account can already own a PRF-protected local root while
+ * this machine has none. Before a key-dependent command reports that the
+ * organization is unavailable, let the CLI ask Keep for the credential PRF
+ * result and restore the root locally. Keep only returns the sealed PRF
+ * result; this process fetches, unwraps, and persists its own wrapper.
+ */
+async function restoreAuthenticatedLocalCustody(input: Readonly<{
+  readonly authService: AuthService;
+  readonly authResult: ContextAuthResult;
+  readonly devMode: boolean;
+  readonly organizationId: string;
+  readonly serviceClient: ServiceClient;
+}>): Promise<void> {
+  const userId = input.authResult.user_id;
+  if (!userId || hasOrgKey(input.organizationId, userId)) return;
+  const { restoreLocalCustodyWithDeviceKey } = await import('../../auth/deviceKey/wiring');
+  await restoreLocalCustodyWithDeviceKey({
+    authService: input.authService,
+    serviceClient: input.serviceClient,
+    devMode: input.devMode,
+    userId,
+    userEmail: input.authResult.user_email,
+    organizations: input.authResult.organizations ?? [],
+    activeOrgId: input.organizationId,
+  });
+}
+
 function decryptReadableValues(
   raw: Readonly<Record<string, string>>,
   projectKey: string,
@@ -161,6 +190,14 @@ export async function resolveContext(opts: ResolveContextOptions = {}): Promise<
     humanError('Authentication failed');
     commandExit(1);
   }
+
+  await restoreAuthenticatedLocalCustody({
+    authService,
+    authResult,
+    devMode,
+    organizationId: orgId,
+    serviceClient,
+  });
 
   const { resolveProjectKeyWithMintFallback } = await import('../../auth/masterKeyMint');
   const projectKey = await (async (): Promise<string> => {
@@ -294,6 +331,14 @@ async function resolveLocklessContext(
     return { orgId, projectId: defaultProject.id, projectName: defaultProject.name };
   })();
   const { orgId, projectId, projectName } = identity;
+
+  await restoreAuthenticatedLocalCustody({
+    authService,
+    authResult,
+    devMode,
+    organizationId: orgId,
+    serviceClient,
+  });
 
   const branch = opts.forceLockless
     ? SyncEngine.DEFAULT_BRANCH

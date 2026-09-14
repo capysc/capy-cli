@@ -2,7 +2,7 @@
  * CAP-383 — e2e per case-matrix row (A, B, B′, C, C′), each driven through
  * the REAL production entry points `capyCommand.ts`/`redeemCommand.ts` call
  * (`src/auth/deviceKey/wiring.ts`'s `attemptCaseAEnrollment` /
- * `runDeviceKeyEnrollment` / `attemptCaseCUnlock`), each TERMINATING in a
+ * `runDeviceKeyEnrollment` / `restoreLocalCustodyWithDeviceKey`), each TERMINATING in a
  * real `capy run` subprocess against the resulting tree (or, for B′, the
  * documented clean failure of `capy run` when there is genuinely no key
  * material yet — B′ is a routing verdict, not a provisioning path).
@@ -249,7 +249,7 @@ describe('CAP-383 onboarding case matrix (A, B, B′, C, C′)', () => {
     const unlock = await driveCeremony(
       fakeService,
       (req) => (req.ceremony === 'enroll' ? auth.enrollResponse(req.prfSalt) : auth.unlockResponse(req.candidates)),
-      () => wiring.attemptCaseCUnlock(ctx2),
+      () => wiring.restoreLocalCustodyWithDeviceKey(ctx2),
     );
     expect(unlock).toEqual({ ok: true, installedCurrentOrg: true });
     expect(gc.readLocalRoot(org1.id, USER_ID)).not.toBeNull();
@@ -289,7 +289,7 @@ describe('CAP-383 onboarding case matrix (A, B, B′, C, C′)', () => {
       const unlock = await driveCeremony(
         fakeService,
         (req) => (req.ceremony === 'enroll' ? auth.enrollResponse(req.prfSalt) : auth.unlockResponse(req.candidates)),
-        () => wiring.attemptCaseCUnlock(ctx),
+        () => wiring.restoreLocalCustodyWithDeviceKey(ctx),
       );
       expect(unlock).toEqual({ ok: true, installedCurrentOrg: true });
 
