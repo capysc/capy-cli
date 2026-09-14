@@ -21,12 +21,11 @@
 //
 // Retarget another rig by exporting CAPY_DEV_HOST (and moving Keep's RP ID
 // with it), or override CAPY_API_URL / CAPY_KEEP_ORIGIN individually.
-const DEV_HOST = process.env.CAPY_DEV_HOST || 'mabels-mac-mini.tailcbfb49.ts.net';
+const { devOrigins } = require('../dist/config/devTarget.js');
 
 const DEV_DEFAULTS = {
   // Stable hosted Development HTTPS endpoints on the tailnet rig.
-  CAPY_API_URL: `https://${DEV_HOST}:3444`,
-  CAPY_KEEP_ORIGIN: `https://${DEV_HOST}:3443`,
+  ...devOrigins(),
   CAPY_FLOW_ONBOARD: '1',
   CAPY_DEVICE_KEYS: '1',
   CAPY_KEEP_SCREENS: '1',

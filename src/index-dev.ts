@@ -12,6 +12,7 @@ import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { GRANT_DAEMON_SUBCOMMAND } from './auth/deviceKey/grantHolder';
+import { devOrigins } from './config/devTarget';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -62,26 +63,26 @@ if (process.argv.includes('-v') || process.argv.includes('--verbose')) {
   process.env.CAPY_VERBOSE = '1';
 }
 
-// Default to localhost for dev builds — but only when neither CAPY_API_URL nor
+// Default to hosted Development — but only when neither CAPY_API_URL nor
 // a saved profile is present. Without this guard, the auto-set silently wins
 // over `capy-dev byoc` profiles, making them functionally useless in dev.
 // Resolution order in dev with this guard:
-//   explicit CAPY_API_URL > saved profile in ~/.capy-dev/config.json > localhost
+//   explicit CAPY_API_URL > saved profile in ~/.capy-dev/config.json > hosted Development
 if (!process.env.CAPY_API_URL) {
   const { existsSync } = require('fs') as typeof import('fs');
   const { join } = require('path') as typeof import('path');
   const { homedir } = require('os') as typeof import('os');
   const configPath = join(homedir(), process.env.CAPY_GLOBAL_DIR_NAME, 'config.json');
   if (!existsSync(configPath)) {
-    process.env.CAPY_API_URL = 'http://localhost:3001';
+    process.env.CAPY_API_URL = devOrigins().CAPY_API_URL;
   }
 }
 
-// Browser-backed dev flows belong to the local Keep app by default. Keep an
+// Browser-backed dev flows belong to hosted Development Keep by default. Keep an
 // explicit origin authoritative so alternate local ports and remote testbeds
 // remain usable.
 if (!process.env.CAPY_KEEP_ORIGIN) {
-  process.env.CAPY_KEEP_ORIGIN = 'http://keep.localhost:3002';
+  process.env.CAPY_KEEP_ORIGIN = devOrigins().CAPY_KEEP_ORIGIN;
 }
 
 const program = new Command();

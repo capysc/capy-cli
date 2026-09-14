@@ -221,7 +221,7 @@ function renderNetworkError(error: CapyError): string {
     '',
     `  Check:`,
     `    1. Your internet connection`,
-    `    2. The service is running ${grey('(capy-dev: http://localhost:3001)')}`,
+    `    2. The configured Capy service is reachable`,
     '',
     `  If you're the org owner, run ${bold('capy decrypt')} to decrypt secrets offline with your seed phrase.`,
     '',
