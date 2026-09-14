@@ -1,6 +1,8 @@
 import { runWithInteraction, currentInteraction, prompt, interactionOrTerminal, InteractionCommandError, ExitPromptError } from '../ui/interaction';
 import { human, humanError } from '../ui/webMode';
 import { inspectRotateDeployment } from './rotateReadiness';
+import { readFreeRotationTarget, resolveFixedRotationContext, type FixedRotationTarget } from './rotateContext';
+type RotationOpts = RotateOpts & Readonly<{ fixedTarget?: FixedRotationTarget }>;
 import {
   resolveContext,
   writeAndSync,
@@ -144,7 +146,7 @@ function describeDeploy(t: TargetConfig): string {
 export class RotateCommand {
   constructor(private readonly devMode: boolean = false) {}
 
-  async execute(varName: string | undefined, opts: RotateOpts & { all?: boolean; skipPrompts?: boolean; provider?: string }): Promise<void> {
+  async execute(varName: string | undefined, opts: RotationOpts & { all?: boolean; skipPrompts?: boolean; provider?: string }): Promise<void> {
     const interaction = currentInteraction();
     if (!interaction) return this.executeSteps(varName, opts);
     try {
@@ -162,11 +164,14 @@ export class RotateCommand {
 
   private async executeSteps(
     varName: string | undefined,
-    opts: RotateOpts & { all?: boolean; skipPrompts?: boolean; provider?: string },
+    opts: RotationOpts & { all?: boolean; skipPrompts?: boolean; provider?: string },
   ): Promise<void> {
     const pm = new ProjectManager();
-    const keep = pm.readKeepFile();
-    const branch = pm.deriveActiveBranch();
+    const fixedTarget = opts.fixedTarget ?? readFreeRotationTarget(pm, opts.expectedUserId);
+    if (fixedTarget && !opts.fixedTarget) return this.executeSteps(varName, { ...opts, fixedTarget });
+    const fixedContext = fixedTarget ? await resolveFixedRotationContext(fixedTarget, this.devMode) : null;
+    const keep = fixedContext?.keep ?? pm.readKeepFile();
+    const branch = fixedContext?.branch ?? pm.deriveActiveBranch();
 
     if (!keep) {
       await refuse(new CapyError('No keep.lock found in this directory.', ERROR_CODES.NO_KEEP_FILE));
@@ -313,7 +318,7 @@ export class RotateCommand {
   private async promoteAndConnect(
     varName: string,
     branch: string,
-    opts: RotateOpts & { provider?: string },
+    opts: RotationOpts & { provider?: string },
   ): Promise<void> {
     const providers = listProviders();
     if (providers.length === 0) {
@@ -329,7 +334,7 @@ export class RotateCommand {
       // whatever is in that variable with a key the provider issues. The
       // screen says that before the list, not after the write.
       const pm = new ProjectManager();
-      const keep = pm.readKeepFile();
+      const keep = opts.fixedTarget ? (await resolveFixedRotationContext(opts.fixedTarget, this.devMode)).keep : pm.readKeepFile();
       const { askRotateIntegrationInBrowser } = await import('../ui/rotateScreens');
       const answer = await askRotateIntegrationInBrowser({
         step: 'integration',
@@ -406,8 +411,9 @@ export class RotateCommand {
     if (!provider) return;
     if (opts.flowProvider && provider !== opts.flowProvider) throw new InteractionCommandError('ROTATE_FLOW_WORKOS_REQUIRED', 'This Flow supports WorkOS credentials. Choose a WorkOS variable.');
 
-    const connect = new ConnectCommand(this.devMode);
-    const { linked } = await connect.execute(provider, {
+    const connect = new ConnectCommand(this.devMode, opts.fixedTarget
+      ? () => resolveFixedRotationContext(opts.fixedTarget!, this.devMode) : undefined);
+    const { linked, connector: localConnector } = await connect.execute(provider, {
       var: varName,
       expectedUserId: opts.expectedUserId,
       noPush: opts.noPush,
@@ -428,8 +434,11 @@ export class RotateCommand {
     // it carries the provider's fingerprint and key type, and `rotateMany`
     // needs both to tell a real rotation from the provider handing back the
     // same key.
-    const keep = new ProjectManager().readKeepFile();
-    const connector = keep ? findManagedConnector(keep, varName, branch) : undefined;
+    const keep = opts.fixedTarget ? (await resolveFixedRotationContext(opts.fixedTarget, this.devMode)).keep
+      : new ProjectManager().readKeepFile();
+    // Local-only free promotion intentionally has no remote connector write.
+    const connector = opts.fixedTarget && opts.noPush ? localConnector
+      : keep ? findManagedConnector(keep, varName, branch) : undefined;
     if (!connector) {
       // Nothing to rotate through. `connect` reported success, so this is a
       // state we do not expect rather than a refusal — say so plainly instead
@@ -462,7 +471,7 @@ export class RotateCommand {
   private async planStops(
     keep: KeepFile | null,
     branch: string,
-    opts: RotateOpts & { all?: boolean; provider?: string },
+    opts: RotationOpts & { all?: boolean; provider?: string },
     settled: Partial<RotationPlanInput> = {},
   ): Promise<RotatePlanStop[]> {
     const providers =
@@ -491,7 +500,7 @@ export class RotateCommand {
    */
   private async rotateMany(
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
-    opts: RotateOpts & { all?: boolean },
+    opts: RotationOpts & { all?: boolean },
   ): Promise<RotateRunReport> {
     const web = opts.web === true;
     const live = this.devMode ? targets.filter(target => target.connector.mode === 'live') : [];
@@ -513,7 +522,8 @@ export class RotateCommand {
       const mod = await loadProvider(provider);
       mod.precheck?.();
     }
-    const ctx = await resolveContext({ devMode: this.devMode });
+    const ctx = opts.fixedTarget ? await resolveFixedRotationContext(opts.fixedTarget, this.devMode)
+      : await resolveContext({ devMode: this.devMode });
     if (opts.expectedUserId && ctx.userId !== opts.expectedUserId) throw new InteractionCommandError('AUTH_ACCOUNT_MISMATCH');
     type State = Readonly<{ succeeded: readonly string[]; keys: readonly RotateKeyResult[]; failed: readonly string[]; stopped: boolean }>;
     const run = async (index: number, state: State): Promise<State> => {
@@ -546,7 +556,8 @@ export class RotateCommand {
         const mod = await loadProvider(connector.provider);
         const result = await mod.rotate(ctx, name, connector, opts);
         try {
-          const fresh = await resolveContext({ devMode: this.devMode });
+          const fresh = opts.fixedTarget ? await resolveFixedRotationContext(opts.fixedTarget, this.devMode)
+            : await resolveContext({ devMode: this.devMode });
           if (opts.expectedUserId && fresh.userId !== opts.expectedUserId) throw new InteractionCommandError('AUTH_ACCOUNT_MISMATCH');
           await writeAndSync(fresh, name, result.value, { push: !opts.noPush, connector: result.entry });
         } catch (error) {
@@ -599,7 +610,7 @@ export class RotateCommand {
   private async planAndRotate(
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
     branch: string,
-    opts: RotateOpts & {
+    opts: RotationOpts & {
       all?: boolean;
       skipPrompts?: boolean;
       provider?: string;
@@ -692,7 +703,7 @@ export class RotateCommand {
 
     // ── Build the (now fully resolved) train-stop ───────────────────────────
     const pm = new ProjectManager();
-    const keep = pm.readKeepFile();
+    const keep = opts.fixedTarget ? (await resolveFixedRotationContext(opts.fixedTarget, this.devMode)).keep : pm.readKeepFile();
     const providers = Array.from(new Set(targets.map((t) => t.connector.provider)));
     const stops = await this.planStops(keep, branch, opts, {
       standing: 'plan',
@@ -813,7 +824,7 @@ export class RotateCommand {
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
     deployTarget: TargetConfig | null,
     configuredTargets: TargetConfig[],
-    opts: RotateOpts & { all?: boolean; provider?: string; varIgnored?: string },
+    opts: RotationOpts & { all?: boolean; provider?: string; varIgnored?: string },
   ): RotateAdvisory[] {
     return [
       ...(this.devMode && targets.some((t) => t.connector.mode === 'live') ? [{
@@ -839,7 +850,7 @@ export class RotateCommand {
   private async reportRun(
     projectName: string,
     branch: string,
-    opts: RotateOpts & { all?: boolean },
+    opts: RotationOpts & { all?: boolean },
     report: RotateRunReport,
     stops: RotatePlanStop[],
     deployed: { name: string; ok: boolean } | null,

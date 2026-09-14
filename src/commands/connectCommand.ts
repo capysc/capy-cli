@@ -1,6 +1,6 @@
 import { currentInteraction, prompt, interactionOrTerminal, ExitPromptError, InteractionCommandError } from '../ui/interaction';
 import { human, humanError } from '../ui/webMode';
-import { resolveContext, writeAndSync, listManagedKeys } from './connectors/shared';
+import { resolveContext, writeAndSync, listManagedKeys, type ResolvedContext } from './connectors/shared';
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
 import { connectPlan } from './connectors/plans';
 import { ProjectManager } from '../core/projectManager';
@@ -12,7 +12,7 @@ import type {
   ConnectResultData,
 } from '../ui/screens/contract';
 import type { AuthService } from '../auth/authService';
-import { CapyError, ERROR_CODES } from '../types/index';
+import { CapyError, ERROR_CODES, type ConnectorMetadata } from '../types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -66,7 +66,8 @@ export function pushOutcomeFor(outcome: ConnectOutcome): 'landed' | 'failed' | '
 }
 
 export class ConnectCommand {
-  constructor(private readonly devMode: boolean = false) {}
+  constructor(private readonly devMode: boolean = false,
+    private readonly boundContext?: () => Promise<ResolvedContext>) {}
 
   /**
    * `capy connect` with no provider.
@@ -121,14 +122,14 @@ export class ConnectCommand {
    * A decline and a failed push both leave `linked: false`; every path that
    * ends in `process.exit` never returns at all.
    */
-  async execute(provider: string, opts: ConnectOpts): Promise<{ linked: boolean }> {
+  async execute(provider: string, opts: ConnectOpts): Promise<{ linked: boolean; connector?: ConnectorMetadata }> {
     // Live-mode firewall: capy-dev never touches a live key.
     if (this.devMode && opts.live) {
       // `await displayErrorAndExit(...); return ...` — the pattern rotateCommand
       // documents. It serves the command-error page under `--web`, holds the
       // process open until the browser has fetched it, still prints to the
       // terminal, and exits 1. The `return` is not decoration: the function is
-      // Promise<{ linked: boolean }> and TypeScript does not narrow across an
+      // Promise<{ linked: boolean; connector?: ConnectorMetadata }> and TypeScript does not narrow across an
       // awaited never, so it is what keeps the signature honest.
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(
@@ -166,7 +167,7 @@ export class ConnectCommand {
       // documents. It serves the command-error page under `--web`, holds the
       // process open until the browser has fetched it, still prints to the
       // terminal, and exits 1. The `return` is not decoration: the function is
-      // Promise<{ linked: boolean }> and TypeScript does not narrow across an
+      // Promise<{ linked: boolean; connector?: ConnectorMetadata }> and TypeScript does not narrow across an
       // awaited never, so it is what keeps the signature honest.
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(
@@ -181,7 +182,7 @@ export class ConnectCommand {
     const mod: ConnectorModule = loaded.mod;
     if (mod.precheck) mod.precheck();
 
-    const ctx = await resolveContext({ devMode: this.devMode });
+    const ctx = this.boundContext ? await this.boundContext() : await resolveContext({ devMode: this.devMode });
     if (opts.expectedUserId && ctx.userId !== opts.expectedUserId) throw new InteractionCommandError('AUTH_ACCOUNT_MISMATCH');
     const { varName, value, entry, also } = await mod.connect(ctx, effective);
 
@@ -192,7 +193,7 @@ export class ConnectCommand {
       // documents. It serves the command-error page under `--web`, holds the
       // process open until the browser has fetched it, still prints to the
       // terminal, and exits 1. The `return` is not decoration: the function is
-      // Promise<{ linked: boolean }> and TypeScript does not narrow across an
+      // Promise<{ linked: boolean; connector?: ConnectorMetadata }> and TypeScript does not narrow across an
       // awaited never, so it is what keeps the signature honest.
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(
@@ -349,7 +350,7 @@ export class ConnectCommand {
     // made "the push did not land" a page nobody could open. The code is
     // delivered when the loop drains, which is after the browser has the page.
     if (failed) process.exitCode = 1;
-    return { linked: !failed };
+    return { linked: !failed, ...(!failed ? { connector: entry } : {}) };
   }
 
   /** The tail of the command, as a page. Reports only — nothing here decides. */

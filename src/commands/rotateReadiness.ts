@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionStore } from '../types';
+import { getSyncKeepHash, type KeepFile, type SessionStore, type SyncState } from '../types';
 import { ProjectManager } from '../core/projectManager';
 import { FileSessionStorageBackend } from '../auth/session/fileBackend';
 import { resolveActiveUrl } from '../config/profileConfig';
@@ -113,6 +113,7 @@ export async function inspectRotateDeployment(opts: RotateReadinessOptions, depe
     : targets.length === 1 ? targets[0] : undefined;
   if (opts.deployTarget && !selected) return { choices, checks: [check('ROTATE_DEPLOYMENT_TARGET_UNKNOWN', false,
     'That deployment target is not configured.', 'Select a listed target and recheck.')] };
+  if (targets.length === 0 && !opts.deployTarget && !opts.deployKind) return { choices, checks: [] };
   const kind = selected?.kind ?? opts.deployKind;
   if (!kind) return { choices, checks: [check('ROTATE_DEPLOYMENT_SELECTION_REQUIRED', false,
     'Choose the intended deployment target or destination so its CLI can be checked before opening Rotate.',
@@ -206,15 +207,28 @@ export async function inspectRotateWorkOS(cwd: string, dependencies: WorkOSProbe
     return [check('ROTATE_WORKOS_READINESS_UNAVAILABLE', false, 'WorkOS account access could not be verified.', 'Check network access and run workos auth login, then recheck.')];
   }
 }
+/** Local attribution only; the Capy probe still verifies identity, access and custody. */
+export function rotateRepositoryContext(
+  keep: KeepFile | null,
+  sync: SyncState | null,
+  branch: string | null,
+): CapyReadinessContext | null {
+  if (!branch) return null;
+  if (keep) return { orgId: keep.org_id, projectId: keep.project_id, branch, userHint: sync?.user_id };
+  if (sync?.sync_mode !== 'free' || sync.project_name !== 'default' || branch !== 'development'
+    || !sync.org_id || !sync.project_id || !sync.user_id || !getSyncKeepHash(sync, branch)) return null;
+  return { orgId: sync.org_id, projectId: sync.project_id, branch, userHint: sync.user_id };
+}
 export async function inspectLocalRotateReadiness(opts: RotateReadinessOptions = {}): Promise<RotateReadiness> {
   const cwd = opts.cwd ?? process.cwd();
   const pm = new ProjectManager(cwd);
   const keep = pm.readKeepFile();
   const branch = pm.deriveActiveBranch();
+  const context = rotateRepositoryContext(keep, pm.readSyncState(), branch);
   return inspectRotateReadiness({
-    repository: async () => check('ROTATE_REPOSITORY', Boolean(keep && branch),
-      'Rotate requires an existing keep.lock and active Capy branch.', 'Run this Capy installation in the intended project first.'),
-    capy: () => inspectRotateCapy({ orgId: keep!.org_id, projectId: keep!.project_id, branch: branch!, userHint: pm.readSyncState()?.user_id }, opts),
+    repository: async () => check('ROTATE_REPOSITORY', Boolean(context),
+      'Rotate requires an initialized project and active Capy branch.', 'Run this Capy installation in the intended project first.'),
+    capy: () => inspectRotateCapy(context!, opts),
     workos: () => inspectRotateWorkOS(cwd),
     deployment: () => inspectRotateDeployment(opts).catch(() => ({ choices: [], checks: [
       check('ROTATE_DEPLOYMENT_READINESS_UNAVAILABLE', false, 'Deployment configuration could not be inspected.',
