@@ -228,8 +228,8 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with an organization_id: direct local transpo
   });
 });
 
-describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker: direct local transport', () => {
-  test('a pending marker uses the Service-owned local transport', async () => {
+describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker', () => {
+  test('opens Keep and forwards the explicit account-switch request', async () => {
     const keepStub = Bun.serve({ port: 0, fetch: () => new Response('ok') });
     try {
       process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
@@ -244,6 +244,12 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker: direct loc
         await new Promise((r) => setTimeout(r, 5));
       }
       expect(captureInitiate).toHaveBeenCalledTimes(1);
+
+      const bridgeUrl = new URL(captureOpenedUrl.mock.calls[0]?.[0]);
+      expect(bridgeUrl.origin).toBe(`http://127.0.0.1:${keepStub.port}`);
+      expect(bridgeUrl.pathname).toBe('/auth/start');
+      expect(bridgeUrl.searchParams.get('cli_transport')).toBe('loopback-direct');
+      expect(bridgeUrl.searchParams.get('switch')).toBe('1');
 
       const init = captureInitiate.mock.calls[0]![0];
       await landOnLoopback(init.redirect_uri, init.state, 'fake-code-4');

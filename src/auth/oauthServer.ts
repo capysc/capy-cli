@@ -71,10 +71,11 @@ export class OAuthServer {
    * the binding after its normal sign-in; this CLI remains the only process
    * that exchanges the resulting code with the public Service endpoint.
    */
-  getKeepLoopbackDirectUrl(keepOrigin: string, binding: string): string {
+  getKeepLoopbackDirectUrl(keepOrigin: string, binding: string, forceLogin = false): string {
     const url = new URL('/auth/start', keepOrigin);
     url.searchParams.set('cli_transport', 'loopback-direct');
     url.searchParams.set('cli_binding', binding);
+    if (forceLogin) url.searchParams.set('switch', '1');
     return url.toString();
   }
 

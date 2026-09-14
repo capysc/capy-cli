@@ -11,7 +11,7 @@ import {
   type KeepAuthFlow,
 } from '../ui/screens/keepScreens';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
-import { consumeForceLoginMarker, isForceLoginMarkerPending } from '../config/globalConfig';
+import { consumeForceLoginMarker } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
 import { SessionStorageBackend } from './session/backend';
@@ -244,11 +244,10 @@ export class AuthService {
     // For a fresh sign-in, Keep owns the browser authentication and signup
     // ceremony; the CLI must never bypass it with a direct WorkOS URL.
     // The CLI remains the sole exchanger for the local loopback callback.
-    const canUseKeepBridge =
-      keepLoginBridgeEnabled() && !organizationId && !isForceLoginMarkerPending();
+    const forceLogin = consumeForceLoginMarker();
+    const canUseKeepBridge = keepLoginBridgeEnabled() && !organizationId;
     const useKeepBridge = canUseKeepBridge;
     const redirectUri = oauthServer.getRedirectUri();
-    const forceLogin = consumeForceLoginMarker();
     const initiated = await postJson<{ auth_url: string; loopback_binding: string }>(
       `${this.serviceApiUrl}/auth/loopback/initiate`,
       {
@@ -260,7 +259,7 @@ export class AuthService {
       },
     );
     const auth_url = useKeepBridge
-      ? oauthServer.getKeepLoopbackDirectUrl(keepOrigin(), initiated.loopback_binding)
+      ? oauthServer.getKeepLoopbackDirectUrl(keepOrigin(), initiated.loopback_binding, forceLogin)
       : initiated.auth_url;
 
     const code = await oauthServer.startAuthFlow(auth_url);
