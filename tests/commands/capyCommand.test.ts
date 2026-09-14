@@ -1665,127 +1665,16 @@ describe('CapyCommand', () => {
     });
   });
 
-  describe('initializeProject — new org creation is atomic with seed phrase', () => {
-    // These tests drive the REAL displayAndConfirmRecoveryPhrase (only
-    // `inquirer` is mocked, to answer its 'confirmed' prompt as a human
-    // would) — CAP-402 gated that function on a real TTY, so a run against
-    // bun test's own non-TTY stdin would refuse before the prompt is ever
-    // reached. Simulate the human-at-a-terminal case this describe block is
-    // actually about; a separate suite (recoveryPhrase.test.ts) pins the
-    // non-TTY refusal itself.
-    const savedIsTTY = process.stdin.isTTY;
-    beforeEach(() => {
-      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-      // No orgs — user will be prompted to create one
+  describe('initializeProject — zero-org identity', () => {
+    test('refuses the retired CLI seed-phrase and organization-creation flow', async () => {
       mockAuthService.authenticate.mockResolvedValue({
-        success: true,
-        organization_id: '',
-        user_id: 'user-456',
-        user_email: 'test@example.com',
-        organizations: [],
-        _refresh_token: 'refresh-token',
+        success: true, organization_id: '', user_id: 'user-456', organizations: [],
       });
 
-      mockAuthService.getToken.mockReturnValue({
-        access_token: 'token-123',
-        refresh_token: 'refresh-123',
-        expires_at: Date.now() + 3600000,
-        organization_id: 'org-new',
-        user_id: 'user-456',
+      await expect((capyCommand as any).initializeProject()).rejects.toMatchObject({
+        code: 'INIT_SIGNUP_REQUIRED',
       });
-
-      const createdOrganization = { id: 'org-new', workos_org_id: 'workos-new', name: 'New Org' };
-      const createdAuth = {
-        success: true,
-        organization_id: createdOrganization.id,
-        organization_name: createdOrganization.name,
-        user_id: 'user-456',
-        user_email: 'test@example.com',
-        organizations: [createdOrganization],
-      };
-      const createdAuthService = {
-        ...mockAuthService,
-        getServiceApiUrl: () => 'https://service.example.test',
-        getValidToken: async () => mockAuthService.getToken(),
-        authenticateSilent: async () => createdAuth,
-      };
-      mockAuthService.createOrganization.mockResolvedValue({
-        organization: createdOrganization,
-        auth: createdAuth,
-        authService: createdAuthService,
-      });
-
-      mockServiceClient.initializeProject.mockResolvedValue({
-        org_id: 'org-new',
-        project_id: 'proj-new',
-        project_name: 'test',
-        created: true,
-      });
-
-      mockServiceClient.listProjects.mockResolvedValue([]);
-    });
-
-    afterEach(() => {
-      Object.defineProperty(process.stdin, 'isTTY', { value: savedIsTTY, configurable: true });
-    });
-
-    test('should re-prompt and not create org while user declines seed phrase', async () => {
-      const inquirer = (await import('inquirer')).default;
-      const origPrompt = inquirer.prompt;
-      let confirmCalls = 0;
-      (inquirer as any).prompt = async (questions: any) => {
-        const q = Array.isArray(questions) ? questions[0] : questions;
-        if (q.name === 'orgName') return { orgName: 'New Org' };
-        if (q.name === 'confirmed') {
-          confirmCalls += 1;
-          // Decline twice, then accept — verifies the loop re-prompts
-          if (confirmCalls < 3) return { confirmed: false };
-          return { confirmed: true };
-        }
-        if (q.name === 'initChoice') return { initChoice: 'development' };
-        return {};
-      };
-
-      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
-
-      try {
-        await (capyCommand as any).initializeProject();
-        // Confirmation was re-prompted until user accepted
-        expect(confirmCalls).toBe(3);
-        // Org was only created after the user confirmed
-        expect(mockAuthService.createOrganization).toHaveBeenCalledTimes(1);
-      } finally {
-        (inquirer as any).prompt = origPrompt;
-        consoleSpy.mockRestore();
-      }
-    });
-
-    test('should create org and save key when user confirms seed phrase', async () => {
-      const inquirer = (await import('inquirer')).default;
-      const origPrompt = inquirer.prompt;
-      (inquirer as any).prompt = async (questions: any) => {
-        const q = Array.isArray(questions) ? questions[0] : questions;
-        if (q.name === 'orgName') return { orgName: 'New Org' };
-        if (q.name === 'confirmed') return { confirmed: true };
-        if (q.name === 'initChoice') return { initChoice: 'development' };
-        return {};
-      };
-
-      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
-
-      try {
-        await (capyCommand as any).initializeProject();
-
-        expect(mockAuthService.createOrganization).toHaveBeenCalledWith(
-          'New Org', 'refresh-token', 'user-456'
-        );
-
-        const { wrapAndSaveMasterKey } = await import('../../src/crypto/keyResolver');
-        expect(wrapAndSaveMasterKey).toHaveBeenCalled();
-      } finally {
-        (inquirer as any).prompt = origPrompt;
-        consoleSpy.mockRestore();
-      }
+      expect(mockAuthService.createOrganization).not.toHaveBeenCalled();
     });
   });
 

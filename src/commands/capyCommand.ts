@@ -101,7 +101,6 @@ import {
 } from '../ui/initRunEvent';
 import type { InitRunTerminalReceipt } from '../auth/initRunContract';
 import { openScreen } from '../ui/openScreen';
-import { createHostedFreshOrganization } from './hostedFreshOrganization';
 import { runHostedFreeRepositorySetup } from './hostedFreeRepositorySetup';
 import { SetupCommand } from './setupCommand';
 
@@ -1372,90 +1371,11 @@ export class CapyCommand {
         }), effectsStarted: false, context, auth: authResult, custodyDeclined: false };
       }
       if (orgs.length === 0) {
-        human('\nNo organization found. Let\'s create one.');
-        if (context.transport === 'hosted') {
-          if (wizardAfterAuth?.kind !== 'hosted' || context.operationDeadline === null
-            || !preparedAuthentication?.rebindHostedSession) {
-            throw new InitWizardFlowError(
-              new CapyError('Hosted organization transport was unavailable', 'INIT_RUN_INVALID'),
-              wizardAfterAuth,
-            );
-          }
-          const created = await createHostedFreshOrganization({
-            auth: authResult,
-            authService: context.authService,
-            deadline: context.operationDeadline,
-            serviceOrigin: context.authService.getServiceApiUrl(),
-            session: wizardAfterAuth.session,
-            rebindSession: preparedAuthentication.rebindHostedSession,
-          });
-          const createdWizard: InitWizardTransport = { kind: 'hosted', session: created.session };
-          if (created.kind === 'cancelled') {
-            throw new InitWizardCancelledError(createdWizard, created.effects, created.authService ?? null);
-          }
-          if (created.kind === 'failed') {
-            throw new InitWizardFlowError(created.error, createdWizard, created.authService ?? null);
-          }
-          if (!created.enrollment.ok || !created.readiness?.signup_complete
-            || created.readiness.retryable || created.readiness.custody.key_state !== 'minted'
-            || created.readiness.custody.ceremony_pending || !created.readiness.custody.has_live_wrapped_k_local) {
-            throw new InitWizardFlowError(
-              new CapyError('Device-key enrollment did not complete',
-                !created.enrollment.ok ? created.enrollment.code : 'INIT_HOSTED_DEVICE_CEREMONY_REQUIRED'),
-              createdWizard,
-              created.authService,
-            );
-          }
-          const replacementContext: InitCommandContext = {
-            transport: 'hosted',
-            operationDeadline: context.operationDeadline,
-            authService: created.authService,
-            serviceClient: created.serviceClient,
-          };
-          const recorded = await capture(() => recordWizard(createdWizard, {
-            organization: { kind: 'new', name: created.organization.name },
-            recoveryShown: true,
-            hasOrgKey: hasOrgKey(created.organization.id, created.auth.user_id!),
-          }));
-          if (!recorded.ok) {
-            throw new InitWizardFlowError(recorded.error, createdWizard, created.authService);
-          }
-          return {
-            selectedOrg: created.organization,
-            wizard: recorded.value,
-            effectsStarted: true,
-            context: replacementContext,
-            auth: created.auth,
-            custodyDeclined: !created.enrollment.ok,
-            defaultProjectId: created.projectId,
-          };
-        }
-      // CAP-382 Case A: a genuinely zero-org identity's exchange carries the
-      // Wave-B org-less token — flag-gated, and a no-op (org creation is
-      // byte-identical) when the flag is off or no such token was captured.
-      const deviceKeyEnrollment = deviceKeysEnabled()
-        ? {
-            ctx: this.deviceKeyWiringContext(context, authResult, undefined),
-            orglessToken: authResult._orgless_access_token,
-          }
-        : undefined;
-      const created = await withWizard(
-        wizardAfterAuth,
-        () => this.createNewOrganization(context, refreshToken!, authResult.user_id!, deviceKeyEnrollment),
-        context.operationDeadline,
-      );
-      const selectedOrg = created.organization;
-      const createdContext: InitCommandContext = {
-        ...context,
-        authService: created.authService,
-        serviceClient: created.serviceClient,
-      };
-      return { selectedOrg, wizard: recordWizard(wizardAfterAuth, {
-        organization: { kind: 'new', name: selectedOrg.name },
-        recoveryShown: true,
-      }), effectsStarted: true, context: createdContext, auth: created.auth, custodyDeclined: false };
-
-    }
+        throw new CapyError(
+          'Signup must complete in Keep before this repository can be initialized.',
+          'INIT_SIGNUP_REQUIRED',
+        );
+      }
       const choice = await askWizard(
         wizardAfterAuth,
         organizationQuestion(orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId }))),
