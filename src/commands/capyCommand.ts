@@ -103,6 +103,7 @@ import type { InitRunTerminalReceipt } from '../auth/initRunContract';
 import { openScreen } from '../ui/openScreen';
 import { createHostedFreshOrganization } from './hostedFreshOrganization';
 import { runHostedFreeRepositorySetup } from './hostedFreeRepositorySetup';
+import { SetupCommand } from './setupCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -481,6 +482,11 @@ export class CapyCommand {
         }
       }
 
+      if (await this.recoverFreeFirstSync(projectState)) {
+        emitInteractionGoal({ status: 'succeeded' });
+        return;
+      }
+
       await this.syncProject(projectState);
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
@@ -505,6 +511,100 @@ export class CapyCommand {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(original);
     }
+  }
+
+  /**
+   * Older root onboarding could materialize an empty keep.lock for the free
+   * default project before its first sync. That file is only a partial local
+   * attempt: free setup intentionally keeps the remote marker authoritative.
+   * Re-enter the existing plan/apply machinery after the normal consent
+   * question, but leave every paid or non-default project on its old path.
+   */
+  private async recoverFreeFirstSync(projectState: ProjectState): Promise<boolean> {
+    if (!projectState.hasKeepFile || projectState.projectName !== 'default'
+      || !projectState.organizationId || !projectState.projectId) return false;
+    const keep = this.projectManager.readKeepFile();
+    if (!keep || keep.org_id !== projectState.organizationId || keep.project_id !== projectState.projectId
+      || Object.keys(keep.variables).length > 0) return false;
+
+    const auth = await this.authService.authenticateSilent(projectState.organizationId);
+    if (!auth.success || !auth.user_id) return false;
+    const billing = await this.serviceClient.getBillingStatus().catch(() => null);
+    if (!billing || billing.tier !== 'free' || billing.grandfathered) return false;
+    const projects = await this.serviceClient.listProjects().catch(() => null);
+    const defaultProject = projects?.length === 1 && projects[0]?.id === projectState.projectId
+      && projects[0].organization_id === projectState.organizationId && projects[0].name === 'default'
+      ? projects[0] : null;
+    if (!defaultProject) return false;
+    const remote = await this.serviceClient.getDecryptData(defaultProject.id, SyncEngine.DEFAULT_BRANCH, undefined, true);
+    if (remote.keep_file) return false;
+
+    if (projectState.userId && projectState.userId !== auth.user_id) return false;
+    const plan = await this.planFreeSetup(projectState.organizationId, defaultProject.id, auth.user_id);
+    this.requireFirstSyncPlan(plan.syncAction);
+    const names = plan.names;
+    const consent = plan.syncAction !== 'push_root_env' || names.length === 0 ? true : (await askWizard(
+      null,
+      encryptQuestion({ count: names.length, names }, {
+        projectName: defaultProject.name,
+        orgName: auth.organizations?.find(org => org.id === projectState.organizationId)?.name ?? projectState.organizationId,
+        branch: SyncEngine.DEFAULT_BRANCH,
+      }),
+      async () => {
+        const answer = await prompt([{
+          type: 'confirm', name: 'confirmEncrypt', default: true,
+          message: `Encrypt these ${names.length} secrets and push to ${B(defaultProject.name)} on ${B(SyncEngine.DEFAULT_BRANCH)}?`,
+        }]);
+        return answer.confirmEncrypt === true;
+      },
+    )).value === true;
+    if (!consent) throw new InteractionSkippedError('The initial secret sync was skipped.');
+
+    await this.applyFreeSetup(projectState.organizationId, defaultProject.id, auth.user_id, plan.hash);
+    return true;
+  }
+
+  /** Prepare the existing free setup plan before collecting consent. */
+  private async planFreeSetup(orgId: string, projectId: string, userId: string): Promise<Readonly<{ hash: string; names: readonly string[]; syncAction: string }>> {
+    const planResult = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+    const setup = new SetupCommand({ envPath: this.options.envPath }, this.devMode, planResult.resolve, {
+      authService: this.authService,
+      serviceClient: this.serviceClient,
+    });
+    await setup.execute({ org: orgId, project: projectId, expectedUserId: userId, expectedSyncMode: 'free' });
+    const plan = await planResult.promise;
+    if (plan.ok !== true || typeof plan.plan_hash !== 'string') {
+      throw new CapyError(typeof plan.detail === 'string' ? plan.detail : 'Free setup could not prepare first sync.',
+        typeof plan.code === 'string' ? plan.code : ERROR_CODES.SERVICE_ERROR);
+    }
+    const names = plan.env !== null && typeof plan.env === 'object' && 'variable_names' in plan.env
+      && Array.isArray(plan.env.variable_names) && plan.env.variable_names.every(name => typeof name === 'string')
+      ? plan.env.variable_names as readonly string[] : [];
+    const syncAction = typeof plan.sync_action === 'string' ? plan.sync_action : '';
+    if (!syncAction) throw new CapyError('Free setup returned no sync action.', ERROR_CODES.SERVICE_ERROR);
+    return { hash: plan.plan_hash, names, syncAction };
+  }
+
+  /** Apply the exact free setup plan that was presented for consent. */
+  private async applyFreeSetup(orgId: string, projectId: string, userId: string, planHash: string): Promise<void> {
+    const applyResult = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+    const apply = new SetupCommand({ envPath: this.options.envPath }, this.devMode, applyResult.resolve, {
+      authService: this.authService,
+      serviceClient: this.serviceClient,
+    });
+    await apply.execute({ org: orgId, project: projectId, expectedUserId: userId,
+      expectedSyncMode: 'free', confirm: planHash });
+    const applied = await applyResult.promise;
+    if (applied.ok !== true) {
+      throw new CapyError(typeof applied.detail === 'string' ? applied.detail : 'Free setup could not complete first sync.',
+        typeof applied.code === 'string' ? applied.code : ERROR_CODES.SERVICE_ERROR);
+    }
+  }
+
+  /** A marker that appeared while planning must retry through the normal pull path. */
+  private requireFirstSyncPlan(syncAction: string): void {
+    if (syncAction === 'push_root_env' || syncAction === 'create_empty_remote_marker') return;
+    throw new CapyError('The free default project completed first sync while this command was preparing it. Re-run Capy.', ERROR_CODES.PLAN_CHANGED);
   }
 
   /**
@@ -1676,7 +1776,8 @@ export class CapyCommand {
       }
     }
 
-    const freeProject = selectedContext.transport === 'hosted' ? await (async () => {
+    const freeService = selectedContext.serviceClient as ServiceClient & Readonly<{ readonly getBillingStatus?: () => ReturnType<ServiceClient['getBillingStatus']> }>;
+    const freeProject = typeof freeService.getBillingStatus === 'function' ? await (async () => {
       const billing = await selectedContext.serviceClient.getBillingStatus();
       if (billing.tier !== 'free' || billing.grandfathered) return null;
       const projects = await selectedContext.serviceClient.listProjects();
@@ -1684,6 +1785,8 @@ export class CapyCommand {
         || projects[0].organization_id !== selectedOrg.id) {
         throw new CapyError('The free account default project is not provisioned.', ERROR_CODES.SERVICE_ERROR);
       }
+      const remote = await selectedContext.serviceClient.getDecryptData(projects[0].id, SyncEngine.DEFAULT_BRANCH, undefined, true);
+      if (remote.keep_file) return null;
       return projects[0];
     })() : null;
     if (selectedContext.transport === 'hosted' && freeProject) {
@@ -1726,6 +1829,34 @@ export class CapyCommand {
       if (setup.kind === 'cancelled') throw new InitWizardCancelledError(setupWizard, 'indeterminate', selectedContext.authService);
       if (setup.kind === 'failed') throw new InitWizardFlowError(setup.error, setupWizard, selectedContext.authService);
       return { wizard: setupWizard, target: { ...target, syncMode: 'free' }, status: 'succeeded', context: selectedContext };
+    }
+    if (freeProject) {
+      const target = {
+        orgId: selectedOrg.id, orgName: selectedOrg.name,
+        projectId: freeProject.id, projectName: 'default', branch: 'development',
+      } as const;
+      const plan = await this.planFreeSetup(target.orgId, target.projectId, selectedAuth.user_id!);
+      this.requireFirstSyncPlan(plan.syncAction);
+      const names = plan.names;
+      const consent = plan.syncAction !== 'push_root_env' || names.length === 0 ? true : (await askWizard(
+        wizardAfterOrgKey,
+        encryptQuestion({ count: names.length, names }, target),
+        async () => {
+          const answer = await prompt([{
+            type: 'confirm', name: 'confirmEncrypt', default: true,
+            message: `Encrypt these ${names.length} secrets and push to ${B(target.projectName)} (${selectedOrg.name}) on ${B(target.branch)}?`,
+          }]);
+          return answer.confirmEncrypt === true;
+        },
+      )).value === true;
+      if (!consent) throw new InteractionSkippedError('The initial secret sync was skipped.');
+      await this.applyFreeSetup(target.orgId, target.projectId, selectedAuth.user_id!, plan.hash);
+      return {
+        wizard: wizardAfterOrgKey,
+        target: { ...target, syncMode: 'free' },
+        status: 'succeeded',
+        context: selectedContext,
+      };
     }
 
     // Discover existing projects in the org. If any exist, give the user the

@@ -149,16 +149,15 @@ program
   .option('--project <id>', 'explicit existing project attribution')
   .option('--create-project <name>', 'explicitly create a project on approved apply')
   .action(async (options, command) => {
-    if (!options.json) {
+    const globalOpts = command.optsWithGlobals();
+    if (!globalOpts.json) {
       console.error('');
       console.error('  capy setup currently supports --json only (it is the onboarding tool\'s entry point).');
       console.error('  A human setting up a project for the first time should just run capy.');
       console.error('');
-      process.exitCode = 1;
-      return;
+      process.exit(1);
     }
     const { SetupCommand } = await import('./commands/setupCommand');
-    const globalOpts = command.optsWithGlobals();
     const cmd = new SetupCommand({ envPath: globalOpts.envPath });
     await cmd.execute({ confirm: options.confirm, org: options.org, project: options.project, createProject: options.createProject });
   });
@@ -169,16 +168,15 @@ program
   .option('--json', 'required today: this command has no TTY mode yet')
   .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
   .action(async (options, command) => {
-    if (!options.json) {
+    const globalOpts = command.optsWithGlobals();
+    if (!globalOpts.json) {
       console.error('');
       console.error('  capy sync currently supports --json only (it is the onboarding tool\'s entry point).');
       console.error('  A human syncing an already-initialized project should just run capy.');
       console.error('');
-      process.exitCode = 1;
-      return;
+      process.exit(1);
     }
     const { SyncCommand } = await import('./commands/syncCommand');
-    const globalOpts = command.optsWithGlobals();
     const cmd = new SyncCommand({ envPath: globalOpts.envPath, expectedUserId: expectedUserIdFor(command) });
     await cmd.execute();
   });

@@ -91,6 +91,7 @@ beforeEach(() => {
     getEnvPath: mock(() => '/tmp/capy-setup-test-absent/.env'),
     readActiveBranch: mock(() => 'development'),
     readSyncState: mock(() => null),
+    readKeepFile: mock(() => null),
     writeKeepFile: mock(() => undefined),
     writeActiveBranch: mock(() => undefined),
   };
@@ -423,6 +424,18 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
     await new SetupCommand().execute({});
     return JSON.parse(logs().at(-1)!).plan_hash;
   }
+
+  test('an empty legacy default lock for another user remains initialized', async () => {
+    useFreeDefaultProject();
+    mockProjectManager().detectProjectState.mockImplementation(async () => ({
+      initialized: true, hasKeepFile: true, hasEnvFile: true,
+      organizationId: ORG.id, projectId: 'project_default', projectName: 'default', activeBranch: 'development', userId: 'user_other',
+    }));
+    mockProjectManager().readKeepFile.mockImplementation(() => ({ version: '3.0', org_id: ORG.id, project_id: 'project_default', project_name: 'default', variables: {} }));
+    mockProjectManager().readSyncState.mockImplementation(() => ({ user_id: 'user_other' }));
+    await new SetupCommand().execute({});
+    expect(parsedOutput().code).toBe(ERROR_CODES.SETUP_ALREADY_INITIALIZED);
+  });
 
   test('remote marker wins over local values and the plan forbids local keep.lock', async () => {
     useFreeDefaultProject();
