@@ -555,16 +555,26 @@ export class RotateCommand {
         }
         const mod = await loadProvider(connector.provider);
         const result = await mod.rotate(ctx, name, connector, opts);
-        try {
-          const fresh = opts.fixedTarget ? await resolveFixedRotationContext(opts.fixedTarget, this.devMode)
-            : await resolveContext({ devMode: this.devMode });
-          if (opts.expectedUserId && fresh.userId !== opts.expectedUserId) throw new InteractionCommandError('AUTH_ACCOUNT_MISMATCH');
-          await writeAndSync(fresh, name, result.value, { push: !opts.noPush, connector: result.entry });
-        } catch (error) {
+        const persistenceFailure = (stage: 'resolving the Capy project' | 'checking the Capy account' | 'saving and syncing the replacement', error: unknown): never => {
           if (!currentInteraction()) throw error;
+          const cause = error instanceof Error && 'code' in error && typeof error.code === 'string'
+            && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'UNKNOWN_ERROR';
           throw new InteractionCommandError('ROTATE_WRITE_SYNC_FAILED',
-            'A replacement key was created and provider expiration handling has already run, but writing or syncing failed. Deployment did not run. Check the provider and local state before retrying rotation.');
+            `A replacement key was created and provider expiration handling has already run, but ${stage} failed (${cause}). Deployment did not run. Do not rotate again; recover the existing replacement key and resume saving or syncing it.`);
+        };
+        const fresh = await (opts.fixedTarget ? resolveFixedRotationContext(opts.fixedTarget, this.devMode)
+          : resolveContext({ devMode: this.devMode })).catch(error => persistenceFailure('resolving the Capy project', error));
+        if (opts.expectedUserId && fresh.userId !== opts.expectedUserId) {
+          persistenceFailure('checking the Capy account', new InteractionCommandError('AUTH_ACCOUNT_MISMATCH'));
         }
+        await writeAndSync(fresh, name, result.value, {
+          push: !opts.noPush,
+          connector: result.entry,
+          // Rotation explicitly replaces this credential with the key just
+          // issued by its provider. A stale saved value is not a conflict.
+          confirmOverwrite: async () => true,
+        })
+          .catch(error => persistenceFailure('saving and syncing the replacement', error));
         human(`\n  ✓ ${B(name)} rotated${opts.noPush ? ' (local only)' : ' and pushed'}.`);
         if (connector.source === 'cli' && connector.provider !== 'workos') human(`  The previous key is now invalid. Teammates must run ${B('capy')} to pick up the new value.`);
         const updatedMode: Pick<RotateKeyResult, 'mode'> = result.entry.mode === 'test' || result.entry.mode === 'live' ? { mode: result.entry.mode } : {};
