@@ -9,6 +9,7 @@ import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { GRANT_DAEMON_SUBCOMMAND } from './auth/deviceKey/grantHolder';
+import { createJsonLineInteraction, runWithInteraction } from './ui/interaction';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -69,10 +70,12 @@ program
   .description('Capy CLI - SecretOps for the AI age')
   .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')
+  .option('--flow', 'use encrypted Keep conversation for this command after pairing')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
   .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a browser instead of TTY prompts')
+  .option('--json', 'stream structured interaction records over stdin/stdout')
   .option('--expected-user-id <id>', 'require the account bound by the hosted launcher')
   // Record `--web` once, before any handler runs, for the code that has no way
   // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
@@ -125,6 +128,15 @@ program
     };
 
     const command = new CapyCommand(cliOptions);
+    if (options.flow === true) {
+      const { runCapyFlow } = await import('./ui/capyFlow');
+      await runCapyFlow(cliOptions, false);
+      return;
+    }
+    if (options.json === true) {
+      await runWithInteraction(createJsonLineInteraction(process.stdin, process.stdout), () => command.execute());
+      return;
+    }
     await command.execute();
   });
 

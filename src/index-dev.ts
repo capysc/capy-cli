@@ -91,6 +91,8 @@ program
   .description('Capy CLI (DEV MODE - mock auth enabled)')
   .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')
+  .option('--json', 'stream normal command interaction as JSON lines')
+  .option('--flow', 'use encrypted Keep conversation for this command after pairing')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
@@ -142,7 +144,13 @@ program
     };
 
     const command = new CapyCommand(cliOptions, true);
-    await command.execute();
+    if (options.flow) {
+      const { runCapyFlow } = await import('./ui/capyFlow');
+      await runCapyFlow(cliOptions, true);
+    } else if (options.json) {
+      const { runWithInteraction, createJsonLineInteraction } = await import('./ui/interaction');
+      await runWithInteraction(createJsonLineInteraction(process.stdin, process.stdout), () => command.execute());
+    } else await command.execute();
   });
 
 program

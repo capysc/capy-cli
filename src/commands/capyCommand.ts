@@ -11,7 +11,7 @@ import { existsSync, unlinkSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { randomUUID, createHash } from 'crypto';
-import inquirer from 'inquirer';
+import { currentInteraction, emitInteractionGoal, prompt } from '../ui/interaction';
 import {
   CliOptions,
   Organization,
@@ -116,6 +116,9 @@ async function askWizard<T>(
   question: InitQuestion<T>,
   terminal: () => Promise<T>,
 ): Promise<Readonly<{ value: T | null; wizard: InitWizardTransport | null }>> {
+  // A structured interaction owns the same terminal questions. This makes
+  // Flow/JSON a rendering transport, rather than a second initialization tree.
+  if (currentInteraction()) return { value: await terminal(), wizard };
   if (!wizard) return { value: await terminal(), wizard: null };
   const result = await askInitWizard(wizard, question);
   return { value: result.value, wizard: result.transport };
@@ -154,6 +157,9 @@ class InitWizardCancelledError extends CapyError {
     super('Initialization cancelled', ERROR_CODES.AUTH_FAILED);
   }
 }
+
+/** A user declined the optional first push; setup itself completed safely. */
+class InteractionSkippedError extends Error {}
 
 const bindInitWizardAuthority = (
   error: unknown,
@@ -446,6 +452,7 @@ export class CapyCommand {
     try {
       // Detect project state
       const detectedProjectState = await this.projectManager.detectProjectState();
+      if (detectedProjectState.userId) this.authService.setSessionUserId(detectedProjectState.userId);
       const envMeta = detectedProjectState.initialized
         ? {}
         : this.fileManager.readEnvMeta(this.options.envPath);
@@ -465,9 +472,11 @@ export class CapyCommand {
           // Local-only mode: bootstrap a project entirely on this machine
           // (synthetic org, generated projectId) instead of server onboarding.
           await this.initializeProjectLocal();
+          emitInteractionGoal({ status: 'succeeded' });
           return;
         } else {
           await this.initializeProject();
+          emitInteractionGoal({ status: 'succeeded' });
           return;
         }
       }
@@ -475,9 +484,20 @@ export class CapyCommand {
       await this.syncProject(projectState);
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
+      emitInteractionGoal({ status: 'succeeded' });
     } catch (error: any) {
       const original = error instanceof HostedInitTerminalError ? error.original : error;
       this.debugError('execute caught error', original);
+      if (error instanceof InteractionSkippedError) {
+        emitInteractionGoal({ status: 'skipped', message: error.message });
+        return;
+      }
+      emitInteractionGoal({
+        status: error?.name === 'ExitPromptError' ? 'cancelled' : 'failed',
+        code: original instanceof CapyError ? original.code : ERROR_CODES.SERVICE_ERROR,
+        message: original instanceof Error ? original.message : undefined,
+      });
+      if (currentInteraction()) return;
       if (error instanceof HostedInitTerminalError) {
         await flushHostedTerminalOutput();
         process.exit(1);
@@ -575,7 +595,7 @@ export class CapyCommand {
           }
           return chosen;
         }
-        const { selected: pick } = await inquirer.prompt([{
+        const { selected: pick } = await prompt([{
           type: 'list',
           name: 'selected',
           message: 'Which branch do you want to use?',
@@ -1348,13 +1368,13 @@ export class CapyCommand {
         // EDIT_SCREEN_UNSAFE_SURFACE's comment argues for: discovering "no
         // TTY" from ExitPromptError at the first keypress read is too late.
         const { isInteractive, refuseNonInteractive } = await import('../ui/interactive');
-        if (!isInteractive()) {
+        if (!currentInteraction() && !isInteractive()) {
           refuseNonInteractive(
             'choosing an organization is a decision this command cannot make for you, and stdin is not a terminal',
             'Re-run with --web to answer it in a browser — the same picker, on a page you can open from any device.',
           );
         }
-        const answer = await inquirer.prompt([{
+        const answer = await prompt([{
           type: 'list',
           name: 'orgId',
           message: 'Select organization for project:',
@@ -1752,7 +1772,7 @@ export class CapyCommand {
         wizardAfterProjects,
         projectQuestion(existingProjects.map(p => ({ id: p.id, name: p.name }))),
         async () => {
-          const answer = await inquirer.prompt([{
+          const answer = await prompt([{
           type: 'list',
           name: 'projectChoice',
           message: 'Which project do you want to use?',
@@ -1878,7 +1898,7 @@ export class CapyCommand {
       wizardAfterProjectName,
       branchChoiceQuestion(),
       async () => {
-        const answer = await inquirer.prompt([{
+        const answer = await prompt([{
         type: 'list',
         name: 'initialBranchChoice',
         message: 'What branch should this project start with?',
@@ -1900,7 +1920,7 @@ export class CapyCommand {
         branchChoice.wizard,
         branchNameQuestion(),
         async () => {
-          const answer = await inquirer.prompt([{
+          const answer = await prompt([{
           type: 'input',
           name: 'branchName',
           message: 'Branch name:',
@@ -2045,7 +2065,7 @@ export class CapyCommand {
           //
           // A closed window is a "no": `askEncrypt` resolves false on cancel,
           // which is the same thing `chosen === 'yes'` already meant.
-          const answer = await inquirer.prompt([{
+          const answer = await prompt([{
             type: 'confirm',
             name: 'confirmEncrypt',
             message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
@@ -2059,6 +2079,7 @@ export class CapyCommand {
         if (!confirmEncrypt) {
           human(`\nSkipped. Your .env was not modified.`);
           human(`Run ${B('capy')} again from the correct project directory, or run ${B('capy push')} when ready.`);
+          if (currentInteraction()) throw new InteractionSkippedError('The initial secret sync was skipped.');
           return {
             wizard: consent.wizard,
             target: {
@@ -3062,7 +3083,7 @@ export class CapyCommand {
       webFinalEnv = resolved.finalEnv;
       action = resolved.action;
     } else {
-      const res = await inquirer.prompt([{
+      const res = await prompt([{
         type: 'list',
         name: 'action',
         message: 'What would you like to do?',

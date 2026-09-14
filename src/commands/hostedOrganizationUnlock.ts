@@ -8,9 +8,8 @@ import type { ServiceClient } from '../service/serviceClient';
 import { CapyError, ERROR_CODES, type AuthResult } from '../types';
 import { askHostedInitChannel, HostedInitChannelError } from '../ui/hostedInitChannel';
 import type { HostedInitWizardSession } from '../ui/hostedInitWizardSession';
-import { readLocalRoot, readMasterKey, saveMasterKey } from '../config/globalConfig';
-import { decryptMasterKey, masterKeyAAD } from '../crypto/keyManager';
-import { deriveLocalInnerKey } from '../crypto/localKeyRoot';
+import { restoreFromLocalRoot } from '../auth/deviceKey/restoreFromLocalRoot';
+import { readMasterKey } from '../config/globalConfig';
 
 type Settlement = Readonly<{ session: HostedInitWizardSession; cancelled: boolean }>;
 export type HostedOrganizationUnlockResult =
@@ -138,32 +137,9 @@ export async function unlockHostedOrganization(input: Readonly<{
         };
       },
     };
-    const existingRoot = readLocalRoot(input.organizationId, userId);
-    if (existingRoot) {
-      if (readMasterKey(input.organizationId, userId) !== null) {
-        return { cancelled: false, installedCurrentOrg: true, effectsStarted: false };
-      }
-      const wrappers = await deps.ops.listWrappers();
-      const wrapper = wrappers.find((row) => row.type === 'key_enc'
-        && row.organization_id === input.organizationId && !row.deleted_at);
-      if (!wrapper) throw new CapyError('The organization key is unavailable for the linked account.', ERROR_CODES.WRAPPER_NOT_FOUND);
-      const scoped = await deps.opsForOrg(input.organizationId);
-      if (!scoped) throw new CapyError('The linked account cannot access this organization.', ERROR_CODES.PERMISSION_DENIED);
-      const blob = await scoped.fetchKeyEnc(wrapper.id);
-      const inner = await scoped.coDecrypt(input.organizationId, blob);
-      // Prove the server blob belongs to the root delivered during signup.
-      // No new PRF assertion, replacement root, or legacy-key fallback.
-      decryptMasterKey(inner, deriveLocalInnerKey(existingRoot), masterKeyAAD(userId, input.organizationId));
-      checkDeadline();
-      const currentRoot = readLocalRoot(input.organizationId, userId);
-      if (!currentRoot || !currentRoot.equals(existingRoot)) {
-        throw new CapyError('Device custody changed while loading the organization key.', ERROR_CODES.LOCAL_ROOT_CONFLICT);
-      }
-      if (readMasterKey(input.organizationId, userId) !== null) {
-        return { cancelled: false, installedCurrentOrg: true, effectsStarted: false };
-      }
-      saveMasterKey(input.organizationId, blob, userId);
-      return { cancelled: false, installedCurrentOrg: true, effectsStarted: true };
+    const hadOrgKey = readMasterKey(input.organizationId, userId) !== null;
+    if (await restoreFromLocalRoot(deps, input.organizationId, checkDeadline)) {
+      return { cancelled: false, installedCurrentOrg: true, effectsStarted: !hadOrgKey };
     }
     const detected = await dependencies.detect(deps);
     checkDeadline();

@@ -154,6 +154,7 @@ const validBaseline = (value: unknown): value is PairedSessionInstallationBaseli
       const record = authority && typeof authority === 'object' && !Array.isArray(authority)
         ? authority as Readonly<Record<string, unknown>> : null;
       return Boolean(record && typeof record.userId === 'string' && USER_ID.test(record.userId)
+        && (record.unavailable === undefined || record.unavailable === true)
         && (record.refreshAuthoritySha256 === null
           || typeof record.refreshAuthoritySha256 === 'string' && /^[0-9a-f]{64}$/u.test(record.refreshAuthoritySha256)));
     }));

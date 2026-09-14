@@ -19,16 +19,19 @@
  * decision the command makes about its own flow. This is only for the code
  * that has no way to ask.
  */
-let webMode = false;
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { currentInteraction } from './interaction';
+
+const webModes = new AsyncLocalStorage<boolean>();
 
 /** Called once, from the root program's `preAction` hook. */
 export function setWebMode(on: boolean): void {
-  webMode = on;
+  webModes.enterWith(on);
 }
 
 /** True when this run should render to a browser rather than a terminal. */
 export function isWebMode(): boolean {
-  return webMode;
+  return webModes.getStore() === true;
 }
 
 /**
@@ -43,5 +46,10 @@ export function isWebMode(): boolean {
  * keeping distinct even with a single implementation.
  */
 export function human(...args: unknown[]): void {
+  const interaction = currentInteraction();
+  if (interaction) {
+    void interaction.output({ text: args.map(String).join(' ') });
+    return;
+  }
   console.log(...args);
 }

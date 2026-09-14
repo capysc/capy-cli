@@ -13,6 +13,7 @@
  * ("A ceremony refusal leaves the machine byte-identical to today's
  * non-passkey flow") extended to the wiring layer.
  */
+import { restoreFromLocalRoot } from './restoreFromLocalRoot';
 import { hostname } from 'os';
 import inquirer from 'inquirer';
 import type { AuthService } from '../authService';
@@ -175,6 +176,7 @@ export async function attemptCaseCUnlock(
 ): Promise<{ ok: boolean; installedCurrentOrg: boolean }> {
   try {
     const deps = buildOnboardingDeps(ctx, currentOrgToken(ctx));
+    if (ctx.activeOrgId && await restoreFromLocalRoot(deps, ctx.activeOrgId)) return { ok: true, installedCurrentOrg: true };
     const detection = await detectOnboardingCase(deps);
     if (detection.kind !== 'unlock') return { ok: false, installedCurrentOrg: false };
 

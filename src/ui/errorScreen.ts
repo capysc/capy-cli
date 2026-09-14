@@ -121,7 +121,8 @@ export async function displayErrorAndExit(
   const output = renderError(error, context);
   const { isWebMode } = await import('./webMode');
   if (output) {
-    console.log(output);
+    const { human } = await import('./webMode');
+    human(output);
   }
   if (isWebMode()) {
     try {
