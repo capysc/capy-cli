@@ -1272,6 +1272,21 @@ export class CapyCommand {
     return { repositoryVerified, custodyVerified };
   }
 
+  /**
+   * A repository's remembered organization is only an optimization for an
+   * already-established local session. It must not select a fresh account's
+   * interactive authentication, because that bypasses Keep's account signup
+   * ceremony.
+   */
+  private async authenticateInitialization(
+    context: InitCommandContext,
+    orgHint: string | undefined,
+  ): Promise<AuthResult> {
+    if (!orgHint) return context.authService.authenticate();
+    const hinted = await context.authService.authenticateSilent(orgHint);
+    return hinted.success ? hinted : context.authService.authenticate();
+  }
+
   private async runInitialization(
     wizard: InitWizardTransport | null,
     preparedAuthentication?: PreparedInitAuthentication,
@@ -1283,7 +1298,8 @@ export class CapyCommand {
     const syncState = this.projectManager.readSyncState();
     const orgHint = syncState?.org_id;
 
-    // Authenticate — pass org hint so session scopes to the right org
+    // A remembered organization scopes silent reuse only. Interactive
+    // authentication must start orgless so Keep can own fresh signup.
     const context = preparedAuthentication?.context ?? {
       transport: 'local' as const,
       operationDeadline: null,
@@ -1291,7 +1307,7 @@ export class CapyCommand {
       serviceClient: this.serviceClient,
     };
     const spinner = ora('Logging in...').start();
-    const authResult = preparedAuthentication?.auth ?? await context.authService.authenticate(orgHint);
+    const authResult = preparedAuthentication?.auth ?? await this.authenticateInitialization(context, orgHint);
     this.debug('init authResult', {
       success: authResult.success,
       user_id: authResult.user_id,

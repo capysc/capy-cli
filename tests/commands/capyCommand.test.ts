@@ -423,6 +423,36 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('initialization authentication', () => {
+    test('uses a remembered organization only for silent authentication', async () => {
+      const hintedAuth = { success: false, error: 'No matching session' };
+      const freshAuth = { success: true, organizations: [] };
+      mockAuthService.authenticateSilent.mockResolvedValue(hintedAuth);
+      mockAuthService.authenticate.mockResolvedValue(freshAuth);
+
+      const result = await (capyCommand as any).authenticateInitialization({
+        authService: mockAuthService,
+      }, 'former-org');
+
+      expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('former-org');
+      expect(mockAuthService.authenticate).toHaveBeenCalledWith();
+      expect(result).toEqual(freshAuth);
+    });
+
+    test('keeps a silently authenticated organization without opening a browser flow', async () => {
+      const hintedAuth = { success: true, organization_id: 'current-org' };
+      mockAuthService.authenticateSilent.mockResolvedValue(hintedAuth);
+
+      const result = await (capyCommand as any).authenticateInitialization({
+        authService: mockAuthService,
+      }, 'current-org');
+
+      expect(mockAuthService.authenticateSilent).toHaveBeenCalledWith('current-org');
+      expect(mockAuthService.authenticate).not.toHaveBeenCalled();
+      expect(result).toEqual(hintedAuth);
+    });
+  });
+
   describe('initializeProject', () => {
     beforeEach(() => {
       // Mock successful authentication
