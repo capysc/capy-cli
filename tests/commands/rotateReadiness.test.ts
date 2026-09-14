@@ -2,7 +2,7 @@ import { describe, expect, test, mock } from 'bun:test';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspectRotateReadiness, inspectRotateDeployment, readRotateDeploymentTargets, inspectRotateCapy, inspectRotateWorkOS, wranglerCanInspectWithoutRefresh, type CapyProbeDependencies, type WorkOSProbeDependencies, type RotateReadinessProbes } from '../../src/commands/rotateReadiness';
+import { rotateRepositoryContext, inspectRotateReadiness, inspectRotateDeployment, readRotateDeploymentTargets, inspectRotateCapy, inspectRotateWorkOS, wranglerCanInspectWithoutRefresh, type CapyProbeDependencies, type WorkOSProbeDependencies, type RotateReadinessProbes } from '../../src/commands/rotateReadiness';
 
 import { TEAM_ENVIRONMENTS_QUERY } from '../../src/commands/connectors/workos';
 
@@ -31,6 +31,11 @@ describe('rotate prerequisites before a browser exists', () => {
   });
   test('local-only rotation does not probe any deployment tool', async () => {
     expect(await inspectRotateDeployment({ noPush: true, cwd: '/not/a/project' })).toEqual({ checks: [], choices: [] });
+  });
+  test('rotate and sync without deployment configuration never probes deployment tools', async () => {
+    const command = mock(() => { throw new Error('must not probe an unrequested deployment'); });
+    expect(await inspectRotateDeployment({ cwd: '/not/a/project' }, { command })).toEqual({ checks: [], choices: [] });
+    expect(command).not.toHaveBeenCalled();
   });
   test('deployment discovery leaves gitignore and filesystem unchanged and requires selection', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'rotate-readiness-'));
@@ -191,5 +196,27 @@ describe('Wrangler readonly freshness metadata', () => {
       expect(wranglerCanInspectWithoutRefresh({ ...opts, environment: { CLOUDFLARE_API_TOKEN: 'synthetic-env-token' } })).toBe(true);
       expect(readdirSync(join(xdg, '.wrangler', 'config'))).toEqual(['default.toml']);
     } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+
+describe('rotation repository attribution without a local manifest', () => {
+  const sync = { last_sync: '2026-09-14', synced_variables: ['WORKOS_API_KEY'], user_id: 'user_1',
+    org_id: 'org_1', project_id: 'project_1', project_name: 'default', sync_mode: 'free' as const,
+    keep_hash: { development: 'remote-hash' } };
+  test('completed free sync supplies attribution without keep.lock', () => {
+    expect(rotateRepositoryContext(null, sync, 'development')).toEqual(capyContext);
+  });
+  test('incomplete or non-free metadata cannot substitute for a manifest', () => {
+    expect(rotateRepositoryContext(null, { ...sync, keep_hash: undefined }, 'development')).toBeNull();
+    expect(rotateRepositoryContext(null, { ...sync, sync_mode: 'paid' }, 'development')).toBeNull();
+    expect(rotateRepositoryContext(null, sync, 'other')).toBeNull();
+    expect(rotateRepositoryContext(null, null, 'development')).toBeNull();
+  });
+  test('existing manifest attribution retains precedence', () => {
+    expect(rotateRepositoryContext({ version: '3.0', org_id: 'paid_org', project_id: 'paid_project',
+      project_name: 'paid', variables: {} }, sync, 'feature')).toEqual({
+      orgId: 'paid_org', projectId: 'paid_project', branch: 'feature', userHint: 'user_1',
+    });
   });
 });
