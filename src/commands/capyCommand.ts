@@ -85,7 +85,7 @@ import {
   type InitRunBootstrap,
 } from '../auth/initRunBootstrap';
 import { resolveInitRunIdentity } from '../auth/initRunIdentity';
-import { resolveInitRunTransportMode } from '../auth/initRunTransportMode';
+import { resolveInitRunTransportMode, usesHostedInitTransport } from '../auth/initRunTransportMode';
 import { BrokerClient } from '../service/brokerClient';
 import { HostedInitChannelError, openHostedInitChannel } from '../ui/hostedInitChannel';
 import { createHostedInitWizardSession, closeHostedInitWizard } from '../ui/hostedInitWizardSession';
@@ -826,7 +826,8 @@ export class CapyCommand {
    * page claiming to still be working on it.
    */
   private async initializeProject(): Promise<void> {
-    const mode = this.options.web
+    const useHostedTransport = usesHostedInitTransport(this.options.web === true, process.env.CAPY_FLOW_ONBOARD);
+    const mode = useHostedTransport
       ? await (async () => {
           const selected = await capture(() => resolveInitRunTransportMode(process.env.CAPY_INIT_TRANSPORT));
           if (selected.ok) return selected.value;
