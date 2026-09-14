@@ -8,7 +8,6 @@ import {
   keepOrigin,
   keepScreensEnabled,
   keepLoginBridgeEnabled,
-  isKeepReachable,
   type KeepAuthFlow,
 } from '../ui/screens/keepScreens';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
@@ -241,14 +240,13 @@ export class AuthService {
     await oauthServer.bind();
 
     // A local CLI listener is its own transport. The Service creates the
-    // WorkOS URL and signs its callback binding before Keep is involved. If
-    // Keep is reachable it hosts the normal browser session and relays that
-    // binding; otherwise the browser goes to WorkOS directly. Either way,
-    // only this CLI exchanges the returned code with the public Service URL.
+    // WorkOS URL and signs its callback binding before Keep is involved.
+    // For a fresh sign-in, Keep owns the browser authentication and signup
+    // ceremony; the CLI must never bypass it with a direct WorkOS URL.
+    // The CLI remains the sole exchanger for the local loopback callback.
     const canUseKeepBridge =
       keepLoginBridgeEnabled() && !organizationId && !isForceLoginMarkerPending();
-    const useKeepBridge =
-      canUseKeepBridge && (await isKeepReachable(keepOrigin()));
+    const useKeepBridge = canUseKeepBridge;
     const redirectUri = oauthServer.getRedirectUri();
     const forceLogin = consumeForceLoginMarker();
     const initiated = await postJson<{ auth_url: string; loopback_binding: string }>(

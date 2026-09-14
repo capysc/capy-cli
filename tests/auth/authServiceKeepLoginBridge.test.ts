@@ -173,10 +173,10 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep reachable, plain sign-in', () => {
   });
 });
 
-describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep unreachable: loopback fallback', () => {
-  test('opens the Service authorization URL directly', async () => {
+describe('CAPY_KEEP_LOGIN_BRIDGE=1, fresh sign-in', () => {
+  test('opens Keep even when it was not probed first', async () => {
     process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
-    process.env.CAPY_KEEP_ORIGIN = 'http://127.0.0.1:9'; // discard port, refuses connections
+    process.env.CAPY_KEEP_ORIGIN = 'http://127.0.0.1:9';
 
     const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
@@ -186,8 +186,11 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep unreachable: loopback fallback', () => 
       await new Promise((r) => setTimeout(r, 5));
     }
     expect(captureInitiate).toHaveBeenCalledTimes(1);
-    // The opened URL is the AuthKit URL the service returned, NOT a keep URL.
-    expect(captureOpenedUrl.mock.calls[0]?.[0]).toBe('https://authkit.example.test/authorize');
+    const bridgeUrl = new URL(captureOpenedUrl.mock.calls[0]?.[0]);
+    expect(bridgeUrl.origin).toBe('http://127.0.0.1:9');
+    expect(bridgeUrl.pathname).toBe('/auth/start');
+    expect(bridgeUrl.searchParams.get('cli_transport')).toBe('loopback-direct');
+    expect(bridgeUrl.searchParams.get('cli_binding')).toBe('service-signed-loopback-binding');
 
     const init = captureInitiate.mock.calls[0]![0];
     const cbRes = await landOnLoopback(init.redirect_uri, init.state, 'fake-code-2');
