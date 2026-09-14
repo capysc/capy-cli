@@ -62,7 +62,20 @@ export class OAuthServer {
   }
 
   getRedirectUri(): string {
-    return `http://localhost:${this.port}/callback`;
+    return `http://127.0.0.1:${this.port}/callback`;
+  }
+
+  /**
+   * Start a Keep-owned browser session while preserving a Service-signed
+   * authorization result for this local listener. Keep verifies and relays
+   * the binding after its normal sign-in; this CLI remains the only process
+   * that exchanges the resulting code with the public Service endpoint.
+   */
+  getKeepLoopbackDirectUrl(keepOrigin: string, binding: string): string {
+    const url = new URL('/auth/start', keepOrigin);
+    url.searchParams.set('cli_transport', 'loopback-direct');
+    url.searchParams.set('cli_binding', binding);
+    return url.toString();
   }
 
   /**

@@ -76,13 +76,16 @@ async function serviceFetch(url: string, init?: RequestInit): Promise<Response> 
   const body = init?.body ? JSON.parse(String(init.body)) : null;
   const path = url.slice(SVC.length);
 
-  if (path === '/auth/initiate') {
+  if (path === '/auth/loopback/initiate') {
     captureInitiate({
       state: body.state,
       redirect_uri: body.redirect_uri,
       organization_id: body.organization_id,
     });
-    return Response.json({ auth_url: 'https://authkit.example.test/authorize' });
+    return Response.json({
+      auth_url: 'https://authkit.example.test/authorize',
+      loopback_binding: 'service-signed-loopback-binding',
+    });
   }
   if (path === '/auth/exchange') {
     return Response.json({
@@ -134,7 +137,7 @@ async function landOnLoopback(redirectUri: string, state: string, code: string):
 }
 
 describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep reachable, plain sign-in', () => {
-  test('opens the keep bridge URL instead of calling /auth/initiate directly', async () => {
+  test('opens Keep with the signed local callback transport', async () => {
     const keepStub = Bun.serve({ port: 0, fetch: () => new Response('ok') });
     try {
       process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
@@ -151,20 +154,14 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep reachable, plain sign-in', () => {
       const bridgeUrl = new URL(captureOpenedUrl.mock.calls[0]![0]);
       expect(bridgeUrl.origin).toBe(`http://127.0.0.1:${keepStub.port}`);
       expect(bridgeUrl.pathname).toBe('/auth/start');
-      const cliRedirect = bridgeUrl.searchParams.get('cli_redirect')!;
-      const cliChallenge = bridgeUrl.searchParams.get('cli_challenge')!;
-      const cliState = bridgeUrl.searchParams.get('cli_state')!;
-      expect(cliRedirect).toMatch(/^http:\/\/localhost:\d+\/callback$/);
-      expect(cliChallenge.length).toBeGreaterThan(0);
-      expect(cliState.length).toBeGreaterThan(0);
+      expect(bridgeUrl.searchParams.get('cli_transport')).toBe('loopback-direct');
+      expect(bridgeUrl.searchParams.get('cli_binding')).toBe('service-signed-loopback-binding');
+      expect(bridgeUrl.searchParams.get('cli_redirect')).toBeNull();
 
-      // The direct /auth/initiate call never happened — keep is the one
-      // fronting the FIRST hop, not this process.
-      expect(captureInitiate).not.toHaveBeenCalled();
+      expect(captureInitiate).toHaveBeenCalledTimes(1);
 
-      // Simulate keep's silent second round trip landing back here with a
-      // code bound to THIS server's own state (the only one it will accept).
-      const cbRes = await landOnLoopback(cliRedirect, cliState, 'fake-code-1');
+      const initiate = captureInitiate.mock.calls[0]![0];
+      const cbRes = await landOnLoopback(initiate.redirect_uri, initiate.state, 'fake-code-1');
       expect(cbRes.status).toBe(200);
 
       const result = await authP;
@@ -177,7 +174,7 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep reachable, plain sign-in', () => {
 });
 
 describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep unreachable: loopback fallback', () => {
-  test('falls back to calling /auth/initiate directly, exactly like the flag being off', async () => {
+  test('opens the Service authorization URL directly', async () => {
     process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
     process.env.CAPY_KEEP_ORIGIN = 'http://127.0.0.1:9'; // discard port, refuses connections
 
@@ -201,8 +198,8 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1, keep unreachable: loopback fallback', () => 
   });
 });
 
-describe('CAPY_KEEP_LOGIN_BRIDGE=1 with an organization_id: falls back to direct', () => {
-  test('keep bridge does not (yet) forward organization_id, so this skips it', async () => {
+describe('CAPY_KEEP_LOGIN_BRIDGE=1 with an organization_id: direct local transport', () => {
+  test('forwards organization_id to the Service-owned local transport', async () => {
     const keepStub = Bun.serve({ port: 0, fetch: () => new Response('ok') });
     try {
       process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
@@ -228,8 +225,8 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with an organization_id: falls back to direct
   });
 });
 
-describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker: falls back to direct', () => {
-  test('a pending marker steers back to the path that actually honors it', async () => {
+describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker: direct local transport', () => {
+  test('a pending marker uses the Service-owned local transport', async () => {
     const keepStub = Bun.serve({ port: 0, fetch: () => new Response('ok') });
     try {
       process.env.CAPY_KEEP_LOGIN_BRIDGE = '1';
@@ -255,8 +252,8 @@ describe('CAPY_KEEP_LOGIN_BRIDGE=1 with a pending force-login marker: falls back
   });
 });
 
-describe('CAPY_KEEP_LOGIN_BRIDGE unset (default): unchanged direct behavior', () => {
-  test('never probes keep, calls /auth/initiate directly', async () => {
+describe('CAPY_KEEP_LOGIN_BRIDGE unset (default): direct local transport', () => {
+  test('never probes Keep and calls the Service local transport', async () => {
     const auth = new AuthService(SVC, false, undefined, memorySessionBackend);
     const authP = auth.authenticate();
 
