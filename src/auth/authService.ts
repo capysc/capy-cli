@@ -240,48 +240,30 @@ export class AuthService {
     const oauthServer = new OAuthServer({ deferCompletion: keepScreens });
     await oauthServer.bind();
 
-    // CAP-374 step 1: route the FIRST hop through keep's own /auth/start
-    // instead of calling /auth/initiate directly, so the SAME browser also
-    // comes away with a keep session cookie ("double duty" — see
-    // oauthServer.ts's getKeepBridgeUrl doc and
-    // keep-app/src/lib/auth/cliBridge.ts). Gated by its OWN flag, separate
-    // from CAPY_KEEP_SCREENS (keepLoginBridgeEnabled's doc explains why),
-    // and only for the plain fresh-sign-in case: keep's bridge doesn't (yet)
-    // forward organization_id or force_login, so either one falls back to
-    // today's direct path, which fully supports both. A short reachability
-    // probe keeps the loopback fallback working when keep can't be reached
-    // at all — once the browser is sent into a flow there's no retargeting
-    // it mid-flight.
+    // A local CLI listener is its own transport. The Service creates the
+    // WorkOS URL and signs its callback binding before Keep is involved. If
+    // Keep is reachable it hosts the normal browser session and relays that
+    // binding; otherwise the browser goes to WorkOS directly. Either way,
+    // only this CLI exchanges the returned code with the public Service URL.
     const canUseKeepBridge =
       keepLoginBridgeEnabled() && !organizationId && !isForceLoginMarkerPending();
     const useKeepBridge =
       canUseKeepBridge && (await isKeepReachable(keepOrigin()));
-
+    const redirectUri = oauthServer.getRedirectUri();
+    const forceLogin = consumeForceLoginMarker();
+    const initiated = await postJson<{ auth_url: string; loopback_binding: string }>(
+      `${this.serviceApiUrl}/auth/loopback/initiate`,
+      {
+        state: oauthServer.getState(),
+        redirect_uri: redirectUri,
+        organization_id: organizationId,
+        code_challenge: oauthServer.getCodeChallenge(),
+        ...(forceLogin ? { force_login: true } : {}),
+      },
+    );
     const auth_url = useKeepBridge
-      ? oauthServer.getKeepBridgeUrl(keepOrigin())
-      : await (async () => {
-        const redirectUri = oauthServer.getRedirectUri();
-        const state = oauthServer.getState();
-
-        // If `capy logout` left a marker, ask the service to add prompt=login
-        // to the WorkOS auth URL so AuthKit re-prompts instead of silently
-        // reusing its SSO cookie. Consume the marker now — even if the OAuth
-        // round-trip fails later, "force_login" was the user's intent for
-        // this attempt and we don't want it sticking forever.
-        const forceLogin = consumeForceLoginMarker();
-
-        const response = await postJson<{ auth_url: string }>(
-          `${this.serviceApiUrl}/auth/initiate`,
-          {
-            state,
-            redirect_uri: redirectUri,
-            organization_id: organizationId,
-            code_challenge: oauthServer.getCodeChallenge(),
-            ...(forceLogin ? { force_login: true } : {}),
-          },
-        );
-        return response.auth_url;
-      })();
+      ? oauthServer.getKeepLoopbackDirectUrl(keepOrigin(), initiated.loopback_binding)
+      : initiated.auth_url;
 
     const code = await oauthServer.startAuthFlow(auth_url);
 
@@ -293,6 +275,8 @@ export class AuthService {
       }>(`${this.serviceApiUrl}/auth/exchange`, {
         code,
         code_verifier: oauthServer.getCodeVerifier(),
+        redirect_uri: redirectUri,
+        loopback_binding: initiated.loopback_binding,
       });
 
       return this.processVerifiedExchangeResponse(
@@ -311,6 +295,8 @@ export class AuthService {
       }>(`${this.serviceApiUrl}/auth/exchange`, {
         code,
         code_verifier: oauthServer.getCodeVerifier(),
+        redirect_uri: redirectUri,
+        loopback_binding: initiated.loopback_binding,
       });
 
       const result = await this.processVerifiedExchangeResponse(
