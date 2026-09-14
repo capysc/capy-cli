@@ -2,9 +2,8 @@ import { describe, expect, test, mock } from 'bun:test';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { rotateRepositoryContext, inspectRotateReadiness, inspectRotateDeployment, readRotateDeploymentTargets, inspectRotateCapy, inspectRotateWorkOS, wranglerCanInspectWithoutRefresh, type CapyProbeDependencies, type WorkOSProbeDependencies, type RotateReadinessProbes } from '../../src/commands/rotateReadiness';
+import { rotateRepositoryContext, inspectRotateReadiness, inspectRotateDeployment, readRotateDeploymentTargets, inspectRotateCapy, inspectRotateWorkOS, wranglerCanInspectWithoutRefresh, type CapyProbeDependencies, type RotateReadinessProbes } from '../../src/commands/rotateReadiness';
 
-import { TEAM_ENVIRONMENTS_QUERY } from '../../src/commands/connectors/workos';
 
 const good = { code: 'READY', ready: true, detail: 'Ready' } as const;
 const probes: RotateReadinessProbes = {
@@ -96,29 +95,14 @@ describe('concrete Capy readiness probe', () => {
   });
 });
 
-const workosProbes = (): WorkOSProbeDependencies => ({
-  command: () => ({ status: 0, stdout: 'version' }),
-  credentials: () => ({ accessToken: 'synthetic-workos-token', expiresAt: now + 120_000, refreshToken: 'never-consumed' }),
-  post: async () => ({ data: { currentTeam: { projectsV2: [] } } }),
-  now: () => now,
-});
-describe('concrete WorkOS account probe', () => {
-  test('reuses the verified teamProjectsV2 document and does not expose account payloads', async () => {
-    const post = mock(async (_url: string, _token: string, _body: Readonly<Record<string, unknown>>) => ({ data: { currentTeam: { projectsV2: [] } } }));
-    const result = await inspectRotateWorkOS('/synthetic', { ...workosProbes(), post });
-    expect(post.mock.calls[0]).toEqual(['https://api.workos.com/graphql', 'synthetic-workos-token', { operationName: 'teamProjectsV2', query: TEAM_ENVIRONMENTS_QUERY }]);
-    expect(result).toMatchObject([{ code: 'ROTATE_WORKOS_AUTH', ready: true }]);
-    expect(JSON.stringify(result)).not.toContain('synthetic-workos-token');
-  });
-  test('expired token refuses without refreshing, querying or logging in', async () => {
+describe('WorkOS installation readiness', () => {
+  test('only checks the installed CLI without requiring an account', async () => {
     const command = mock(() => ({ status: 0, stdout: 'version' }));
-    const post = mock(async () => ({}));
-    expect(await inspectRotateWorkOS('/synthetic', { ...workosProbes(), command, post, credentials: () => ({ accessToken: 'expired', expiresAt: now }) })).toMatchObject([{ code: 'ROTATE_WORKOS_AUTH_REQUIRED', ready: false }]);
-    expect(command).toHaveBeenCalledTimes(1);
-    expect(post).not.toHaveBeenCalled();
+    expect(await inspectRotateWorkOS('/synthetic', { command })).toMatchObject([{ code: 'ROTATE_WORKOS_CLI', ready: true }]);
+    expect(command.mock.calls).toEqual([['workos', ['--version'], '/synthetic']]);
   });
-  test.each([{ data: { currentTeam: null } }, { data: { currentTeam: { id: 'unverified-old-shape' } } }, { errors: [{ extensions: { code: 'FORBIDDEN' } }] }])('rejects missing or refused authoritative account response %p', async (response) => {
-    expect(await inspectRotateWorkOS('/synthetic', { ...workosProbes(), post: async () => response })).toMatchObject([{ code: 'ROTATE_WORKOS_AUTH', ready: false }]);
+  test('missing CLI still blocks readiness', async () => {
+    expect(await inspectRotateWorkOS('/synthetic', { command: () => ({ status: 1, stdout: '' }) })).toMatchObject([{ code: 'ROTATE_WORKOS_CLI_MISSING', ready: false }]);
   });
 });
 
@@ -150,14 +134,14 @@ describe('concrete deployment probes', () => {
       expect(versionOnly).toHaveBeenCalledTimes(1);
     });
   });
-  test('dev skips a saved direct target but still checks CI target and GitHub', async () => {
+  test('dev skips a saved direct target and checks only Vercel installation for CI', async () => {
     await withTarget({ kind: 'cf-worker', mode: 'direct' }, async cwd => {
       expect(await inspectRotateDeployment({ cwd, devMode: true }, { command: () => { throw new Error('dev cannot probe skipped direct deployment'); } })).toMatchObject({ checks: [] });
     });
     await withTarget({ kind: 'vercel', mode: 'ci' }, async cwd => {
       const command = mock((_binary: string, _args: readonly string[], _cwd: string) => ({ status: 0, stdout: 'synthetic-user' }));
       expect((await inspectRotateDeployment({ cwd, devMode: true }, { command })).checks.every(row => row.ready)).toBe(true);
-      expect(command.mock.calls.map(([binary, args]) => [binary, args])).toEqual([['vercel', ['--version']], ['vercel', ['whoami']], ['gh', ['auth', 'status']]]);
+      expect(command.mock.calls.map(([binary, args]) => [binary, args])).toEqual([['vercel', ['--version']]]);
     });
   });
   test('unknown target or unsupported adapter refuses without probing', async () => {

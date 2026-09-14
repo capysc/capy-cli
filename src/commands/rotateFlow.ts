@@ -6,7 +6,7 @@ import type { RotateOpts } from './connectors/registry';
 import { runWithFlowInteraction } from '../ui/flowInteraction';
 
 type Options = RotateOpts & Readonly<{ all?: boolean; skipPrompts?: boolean; provider?: string }>;
-/** Inspection precedes conversation creation. Pair and provider login remain local prerequisites. */
+/** Inspection precedes conversation creation. Capy pairing and provider CLI installation remain local prerequisites. */
 export async function runRotateFlow(variable: string | undefined, options: Options, devMode: boolean): Promise<void> {
   const manager = new ProjectManager();
   const keep = manager.readKeepFile();

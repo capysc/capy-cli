@@ -12,7 +12,7 @@ import { deriveLocalInnerKey } from '../crypto/localKeyRoot';
 import { deployConfigPath } from '../deploy/config';
 import { getAdapter } from '../deploy/registry';
 import type { TargetConfig } from '../deploy/adapter';
-import { readStoredCredentials, TEAM_ENVIRONMENTS_QUERY, WORKOS_CLI_MISSING, WORKOS_NOT_LOGGED_IN } from './connectors/workos';
+import { WORKOS_CLI_MISSING } from './connectors/workos';
 
 export type RotatePrerequisite = Readonly<{ code: string; ready: boolean; detail: string; remedy?: string; url?: string }>;
 export type RotateReadiness = Readonly<{
@@ -122,9 +122,13 @@ export async function inspectRotateDeployment(opts: RotateReadinessOptions, depe
   const tool = deploymentTools[kind];
   if (!adapter || !tool) return { choices, checks: [check('ROTATE_DEPLOYMENT_UNSUPPORTED', false,
     'This build cannot inspect that deployment destination.', 'Choose an implemented CLI deployment adapter.')] };
-  if (opts.devMode && selected && (selected.mode ?? 'direct') !== 'ci') return { choices, checks: [] };
+  if (opts.devMode && selected && tool.binary !== 'vercel' && (selected.mode ?? 'direct') !== 'ci') return { choices, checks: [] };
   const command = dependencies.command ?? runReadinessCommand;
   const installed = command(tool.binary, ['--version'], cwd).status === 0;
+  // Provider authentication belongs inside the interaction, not before Flow creation.
+  if (tool.binary === 'vercel') return { choices, checks: [
+    check('ROTATE_DEPLOYMENT_CLI', installed, 'vercel installation', 'Install vercel.'),
+  ] };
   const safeToInspect = tool.binary !== 'wrangler' || (dependencies.wranglerFresh ?? wranglerCanInspectWithoutRefresh)();
   if (installed && !safeToInspect) return { choices, checks: [
     check('ROTATE_DEPLOYMENT_CLI', true, 'wrangler installation'),
@@ -189,23 +193,11 @@ export async function inspectRotateCapy(context: CapyReadinessContext, opts: Rot
     return [check('ROTATE_CAPY_READINESS_UNAVAILABLE', false, 'Capy could not verify authentication, project access and existing device key custody.', 'Run this Capy installation to restore access, then recheck.')];
   }
 }
-export type WorkOSProbeDependencies = Readonly<{ command: ReadinessCommand; credentials: typeof readStoredCredentials; post: typeof jsonPost; now: () => number }>;
-export async function inspectRotateWorkOS(cwd: string, dependencies: WorkOSProbeDependencies = { command: runReadinessCommand, credentials: readStoredCredentials, post: jsonPost, now: () => Date.now() }): Promise<readonly RotatePrerequisite[]> {
+export type WorkOSProbeDependencies = Readonly<{ command: ReadinessCommand }>;
+export async function inspectRotateWorkOS(cwd: string, dependencies: WorkOSProbeDependencies = { command: runReadinessCommand }): Promise<readonly RotatePrerequisite[]> {
   if (dependencies.command('workos', ['--version'], cwd).status !== 0)
     return [check('ROTATE_WORKOS_CLI_MISSING', false, WORKOS_CLI_MISSING.detail, WORKOS_CLI_MISSING.remedy, WORKOS_CLI_MISSING.link?.url)];
-  try {
-    const credentials = dependencies.credentials();
-    if (!credentials?.accessToken || !Number.isFinite(credentials.expiresAt) || credentials.expiresAt <= dependencies.now() + 60_000)
-      return [check('ROTATE_WORKOS_AUTH_REQUIRED', false, 'WorkOS needs a current session. Inspection does not consume refresh tokens.', WORKOS_NOT_LOGGED_IN.remedy)];
-    const result = object(await dependencies.post('https://api.workos.com/graphql', credentials.accessToken, {
-      operationName: 'teamProjectsV2', query: TEAM_ENVIRONMENTS_QUERY,
-    }));
-    const team = object(object(result?.data)?.currentTeam);
-    const authenticated = Boolean(team) && (team?.projectsV2 === null || Array.isArray(team?.projectsV2)) && (!result?.errors || (Array.isArray(result.errors) && result.errors.length === 0));
-    return [check('ROTATE_WORKOS_AUTH', authenticated, 'WorkOS account access', WORKOS_NOT_LOGGED_IN.remedy)];
-  } catch {
-    return [check('ROTATE_WORKOS_READINESS_UNAVAILABLE', false, 'WorkOS account access could not be verified.', 'Check network access and run workos auth login, then recheck.')];
-  }
+  return [check('ROTATE_WORKOS_CLI', true, 'workos installation')];
 }
 /** Local attribution only; the Capy probe still verifies identity, access and custody. */
 export function rotateRepositoryContext(
