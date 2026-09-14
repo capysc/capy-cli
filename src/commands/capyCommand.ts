@@ -7,10 +7,10 @@ import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { PromptEngine } from '../ui/promptEngine';
 import { debugLine } from '../ui/debug';
-import { existsSync, unlinkSync, rmSync } from 'fs';
+import { existsSync, unlinkSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import inquirer from 'inquirer';
 import {
   CliOptions,
@@ -226,6 +226,7 @@ type InitRepositoryTarget = Readonly<{
   projectName: string;
   branch: string;
   syncMode?: 'free';
+  readonly unchangedEnvHash?: string;
 }>;
 
 type InitWorkflowResult = Readonly<{
@@ -793,12 +794,17 @@ export class CapyCommand {
     }
 
     const createdEventState = recordInitRunCreated({ phase: 'new' }, created.value.handoff.runId);
-    const eventState = emitInitRunEvent(createdEventState, initRunHandoffEvent(created.value.handoff));
-    await presentInitRunHandoff(created.value);
-    const authorized = await capture(() => completeInitRunAuthentication({
-      bootstrap: created.value,
-      authService: this.authService,
-    }));
+    const eventState = { ...createdEventState, phase: 'handed-off' as const, runId: created.value.handoff.runId };
+    const authorized = await capture(async () => {
+      const { runComposedDeviceGrant } = await import('./composedDeviceGrant');
+      const { continueInitRunFromDeviceGrant } = await import('../auth/initRunBootstrap');
+      const completion = Promise.withResolvers<InitRunAuthorizedContext>();
+      const code = await runComposedDeviceGrant(undefined, this.options.expectedUserId, async (continuation) => {
+        completion.resolve(await continueInitRunFromDeviceGrant(created.value, continuation));
+      });
+      if (code !== 0) throw new CapyError('Device authorization did not complete', 'INIT_AUTH_FAILED');
+      return completion.promise;
+    });
     if (!authorized.ok) {
       const code = terminalCode(authorized.error);
       const noEffects = [
@@ -1105,7 +1111,7 @@ export class CapyCommand {
       && remoteSnapshot.keep.project_id === target.projectId
       && remoteSnapshot.keep.project_name === target.projectName
     );
-    const repositoryVerified = targetMatches
+    const synchronizedRepositoryVerified = targetMatches
       && localEnvironmentVerified
       && (!free || (billing?.tier === 'free' && billing.grandfathered === false && projects.length === 1))
       && projects.some((project) => project.id === target.projectId
@@ -1118,6 +1124,18 @@ export class CapyCommand {
       && (remoteSnapshot.kind === 'keep'
         ? localHash === remoteHash && (remote?.keep_hash === undefined || remote.keep_hash === remoteHash)
         : !free && remoteSnapshot.kind === 'empty' && keep !== null && Object.keys(keep.variables).length === 0);
+    const envPath = this.projectManager.getEnvPath(this.options.envPath);
+    const unchangedEnvHash = existsSync(envPath)
+      ? createHash('sha256').update(readFileSync(envPath)).digest('hex') : 'absent';
+    // Declining encryption verifies adoption and an unchanged environment;
+    // it must not pretend that local plaintext was synchronized remotely.
+    const repositoryVerified = target.unchangedEnvHash === undefined ? synchronizedRepositoryVerified
+      : free && targetMatches && target.unchangedEnvHash === unchangedEnvHash
+        && billing?.tier === 'free' && billing.grandfathered === false && projects.length === 1
+        && projects.some(project => project.id === target.projectId && project.name === 'default'
+          && project.organization_id === target.orgId)
+        && branches.some(candidate => candidate.name === 'development' && candidate.is_protected === false
+          && (candidate.project_id === undefined || candidate.project_id === target.projectId));
     const readiness = await context.serviceClient.getSignupReadiness(target.orgId);
     const custodyVerified = readiness.signup_complete === true
       && readiness.retryable === false
@@ -1210,6 +1228,13 @@ export class CapyCommand {
       custodyDeclined: boolean;
       defaultProjectId?: string;
     }>> => {
+      if (preparedAuthentication && context.transport === 'hosted') {
+        if (!currentOrg) throw new CapyError('Signup organization is unavailable', 'INIT_BINDING_MISMATCH');
+        return { selectedOrg: currentOrg, wizard: recordWizard(wizardAfterAuth, {
+          organization: { kind: 'existing', name: currentOrg.name },
+          recoveryShown: true, hasOrgKey: hasOrgKey(currentOrg.id, authResult.user_id!),
+        }), effectsStarted: false, context, auth: authResult, custodyDeclined: false };
+      }
       if (orgs.length === 0) {
         human('\nNo organization found. Let\'s create one.');
         if (context.transport === 'hosted') {
@@ -1631,17 +1656,51 @@ export class CapyCommand {
       }
     }
 
-    if (selectedContext.transport === 'hosted' && organizationSelection.defaultProjectId) {
+    const freeProject = selectedContext.transport === 'hosted' ? await (async () => {
+      const billing = await selectedContext.serviceClient.getBillingStatus();
+      if (billing.tier !== 'free' || billing.grandfathered) return null;
+      const projects = await selectedContext.serviceClient.listProjects();
+      if (projects.length !== 1 || projects[0]?.name !== 'default'
+        || projects[0].organization_id !== selectedOrg.id) {
+        throw new CapyError('The free account default project is not provisioned.', ERROR_CODES.SERVICE_ERROR);
+      }
+      return projects[0];
+    })() : null;
+    if (selectedContext.transport === 'hosted' && freeProject) {
       if (wizardAfterOrgKey?.kind !== 'hosted') {
         throw new InitWizardFlowError(new CapyError('Hosted repository transport was unavailable', 'INIT_RUN_INVALID'), wizardAfterOrgKey);
       }
       const target = {
         orgId: selectedOrg.id, orgName: selectedOrg.name,
-        projectId: organizationSelection.defaultProjectId, projectName: 'default', branch: 'development',
+        projectId: freeProject.id, projectName: 'default', branch: 'development',
       } as const;
+      const envPath = this.projectManager.getEnvPath(this.options.envPath);
+      const envHash = () => existsSync(envPath)
+        ? createHash('sha256').update(readFileSync(envPath)).digest('hex') : 'absent';
+      const originalEnvHash = envHash();
+      const names = Object.keys(this.fileManager.readEnvFile(this.options.envPath));
+      const freeWizard = recordWizard(wizardAfterOrgKey, { hostedFree: true,
+        project: { kind: 'existing', name: 'default' }, projectCount: 1,
+        branchChoice: 'development', branchName: 'development', localEnvCount: names.length });
+      const consent = names.length > 0 ? await askWizard(freeWizard,
+        encryptQuestion({ count: names.length, names }, { projectName: 'default', orgName: selectedOrg.name, branch: 'development' }),
+        async () => false) : { value: false, wizard: freeWizard };
+      if (consent.value === null) throw new InitWizardCancelledError(consent.wizard, 'none');
+      if (consent.wizard?.kind !== 'hosted') throw new CapyError('Hosted flow is unavailable.', 'INIT_RUN_INVALID');
+      if (!consent.value) {
+        if (envHash() !== originalEnvHash) throw new CapyError('The environment changed during initialization.', ERROR_CODES.PLAN_CHANGED);
+        this.projectManager.writeActiveBranch(target.branch);
+        this.fileManager.ensureCapyGitignore();
+        this.fileManager.writeSyncState({ last_sync: '', synced_variables: [],
+          user_id: selectedAuth.user_id!, org_id: target.orgId, project_id: target.projectId,
+          project_name: target.projectName, sync_mode: 'free' });
+        return { wizard: { kind: 'hosted', session: { ...consent.wizard.session, step: 'encrypt' } },
+          target: { ...target, syncMode: 'free', unchangedEnvHash: originalEnvHash },
+          status: 'succeeded', context: selectedContext };
+      }
       const setup = await runHostedFreeRepositorySetup({
         target, authService: selectedContext.authService, serviceClient: selectedContext.serviceClient,
-        session: wizardAfterOrgKey.session, devMode: this.devMode, envPath: this.options.envPath,
+        session: consent.wizard.session, devMode: this.devMode, envPath: this.options.envPath,
       });
       const setupWizard: InitWizardTransport = { kind: 'hosted', session: setup.session };
       if (setup.kind === 'cancelled') throw new InitWizardCancelledError(setupWizard, 'indeterminate', selectedContext.authService);

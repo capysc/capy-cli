@@ -629,3 +629,29 @@ export async function completeInitRunAuthentication(
     expiresAt: acknowledged.expires_at,
   };
 }
+
+/** Use the installed CLI grant, with no second OAuth exchange or browser claim. */
+export async function continueInitRunFromDeviceGrant(
+  bootstrap: InitRunBootstrap,
+  continuation: import('../commands/composedDeviceGrant').ComposedAuthenticatedContinuation,
+): Promise<InitRunAuthorizedContext> {
+  if (continuation.serviceOrigin !== bootstrap.request.serviceOrigin) throw initRunFailure('INIT_BINDING_MISMATCH');
+  const authService = new AuthService(bootstrap.request.serviceOrigin, false, continuation.userId);
+  const auth = await authService.authenticateSilent();
+  const token = await authService.getValidToken();
+  if (!auth.success || !token || auth.user_id !== continuation.userId || token.user_id !== continuation.userId)
+    throw initRunFailure('INIT_BINDING_MISMATCH');
+  const status = parseInitRunContinueResponse(await post(defaultTransport,
+    `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/device-grant`,
+    { run_secret: bootstrap.response.run_secret, authentication_flow_id: continuation.flowId }, token.access_token));
+  const binding: InitRunBinding = {
+    run_id: bootstrap.response.run_id, subject_user_id: continuation.userId,
+    service_origin: bootstrap.request.serviceOrigin, runtime_id: bootstrap.request.runtimeId,
+    repository_fingerprint: bootstrap.request.repositoryFingerprint, cli_key_fingerprint: bootstrap.cliKeyFingerprint,
+  };
+  validateExchangeBinding(bootstrap, binding);
+  if (!status || !isAcknowledgedBinding(bootstrap, binding, status.auth_epoch, status, Date.now()))
+    throw initRunFailure('INIT_BINDING_MISMATCH');
+  return { auth, authService, binding, authEpoch: status.auth_epoch, credentialReceipt: '',
+    brokerAccessToken: token.access_token, runSecret: bootstrap.response.run_secret, expiresAt: status.expires_at };
+}

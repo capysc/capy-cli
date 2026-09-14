@@ -42,6 +42,7 @@ export type InitChoice = { kind: 'existing'; name: string } | { kind: 'new'; nam
  * state itself.
  */
 export interface InitWizardInput {
+  readonly hostedFree?: boolean;
   /** Who the run authenticated as. Shown on the `auth` stop, which is done. */
   signedInAs?: string;
   /** Organizations this session can reach. 0 means the CLI never asks. */
@@ -81,6 +82,12 @@ function creatingProject(i: InitWizardInput): boolean | undefined {
 }
 
 export function initWizardPlan(i: InitWizardInput): InitWizardStop[] {
+  if (i.hostedFree) return [
+    { id: 'login', label: 'Login', state: 'done' },
+    { id: 'link-device', label: 'Link Device', state: 'done' },
+    ...(i.localEnvCount ? [{ id: 'encrypt', label: 'Encrypt and store secrets',
+      state: i.encrypt === undefined ? 'current' as const : 'done' as const }] : []),
+  ];
   const newOrg = i.organization?.kind === 'new';
   const existingOrg = i.organization?.kind === 'existing';
   const newProject = creatingProject(i);

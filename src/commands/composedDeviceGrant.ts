@@ -369,6 +369,7 @@ async function reuseExistingCustody(origin: string, expectedUserId?: string): Pr
 export async function runComposedDeviceGrant(
   resumeFlowId?: string,
   expectedUserId?: string,
+  onCustodyReady?: (continuation: ComposedAuthenticatedContinuation) => Promise<void>,
 ): Promise<number> {
   if (resumeFlowId !== undefined && !UUID.test(resumeFlowId)
     || expectedUserId !== undefined && !USER_ID.test(expectedUserId)) {
@@ -380,7 +381,7 @@ export async function runComposedDeviceGrant(
   const lease = acquirePairAttemptLease();
   try {
     const previous = readCheckpoint(path);
-    if (!previous && !resumeFlowId && await reuseExistingCustody(origin, expectedUserId)) return 0;
+    if (!onCustodyReady && !previous && !resumeFlowId && await reuseExistingCustody(origin, expectedUserId)) return 0;
     if (previous && previous.origin !== origin) return reject('AUTH_ENVIRONMENT_MISMATCH');
     if (previous?.baseline.expectedUserId && expectedUserId
       && previous.baseline.expectedUserId !== expectedUserId) return reject('AUTH_ACCOUNT_MISMATCH');
@@ -388,10 +389,12 @@ export async function runComposedDeviceGrant(
       return reject('AUTH_ACCOUNT_MISMATCH');
     }
     const state = previous ?? await startGrant(origin, path, expectedUserId);
+    const flowUrl = new URL(`${state.grant.keep_url}${resumeFlowId ? `&resume=${resumeFlowId}` : ''}`);
+    const loginUrl = `${flowUrl.origin}/auth/login?${new URLSearchParams({ return_to: `${flowUrl.pathname}${flowUrl.search}` })}`;
     console.log(JSON.stringify({
       ok: true, stage: state.authenticated ? 'authenticated' : 'approval_pending',
       flow_id: state.grant.flow_id,
-      url: `${state.grant.keep_url}${resumeFlowId ? `&resume=${resumeFlowId}` : ''}`,
+      url: loginUrl,
       userCode: state.grant.user_code,
       expiresAt: state.grant.expires_at,
     }));
@@ -404,6 +407,7 @@ export async function runComposedDeviceGrant(
     const { continueComposedCustody } = await import('../auth/pairing/composedCustody');
     const custody = await continueComposedCustody(continuation);
     if (custody.kind !== 'complete') return reject(custody.code);
+    if (onCustodyReady) await onCustodyReady(continuation);
     removeCheckpoint(path);
     console.log(JSON.stringify({ ok: true, stage: 'custody_ready', flow_id: continuation.flowId,
       user_id: continuation.userId, org_id: custody.orgId, custody: 'filesystem' }));
