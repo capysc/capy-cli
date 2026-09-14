@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { getSyncKeepHash, type KeepFile, type SessionStore, type SyncState } from '../types';
 import { ProjectManager } from '../core/projectManager';
 import { FileSessionStorageBackend } from '../auth/session/fileBackend';
+import { AuthService } from '../auth/authService';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { getLocalRootMode, readLocalRoot, readMasterKey } from '../config/globalConfig';
 import { decryptMasterKey, masterKeyAAD } from '../crypto/keyManager';
@@ -176,7 +177,7 @@ export async function inspectRotateCapy(context: CapyReadinessContext, opts: Rot
     if (session?.user_id && opts.expectedUserId !== undefined && session.user_id !== opts.expectedUserId)
       return [check('ROTATE_CAPY_IDENTITY_MISMATCH', false, 'The CLI account does not match the account requesting this rotation.', 'Use the CLI paired to the requesting account, then recheck.')];
     const token = session?.sessions[context.orgId];
-    if (!session?.user_id || !token?.access_token || !Number.isFinite(token.expires_at) || token.expires_at <= dependencies.now() + 60_000)
+    if (!session?.user_id || !token?.access_token || !Number.isFinite(token.expires_at) || token.expires_at <= dependencies.now())
       return [check('ROTATE_CAPY_AUTH', false, 'Capy needs a current authenticated session.', 'Run this Capy installation to sign in, then recheck.')];
     dependencies.assertAuthority(session.user_id);
     const api = resolveActiveUrl(opts.devMode ?? false);
@@ -220,7 +221,16 @@ export async function inspectLocalRotateReadiness(opts: RotateReadinessOptions =
   return inspectRotateReadiness({
     repository: async () => check('ROTATE_REPOSITORY', Boolean(context),
       'Rotate requires an initialized project and active Capy branch.', 'Run this Capy installation in the intended project first.'),
-    capy: () => inspectRotateCapy(context!, opts),
+    capy: async () => {
+      try {
+        const auth = new AuthService(undefined, opts.devMode ?? false, context!.userHint);
+        const identity = await auth.authenticateSilent(context!.orgId);
+        if (identity.success) await auth.getValidToken();
+      } catch {
+        // The existing probe reports unavailable auth without starting login.
+      }
+      return inspectRotateCapy(context!, opts);
+    },
     workos: () => inspectRotateWorkOS(cwd),
     deployment: () => inspectRotateDeployment(opts).catch(() => ({ choices: [], checks: [
       check('ROTATE_DEPLOYMENT_READINESS_UNAVAILABLE', false, 'Deployment configuration could not be inspected.',
