@@ -120,6 +120,14 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     if (next.done) return;
     const item = next.value as Queued;
     try {
+      if (item.type === 'progress' && item.data.provider_auth) {
+        // A provider ceremony waits outside the CLI prompt loop. Flush its
+        // public handoff immediately, still inside the encrypted transport.
+        for (const pending of items) await append(pending.type, pending.data);
+        await append('progress', item.data);
+        item.resolve();
+        return consume([]);
+      }
       if (item.type === 'output' || item.type === 'progress') {
         item.resolve();
         return consume([...items, { type: item.type, data: item.data }]);

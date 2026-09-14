@@ -9,7 +9,8 @@ export async function runCapyFlow(options: CliOptions, devMode: boolean): Promis
   const execute = () => runWithFlowInteraction(() => new CapyCommand({...options, web:false}, devMode).execute(), devMode);
   try { await execute(); }
   catch (error) {
-    if (!(error instanceof Error) || error.message !== 'PAIR_REQUIRED') throw error;
+    if (!(error instanceof Error)
+      || !['PAIR_REQUIRED', 'CONVERSATION_RUNTIME_UNAVAILABLE'].includes(error.message)) throw error;
     const existing = await new ProjectManager().detectProjectState();
     const expectedUserId = options.expectedUserId ?? (existing.initialized ? existing.userId : undefined);
     const code = await runComposedDeviceGrant(undefined, expectedUserId, async continuation => {

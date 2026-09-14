@@ -1,4 +1,5 @@
-import { currentInteraction, prompt, commandExit, interactionOrTerminal, InteractionCommandError } from '../../ui/interaction';
+import { currentInteraction, prompt, commandExit, interactionOrTerminal, InteractionCommandError, ExitPromptError } from '../../ui/interaction';
+import { runWorkOSFlowLogin } from './workosFlowLogin';
 import { human, humanError, humanWarning } from '../../ui/webMode';
 import { execSync, spawnSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
@@ -251,7 +252,14 @@ async function loginAndReadToken(nonTty?: boolean): Promise<string> {
   // Wording covers both callers: never signed in, and signed in but stale.
   // Naming the wrong one sends the user looking for a session that was never
   // there, or makes them think they have to sign out first.
-  if (currentInteraction()) throw new InteractionCommandError('ROTATE_WORKOS_AUTH_REQUIRED', 'WorkOS authentication is required. Authenticate in the host shell, then retry.');
+  const interaction = currentInteraction();
+  if (interaction) {
+    await runWorkOSFlowLogin(interaction);
+    const renewed = readStoredCredentials();
+    if (!renewed || renewed.expiresAt <= Date.now()) throw new InteractionCommandError(
+      'ROTATE_WORKOS_SESSION_UNAVAILABLE', 'WorkOS login completed, but its saved session could not be read.');
+    return renewed.accessToken;
+  }
   if (!isInteractive(nonTty)) {
     refuseNonInteractive(
       'Capy needs a WorkOS session and getting one needs a browser sign-in',
@@ -1229,6 +1237,14 @@ async function rotate(
   // one.
   const applicationId = await chooseApplicationId(keys, outgoing, varName, target, opts.nonTty);
 
+  const superseded = outgoing ?? findPreviousRotatedKey(keys, '', applicationId);
+  if (currentInteraction()) {
+    const { approved } = await prompt([{ type: 'confirm', name: 'approved', default: false,
+      message: `Rotate ${varName} in WorkOS ${target.environmentName} (${target.sandbox ? 'sandbox' : 'production'})?\nEnvironment: ${target.environmentId}\nClient: ${target.clientId}\nApplication: ${applicationId}\n${superseded ? `Expire ${superseded.name} (${superseded.id}) after 1 hour.` : 'No existing key will be expired.'}`,
+    }]);
+    if (!approved) throw new ExitPromptError('Rotation cancelled');
+  }
+
   const created = await createKey(token, target.environmentId, applicationId, rotationKeyName());
   if (!created) {
     humanError(`\n  WorkOS did not create a new key for ${B(varName)}.`);
@@ -1241,7 +1257,6 @@ async function rotate(
   // keeps production from accumulating live keys forever: a production key's
   // plaintext is never returned, so the value match always misses there and
   // without this nothing would ever be expired.
-  const superseded = outgoing ?? findPreviousRotatedKey(keys, created.id, applicationId);
 
   // Expire AFTER the new key exists, and on a delay. Order and delay are both
   // load-bearing: expiring first would leave the app with no working key if

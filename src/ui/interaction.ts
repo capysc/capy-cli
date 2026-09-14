@@ -4,7 +4,11 @@ import type { Readable, Writable } from 'node:stream';
 import inquirer from 'inquirer';
 
 export type InteractionOutput = Readonly<{ readonly text: string; readonly level?: 'info' | 'warning' | 'error' }>;
-export type InteractionProgress = Readonly<{ readonly status: 'start' | 'success' | 'failure' | 'warning'; readonly text: string }>;
+export type ProviderAuthentication = Readonly<{
+  id: string; provider: string; authorization_url: string | null; verification_code: string | null;
+  state: 'starting' | 'pending' | 'authorized' | 'failed'; expires_at: string | null; failure_code?: string;
+}>;
+export type InteractionProgress = Readonly<{ readonly status: 'start' | 'success' | 'failure' | 'warning'; readonly text: string; readonly provider_auth?: ProviderAuthentication }>;
 export type InteractionGoal = Readonly<{
   readonly status: 'succeeded' | 'failed' | 'cancelled' | 'skipped';
   readonly code?: string;

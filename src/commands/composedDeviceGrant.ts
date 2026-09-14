@@ -3,7 +3,7 @@ import {
   readSync, readdirSync, renameSync, unlinkSync, writeFileSync,
 } from 'fs';
 import { dirname, join } from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { hostname } from 'os';
 import { AuthService } from '../auth/authService';
 import { getGlobalCapyDir, readLocalRoot } from '../config/globalConfig';
@@ -227,7 +227,7 @@ const validateGrantOrigins = (grant: Grant, origin: string): void => {
     const keepUrl = new URL(grant.keep_url);
     if (new URL(origin).origin !== origin || keepUrl.protocol !== 'https:' || keepUrl.origin !== expectedKeepOrigin
       || keepUrl.pathname !== '/flow/authentication' || keepUrl.searchParams.get('f') !== grant.flow_id
-      || keepUrl.searchParams.get('compose') !== 'signup') return reject('AUTH_DEVICE_RESPONSE_INVALID');
+      || !['signup', 'signin'].includes(keepUrl.searchParams.get('compose') ?? '')) return reject('AUTH_DEVICE_RESPONSE_INVALID');
   } catch { return reject('AUTH_DEVICE_RESPONSE_INVALID'); }
 };
 
@@ -236,13 +236,30 @@ const startGrant = async (
   path: string,
   expectedUserId?: string,
 ): Promise<Checkpoint> => {
-  const baseline = capturePairedSessionInstallationBaseline(expectedUserId ?? null);
-  const response = await request(origin, '/auth/device/authorize', { compose: 'signup', machine_name: hostname() })
+  const auth = new AuthService(origin, false, expectedUserId);
+  const identity = await auth.authenticateSilent();
+  const token = identity.success ? await auth.getValidToken() : null;
+  const baseline = capturePairedSessionInstallationBaseline(expectedUserId ?? token?.user_id ?? null);
+  const response = await request(origin, '/auth/device/authorize', token ? {} : { compose: 'signup', machine_name: hostname() })
     .catch(() => reject('AUTH_DEVICE_START_FAILED'));
-  const body = await responseRecord(response);
-  if (!response.ok || !validGrant(body)) return reject(
-    typeof body?.code === 'string' ? body.code : 'AUTH_DEVICE_START_FAILED',
-  );
+  const authorization = await responseRecord(response);
+  if (!response.ok || !authorization) return reject('AUTH_DEVICE_START_FAILED');
+  const body = await (async () => {
+    if (!token) return authorization;
+    const created = await request(origin, '/flows/authentication', {}, token.access_token);
+    const flow = await responseRecord(created);
+    if (!created.ok || typeof flow?.flow_id !== 'string' || !UUID.test(flow.flow_id)) return reject('AUTH_DEVICE_START_FAILED');
+    if (typeof authorization.device_code !== 'string' || typeof authorization.expires_in !== 'number') return reject('AUTH_DEVICE_RESPONSE_INVALID');
+    const expiresAt = new Date(Date.now() + authorization.expires_in * 1000).toISOString();
+    const attached = await request(origin, `/flows/authentication/${flow.flow_id}/handoff`, {
+      attemptId: randomUUID(), deviceCodeHash: createHash('sha256').update(authorization.device_code).digest('hex'),
+      url: authorization.verification_uri, userCode: authorization.user_code, expiresAt,
+    }, token.access_token);
+    if (!attached.ok) return reject('AUTH_HANDOFF_INVALID');
+    return { ...authorization, flow_id: flow.flow_id,
+      keep_url: `${keepOrigin()}/flow/authentication?f=${flow.flow_id}&compose=signin`, expires_at: expiresAt };
+  })();
+  if (!validGrant(body)) return reject('AUTH_DEVICE_RESPONSE_INVALID');
   validateGrantOrigins(body, origin);
   const expiry = Date.parse(body.expires_at);
   if (expiry <= Date.now() || expiry > Date.now() + 15 * 60_000) return reject('AUTH_DEVICE_RESPONSE_INVALID');
