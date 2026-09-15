@@ -39,7 +39,7 @@ interface IssuedCredentials {
   readonly attemptId: string;
 }
 
-interface Checkpoint {
+export interface ComposedDeviceGrantCheckpoint {
   readonly version: 1;
   readonly origin: string;
   readonly grant: Grant;
@@ -50,6 +50,8 @@ interface Checkpoint {
   readonly installed?: true;
   readonly authenticated?: true;
 }
+
+type Checkpoint = ComposedDeviceGrantCheckpoint;
 
 export interface ComposedAuthenticatedContinuation {
   readonly flowId: string;
@@ -88,6 +90,23 @@ const saveCheckpoint = (path: string, state: Checkpoint): void => {
 const removeCheckpoint = (path: string): void => {
   if (!existsSync(path)) return;
   unlinkSync(path);
+  syncDirectory(dirname(path));
+};
+
+/**
+ * Preserve an expired or vanished ceremony for diagnosis without leaving it
+ * eligible to hijack the next authenticated command. The pair-attempt lease
+ * serializes this with any competing ceremony. A flow can advance between
+ * retirements, so an existing archive gets a distinct revision rather than
+ * replacing or discarding either record.
+ */
+export const retireCheckpoint = (path: string, state: Checkpoint): void => {
+  const archiveBase = join(dirname(path), `composed-device-grant.retired-${state.grant.flow_id}`);
+  const retired = (() => {
+    const initial = `${archiveBase}.json`;
+    return existsSync(initial) ? `${archiveBase}.${randomUUID()}.json` : initial;
+  })();
+  renameSync(path, retired);
   syncDirectory(dirname(path));
 };
 
@@ -181,6 +200,15 @@ function validCheckpoint(value: unknown): value is Checkpoint {
 const exactSession = (left: SessionStore | null, right: SessionStore): boolean =>
   left !== null && JSON.stringify(left) === JSON.stringify(right);
 
+/** The post-install readback is the authority boundary for a recovered session. */
+export const recoveredSessionMatchesCheckpoint = (
+  state: Checkpoint,
+  current: SessionStore | null,
+): boolean => {
+  const issued = state.issued;
+  return issued !== undefined && exactSession(current, buildSessionStoreFromAnswer(issued.session));
+};
+
 const installIssuedSession = async (state: Checkpoint): Promise<Checkpoint> => {
   const issued = state.issued ?? reject('AUTH_CREDENTIALS_MISSING');
   const expected = buildSessionStoreFromAnswer(issued.session);
@@ -201,7 +229,9 @@ const installIssuedSession = async (state: Checkpoint): Promise<Checkpoint> => {
     catch { return reject('AUTH_SESSION_INSTALLATION_REFUSED'); }
   }
   try {
-    if (!exactSession(backend.load(expected.user_id), expected)) return reject('AUTH_SESSION_INSTALLATION_REFUSED');
+    if (!recoveredSessionMatchesCheckpoint(state, backend.load(expected.user_id))) {
+      return reject('AUTH_SESSION_INSTALLATION_REFUSED');
+    }
   } catch { return reject('AUTH_SESSION_INSTALLATION_REFUSED'); }
   return state.installed ? state : { ...state, installed: true };
 };
@@ -212,6 +242,60 @@ const request = (origin: string, route: string, body: unknown, bearer?: string):
     headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
     body: JSON.stringify(body),
   });
+
+const inspectAuthenticationFlow = async (state: Checkpoint): Promise<Response | null> => {
+  const issued = state.issued;
+  if (!issued) return null;
+  try {
+    return await fetch(`${state.origin}/flows/authentication/${state.grant.flow_id}`, {
+      method: 'GET', redirect: 'error', signal: AbortSignal.timeout(15_000),
+      headers: { Authorization: `Bearer ${issued.identityAccessToken}` },
+    });
+  } catch { return null; }
+};
+
+export interface CheckpointResumptionDependencies {
+  readonly now?: () => number;
+  readonly inspectFlow?: (state: Checkpoint) => Promise<Response | null>;
+}
+
+/**
+ * Return true only when the active checkpoint is conclusively dead. A failed
+ * network request or an unissued grant is deliberately retained: neither
+ * proves the Service has discarded the corresponding ceremony.
+ */
+export const checkpointMustRetire = async (
+  state: Checkpoint,
+  dependencies: CheckpointResumptionDependencies = {},
+): Promise<boolean> => {
+  const now = (dependencies.now ?? Date.now)();
+  if (now >= Date.parse(state.grant.expires_at)) return true;
+  if (!state.issued) return false;
+  const response = await (dependencies.inspectFlow ?? inspectAuthenticationFlow)(state);
+  return response?.status === 404 || response?.status === 410;
+};
+
+const reusableCheckpoint = async (
+  path: string,
+  state: Checkpoint | null,
+  origin: string,
+  expectedUserId?: string,
+): Promise<Checkpoint | null> => {
+  if (!state) return null;
+  if (state.origin !== origin) return reject('AUTH_ENVIRONMENT_MISMATCH');
+  if (!checkpointMatchesExpectedUser(state, expectedUserId)) return reject('AUTH_ACCOUNT_MISMATCH');
+  if (!await checkpointMustRetire(state)) return state;
+  retireCheckpoint(path, state);
+  return null;
+};
+
+export const checkpointMatchesExpectedUser = (
+  state: Checkpoint,
+  expectedUserId?: string,
+): boolean => expectedUserId === undefined || (
+  (state.baseline.expectedUserId === null || state.baseline.expectedUserId === expectedUserId)
+  && (state.issued === undefined || state.issued.session.user.id === expectedUserId)
+);
 
 const responseRecord = async (response: Response): Promise<Readonly<Record<string, unknown>> | null> => {
   try {
@@ -277,8 +361,8 @@ const pollGrant = async (
   state: Checkpoint,
   expectedUserId?: string,
 ): Promise<Checkpoint> => {
-  if (state.issued) return state;
   if (Date.now() >= Date.parse(state.grant.expires_at)) return reject('AUTH_FLOW_EXPIRED');
+  if (state.issued) return state;
   await sleep(Math.max(0, state.pollAfter - Date.now()));
   const next = { ...state, pollAfter: Date.now() + state.intervalMs };
   // A restart after a request never polls sooner than the provider allows.
@@ -398,14 +482,8 @@ export async function runComposedDeviceGrant(
   const path = join(getGlobalCapyDir(), 'auth', 'composed-device-grant.json');
   const lease = acquirePairAttemptLease();
   try {
-    const previous = readCheckpoint(path);
+    const previous = await reusableCheckpoint(path, readCheckpoint(path), origin, expectedUserId);
     if (!onCustodyReady && !previous && !resumeFlowId && await reuseExistingCustody(origin, expectedUserId)) return 0;
-    if (previous && previous.origin !== origin) return reject('AUTH_ENVIRONMENT_MISMATCH');
-    if (previous?.baseline.expectedUserId && expectedUserId
-      && previous.baseline.expectedUserId !== expectedUserId) return reject('AUTH_ACCOUNT_MISMATCH');
-    if (previous?.issued && expectedUserId && previous.issued.session.user.id !== expectedUserId) {
-      return reject('AUTH_ACCOUNT_MISMATCH');
-    }
     const state = previous ?? await startGrant(origin, path, expectedUserId);
     const flowUrl = new URL(`${state.grant.keep_url}${resumeFlowId ? `&resume=${resumeFlowId}` : ''}`);
     const loginUrl = `${flowUrl.origin}/auth/login?${new URLSearchParams({ return_to: `${flowUrl.pathname}${flowUrl.search}` })}`;
