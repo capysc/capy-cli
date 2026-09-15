@@ -31,6 +31,7 @@
  * Flagged here rather than silently claimed as full support.
  */
 import { hostname } from 'os';
+import { PASSPHRASE_CREDENTIAL_ID } from '../auth/deviceKey/passphraseDoor';
 import {
   deriveDeviceKeyKek,
   deviceKeyWrapAAD,
@@ -58,7 +59,7 @@ import {
 /** The passphrase-door sentinel credential id (keep-app's
  *  `webauthn/passphraseDoorId.ts`) — opaque here, exactly like every other
  *  credential id the CLI already handles uniformly (`grant.ts`). */
-export const PASSPHRASE_CREDENTIAL_ID = 'capy:passphrase';
+export { PASSPHRASE_CREDENTIAL_ID } from '../auth/deviceKey/passphraseDoor';
 
 const isLiveDoor = (w: KeyWrapperMetadata): boolean =>
   w.type === 'wrapped_k_local' && !w.deleted_at;

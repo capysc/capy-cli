@@ -9,6 +9,7 @@ import { CapyError, ERROR_CODES, type AuthResult } from '../types';
 import { askHostedInitChannel, HostedInitChannelError } from '../ui/hostedInitChannel';
 import type { HostedInitWizardSession } from '../ui/hostedInitWizardSession';
 import { restoreFromLocalRoot } from '../auth/deviceKey/restoreFromLocalRoot';
+import { PASSPHRASE_CREDENTIAL_ID } from '../auth/deviceKey/passphraseDoor';
 import { readMasterKey } from '../config/globalConfig';
 
 type Settlement = Readonly<{ session: HostedInitWizardSession; cancelled: boolean }>;
@@ -34,7 +35,8 @@ export function validateHostedUnlockRequest(request: UnlockRequest, expectedUser
     || request.candidates.length > MAX_UNLOCK_CANDIDATES
     || request.candidates.some((candidate) => !candidate || typeof candidate !== 'object' || Array.isArray(candidate)
       || !exactKeys(candidate, ['credentialId', 'prfSalt']) || typeof candidate.credentialId !== 'string'
-      || typeof candidate.prfSalt !== 'string' || !/^[A-Za-z0-9_-]+$/u.test(candidate.credentialId)
+      || typeof candidate.prfSalt !== 'string' || (candidate.credentialId !== PASSPHRASE_CREDENTIAL_ID
+        && !/^[A-Za-z0-9_-]+$/u.test(candidate.credentialId))
       || candidate.credentialId.length > MAX_CREDENTIAL_ID_LENGTH
       || !isWellFormedPrfOutput(candidate.prfSalt))
     || new Set(request.candidates.map((candidate) => candidate.credentialId)).size !== request.candidates.length) invalid();
