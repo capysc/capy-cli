@@ -126,7 +126,7 @@ export const createJsonLineInteraction = (input: Readable, output: Writable): In
     output: event => jsonLine(output, { type: 'output', ...event }),
     progress: event => jsonLine(output, { type: 'progress', ...event }),
     prompt,
-    goal: outcome => jsonLine(output, { type: 'goal', ...outcome }),
+    goal: ({ presentation: _presentation, ...outcome }) => jsonLine(output, { type: 'goal', ...outcome }),
   };
 };
 

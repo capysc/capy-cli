@@ -1,6 +1,7 @@
 import { describe, expect, test, mock } from 'bun:test';
 import inquirer from 'inquirer';
-import { prompt, runWithInteraction, ExitPromptError, type Interaction, type InteractionQuestion } from '../../src/ui/interaction';
+import { PassThrough } from 'node:stream';
+import { createJsonLineInteraction, prompt, runWithInteraction, ExitPromptError, type Interaction, type InteractionQuestion } from '../../src/ui/interaction';
 
 const adapter = (answer: (question: InteractionQuestion<unknown>) => unknown): Interaction => ({
   output: () => undefined, progress: () => undefined, goal: () => undefined,
@@ -59,5 +60,16 @@ describe('ordinary CLI question adapter', () => {
   test('EOF/cancel is separate from an accepted null choice', async () => {
     const interaction: Interaction = { ...adapter(() => true), prompt: async () => null };
     await expect(runWithInteraction(interaction, () => prompt([{ name: 'x', type: 'confirm', message: 'Proceed?' }]))).rejects.toBeInstanceOf(ExitPromptError);
+  });
+
+  test('JSON terminal output ignores Flow-only presentation metadata', async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const interaction = createJsonLineInteraction(input, output);
+
+    await interaction.goal({ status: 'succeeded', code: 'SYNC_COMPLETE',
+      presentation: { title: 'Repository ready', component: 'repository-sync' } });
+
+    expect(JSON.parse(output.read()!.toString())).toEqual({ type: 'goal', status: 'succeeded', code: 'SYNC_COMPLETE' });
   });
 });
