@@ -8,7 +8,7 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { readLocalRoot } from '../config/globalConfig';
 import { keepOrigin } from './screens/keepScreens';
 import { mintConnectionKeypair, openEnvelope, sealRequestEnvelope } from '../service/brokerEnvelope';
-import { runWithInteraction, type Interaction, type InteractionQuestion } from './interaction';
+import { runWithInteraction, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
 
 type Data = Readonly<Record<string, unknown>>;
 type MessageType = 'output' | 'progress' | 'prompt' | 'answer' | 'goal' | 'ping' | 'pong';
@@ -17,6 +17,35 @@ interface History { readonly flow_id: string; readonly owner: string; readonly r
 const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
   : value !== null && typeof value === 'object' ? `{${Object.keys(value).toSorted().map(key => `${JSON.stringify(key)}:${canonical((value as Data)[key])}`).join(',')}}`
   : JSON.stringify(value);
+
+type TurnItem = Readonly<{ readonly type: 'output' | 'progress'; readonly data: Data }>;
+const turnPresentation = (data: Data): InteractionPresentation | undefined => {
+  const value = data.presentation;
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Readonly<Record<string, unknown>>;
+  const title = typeof candidate.title === 'string' ? candidate.title : undefined;
+  const component = typeof candidate.component === 'string' ? candidate.component : undefined;
+  return title === undefined && component === undefined
+    ? undefined
+    : { ...(title === undefined ? {} : { title }), ...(component === undefined ? {} : { component }) };
+};
+const turnOutcome = (data: Data): Data => Object.fromEntries(
+  Object.entries(data).filter(([key]) => key !== 'presentation'),
+);
+
+/** The encrypted Flow payload for one CLI-owned question or terminal outcome. */
+export const flowTurnPayload = (
+  messages: readonly TurnItem[],
+  boundary: Readonly<{ readonly type: 'prompt' | 'goal'; readonly data: Data }>,
+): Data => {
+  const presentation = turnPresentation(boundary.data);
+  return {
+    type: 'turn',
+    messages,
+    ...(boundary.type === 'prompt' ? { question: boundary.data.question } : { outcome: turnOutcome(boundary.data) }),
+    ...(presentation === undefined ? {} : { presentation }),
+  };
+};
 
 /** Adapter only: executes the ordinary command under the encrypted Flow I/O boundary. */
 export async function runWithFlowInteraction(operation: () => Promise<void>, devMode: boolean, descriptor: Readonly<{ command: 'capy' | 'rotate'; continuationTool: 'capy_onboard_continue' | 'capy_rotate_continue'; expectedUserId?: string }> = { command: 'capy', continuationTool: 'capy_onboard_continue' }): Promise<void> {
@@ -112,7 +141,6 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   type Queued = { readonly type: MessageType; readonly data: Data; readonly correlation?: string; readonly resolve: () => void; readonly reject: (reason: unknown) => void };
   const queue = new PassThrough({ objectMode: true });
   const iterator = queue[Symbol.asyncIterator]();
-  type TurnItem = Readonly<{ type: 'output' | 'progress'; data: Data }>;
   // Output stays local until the CLI reaches a question or a terminal goal.
   // The outer prompt/goal tag preserves the service's answer and completion checks.
   const consume = async (items: readonly TurnItem[]): Promise<void> => {
@@ -133,8 +161,9 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
         return consume([...items, { type: item.type, data: item.data }]);
       }
       const boundary = item.type === 'prompt' || item.type === 'goal';
-      await append(item.type, boundary ? { type: 'turn', messages: items,
-        ...(item.type === 'prompt' ? { question: item.data.question } : { outcome: item.data }) } : item.data, item.correlation);
+      await append(item.type, boundary
+        ? flowTurnPayload(items, { type: item.type, data: item.data })
+        : item.data, item.correlation);
       if (item.type === 'goal') process.stdout.write(`${JSON.stringify({ok: true, command: descriptor.command, flow_id: flowId, outcome: item.data.status, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: false}}})}\n`);
       item.resolve();
       return consume(boundary ? [] : items);
@@ -175,7 +204,8 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       incoming.once(id, answered); incoming.once('failure', failed);
       if (controller.signal.aborted) failed(controller.signal.reason);
     });
-    await emit('prompt', { question: question.view }, id);
+    await emit('prompt', { question: question.view,
+      ...(question.presentation === undefined ? {} : { presentation: question.presentation }) }, id);
     const payload = await answer;
     const decision = question.decide(payload);
     if ('error' in decision) { await emit('output', { message: decision.error, level: 'error' }); return ask(question); }

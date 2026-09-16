@@ -4,6 +4,14 @@ import type { Readable, Writable } from 'node:stream';
 import inquirer from 'inquirer';
 
 export type InteractionOutput = Readonly<{ readonly text: string; readonly level?: 'info' | 'warning' | 'error' }>;
+/**
+ * Optional rendering hint supplied by the command that owns a turn.  It is
+ * deliberately descriptive only: transports must never derive it from text.
+ */
+export type InteractionPresentation = Readonly<{
+  readonly title?: string;
+  readonly component?: string;
+}>;
 export type ProviderAuthentication = Readonly<{
   id: string; provider: string; authorization_url: string | null; verification_code: string | null;
   state: 'starting' | 'pending' | 'authorized' | 'failed'; expires_at: string | null; failure_code?: string;
@@ -13,12 +21,14 @@ export type InteractionGoal = Readonly<{
   readonly status: 'succeeded' | 'failed' | 'cancelled' | 'skipped';
   readonly code?: string;
   readonly message?: string;
+  readonly presentation?: InteractionPresentation;
 }>;
 export type InteractionQuestion<T> = Readonly<{
   readonly view: unknown;
   readonly decide: (payload: Readonly<Record<string, unknown>>) =>
     | Readonly<{ readonly error: string }>
     | Readonly<{ readonly value: T }>;
+  readonly presentation?: InteractionPresentation;
 }>;
 
 /**
