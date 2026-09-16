@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { flowTurnPayload } from '../../src/ui/flowInteraction';
+import { flowQueueStep, flowTurnPayload } from '../../src/ui/flowInteraction';
 
 describe('Flow turn payloads', () => {
   test('preserves CLI event order and omits presentation when the CLI did not supply it', () => {
@@ -42,5 +42,42 @@ describe('Flow turn payloads', () => {
       type: 'goal',
       data: { status: 'succeeded', message: 'Repository ready\nOpen the dashboard.' },
     })).not.toHaveProperty('presentation');
+  });
+
+  test('flushes buffered CLI output before a provider-auth handoff', () => {
+    const buffered = flowQueueStep([], { type: 'output', data: { text: 'Opening provider login' } });
+    const flushed = flowQueueStep(buffered.nextItems, {
+      type: 'progress',
+      data: { status: 'start', text: 'Sign in with WorkOS', provider_auth: { state: 'pending' } },
+    });
+
+    expect(flushed).toEqual({
+      nextItems: [],
+      writes: [
+        { type: 'output', data: { text: 'Opening provider login' } },
+        { type: 'progress', data: { status: 'start', text: 'Sign in with WorkOS', provider_auth: { state: 'pending' } } },
+      ],
+    });
+  });
+
+  test('keeps the browser answer correlation on the closing prompt turn', () => {
+    const step = flowQueueStep([{ type: 'progress', data: { status: 'success', text: 'Repository inspected' } }], {
+      type: 'prompt',
+      correlation: 'request-123',
+      data: { question: { text: 'Apply this setup?' } },
+    });
+
+    expect(step).toEqual({
+      nextItems: [],
+      writes: [{
+        type: 'prompt',
+        correlation: 'request-123',
+        data: {
+          type: 'turn',
+          messages: [{ type: 'progress', data: { status: 'success', text: 'Repository inspected' } }],
+          question: { text: 'Apply this setup?' },
+        },
+      }],
+    });
   });
 });

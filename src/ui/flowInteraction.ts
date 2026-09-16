@@ -19,6 +19,8 @@ const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.m
   : JSON.stringify(value);
 
 type TurnItem = Readonly<{ readonly type: 'output' | 'progress'; readonly data: Data }>;
+type FlowQueueItem = Readonly<{ readonly type: MessageType; readonly data: Data; readonly correlation?: string }>;
+type FlowQueueWrite = Readonly<{ readonly type: MessageType; readonly data: Data; readonly correlation?: string }>;
 const turnPresentation = (data: Data): InteractionPresentation | undefined => {
   const value = data.presentation;
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
@@ -44,6 +46,30 @@ export const flowTurnPayload = (
     messages,
     ...(boundary.type === 'prompt' ? { question: boundary.data.question } : { outcome: turnOutcome(boundary.data) }),
     ...(presentation === undefined ? {} : { presentation }),
+  };
+};
+
+/**
+ * Decide the encrypted writes for one CLI interaction event. Keeping this
+ * pure makes the provider-auth handoff's immediate flush and request
+ * correlation part of the transport contract rather than a UI convention.
+ */
+export const flowQueueStep = (
+  items: readonly TurnItem[],
+  item: FlowQueueItem,
+): Readonly<{ readonly nextItems: readonly TurnItem[]; readonly writes: readonly FlowQueueWrite[] }> => {
+  if (item.type === 'progress' && item.data.provider_auth) {
+    return { nextItems: [], writes: [...items, { type: 'progress', data: item.data }] };
+  }
+  if (item.type === 'output' || item.type === 'progress') {
+    return { nextItems: [...items, { type: item.type, data: item.data }], writes: [] };
+  }
+  const boundary = item.type === 'prompt' || item.type === 'goal';
+  return {
+    nextItems: boundary ? [] : items,
+    writes: [{ type: item.type, data: boundary
+      ? flowTurnPayload(items, { type: item.type, data: item.data })
+      : item.data, ...(item.correlation === undefined ? {} : { correlation: item.correlation }) }],
   };
 };
 
@@ -148,25 +174,11 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     if (next.done) return;
     const item = next.value as Queued;
     try {
-      if (item.type === 'progress' && item.data.provider_auth) {
-        // A provider ceremony waits outside the CLI prompt loop. Flush its
-        // public handoff immediately, still inside the encrypted transport.
-        for (const pending of items) await append(pending.type, pending.data);
-        await append('progress', item.data);
-        item.resolve();
-        return consume([]);
-      }
-      if (item.type === 'output' || item.type === 'progress') {
-        item.resolve();
-        return consume([...items, { type: item.type, data: item.data }]);
-      }
-      const boundary = item.type === 'prompt' || item.type === 'goal';
-      await append(item.type, boundary
-        ? flowTurnPayload(items, { type: item.type, data: item.data })
-        : item.data, item.correlation);
+      const step = flowQueueStep(items, item);
+      for (const write of step.writes) await append(write.type, write.data, write.correlation);
       if (item.type === 'goal') process.stdout.write(`${JSON.stringify({ok: true, command: descriptor.command, flow_id: flowId, outcome: item.data.status, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: false}}})}\n`);
       item.resolve();
-      return consume(boundary ? [] : items);
+      return consume(step.nextItems);
     } catch (error) {
       item.reject(error);
       incoming.emit('failure', error);
