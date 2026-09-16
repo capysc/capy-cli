@@ -416,7 +416,10 @@ describe('CapyCommand', () => {
       spyOn(capyCommand as any, 'planFreeSetup').mockResolvedValue({ hash: 'sha256:test', names: ['SECRET'], syncAction: 'push_root_env' });
       const apply = spyOn(capyCommand as any, 'applyFreeSetup').mockResolvedValue(undefined);
       await runWithInteraction({ output: () => undefined, progress: () => undefined, goal: () => undefined,
-        prompt: async () => ({ answer: false }) }, async () => {
+        prompt: async question => {
+          expect(question.presentation).toEqual({ title: 'Review repository setup', component: 'repository-review' });
+          return { answer: false };
+        } }, async () => {
         await expect((capyCommand as any).recoverFreeFirstSync({ initialized: true, hasKeepFile: true, hasEnvFile: true, projectName: 'default', organizationId: 'org_1', projectId: 'project_default', activeBranch: 'development', userId: 'user_1' })).rejects.toMatchObject({ message: 'The initial secret sync was skipped.' });
       });
       expect(apply).not.toHaveBeenCalled();

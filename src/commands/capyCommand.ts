@@ -105,6 +105,7 @@ import { runHostedFreeRepositorySetup } from './hostedFreeRepositorySetup';
 import { SetupCommand } from './setupCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+const repositoryReviewPresentation = { title: 'Review repository setup', component: 'repository-review' } as const;
 
 const recordWizard = (
   wizard: InitWizardTransport | null,
@@ -553,6 +554,7 @@ export class CapyCommand {
         const answer = await prompt([{
           type: 'confirm', name: 'confirmEncrypt', default: true,
           message: `Encrypt these ${names.length} secrets and push to ${B(defaultProject.name)} on ${B(SyncEngine.DEFAULT_BRANCH)}?`,
+          presentation: repositoryReviewPresentation,
         }]);
         return answer.confirmEncrypt === true;
       },
@@ -1781,6 +1783,7 @@ export class CapyCommand {
           const answer = await prompt([{
             type: 'confirm', name: 'confirmEncrypt', default: true,
             message: `Encrypt these ${names.length} secrets and push to ${B(target.projectName)} (${selectedOrg.name}) on ${B(target.branch)}?`,
+            presentation: repositoryReviewPresentation,
           }]);
           return answer.confirmEncrypt === true;
         },

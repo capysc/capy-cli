@@ -130,7 +130,7 @@ export const createJsonLineInteraction = (input: Readable, output: Writable): In
   };
 };
 
-type TerminalQuestion = Readonly<Record<string, unknown>>;
+type TerminalQuestion = Readonly<Record<string, unknown>> & Readonly<{ readonly presentation?: InteractionPresentation }>;
 export class ExitPromptError extends Error {
   readonly name = 'ExitPromptError';
 }
@@ -176,6 +176,7 @@ const askTerminalQuestion = async (question: TerminalQuestion, answers: Terminal
     view: { text: String(resolveSetting(question.message, answers) ?? ''),
       input: { kind, ...(choices ? { choices: choices.map(({ label, value, disabled }) => ({ label, value, disabled })) } : {}),
         ...(initial === undefined ? {} : { default: initial }) } },
+    ...(question.presentation === undefined ? {} : { presentation: question.presentation }),
     decide: payload => {
       const raw = payload.value;
       const decode = (token: unknown) => choices?.find(choice => choice.value === token && !choice.disabled);
