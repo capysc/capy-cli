@@ -1,5 +1,5 @@
 import { describe, test, expect, spyOn, mock } from 'bun:test';
-import { runRotateFlow } from '../../src/commands/rotateFlow';
+import { canRecoverCapyReadiness, runRotateFlow } from '../../src/commands/rotateFlow';
 import { RotateCommand } from '../../src/commands/rotateCommand';
 import * as readiness from '../../src/commands/rotateReadiness';
 import * as flow from '../../src/ui/flowInteraction';
@@ -11,6 +11,18 @@ const keep: KeepFile = { version: '3.0', org_id: 'org_fixture', project_id: 'pro
     connector: { provider: 'workos', source: 'api', created_at: 1 } }] } };
 
 describe('rotate conversation entry', () => {
+  test('only a missing Capy session is eligible for composed device recovery', () => {
+    expect(canRecoverCapyReadiness({ v: 1, command: 'rotate', ready: false, deploymentChoices: [], checks: [
+      { code: 'ROTATE_REPOSITORY', ready: true, detail: '', remedy: '' },
+      { code: 'ROTATE_CAPY_AUTH', ready: false, detail: '', remedy: '' },
+      { code: 'ROTATE_WORKOS_CLI', ready: true, detail: '', remedy: '' },
+    ] })).toBe(true);
+    expect(canRecoverCapyReadiness({ v: 1, command: 'rotate', ready: false, deploymentChoices: [], checks: [
+      { code: 'ROTATE_REPOSITORY', ready: false, detail: '', remedy: '' },
+      { code: 'ROTATE_CAPY_AUTH', ready: false, detail: '', remedy: '' },
+    ] })).toBe(false);
+  });
+
   test.each([true, false])('readiness=%s is inspected before any conversation is created', async ready => {
     const event = mock((_name: string) => undefined);
     const read = spyOn(ProjectManager.prototype, 'readKeepFile').mockReturnValue(keep);
