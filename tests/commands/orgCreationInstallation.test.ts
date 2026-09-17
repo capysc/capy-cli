@@ -45,66 +45,18 @@ beforeEach(() => {
 const run = (enrollment?: DeviceKeyEnrollmentOptions) =>
   createNewOrganization(originalAuth, serviceClientFor, 'refresh-before', auth.user_id, true, enrollment);
 
-describe('organization creation installation propagation', () => {
-  test('wraps and enrolls through replacement authority and returns the same context', async () => {
-    const enrollment = {
-      ctx: { authService: originalAuth, serviceClient: {} as ServiceClient, devMode: true,
-        userId: auth.user_id, organizations: [] },
-      orglessToken: 'prior-orgless-token',
-    } as DeviceKeyEnrollmentOptions;
-    const result = await run(enrollment);
-    expect(serviceClientFor).toHaveBeenCalledWith(replacementAuth);
-    expect(result).toEqual({ ...installed, serviceClient: scopedClient });
-    const ops = wrapAndSaveMasterKey.mock.calls[0]?.[3] as unknown as Readonly<{
-      coDecrypt: (orgId: string, ciphertext: string) => Promise<string>;
-    }>;
-    expect(await ops.coDecrypt(org.id, 'fixture ciphertext')).toBe('fixture wrapped result');
-    expect(scopedCoDecrypt).toHaveBeenCalledWith(org.id, 'fixture ciphertext');
-    expect(attemptCaseAEnrollment).toHaveBeenCalledWith(expect.objectContaining({
-      ctx: expect.objectContaining({ authService: replacementAuth, serviceClient: scopedClient,
-        organizations: [org], activeOrgId: org.id }),
-      orgId: org.id,
-      orglessToken: 'prior-orgless-token',
-    }));
-    expect(enrollment.ctx.authService).toBe(originalAuth);
-  });
-
-  test('only exact pre-refresh conflict retries the name with the same phrase', async () => {
-    createOrganization.mockRejectedValueOnce({ code: 'AUTH_ORG_NAME_TAKEN_PRE_REFRESH' });
-    const result = await run();
-    expect(result.organization).toEqual(org);
-    expect(createOrganization).toHaveBeenCalledTimes(2);
-    expect(generateSeedPhrase).toHaveBeenCalledTimes(1);
-    const requests = createOrganizationInBrowser.mock.calls.map((call) => call[0]) as ReadonlyArray<Readonly<{
-      phrase: string; nameOnly: boolean;
-    }>>;
-    expect(requests[0]?.phrase).toBe(requests[1]?.phrase);
-    expect(requests[1]?.nameOnly).toBe(true);
-    expect(wrapAndSaveMasterKey).toHaveBeenCalledTimes(1);
-  });
-
-  test('generic provider conflict is propagated without creation retry or local wrapping', async () => {
-    const failure = { status: 409 };
-    createOrganization.mockRejectedValueOnce(failure);
-    await expect(run()).rejects.toBe(failure);
-    expect(createOrganization).toHaveBeenCalledTimes(1);
-    expect(wrapAndSaveMasterKey).not.toHaveBeenCalled();
-  });
-
-  test('a wrapping conflict cannot return to the create call even with the safe provider code', async () => {
-    const failure = { status: 409, code: 'AUTH_ORG_NAME_TAKEN_PRE_REFRESH' };
-    wrapAndSaveMasterKey.mockRejectedValueOnce(failure);
-    await expect(run()).rejects.toBe(failure);
-    expect(createOrganization).toHaveBeenCalledTimes(1);
-    expect(attemptCaseAEnrollment).not.toHaveBeenCalled();
-  });
-
-  test('an enrollment conflict cannot repeat creation or wrapping', async () => {
-    const failure = { status: 409, code: 'AUTH_ORG_NAME_TAKEN_PRE_REFRESH' };
-    attemptCaseAEnrollment.mockRejectedValueOnce(failure);
-    await expect(run({ ctx: { userId: auth.user_id } as DeviceKeyEnrollmentOptions['ctx'],
-      orglessToken: null })).rejects.toBe(failure);
-    expect(createOrganization).toHaveBeenCalledTimes(1);
-    expect(wrapAndSaveMasterKey).toHaveBeenCalledTimes(1);
-  });
+describe('Keep-owned organization creation', () => {
+  for (const web of [false, true]) {
+    test(`routes ${web ? 'browser' : 'terminal'} creation to Keep before any local ceremony`, async () => {
+      await expect(createNewOrganization(originalAuth, serviceClientFor, 'refresh-before', auth.user_id, web))
+        .rejects.toMatchObject({ code: 'KEEP_ONBOARDING_REQUIRED',
+          details: { keep_url: expect.stringMatching(/\/signup\?intent=create-org$/) } });
+      expect(createOrganization).not.toHaveBeenCalled();
+      expect(generateSeedPhrase).not.toHaveBeenCalled();
+      expect(createOrganizationInBrowser).not.toHaveBeenCalled();
+      expect(wrapAndSaveMasterKey).not.toHaveBeenCalled();
+      expect(attemptCaseAEnrollment).not.toHaveBeenCalled();
+      expect(serviceClientFor).not.toHaveBeenCalled();
+    });
+  }
 });
