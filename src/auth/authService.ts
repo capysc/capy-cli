@@ -160,6 +160,10 @@ export class AuthService {
       this.serviceApiUrl,
       sessionUserId,
       initialCurrentOrgId,
+      async (userId) => {
+        const { retireCheckpointForDeletedUser } = await import('../commands/composedDeviceGrant');
+        retireCheckpointForDeletedUser(userId);
+      },
     );
     this.lifecycle.load();
     this.initialSessionUserId = this.lifecycle.session?.user_id ?? null;

@@ -1,6 +1,7 @@
 import { mock, describe, test, expect, beforeEach, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
+import { createHash } from 'crypto';
 
 // Guard rail: pin HOME to a throwaway tmpdir so if any file path ever leaked
 // into this suite it could not touch the real ~/.capy. The suite itself runs
@@ -52,6 +53,16 @@ class MemorySessionStorageBackend implements SessionStorageBackend {
 
   clear(userId: string | undefined): void {
     this.store.delete(this.key(userId));
+  }
+
+  retireDeletedUserIfRefreshAuthorityMatches(userId: string, expectedDigest: string): boolean {
+    const current = this.load(userId);
+    const digest = current?.refresh_token
+      ? createHash('sha256').update(current.refresh_token).digest('hex')
+      : null;
+    if (current?.user_id !== userId || digest !== expectedDigest) return false;
+    this.clear(userId);
+    return true;
   }
 
   discover(): DiscoveredSession | null {
@@ -266,6 +277,41 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(result.error_code).toBe('network');
       expect(service.getLastRefreshFailure()?.reason).toBe('network');
     });
+
+    test('a confirmed deleted user retires only the matching stored session', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-1' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe('user_deleted');
+      expect(backend.load('user-1')).toBeNull();
+    });
+
+    test('a deletion response naming a different user never clears the local session', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-other' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('session_ended');
+      expect(backend.load('user-1')).toEqual(expired);
+    });
   });
 
   describe('org validation still gates cached tokens', () => {
@@ -330,7 +376,7 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(method).toBe('refreshed_orgless');
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe(`${API}/auth/refresh`);
-      expect(calls[0].body).toEqual({ refresh_token: 'rt-original' });
+      expect(calls[0].body).toEqual({ refresh_token: 'rt-original', expected_user_id: 'user-1' });
       // No organization_id key at all — org-scoped refreshForOrg always sends one.
       expect('organization_id' in calls[0].body).toBe(false);
     });

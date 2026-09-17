@@ -123,6 +123,16 @@ describe('FileSessionStorageBackend', () => {
       expect(() => backend.clear('user-a')).not.toThrow();
     });
 
+    test('retires only the exact deleted-user refresh authority', () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+
+      expect(backend.retireDeletedUserIfRefreshAuthorityMatches('user-a', authorityDigest('rt_other'))).toBe(false);
+      expect(backend.load('user-a')).toEqual(stored);
+      expect(backend.retireDeletedUserIfRefreshAuthorityMatches('user-a', authorityDigest(stored.refresh_token))).toBe(true);
+      expect(backend.load('user-a')).toBeNull();
+    });
+
     test('explicit logout clears an uncertain fence before a fresh login', async () => {
       backend.save(makeSession('user-a'), 'user-a');
       await expect(backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {

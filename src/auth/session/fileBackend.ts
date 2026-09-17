@@ -302,6 +302,23 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
     });
   }
 
+  retireDeletedUserIfRefreshAuthorityMatches(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+  ): boolean {
+    return withStableSessionLockSync(userId, (sessionPath) => {
+      const current = readProtectedSession(userId);
+      const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
+      if (current?.user_id !== userId || currentDigest !== expectedRefreshAuthoritySha256) return false;
+      if (existsSync(sessionPath)) {
+        unlinkSync(sessionPath);
+        syncDirectory(dirname(sessionPath));
+      }
+      removeFenceDurably(userId);
+      return true;
+    });
+  }
+
   discover(): DiscoveredSession | null {
     // Scan ~/.capy/auth/sessions/ for any existing session file. This handles
     // the post-redeem flow where the invitee runs `capy` in a new project
@@ -363,7 +380,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
         const code = error !== null && typeof error === 'object' && 'code' in error
           ? (error as Readonly<{ code?: unknown }>).code
           : null;
-        if (code === 'AUTH_ORG_NAME_TAKEN_PRE_REFRESH') removeFenceDurably(userId);
+        if (code === 'AUTH_ORG_NAME_TAKEN_PRE_REFRESH' || code === 'AUTH_USER_DELETED') removeFenceDurably(userId);
         throw error;
       });
       if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');

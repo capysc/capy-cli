@@ -194,6 +194,7 @@ export interface Organization {
  */
 export type SilentAuthFailureCode =
   | 'session_ended'
+  | 'user_deleted'
   | 'org_not_found'
   | 'server_error'
   | 'network'

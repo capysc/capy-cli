@@ -56,6 +56,15 @@ export interface SessionStorageBackend {
   clear(userId: string | undefined): void;
 
   /**
+   * Retire only the precise session authority WorkOS confirmed deleted.
+   * A changed session (including a concurrent sign-in) remains untouched.
+   */
+  retireDeletedUserIfRefreshAuthorityMatches?(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+  ): boolean;
+
+  /**
    * Locate a session when the caller has no userId hint (e.g. the post-redeem
    * flow where a fresh checkout has no sync-state). Only sessions whose
    * storage scope agrees with the content's `user_id` may be returned — a

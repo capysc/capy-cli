@@ -1,4 +1,5 @@
 import { ServiceToken, SessionStore, SilentAuthFailureCode } from '../../types/index';
+import { createHash } from 'crypto';
 import { debug } from '../../ui/debug';
 import { SessionStorageBackend } from './backend';
 import { HttpStatusError, postJson } from './http';
@@ -21,7 +22,42 @@ export interface RefreshFailure {
   detail?: string;
 }
 
+class DeletedUserRefreshError extends Error {
+  readonly code = 'AUTH_USER_DELETED';
+
+  constructor(
+    readonly userId: string,
+    readonly refreshAuthoritySha256: string,
+  ) {
+    super('The signed-in account no longer exists');
+  }
+}
+
+const refreshAuthorityDigest = (refreshToken: string): string =>
+  createHash('sha256').update(refreshToken).digest('hex');
+
+const deletedUserRefreshError = (
+  error: unknown,
+  session: Readonly<Pick<SessionStore, 'user_id' | 'refresh_token'>>,
+): Error => {
+  const body = error instanceof HttpStatusError && error.body !== null
+    && typeof error.body === 'object' && !Array.isArray(error.body)
+    ? error.body as Readonly<Record<string, unknown>>
+    : null;
+  return error instanceof HttpStatusError
+    && error.status === 401
+    && body?.code === 'AUTH_USER_DELETED'
+    && body.user_id === session.user_id
+    ? new DeletedUserRefreshError(session.user_id, refreshAuthorityDigest(session.refresh_token))
+    : error instanceof Error
+      ? error
+      : new Error('AUTH_REFRESH_FAILURE');
+};
+
 export function classifyRefreshFailure(error: any): RefreshFailure {
+  if (error instanceof DeletedUserRefreshError) {
+    return { reason: 'user_deleted', status: 401, detail: error.message };
+  }
   if (error instanceof HttpStatusError) {
     if (error.status === 401) {
       // WorkOS rejected the refresh token — the backing session has ended
@@ -111,9 +147,30 @@ export class SessionLifecycle {
     private readonly serviceApiUrl: string,
     sessionUserId?: string,
     initialCurrentOrgId: string | null = null,
+    private readonly onDeletedUser?: (userId: string) => Promise<void>,
   ) {
     this.sessionUserId = sessionUserId;
     this.currentOrgId = initialCurrentOrgId;
+  }
+
+  private async retireDeletedUser(error: unknown): Promise<boolean> {
+    if (!(error instanceof DeletedUserRefreshError)) return false;
+    const retired = this.storage.retireDeletedUserIfRefreshAuthorityMatches?.(
+      error.userId,
+      error.refreshAuthoritySha256,
+    ) ?? false;
+    if (!retired) return false;
+    this.session = null;
+    this.currentOrgId = null;
+    this.loadedRefreshToken = null;
+    this.orglessAccessToken = null;
+    try {
+      await this.onDeletedUser?.(error.userId);
+    } catch {
+      // Session retirement remains valid even if the diagnostic checkpoint
+      // archive cannot be completed; that checkpoint will reject its old ID.
+    }
+    return true;
   }
 
   /**
@@ -304,10 +361,11 @@ export class SessionLifecycle {
           this.session!.refresh_token = freshSession.refresh_token;
         }
 
+        const refreshSession = freshSession?.version === 2 ? freshSession : this.session!;
         const data = await postJson<OrglessRefreshResponse>(
           `${this.serviceApiUrl}/auth/refresh`,
-          { refresh_token: this.session!.refresh_token },
-        );
+          { refresh_token: refreshSession.refresh_token, expected_user_id: refreshSession.user_id },
+        ).catch((error) => { throw deletedUserRefreshError(error, refreshSession); });
 
         this.session!.refresh_token = data.refresh_token;
         this.orglessAccessToken = data.access_token;
@@ -324,7 +382,9 @@ export class SessionLifecycle {
         // refresh failure, just means this branch no longer applies.
         return false;
       }
-      const failure = classifyRefreshFailure(error);
+      const failure = await this.retireDeletedUser(error)
+        ? { reason: 'user_deleted' as const, status: 401, detail: 'The signed-in account no longer exists' }
+        : classifyRefreshFailure(error);
       this.lastRefreshFailure = failure;
       debug(
         `[auth] org-less refresh failed (${failure.reason}` +
@@ -347,6 +407,8 @@ export class SessionLifecycle {
     switch (this.lastRefreshFailure?.reason) {
       case 'session_ended':
         return { code: 'session_ended', message: 'Session expired — sign-in required' };
+      case 'user_deleted':
+        return { code: 'user_deleted', message: 'This account was deleted — complete signup again' };
       case 'network':
         return { code: 'network', message: 'Could not reach the Capy service to refresh your session' };
       case 'org_not_found':
@@ -381,13 +443,15 @@ export class SessionLifecycle {
           this.session!.refresh_token = freshSession.refresh_token;
         }
 
+        const refreshSession = freshSession?.version === 2 ? freshSession : this.session!;
         const data = await postJson<RefreshResponse>(
           `${this.serviceApiUrl}/auth/refresh`,
           {
-            refresh_token: this.session!.refresh_token,
+            refresh_token: refreshSession.refresh_token,
             organization_id: orgId,
+            expected_user_id: refreshSession.user_id,
           },
-        );
+        ).catch((error) => { throw deletedUserRefreshError(error, refreshSession); });
 
         // Resolve the actual org from the JWT — the caller may have passed a
         // stale internal org ID but the token is scoped to the canonical one.
@@ -432,7 +496,9 @@ export class SessionLifecycle {
         return true;
       });
     } catch (error: any) {
-      const failure = classifyRefreshFailure(error);
+      const failure = await this.retireDeletedUser(error)
+        ? { reason: 'user_deleted' as const, status: 401, detail: 'The signed-in account no longer exists' }
+        : classifyRefreshFailure(error);
       this.lastRefreshFailure = failure;
       debug(
         `[auth] token refresh failed for org ${orgId} (${failure.reason}` +
