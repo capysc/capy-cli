@@ -296,6 +296,41 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(backend.load('user-1')).toBeNull();
     });
 
+    test('a confirmed deletion permits a new immutable user to install in the same auth instance', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-1' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      await service.authenticateSilent('org-1');
+      const verified = service as unknown as Readonly<{
+        captureExplicitAuthInstallationBaseline: () => Readonly<{ userId: string | null; refreshAuthoritySha256: string | null }>;
+        processVerifiedExchangeResponse: (
+          token: Readonly<{ access_token: string; refresh_token: string; expires_in: number }>,
+          user: Readonly<{ id: string; email: string; first_name: null; last_name: null }>,
+          organizations: readonly [],
+          baseline: Readonly<{ userId: string | null; refreshAuthoritySha256: string | null }>,
+        ) => Promise<Readonly<{ success: boolean; user_id?: string }>>;
+      }>;
+      const baseline = verified.captureExplicitAuthInstallationBaseline();
+      const replacement = await verified.processVerifiedExchangeResponse(
+        { access_token: fakeJwt({ sub: 'user-2' }), refresh_token: 'rt-user-2', expires_in: 600 },
+        { id: 'user-2', email: 'user-1@test.com', first_name: null, last_name: null },
+        [],
+        baseline,
+      );
+
+      expect(baseline).toEqual({ userId: null, refreshAuthoritySha256: null });
+      expect(replacement).toMatchObject({ success: true, user_id: 'user-2' });
+      expect(backend.load('user-1')).toBeNull();
+      expect(backend.load('user-2')?.refresh_token).toBe('rt-user-2');
+    });
+
     test('a deletion response naming a different user never clears the local session', async () => {
       const expired = makeSession({
         sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
@@ -310,6 +345,32 @@ describe('SessionLifecycle with an injected backend', () => {
       const result = await service.authenticateSilent('org-1');
 
       expect(result.error_code).toBe('session_ended');
+      expect(backend.load('user-1')).toEqual(expired);
+    });
+
+    test('a deletion result that loses the authority race reports an indeterminate session instead', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      const changingBackend: SessionStorageBackend = {
+        load: (userId) => backend.load(userId),
+        save: (session, userId) => backend.save(session, userId),
+        clear: (userId) => backend.clear(userId),
+        discover: () => backend.discover(),
+        withRefreshLock: (userId, run) => backend.withRefreshLock(userId, run),
+        retireDeletedUserIfRefreshAuthorityMatches: () => false,
+      };
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-1' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', changingBackend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('server_error');
+      expect(result.error).toContain('Session changed');
       expect(backend.load('user-1')).toEqual(expired);
     });
   });

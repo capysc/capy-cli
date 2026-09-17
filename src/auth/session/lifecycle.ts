@@ -33,6 +33,12 @@ class DeletedUserRefreshError extends Error {
   }
 }
 
+class RefreshAuthorityChangedError extends Error {
+  constructor() {
+    super('Session changed while confirming whether the previous account was deleted');
+  }
+}
+
 const refreshAuthorityDigest = (refreshToken: string): string =>
   createHash('sha256').update(refreshToken).digest('hex');
 
@@ -55,6 +61,9 @@ const deletedUserRefreshError = (
 };
 
 export function classifyRefreshFailure(error: any): RefreshFailure {
+  if (error instanceof RefreshAuthorityChangedError) {
+    return { reason: 'server_error', detail: error.message };
+  }
   if (error instanceof DeletedUserRefreshError) {
     return { reason: 'user_deleted', status: 401, detail: error.message };
   }
@@ -141,6 +150,7 @@ export class SessionLifecycle {
    * Overwritten by each successful org-less refresh; stale otherwise.
    */
   orglessAccessToken: string | null = null;
+  retiredDeletedUserId: string | null = null;
 
   constructor(
     private readonly storage: SessionStorageBackend,
@@ -153,24 +163,26 @@ export class SessionLifecycle {
     this.currentOrgId = initialCurrentOrgId;
   }
 
-  private async retireDeletedUser(error: unknown): Promise<boolean> {
-    if (!(error instanceof DeletedUserRefreshError)) return false;
+  private async retireDeletedUser(error: unknown): Promise<'retired' | 'changed' | 'not_deleted'> {
+    if (!(error instanceof DeletedUserRefreshError)) return 'not_deleted';
     const retired = this.storage.retireDeletedUserIfRefreshAuthorityMatches?.(
       error.userId,
       error.refreshAuthoritySha256,
     ) ?? false;
-    if (!retired) return false;
+    if (!retired) return 'changed';
     this.session = null;
+    this.sessionUserId = undefined;
     this.currentOrgId = null;
     this.loadedRefreshToken = null;
     this.orglessAccessToken = null;
+    this.retiredDeletedUserId = error.userId;
     try {
       await this.onDeletedUser?.(error.userId);
     } catch {
       // Session retirement remains valid even if the diagnostic checkpoint
       // archive cannot be completed; that checkpoint will reject its old ID.
     }
-    return true;
+    return 'retired';
   }
 
   /**
@@ -382,9 +394,12 @@ export class SessionLifecycle {
         // refresh failure, just means this branch no longer applies.
         return false;
       }
-      const failure = await this.retireDeletedUser(error)
+      const retirement = await this.retireDeletedUser(error);
+      const failure = retirement === 'retired'
         ? { reason: 'user_deleted' as const, status: 401, detail: 'The signed-in account no longer exists' }
-        : classifyRefreshFailure(error);
+        : retirement === 'changed'
+          ? classifyRefreshFailure(new RefreshAuthorityChangedError())
+          : classifyRefreshFailure(error);
       this.lastRefreshFailure = failure;
       debug(
         `[auth] org-less refresh failed (${failure.reason}` +
@@ -416,7 +431,7 @@ export class SessionLifecycle {
       case 'server_error':
         return {
           code: 'server_error',
-          message: `Token refresh failed (HTTP ${this.lastRefreshFailure.status})`,
+          message: this.lastRefreshFailure.detail ?? `Token refresh failed (HTTP ${this.lastRefreshFailure.status})`,
         };
       default:
         return { code: 'no_session', message: 'No valid session available' };
@@ -496,9 +511,12 @@ export class SessionLifecycle {
         return true;
       });
     } catch (error: any) {
-      const failure = await this.retireDeletedUser(error)
+      const retirement = await this.retireDeletedUser(error);
+      const failure = retirement === 'retired'
         ? { reason: 'user_deleted' as const, status: 401, detail: 'The signed-in account no longer exists' }
-        : classifyRefreshFailure(error);
+        : retirement === 'changed'
+          ? classifyRefreshFailure(new RefreshAuthorityChangedError())
+          : classifyRefreshFailure(error);
       this.lastRefreshFailure = failure;
       debug(
         `[auth] token refresh failed for org ${orgId} (${failure.reason}` +

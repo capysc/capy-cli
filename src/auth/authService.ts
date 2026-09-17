@@ -427,6 +427,13 @@ export class AuthService {
   }
 
   private captureExplicitAuthInstallationBaseline(): ExplicitAuthInstallationBaseline {
+    // WorkOS conclusively deleted the old immutable subject. This instance
+    // intentionally has no remaining authority for it, so a new user with
+    // the same email must install under their new ID rather than inherit the
+    // old project/session baseline.
+    if (this.lifecycle.retiredDeletedUserId !== null) {
+      return { userId: null, refreshAuthoritySha256: null };
+    }
     this.assertRefreshAuthorityAvailable();
     const scopedUserId = this.lifecycle.sessionUserId ?? this.initialSessionUserId ?? this.session?.user_id ?? null;
     const stored = scopedUserId === null ? null : this.storageBackend.load(scopedUserId);
