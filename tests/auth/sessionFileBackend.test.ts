@@ -146,6 +146,22 @@ describe('FileSessionStorageBackend', () => {
       backend.save(replacement, 'user-a');
       expect(backend.load('user-a')).toEqual(replacement);
     });
+
+    test('returns subject proof only when a fenced session still owns the recorded authority', async () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+      await expect(backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+        beginRotation();
+        throw new Error('provider outcome lost');
+      })).rejects.toThrow('provider outcome lost');
+
+      expect(backend.getFencedIdentityProof('user-a')).toEqual({
+        userId: 'user-a',
+        refreshAuthoritySha256: authorityDigest(stored.refresh_token),
+        priorAccessToken: 'at_user-a_org-1',
+      });
+      expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+    });
   });
 
   describe('discover', () => {

@@ -224,6 +224,7 @@ export class AuthService {
    */
   async authenticateSilent(organizationId?: string): Promise<AuthResult> {
     this.lifecycle.lastRefreshFailure = null;
+    await this.lifecycle.recoverConfirmedFencedDeletion();
     const method = await this.lifecycle.acquireSilent(organizationId);
     if (method) {
       return this.buildAuthResult(method);

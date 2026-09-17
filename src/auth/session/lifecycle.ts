@@ -138,6 +138,11 @@ interface OrglessRefreshResponse {
   scope?: string;
 }
 
+interface FencedSessionStatusResponse {
+  readonly status: 'deleted' | 'present';
+  readonly user_id?: string;
+}
+
 export class SessionLifecycle {
   session: SessionStore | null = null;
   sessionUserId: string | undefined;
@@ -183,6 +188,40 @@ export class SessionLifecycle {
       // archive cannot be completed; that checkpoint will reject its old ID.
     }
     return 'retired';
+  }
+
+  /**
+   * A durable fence means the provider might have consumed the refresh token.
+   * Never replay it. The Service verifies a prior access token only as proof
+   * of the former subject, then reports whether that WorkOS user was deleted.
+   */
+  async recoverConfirmedFencedDeletion(): Promise<void> {
+    const userId = this.sessionUserId;
+    const proof = userId ? this.storage.getFencedIdentityProof?.(userId) ?? null : null;
+    if (!proof) return;
+    try {
+      const response = await postJson<FencedSessionStatusResponse>(
+        `${this.serviceApiUrl}/auth/session-status`,
+        { expected_user_id: proof.userId, prior_access_token: proof.priorAccessToken },
+      );
+      if (response.status === 'deleted' && response.user_id === proof.userId) {
+        const retirement = await this.retireDeletedUser(
+          new DeletedUserRefreshError(proof.userId, proof.refreshAuthoritySha256),
+        );
+        this.lastRefreshFailure = retirement === 'retired'
+          ? { reason: 'user_deleted', status: 401, detail: 'The signed-in account no longer exists' }
+          : retirement === 'changed'
+            ? classifyRefreshFailure(new RefreshAuthorityChangedError())
+            : { reason: 'server_error', detail: 'Could not confirm deleted account retirement' };
+        return;
+      }
+      this.lastRefreshFailure = { reason: 'server_error', detail: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE' };
+    } catch (error) {
+      this.lastRefreshFailure = {
+        reason: 'server_error',
+        detail: error instanceof Error ? error.message : 'Could not confirm fenced session status',
+      };
+    }
   }
 
   /**

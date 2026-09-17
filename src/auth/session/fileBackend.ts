@@ -10,7 +10,7 @@ import {
   getAuthSessionPath,
   getGlobalCapyDir,
 } from '../../config/globalConfig';
-import { DiscoveredSession, SessionStorageBackend } from './backend';
+import { DiscoveredSession, FencedSessionIdentityProof, SessionStorageBackend } from './backend';
 import {
   currentRefreshRotationContext,
   runWithRefreshRotationContext,
@@ -204,6 +204,23 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
   assertRefreshAuthorityAvailable(userId: string | undefined): void {
     withStableSessionLockSync(userId, () => {
       if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+    });
+  }
+
+  getFencedIdentityProof(userId: string): FencedSessionIdentityProof | null {
+    return withStableSessionLockSync(userId, () => {
+      const fence = readFence(userId);
+      const session = readProtectedSession(userId);
+      const priorAccessToken = session?.identity_session?.access_token
+        ?? Object.values(session?.sessions ?? {}).map((entry) => entry.access_token).find(Boolean);
+      const currentDigest = session?.refresh_token ? digest(session.refresh_token) : null;
+      if (!fence || fence.user_id !== userId || session?.user_id !== userId
+        || currentDigest !== fence.authority_sha256 || !priorAccessToken) return null;
+      return {
+        userId,
+        refreshAuthoritySha256: fence.authority_sha256,
+        priorAccessToken,
+      };
     });
   }
 
