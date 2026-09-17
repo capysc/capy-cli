@@ -110,6 +110,21 @@ export const retireCheckpoint = (path: string, state: Checkpoint): void => {
   syncDirectory(dirname(path));
 };
 
+/**
+ * A confirmed deleted WorkOS identity must not resume its former device
+ * ceremony under a newly-created account with the same email address.
+ * Retire only a checkpoint that explicitly names that immutable user ID.
+ */
+export const retireCheckpointForDeletedUser = (userId: string): boolean => {
+  const path = join(getGlobalCapyDir(), 'auth', 'composed-device-grant.json');
+  const state = readCheckpoint(path);
+  const belongsToDeletedUser = state?.baseline.expectedUserId === userId
+    || state?.issued?.session.user.id === userId;
+  if (!belongsToDeletedUser || !state) return false;
+  retireCheckpoint(path, state);
+  return true;
+};
+
 const readCheckpoint = (path: string): Checkpoint | null => {
   const descriptor = (() => {
     try { return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }

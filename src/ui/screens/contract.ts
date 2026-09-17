@@ -4353,6 +4353,7 @@ export interface SeedPhraseDecryptData {
  */
 export type AuthFailureReason =
   | 'session_ended'
+  | 'user_deleted'
   | 'org_not_found'
   | 'server_error'
   | 'network'

@@ -160,6 +160,10 @@ export class AuthService {
       this.serviceApiUrl,
       sessionUserId,
       initialCurrentOrgId,
+      async (userId) => {
+        const { retireCheckpointForDeletedUser } = await import('../commands/composedDeviceGrant');
+        retireCheckpointForDeletedUser(userId);
+      },
     );
     this.lifecycle.load();
     this.initialSessionUserId = this.lifecycle.session?.user_id ?? null;
@@ -193,19 +197,21 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
+      await this.lifecycle.recoverConfirmedFencedDeletion();
       this.assertRefreshAuthorityAvailable();
+      const effectiveOrganizationId = this.lifecycle.retiredDeletedUserId ? undefined : organizationId;
       // Cached or refreshed token first — same path authenticateSilent uses
-      const method = await this.lifecycle.acquireSilent(organizationId);
+      const method = await this.lifecycle.acquireSilent(effectiveOrganizationId);
       if (method) {
         return this.buildAuthResult(method);
       }
 
       // Try password auth (E2E testing only — requires devMode + env vars)
-      const pwResult = await this.tryPasswordAuth(organizationId);
+      const pwResult = await this.tryPasswordAuth(effectiveOrganizationId);
       if (pwResult) return pwResult;
 
       // Full OAuth flow
-      return await this.startOAuthFlow(organizationId);
+      return await this.startOAuthFlow(effectiveOrganizationId);
     } catch (error: any) {
       return {
         success: false,
@@ -220,6 +226,7 @@ export class AuthService {
    */
   async authenticateSilent(organizationId?: string): Promise<AuthResult> {
     this.lifecycle.lastRefreshFailure = null;
+    await this.lifecycle.recoverConfirmedFencedDeletion();
     const method = await this.lifecycle.acquireSilent(organizationId);
     if (method) {
       return this.buildAuthResult(method);
@@ -423,6 +430,13 @@ export class AuthService {
   }
 
   private captureExplicitAuthInstallationBaseline(): ExplicitAuthInstallationBaseline {
+    // WorkOS conclusively deleted the old immutable subject. This instance
+    // intentionally has no remaining authority for it, so a new user with
+    // the same email must install under their new ID rather than inherit the
+    // old project/session baseline.
+    if (this.lifecycle.retiredDeletedUserId !== null) {
+      return { userId: null, refreshAuthoritySha256: null };
+    }
     this.assertRefreshAuthorityAvailable();
     const scopedUserId = this.lifecycle.sessionUserId ?? this.initialSessionUserId ?? this.session?.user_id ?? null;
     const stored = scopedUserId === null ? null : this.storageBackend.load(scopedUserId);

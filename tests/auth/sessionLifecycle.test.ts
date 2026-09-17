@@ -1,6 +1,7 @@
-import { mock, describe, test, expect, beforeEach, afterAll } from 'bun:test';
+import { mock, describe, test, expect, beforeEach, afterAll, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
+import { createHash } from 'crypto';
 
 // Guard rail: pin HOME to a throwaway tmpdir so if any file path ever leaked
 // into this suite it could not touch the real ~/.capy. The suite itself runs
@@ -52,6 +53,16 @@ class MemorySessionStorageBackend implements SessionStorageBackend {
 
   clear(userId: string | undefined): void {
     this.store.delete(this.key(userId));
+  }
+
+  retireDeletedUserIfRefreshAuthorityMatches(userId: string, expectedDigest: string): boolean {
+    const current = this.load(userId);
+    const digest = current?.refresh_token
+      ? createHash('sha256').update(current.refresh_token).digest('hex')
+      : null;
+    if (current?.user_id !== userId || digest !== expectedDigest) return false;
+    this.clear(userId);
+    return true;
   }
 
   discover(): DiscoveredSession | null {
@@ -136,6 +147,99 @@ describe('SessionLifecycle with an injected backend', () => {
 
       expect(result.success).toBe(true);
       expect(result.user_id).toBe('user-1');
+    });
+
+    test('retires a fenced session only after the service confirms its signed subject was deleted', async () => {
+      const priorAccessToken = fakeJwt({ org_id: 'workos-org-1' });
+      const digest = createHash('sha256').update('rt-original').digest('hex');
+      const retire = mock(() => true);
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => ({
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken,
+        }),
+        retireFencedDeletedUserIfMatches: retire,
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      const calls = stubFetch([{ status: 200, body: { status: 'deleted', user_id: 'user-1' } }]);
+
+      const service = new AuthService(API, false, 'user-1', fencedBackend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('user_deleted');
+      expect(retire).toHaveBeenCalledWith('user-1', digest, 'fence-1');
+      expect(calls).toEqual([{ url: `${API}/auth/session-status`, body: {
+        expected_user_id: 'user-1', prior_access_token: priorAccessToken,
+      } }]);
+    });
+
+    test('keeps a fenced session when the service reports that its subject is still present', async () => {
+      const digest = createHash('sha256').update('rt-original').digest('hex');
+      const retire = mock(() => true);
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => ({
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken: fakeJwt(),
+        }),
+        retireFencedDeletedUserIfMatches: retire,
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      stubFetch([{ status: 200, body: { status: 'present' } }]);
+
+      const service = new AuthService(API, false, 'user-1', fencedBackend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('server_error');
+      expect(result.error).toBe('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      expect(retire).not.toHaveBeenCalled();
+    });
+
+    test('uses Keep-owned fresh signup after fenced deletion instead of the stale project org', async () => {
+      const digest = createHash('sha256').update('rt-original').digest('hex');
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => ({
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken: fakeJwt(),
+        }),
+        retireFencedDeletedUserIfMatches: () => true,
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      stubFetch([{ status: 200, body: { status: 'deleted', user_id: 'user-1' } }]);
+      const authPrototype = AuthService.prototype as unknown as {
+        startOAuthFlow: (organizationId?: string) => Promise<unknown>;
+      };
+      const startOAuthFlow = spyOn(authPrototype, 'startOAuthFlow').mockResolvedValue({ success: false });
+      const service = new AuthService(API, false, 'user-1', fencedBackend);
+
+      await service.authenticate('org-stale');
+
+      expect(startOAuthFlow).toHaveBeenCalledWith(undefined);
+      startOAuthFlow.mockRestore();
+    });
+
+    test('reports a read failure without clearing or bypassing a fenced session', async () => {
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => { throw new Error('AUTH_REFRESH_FENCE_INVALID'); },
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      const service = new AuthService(API, false, 'user-1', fencedBackend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('server_error');
+      expect(result.error).toBe('AUTH_REFRESH_FENCE_INVALID');
     });
 
     test('clearSession clears the backend, not the filesystem', async () => {
@@ -266,6 +370,102 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(result.error_code).toBe('network');
       expect(service.getLastRefreshFailure()?.reason).toBe('network');
     });
+
+    test('a confirmed deleted user retires only the matching stored session', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-1' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.success).toBe(false);
+      expect(result.error_code).toBe('user_deleted');
+      expect(backend.load('user-1')).toBeNull();
+    });
+
+    test('a confirmed deletion permits a new immutable user to install in the same auth instance', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-1' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      await service.authenticateSilent('org-1');
+      const verified = service as unknown as Readonly<{
+        captureExplicitAuthInstallationBaseline: () => Readonly<{ userId: string | null; refreshAuthoritySha256: string | null }>;
+        processVerifiedExchangeResponse: (
+          token: Readonly<{ access_token: string; refresh_token: string; expires_in: number }>,
+          user: Readonly<{ id: string; email: string; first_name: null; last_name: null }>,
+          organizations: readonly [],
+          baseline: Readonly<{ userId: string | null; refreshAuthoritySha256: string | null }>,
+        ) => Promise<Readonly<{ success: boolean; user_id?: string }>>;
+      }>;
+      const baseline = verified.captureExplicitAuthInstallationBaseline();
+      const replacement = await verified.processVerifiedExchangeResponse(
+        { access_token: fakeJwt({ sub: 'user-2' }), refresh_token: 'rt-user-2', expires_in: 600 },
+        { id: 'user-2', email: 'user-1@test.com', first_name: null, last_name: null },
+        [],
+        baseline,
+      );
+
+      expect(baseline).toEqual({ userId: null, refreshAuthoritySha256: null });
+      expect(replacement).toMatchObject({ success: true, user_id: 'user-2' });
+      expect(backend.load('user-1')).toBeNull();
+      expect(backend.load('user-2')?.refresh_token).toBe('rt-user-2');
+    });
+
+    test('a deletion response naming a different user never clears the local session', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-other' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', backend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('session_ended');
+      expect(backend.load('user-1')).toEqual(expired);
+    });
+
+    test('a deletion result that loses the authority race reports an indeterminate session instead', async () => {
+      const expired = makeSession({
+        sessions: { 'org-1': { access_token: fakeJwt({ org_id: 'workos-org-1' }), expires_at: Date.now() - 1000 } },
+      });
+      backend.save(expired, 'user-1');
+      const changingBackend: SessionStorageBackend = {
+        load: (userId) => backend.load(userId),
+        save: (session, userId) => backend.save(session, userId),
+        clear: (userId) => backend.clear(userId),
+        discover: () => backend.discover(),
+        withRefreshLock: (userId, run) => backend.withRefreshLock(userId, run),
+        retireDeletedUserIfRefreshAuthorityMatches: () => false,
+      };
+      stubFetch([{
+        status: 401,
+        body: { error: 'The signed-in account no longer exists', code: 'AUTH_USER_DELETED', user_id: 'user-1' },
+      }]);
+
+      const service = new AuthService(API, false, 'user-1', changingBackend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('server_error');
+      expect(result.error).toContain('Session changed');
+      expect(backend.load('user-1')).toEqual(expired);
+    });
   });
 
   describe('org validation still gates cached tokens', () => {
@@ -330,7 +530,7 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(method).toBe('refreshed_orgless');
       expect(calls).toHaveLength(1);
       expect(calls[0].url).toBe(`${API}/auth/refresh`);
-      expect(calls[0].body).toEqual({ refresh_token: 'rt-original' });
+      expect(calls[0].body).toEqual({ refresh_token: 'rt-original', expected_user_id: 'user-1' });
       // No organization_id key at all — org-scoped refreshForOrg always sends one.
       expect('organization_id' in calls[0].body).toBe(false);
     });

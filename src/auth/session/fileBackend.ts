@@ -10,7 +10,7 @@ import {
   getAuthSessionPath,
   getGlobalCapyDir,
 } from '../../config/globalConfig';
-import { DiscoveredSession, SessionStorageBackend } from './backend';
+import { DiscoveredSession, FencedSessionIdentityProof, SessionStorageBackend } from './backend';
 import {
   currentRefreshRotationContext,
   runWithRefreshRotationContext,
@@ -207,6 +207,24 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
     });
   }
 
+  getFencedIdentityProof(userId: string): FencedSessionIdentityProof | null {
+    return withStableSessionLockSync(userId, () => {
+      const fence = readFence(userId);
+      const session = readProtectedSession(userId);
+      const priorAccessToken = session?.identity_session?.access_token
+        ?? Object.values(session?.sessions ?? {}).map((entry) => entry.access_token).find(Boolean);
+      const currentDigest = session?.refresh_token ? digest(session.refresh_token) : null;
+      if (!fence || fence.user_id !== userId || session?.user_id !== userId
+        || currentDigest !== fence.authority_sha256 || !priorAccessToken) return null;
+      return {
+        userId,
+        refreshAuthoritySha256: fence.authority_sha256,
+        fenceId: fence.id,
+        priorAccessToken,
+      };
+    });
+  }
+
   load(userId: string | undefined): SessionStore | null {
     return withStableSessionLockSync(userId, () => {
       if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
@@ -302,6 +320,44 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
     });
   }
 
+  retireDeletedUserIfRefreshAuthorityMatches(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+  ): boolean {
+    return withStableSessionLockSync(userId, (sessionPath) => {
+      const current = readProtectedSession(userId);
+      const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
+      if (current?.user_id !== userId || currentDigest !== expectedRefreshAuthoritySha256) return false;
+      if (existsSync(sessionPath)) {
+        unlinkSync(sessionPath);
+        syncDirectory(dirname(sessionPath));
+      }
+      removeFenceDurably(userId);
+      return true;
+    });
+  }
+
+  retireFencedDeletedUserIfMatches(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+    expectedFenceId: string,
+  ): boolean {
+    return withStableSessionLockSync(userId, (sessionPath) => {
+      const fence = readFence(userId);
+      const current = readProtectedSession(userId);
+      const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
+      if (!fence || fence.id !== expectedFenceId || fence.user_id !== userId
+        || fence.authority_sha256 !== expectedRefreshAuthoritySha256
+        || current?.user_id !== userId || currentDigest !== expectedRefreshAuthoritySha256) return false;
+      if (existsSync(sessionPath)) {
+        unlinkSync(sessionPath);
+        syncDirectory(dirname(sessionPath));
+      }
+      removeFenceDurably(userId);
+      return true;
+    });
+  }
+
   discover(): DiscoveredSession | null {
     // Scan ~/.capy/auth/sessions/ for any existing session file. This handles
     // the post-redeem flow where the invitee runs `capy` in a new project
@@ -363,7 +419,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
         const code = error !== null && typeof error === 'object' && 'code' in error
           ? (error as Readonly<{ code?: unknown }>).code
           : null;
-        if (code === 'AUTH_ORG_NAME_TAKEN_PRE_REFRESH') removeFenceDurably(userId);
+        if (code === 'AUTH_ORG_NAME_TAKEN_PRE_REFRESH' || code === 'AUTH_USER_DELETED') removeFenceDurably(userId);
         throw error;
       });
       if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
