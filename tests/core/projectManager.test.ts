@@ -77,6 +77,22 @@ describe('ProjectManager', () => {
       });
     });
 
+    test('rejects a persisted retired mode even when the Keep binding is valid, without writing files', async () => {
+      const mockKeep: KeepFile = {
+        version: '3.0', org_id: 'org_123', project_id: 'proj_456', project_name: 'test-project', variables: {},
+      };
+      const syncPath = join(testRoot, '.capy', 'sync-state');
+      mockExistsSync.mockImplementation((path) => path === join(testRoot, 'keep.lock') || path === syncPath);
+      mockReadFileSync.mockImplementation((path) => path === syncPath
+        ? JSON.stringify({ last_sync: '2026-09-17T00:00:00.000Z', synced_variables: [], sync_mode: 'free' })
+        : JSON.stringify(mockKeep));
+
+      await expect(projectManager.detectProjectState()).rejects.toEqual(
+        expect.objectContaining({ code: ERROR_CODES.LEGACY_KEEP_MODE_UNSUPPORTED }),
+      );
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
     test('should throw CapyError for invalid keep.lock file', async () => {
       mockExistsSync.mockImplementation((path) => {
         if (path === join(testRoot, 'keep.lock')) return true;

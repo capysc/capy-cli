@@ -80,8 +80,8 @@ export async function runHostedCommand(args: readonly string[], userId: string, 
     const project = new ProjectManager();
     const file = new FileManager();
     return await executeHostedRun(args, userId, {
-      authenticate: (orgId) => auth.authenticateSilent(orgId), billing: () => service.getBillingStatus(),
-      projects: () => service.listProjects(), snapshot: (projectId, branch) => service.getDecryptData(projectId, branch),
+      authenticate: (orgId) => auth.authenticateSilent(orgId),
+      projects: () => service.listProjects(),
       keep: () => project.readKeepFile(), branch: () => project.deriveActiveBranch(),
       env: () => file.readEnvFile(), envIdentity: () => file.readEnvMeta(), encrypted: (value) => file.isEncrypted(value),
       key: (orgId, projectId, expected) => resolveStatusProjectKey(orgId, projectId, expected, service, auth),

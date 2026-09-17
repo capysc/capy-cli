@@ -18,27 +18,9 @@ export class ProjectManager {
     const hasKeepFile = existsSync(keepPath);
     const hasEnvFile = existsSync(envPath);
 
-    let projectName: string | undefined;
-    let organizationId: string | undefined;
-    let projectId: string | undefined;
-
-    if (hasKeepFile) {
-      try {
-        const keepContent = readFileSync(keepPath, 'utf-8');
-        const keep = this.parseKeepFile(JSON.parse(keepContent));
-        this.validateKeepFile(keep);
-        projectName = keep.project_name;
-        organizationId = keep.org_id;
-        projectId = keep.project_id;
-      } catch (error) {
-        if (error instanceof CapyError) throw error;
-        throw new CapyError(
-          'Invalid keep.lock file format',
-          ERROR_CODES.INVALID_FORMAT,
-          { error, path: keepPath }
-        );
-      }
-    }
+    const identity = hasKeepFile
+      ? this.readProjectIdentity(keepPath)
+      : { projectName: undefined, organizationId: undefined, projectId: undefined } as const;
 
     const syncState = this.readSyncState();
     assertSupportedKeepMode(syncState);
@@ -47,12 +29,35 @@ export class ProjectManager {
       initialized: hasKeepFile,
       hasKeepFile,
       hasEnvFile,
-      projectName,
-      organizationId,
-      projectId,
+      projectName: identity.projectName,
+      organizationId: identity.organizationId,
+      projectId: identity.projectId,
       activeBranch: this.deriveActiveBranch(),
       userId: syncState?.user_id,
     };
+  }
+
+  private readProjectIdentity(keepPath: string): Readonly<{
+    readonly projectName: string;
+    readonly organizationId: string;
+    readonly projectId: string;
+  }> {
+    try {
+      const keep = this.parseKeepFile(JSON.parse(readFileSync(keepPath, 'utf-8')));
+      this.validateKeepFile(keep);
+      return {
+        projectName: keep.project_name,
+        organizationId: keep.org_id,
+        projectId: keep.project_id,
+      };
+    } catch (error) {
+      if (error instanceof CapyError) throw error;
+      throw new CapyError(
+        'Invalid keep.lock file format',
+        ERROR_CODES.INVALID_FORMAT,
+        { error, path: keepPath },
+      );
+    }
   }
 
   getKeepPath(): string {

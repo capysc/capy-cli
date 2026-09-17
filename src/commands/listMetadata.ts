@@ -2,9 +2,7 @@ import { CapyError, ERROR_CODES, type AuthResult, type KeepFile } from '../types
 
 export interface ListMetadataDependencies {
   readonly authenticate: (orgId?: string) => Promise<AuthResult>;
-  readonly billing: () => Promise<{ readonly tier: string; readonly grandfathered?: boolean }>;
   readonly projects: () => Promise<readonly { readonly id: string; readonly name: string; readonly organization_id: string }[]>;
-  readonly snapshot: (projectId: string, branch: string) => Promise<{ readonly keep_file?: string }>;
 }
 
 export async function requireListIdentity(deps: Pick<ListMetadataDependencies, 'authenticate'>, expectedUserId?: string, orgId?: string): Promise<AuthResult> {
@@ -23,8 +21,6 @@ export async function createListMetadataDependencies(devMode: boolean, expectedU
   service.setTokenProvider(() => auth.getValidToken());
   return {
     authenticate: (orgId) => auth.authenticateSilent(orgId),
-    billing: () => service.getBillingStatus(),
     projects: () => service.listProjects(),
-    snapshot: (projectId, branch) => service.getDecryptData(projectId, branch),
   };
 }
