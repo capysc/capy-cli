@@ -16,14 +16,14 @@ import {
   KeepFile,
 } from '../types/index';
 import type { KeyServiceOps } from '../crypto/keyResolver';
-import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
+import { resolveConfiguredProjectKey } from '../sync/projectKeyResolver';
 import { createGrantResolutionOps } from '../auth/deviceKey/grantResolver';
 import { deriveResourceId } from '../crypto/resourceId';
 import { writeKeepCache, LOCAL_USER_ID } from '../config/globalConfig';
 import { isLocalOnly, resolveActiveUrl } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { pushKeepWithRetry, conflictOverwriteQuestion } from './connectors/shared';
-import { tryFreeLocklessPush } from '../sync/freeLocklessPush';
+import { assertSupportedKeepMode } from '../sync/legacyKeepMode';
 import { buildPushReview, pushCompleted, pushNoop, pushReviewDecision, type PushReviewOptions, type PushReviewResult, type PushReviewScope } from '../sync/pushReview';
 import { realpathSync } from 'fs';
 
@@ -77,17 +77,7 @@ export class PushCommand {
   async execute(options: PushAuthPolicy = {}): Promise<void> {
     const authPolicy = { ...options, nonInteractive: options.nonInteractive === true || !process.stdin.isTTY };
     try {
-      const dispatch = await tryFreeLocklessPush({
-        projectManager: this.projectManager,
-        fileManager: this.fileManager,
-        authService: this.authService,
-        serviceClient: this.serviceClient,
-        devMode: this.devMode,
-        localOnly: isLocalOnly(),
-        authPolicy,
-      });
-      if (dispatch.handled) return;
-      await this._execute(dispatch.authResult, authPolicy);
+      await this._execute(undefined, authPolicy);
     } catch (error: unknown) {
       this.debugError('push execute caught', error);
       if (authPolicy.nonInteractive) throw error;
@@ -117,22 +107,7 @@ export class PushCommand {
       plan: options.plan,
       confirm: options.confirm,
     };
-    const dispatch = await tryFreeLocklessPush({
-      projectManager: this.projectManager,
-      fileManager: this.fileManager,
-      authService: this.authService,
-      serviceClient: this.serviceClient,
-      devMode: this.devMode,
-      localOnly: false,
-      authPolicy,
-      preauthenticated: authenticated,
-      review,
-    });
-    if (dispatch.handled && dispatch.result) return dispatch.result;
-    if (dispatch.handled) {
-      throw new CapyError('Reviewed push completed without a structured result.', ERROR_CODES.SERVICE_ERROR);
-    }
-    const result = await this._execute(dispatch.authResult ?? authenticated, authPolicy, review);
+    const result = await this._execute(authenticated, authPolicy, review);
     if (result) return result;
     throw new CapyError('Reviewed push completed without a structured result.', ERROR_CODES.SERVICE_ERROR);
   }
@@ -180,7 +155,7 @@ export class PushCommand {
       // Paid push shares pairing custody with setup and sync. The existing
       // resolver preserves legacy unpaired behavior and fails closed when a
       // configured runtime grant is unavailable; local-only mode exits above.
-      encryptionKey: await resolveFreeSyncProjectKey(
+      encryptionKey: await resolveConfiguredProjectKey(
         input.organizationId, input.projectId, authResult.user_id, keyOps,
         createGrantResolutionOps(this.serviceClient, this.authService),
       ),
@@ -204,6 +179,7 @@ export class PushCommand {
       userId: projectState.userId,
     });
     if (!projectState.initialized) {
+      assertSupportedKeepMode(this.projectManager.readSyncState());
       // THROW, never console.error + process.exit. `execute()`'s catch routes to
       // `displayErrorAndExit`, which serves the command-error page under `--web`.
       // `push` takes no `web` option and needs none: that function reads web mode

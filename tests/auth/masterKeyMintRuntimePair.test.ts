@@ -8,8 +8,8 @@ mock.module(join(import.meta.dir, '../../src/auth/deviceKey/ephemeral.ts'), () =
   configuredGrantSocketPath: () => '/runtime-pair/grant.sock',
 }));
 
-mock.module(join(import.meta.dir, '../../src/sync/freeSyncKeyResolver.ts'), () => ({
-  resolveFreeSyncProjectKey: resolveFromRuntimePair,
+mock.module(join(import.meta.dir, '../../src/sync/projectKeyResolver.ts'), () => ({
+  resolveConfiguredProjectKey: resolveFromRuntimePair,
 }));
 
 import { resolveProjectKeyWithMintFallback } from '../../src/auth/masterKeyMint';

@@ -20,7 +20,7 @@ mock.module('../../src/config/globalConfig', () => ({
   LOCAL_USER_ID: 'local_user',
   writeKeepCache: writeCache,
 }));
-mock.module('../../src/sync/freeSyncKeyResolver', () => ({ resolveFreeSyncProjectKey: runtimeKey }));
+mock.module('../../src/sync/projectKeyResolver', () => ({ resolveConfiguredProjectKey: runtimeKey }));
 mock.module('../../src/auth/deviceKey/grantResolver', () => ({ createGrantResolutionOps: () => ({}) }));
 mock.module('../../src/git/autoCommitKeep', () => ({ autoCommitKeep: autoCommit }));
 mock.module('../../src/ui/debug', () => ({ debugLine: () => undefined }));

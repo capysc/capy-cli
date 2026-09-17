@@ -15,7 +15,7 @@ import { deriveResourceId } from '../crypto/resourceId';
 import { CapyError, ERROR_CODES, setSyncKeepHash, getSyncKeepHash, KeepFile } from '../types/index';
 import { isReservedRuntimeVar } from '../core/reservedVars';
 import { keepScreensEnabled } from '../ui/screens/keepScreens';
-import { pushKeepWithRetry, maybeWarnPersonalEnv, conflictOverwriteQuestion } from './connectors/shared';
+import { pushKeepWithRetry, conflictOverwriteQuestion } from './connectors/shared';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -99,13 +99,11 @@ export class EditCommand {
     const projectState = await pm.detectProjectState();
     const fileManager = new FileManager();
 
-    // No keep.lock: single-user lock-less mode. `resolveContext()` already does
-    // everything this block does below (identity, branch, auth, key
-    // resolution) against the server's latest keep.json for the branch, so
-    // the lock-less branch just adopts its result wholesale rather than
-    // duplicating it. A dir WITH keep.lock keeps every line in the `else`
-    // below byte-for-byte unchanged.
-    const lockless = !projectState.initialized || !projectState.organizationId || !projectState.projectId;
+    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
+      const { displayErrorAndExit } = await import("../ui/errorScreen");
+      await displayErrorAndExit(new CapyError("Could not read keep.lock", ERROR_CODES.NO_KEEP_FILE));
+      return;
+    }
 
     let orgId: string;
     let projectId: string;
@@ -116,38 +114,7 @@ export class EditCommand {
     let serviceClient: ServiceClient | undefined;
     let userId: string;
     let projectKey: string;
-    let locklessBaseHash: string | undefined;
-    // Server-seeded + local-`.env`-overlaid plaintext from resolveContext's
-    // lock-less path (see its own doc comment) — used below INSTEAD OF a raw
-    // local-`.env`-only read, which in a fresh directory (the normal case for
-    // a personal env that follows the user across repos) would be empty and
-    // make every existing branch variable look locally deleted.
-    let locklessLocalPlaintext: Record<string, string> | undefined;
-    // The full lock-less `ResolvedContext`, kept around only so
-    // `maybeWarnPersonalEnv` can dedup its one-line note per command
-    // invocation (it keys off the object itself) — every other lock-less
-    // field above is already unpacked individually.
-    let locklessCtx: Awaited<ReturnType<typeof import('./connectors/shared').resolveContext>> | undefined;
 
-    if (lockless) {
-      const { resolveContext } = await import('./connectors/shared');
-      const ctx = await resolveContext({ apiUrl: this.apiUrl, devMode: this.devMode });
-      orgId = ctx.orgId;
-      projectId = ctx.projectId;
-      keep = ctx.keep;
-      branch = ctx.branch;
-      // Local-only mode (isLocalOnly()) is a separate, mutually exclusive
-      // feature — it has no server identity at all, so it can never be the
-      // reason a directory lacks keep.lock under single-user lock-less mode.
-      localMode = false;
-      authService = ctx.authService;
-      serviceClient = ctx.serviceClient;
-      userId = ctx.userId;
-      projectKey = ctx.projectKey;
-      locklessBaseHash = ctx.base_keep_hash;
-      locklessLocalPlaintext = ctx.localPlaintext;
-      locklessCtx = ctx;
-    } else {
       orgId = projectState.organizationId!;
       projectId = projectState.projectId!;
 
@@ -248,14 +215,12 @@ export class EditCommand {
           return;
         }
       }
-    }
-
     // CAS precondition for the eventual save's push — the branch's keep_hash
     // this command started from. Lock-less mode always has one (resolved
     // above, real or the well-known empty-state hash); lock-full mode has one
     // when sync-state recorded it and `undefined` otherwise, in which case
     // the eventual push omits base_keep_hash entirely (legacy behavior).
-    const baseKeepHash: string | undefined = lockless ? locklessBaseHash : getSyncKeepHash(pm.readSyncState(), branch);
+    const baseKeepHash: string | undefined = getSyncKeepHash(pm.readSyncState(), branch);
 
     // Pinned hashes for the active branch
     const pinned: Record<string, string> = {};
@@ -270,33 +235,6 @@ export class EditCommand {
     // these on the floor and says nothing, and the next commit then deletes
     // their pins — so the browser table names them.
     const undecryptableKeys: string[] = [];
-    if (lockless) {
-      // Lock-less mode: `resolveContext()` already built the correct
-      // working set — the server's latest values for the branch, with this
-      // directory's local `.env` (if any) overlaid on top for uncommitted
-      // edits. Re-deriving it here from a raw local `.env` read alone would
-      // reintroduce the exact bug that seeding fixes: a fresh directory's
-      // `.env` is normal and empty, and `saveLocalEdits`'s prune step would
-      // read "every branch variable" as locally deleted.
-      for (const [key, value] of Object.entries(locklessLocalPlaintext!)) {
-        if (isReservedRuntimeVar(key)) continue;
-        localPlaintext[key] = value;
-      }
-      // `undecryptableKeys` is a display-only hint (see above); resolveContext
-      // already swallowed decrypt failures silently while building the merged
-      // set, so recompute just the LOCAL half here for the same warning this
-      // screen has always shown, without changing what's actually editable.
-      const rawLocalForWarning = fileManager.readEnvFile();
-      for (const [key, value] of Object.entries(rawLocalForWarning)) {
-        if (isReservedRuntimeVar(key)) continue;
-        if (!value.startsWith('capy:')) continue;
-        try {
-          fileManager.decryptValue(value, projectKey);
-        } catch {
-          undecryptableKeys.push(key);
-        }
-      }
-    } else {
       const rawLocal = fileManager.readEnvFile();
       for (const [key, value] of Object.entries(rawLocal)) {
         // Reserved runtime variables are not editable secrets (CAP-424). They
@@ -314,8 +252,6 @@ export class EditCommand {
           localPlaintext[key] = value;
         }
       }
-    }
-
     // Baseline the working copy is compared against:
     //  - remote mode: the latest committed blob fetched from the server.
     //  - local mode:  the committed blob from the local keep cache (no server).
@@ -449,7 +385,6 @@ export class EditCommand {
         // Same flow as the conflict-resolution "commit local" action and
         // PushCommand: encrypt the merged local state, mergeWithKeep, push
         // to the server, then cache + write keep.lock + .env + sync state.
-        if (lockless && locklessCtx) maybeWarnPersonalEnv(locklessCtx);
         const finalEnv: Record<string, string> = { ...localPlaintext, ...edits };
 
         const encrypted: Record<string, string> = {};
@@ -494,8 +429,8 @@ export class EditCommand {
 
         // In local-only mode there is no push — the local writes below ARE
         // the commit, against the merge computed straight off `keep`. In
-        // server mode, a stale base is rebased and retried (single-user
-        // lock-less CAS); a same-key conflict now offers the same
+        // server mode, a stale base is rebased and retried; a same-key conflict
+        // offers the same
         // `confirmOverwrite` gate `addCommand` uses (see above) instead of
         // refusing unconditionally.
         let finalKeep = buildFinalKeep(keep);
@@ -528,10 +463,8 @@ export class EditCommand {
         // Prefer the server's copy — it carries server-assigned changed_at.
         // Lock-less mode never writes keep.lock — there is none for this dir.
         const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);
-        if (!lockless) {
-          fileManager.writeKeepFile(adoptedKeep);
-          keepDirty = true;
-        }
+        fileManager.writeKeepFile(adoptedKeep);
+        keepDirty = true;
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
         const existingSyncState = pm.readSyncState();

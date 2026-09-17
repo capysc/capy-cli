@@ -12,7 +12,7 @@ const localKey = mock(async () => 'local-project-key');
 const grantOps = { fetchKeyEnc: async () => '', coDecrypt: async () => '' } as const;
 const makeGrantOps = mock(() => grantOps);
 mock.module('../../src/crypto/keyResolver', () => ({ resolveProjectKey: legacyKey }));
-mock.module('../../src/sync/freeSyncKeyResolver', () => ({ resolveFreeSyncProjectKey: runtimeKey }));
+mock.module('../../src/sync/projectKeyResolver', () => ({ resolveConfiguredProjectKey: runtimeKey }));
 mock.module('../../src/auth/deviceKey/grantResolver', () => ({ createGrantResolutionOps: makeGrantOps }));
 mock.module('../../src/core/localUnlock', () => ({ resolveLocalProjectKey: localKey }));
 mock.module('../../src/ui/debug', () => ({ debugLine: () => undefined }));

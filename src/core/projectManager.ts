@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from '
 import { join, basename } from 'path';
 import { ProjectState, KeepFile, SyncState, CapyError, ERROR_CODES } from '../types/index';
 import { branchesFromKeep, syncedBranchNames } from './branchResolver';
+import { assertSupportedKeepMode } from '../sync/legacyKeepMode';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -40,6 +41,7 @@ export class ProjectManager {
     }
 
     const syncState = this.readSyncState();
+    assertSupportedKeepMode(syncState);
 
     return {
       initialized: hasKeepFile,

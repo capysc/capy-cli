@@ -33,7 +33,7 @@ export type PushReviewKeep = Readonly<Omit<KeepFile, "variables">> & {
 };
 
 export interface PushReviewInput extends PushReviewScope {
-  readonly mode: "free_snapshot" | "paid_merge" | "local_only";
+  readonly mode: "paid_merge" | "local_only";
   readonly userId: string;
   readonly organizationId: string;
   readonly projectId: string;
@@ -68,18 +68,7 @@ function canonical(value: unknown): string {
 /** A keyed digest binds values without publishing an offline password-guessing oracle. */
 export function buildPushReview(input: PushReviewInput) {
   const variableNames = sorted(Object.keys(input.localRaw));
-  const removedNames =
-    input.mode === "free_snapshot"
-      ? sorted(
-          Object.entries(input.keep.variables)
-            .filter(
-              ([name, entries]) =>
-                !variableNames.includes(name) &&
-                entries.some((entry) => entry.branch === input.branch),
-            )
-            .map(([name]) => name),
-        )
-      : [];
+  const removedNames: readonly string[] = [];
   const summary = {
     version: 1,
     mode: input.mode,

@@ -27,7 +27,7 @@ mock.module('../../src/sync/syncEngine', () => ({ SyncEngine: { DEFAULT_BRANCH: 
 mock.module('../../src/git/installGitHooks', () => ({ installGitHooks: write }));
 mock.module('../../src/config/globalConfig', () => ({ writeKeepCache: write }));
 mock.module('../../src/crypto/keyResolver', () => ({ resolveProjectKey: legacyKey }));
-mock.module('../../src/sync/freeSyncKeyResolver', () => ({ resolveFreeSyncProjectKey: runtimeKey }));
+mock.module('../../src/sync/projectKeyResolver', () => ({ resolveConfiguredProjectKey: runtimeKey }));
 mock.module('../../src/auth/deviceKey/grantResolver', () => ({ createGrantResolutionOps: () => grantOps }));
 
 import { SyncCommand } from '../../src/commands/syncCommand';
@@ -40,7 +40,7 @@ afterEach(() => {
 
 test('paid sync plan uses the configured runtime grant without requiring legacy key.enc', async () => {
   await new SyncCommand({ expectedUserId: 'user_fixture' }, true, report).execute({ plan: true });
-  expect(report).toHaveBeenCalledWith(expect.objectContaining({ ok: true, sync_mode: 'paid', action: 'sync' }));
+  expect(report).toHaveBeenCalledWith(expect.objectContaining({ ok: true, action: 'sync' }));
   expect(runtimeKey).toHaveBeenCalledWith('org', 'project', 'user_fixture', expect.any(Object), grantOps);
   expect(legacyKey).not.toHaveBeenCalled();
   expect(decryptData).toHaveBeenCalledTimes(1);

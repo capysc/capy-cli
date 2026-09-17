@@ -349,6 +349,10 @@ export class CapyError extends Error {
 // sync until cli (a submodule) and @capy/service share a module. Per cardinal
 // Rule 4, control flow keys off these codes, never off message text.
 export const ERROR_CODES = {
+  // A repository still carries the retired lockless/free storage marker. It
+  // must be migrated deliberately; do not infer this from billing because a
+  // grandfathered Keep organization may legitimately display a free tier.
+  LEGACY_KEEP_MODE_UNSUPPORTED: 'LEGACY_KEEP_MODE_UNSUPPORTED',
   AUTH_FAILED: 'AUTH_FAILED',
   NO_ENV_FILE: 'NO_ENV_FILE',
   NO_KEEP_FILE: 'NO_KEEP_FILE',

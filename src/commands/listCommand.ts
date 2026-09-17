@@ -2,7 +2,8 @@ import { existsSync } from 'fs';
 import { ProjectManager } from '../core/projectManager';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { listAllVarsOnBranch, listManagedKeys, findManagedConnector } from './connectors/shared';
-import { createListMetadataDependencies, requireListIdentity, resolveListMetadata } from './listMetadata';
+import { requireListIdentity } from './listMetadata';
+import { assertSupportedKeepMode } from '../sync/legacyKeepMode';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = '\x1b[90m';
@@ -24,7 +25,8 @@ export class ListCommand {
 
     const context = await (async () => {
       if (!existsSync(pm.getKeepPath())) {
-        return resolveListMetadata(await createListMetadataDependencies(this.devMode, opts.expectedUserId), opts.expectedUserId);
+        assertSupportedKeepMode(pm.readSyncState());
+        throw new CapyError('No keep.lock found in this directory.', ERROR_CODES.PROJECT_NOT_INITIALIZED);
       }
       const projectState = await pm.detectProjectState();
       const found = pm.readKeepFile();
@@ -32,6 +34,7 @@ export class ListCommand {
         throw new CapyError('Could not read keep.lock', ERROR_CODES.PROJECT_NOT_FOUND);
       }
       if (opts.expectedUserId) {
+        const { createListMetadataDependencies } = await import('./listMetadata');
         await requireListIdentity(await createListMetadataDependencies(this.devMode, opts.expectedUserId), opts.expectedUserId, found.org_id);
       }
       return { keep: found, branch: projectState.activeBranch };

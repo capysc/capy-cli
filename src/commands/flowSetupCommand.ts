@@ -22,7 +22,7 @@ import { applyRepositoryEdits, composeRepositoryPlan, prepareRepository, Reposit
 export interface FlowSetupOptions { readonly expectedUserId: string; readonly serviceOrigin: string; readonly json?: boolean }
 export interface RepositoryTarget {
   readonly org_id: string; readonly project_id: string; readonly project_name: string;
-  readonly branch: string; readonly sync_mode: 'free' | 'paid';
+  readonly branch: string;
 }
 export interface RepositoryView {
   readonly flow_id: string; readonly user_id: string; readonly runtime_id: string; readonly repo_fingerprint: string;
@@ -80,7 +80,7 @@ export function setupFailureResult(flowId: string, error: unknown): JsonResult {
 }
 const sameTarget = (left: RepositoryTarget, right: RepositoryTarget): boolean =>
   left.org_id === right.org_id && left.project_id === right.project_id && left.project_name === right.project_name
-  && left.branch === right.branch && left.sync_mode === right.sync_mode;
+  && left.branch === right.branch;
 
 export async function executeFlowSetup(flowId: string, options: FlowSetupOptions, deps: SetupExecutorDependencies): Promise<JsonResult> {
   const checked = (view: RepositoryView): RepositoryView => {
@@ -215,8 +215,7 @@ export async function runFlowSetupCommand(flowId: string, options: FlowSetupOpti
       },
       verify: async (target) => {
         const keep = manager.readKeepFile();
-        if ((target.sync_mode === 'free' && keep) || (target.sync_mode === 'paid'
-          && (!keep || keep.org_id !== target.org_id || keep.project_id !== target.project_id))) return reject('SETUP_LOCAL_TARGET_MISMATCH');
+        if (!keep || keep.org_id !== target.org_id || keep.project_id !== target.project_id) return reject('SETUP_LOCAL_TARGET_MISMATCH');
         const values = files.readEnvFile();
         if (Object.keys(values).length > 0) {
           const meta = files.readEnvMeta();

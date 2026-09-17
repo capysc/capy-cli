@@ -7,7 +7,7 @@ import { ProjectManager } from '../core/projectManager';
 import { isReservedRuntimeVar, stripReservedRuntimeVars } from '../core/reservedVars';
 import { isLocalOnly } from '../config/profileConfig';
 import { CapyError, ERROR_CODES, type KeepFile } from '../types/index';
-import { requireListIdentity, resolveListMetadata, type ListMetadataDependencies } from './listMetadata';
+import { requireListIdentity, type ListMetadataDependencies } from './listMetadata';
 import { resolveStatusProjectKey } from './statusKey';
 
 /** Accidental disclosure guard, not a sandbox for arbitrary programs or repository scripts. */
@@ -39,7 +39,8 @@ export async function executeHostedRun(args: readonly string[], userId: string, 
   requireHostedRunArguments(args);
   if (!/^user_[A-Za-z0-9_]{1,120}$/.test(userId)) throw new CapyError('A valid connected account is required.', ERROR_CODES.AUTH_FAILED);
   const localKeep = deps.keep();
-  const binding = localKeep ? { keep: localKeep, branch: deps.branch() } : await resolveListMetadata(deps, userId);
+  if (!localKeep) throw new CapyError('Complete explicit Keep setup before running.', ERROR_CODES.SYNC_NOT_INITIALIZED);
+  const binding = { keep: localKeep, branch: deps.branch() };
   const { org_id: orgId, project_id: projectId } = binding.keep;
   if (!orgId || !projectId || !binding.branch) throw new CapyError('Complete project and branch setup before running.', ERROR_CODES.SYNC_NOT_INITIALIZED);
   await requireListIdentity(deps, userId, orgId);
