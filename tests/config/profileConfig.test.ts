@@ -11,16 +11,14 @@ mock.module('os', () => {
   return { ...actual, homedir: () => tempHome };
 });
 
-let mod: typeof import('../../src/config/profileConfig');
+const mod = await import('../../src/config/profileConfig');
 
-beforeEach(async () => {
+beforeEach(() => {
   // Reset state between tests: wipe the config file, clear env overrides.
   const capyDir = join(tempHome, '.capy');
   if (existsSync(capyDir)) rmSync(capyDir, { recursive: true, force: true });
   delete process.env.CAPY_API_URL;
   delete process.env.CAPY_PROFILE;
-
-  mod = await import('../../src/config/profileConfig');
 });
 
 afterAll(() => {
@@ -73,8 +71,8 @@ describe('profileConfig', () => {
       expect(mod.resolveActiveUrl(false)).toBe(mod.DEFAULT_CLOUD_URL);
     });
 
-    it('falls back to localhost in dev mode', () => {
-      expect(mod.resolveActiveUrl(true)).toBe('http://localhost:3001');
+    it('falls back to hosted Development in dev mode', () => {
+      expect(mod.resolveActiveUrl(true)).toBe('https://mabels-mac-mini.tailcbfb49.ts.net:3444');
     });
 
     it('CAPY_API_URL wins over everything', () => {

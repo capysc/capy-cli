@@ -9,6 +9,7 @@ import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { GRANT_DAEMON_SUBCOMMAND } from './auth/deviceKey/grantHolder';
+import { createJsonLineInteraction, runWithInteraction } from './ui/interaction';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -69,10 +70,12 @@ program
   .description('Capy CLI - SecretOps for the AI age')
   .version(CLI_VERSION)
   .option('--env-path <path>', 'specify custom .env file location')
+  .option('--flow', 'use encrypted Keep conversation for this command after pairing')
   .option('-v, --verbose', 'enable detailed logging')
   .option('-f, --force', 're-encrypt existing variables')
   .option('-d, --dry-run', 'preview changes without applying')
   .option('--web', 'render interactive steps (first-run setup / sync conflicts) in a browser instead of TTY prompts')
+  .option('--json', 'stream structured interaction records over stdin/stdout')
   .option('--expected-user-id <id>', 'require the account bound by the hosted launcher')
   // Record `--web` once, before any handler runs, for the code that has no way
   // to ask. `displayErrorAndExit` is reached from eighteen catch blocks — a key
@@ -125,6 +128,15 @@ program
     };
 
     const command = new CapyCommand(cliOptions);
+    if (options.flow === true) {
+      const { runCapyFlow } = await import('./ui/capyFlow');
+      await runCapyFlow(cliOptions, false);
+      return;
+    }
+    if (options.json === true) {
+      await runWithInteraction(createJsonLineInteraction(process.stdin, process.stdout), () => command.execute());
+      return;
+    }
     await command.execute();
   });
 
@@ -137,16 +149,15 @@ program
   .option('--project <id>', 'explicit existing project attribution')
   .option('--create-project <name>', 'explicitly create a project on approved apply')
   .action(async (options, command) => {
-    if (!options.json) {
+    const globalOpts = command.optsWithGlobals();
+    if (!globalOpts.json) {
       console.error('');
       console.error('  capy setup currently supports --json only (it is the onboarding tool\'s entry point).');
       console.error('  A human setting up a project for the first time should just run capy.');
       console.error('');
-      process.exitCode = 1;
-      return;
+      process.exit(1);
     }
     const { SetupCommand } = await import('./commands/setupCommand');
-    const globalOpts = command.optsWithGlobals();
     const cmd = new SetupCommand({ envPath: globalOpts.envPath });
     await cmd.execute({ confirm: options.confirm, org: options.org, project: options.project, createProject: options.createProject });
   });
@@ -157,16 +168,15 @@ program
   .option('--json', 'required today: this command has no TTY mode yet')
   .option('--expected-user-id <id>', 'require the account bound by the hosted MCP')
   .action(async (options, command) => {
-    if (!options.json) {
+    const globalOpts = command.optsWithGlobals();
+    if (!globalOpts.json) {
       console.error('');
       console.error('  capy sync currently supports --json only (it is the onboarding tool\'s entry point).');
       console.error('  A human syncing an already-initialized project should just run capy.');
       console.error('');
-      process.exitCode = 1;
-      return;
+      process.exit(1);
     }
     const { SyncCommand } = await import('./commands/syncCommand');
-    const globalOpts = command.optsWithGlobals();
     const cmd = new SyncCommand({ envPath: globalOpts.envPath, expectedUserId: expectedUserIdFor(command) });
     await cmd.execute();
   });
@@ -1062,18 +1072,37 @@ program
   .option('--skip-prompts', 'alias for --yes')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--provider <name>', 'integration to promote an unmanaged var through (non-interactive)')
+  .option('--check-readiness', 'inspect target-machine prerequisites without opening a flow')
+  .option('--deploy-target <name>', 'deployment target to inspect and use')
+  .option('--deploy-kind <kind>', 'deployment destination to inspect before setup')
+  .option('--expected-user-id <id>', 'require the requesting Capy account')
   .action(async (varName, options, command) => {
     assertNotLocalOnly('rotate');
+    const globals = command.optsWithGlobals();
+    const rotateOptions = {
+      web: globals.web === true, all: options.all, noPush: options.push === false,
+      skipPrompts: !!(options.yes || options.skipPrompts), nonTty: options.nonTty, provider: options.provider,
+      deployTarget: options.deployTarget, deployKind: options.deployKind, expectedUserId: expectedUserIdFor(command),
+    };
+    if (options.checkReadiness) {
+      const { inspectLocalRotateReadiness } = await import('./commands/rotateReadiness');
+      const readiness = await inspectLocalRotateReadiness({ ...rotateOptions, devMode: false });
+      console.log(JSON.stringify(readiness));
+      return;
+    }
+    if (globals.flow) {
+      const { runRotateFlow } = await import('./commands/rotateFlow');
+      await runRotateFlow(varName, rotateOptions, false);
+      return;
+    }
     const { RotateCommand } = await import('./commands/rotateCommand');
-    const cmd = new RotateCommand();
-    await cmd.execute(varName, {
-      web: command.optsWithGlobals().web === true,
-      all: options.all,
-      noPush: options.push === false,
-      skipPrompts: !!(options.yes || options.skipPrompts),
-      nonTty: options.nonTty,
-      provider: options.provider,
-    });
+    const execute = () => new RotateCommand(false).execute(varName, rotateOptions);
+    if (globals.json) {
+      const { runWithInteraction, createJsonLineInteraction } = await import('./ui/interaction');
+      await runWithInteraction(createJsonLineInteraction(process.stdin, process.stdout), execute);
+      return;
+    }
+    await execute();
   });
 
 program

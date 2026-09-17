@@ -123,6 +123,16 @@ describe('FileSessionStorageBackend', () => {
       expect(() => backend.clear('user-a')).not.toThrow();
     });
 
+    test('retires only the exact deleted-user refresh authority', () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+
+      expect(backend.retireDeletedUserIfRefreshAuthorityMatches('user-a', authorityDigest('rt_other'))).toBe(false);
+      expect(backend.load('user-a')).toEqual(stored);
+      expect(backend.retireDeletedUserIfRefreshAuthorityMatches('user-a', authorityDigest(stored.refresh_token))).toBe(true);
+      expect(backend.load('user-a')).toBeNull();
+    });
+
     test('explicit logout clears an uncertain fence before a fresh login', async () => {
       backend.save(makeSession('user-a'), 'user-a');
       await expect(backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
@@ -135,6 +145,41 @@ describe('FileSessionStorageBackend', () => {
       const replacement = { ...makeSession('user-a'), refresh_token: 'rt_fresh_login' };
       backend.save(replacement, 'user-a');
       expect(backend.load('user-a')).toEqual(replacement);
+    });
+
+    test('returns subject proof only when a fenced session still owns the recorded authority', async () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+      await expect(backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+        beginRotation();
+        throw new Error('provider outcome lost');
+      })).rejects.toThrow('provider outcome lost');
+
+      expect(backend.getFencedIdentityProof('user-a')).toEqual({
+        userId: 'user-a',
+        refreshAuthoritySha256: authorityDigest(stored.refresh_token),
+        fenceId: expect.any(String),
+        priorAccessToken: 'at_user-a_org-1',
+      });
+      expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+    });
+
+    test('does not retire a session when the durable fence changed after identity proof', async () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+      await expect(backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+        beginRotation();
+        throw new Error('provider outcome lost');
+      })).rejects.toThrow('provider outcome lost');
+      const proof = backend.getFencedIdentityProof('user-a');
+      const fencePath = join(SESSIONS_DIR, 'user-a.json.refresh-in-flight');
+      const changedFence = { ...JSON.parse(readFileSync(fencePath, 'utf-8')), id: '00000000-0000-4000-8000-000000000001' };
+      writeFileSync(fencePath, JSON.stringify(changedFence), { mode: 0o600 });
+
+      expect(backend.retireFencedDeletedUserIfMatches(
+        'user-a', authorityDigest(stored.refresh_token), proof!.fenceId,
+      )).toBe(false);
+      expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
     });
   });
 

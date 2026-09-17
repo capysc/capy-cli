@@ -8,11 +8,10 @@ import {
   keepOrigin,
   keepScreensEnabled,
   keepLoginBridgeEnabled,
-  isKeepReachable,
   type KeepAuthFlow,
 } from '../ui/screens/keepScreens';
 import { emitHandoffUrlEvent } from '../ui/handoffEvent';
-import { consumeForceLoginMarker, isForceLoginMarkerPending } from '../config/globalConfig';
+import { consumeForceLoginMarker } from '../config/globalConfig';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { debug } from '../ui/debug';
 import { SessionStorageBackend } from './session/backend';
@@ -161,6 +160,10 @@ export class AuthService {
       this.serviceApiUrl,
       sessionUserId,
       initialCurrentOrgId,
+      async (userId) => {
+        const { retireCheckpointForDeletedUser } = await import('../commands/composedDeviceGrant');
+        retireCheckpointForDeletedUser(userId);
+      },
     );
     this.lifecycle.load();
     this.initialSessionUserId = this.lifecycle.session?.user_id ?? null;
@@ -194,19 +197,21 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
+      await this.lifecycle.recoverConfirmedFencedDeletion();
       this.assertRefreshAuthorityAvailable();
+      const effectiveOrganizationId = this.lifecycle.retiredDeletedUserId ? undefined : organizationId;
       // Cached or refreshed token first — same path authenticateSilent uses
-      const method = await this.lifecycle.acquireSilent(organizationId);
+      const method = await this.lifecycle.acquireSilent(effectiveOrganizationId);
       if (method) {
         return this.buildAuthResult(method);
       }
 
       // Try password auth (E2E testing only — requires devMode + env vars)
-      const pwResult = await this.tryPasswordAuth(organizationId);
+      const pwResult = await this.tryPasswordAuth(effectiveOrganizationId);
       if (pwResult) return pwResult;
 
       // Full OAuth flow
-      return await this.startOAuthFlow(organizationId);
+      return await this.startOAuthFlow(effectiveOrganizationId);
     } catch (error: any) {
       return {
         success: false,
@@ -221,6 +226,7 @@ export class AuthService {
    */
   async authenticateSilent(organizationId?: string): Promise<AuthResult> {
     this.lifecycle.lastRefreshFailure = null;
+    await this.lifecycle.recoverConfirmedFencedDeletion();
     const method = await this.lifecycle.acquireSilent(organizationId);
     if (method) {
       return this.buildAuthResult(method);
@@ -240,48 +246,30 @@ export class AuthService {
     const oauthServer = new OAuthServer({ deferCompletion: keepScreens });
     await oauthServer.bind();
 
-    // CAP-374 step 1: route the FIRST hop through keep's own /auth/start
-    // instead of calling /auth/initiate directly, so the SAME browser also
-    // comes away with a keep session cookie ("double duty" — see
-    // oauthServer.ts's getKeepBridgeUrl doc and
-    // keep-app/src/lib/auth/cliBridge.ts). Gated by its OWN flag, separate
-    // from CAPY_KEEP_SCREENS (keepLoginBridgeEnabled's doc explains why),
-    // and only for the plain fresh-sign-in case: keep's bridge doesn't (yet)
-    // forward organization_id or force_login, so either one falls back to
-    // today's direct path, which fully supports both. A short reachability
-    // probe keeps the loopback fallback working when keep can't be reached
-    // at all — once the browser is sent into a flow there's no retargeting
-    // it mid-flight.
-    const canUseKeepBridge =
-      keepLoginBridgeEnabled() && !organizationId && !isForceLoginMarkerPending();
-    const useKeepBridge =
-      canUseKeepBridge && (await isKeepReachable(keepOrigin()));
-
+    // A local CLI listener is its own transport. The Service creates the
+    // WorkOS URL and signs its callback binding before Keep is involved.
+    // For a fresh sign-in, Keep owns the browser authentication and signup
+    // ceremony; the CLI must never bypass it with a direct WorkOS URL.
+    // The CLI remains the sole exchanger for the local loopback callback.
+    const forceLogin = consumeForceLoginMarker();
+    const canUseKeepBridge = keepLoginBridgeEnabled() && !organizationId;
+    const useKeepBridge = canUseKeepBridge;
+    const redirectUri = oauthServer.getRedirectUri();
+    const initiated = await postJson<{ auth_url: string; loopback_binding: string }>(
+      `${this.serviceApiUrl}/auth/loopback/initiate`,
+      {
+        state: oauthServer.getState(),
+        redirect_uri: redirectUri,
+        organization_id: organizationId,
+        code_challenge: oauthServer.getCodeChallenge(),
+        // Keep performs the forced account switch itself. Its signed callback
+        // must remain silent after that authenticated browser session exists.
+        ...(forceLogin && !useKeepBridge ? { force_login: true } : {}),
+      },
+    );
     const auth_url = useKeepBridge
-      ? oauthServer.getKeepBridgeUrl(keepOrigin())
-      : await (async () => {
-        const redirectUri = oauthServer.getRedirectUri();
-        const state = oauthServer.getState();
-
-        // If `capy logout` left a marker, ask the service to add prompt=login
-        // to the WorkOS auth URL so AuthKit re-prompts instead of silently
-        // reusing its SSO cookie. Consume the marker now — even if the OAuth
-        // round-trip fails later, "force_login" was the user's intent for
-        // this attempt and we don't want it sticking forever.
-        const forceLogin = consumeForceLoginMarker();
-
-        const response = await postJson<{ auth_url: string }>(
-          `${this.serviceApiUrl}/auth/initiate`,
-          {
-            state,
-            redirect_uri: redirectUri,
-            organization_id: organizationId,
-            code_challenge: oauthServer.getCodeChallenge(),
-            ...(forceLogin ? { force_login: true } : {}),
-          },
-        );
-        return response.auth_url;
-      })();
+      ? oauthServer.getKeepLoopbackDirectUrl(keepOrigin(), initiated.loopback_binding, forceLogin)
+      : initiated.auth_url;
 
     const code = await oauthServer.startAuthFlow(auth_url);
 
@@ -293,6 +281,8 @@ export class AuthService {
       }>(`${this.serviceApiUrl}/auth/exchange`, {
         code,
         code_verifier: oauthServer.getCodeVerifier(),
+        redirect_uri: redirectUri,
+        loopback_binding: initiated.loopback_binding,
       });
 
       return this.processVerifiedExchangeResponse(
@@ -311,6 +301,8 @@ export class AuthService {
       }>(`${this.serviceApiUrl}/auth/exchange`, {
         code,
         code_verifier: oauthServer.getCodeVerifier(),
+        redirect_uri: redirectUri,
+        loopback_binding: initiated.loopback_binding,
       });
 
       const result = await this.processVerifiedExchangeResponse(
@@ -438,6 +430,13 @@ export class AuthService {
   }
 
   private captureExplicitAuthInstallationBaseline(): ExplicitAuthInstallationBaseline {
+    // WorkOS conclusively deleted the old immutable subject. This instance
+    // intentionally has no remaining authority for it, so a new user with
+    // the same email must install under their new ID rather than inherit the
+    // old project/session baseline.
+    if (this.lifecycle.retiredDeletedUserId !== null) {
+      return { userId: null, refreshAuthoritySha256: null };
+    }
     this.assertRefreshAuthorityAvailable();
     const scopedUserId = this.lifecycle.sessionUserId ?? this.initialSessionUserId ?? this.session?.user_id ?? null;
     const stored = scopedUserId === null ? null : this.storageBackend.load(scopedUserId);

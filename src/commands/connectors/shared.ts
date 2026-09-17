@@ -1,3 +1,5 @@
+import { commandExit, currentInteraction, InteractionCommandError } from '../../ui/interaction';
+import { humanError } from '../../ui/webMode';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { ProjectManager } from '../../core/projectManager';
@@ -6,6 +8,7 @@ import { AuthService } from '../../auth/authService';
 import { ServiceClient } from '../../service/serviceClient';
 import { SyncEngine } from '../../sync/syncEngine';
 import { Encryptor } from '../../crypto/encryptor';
+import { hasOrgKey } from '../../crypto/keyResolver';
 import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
 import { formatRelativeTime } from '../../ui/relativeTime';
@@ -84,7 +87,36 @@ async function authenticateContext(authService: AuthService, orgId?: string): Pr
   if (scopedSilent.success) return scopedSilent;
   const unscopedSilent = await authService.authenticateSilent();
   if (unscopedSilent.success) return unscopedSilent;
+  if (currentInteraction()) throw new InteractionCommandError('ROTATE_CAPY_AUTH_REQUIRED', 'Capy authentication is required. Restore this device pairing, then retry.');
   return authService.authenticate(orgId);
+}
+
+/**
+ * An authenticated account can already own a PRF-protected local root while
+ * this machine has none. Before a key-dependent command reports that the
+ * organization is unavailable, let the CLI ask Keep for the credential PRF
+ * result and restore the root locally. Keep only returns the sealed PRF
+ * result; this process fetches, unwraps, and persists its own wrapper.
+ */
+async function restoreAuthenticatedLocalCustody(input: Readonly<{
+  readonly authService: AuthService;
+  readonly authResult: ContextAuthResult;
+  readonly devMode: boolean;
+  readonly organizationId: string;
+  readonly serviceClient: ServiceClient;
+}>): Promise<void> {
+  const userId = input.authResult.user_id;
+  if (!userId || hasOrgKey(input.organizationId, userId)) return;
+  const { restoreLocalCustodyWithDeviceKey } = await import('../../auth/deviceKey/wiring');
+  await restoreLocalCustodyWithDeviceKey({
+    authService: input.authService,
+    serviceClient: input.serviceClient,
+    devMode: input.devMode,
+    userId,
+    userEmail: input.authResult.user_email,
+    organizations: input.authResult.organizations ?? [],
+    activeOrgId: input.organizationId,
+  });
 }
 
 function decryptReadableValues(
@@ -137,14 +169,14 @@ export async function resolveContext(opts: ResolveContextOptions = {}): Promise<
   const projectId = projectState.projectId;
   const branch = projectState.activeBranch;
   if (!branch) {
-    console.error(`No active branch. Run ${B('capy')} to select a branch.`);
-    process.exit(1);
+    humanError(`No active branch. Run ${B('capy')} to select a branch.`);
+    commandExit(1);
   }
 
   const keep = pm.readKeepFile();
   if (!keep) {
-    console.error('Could not read keep.lock');
-    process.exit(1);
+    humanError('Could not read keep.lock');
+    commandExit(1);
   }
 
   const fileManager = new FileManager();
@@ -155,9 +187,17 @@ export async function resolveContext(opts: ResolveContextOptions = {}): Promise<
 
   const authResult = await authenticateContext(authService, orgId);
   if (!authResult.success || !authResult.user_id) {
-    console.error('Authentication failed');
-    process.exit(1);
+    humanError('Authentication failed');
+    commandExit(1);
   }
+
+  await restoreAuthenticatedLocalCustody({
+    authService,
+    authResult,
+    devMode,
+    organizationId: orgId,
+    serviceClient,
+  });
 
   const { resolveProjectKeyWithMintFallback } = await import('../../auth/masterKeyMint');
   const projectKey = await (async (): Promise<string> => {
@@ -291,6 +331,14 @@ async function resolveLocklessContext(
     return { orgId, projectId: defaultProject.id, projectName: defaultProject.name };
   })();
   const { orgId, projectId, projectName } = identity;
+
+  await restoreAuthenticatedLocalCustody({
+    authService,
+    authResult,
+    devMode,
+    organizationId: orgId,
+    serviceClient,
+  });
 
   const branch = opts.forceLockless
     ? SyncEngine.DEFAULT_BRANCH
@@ -693,7 +741,7 @@ export function maybeWarnPersonalEnv(
   const persistedIdentity = ctx.fileManager.readEnvMeta();
   if (persistedIdentity.org_id && persistedIdentity.project_id) return state;
   if (!hasGitRemote(cwd)) return state;
-  console.error('Heads up: this saves to your personal env, not a team project.');
+  humanError('Heads up: this saves to your personal env, not a team project.');
   return { emitted: true };
 }
 
@@ -1020,7 +1068,7 @@ export function printExpiryWarnings(): void {
       : k.expiresIn === 0
         ? 'expires today'
         : `expires in ${k.expiresIn} day(s)`;
-    console.error(
+    humanError(
       `\x1b[33m⚠\x1b[0m ${B(k.varName)} ${when}. Run ${B(`capy rotate ${k.varName}`)} to refresh.`,
     );
   }

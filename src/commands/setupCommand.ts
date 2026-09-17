@@ -24,7 +24,7 @@
  */
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync, unlinkSync } from 'fs';
 import { resolve } from 'path';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
@@ -102,6 +102,9 @@ interface SetupPlanFacts {
   readonly environment: string;
   readonly envPath: string;
   readonly choices: Readonly<Pick<SetupCommandOptions, 'org' | 'project' | 'createProject'>>;
+  /** A legacy root flow wrote this empty free-project stub before first sync. */
+  readonly recoverFreeStub: boolean;
+  readonly legacyKeepHash: string | null;
 }
 
 /** Immutable equivalent of Array#sort's default UTF-16 ordering. */
@@ -131,6 +134,8 @@ function canonicalPlanInput(cwd: string, plan: SetupPlanFacts): string {
     environment: plan.environment,
     env_path: plan.envPath,
     choices: plan.choices,
+    recover_free_stub: plan.recoverFreeStub,
+    legacy_keep_hash: plan.legacyKeepHash,
   });
 }
 
@@ -266,12 +271,18 @@ export class SetupCommand {
       return;
     }
     const projectState = await this.projectManager.detectProjectState();
+    const legacyKeepReader = this.projectManager as ProjectManager & Readonly<{ readonly readKeepFile?: () => KeepFile | null }>;
+    const existingKeep = projectState.initialized ? legacyKeepReader.readKeepFile?.() ?? null : null;
+    const possibleFreeStub = existingKeep !== null
+      && existingKeep.org_id === projectState.organizationId
+      && existingKeep.project_id === projectState.projectId
+      && existingKeep.project_name === 'default'
+      && Object.keys(existingKeep.variables).length === 0;
     this.checkOperation();
-    if (projectState.initialized) {
+    if (projectState.initialized && !possibleFreeStub) {
       this.refuse(ERROR_CODES.SETUP_ALREADY_INITIALIZED, 'keep.lock already exists in this directory', { remedy: 'capy sync --json' });
       return;
     }
-
     if (cmdOptions.expectedUserId) this.authService.setSessionUserId(cmdOptions.expectedUserId);
     const identity = await resolveIdentity(this.authService, cmdOptions.org);
     this.checkOperation();
@@ -308,6 +319,14 @@ export class SetupCommand {
     const isFree = billingOutcome.value.tier === 'free' && !billingOutcome.value.grandfathered;
     this.checkOperation();
 
+    const syncState = possibleFreeStub ? this.projectManager.readSyncState() : null;
+    const recoverFreeStub = isFree && possibleFreeStub
+      && (syncState?.user_id === undefined || syncState.user_id === authResult.user_id);
+    if (projectState.initialized && !recoverFreeStub) {
+      this.refuse(ERROR_CODES.SETUP_ALREADY_INITIALIZED, 'keep.lock already exists in this directory', { remedy: 'capy sync --json' });
+      return;
+    }
+
     if (cmdOptions.expectedSyncMode === 'free' && !isFree) {
       this.refuse(ERROR_CODES.PLAN_CHANGED, 'The account no longer has the approved free setup target.');
       return;
@@ -332,6 +351,11 @@ export class SetupCommand {
     }
 
     const selected = isFree ? projects[0] : projects.find((project) => project.id === cmdOptions.project);
+    if (recoverFreeStub && (!selected || selected.id !== existingKeep!.project_id
+      || selected.organization_id !== existingKeep!.org_id || org.id !== existingKeep!.org_id)) {
+      this.refuse('SETUP_TARGET_INVALID', 'The legacy free keep.lock belongs to a different organization or project.');
+      return;
+    }
     if ((isFree && (cmdOptions.createProject || (cmdOptions.project && cmdOptions.project !== selected?.id)))
       || (!isFree && cmdOptions.project && (!selected || selected.organization_id !== org.id))) {
       this.refuse('SETUP_TARGET_INVALID', 'The selected project is not an available target in this organization.');
@@ -394,6 +418,10 @@ export class SetupCommand {
       environment: `${this.devMode ? 'development' : 'configured'}:${resolveActiveUrl(this.devMode)}`,
       envPath: resolve(this.cliOptions.envPath ?? '.env'),
       choices: { org: cmdOptions.org, project: cmdOptions.project, createProject: cmdOptions.createProject },
+      recoverFreeStub,
+      legacyKeepHash: recoverFreeStub
+        ? createHash('sha256').update(readFileSync(this.projectManager.getKeepPath())).digest('hex')
+        : null,
     };
     const planHash = computePlanHash(process.cwd(), plan);
 
@@ -740,6 +768,7 @@ export class SetupCommand {
       });
       writeKeepCache(plan.org.id, resolved.project.id, keepHash, remote.value.env_content ?? '');
       installGitHooks(this.devMode);
+      this.removeRecoveredFreeStub(plan);
       this.printResult({
         ok: true,
         action: plan.action,
@@ -823,6 +852,7 @@ export class SetupCommand {
       this.fileManager.writeEncryptedEnvFile(resolvedLocalEnv, encryptionKey, this.cliOptions.envPath, adoptedKeep, plan.branch);
     }
     installGitHooks(this.devMode);
+    this.removeRecoveredFreeStub(plan);
     this.printResult({
       ok: true,
       action: plan.action,
@@ -835,5 +865,18 @@ export class SetupCommand {
       secrets_written: Object.keys(resolvedLocalEnv).length,
       git_hooks_installed: true,
     });
+  }
+
+  /** Delete only the exact legacy stub whose bytes and target were planned. */
+  private removeRecoveredFreeStub(plan: SetupPlanFacts): void {
+    if (!plan.recoverFreeStub || plan.legacyKeepHash === null) return;
+    const path = this.projectManager.getKeepPath();
+    const currentHash = existsSync(path)
+      ? createHash('sha256').update(readFileSync(path)).digest('hex') : null;
+    const keep = currentHash === plan.legacyKeepHash ? this.projectManager.readKeepFile() : null;
+    const safe = keep !== null && keep.org_id === plan.org.id && keep.project_id === plan.project.id
+      && keep.project_name === 'default' && Object.keys(keep.variables).length === 0;
+    if (!safe) throw new CapyError('keep.lock changed while free first sync was running; it was left untouched.', ERROR_CODES.PLAN_CHANGED);
+    unlinkSync(path);
   }
 }

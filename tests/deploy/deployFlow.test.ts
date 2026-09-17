@@ -186,4 +186,16 @@ describe('deploy CI worktree flow (e2e — no stranding)', () => {
     expect(git(['stash', 'list'], REPO).stdout.trim()).toBe(''); // no stash left behind
     expect(git(['branch', '--list', 'capy-deploy-*'], REPO).stdout.trim()).toBe(''); // no temp branch left
   });
+
+  test('does not run the user checkout hook in the temporary deploy worktree', () => {
+    const hooks = join(REPO, git(['rev-parse', '--git-path', 'hooks'], REPO).stdout.trim());
+    writeFileSync(join(hooks, 'post-checkout'), '#!/bin/sh\necho hook-ran >&2\nexit 1\n', { mode: 0o755 });
+
+    const branch = 'capy-deploy-hook-isolation';
+    const wt = join(TMP, 'hook-isolation');
+    expect(worktreeAddNewBranch(REPO, wt, branch, 'origin/staging')).toEqual({ ok: true });
+
+    worktreeRemove(REPO, wt);
+    deleteLocalBranch(REPO, branch);
+  });
 });

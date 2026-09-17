@@ -1,3 +1,4 @@
+import { currentInteraction } from './interaction';
 import { CapyError, ERROR_CODES } from '../types/index';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { FlowHttpError } from '../flows/client';
@@ -114,6 +115,7 @@ export async function displayErrorAndExit(
   error: any,
   context: ErrorContext = {},
 ): Promise<never> {
+  if (currentInteraction()) throw error;
   if (error?.name === 'ExitPromptError') {
     process.exit(0);
   }
@@ -121,7 +123,8 @@ export async function displayErrorAndExit(
   const output = renderError(error, context);
   const { isWebMode } = await import('./webMode');
   if (output) {
-    console.log(output);
+    const { human } = await import('./webMode');
+    human(output);
   }
   if (isWebMode()) {
     try {
@@ -218,7 +221,7 @@ function renderNetworkError(error: CapyError): string {
     '',
     `  Check:`,
     `    1. Your internet connection`,
-    `    2. The service is running ${grey('(capy-dev: http://localhost:3001)')}`,
+    `    2. The configured Capy service is reachable`,
     '',
     `  If you're the org owner, run ${bold('capy decrypt')} to decrypt secrets offline with your seed phrase.`,
     '',

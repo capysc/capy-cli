@@ -1,3 +1,8 @@
+import { runWithInteraction, currentInteraction, prompt, interactionOrTerminal, InteractionCommandError, ExitPromptError } from '../ui/interaction';
+import { human, humanError } from '../ui/webMode';
+import { inspectRotateDeployment } from './rotateReadiness';
+import { readFreeRotationTarget, resolveFixedRotationContext, type FixedRotationTarget } from './rotateContext';
+type RotationOpts = RotateOpts & Readonly<{ fixedTarget?: FixedRotationTarget }>;
 import {
   resolveContext,
   writeAndSync,
@@ -11,7 +16,7 @@ import { cap, rotationPlan, type RotationPlanInput } from './connectors/plans';
 import { ProjectManager } from '../core/projectManager';
 import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/index';
 import { TargetConfig } from '../deploy/adapter';
-import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { refuseNonInteractive } from '../ui/interactive';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
 import type {
   RotateAdvisory,
@@ -48,8 +53,7 @@ const shouldOpen = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
  */
 export function rotationPlanLines(stops: RotatePlanStop[]): string[] {
   const width = Math.max(...stops.map((s) => s.label.length));
-  const lines: string[] = ['', `  ${B('Rotation plan')}`, ''];
-  stops.forEach((s, i) => {
+  const lines = stops.flatMap((s, i) => {
     const last = i === stops.length - 1;
     const faint = s.blank || s.state === 'skipped';
     const node = s.blank
@@ -66,14 +70,14 @@ export function rotationPlanLines(stops: RotatePlanStop[]): string[] {
     // with no marker is indistinguishable from a question still to come, and
     // the flag is the honest answer to "why was I never asked?".
     const settled = s.answer ? DIM(` · ${s.answer}${s.flag ? ` (${s.flag})` : ''}`) : '';
-    lines.push(`  ${node}  ${label}   ${DIM(s.detail ?? '')}${settled}`);
+    const line = `  ${node}  ${label}   ${DIM(s.detail ?? '')}${settled}`;
     if (!last) {
       const dotted = s.manual || stops[i + 1].manual;
-      lines.push(`  ${DIM(dotted ? '┊' : '│')}`);
+      return [line, `  ${DIM(dotted ? '┊' : '│')}`];
     }
+    return [line];
   });
-  lines.push('');
-  return lines;
+  return ['', `  ${B('Rotation plan')}`, '', ...lines, ''];
 }
 
 function renderRotationPlan(stops: RotatePlanStop[]): void {
@@ -82,7 +86,9 @@ function renderRotationPlan(stops: RotatePlanStop[]): void {
   // `stripe login` spawnSync — so the plan would be missing from the captured
   // output during the auth wait (when the agent reads it to relay the pairing
   // code). writeSync lands the whole plan now, before that block.
-  writeSync(1, rotationPlanLines(stops).join('\n') + '\n');
+  const text = rotationPlanLines(stops).join('\n') + '\n';
+  if (currentInteraction()) human(text);
+  else writeSync(1, text);
 }
 
 /**
@@ -113,6 +119,7 @@ async function refuse(
   error: CapyError,
   context: { projectName?: string; projectId?: string; branch?: string } = {},
 ): Promise<void> {
+  if (currentInteraction()) throw error;
   const { displayErrorAndExit } = await import('../ui/errorScreen');
   await displayErrorAndExit(error, context);
 }
@@ -137,19 +144,34 @@ function describeDeploy(t: TargetConfig): string {
 }
 
 export class RotateCommand {
-  private devMode: boolean;
+  constructor(private readonly devMode: boolean = false) {}
 
-  constructor(devMode: boolean = false) {
-    this.devMode = devMode;
+  async execute(varName: string | undefined, opts: RotationOpts & { all?: boolean; skipPrompts?: boolean; provider?: string }): Promise<void> {
+    const interaction = currentInteraction();
+    if (!interaction) return this.executeSteps(varName, opts);
+    try {
+      await runWithInteraction({ ...interaction, output: event => interaction.output({ level: 'info', ...event }) },
+        () => this.executeSteps(varName, { ...opts, web: false }));
+    } catch (error) {
+      const cancelled = error instanceof ExitPromptError;
+      const safe = error instanceof InteractionCommandError || error instanceof CapyError;
+      await interaction.goal({ status: cancelled ? 'cancelled' : 'failed',
+        code: cancelled ? 'ROTATE_CANCELLED' : safe ? String(error.code) : 'ROTATE_FAILED',
+        message: cancelled ? 'Rotation cancelled.' : safe ? error.message : 'Rotation could not complete. Check the provider and deployment state before retrying.' });
+      if (!cancelled) process.exitCode = 1;
+    }
   }
 
-  async execute(
+  private async executeSteps(
     varName: string | undefined,
-    opts: RotateOpts & { all?: boolean; skipPrompts?: boolean; provider?: string },
+    opts: RotationOpts & { all?: boolean; skipPrompts?: boolean; provider?: string },
   ): Promise<void> {
     const pm = new ProjectManager();
-    const keep = pm.readKeepFile();
-    const branch = pm.deriveActiveBranch();
+    const fixedTarget = opts.fixedTarget ?? readFreeRotationTarget(pm, opts.expectedUserId);
+    if (fixedTarget && !opts.fixedTarget) return this.executeSteps(varName, { ...opts, fixedTarget });
+    const fixedContext = fixedTarget ? await resolveFixedRotationContext(fixedTarget, this.devMode) : null;
+    const keep = fixedContext?.keep ?? pm.readKeepFile();
+    const branch = fixedContext?.branch ?? pm.deriveActiveBranch();
 
     if (!keep) {
       await refuse(new CapyError('No keep.lock found in this directory.', ERROR_CODES.NO_KEEP_FILE));
@@ -186,14 +208,14 @@ export class RotateCommand {
     }
 
     // Resolve which (varName, connector|unmanaged) we're operating on.
-    let target: { varName: string; connector: ConnectorMetadata } | { varName: string; unmanaged: true };
+    const target = await (async (): Promise<{ varName: string; connector: ConnectorMetadata } | { varName: string; unmanaged: true } | undefined> => {
 
     if (varName) {
       const connector = findManagedConnector(keep, varName, branch);
       if (connector) {
-        target = { varName, connector };
+        return { varName, connector };
       } else if (allVars.includes(varName)) {
-        target = { varName, unmanaged: true };
+        return { varName, unmanaged: true };
       } else {
         await refuse(
           new CapyError(
@@ -216,7 +238,7 @@ export class RotateCommand {
         );
         return;
       }
-      let picked: string;
+      const picked = await (async (): Promise<string | undefined> => {
       if (opts.web) {
         const candidates = buildRotateCandidates(allVars, keep, branch);
         const { askRotateVariableInBrowser } = await import('../ui/rotateScreens');
@@ -232,19 +254,20 @@ export class RotateCommand {
           open: shouldOpen(),
         });
         if (answer.cancelled) {
-          console.log('\n  Cancelled.\n');
+          human('\n  Cancelled.\n');
+          if (currentInteraction()) throw new ExitPromptError('Rotation cancelled');
           return;
         }
-        picked = answer.variable;
+        return answer.variable;
       } else {
-        if (!isInteractive(opts.nonTty)) {
+        if (!interactionOrTerminal(opts.nonTty)) {
           refuseNonInteractive(
             'no variable specified and the picker needs a prompt',
             `Pass the variable name: capy rotate <VAR> (available: ${allVars.join(', ')}).`,
           );
         }
         const inquirer = (await import('inquirer')).default;
-        const answer = await inquirer.prompt([
+        const answer = await prompt([
           {
             type: 'list',
             name: 'picked',
@@ -254,11 +277,16 @@ export class RotateCommand {
             ),
           },
         ]);
-        picked = answer.picked;
+        return answer.picked;
       }
+      })();
+      if (!picked) return;
       const connector = findManagedConnector(keep, picked, branch);
-      target = connector ? { varName: picked, connector } : { varName: picked, unmanaged: true };
+      return connector ? { varName: picked, connector } : { varName: picked, unmanaged: true };
     }
+
+    })();
+    if (!target) return;
 
     if ('unmanaged' in target) {
       await this.promoteAndConnect(target.varName, branch, opts);
@@ -290,7 +318,7 @@ export class RotateCommand {
   private async promoteAndConnect(
     varName: string,
     branch: string,
-    opts: RotateOpts & { provider?: string },
+    opts: RotationOpts & { provider?: string },
   ): Promise<void> {
     const providers = listProviders();
     if (providers.length === 0) {
@@ -298,7 +326,7 @@ export class RotateCommand {
       return;
     }
 
-    let provider: string;
+    const provider = await (async (): Promise<string | undefined> => {
     if (opts.web) {
       // Never pre-selected, however few are registered. Off a TTY the CLI
       // auto-picks the single provider with no output at all — for a variable
@@ -306,7 +334,7 @@ export class RotateCommand {
       // whatever is in that variable with a key the provider issues. The
       // screen says that before the list, not after the write.
       const pm = new ProjectManager();
-      const keep = pm.readKeepFile();
+      const keep = opts.fixedTarget ? (await resolveFixedRotationContext(opts.fixedTarget, this.devMode)).keep : pm.readKeepFile();
       const { askRotateIntegrationInBrowser } = await import('../ui/rotateScreens');
       const answer = await askRotateIntegrationInBrowser({
         step: 'integration',
@@ -327,11 +355,12 @@ export class RotateCommand {
         open: shouldOpen(),
       });
       if (answer.cancelled) {
-        console.log('\n  Cancelled.\n');
+        human('\n  Cancelled.\n');
+          if (currentInteraction()) throw new ExitPromptError('Rotation cancelled');
         return;
       }
-      provider = answer.provider;
-    } else if (!isInteractive(opts.nonTty)) {
+      return answer.provider;
+    } else if (!interactionOrTerminal(opts.nonTty) || (currentInteraction() && opts.provider)) {
       // Non-interactive: resolve the integration from --provider, or auto-pick
       // it only when there's exactly one registered (unambiguous). Otherwise
       // refuse — we won't silently guess which provider owns this credential.
@@ -342,9 +371,9 @@ export class RotateCommand {
             `Known integrations: ${providers.map((p) => p.name).join(', ')}.`,
           );
         }
-        provider = opts.provider;
+        return opts.provider;
       } else if (providers.length === 1) {
-        provider = providers[0].name;
+        return providers[0].name;
       } else {
         refuseNonInteractive(
           `${B(varName)} isn't connected to an integration yet, and several are available`,
@@ -352,13 +381,13 @@ export class RotateCommand {
         );
       }
     } else {
-      console.log('');
-      console.log(`  ${B(varName)} isn't connected to a third-party integration yet.`);
-      console.log('  Pick one and Capy will rotate it via the provider from here on.');
-      console.log('');
+      human('');
+      human(`  ${B(varName)} isn't connected to a third-party integration yet.`);
+      human('  Pick one and Capy will rotate it via the provider from here on.');
+      human('');
 
       const inquirer = (await import('inquirer')).default;
-      const picked = await inquirer.prompt([
+      const picked = await prompt([
         {
           type: 'list',
           name: 'provider',
@@ -371,15 +400,22 @@ export class RotateCommand {
         },
       ]);
       if (picked.provider === '__cancel__') {
-        console.log('\n  Cancelled.\n');
+        human('\n  Cancelled.\n');
+          if (currentInteraction()) throw new ExitPromptError('Rotation cancelled');
         return;
       }
-      provider = picked.provider;
+      return picked.provider;
     }
 
-    const connect = new ConnectCommand(this.devMode);
-    const { linked } = await connect.execute(provider, {
+    })();
+    if (!provider) return;
+    if (opts.flowProvider && provider !== opts.flowProvider) throw new InteractionCommandError('ROTATE_FLOW_WORKOS_REQUIRED', 'This Flow supports WorkOS credentials. Choose a WorkOS variable.');
+
+    const connect = new ConnectCommand(this.devMode, opts.fixedTarget
+      ? () => resolveFixedRotationContext(opts.fixedTarget!, this.devMode) : undefined);
+    const { linked, connector: localConnector } = await connect.execute(provider, {
       var: varName,
+      expectedUserId: opts.expectedUserId,
       noPush: opts.noPush,
       nonTty: opts.nonTty,
       // The connect flow takes over from here, and it has to keep serving
@@ -392,14 +428,17 @@ export class RotateCommand {
       subStep: true,
     });
     // A decline or a failed push already served its own ending and said why.
-    if (!linked) return;
+    if (!linked) { if (currentInteraction()) throw new ExitPromptError('Connect was not completed'); return; }
 
     // The connector `connect` just recorded, read back rather than assumed:
     // it carries the provider's fingerprint and key type, and `rotateMany`
     // needs both to tell a real rotation from the provider handing back the
     // same key.
-    const keep = new ProjectManager().readKeepFile();
-    const connector = keep ? findManagedConnector(keep, varName, branch) : undefined;
+    const keep = opts.fixedTarget ? (await resolveFixedRotationContext(opts.fixedTarget, this.devMode)).keep
+      : new ProjectManager().readKeepFile();
+    // Local-only free promotion intentionally has no remote connector write.
+    const connector = opts.fixedTarget && opts.noPush ? localConnector
+      : keep ? findManagedConnector(keep, varName, branch) : undefined;
     if (!connector) {
       // Nothing to rotate through. `connect` reported success, so this is a
       // state we do not expect rather than a refusal — say so plainly instead
@@ -432,7 +471,7 @@ export class RotateCommand {
   private async planStops(
     keep: KeepFile | null,
     branch: string,
-    opts: RotateOpts & { all?: boolean; provider?: string },
+    opts: RotationOpts & { all?: boolean; provider?: string },
     settled: Partial<RotationPlanInput> = {},
   ): Promise<RotatePlanStop[]> {
     const providers =
@@ -440,11 +479,10 @@ export class RotateCommand {
       (keep
         ? Array.from(new Set(listManagedKeys(keep, branch).map((m) => m.connector.provider)))
         : []);
-    const authProviders: string[] = [];
-    for (const p of providers) {
-      const mod = await loadProvider(p).catch(() => undefined);
-      if (mod?.requiresAuth) authProviders.push(p);
-    }
+    const authProviders = (await Promise.all(providers.map(async provider => {
+      const mod = await loadProvider(provider).catch(() => undefined);
+      return mod?.requiresAuth ? [provider] : [];
+    }))).flat();
     return rotationPlan({
       branch,
       all: opts.all === true,
@@ -462,223 +500,105 @@ export class RotateCommand {
    */
   private async rotateMany(
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
-    opts: RotateOpts & { all?: boolean },
+    opts: RotationOpts & { all?: boolean },
   ): Promise<RotateRunReport> {
-    let toRotate = targets;
     const web = opts.web === true;
-    // Every credential the run touched keeps a row, including the ones it
-    // never reached. `Rotated 2/3 key(s).` says nothing about which of the
-    // three never started, and that is the one the user still has to deal with.
-    const keys: RotateKeyResult[] = [];
-    let stopped = false;
-
-    if (this.devMode) {
-      const liveOnes = toRotate.filter((m) => m.connector.mode === 'live');
-      if (!opts.all && liveOnes.length > 0) {
-        // Reached AFTER the plan was approved in the browser under `--web`, so
-        // this is the one refusal the user has already said yes to something
-        // about. A terminal-only exit here reads as the run simply stopping.
-        await refuse(
-          new CapyError(
-            `${liveOnes[0].varName} is configured for live mode.`,
-            ERROR_CODES.DEV_LIVE_FIREWALL,
-            { variables: liveOnes.map((m) => m.varName), nothingLeft: false },
-          ),
-        );
-        return { succeeded: [], keys, stopped: true };
-      }
-      if (opts.all && liveOnes.length > 0) {
-        console.log('');
-        for (const m of liveOnes) {
-          console.log(
-            `  \x1b[33m⚠ skipping ${m.varName} (live mode — not allowed in capy-dev)\x1b[0m`,
-          );
-          keys.push({
-            name: m.varName,
-            provider: m.connector.provider,
-            outcome: 'skipped',
-            skipReason: 'dev-live-firewall',
-            mode: 'live',
-          });
-        }
-        toRotate = toRotate.filter((m) => m.connector.mode !== 'live');
-        if (toRotate.length === 0) {
-          await refuse(
-            new CapyError(
-              'Nothing to rotate. All managed keys are live-mode.',
-              ERROR_CODES.DEV_LIVE_FIREWALL,
-              { variables: liveOnes.map((m) => m.varName), nothingLeft: true },
-            ),
-          );
-          return { succeeded: [], keys, stopped: true };
-        }
-      }
+    const live = this.devMode ? targets.filter(target => target.connector.mode === 'live') : [];
+    const skipped: RotateKeyResult[] = opts.all ? live.map(target => ({ name: target.varName,
+      provider: target.connector.provider, outcome: 'skipped', skipReason: 'dev-live-firewall', mode: 'live' })) : [];
+    if (!opts.all && live.length) {
+      await refuse(new CapyError(`${live[0].varName} is configured for live mode.`, ERROR_CODES.DEV_LIVE_FIREWALL,
+        { variables: live.map(target => target.varName), nothingLeft: false }));
+      return { succeeded: [], keys: [], stopped: true };
     }
-
-    const precheckedProviders = new Set<string>();
-    for (const { connector } of toRotate) {
-      if (precheckedProviders.has(connector.provider)) continue;
-      precheckedProviders.add(connector.provider);
-      const mod = await loadProvider(connector.provider);
-      if (mod.precheck) mod.precheck();
+    for (const target of live) human(`  Skipping ${target.varName} (live mode — not allowed in capy-dev).`);
+    const selected = this.devMode && opts.all ? targets.filter(target => target.connector.mode !== 'live') : targets;
+    if (!selected.length && live.length) {
+      await refuse(new CapyError('Nothing to rotate. All managed keys are live-mode.', ERROR_CODES.DEV_LIVE_FIREWALL,
+        { variables: live.map(target => target.varName), nothingLeft: true }));
+      return { succeeded: [], keys: skipped, stopped: true };
     }
-
-    const ctx = await resolveContext({ devMode: this.devMode });
-
-    const succeeded: string[] = [];
-    const failed: { name: string; err: any }[] = [];
-
-    for (const { varName: name, connector } of toRotate) {
-      if (stopped) {
-        // The batch stopped at an earlier key, so this one never started —
-        // which is a different fact from "it failed", and the terminal draws
-        // neither.
-        keys.push({
-          name,
-          provider: connector.provider,
-          outcome: 'not-run',
-          skipReason: 'batch-stopped',
-          ...(connector.mode === 'test' || connector.mode === 'live' ? { mode: connector.mode } : {}),
-        });
-        continue;
-      }
+    for (const provider of new Set(selected.map(target => target.connector.provider))) {
+      const mod = await loadProvider(provider);
+      mod.precheck?.();
+    }
+    const ctx = opts.fixedTarget ? await resolveFixedRotationContext(opts.fixedTarget, this.devMode)
+      : await resolveContext({ devMode: this.devMode });
+    if (opts.expectedUserId && ctx.userId !== opts.expectedUserId) throw new InteractionCommandError('AUTH_ACCOUNT_MISMATCH');
+    type State = Readonly<{ succeeded: readonly string[]; keys: readonly RotateKeyResult[]; failed: readonly string[]; stopped: boolean }>;
+    const run = async (index: number, state: State): Promise<State> => {
+      const target = selected[index];
+      if (!target) return state;
+      const { varName: name, connector } = target;
+      const mode: Pick<RotateKeyResult, 'mode'> = connector.mode === 'test' || connector.mode === 'live' ? { mode: connector.mode } : {};
+      if (state.stopped) return run(index + 1, { ...state, keys: [...state.keys, {
+        name, provider: connector.provider, outcome: 'not-run', skipReason: 'batch-stopped', ...mode,
+      }] });
+      const failed = (detail: string, failureCode: 'other' | 'declined-live-confirm'): Promise<State> => {
+        humanError(`\n  Failed to rotate ${name}: ${detail}\n`);
+        if (!opts.all && !web && !currentInteraction()) process.exit(1);
+        return run(index + 1, { ...state, stopped: !opts.all, failed: [...state.failed, name], keys: [...state.keys, {
+          name, provider: connector.provider, outcome: 'failed', ...mode, failureCode, detail, retry: `capy rotate ${name}`,
+        }] });
+      };
       try {
-        // Prod live rotation normally gates on a human typing the account ID.
-        // In assisted non-interactive mode we skip that echo: the rotation
-        // re-runs `stripe login`, and completing that browser pairing is itself
-        // the human-presence proof (see docs/rotate-deploy-agent-flow.md). The
-        // typed confirmation only runs in an interactive terminal — or in a
-        // browser, which is the only way an agent-driven run gets asked at all.
-        if (!this.devMode && connector.mode === 'live' && (web || isInteractive(opts.nonTty))) {
-          const ok = web
-            ? await confirmLiveActionInBrowser({
-                action: 'rotate',
-                provider: connector.provider,
-                projectName: ctx.keep.project_name,
-                branch: ctx.branch,
-                varName: name,
-                accountId: connector.account_id ?? null,
-                // NO `keyPrefix`. The gate's is `value.slice(0, 8)` — the
-                // literal `rk_live_` the terminal prints as "Key type" — and a
-                // rotation has no value to slice: the new key does not exist
-                // yet and the old one was never stored. What keep.lock holds
-                // is `fingerprint()`'s redacted `rk_…tst`, and passing its
-                // first eight characters rendered as `rk_…tst…`, a key type
-                // that does not exist. The screen omits the row when the field
-                // is absent, which is the honest reading.
-                //
-                // REPORTED, not patched: `ConnectLiveGateData` has no field
-                // for a fingerprint, so rotate's gate cannot say anything at
-                // all about which key is being replaced. It should.
-                push: !opts.noPush,
-                pushFromFlag: opts.noPush === true,
-                stops: rotateLiveGateStops({
-                  provider: connector.provider,
-                  branch: ctx.branch,
-                  varName: name,
-                  ...(connector.account_id ? { accountId: connector.account_id } : {}),
-                  push: !opts.noPush,
-                  pushFromFlag: opts.noPush === true,
-                }),
-                open: shouldOpen(),
-                // Opts this call into the keep-hosted transport when
-                // CAPY_KEEP_SCREENS=1 (W2-D) — omitted, unreachable, loopback-only.
-                authService: ctx.authService,
-              })
-            : await confirmLiveAction({
-                action: 'rotate',
-                varName: name,
-                accountId: connector.account_id ?? '(unknown)',
-                keyPrefix: connector.fingerprint?.slice(0, 8),
-              });
-          if (!ok) {
-            console.log(`  Cancelled ${name}.`);
-            failed.push({ name, err: new Error('confirmation declined') });
-            keys.push({
-              name,
-              provider: connector.provider,
-              outcome: 'failed',
-              mode: 'live',
-              failureCode: 'declined-live-confirm',
-              detail: 'the account ID was not confirmed, so nothing was fetched',
-              retry: `capy rotate ${name}`,
-            });
-            if (opts.all) continue;
-            if (web) {
-              stopped = true;
-              continue;
-            }
-            process.exit(1);
-          }
+        if (!this.devMode && connector.mode === 'live' && (web || interactionOrTerminal(opts.nonTty))) {
+          const approved = web ? await confirmLiveActionInBrowser({ action: 'rotate', provider: connector.provider,
+            projectName: ctx.keep.project_name, branch: ctx.branch, varName: name, accountId: connector.account_id ?? null,
+            push: !opts.noPush, pushFromFlag: opts.noPush === true,
+            stops: rotateLiveGateStops({ provider: connector.provider, branch: ctx.branch, varName: name,
+              ...(connector.account_id ? { accountId: connector.account_id } : {}), push: !opts.noPush, pushFromFlag: opts.noPush === true }),
+            open: shouldOpen(), authService: ctx.authService,
+          }) : await confirmLiveAction({ action: 'rotate', varName: name, accountId: connector.account_id ?? '(unknown)',
+            keyPrefix: connector.fingerprint?.slice(0, 8) });
+          if (!approved) return failed('The account ID was not confirmed; nothing was fetched.', 'declined-live-confirm');
         }
-
         const mod = await loadProvider(connector.provider);
-        const { value, entry: updated } = await mod.rotate(ctx, name, connector, {
-          noPush: opts.noPush,
-        });
-
-        const freshCtx = await resolveContext({ devMode: this.devMode });
-        await writeAndSync(freshCtx, name, value, { push: !opts.noPush, connector: updated });
-
-        succeeded.push(name);
-        keys.push({
-          name,
-          provider: connector.provider,
-          outcome: 'rotated',
-          pushed: !opts.noPush,
-          ...(updated.mode === 'test' || updated.mode === 'live' ? { mode: updated.mode } : {}),
-          // A key Capy issued through the provider's CLI: every teammate's copy
-          // stopped working the moment this ran.
+        const result = await mod.rotate(ctx, name, connector, opts);
+        const persistenceFailure = (stage: 'resolving the Capy project' | 'checking the Capy account' | 'saving and syncing the replacement', error: unknown): never => {
+          if (!currentInteraction()) throw error;
+          const cause = error instanceof Error && 'code' in error && typeof error.code === 'string'
+            && /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code) ? error.code : 'UNKNOWN_ERROR';
+          throw new InteractionCommandError('ROTATE_WRITE_SYNC_FAILED',
+            `A replacement key was created and provider expiration handling has already run, but ${stage} failed (${cause}). Deployment did not run. Do not rotate again; recover the existing replacement key and resume saving or syncing it.`);
+        };
+        const fresh = await (opts.fixedTarget ? resolveFixedRotationContext(opts.fixedTarget, this.devMode)
+          : resolveContext({ devMode: this.devMode })).catch(error => persistenceFailure('resolving the Capy project', error));
+        if (opts.expectedUserId && fresh.userId !== opts.expectedUserId) {
+          persistenceFailure('checking the Capy account', new InteractionCommandError('AUTH_ACCOUNT_MISMATCH'));
+        }
+        await writeAndSync(fresh, name, result.value, {
+          push: !opts.noPush,
+          connector: result.entry,
+          // Rotation explicitly replaces this credential with the key just
+          // issued by its provider. A stale saved value is not a conflict.
+          confirmOverwrite: async () => true,
+        })
+          .catch(error => persistenceFailure('saving and syncing the replacement', error));
+        human(`\n  ✓ ${B(name)} rotated${opts.noPush ? ' (local only)' : ' and pushed'}.`);
+        if (connector.source === 'cli' && connector.provider !== 'workos') human(`  The previous key is now invalid. Teammates must run ${B('capy')} to pick up the new value.`);
+        const updatedMode: Pick<RotateKeyResult, 'mode'> = result.entry.mode === 'test' || result.entry.mode === 'live' ? { mode: result.entry.mode } : {};
+        return run(index + 1, { ...state, succeeded: [...state.succeeded, name], keys: [...state.keys, {
+          name, provider: connector.provider, outcome: 'rotated', pushed: !opts.noPush, ...updatedMode,
           ...(connector.source === 'cli' ? { issuedByCapy: true } : {}),
-        });
-        console.log('');
-        console.log(`  ✓ ${B(name)} rotated${opts.noPush ? ' (local only)' : ' and pushed'}.`);
-        if (connector.source === 'cli') {
-          console.log(
-            `  ⚠ The previous key is now invalid. Teammates must run ${B('capy')} to pick up the new value.`,
-          );
-        }
-        console.log('');
-      } catch (err) {
-        failed.push({ name, err });
-        keys.push({
-          name,
-          provider: connector.provider,
-          outcome: 'failed',
-          ...(connector.mode === 'test' || connector.mode === 'live' ? { mode: connector.mode } : {}),
-          // No stable code to mint here: this is whatever the provider threw,
-          // and the screen branches on `failureCode`, never on the sentence.
-          failureCode: 'other',
-          detail: (err as Error).message,
-          retry: `capy rotate ${name}`,
-        });
-        console.error('');
-        console.error(`  ✗ Failed to rotate ${B(name)}: ${(err as Error).message}`);
-        console.error('');
-        if (opts.all) continue;
-        if (web) {
-          stopped = true;
-          continue;
-        }
-        process.exit(1);
+        }] });
+      } catch (error) {
+        // A provider's fatal exit must halt --all as it did in a terminal. It
+        // must never become an ordinary failed item followed by deployment.
+        if (error instanceof InteractionCommandError || error instanceof ExitPromptError) throw error;
+        return failed(currentInteraction() ? 'The provider operation failed. Check its state before retrying.'
+          : error instanceof Error ? error.message : String(error), 'other');
+      }
+    };
+    const result = await run(0, { succeeded: [], keys: skipped, failed: [], stopped: false });
+    if (opts.all && (result.succeeded.length || result.failed.length)) {
+      human(`\n  Rotated ${result.succeeded.length}/${selected.length} key(s).`);
+      if (result.failed.length) {
+        human(`  Failed: ${result.failed.join(', ')}`);
+        if (!web && !currentInteraction()) process.exit(1);
       }
     }
-
-    if (opts.all && (succeeded.length > 0 || failed.length > 0)) {
-      console.log('');
-      console.log(`  Rotated ${succeeded.length}/${toRotate.length} key(s).`);
-      if (failed.length > 0) {
-        console.log(`  Failed: ${failed.map((f) => f.name).join(', ')}`);
-        // Under `--web` the caller still has a page to serve, and `process.exit`
-        // would kill the loopback server before the browser could fetch it.
-        if (!web) process.exit(1);
-        stopped = true;
-      } else {
-        console.log('');
-      }
-    }
-
-    return { succeeded, keys, stopped, authService: ctx.authService };
+    return { succeeded: [...result.succeeded], keys: [...result.keys], stopped: result.stopped || result.failed.length > 0, authService: ctx.authService };
   }
 
   /**
@@ -700,7 +620,7 @@ export class RotateCommand {
   private async planAndRotate(
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
     branch: string,
-    opts: RotateOpts & {
+    opts: RotationOpts & {
       all?: boolean;
       skipPrompts?: boolean;
       provider?: string;
@@ -714,14 +634,15 @@ export class RotateCommand {
       promotedVia?: string;
     },
   ): Promise<void> {
+    if (opts.flowProvider && targets.some(target => target.connector.provider !== opts.flowProvider)) throw new InteractionCommandError('ROTATE_FLOW_WORKOS_REQUIRED', 'This Flow supports WorkOS credentials. Choose a WorkOS variable.');
     const web = opts.web === true;
 
-    if (opts.noPush && !web) {
+    if (opts.noPush && !web && !currentInteraction()) {
       await this.rotateMany(targets, opts);
       return;
     }
 
-    const isTTY = isInteractive(opts.nonTty);
+    const isTTY = interactionOrTerminal(opts.nonTty);
 
     // ── Resolve: deploy target (gate 3) ─────────────────────────────────────
     // Branch (gate 1) is the active branch; the credential connector (gate 2)
@@ -734,12 +655,13 @@ export class RotateCommand {
     // invokes a vendor CLI/API directly.
     const { listTargets } = await import('../deploy/config');
     const configuredTargets = listTargets(process.cwd());
-    let deployTarget: TargetConfig | null = null;
-    if (opts.noPush) {
+    const resolvedDeployTarget = await (async (): Promise<TargetConfig | null> => {
+    if (opts.noPush || (configuredTargets.length === 0 && !opts.deployTarget && !opts.deployKind)) {
+      // No configured or explicitly requested deployment means rotate + sync only.
       // `--no-push` ships nothing, so there is no target to resolve. The plan
       // is still drawn for that run — the destructive half is unchanged — with
       // the stops it will not travel struck through.
-      deployTarget = null;
+      return null;
     } else if (web || isTTY) {
       // Ensure a target exists, setting one up inline if needed.
       //
@@ -760,34 +682,39 @@ export class RotateCommand {
       // old condition sent exactly the intended caller down the branch that
       // silently resolves nothing.
       const { ensureDeployTarget } = await import('./deployCommand');
-      deployTarget = await ensureDeployTarget(process.cwd(), web ? { web: true } : {});
+      const deployTarget = opts.deployTarget ? configuredTargets.find(target => target.name === opts.deployTarget) ?? null
+        : await ensureDeployTarget(process.cwd(), web ? { web: true } : {}, opts.deployKind);
       if (!deployTarget) {
         // A declined picker wrote nothing and that was the point, so this is a
         // 0 either way. Under `--web` the wizard has already closed on the
         // user's own cancel, so the line below is a terminal echo of a
         // decision they watched themselves make — not the only report of it.
-        console.log('\n  Cancelled.\n');
-        return;
+        human('\n  Cancelled.\n');
+          if (currentInteraction()) throw new ExitPromptError('Rotation cancelled');
+        return null;
       }
+      return deployTarget;
     } else if (configuredTargets.length === 1) {
       // Non-interactive: auto-resolve the unambiguous single target. With zero
       // or several we don't refuse — rotate + push still runs and the user is
       // kicked into the deploy flow afterward (deployTarget stays null).
-      deployTarget = configuredTargets[0];
+      return configuredTargets[0];
     }
 
-    // Dev isolation: capy-dev may open a CI/PR deploy, but must never run a
-    // direct vendor ship. Drop a resolved direct-mode target in dev.
-    if (this.devMode && deployTarget && (deployTarget.mode ?? 'direct') !== 'ci') {
-      console.log(
-        `\n  \x1b[33m⚠ capy-dev skips the direct-mode deploy for ${deployTarget.name} (CI/PR only in dev).\x1b[0m`,
-      );
-      deployTarget = null;
+    return null;
+    })();
+    const deployTarget = this.devMode && resolvedDeployTarget && (resolvedDeployTarget.mode ?? 'direct') !== 'ci'
+      ? null : resolvedDeployTarget;
+    if (resolvedDeployTarget && !deployTarget) human(`capy-dev skips the direct-mode deploy for ${resolvedDeployTarget.name} (CI/PR only in dev).`);
+    if (currentInteraction() && deployTarget) {
+      const readiness = await inspectRotateDeployment({ deployTarget: deployTarget.name, devMode: this.devMode });
+      const missing = readiness.checks.filter(check => !check.ready);
+      if (missing.length) throw new InteractionCommandError('ROTATE_DEPLOYMENT_NOT_READY', missing.map(check => [check.detail, check.remedy].filter(Boolean).join(' ')).join('\n'));
     }
 
     // ── Build the (now fully resolved) train-stop ───────────────────────────
     const pm = new ProjectManager();
-    const keep = pm.readKeepFile();
+    const keep = opts.fixedTarget ? (await resolveFixedRotationContext(opts.fixedTarget, this.devMode)).keep : pm.readKeepFile();
     const providers = Array.from(new Set(targets.map((t) => t.connector.provider)));
     const stops = await this.planStops(keep, branch, opts, {
       standing: 'plan',
@@ -831,16 +758,18 @@ export class RotateCommand {
         open: shouldOpen(),
       });
       if (!proceed) {
-        console.log('\n  Cancelled.\n');
+        human('\n  Cancelled.\n');
+          if (currentInteraction()) throw new ExitPromptError('Rotation cancelled');
         return;
       }
     } else if (!opts.skipPrompts && isTTY) {
       const inquirer = (await import('inquirer')).default;
-      const { proceed } = await inquirer.prompt([
+      const { proceed } = await prompt([
         { type: 'confirm', name: 'proceed', message: 'Proceed?', default: true },
       ]);
       if (!proceed) {
-        console.log('\n  Cancelled.\n');
+        human('\n  Cancelled.\n');
+          if (currentInteraction()) throw new ExitPromptError('Rotation cancelled');
         return;
       }
     }
@@ -856,6 +785,7 @@ export class RotateCommand {
     // that dropped it.
     const report = await this.rotateMany(targets, opts);
     if (report.succeeded.length === 0) {
+      if (currentInteraction()) throw new InteractionCommandError('ROTATE_NO_KEYS_ROTATED', 'No keys were rotated. Review the preceding results.');
       if (web) {
         await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, null, configuredTargets.length);
         if (report.keys.some((k) => k.outcome === 'failed')) process.exitCode = 1;
@@ -863,30 +793,29 @@ export class RotateCommand {
       return;
     }
 
-    let deployed: { name: string; ok: boolean } | null = null;
-    if (deployTarget) {
+    if (currentInteraction() && report.stopped) throw new InteractionCommandError('ROTATE_BATCH_FAILED', 'Rotation stopped with failed keys. Deployment did not run. Review the completed rotations before retrying.');
+    const deployed = await (async (): Promise<{ name: string; ok: boolean } | null> => {
+      if (!deployTarget) {
+        if (!opts.noPush) this.deployHint(configuredTargets.length);
+        return null;
+      }
       const { deployCommand } = await import('./deployCommand');
       const code = await deployCommand(deployTarget.name, { yes: true, devMode: this.devMode });
-      deployed = { name: deployTarget.name, ok: code === 0 };
+      const result = { name: deployTarget.name, ok: code === 0 };
       if (code !== 0) {
-        // The keys are already live in Capy and every running system still
-        // holds the old ones. Under `--web` that state gets its own page
-        // before the exit code, because re-running rotate here makes it worse
-        // — and the page is the whole reason this branch exists, so the exit
-        // waits for it rather than racing it.
+        if (currentInteraction()) throw new InteractionCommandError('ROTATE_DEPLOY_FAILED', 'Rotation and sync completed, but deployment failed. Retry deployment rather than rotating again.');
         if (web) {
-          await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
+          await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, result, configuredTargets.length);
           process.exitCode = code;
-          return;
+          return result;
         }
         process.exit(code);
       }
-    } else if (!opts.noPush) {
-      // No target resolved (none configured, several to disambiguate, or a
-      // dev direct-mode target we skipped). The key is already rotated +
-      // pushed; kick the user into the deploy flow to open the rollout PR.
-      this.deployHint(configuredTargets.length);
-    }
+      return result;
+    })();
+    if (deployed && !deployed.ok) return;
+    if (currentInteraction()) await currentInteraction()!.goal({ status: 'succeeded', code: 'ROTATE_COMPLETE',
+      message: deployed ? `Rotation, sync and deployment to ${deployed.name} completed.` : opts.noPush ? 'Rotation completed locally. Sync and deployment were skipped.' : 'Rotation and sync completed. Deployment remains outstanding.' });
 
     if (web) {
       await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
@@ -906,41 +835,33 @@ export class RotateCommand {
     targets: Array<{ varName: string; connector: ConnectorMetadata }>,
     deployTarget: TargetConfig | null,
     configuredTargets: TargetConfig[],
-    opts: RotateOpts & { all?: boolean; provider?: string; varIgnored?: string },
+    opts: RotationOpts & { all?: boolean; provider?: string; varIgnored?: string },
   ): RotateAdvisory[] {
-    const out: RotateAdvisory[] = [];
-    if (this.devMode && targets.some((t) => t.connector.mode === 'live')) {
-      out.push({
+    return [
+      ...(this.devMode && targets.some((t) => t.connector.mode === 'live') ? [{
         code: 'dev-skips-live-key',
         detail: 'capy-dev refuses live keys, so they are left out of this run.',
-      });
-    }
-    if (this.devMode && !deployTarget && configuredTargets.some((t) => (t.mode ?? 'direct') !== 'ci')) {
-      out.push({
+      } satisfies RotateAdvisory] : []),
+      ...(this.devMode && !deployTarget && configuredTargets.some((t) => (t.mode ?? 'direct') !== 'ci') ? [{
         code: 'dev-skips-direct-deploy',
         detail: 'capy-dev never runs a direct vendor ship, so the resolved target was dropped.',
-      });
-    }
-    if (opts.provider && targets.length > 0) {
-      out.push({
+      } satisfies RotateAdvisory] : []),
+      ...(opts.provider && targets.length > 0 ? [{
         code: 'provider-flag-ignored',
         detail: `--provider ${opts.provider} only applies to a variable with no integration yet. These are already managed.`,
-      });
-    }
-    if (opts.all && opts.varIgnored) {
-      out.push({
+      } satisfies RotateAdvisory] : []),
+      ...(opts.all && opts.varIgnored ? [{
         code: 'var-ignored-with-all',
         detail: `--all rotates every managed credential on this branch, so ${opts.varIgnored} was not treated as the target.`,
-      });
-    }
-    return out;
+      } satisfies RotateAdvisory] : [])
+    ];
   }
 
   /** What the run actually did, as a page. Reports only — nothing here decides. */
   private async reportRun(
     projectName: string,
     branch: string,
-    opts: RotateOpts & { all?: boolean },
+    opts: RotationOpts & { all?: boolean },
     report: RotateRunReport,
     stops: RotatePlanStop[],
     deployed: { name: string; ok: boolean } | null,
@@ -1022,23 +943,25 @@ export class RotateCommand {
    */
   private deployHint(targetCount: number): void {
     if (targetCount === 0) {
-      console.log(`  ✓ Rotated + pushed. No deploy target yet — set one up to open the rollout PR: ${B('capy deploy')}`);
+      human(`  ✓ Rotated + pushed. No deploy target yet — set one up to open the rollout PR: ${B('capy deploy')}`);
     } else if (targetCount > 1) {
-      console.log(`  ✓ Rotated + pushed. Pick a target to open the rollout PR: ${B('capy deploy <target>')}`);
+      human(`  ✓ Rotated + pushed. Pick a target to open the rollout PR: ${B('capy deploy <target>')}`);
     } else {
-      console.log(`  ✓ Rotated + pushed. Deploy to open the rollout PR: ${B('capy deploy')}`);
+      human(`  ✓ Rotated + pushed. Deploy to open the rollout PR: ${B('capy deploy')}`);
     }
-    console.log('');
+    human('');
   }
 }
 
 function formatChoice(name: string, c: ConnectorMetadata): string {
-  const parts = [c.provider];
-  if (c.fingerprint) parts.push(c.fingerprint);
+  const expiry = (() => {
   if (typeof c.expires_at === 'number') {
     const days = Math.floor((c.expires_at - Date.now() / 1000) / 86400);
-    parts.push(days < 0 ? `expired ${-days}d ago` : days === 0 ? 'expires today' : `expires in ${days}d`);
+    return [days < 0 ? `expired ${-days}d ago` : days === 0 ? 'expires today' : `expires in ${days}d`];
   }
+  return [];
+  })();
+  const parts = [c.provider, ...(c.fingerprint ? [c.fingerprint] : []), ...expiry];
   return `${name}  (${parts.join(', ')})`;
 }
 

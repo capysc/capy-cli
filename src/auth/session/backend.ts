@@ -10,6 +10,18 @@ export interface DiscoveredSession {
 }
 
 /**
+ * Non-authorizing proof from a refresh-fenced session. The access token is
+ * sent only to establish the prior WorkOS subject; the refresh token itself
+ * never leaves local storage for this recovery path.
+ */
+export interface FencedSessionIdentityProof {
+  readonly userId: string;
+  readonly refreshAuthoritySha256: string;
+  readonly fenceId: string;
+  readonly priorAccessToken: string;
+}
+
+/**
  * Where auth sessions live. `SessionLifecycle` owns every decision about a
  * session (refresh, expiry, org resolution, validation); a backend owns only
  * where the bytes are and how concurrent writers are kept from trampling each
@@ -45,6 +57,12 @@ export interface SessionStorageBackend {
   /** Refuse cached authority while a prior refresh outcome remains fenced. */
   assertRefreshAuthorityAvailable?(userId: string | undefined): void;
 
+  /**
+   * Return a proof only while the persisted session and durable fence agree
+   * on the exact user and refresh authority. This must not alter either file.
+   */
+  getFencedIdentityProof?(userId: string): FencedSessionIdentityProof | null;
+
   /** Verify a provider-authenticated authority replacement was durably installed. */
   withVerifiedAuthInstallation?<T>(
     userId: string,
@@ -54,6 +72,22 @@ export interface SessionStorageBackend {
 
   /** Remove the persisted session for `userId`. A missing session is a no-op. */
   clear(userId: string | undefined): void;
+
+  /**
+   * Retire only the precise session authority WorkOS confirmed deleted.
+   * A changed session (including a concurrent sign-in) remains untouched.
+   */
+  retireDeletedUserIfRefreshAuthorityMatches?(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+  ): boolean;
+
+  /** Retire only the exact fenced authority whose signed subject was deleted. */
+  retireFencedDeletedUserIfMatches?(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+    expectedFenceId: string,
+  ): boolean;
 
   /**
    * Locate a session when the caller has no userId hint (e.g. the post-redeem

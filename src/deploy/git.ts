@@ -328,8 +328,17 @@ export function worktreeAddNewBranch(
   branch: string,
   startPoint: string,
 ): { ok: boolean; error?: string } {
-  const r = git(['worktree', 'add', '-b', branch, dir, startPoint], cwd);
-  if (r.code !== 0) return { ok: false, error: r.stderr.trim() };
+  // A deploy worktree is an internal, short-lived checkout. The repository's
+  // post-checkout hook runs `capy status`, but that temporary tree has not
+  // acquired its own local Capy context yet; Git reports the hook's nonzero
+  // status as a failed `worktree add`. Hooks still run for the user's branch
+  // and the deploy PR's eventual checkout — only this implementation detail
+  // is isolated.
+  const r = git(['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-b', branch, dir, startPoint], cwd);
+  if (r.code !== 0) {
+    const error = [r.stderr.trim(), r.stdout.trim()].filter(Boolean).join('\n');
+    return { ok: false, error };
+  }
   return { ok: true };
 }
 

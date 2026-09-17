@@ -9,6 +9,7 @@ import type { AuthResult } from '../../src/types';
 import type { InitRunBinding, InitWizardFrame } from '../../src/auth/initRunContract';
 import { HostedInitChannelError } from '../../src/ui/hostedInitChannel';
 import type { HostedInitWizardSession } from '../../src/ui/hostedInitWizardSession';
+import { PASSPHRASE_CREDENTIAL_ID } from '../../src/auth/deviceKey/passphraseDoor';
 import {
   parseHostedUnlockAnswer,
   unlockHostedOrganization,
@@ -187,6 +188,10 @@ test('request validation closes null, malformed, oversized, duplicate, and extra
     validateHostedUnlockRequest(request as unknown as UnlockRequest, userId))))
     .toEqual(malformed.map(() => 'INIT_RUN_INVALID'));
   expect(capturedCode(() => validateHostedUnlockRequest(unlockRequest, userId))).toBeNull();
+  expect(capturedCode(() => validateHostedUnlockRequest({
+    userId,
+    candidates: [{ credentialId: PASSPHRASE_CREDENTIAL_ID, prfSalt }],
+  }, userId))).toBeNull();
 });
 
 test('answer validation accepts only closed failures or a candidate-bound PRF result', () => {

@@ -2,6 +2,16 @@
  * Simple spinner implementation without dependencies
  * Replaces ora to avoid chalk dependency
  */
+import { currentInteraction } from './interaction';
+
+export type SpinnerLike = {
+  text: string;
+  start(): SpinnerLike;
+  stop(): void;
+  succeed(text?: string): void;
+  fail(text?: string): void;
+  warn(text?: string): void;
+};
 
 export class Spinner {
   public text: string;
@@ -77,9 +87,42 @@ export class Spinner {
   }
 }
 
+class InteractionSpinner implements SpinnerLike {
+  constructor(private readonly initialText: string) {}
+
+  get text(): string {
+    return this.initialText;
+  }
+
+  set text(_value: string) {}
+
+  start(): SpinnerLike {
+    const interaction = currentInteraction();
+    if (interaction) void interaction.progress({ status: 'start', text: this.initialText });
+    return this;
+  }
+
+  stop(): void {}
+
+  succeed(text?: string): void {
+    const interaction = currentInteraction();
+    if (interaction) void interaction.progress({ status: 'success', text: text ?? this.initialText });
+  }
+
+  fail(text?: string): void {
+    const interaction = currentInteraction();
+    if (interaction) void interaction.progress({ status: 'failure', text: text ?? this.initialText });
+  }
+
+  warn(text?: string): void {
+    const interaction = currentInteraction();
+    if (interaction) void interaction.progress({ status: 'warning', text: text ?? this.initialText });
+  }
+}
+
 /**
  * Factory function to match ora's API
  */
-export default function ora(text: string): Spinner {
-  return new Spinner(text);
+export default function ora(text: string): SpinnerLike {
+  return currentInteraction() ? new InteractionSpinner(text) : new Spinner(text);
 }

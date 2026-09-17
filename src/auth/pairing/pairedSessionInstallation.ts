@@ -8,7 +8,7 @@ import { FileSessionStorageBackend } from '../session/fileBackend';
 
 export interface PairedSessionInstallationBaseline {
   readonly expectedUserId: string | null;
-  readonly authorities: readonly Readonly<{ userId: string; refreshAuthoritySha256: string | null }>[];
+  readonly authorities: readonly Readonly<{ userId: string; refreshAuthoritySha256: string | null; unavailable?: true }>[];
 }
 
 const refuse = (): never => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); };
@@ -46,10 +46,16 @@ export function capturePairedSessionInstallationBaseline(
     if (subject !== null && !validUser(subject)) return refuse();
     const subjects = [...new Set([...existingSessionSubjects(), ...(subject === null ? [] : [subject])])];
     const authorities = subjects.map((userId) => {
-      // Unlike discover(), this must propagate unreadable state and fences.
-      const session = backend.load(userId);
-      if (session && (session.user_id !== userId || !session.refresh_token)) return refuse();
-      return { userId, refreshAuthoritySha256: refreshTokenAuthorityDigest(session) };
+      // Preserve unreadable authority per account rather than blocking unrelated accounts.
+      try {
+        const session = backend.load(userId);
+        if (session && (session.user_id !== userId || !session.refresh_token)) return refuse();
+        return { userId, refreshAuthoritySha256: refreshTokenAuthorityDigest(session) };
+      } catch {
+        // An unrelated account's unresolved refresh cannot block fresh pairing.
+        // Retain the fence: installing into THIS account must still fail closed.
+        return { userId, refreshAuthoritySha256: null, unavailable: true as const };
+      }
     });
     return { expectedUserId: subject, authorities };
   } catch { return refuse(); }
@@ -64,8 +70,9 @@ export async function installDeviceAuthenticatedSession(
       || (baseline?.expectedUserId != null && baseline.expectedUserId !== session.user_id)) return refuse();
     // A caller without a pre-provider baseline may only install into an empty
     // destination. It cannot replace authority learned after authentication.
-    const expected = baseline?.authorities.find(({ userId }) => userId === session.user_id)
-      ?.refreshAuthoritySha256 ?? null;
+    const authority = baseline?.authorities.find(({ userId }) => userId === session.user_id);
+    if (authority?.unavailable) return refuse();
+    const expected = authority?.refreshAuthoritySha256 ?? null;
     const backend = new FileSessionStorageBackend();
     await backend.withVerifiedAuthInstallation(session.user_id, expected, async () => {
       backend.save(session, session.user_id);

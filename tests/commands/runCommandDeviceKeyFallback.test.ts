@@ -85,13 +85,13 @@ mock.module('../../src/auth/deviceKey/flag', () => ({
 
 let unlockResult: { ok: boolean; installedCurrentOrg: boolean } = { ok: false, installedCurrentOrg: false };
 const unlockCalls: unknown[] = [];
-// Same never-throws, safe-no-op contract as attemptCaseCUnlock —
+// Same never-throws, safe-no-op contract as restoreLocalCustodyWithDeviceKey —
 // defaults to "no pending pickup" so every EXISTING test in this file keeps
 // taking exactly the path it took before this export existed.
 let pickupResult: { ok: boolean } = { ok: false };
 const pickupCalls: unknown[] = [];
 mock.module('../../src/auth/deviceKey/wiring', () => ({
-  attemptCaseCUnlock: mock(async (ctx: unknown) => {
+  restoreLocalCustodyWithDeviceKey: mock(async (ctx: unknown) => {
     unlockCalls.push(ctx);
     return unlockResult;
   }),
@@ -221,7 +221,7 @@ describe('capy run — device-key fallback on a missing/invalid key.enc (BLOCKER
   });
 });
 
-describe('capy run — pending-pickup fallback (tried after attemptCaseCUnlock)', () => {
+describe('capy run — pending-pickup fallback (tried after restoreLocalCustodyWithDeviceKey)', () => {
   test('flag on, case-C unlock declines, no pending pickup: pickup IS tried, still fails with the same remediation', async () => {
     deviceKeysOn = true;
     unlockResult = { ok: false, installedCurrentOrg: false };

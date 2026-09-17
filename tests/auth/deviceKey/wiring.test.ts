@@ -1,6 +1,6 @@
 /**
  * CAP-382 wiring.ts — the command-facing helpers (attemptCaseAEnrollment,
- * attemptCaseCUnlock, runDeviceKeyEnrollment, runPendingSyncBestEffort) in
+ * restoreLocalCustodyWithDeviceKey, runDeviceKeyEnrollment, runPendingSyncBestEffort) in
  * isolation from real network/crypto: `createDeviceKeyServiceOps` and
  * `BrokerCeremonyTransport` are replaced with in-memory fakes so this suite
  * tests wiring.ts's OWN dispatch/glue logic — the underlying engine
@@ -270,9 +270,9 @@ describe('attemptCaseAEnrollment', () => {
   });
 });
 
-describe('attemptCaseCUnlock', () => {
+describe('restoreLocalCustodyWithDeviceKey', () => {
   test('no live doors → detection is not "unlock", the ceremony is never touched', async () => {
-    const result = await wiring.attemptCaseCUnlock(ctx());
+    const result = await wiring.restoreLocalCustodyWithDeviceKey(ctx());
     expect(result).toEqual({ ok: false, installedCurrentOrg: false });
     expect(ceremonyCalls.unlock).toBe(0);
   });
@@ -291,7 +291,7 @@ describe('attemptCaseCUnlock', () => {
 
     server.uploadKeyEnc(ORG_A, 'kms:inner');
 
-    const result = await wiring.attemptCaseCUnlock(ctx());
+    const result = await wiring.restoreLocalCustodyWithDeviceKey(ctx());
     expect(ceremonyCalls.unlock).toBe(1);
     expect(result.ok).toBe(true);
     expect(result.installedCurrentOrg).toBe(true);

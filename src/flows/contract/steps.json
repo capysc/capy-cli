@@ -326,8 +326,8 @@
         "default": false,
         "why": "The CAP-382 device-key unlock ceremony is its own consent surface (the human compares the ceremony's own confirmation, the same as the authenticate step) — putting the onboarding plan dialog in front of it would ask someone to approve writes to a project the flow has not even named yet on this device."
       },
-      "executor": "The CAP-382 Case-C device-key unlock ceremony — attemptCaseCUnlock + deviceKeyWiringContext (packages/cli/src/auth/deviceKey/wiring.ts), the same functions capyCommand.ts:524-529 already calls inline during authentication. This verb runs them explicitly, once a live session still finds the key missing after authenticate has completed.",
-      "idempotent_because": "Gated by orgKeyOnDevice. hasOrgKey short-circuits when the key is already present; a still-missing key after the ceremony reports KEY_NOT_ON_DEVICE again with no side effect beyond the ceremony attempt itself, which the existing Case-C flow already treats as safe to retry.",
+      "executor": "The device-key local-custody restoration ceremony — restoreLocalCustodyWithDeviceKey + deviceKeyWiringContext (packages/cli/src/auth/deviceKey/wiring.ts), the same functions capyCommand.ts calls inline during authentication. This verb runs them explicitly, once a live session still finds the key missing after authenticate has completed.",
+      "idempotent_because": "Gated by orgKeyOnDevice. hasOrgKey short-circuits when the key is already present; a still-missing key after the ceremony reports KEY_NOT_ON_DEVICE again with no side effect beyond the ceremony attempt itself, which local custody restoration already treats as safe to retry.",
       "params_schema": {
         "type": "object",
         "additionalProperties": false,

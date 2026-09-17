@@ -32,6 +32,7 @@ import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { getGlobalCapyDir, getGlobalConfigPath } from './globalConfig';
 import { isStagingEntrypoint, STAGING_API_URL } from './stagingTarget';
+import { devOrigins } from './devTarget';
 
 export interface Profile {
   /** Base URL of the Capy service for this profile, no trailing slash. */
@@ -204,9 +205,8 @@ export function resolveActiveUrl(devMode: boolean = false): string {
   const active = getActiveProfile();
   if (active) return active.profile.url;
 
-  // No profile, no env override — built-in default. Dev mode keeps its
-  // historical localhost behavior to match the legacy ServiceClient.
-  return devMode ? 'http://localhost:3001' : DEFAULT_CLOUD_URL;
+  // No profile, no env override — use the entrypoint's built-in default.
+  return devMode ? devOrigins().CAPY_API_URL : DEFAULT_CLOUD_URL;
 }
 
 /**
