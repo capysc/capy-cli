@@ -158,8 +158,27 @@ describe('FileSessionStorageBackend', () => {
       expect(backend.getFencedIdentityProof('user-a')).toEqual({
         userId: 'user-a',
         refreshAuthoritySha256: authorityDigest(stored.refresh_token),
+        fenceId: expect.any(String),
         priorAccessToken: 'at_user-a_org-1',
       });
+      expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+    });
+
+    test('does not retire a session when the durable fence changed after identity proof', async () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+      await expect(backend.withRefreshLock('user-a', async (_fresh, beginRotation) => {
+        beginRotation();
+        throw new Error('provider outcome lost');
+      })).rejects.toThrow('provider outcome lost');
+      const proof = backend.getFencedIdentityProof('user-a');
+      const fencePath = join(SESSIONS_DIR, 'user-a.json.refresh-in-flight');
+      const changedFence = { ...JSON.parse(readFileSync(fencePath, 'utf-8')), id: '00000000-0000-4000-8000-000000000001' };
+      writeFileSync(fencePath, JSON.stringify(changedFence), { mode: 0o600 });
+
+      expect(backend.retireFencedDeletedUserIfMatches(
+        'user-a', authorityDigest(stored.refresh_token), proof!.fenceId,
+      )).toBe(false);
       expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
     });
   });

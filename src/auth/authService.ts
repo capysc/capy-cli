@@ -197,19 +197,21 @@ export class AuthService {
 
   async authenticate(organizationId?: string): Promise<AuthResult> {
     try {
+      await this.lifecycle.recoverConfirmedFencedDeletion();
       this.assertRefreshAuthorityAvailable();
+      const effectiveOrganizationId = this.lifecycle.retiredDeletedUserId ? undefined : organizationId;
       // Cached or refreshed token first — same path authenticateSilent uses
-      const method = await this.lifecycle.acquireSilent(organizationId);
+      const method = await this.lifecycle.acquireSilent(effectiveOrganizationId);
       if (method) {
         return this.buildAuthResult(method);
       }
 
       // Try password auth (E2E testing only — requires devMode + env vars)
-      const pwResult = await this.tryPasswordAuth(organizationId);
+      const pwResult = await this.tryPasswordAuth(effectiveOrganizationId);
       if (pwResult) return pwResult;
 
       // Full OAuth flow
-      return await this.startOAuthFlow(organizationId);
+      return await this.startOAuthFlow(effectiveOrganizationId);
     } catch (error: any) {
       return {
         success: false,

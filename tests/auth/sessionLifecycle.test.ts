@@ -1,4 +1,4 @@
-import { mock, describe, test, expect, beforeEach, afterAll } from 'bun:test';
+import { mock, describe, test, expect, beforeEach, afterAll, spyOn } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
@@ -159,9 +159,9 @@ describe('SessionLifecycle with an injected backend', () => {
         clear: () => undefined,
         discover: () => null,
         getFencedIdentityProof: () => ({
-          userId: 'user-1', refreshAuthoritySha256: digest, priorAccessToken,
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken,
         }),
-        retireDeletedUserIfRefreshAuthorityMatches: retire,
+        retireFencedDeletedUserIfMatches: retire,
         withRefreshLock: async (_userId, fn) => fn(null),
       };
       const calls = stubFetch([{ status: 200, body: { status: 'deleted', user_id: 'user-1' } }]);
@@ -170,7 +170,7 @@ describe('SessionLifecycle with an injected backend', () => {
       const result = await service.authenticateSilent('org-1');
 
       expect(result.error_code).toBe('user_deleted');
-      expect(retire).toHaveBeenCalledWith('user-1', digest);
+      expect(retire).toHaveBeenCalledWith('user-1', digest, 'fence-1');
       expect(calls).toEqual([{ url: `${API}/auth/session-status`, body: {
         expected_user_id: 'user-1', prior_access_token: priorAccessToken,
       } }]);
@@ -185,9 +185,9 @@ describe('SessionLifecycle with an injected backend', () => {
         clear: () => undefined,
         discover: () => null,
         getFencedIdentityProof: () => ({
-          userId: 'user-1', refreshAuthoritySha256: digest, priorAccessToken: fakeJwt(),
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken: fakeJwt(),
         }),
-        retireDeletedUserIfRefreshAuthorityMatches: retire,
+        retireFencedDeletedUserIfMatches: retire,
         withRefreshLock: async (_userId, fn) => fn(null),
       };
       stubFetch([{ status: 200, body: { status: 'present' } }]);
@@ -198,6 +198,48 @@ describe('SessionLifecycle with an injected backend', () => {
       expect(result.error_code).toBe('server_error');
       expect(result.error).toBe('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
       expect(retire).not.toHaveBeenCalled();
+    });
+
+    test('uses Keep-owned fresh signup after fenced deletion instead of the stale project org', async () => {
+      const digest = createHash('sha256').update('rt-original').digest('hex');
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => ({
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken: fakeJwt(),
+        }),
+        retireFencedDeletedUserIfMatches: () => true,
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      stubFetch([{ status: 200, body: { status: 'deleted', user_id: 'user-1' } }]);
+      const authPrototype = AuthService.prototype as unknown as {
+        startOAuthFlow: (organizationId?: string) => Promise<unknown>;
+      };
+      const startOAuthFlow = spyOn(authPrototype, 'startOAuthFlow').mockResolvedValue({ success: false });
+      const service = new AuthService(API, false, 'user-1', fencedBackend);
+
+      await service.authenticate('org-stale');
+
+      expect(startOAuthFlow).toHaveBeenCalledWith(undefined);
+      startOAuthFlow.mockRestore();
+    });
+
+    test('reports a read failure without clearing or bypassing a fenced session', async () => {
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => { throw new Error('AUTH_REFRESH_FENCE_INVALID'); },
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      const service = new AuthService(API, false, 'user-1', fencedBackend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('server_error');
+      expect(result.error).toBe('AUTH_REFRESH_FENCE_INVALID');
     });
 
     test('clearSession clears the backend, not the filesystem', async () => {

@@ -197,7 +197,18 @@ export class SessionLifecycle {
    */
   async recoverConfirmedFencedDeletion(): Promise<void> {
     const userId = this.sessionUserId;
-    const proof = userId ? this.storage.getFencedIdentityProof?.(userId) ?? null : null;
+    const proofResult = (() => {
+      try {
+        return { proof: userId ? this.storage.getFencedIdentityProof?.(userId) ?? null : null } as const;
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : 'Could not read fenced session status' } as const;
+      }
+    })();
+    if ('error' in proofResult) {
+      this.lastRefreshFailure = { reason: 'server_error', detail: proofResult.error };
+      return;
+    }
+    const proof = proofResult.proof;
     if (!proof) return;
     try {
       const response = await postJson<FencedSessionStatusResponse>(
@@ -205,14 +216,27 @@ export class SessionLifecycle {
         { expected_user_id: proof.userId, prior_access_token: proof.priorAccessToken },
       );
       if (response.status === 'deleted' && response.user_id === proof.userId) {
-        const retirement = await this.retireDeletedUser(
-          new DeletedUserRefreshError(proof.userId, proof.refreshAuthoritySha256),
-        );
-        this.lastRefreshFailure = retirement === 'retired'
+        const retired = this.storage.retireFencedDeletedUserIfMatches?.(
+          proof.userId,
+          proof.refreshAuthoritySha256,
+          proof.fenceId,
+        ) ?? false;
+        if (retired) {
+          this.session = null;
+          this.sessionUserId = undefined;
+          this.currentOrgId = null;
+          this.loadedRefreshToken = null;
+          this.orglessAccessToken = null;
+          this.retiredDeletedUserId = proof.userId;
+          try {
+            await this.onDeletedUser?.(proof.userId);
+          } catch {
+            // The confirmed session retirement is still valid without its diagnostic checkpoint.
+          }
+        }
+        this.lastRefreshFailure = retired
           ? { reason: 'user_deleted', status: 401, detail: 'The signed-in account no longer exists' }
-          : retirement === 'changed'
-            ? classifyRefreshFailure(new RefreshAuthorityChangedError())
-            : { reason: 'server_error', detail: 'Could not confirm deleted account retirement' };
+          : classifyRefreshFailure(new RefreshAuthorityChangedError());
         return;
       }
       this.lastRefreshFailure = { reason: 'server_error', detail: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE' };

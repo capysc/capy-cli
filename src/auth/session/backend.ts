@@ -17,6 +17,7 @@ export interface DiscoveredSession {
 export interface FencedSessionIdentityProof {
   readonly userId: string;
   readonly refreshAuthoritySha256: string;
+  readonly fenceId: string;
   readonly priorAccessToken: string;
 }
 
@@ -79,6 +80,13 @@ export interface SessionStorageBackend {
   retireDeletedUserIfRefreshAuthorityMatches?(
     userId: string,
     expectedRefreshAuthoritySha256: string,
+  ): boolean;
+
+  /** Retire only the exact fenced authority whose signed subject was deleted. */
+  retireFencedDeletedUserIfMatches?(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+    expectedFenceId: string,
   ): boolean;
 
   /**

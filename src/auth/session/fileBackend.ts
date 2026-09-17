@@ -219,6 +219,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
       return {
         userId,
         refreshAuthoritySha256: fence.authority_sha256,
+        fenceId: fence.id,
         priorAccessToken,
       };
     });
@@ -327,6 +328,27 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
       const current = readProtectedSession(userId);
       const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
       if (current?.user_id !== userId || currentDigest !== expectedRefreshAuthoritySha256) return false;
+      if (existsSync(sessionPath)) {
+        unlinkSync(sessionPath);
+        syncDirectory(dirname(sessionPath));
+      }
+      removeFenceDurably(userId);
+      return true;
+    });
+  }
+
+  retireFencedDeletedUserIfMatches(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+    expectedFenceId: string,
+  ): boolean {
+    return withStableSessionLockSync(userId, (sessionPath) => {
+      const fence = readFence(userId);
+      const current = readProtectedSession(userId);
+      const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
+      if (!fence || fence.id !== expectedFenceId || fence.user_id !== userId
+        || fence.authority_sha256 !== expectedRefreshAuthoritySha256
+        || current?.user_id !== userId || currentDigest !== expectedRefreshAuthoritySha256) return false;
       if (existsSync(sessionPath)) {
         unlinkSync(sessionPath);
         syncDirectory(dirname(sessionPath));
