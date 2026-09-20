@@ -1,7 +1,6 @@
 import { commandExit, currentInteraction, InteractionCommandError } from '../../ui/interaction';
 import { humanError } from '../../ui/webMode';
 import { createHash } from 'crypto';
-import { execFileSync } from 'child_process';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { AuthService } from '../../auth/authService';
@@ -13,6 +12,7 @@ import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
 import { formatRelativeTime } from '../../ui/relativeTime';
 import { createGrantResolutionOps } from '../../auth/deviceKey/grantResolver';
+import { assertSupportedKeepMode } from '../../sync/legacyKeepMode';
 import {
   setSyncKeepHash,
   getSyncKeepHash,
@@ -23,16 +23,6 @@ import {
 } from '../../types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
-
-/**
- * sha256('') — the well-known CAS base hash for a branch nothing has ever
- * been pushed to (SyncEngine.computeKeepHash of an empty KeepFile hashes the
- * empty string the same way). Lock-less contexts bootstrapping against a
- * project with no secrets yet resolve to this rather than `undefined`, so
- * the first push still carries a real precondition instead of silently
- * skipping the CAS check.
- */
-const EMPTY_KEEP_HASH = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 export interface ResolvedContext {
   pm: ProjectManager;
@@ -46,13 +36,8 @@ export interface ResolvedContext {
   projectKey: string;
   keep: KeepFile;
   localPlaintext: Record<string, string>;
-  /**
-   * True when this directory has no keep.lock — single-user "lock-less"
-   * mode. The server's latest/keep.json for org/project/branch is the only
-   * source of truth; `writeAndSync` never writes keep.lock or auto-commits
-   * it in this mode.
-   */
-  lockless: boolean;
+  /** Compatibility field while command callers converge; initialized Keep is always lock-full. */
+  readonly lockless: false;
   /**
    * The branch's keep_hash this context was resolved from — the CAS
    * precondition for the next push (`ServiceClient.pushSecrets`'s
@@ -63,19 +48,6 @@ export interface ResolvedContext {
    * `base_keep_hash` entirely rather than guess when this is `undefined`.
    */
   base_keep_hash?: string;
-  /**
-   * How lock-less identity was resolved — `'header'` when the `.env` capy
-   * header already named org/project (a previous lock-less write in this
-   * directory, or a git-synced teammate's `.env`), `'server'` when nothing
-   * local named it and this call fell back to auth + `listProjects`'s
-   * "default" project. `undefined` in lock-full mode (irrelevant — keep.lock
-   * is the identity source there).
-   *
-   * Drives `maybeWarnPersonalEnv`'s "first lock-less write in this
-   * directory" condition below: it only fires on `'server'`, since `'header'`
-   * means an earlier write already left the header behind.
-   */
-  identitySource?: 'header' | 'server';
   /** Whether the authoritative remote keep marker existed when this context was resolved. */
   remoteKeepExists: boolean;
 }
@@ -144,26 +116,20 @@ function decryptReadableValues(
 export interface ResolveContextOptions {
   readonly apiUrl?: string;
   readonly devMode?: boolean;
-  /** Billing-authoritative free mode ignores any stale/local keep.lock identity. */
-  readonly forceLockless?: boolean;
   readonly authService?: AuthService;
   readonly serviceClient?: ServiceClient;
   readonly authResult?: ContextAuthResult;
   /** Fail directly instead of displaying a browser error surface. */
   readonly nonInteractive?: boolean;
-  /** Planning/agent push may restore existing custody, never mint replacement keys. */
-  readonly existingKeyOnly?: boolean;
 }
 
 export async function resolveContext(opts: ResolveContextOptions = {}): Promise<ResolvedContext> {
   const pm = new ProjectManager();
   const projectState = await pm.detectProjectState();
 
-  // No keep.lock: single-user lock-less mode against the user's personal
-  // ("default") project, rather than the old hard exit. A dir WITH
-  // keep.lock keeps every line below byte-for-byte unchanged.
-  if (opts.forceLockless || !projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-    return resolveLocklessContext(pm, opts);
+  if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
+    assertSupportedKeepMode(pm.readSyncState());
+    throw new CapyError('No keep.lock found in this directory.', ERROR_CODES.NO_KEEP_FILE);
   }
   const orgId = projectState.organizationId;
   const projectId = projectState.projectId;
@@ -252,194 +218,6 @@ export async function resolveContext(opts: ResolveContextOptions = {}): Promise<
 }
 
 /**
- * Identity + secrets resolution for a directory with no keep.lock —
- * single-user "lock-less" mode. The server's latest/keep.json for the
- * org/project/branch is the only source of truth; nothing here writes
- * keep.lock (see `writeAndSync`'s lock-less branch, which skips it too).
- *
- * Identity resolution order:
- *   1. The `.env` header a previous lock-less `writeAndSync` wrote
- *      (`# capy:org_id=…` / `# capy:project_id=…`, parsed by
- *      `FileManager.readEnvMeta`).
- *   2. Otherwise: authenticate, then find the caller's org's project named
- *      "default" via `ServiceClient.listProjects()`. A missing "default"
- *      project fails with a coded PROJECT_NOT_FOUND — server-side
- *      auto-provisioning of that project is a separate workstream; this
- *      function never creates one.
- *
- * Branch: billing-forced lock-less resolution always uses `'development'`,
- * because free mode has one authoritative remote branch and stale local
- * branch hints must not redirect it. Legacy lock-less resolution continues to
- * use `ProjectManager.deriveActiveBranch()` (which itself already checks the
- * `.env` header, `.capy/branch`, and single-branch fallbacks), defaulting to
- * `'development'` only when none yield anything. The lock-full path above is
- * untouched.
- */
-async function resolveLocklessContext(
-  pm: ProjectManager,
-  opts: ResolveContextOptions,
-): Promise<ResolvedContext> {
-  const fileManager = new FileManager();
-  const devMode = opts.devMode ?? false;
-
-  const envMeta = fileManager.readEnvMeta();
-  const identityMeta = opts.forceLockless ? {} : envMeta;
-  // Captured before the auth+listProjects fallback below can fill orgId in —
-  // this is the only point that knows whether identity came from the header
-  // or had to be looked up. See `identitySource` on `ResolvedContext`.
-  const identitySource: 'header' | 'server' = identityMeta.org_id && identityMeta.project_id ? 'header' : 'server';
-  // Used only to synthesize an empty KeepFile's project_name below, when
-  // nothing has ever been pushed to this branch — a KeepFile fetched from the
-  // server always carries the project's real name instead. Lock-less mode
-  // always targets the org's project literally named "default" (the
-  // identity-resolution contract above), so that's the safe assumption here
-  // even when identity came from the `.env` header rather than listProjects.
-  const authService = opts.authService ?? new AuthService(opts.apiUrl, devMode, pm.readSyncState()?.user_id);
-  const serviceClient = opts.serviceClient ?? new ServiceClient(opts.apiUrl, devMode);
-  if (!opts.serviceClient) serviceClient.setTokenProvider(() => authService.getValidToken());
-
-  const authResult = opts.authResult ?? await authenticateContext(authService, identityMeta.org_id);
-  if (!authResult.success || !authResult.user_id) {
-    throw new CapyError(authResult.error ?? 'Authentication failed', ERROR_CODES.AUTH_FAILED);
-  }
-  const userId = authResult.user_id;
-
-  const identity = await (async (): Promise<{
-    readonly orgId: string;
-    readonly projectId: string;
-    readonly projectName: string;
-  }> => {
-    if (identityMeta.org_id && identityMeta.project_id) {
-      return { orgId: identityMeta.org_id, projectId: identityMeta.project_id, projectName: 'default' };
-    }
-    const orgId = authResult.organization_id;
-    if (!orgId) {
-      throw new CapyError(
-        'Could not determine an organization for this account.',
-        ERROR_CODES.ORG_NOT_FOUND,
-      );
-    }
-    const projects = await serviceClient.listProjects();
-    const defaultProject = projects.find((p) => p.name === 'default' && p.organization_id === orgId);
-    if (!defaultProject) {
-      throw new CapyError(
-        `No "default" project found for this organization. Run ${B('capy')} in a new directory to create one.`,
-        ERROR_CODES.PROJECT_NOT_FOUND,
-        { orgId },
-      );
-    }
-    return { orgId, projectId: defaultProject.id, projectName: defaultProject.name };
-  })();
-  const { orgId, projectId, projectName } = identity;
-
-  await restoreAuthenticatedLocalCustody({
-    authService,
-    authResult,
-    devMode,
-    organizationId: orgId,
-    serviceClient,
-  });
-
-  const branch = opts.forceLockless
-    ? SyncEngine.DEFAULT_BRANCH
-    : pm.deriveActiveBranch() || SyncEngine.DEFAULT_BRANCH;
-
-  const { resolveProjectKeyWithMintFallback } = await import('../../auth/masterKeyMint');
-  const projectKey = await (async (): Promise<string> => {
-    try {
-      if (opts.existingKeyOnly) {
-        const { resolveFreeSyncProjectKey } = await import('../../sync/freeSyncKeyResolver');
-        return resolveFreeSyncProjectKey(orgId, projectId, userId, {
-          coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then(result => result.plaintext),
-          wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then(result => result.ciphertext),
-        }, createGrantResolutionOps(serviceClient, authService));
-      }
-      return await resolveProjectKeyWithMintFallback({
-        orgId,
-        projectId,
-        userId,
-        serviceClient,
-        keyServiceOps: {
-          coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then((r) => r.plaintext),
-          wrapOuterLayer: (oid, pt) => serviceClient.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-        },
-        grantResolutionOps: createGrantResolutionOps(serviceClient, authService),
-        orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
-      });
-    } catch (err: unknown) {
-      if (opts.nonInteractive) throw err;
-      const { displayErrorAndExit } = await import('../../ui/errorScreen');
-      await displayErrorAndExit(err, { projectName, projectId, branch });
-      throw err;
-    }
-  })();
-
-  // Latest state from the server for this branch — the lock-less source of
-  // truth. `keepHash` omitted is the CLI's existing "give me latest"
-  // contract (GET /secrets/:id?branch=… with no keep_hash), which already
-  // returns `keep_hash` + `keep_file` and already swallows a "nothing pushed
-  // yet" 404 (NO_SECRETS) into an empty result — see getDecryptData's own
-  // doc comment for the PROJECT_NOT_FOUND/BRANCH_NOT_FOUND propagation rule.
-  const decryptResult = await serviceClient.getDecryptData(projectId, branch);
-  const keep: KeepFile = decryptResult.keep_file
-    ? JSON.parse(decryptResult.keep_file)
-    : { version: '3.0', org_id: orgId, project_id: projectId, project_name: projectName, variables: {} };
-  const baseKeepHash = decryptResult.keep_file
-    ? decryptResult.keep_hash ?? SyncEngine.computeKeepHash(keep, branch)
-    : EMPTY_KEEP_HASH;
-
-  // Seed from the server's blob FIRST. A fresh directory with no local `.env`
-  // is the NORMAL case in single-user mode — the personal env follows the
-  // user across repos rather than living in any one checkout — so starting
-  // `localPlaintext` from local `.env` alone would make it empty here even
-  // though the branch already has vars on the server. `writeAndSync`'s prune
-  // step treats anything in `keep` (the server's keep, in lock-less mode)
-  // but missing from `finalEnv` as an explicit local delete; an empty
-  // `localPlaintext` would make the very first write in a new directory
-  // silently wipe every existing variable on the branch. Local `.env`
-  // entries are layered on top afterward so uncommitted local edits win.
-  const remotePlaintext = decryptReadableValues(
-    decryptResult.env_content ? fileManager.parseEnvContent(decryptResult.env_content) : {},
-    projectKey,
-    fileManager,
-  );
-  const localPlaintext = {
-    ...remotePlaintext,
-    ...decryptReadableValues(fileManager.readEnvFile(), projectKey, fileManager),
-  };
-
-  return {
-    pm,
-    fileManager,
-    authService,
-    serviceClient,
-    orgId,
-    projectId,
-    branch,
-    userId,
-    projectKey,
-    keep,
-    localPlaintext,
-    lockless: true,
-    base_keep_hash: baseKeepHash,
-    identitySource,
-    remoteKeepExists: Boolean(decryptResult.keep_file),
-  };
-}
-
-/**
- * Set `varName=value` in `.env`, encrypt + push to Keep, and update
- * keep.lock + sync state. Mirrors the editCommand `saveLocalEdits` flow.
- *
- * If `connector` is provided, the metadata is attached to the keep.lock entry
- * for `varName` on the active branch. Survives future syncs because
- * `mergeWithKeep` preserves extra fields on existing entries.
- *
- * If `push` is false, writes the encrypted snippet locally only — the next
- * `capy push` / `capy` will pick it up. Local-only mode skips the merge so
- * the connector field doesn't get attached until a real push.
- */
-/**
  * Write a variable (when there is one to write), attach its connector, sync.
  *
  * `value === undefined` is the METADATA-ONLY mode, and it is what `connect`
@@ -474,28 +252,20 @@ export async function writeAndSync(
     /** Additional (varName, connector) pairs to mark managed in the same write. */
     alsoConnect?: ReadonlyArray<{ varName: string; entry: ConnectorMetadata }>;
   },
-  warningState: PersonalEnvWarningState = initialPersonalEnvWarningState(),
-): Promise<PersonalEnvWarningState> {
-  const nextWarningState = maybeWarnPersonalEnv(ctx, warningState);
+): Promise<void> {
   const finalEnv = value === undefined
     ? { ...ctx.localPlaintext }
     : { ...ctx.localPlaintext, [varName]: value };
 
   if (!opts.push) {
-    // Local-only path. Even though we're not hitting the service, we still
-    // need to attach the connector marker to keep.lock so a follow-up `capy
-    // push` (which will round-trip through mergeWithKeep) preserves it. In
-    // lock-less mode there is no keep.lock to write — the connector-attached
-    // keep is still handed to writeEncryptedEnvFile so the `.env` identity
-    // header stays correct, but nothing lands on disk as keep.lock.
     if (opts.connector || opts.alsoConnect) {
       const merged = applyConnectors(ctx.keep, ctx.branch, varName, opts.connector, opts.alsoConnect);
-      if (!ctx.lockless) ctx.fileManager.writeKeepFile(merged);
+      ctx.fileManager.writeKeepFile(merged);
       ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, merged, ctx.branch);
     } else {
       ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, ctx.keep, ctx.branch);
     }
-    return nextWarningState;
+    return;
   }
 
   await syncResolvedSnapshot(ctx, finalEnv, {
@@ -504,7 +274,7 @@ export async function writeAndSync(
     alsoConnect: opts.alsoConnect,
     confirmOverwrite: opts.confirmOverwrite,
   });
-  return nextWarningState;
+  return;
 }
 
 export interface SyncResolvedSnapshotOptions {
@@ -615,7 +385,7 @@ export async function syncResolvedSnapshot(
   await opts.beforePush?.();
   (opts.cacheRemote ?? writeKeepCache)(ctx.orgId, ctx.projectId, pushed.keep_hash, pushed.envBlob);
   const adoptedKeep = SyncEngine.adoptServerKeep(pushed.keep_file, pushed.finalKeep, ctx.branch);
-  if (!ctx.lockless) ctx.fileManager.writeKeepFile(adoptedKeep);
+  ctx.fileManager.writeKeepFile(adoptedKeep);
   opts.beforeLocalWrite?.();
   ctx.fileManager.writeEncryptedEnvFile(finalEnv, ctx.projectKey, undefined, adoptedKeep, ctx.branch);
 
@@ -625,20 +395,12 @@ export async function syncResolvedSnapshot(
     last_sync: new Date().toISOString(),
     synced_variables: Object.keys(finalEnv),
     user_id: ctx.userId,
-    ...(ctx.lockless ? {
-      org_id: ctx.orgId,
-      project_id: ctx.projectId,
-      project_name: ctx.keep.project_name,
-      sync_mode: 'free' as const,
-    } : {}),
     keep_hash: setSyncKeepHash(existingSyncState, ctx.branch, pushed.keep_hash),
   });
 
-  if (!ctx.lockless) {
-    const { autoCommitKeep } = await import('../../git/autoCommitKeep');
-    if (opts.reportStatus) autoCommitKeep(ctx.branch, undefined, opts.reportStatus);
-    else autoCommitKeep(ctx.branch);
-  }
+  const { autoCommitKeep } = await import('../../git/autoCommitKeep');
+  if (opts.reportStatus) autoCommitKeep(ctx.branch, undefined, opts.reportStatus);
+  else autoCommitKeep(ctx.branch);
 }
 
 /** The (varName, branch) entry, or undefined when the variable has no entry on this branch. */
@@ -686,63 +448,6 @@ export function conflictContextLines(keep: KeepFile, varNames: string[], branch:
     ];
     return parts.length > 0 ? [`  ${B(varName)} — ${parts.join(', ')}`] : [];
   });
-}
-
-/**
- * Cheap "does this look like a team project" probe for `maybeWarnPersonalEnv`
- * below: inside a git work tree with at least one remote configured. Mirrors
- * `autoCommitKeep`'s own `git rev-parse --is-inside-work-tree` pattern —
- * never throws, folds any git failure (not a repo, git missing) into `false`.
- */
-function hasGitRemote(cwd: string): boolean {
-  try {
-    const inRepo = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      encoding: 'utf-8',
-    }).trim() === 'true';
-    if (!inRepo) return false;
-    const remotes = execFileSync('git', ['remote'], {
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      encoding: 'utf-8',
-    }).trim();
-    return remotes.length > 0;
-  } catch {
-    return false;
-  }
-}
-
-/** Immutable caller-owned state for a command/context's personal-env note. */
-export interface PersonalEnvWarningState {
-  readonly emitted: boolean;
-}
-
-export function initialPersonalEnvWarningState(): PersonalEnvWarningState {
-  return { emitted: false };
-}
-
-/**
- * Soft, non-blocking heads-up — never a prompt, never blocks the write — for
- * the FIRST lock-less write in a directory that git recognizes as a team
- * project (a repo with at least one remote) whose `.env` has no capy
- * identity header yet (`ctx.identitySource === 'server'`: see the field's own
- * doc comment on `ResolvedContext`). Once a write lands, `writeEncryptedEnvFile`
- * puts the header in place, so the very next command's `ctx.identitySource`
- * reads `'header'` and this stays silent from then on. Within a command,
- * callers thread the returned immutable state through repeated writes.
- */
-export function maybeWarnPersonalEnv(
-  ctx: ResolvedContext,
-  state: PersonalEnvWarningState = initialPersonalEnvWarningState(),
-  cwd: string = process.cwd(),
-): PersonalEnvWarningState {
-  if (state.emitted || !ctx.lockless || ctx.identitySource !== 'server') return state;
-  const persistedIdentity = ctx.fileManager.readEnvMeta();
-  if (persistedIdentity.org_id && persistedIdentity.project_id) return state;
-  if (!hasGitRemote(cwd)) return state;
-  humanError('Heads up: this saves to your personal env, not a team project.');
-  return { emitted: true };
 }
 
 /**

@@ -190,7 +190,7 @@ const parseFinalizedSignupCustody = (value: unknown): FinalizedSignupCustody | n
   };
 };
 
-/** Billing is the only authority for choosing the keepless free-sync corpus. */
+/** Billing reports eligibility and entitlement; it never selects repository storage. */
 export interface BillingStatus {
   readonly tier: 'free' | 'business';
   readonly grandfathered: boolean;

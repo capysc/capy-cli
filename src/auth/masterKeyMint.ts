@@ -356,8 +356,8 @@ export async function resolveProjectKeyWithMintFallback(
 ): Promise<string> {
   const { configuredGrantSocketPath } = await import('./deviceKey/ephemeral');
   if (opts.grantResolutionOps !== undefined && configuredGrantSocketPath() !== null) {
-    const { resolveFreeSyncProjectKey } = await import('../sync/freeSyncKeyResolver');
-    return resolveFreeSyncProjectKey(
+    const { resolveConfiguredProjectKey } = await import('../sync/projectKeyResolver');
+    return resolveConfiguredProjectKey(
       opts.orgId,
       opts.projectId,
       opts.userId,

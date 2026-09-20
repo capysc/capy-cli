@@ -975,7 +975,7 @@ describe('runtime pairing registry', () => {
     try {
       await registerRuntimePairing(USER_A, CREDENTIAL_A, daemon);
       const source = [
-        "import { resolveFreeSyncProjectKey } from './src/sync/freeSyncKeyResolver.ts';",
+        "import { resolveConfiguredProjectKey } from './src/sync/projectKeyResolver.ts';",
         "import { encryptMasterKey, masterKeyAAD, deriveProjectKey } from './src/crypto/keyManager.ts';",
         "import { deriveLocalInnerKey } from './src/crypto/localKeyRoot.ts';",
         `const user = '${USER_A}';`,
@@ -984,7 +984,7 @@ describe('runtime pairing registry', () => {
         `const kLocal = Buffer.alloc(32, 0x4c);`,
         `const masterKey = Buffer.alloc(32, 0x6b);`,
         `const keyEnc = encryptMasterKey(masterKey, deriveLocalInnerKey(kLocal), masterKeyAAD(user, org));`,
-        `const key = await resolveFreeSyncProjectKey(org, project, user, {`,
+        `const key = await resolveConfiguredProjectKey(org, project, user, {`,
         `  coDecrypt: async () => { throw new Error('disk custody must not run'); },`,
         `  wrapOuterLayer: async () => { throw new Error('disk custody must not run'); },`,
         `}, {`,
@@ -1008,8 +1008,8 @@ describe('runtime pairing registry', () => {
 
   test('a fresh free-sync process without runtime or disk custody fails closed', async () => {
     const source = [
-      "import { resolveFreeSyncProjectKey } from './src/sync/freeSyncKeyResolver.ts';",
-      `const outcome = await resolveFreeSyncProjectKey('org_unavailable', 'project_unavailable', '${USER_A}', {`,
+      "import { resolveConfiguredProjectKey } from './src/sync/projectKeyResolver.ts';",
+      `const outcome = await resolveConfiguredProjectKey('org_unavailable', 'project_unavailable', '${USER_A}', {`,
       `  coDecrypt: async (_orgId, ciphertext) => ciphertext,`,
       `  wrapOuterLayer: async (_orgId, plaintext) => plaintext,`,
       `}, {`,

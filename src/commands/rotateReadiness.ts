@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { getSyncKeepHash, type KeepFile, type SessionStore, type SyncState } from '../types';
+import { type KeepFile, type SessionStore, type SyncState } from '../types';
 import { ProjectManager } from '../core/projectManager';
 import { FileSessionStorageBackend } from '../auth/session/fileBackend';
 import { AuthService } from '../auth/authService';
@@ -208,9 +208,7 @@ export function rotateRepositoryContext(
 ): CapyReadinessContext | null {
   if (!branch) return null;
   if (keep) return { orgId: keep.org_id, projectId: keep.project_id, branch, userHint: sync?.user_id };
-  if (sync?.sync_mode !== 'free' || sync.project_name !== 'default' || branch !== 'development'
-    || !sync.org_id || !sync.project_id || !sync.user_id || !getSyncKeepHash(sync, branch)) return null;
-  return { orgId: sync.org_id, projectId: sync.project_id, branch, userHint: sync.user_id };
+  return null;
 }
 export async function inspectLocalRotateReadiness(opts: RotateReadinessOptions = {}): Promise<RotateReadiness> {
   const cwd = opts.cwd ?? process.cwd();

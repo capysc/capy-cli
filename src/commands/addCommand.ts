@@ -21,26 +21,9 @@ export interface AddOpts {
   noPush?: boolean;
   force?: boolean;
   nonTty?: boolean;
-  /** Explicit human approval to create the first local .env in lock-less mode. */
-  createEnv?: boolean;
 }
 
 const VAR_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const FIRST_SECRET_ENV_QUESTION = 'Create .env for this project?';
-
-export interface FirstSecretEnvState {
-  readonly lockless: boolean;
-  readonly localEnvExists: boolean;
-  readonly remoteEnvExists: boolean;
-  readonly createEnvApproved: boolean;
-}
-
-export interface FirstSecretEnvDecision {
-  readonly code: typeof ERROR_CODES.FIRST_SECRET_ENV_REQUIRED;
-  readonly question: typeof FIRST_SECRET_ENV_QUESTION;
-  readonly retryFlag: '--create-env';
-}
-
 export interface AddCommandDependencies {
   readonly resolveContext: typeof resolveContext;
   readonly writeAndSync: typeof writeAndSync;
@@ -48,26 +31,6 @@ export interface AddCommandDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: AddCommandDependencies = { resolveContext, writeAndSync, runWebIntake };
-
-/**
- * Free lock-less onboarding deliberately leaves `.env` absent when there were
- * no secrets to import. The first later secret write therefore needs a real
- * human decision before any intake surface asks for a value. Paid/keep.lock
- * projects and either existing environment source stay on their established
- * paths unchanged.
- */
-export function firstSecretEnvDecision(state: FirstSecretEnvState): FirstSecretEnvDecision | null {
-  if (!state.lockless || state.localEnvExists || state.remoteEnvExists || state.createEnvApproved) return null;
-  return {
-    code: ERROR_CODES.FIRST_SECRET_ENV_REQUIRED,
-    question: FIRST_SECRET_ENV_QUESTION,
-    retryFlag: '--create-env',
-  };
-}
-
-function remoteEnvironmentExists(ctx: Pick<Awaited<ReturnType<typeof resolveContext>>, 'keep' | 'branch'>): boolean {
-  return Object.values(ctx.keep.variables).some((entries) => entries.some((entry) => entry.branch === ctx.branch));
-}
 
 /** Parse repeatable `--help-url NAME=URL` flags into a name→url map (http(s) only). */
 export function parseHelpUrls(pairs: string[] | undefined): Record<string, string> {
@@ -115,37 +78,6 @@ export class AddCommand {
 
     const ctx = await this.dependencies.resolveContext({ devMode: this.devMode });
     const push = opts.noPush !== true;
-    const firstSecretDecision = !ctx.lockless
-      ? null
-      : firstSecretEnvDecision({
-        lockless: true,
-        localEnvExists: (await ctx.pm.detectProjectState()).hasEnvFile,
-        remoteEnvExists: remoteEnvironmentExists(ctx),
-        createEnvApproved: opts.createEnv === true,
-      });
-    if (firstSecretDecision !== null) {
-      if (opts.nonTty) {
-        throw new CapyError(
-          `No local or remote .env exists. Ask the user: "${firstSecretDecision.question}" If approved, retry with ${firstSecretDecision.retryFlag}.`,
-          firstSecretDecision.code,
-          {
-            decision: 'create_env',
-            question: firstSecretDecision.question,
-            retry_flag: firstSecretDecision.retryFlag,
-          },
-        );
-      }
-      console.log('No local or remote .env exists.');
-      const inquirer = (await import('inquirer')).default;
-      const { ok } = await inquirer.prompt([
-        { type: 'confirm', name: 'ok', message: firstSecretDecision.question, default: true },
-      ]);
-      if (!ok) {
-        console.log('Aborted.');
-        return;
-      }
-    }
-
     const existing = names.filter((n) => n in ctx.localPlaintext);
     if (existing.length > 0 && !opts.force && !opts.web && !opts.nonTty) {
       // Context ABOVE the question, never folded into it — the question
@@ -203,18 +135,17 @@ export class AddCommand {
       pairs: readonly SecretPair[],
       index: number = 0,
       currentCtx: typeof ctx = ctx,
-      warningState: { readonly emitted: boolean } = { emitted: false },
     ): Promise<void> => {
       const pair = pairs[index];
       if (pair === undefined) return;
       const nextWarningState = await this.dependencies.writeAndSync(currentCtx, pair.name, pair.value, {
         push: push && index === pairs.length - 1,
         confirmOverwrite,
-      }, warningState);
+      });
       return writeMany(pairs, index + 1, {
         ...currentCtx,
         localPlaintext: { ...currentCtx.localPlaintext, [pair.name]: pair.value },
-      }, nextWarningState);
+      });
     };
 
     const savedNames = await (async (): Promise<readonly string[]> => {

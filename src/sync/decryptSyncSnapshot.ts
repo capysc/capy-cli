@@ -1,6 +1,6 @@
 import { CapyError, ERROR_CODES } from '../types/index';
 
-/** A free-mode pull replaces local state: never apply a partially decrypted snapshot. */
+/** Never apply a partially decrypted snapshot. */
 export function decryptSyncSnapshot(
   values: Readonly<Record<string, string>>,
   decrypt: (value: string) => string,

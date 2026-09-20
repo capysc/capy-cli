@@ -61,7 +61,7 @@ const fail = (code: string): never => { throw new IntakeError(code); };
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const intentDigest = (view: IntakeView) => sha(JSON.stringify({ parent: view.onboarding_flow_id,
-  org: view.target.org_id, project: view.target.project_id, branch: view.target.branch, mode: view.target.sync_mode,
+  org: view.target.org_id, project: view.target.project_id, branch: view.target.branch,
   names: view.variable_names }));
 const publicResult = (view: IntakeView, handoff?: Handoff) => ({ ok: true, flow_id: view.flow_id,
   stage: view.next_action === 'done' ? 'done' : 'intake_pending', ...(handoff ? { handoff } : {}),
@@ -235,8 +235,8 @@ export async function runFlowAddCommand(flowId: string, options: FlowAddOptions,
           const ctx = await context();
           return { env_exists: existsSync(join(root, '.env')), existing_variable_names: Object.keys(ctx.fileManager.readEnvFile()),
             overwrite_variable_names: Object.keys(ctx.localPlaintext),
-            local_state_digest: localDigest(), keep_lock: ctx.lockless ? null
-              : { org_id: ctx.orgId, project_id: ctx.projectId, branch: ctx.branch } };
+            local_state_digest: localDigest(), keep_lock:
+              { org_id: ctx.orgId, project_id: ctx.projectId, branch: ctx.branch } };
         },
         create: () => broker.createConnection({ purpose: 'secret-intake', machineName: hostname(), ttlSeconds: 900 }),
         url: (id) => keepFlowUrl('secret-intake', id), poll: (connection, waitSeconds) => broker.pollExchange(connection, waitSeconds),

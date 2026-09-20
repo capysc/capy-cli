@@ -997,7 +997,6 @@ program
   )
   .option('--no-open', 'do not auto-open the browser; print the URL only')
   .option('--no-push', 'write to .env only; do not push to Capy')
-  .option('--create-env', 'confirm creation of the first .env in a lock-less project')
   .option('-f, --force', 'overwrite existing values without prompting')
   .option('--non-tty', 'never prompt; resolve from flags or fail fast (agents/CI)')
   .action(async (varNames, options, command) => {
@@ -1010,7 +1009,6 @@ program
       helpUrls: options.helpUrl,
       open: options.open,
       noPush: options.push === false,
-      createEnv: options.createEnv,
       force: merged.force,
       nonTty: options.nonTty,
     });

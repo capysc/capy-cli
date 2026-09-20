@@ -41,8 +41,8 @@ mock.module('../../src/config/globalConfig', () => ({
 mock.module('../../src/crypto/keyResolver', () => ({
   resolveProjectKey: mock(async () => 'mock-project-key'),
 }));
-mock.module('../../src/sync/freeSyncKeyResolver', () => ({
-  resolveFreeSyncProjectKey: mock(async () => 'mock-project-key'),
+mock.module('../../src/sync/projectKeyResolver', () => ({
+  resolveConfiguredProjectKey: mock(async () => 'mock-project-key'),
 }));
 
 afterEach(() => {
@@ -55,7 +55,7 @@ import { FileManager } from '../../src/files/fileManager';
 import { AuthService } from '../../src/auth/authService';
 import { ServiceClient } from '../../src/service/serviceClient';
 import { resolveProjectKey } from '../../src/crypto/keyResolver';
-import { resolveFreeSyncProjectKey } from '../../src/sync/freeSyncKeyResolver';
+import { resolveConfiguredProjectKey } from '../../src/sync/projectKeyResolver';
 import { CapyError, ERROR_CODES } from '../../src/types/index';
 
 const MockProjectManager = ProjectManager as any;
@@ -63,7 +63,7 @@ const MockFileManager = FileManager as any;
 const MockAuthService = AuthService as any;
 const MockServiceClient = ServiceClient as any;
 const MockResolveProjectKey = resolveProjectKey as any;
-const MockResolveFreeSyncProjectKey = resolveFreeSyncProjectKey as any;
+const MockResolveFreeSyncProjectKey = resolveConfiguredProjectKey as any;
 
 const mockProjectManager = (): any => MockProjectManager.mock.results.at(-1).value;
 const mockFileManager = (): any => MockFileManager.mock.results.at(-1).value;

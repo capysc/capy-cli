@@ -7,7 +7,8 @@ import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 export { compareSecrets, hashValue, type DiffResult } from './statusComparison';
 import { branchHashes, localStatusHashes, makeStatusReport, withStatusStage } from './statusData';
-import { requireListIdentity, resolveListMetadata } from './listMetadata';
+import { requireListIdentity } from './listMetadata';
+import { assertSupportedKeepMode } from '../sync/legacyKeepMode';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const DIM = '\x1b[90m';
@@ -92,9 +93,8 @@ export class StatusCommand {
     const binding = await withStatusStage('binding', async () => {
       if (!localKeep) {
         if (localMode) throw new CapyError('No local project binding.', ERROR_CODES.PROJECT_NOT_FOUND);
-        const resolved = await resolveListMetadata(metadata, this.expectedUserId);
-        const auth = await requireListIdentity(metadata, this.expectedUserId, resolved.keep.org_id);
-        return { ...resolved, userId: auth.user_id! };
+        assertSupportedKeepMode(this.projectManager.readSyncState());
+        throw new CapyError('No keep.lock found in this directory.', ERROR_CODES.PROJECT_NOT_INITIALIZED);
       }
       const state = await this.projectManager.detectProjectState();
       if (!state.activeBranch) throw new CapyError('Select a branch before checking drift.', ERROR_CODES.BRANCH_NOT_FOUND);

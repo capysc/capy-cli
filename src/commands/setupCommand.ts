@@ -24,7 +24,7 @@
  */
 import { createHash } from 'crypto';
 import { execSync } from 'child_process';
-import { existsSync, readFileSync, unlinkSync } from 'fs';
+import { existsSync } from 'fs';
 import { resolve } from 'path';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
@@ -39,10 +39,8 @@ import { Encryptor } from '../crypto/encryptor';
 import { writeKeepCache } from '../config/globalConfig';
 import { EXIT_NEEDS_INPUT } from '../ui/interactive';
 import { AuthResult, CapyError, ERROR_CODES, KeepFile, setSyncKeepHash } from '../types/index';
-import { planCanonicalSync } from '../sync/canonicalSyncPolicy';
-import type { CanonicalSyncDecision } from '../sync/canonicalSyncPolicy';
-import { resolveBillingSyncAuthority } from '../sync/billingSyncAuthority';
-import { resolveFreeSyncProjectKey } from '../sync/freeSyncKeyResolver';
+import { resolveConfiguredProjectKey } from '../sync/projectKeyResolver';
+import { assertSupportedKeepMode } from '../sync/legacyKeepMode';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { SyncCommand } from './syncCommand';
 
@@ -53,8 +51,6 @@ export interface SetupCommandOptions {
   readonly project?: string;
   readonly createProject?: string;
   readonly expectedUserId?: string;
-  /** Hosted onboarding has already selected the server's free default target. */
-  readonly expectedSyncMode?: 'free';
 }
 
 export interface SetupCommandRuntime {
@@ -96,15 +92,10 @@ interface SetupPlanFacts {
   readonly project: ProjectRef;
   readonly branch: string;
   readonly envVariableNames: readonly string[];
-  readonly syncMode: 'free' | 'paid';
-  readonly syncAction: CanonicalSyncDecision['action'];
   readonly remoteVariableNames: readonly string[];
   readonly environment: string;
   readonly envPath: string;
   readonly choices: Readonly<Pick<SetupCommandOptions, 'org' | 'project' | 'createProject'>>;
-  /** A legacy root flow wrote this empty free-project stub before first sync. */
-  readonly recoverFreeStub: boolean;
-  readonly legacyKeepHash: string | null;
 }
 
 /** Immutable equivalent of Array#sort's default UTF-16 ordering. */
@@ -128,14 +119,10 @@ function canonicalPlanInput(cwd: string, plan: SetupPlanFacts): string {
     project_name: plan.project.name,
     branch: plan.branch,
     env_variable_names: sortedStrings(plan.envVariableNames),
-    sync_mode: plan.syncMode,
-    sync_action: plan.syncAction,
     remote_variable_names: sortedStrings(plan.remoteVariableNames),
     environment: plan.environment,
     env_path: plan.envPath,
     choices: plan.choices,
-    recover_free_stub: plan.recoverFreeStub,
-    legacy_keep_hash: plan.legacyKeepHash,
   });
 }
 
@@ -270,16 +257,10 @@ export class SetupCommand {
       this.refuse('SETUP_CHOICES_INVALID', 'Choose either --project or --create-project, not both.');
       return;
     }
+    assertSupportedKeepMode(this.projectManager.readSyncState());
     const projectState = await this.projectManager.detectProjectState();
-    const legacyKeepReader = this.projectManager as ProjectManager & Readonly<{ readonly readKeepFile?: () => KeepFile | null }>;
-    const existingKeep = projectState.initialized ? legacyKeepReader.readKeepFile?.() ?? null : null;
-    const possibleFreeStub = existingKeep !== null
-      && existingKeep.org_id === projectState.organizationId
-      && existingKeep.project_id === projectState.projectId
-      && existingKeep.project_name === 'default'
-      && Object.keys(existingKeep.variables).length === 0;
     this.checkOperation();
-    if (projectState.initialized && !possibleFreeStub) {
+    if (projectState.initialized) {
       this.refuse(ERROR_CODES.SETUP_ALREADY_INITIALIZED, 'keep.lock already exists in this directory', { remedy: 'capy sync --json' });
       return;
     }
@@ -309,38 +290,7 @@ export class SetupCommand {
     const projects = existingProjects.value;
     this.checkOperation();
 
-    const billingOutcome = await this.serviceClient.getBillingStatus()
-      .then((value) => ({ ok: true as const, value }))
-      .catch((err: unknown) => ({ ok: false as const, err }));
-    if (!billingOutcome.ok) {
-      this.refuse(codeOf(billingOutcome.err), detailOf(billingOutcome.err));
-      return;
-    }
-    const isFree = billingOutcome.value.tier === 'free' && !billingOutcome.value.grandfathered;
-    this.checkOperation();
-
-    const syncState = possibleFreeStub ? this.projectManager.readSyncState() : null;
-    const recoverFreeStub = isFree && possibleFreeStub
-      && (syncState?.user_id === undefined || syncState.user_id === authResult.user_id);
-    if (projectState.initialized && !recoverFreeStub) {
-      this.refuse(ERROR_CODES.SETUP_ALREADY_INITIALIZED, 'keep.lock already exists in this directory', { remedy: 'capy sync --json' });
-      return;
-    }
-
-    if (cmdOptions.expectedSyncMode === 'free' && !isFree) {
-      this.refuse(ERROR_CODES.PLAN_CHANGED, 'The account no longer has the approved free setup target.');
-      return;
-    }
-
-    if (isFree && (projects.length !== 1 || projects[0]?.name !== 'default')) {
-      this.refuse(
-        ERROR_CODES.SERVICE_ERROR,
-        'free onboarding requires the server-provisioned default project; retry signup provisioning before setup',
-      );
-      return;
-    }
-
-    if (!isFree && (!cmdOptions.org || (!cmdOptions.project && !cmdOptions.createProject))) {
+    if (!cmdOptions.org || (!cmdOptions.project && !cmdOptions.createProject)) {
       this.refuse(
         ERROR_CODES.AMBIGUOUS_PROJECT,
         'Choose an organization and project: pass --org <id> with --project <id> or --create-project <name>.',
@@ -350,14 +300,8 @@ export class SetupCommand {
       return;
     }
 
-    const selected = isFree ? projects[0] : projects.find((project) => project.id === cmdOptions.project);
-    if (recoverFreeStub && (!selected || selected.id !== existingKeep!.project_id
-      || selected.organization_id !== existingKeep!.org_id || org.id !== existingKeep!.org_id)) {
-      this.refuse('SETUP_TARGET_INVALID', 'The legacy free keep.lock belongs to a different organization or project.');
-      return;
-    }
-    if ((isFree && (cmdOptions.createProject || (cmdOptions.project && cmdOptions.project !== selected?.id)))
-      || (!isFree && cmdOptions.project && (!selected || selected.organization_id !== org.id))) {
+    const selected = projects.find((project) => project.id === cmdOptions.project);
+    if (cmdOptions.project && (!selected || selected.organization_id !== org.id)) {
       this.refuse('SETUP_TARGET_INVALID', 'The selected project is not an available target in this organization.');
       return;
     }
@@ -374,12 +318,6 @@ export class SetupCommand {
 
     const localEnv = this.fileManager.readEnvFile(this.cliOptions.envPath);
     const envVariableNames = sortedStrings(Object.keys(localEnv));
-    const authority = resolveBillingSyncAuthority(
-      billingOutcome.value,
-      org.id,
-      { id: project.id, name: project.name, organization_id: org.id },
-      branch,
-    );
     const remoteObservation = project.status === 'existing'
       ? await this.serviceClient.getDecryptData(project.id, branch, undefined, true)
         .then((value) => ({ ok: true as const, value }))
@@ -394,34 +332,16 @@ export class SetupCommand {
       : undefined;
     this.checkOperation();
     const remoteVariableNames = sortedStrings(Object.keys(remoteKeep?.variables ?? {}));
-    const rootEnvExists = this.cliOptions.envPath
-      ? existsSync(this.cliOptions.envPath)
-      : projectState.hasEnvFile;
-    const syncDecision = planCanonicalSync({
-      authority,
-      rootEnv: { exists: rootEnvExists, variableNames: envVariableNames },
-      remote: {
-        keepMarkerExists: remoteObservation.value?.keep_file !== undefined,
-        variableNames: remoteVariableNames,
-      },
-    });
-
     const plan: SetupPlanFacts = {
       action,
       org,
       project,
       branch,
       envVariableNames,
-      syncMode: syncDecision.mode,
-      syncAction: syncDecision.action,
       remoteVariableNames,
       environment: `${this.devMode ? 'development' : 'configured'}:${resolveActiveUrl(this.devMode)}`,
       envPath: resolve(this.cliOptions.envPath ?? '.env'),
       choices: { org: cmdOptions.org, project: cmdOptions.project, createProject: cmdOptions.createProject },
-      recoverFreeStub,
-      legacyKeepHash: recoverFreeStub
-        ? createHash('sha256').update(readFileSync(this.projectManager.getKeepPath())).digest('hex')
-        : null,
     };
     const planHash = computePlanHash(process.cwd(), plan);
 
@@ -433,15 +353,11 @@ export class SetupCommand {
         org,
         project,
         branch,
-        sync_mode: plan.syncMode,
-        sync_action: plan.syncAction,
         // Existing setup merges local entries or pulls remote; neither deletes remote entries.
         removed_remote_variable_names: [],
-        keep_lock_path: plan.syncMode === 'paid' ? 'keep.lock' : null,
+        keep_lock_path: 'keep.lock',
         env: { path: '.env', variable_count: envVariableNames.length, variable_names: envVariableNames },
-        will_write: plan.syncMode === 'paid'
-          ? (envVariableNames.length > 0 || remoteVariableNames.length > 0 ? ['keep.lock', '.env'] : ['keep.lock'])
-          : (plan.syncAction === 'create_empty_remote_marker' || (!rootEnvExists && remoteVariableNames.length === 0) ? [] : ['.env']),
+        will_write: envVariableNames.length > 0 || remoteVariableNames.length > 0 ? ['keep.lock', '.env'] : ['keep.lock'],
         confirm_command: setupConfirmCommand(
           this.devMode ? 'capy-dev' : process.env.CAPY_BIN_NAME || 'capy',
           planHash,
@@ -517,7 +433,7 @@ export class SetupCommand {
 
   /**
    * Project-key resolution for the apply path shares the same custody-source
-   * precedence as free sync. A configured runtime pair is an explicit,
+   * precedence as sync. A configured runtime pair is an explicit,
    * exclusive instruction to use its live grant; setup must not silently
    * fall back to older durable key material when that grant has expired.
    * Without this alignment setup could report success through disk custody
@@ -525,7 +441,7 @@ export class SetupCommand {
    * DEVICE_KEY_GRANT_NOT_FOUND against the stale runtime-pair record.
    */
   private async resolveEncryptionKey(orgId: string, projectId: string, userId: string): Promise<string> {
-    return resolveFreeSyncProjectKey(
+    return resolveConfiguredProjectKey(
       orgId,
       projectId,
       userId,
@@ -536,11 +452,6 @@ export class SetupCommand {
 
   private async apply(plan: SetupPlanFacts, authResult: AuthResult, localEnv: Readonly<Record<string, string>>): Promise<void> {
     this.checkOperation();
-    if (plan.syncMode === 'free') {
-      await this.applyFree(plan, authResult, localEnv);
-      return;
-    }
-
     const userId = authResult.user_id!;
     const branch = plan.branch;
 
@@ -685,198 +596,4 @@ export class SetupCommand {
     });
   }
 
-  /**
-   * Initial single-user onboarding. The remote keep is authoritative and is
-   * deliberately never written to `keep.lock`; only encrypted `.env` data and
-   * gitignored runtime metadata land in the working tree.
-   */
-  private async applyFree(
-    plan: SetupPlanFacts,
-    authResult: AuthResult,
-    localEnv: Readonly<Record<string, string>>,
-  ): Promise<void> {
-    const userId = authResult.user_id!;
-    const resolved = await this.resolveOrCreateProject(plan);
-    this.checkOperation();
-    if (!resolved.ok) {
-      this.refuse(resolved.code, resolved.detail, { env_rewritten: false, failure_stage: 'resolve_project' });
-      return;
-    }
-
-    const encryptionKeyOutcome = await this.resolveEncryptionKey(plan.org.id, resolved.project.id, userId)
-      .then((key) => ({ ok: true as const, key }))
-      .catch((err: unknown) => ({ ok: false as const, err }));
-    if (!encryptionKeyOutcome.ok) {
-      this.refuse(codeOf(encryptionKeyOutcome.err), detailOf(encryptionKeyOutcome.err), { env_rewritten: false, failure_stage: 'resolve_key' });
-      return;
-    }
-    const encryptionKey = encryptionKeyOutcome.key;
-    this.checkOperation();
-    const projectKeep: KeepFile = {
-      ...resolved.keep,
-      org_id: plan.org.id,
-      project_id: resolved.project.id,
-      project_name: resolved.project.name,
-    };
-
-    if (plan.syncAction === 'fetch_remote') {
-      const remote = await this.serviceClient.getDecryptData(resolved.project.id, plan.branch, undefined, true)
-        .then((value) => ({ ok: true as const, value }))
-        .catch((err: unknown) => ({ ok: false as const, err }));
-      if (!remote.ok) {
-        this.refuse(codeOf(remote.err), detailOf(remote.err), { env_rewritten: false });
-        return;
-      }
-      if (!remote.value.keep_file) {
-        this.refuse(ERROR_CODES.PLAN_CHANGED, 'remote state changed since this plan was computed — re-run capy setup --json');
-        return;
-      }
-      this.checkOperation();
-
-      const remoteKeep = {
-        ...(JSON.parse(remote.value.keep_file) as KeepFile),
-        org_id: plan.org.id,
-        project_id: resolved.project.id,
-        project_name: resolved.project.name,
-      };
-      const remotePlaintext = Object.fromEntries(
-        Object.entries(this.fileManager.parseEnvContent(remote.value.env_content ?? ''))
-          .flatMap(([name, value]) => {
-            try {
-              return [[name, this.fileManager.decryptValue(value, encryptionKey)] as const];
-            } catch {
-              return [];
-            }
-          }),
-      );
-      this.checkOperation();
-      this.projectManager.writeActiveBranch(plan.branch);
-      this.fileManager.ensureCapyGitignore();
-      if (Object.keys(remotePlaintext).length > 0 || existsSync(this.projectManager.getEnvPath(this.cliOptions.envPath))) {
-        this.fileManager.writeEncryptedEnvFile(remotePlaintext, encryptionKey, this.cliOptions.envPath, remoteKeep, plan.branch);
-      }
-      const keepHash = SyncEngine.computeKeepHash(remoteKeep, plan.branch);
-      this.fileManager.writeSyncState({
-        last_sync: new Date().toISOString(),
-        synced_variables: Object.keys(remotePlaintext),
-        user_id: userId,
-        org_id: plan.org.id,
-        project_id: resolved.project.id,
-        project_name: resolved.project.name,
-        sync_mode: 'free',
-        keep_hash: setSyncKeepHash(null, plan.branch, keepHash),
-      });
-      writeKeepCache(plan.org.id, resolved.project.id, keepHash, remote.value.env_content ?? '');
-      installGitHooks(this.devMode);
-      this.removeRecoveredFreeStub(plan);
-      this.printResult({
-        ok: true,
-        action: plan.action,
-        sync_mode: 'free',
-        sync_action: 'fetch_remote',
-        org: plan.org,
-        project: { id: resolved.project.id, name: resolved.project.name, status: plan.project.status },
-        branch: plan.branch,
-        keep_lock_path: null,
-        secrets_written: Object.keys(remotePlaintext).length,
-        git_hooks_installed: true,
-      });
-      return;
-    }
-
-    const encryptedEntries = Object.entries(localEnv).filter(([, value]) => value.startsWith('capy:'));
-    const foreignKeys = encryptedEntries
-      .filter(([, value]) => !this.decryptsWithKey(value, encryptionKey))
-      .map(([name]) => name);
-    if (foreignKeys.length > 0) {
-      this.refuse(ERROR_CODES.PERMISSION_DENIED, "this .env holds values encrypted with a different project's key", { names: foreignKeys, env_rewritten: false });
-      return;
-    }
-    const resolvedLocalEnv = plan.syncAction === 'create_empty_remote_marker'
-      ? {}
-      : Object.fromEntries(
-          Object.entries(localEnv).map(([name, value]) => [
-            name,
-            value.startsWith('capy:') ? this.fileManager.decryptValue(value, encryptionKey) : value,
-          ]),
-        );
-    const built = Object.entries(resolvedLocalEnv).reduce<{
-      readonly encrypted: Readonly<Record<string, string>>;
-      readonly pushedVars: Readonly<Record<string, { readonly resource_id: string; readonly value_hash: string }>>;
-    }>(
-      (acc, [name, value]) => {
-        const resourceId = deriveResourceId(plan.branch, name);
-        return {
-          encrypted: { ...acc.encrypted, [name]: `capy:${resourceId}:${Encryptor.encrypt(value, encryptionKey)}` },
-          pushedVars: {
-            ...acc.pushedVars,
-            [name]: { resource_id: resourceId, value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16) },
-          },
-        };
-      },
-      { encrypted: {}, pushedVars: {} },
-    );
-    const envBlob = Object.entries(built.encrypted).map(([name, value]) => `${name}=${value}`).join('\n');
-    const updatedKeep = this.syncEngine.mergeWithKeep(projectKeep, built.pushedVars, plan.branch);
-    this.checkOperation();
-    const pushed = await this.serviceClient.pushSecrets(
-      resolved.project.id,
-      JSON.stringify(updatedKeep),
-      envBlob,
-      plan.branch,
-    ).then((value) => ({ ok: true as const, value }))
-      .catch((err: unknown) => ({ ok: false as const, err }));
-    if (!pushed.ok) {
-      this.refuse(codeOf(pushed.err), detailOf(pushed.err), { env_rewritten: false, pushed: false, failure_stage: 'push' });
-      return;
-    }
-    this.checkOperation();
-
-    const adoptedKeep = SyncEngine.adoptServerKeep(pushed.value.keep_file, updatedKeep, plan.branch);
-    const keepHash = SyncEngine.computeKeepHash(adoptedKeep, plan.branch);
-    writeKeepCache(plan.org.id, resolved.project.id, keepHash, envBlob);
-    this.projectManager.writeActiveBranch(plan.branch);
-    this.fileManager.ensureCapyGitignore();
-    this.fileManager.writeSyncState({
-      last_sync: new Date().toISOString(),
-      synced_variables: Object.keys(resolvedLocalEnv),
-      user_id: userId,
-      org_id: plan.org.id,
-      project_id: resolved.project.id,
-      project_name: resolved.project.name,
-      sync_mode: 'free',
-      keep_hash: setSyncKeepHash(null, plan.branch, keepHash),
-    });
-    if (plan.syncAction === 'push_root_env') {
-      this.fileManager.backupPlaintextEnv(this.cliOptions.envPath, true);
-      this.fileManager.writeEncryptedEnvFile(resolvedLocalEnv, encryptionKey, this.cliOptions.envPath, adoptedKeep, plan.branch);
-    }
-    installGitHooks(this.devMode);
-    this.removeRecoveredFreeStub(plan);
-    this.printResult({
-      ok: true,
-      action: plan.action,
-      sync_mode: 'free',
-      sync_action: plan.syncAction,
-      org: plan.org,
-      project: { id: resolved.project.id, name: resolved.project.name, status: plan.project.status },
-      branch: plan.branch,
-      keep_lock_path: null,
-      secrets_written: Object.keys(resolvedLocalEnv).length,
-      git_hooks_installed: true,
-    });
-  }
-
-  /** Delete only the exact legacy stub whose bytes and target were planned. */
-  private removeRecoveredFreeStub(plan: SetupPlanFacts): void {
-    if (!plan.recoverFreeStub || plan.legacyKeepHash === null) return;
-    const path = this.projectManager.getKeepPath();
-    const currentHash = existsSync(path)
-      ? createHash('sha256').update(readFileSync(path)).digest('hex') : null;
-    const keep = currentHash === plan.legacyKeepHash ? this.projectManager.readKeepFile() : null;
-    const safe = keep !== null && keep.org_id === plan.org.id && keep.project_id === plan.project.id
-      && keep.project_name === 'default' && Object.keys(keep.variables).length === 0;
-    if (!safe) throw new CapyError('keep.lock changed while free first sync was running; it was left untouched.', ERROR_CODES.PLAN_CHANGED);
-    unlinkSync(path);
-  }
 }

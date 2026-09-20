@@ -22,7 +22,7 @@ mock.module('../../../src/files/fileManager', () => ({ FileManager: class {
   })); }
   decryptValue(value: string, key: string) { return decrypt(value, key); }
 } }));
-mock.module('../../../src/sync/freeSyncKeyResolver', () => ({ resolveFreeSyncProjectKey: resolveKey }));
+mock.module('../../../src/sync/projectKeyResolver', () => ({ resolveConfiguredProjectKey: resolveKey }));
 const { resolveBoundIntakeContext } = await import('../../../src/commands/connectors/boundIntakeContext');
 const target = { org_id: 'org_test', project_id: 'project', project_name: 'default', branch: 'development', sync_mode: 'free' as const };
 function dependencies() {
