@@ -374,6 +374,21 @@
           }
         }
       }
+    },
+    "pair_runtime": {
+      "flips": "N/A — chunk 1 (docs/onboarding/level-set-2026-09-03.md §5) mints this step (onboard stage signup_ready) but implements no trigger past it; the verb exists in the closed vocabulary so a client that reaches signup_ready has something valid to render, not a live executor yet.",
+      "requires_consent": {
+        "default": false,
+        "why": "Pairing is its own ceremony (chunk 2, RFC 8628 device grant + grant ceremony) — not a write this contract gates behind an onboarding plan dialog."
+      },
+      "executor": "Chunk 2: pair this runtime with the account. No executor exists yet in chunk 1.",
+      "idempotent_because": "Re-asked while stage stays signup_ready, this verb is reissued unchanged until chunk 2's trigger advances the stage — same level-triggered re-ask discipline as checkout's own verbs.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {}
+      }
     }
   },
   "screens": {
@@ -410,6 +425,16 @@
             "description": "CAP-542 wave 2. OPTIONAL — present only when this ceremony is the mint-org-key rail (engine.ts): the driving machine holds a live session but the PINNED org's key has never been minted at all, so there is no key anywhere to transport and the CAP-382 unlock ceremony (local_action unlock_org_key) would only fail with KEY_NOT_ON_DEVICE. Names which org this ceremony mints. Absent for every other sandbox_session use (the ordinary auth ceremony, S1/A1) — a client that sees it present is minting, not authenticating."
           }
         }
+      }
+    },
+    "signup": {
+      "purpose": "onboarding-v2-signup",
+      "doc": "The Keep signup page (chunk 1, docs/onboarding/level-set-2026-09-03.md §2 decision 1: entrances A and C both land here). The onboard flow instance is anonymous to this screen — Keep completes account readiness (identity, recovery phrase, org, initial PRF custody, authoritative finalize) and the service observes readiness itself (push from the finalize routes, pull on GET) rather than this screen reporting anything back through the flow contract.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {}
       }
     }
   },
