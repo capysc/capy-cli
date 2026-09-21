@@ -140,6 +140,8 @@ function setupMocks(overrides: {
   MockServiceClient.mockImplementation(() => mockServiceClient);
   MockResolveProjectKey.mockImplementation(async () => 'mock-project-key');
   MockResolveFreeSyncProjectKey.mockImplementation(async () => 'mock-project-key');
+  MockWriteKeepCache.mockClear();
+  MockInstallGitHooks.mockClear();
   return { log, mockProjectManager, mockFileManager, mockAuthService, mockServiceClient };
 }
 
@@ -154,7 +156,7 @@ function parsedOutput(log: ReturnType<typeof mock>): any {
 }
 
 describe('SyncCommand — capy sync --json', () => {
-  test('free sync rejects ambiguous default projects before fetching secrets', async () => {
+  test('an uninitialized repository refuses before project discovery or local writes', async () => {
     const { log, mockServiceClient, mockFileManager } = setupMocks({
       projectManager: { detectProjectState: mock(async () => ({ initialized: false })) },
       serviceClient: { listProjects: mock(async () => [
@@ -163,13 +165,14 @@ describe('SyncCommand — capy sync --json', () => {
       ]) },
     });
     await new SyncCommand().execute();
-    expect(parsedOutput(log).code).toBe(ERROR_CODES.PERMISSION_DENIED);
+    expect(parsedOutput(log).code).toBe(ERROR_CODES.SYNC_NOT_INITIALIZED);
+    expect(mockServiceClient.listProjects).not.toHaveBeenCalled();
     expect(mockServiceClient.getDecryptData).not.toHaveBeenCalled();
     expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
   });
 
   for (const failure of ['identity', 'decryption'] as const) {
-    test(`free sync ${failure} failure refuses before every repository write`, async () => {
+    test(`an uninitialized repository ignores ${failure} fixture data before every repository write`, async () => {
       const { log, mockProjectManager, mockFileManager } = setupMocks({
         projectManager: { detectProjectState: mock(async () => ({ initialized: false })) },
         serviceClient: { getDecryptData: mock(async () => ({
@@ -183,7 +186,7 @@ describe('SyncCommand — capy sync --json', () => {
       });
       await new SyncCommand().execute();
       const output = parsedOutput(log);
-      expect(output.code).toBe(failure === 'identity' ? ERROR_CODES.PERMISSION_DENIED : ERROR_CODES.DECRYPT_KEY_MISMATCH);
+      expect(output.code).toBe(ERROR_CODES.SYNC_NOT_INITIALIZED);
       expect(JSON.stringify(output)).not.toContain('PRIVATE_SENTINEL');
       expect(mockProjectManager.writeActiveBranch).not.toHaveBeenCalled();
       expect(mockFileManager.ensureCapyGitignore).not.toHaveBeenCalled();
@@ -248,7 +251,7 @@ describe('SyncCommand — capy sync --json', () => {
     expect(mockServiceClient.listProjects).not.toHaveBeenCalled();
   });
 
-  test('no keep.lock + free billing: pulls the authoritative default-project snapshot without writing keep.lock', async () => {
+  test('legacy lockless sync state is refused before fetching or writing the repository', async () => {
     const { log, mockFileManager } = setupMocks({
       projectManager: {
         detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true })),
@@ -288,40 +291,13 @@ describe('SyncCommand — capy sync --json', () => {
     await new SyncCommand().execute();
 
     const out = parsedOutput(log);
-    expect(out).toMatchObject({
-      ok: true,
-      action: 'sync',
-      sync_mode: 'free',
-      sync_action: 'fetch_remote',
-      branch: 'development',
-      keep_lock_path: null,
-      pulled_variables: 1,
-    });
+    expect(out.code).toBe('LEGACY_KEEP_MODE_UNSUPPORTED');
     expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
-    expect(MockResolveFreeSyncProjectKey).toHaveBeenCalledWith(
-      'org_1',
-      'proj_default',
-      'user_1',
-      expect.objectContaining({ coDecrypt: expect.any(Function), wrapOuterLayer: expect.any(Function) }),
-      expect.objectContaining({ fetchKeyEnc: expect.any(Function), coDecrypt: expect.any(Function) }),
-    );
-    expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
-      { REMOTE_ONLY: 'authoritative-remote-value' },
-      'mock-project-key',
-      undefined,
-      expect.objectContaining({ project_id: 'proj_default', project_name: 'default' }),
-      'development',
-    );
-    expect(mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
-      org_id: 'org_1',
-      project_id: 'proj_default',
-      project_name: 'default',
-      sync_mode: 'free',
-      synced_variables: ['REMOTE_ONLY'],
-    }));
+    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+    expect(mockFileManager.writeSyncState).not.toHaveBeenCalled();
   });
 
-  test('no keep.lock + free billing + absent .env + empty remote marker: leaves .env absent but updates sync metadata', async () => {
+  test('legacy lockless state with an empty marker is refused before local writes', async () => {
     const { log, mockProjectManager, mockFileManager } = setupMocks({
       projectManager: {
         detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false })),
@@ -358,30 +334,17 @@ describe('SyncCommand — capy sync --json', () => {
     await new SyncCommand().execute();
 
     const out = parsedOutput(log);
-    expect(out).toMatchObject({
-      ok: true,
-      action: 'sync',
-      sync_mode: 'free',
-      sync_action: 'fetch_remote',
-      pulled_variables: 0,
-      keep_lock_path: null,
-    });
+    expect(out.code).toBe('LEGACY_KEEP_MODE_UNSUPPORTED');
     expect(mockFileManager.writeKeepFile).not.toHaveBeenCalled();
     expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
-    expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('development');
-    expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalledTimes(1);
-    expect(mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
-      org_id: 'org_1',
-      project_id: 'proj_default',
-      project_name: 'default',
-      sync_mode: 'free',
-      synced_variables: [],
-    }));
-    expect(MockWriteKeepCache).toHaveBeenCalledWith('org_1', 'proj_default', 'a'.repeat(64), '');
-    expect(MockInstallGitHooks).toHaveBeenCalledWith(false);
+    expect(mockProjectManager.writeActiveBranch).not.toHaveBeenCalled();
+    expect(mockFileManager.ensureCapyGitignore).not.toHaveBeenCalled();
+    expect(mockFileManager.writeSyncState).not.toHaveBeenCalled();
+    expect(MockWriteKeepCache).not.toHaveBeenCalled();
+    expect(MockInstallGitHooks).not.toHaveBeenCalled();
   });
 
-  test('no keep.lock + free billing + existing .env + empty remote marker: replaces local file with authoritative empty remote', async () => {
+  test('legacy lockless state with a local env is refused before replacing it', async () => {
     const { log, mockFileManager } = setupMocks({
       projectManager: {
         detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true })),
@@ -418,21 +381,12 @@ describe('SyncCommand — capy sync --json', () => {
 
     await new SyncCommand().execute();
 
-    expect(parsedOutput(log)).toMatchObject({ ok: true, pulled_variables: 0 });
-    expect(mockFileManager.writeEncryptedEnvFile).toHaveBeenCalledWith(
-      {},
-      'mock-project-key',
-      undefined,
-      expect.objectContaining({ project_id: 'proj_default', project_name: 'default' }),
-      'development',
-    );
-    expect(mockFileManager.writeSyncState).toHaveBeenCalledWith(expect.objectContaining({
-      synced_variables: [],
-      sync_mode: 'free',
-    }));
+    expect(parsedOutput(log).code).toBe('LEGACY_KEEP_MODE_UNSUPPORTED');
+    expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+    expect(mockFileManager.writeSyncState).not.toHaveBeenCalled();
   });
 
-  test('no keep.lock + free billing but no remote marker: refuses because first sync is incomplete', async () => {
+  test('legacy lockless state without a marker is refused before first-sync fallback', async () => {
     const { log, mockFileManager } = setupMocks({
       projectManager: {
         detectProjectState: mock(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false })),
@@ -448,12 +402,7 @@ describe('SyncCommand — capy sync --json', () => {
 
     await new SyncCommand().execute();
 
-    expect(parsedOutput(log)).toEqual({
-      ok: false,
-      code: ERROR_CODES.SYNC_NOT_INITIALIZED,
-      detail: 'the default project has not completed its first sync',
-      remedy: 'capy setup --json',
-    });
+    expect(parsedOutput(log).code).toBe('LEGACY_KEEP_MODE_UNSUPPORTED');
     expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
   });
 

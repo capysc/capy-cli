@@ -406,7 +406,7 @@ describe('SetupCommand — apply (capy setup --json --confirm <hash>)', () => {
   });
 });
 
-describe('SetupCommand — billing-authoritative free onboarding', () => {
+describe('SetupCommand — explicit Keep project binding', () => {
   function useFreeDefaultProject(): void {
     mockProjectManager().detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: false }));
     mockServiceClient().getBillingStatus.mockImplementation(async () => ({
@@ -418,11 +418,6 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
       project_count: 1,
     }));
     mockServiceClient().listProjects.mockImplementation(async () => [{ id: 'project_default', name: 'default', organization_id: ORG.id }]);
-  }
-
-  async function planHash(): Promise<string> {
-    await new SetupCommand().execute({});
-    return JSON.parse(logs().at(-1)!).plan_hash;
   }
 
   test('an empty legacy default lock for another user remains initialized', async () => {
@@ -437,85 +432,7 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
     expect(parsedOutput().code).toBe(ERROR_CODES.SETUP_ALREADY_INITIALIZED);
   });
 
-  test('remote marker wins over local values and the plan forbids local keep.lock', async () => {
-    useFreeDefaultProject();
-    mockProjectManager().detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
-    mockFileManager().readEnvFile.mockImplementation(() => ({ STALE_LOCAL: 'old' }));
-    mockServiceClient().getDecryptData.mockImplementation(async () => ({
-      env_content: '',
-      decrypt_key: '',
-      expires_at: new Date().toISOString(),
-      keep_file: JSON.stringify({ version: '3.0', org_id: ORG.id, project_id: 'project_default', project_name: 'default', variables: {} }),
-    }));
-
-    await new SetupCommand().execute({});
-    const out = parsedOutput();
-    expect(out.sync_mode).toBe('free');
-    expect(out.sync_action).toBe('fetch_remote');
-    expect(out.keep_lock_path).toBeNull();
-    expect(out.will_write).toEqual(['.env']);
-  });
-
-  test('remote fetch applies without ever materializing the authoritative remote keep.lock locally', async () => {
-    useFreeDefaultProject();
-    mockProjectManager().detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
-    mockFileManager().readEnvFile.mockImplementation(() => ({ STALE_LOCAL: 'old' }));
-    mockServiceClient().getDecryptData.mockImplementation(async () => ({
-      env_content: 'REMOTE_ONLY=encrypted',
-      decrypt_key: '',
-      expires_at: new Date().toISOString(),
-      keep_file: JSON.stringify({
-        version: '3.0',
-        org_id: ORG.id,
-        project_id: 'project_default',
-        project_name: 'default',
-        variables: { REMOTE_ONLY: [] },
-      }),
-    }));
-    mockFileManager().parseEnvContent.mockImplementation(() => ({ REMOTE_ONLY: 'encrypted' }));
-    const hash = await planHash();
-
-    await new SetupCommand().execute({ confirm: hash });
-    const out = JSON.parse(logs().at(-1)!);
-    expect(out.sync_mode).toBe('free');
-    expect(out.sync_action).toBe('fetch_remote');
-    expect(out.keep_lock_path).toBeNull();
-    expect(mockFileManager().writeKeepFile).not.toHaveBeenCalled();
-    expect(mockFileManager().writeEncryptedEnvFile).toHaveBeenCalledTimes(1);
-  });
-
-  test('local-only root .env pushes through the canonical corpus without writing keep.lock', async () => {
-    useFreeDefaultProject();
-    mockProjectManager().detectProjectState.mockImplementation(async () => ({ initialized: false, hasKeepFile: false, hasEnvFile: true }));
-    mockFileManager().readEnvFile.mockImplementation(() => ({ API_KEY: 'secret' }));
-    const hash = await planHash();
-
-    await new SetupCommand().execute({ confirm: hash });
-    const out = JSON.parse(logs().at(-1)!);
-    expect(out.ok).toBe(true);
-    expect(out.sync_action).toBe('push_root_env');
-    expect(out.keep_lock_path).toBeNull();
-    expect(mockServiceClient().pushSecrets).toHaveBeenCalledTimes(1);
-    expect(mockFileManager().writeKeepFile).not.toHaveBeenCalled();
-    expect(mockFileManager().writeEncryptedEnvFile).toHaveBeenCalledTimes(1);
-  });
-
-  test('no local or remote env creates an empty remote marker and leaves .env absent', async () => {
-    useFreeDefaultProject();
-    const hash = await planHash();
-
-    await new SetupCommand().execute({ confirm: hash });
-    const out = JSON.parse(logs().at(-1)!);
-    expect(out.ok).toBe(true);
-    expect(out.sync_action).toBe('create_empty_remote_marker');
-    expect(out.keep_lock_path).toBeNull();
-    expect(mockServiceClient().pushSecrets).toHaveBeenCalledTimes(1);
-    expect(mockServiceClient().pushSecrets.mock.calls[0]?.[2]).toBe('');
-    expect(mockFileManager().writeKeepFile).not.toHaveBeenCalled();
-    expect(mockFileManager().writeEncryptedEnvFile).not.toHaveBeenCalled();
-  });
-
-  test('stale .capy metadata does not establish a project binding without keep.lock', async () => {
+  test('retired lockless sync metadata is refused before any network or local write', async () => {
     useFreeDefaultProject();
     mockProjectManager().readSyncState.mockImplementation(() => ({
       last_sync: '2026-09-01T00:00:00.000Z',
@@ -527,76 +444,18 @@ describe('SetupCommand — billing-authoritative free onboarding', () => {
       sync_mode: 'free',
     }));
 
-    await new SetupCommand().execute({});
-
-    const out = parsedOutput();
-    expect(out.ok).toBe(true);
-    expect(out.project.id).toBe('project_default');
-    expect(mockProjectManager().readSyncState).not.toHaveBeenCalled();
-  });
-
-  test('a missing default project refuses instead of silently inferring paid mode', async () => {
-    useFreeDefaultProject();
-    mockServiceClient().listProjects.mockImplementation(async () => []);
-    await new SetupCommand().execute({});
-    const out = parsedOutput();
-    expect(out.ok).toBe(false);
-    expect(out.code).toBe(ERROR_CODES.SERVICE_ERROR);
+    await expect(new SetupCommand().execute({})).rejects.toMatchObject({ code: 'LEGACY_KEEP_MODE_UNSUPPORTED' });
+    expect(mockServiceClient().listProjects).not.toHaveBeenCalled();
     expect(mockFileManager().writeKeepFile).not.toHaveBeenCalled();
+    expect(mockFileManager().writeEncryptedEnvFile).not.toHaveBeenCalled();
+    expect(mockServiceClient().pushSecrets).not.toHaveBeenCalled();
   });
 
-  test('hosted free target cannot become paid before apply', async () => {
+  test('a retired lockless target is invalid before planning', async () => {
     await new SetupCommand().execute({ expectedSyncMode: 'free', org: ORG.id, project: 'project_default' });
-    expect(parsedOutput().code).toBe(ERROR_CODES.PLAN_CHANGED);
+    expect(parsedOutput().code).toBe('SETUP_TARGET_INVALID');
     expect(mockServiceClient().pushSecrets).not.toHaveBeenCalled();
     expect(mockFileManager().writeKeepFile).not.toHaveBeenCalled();
-  });
-
-  test('hosted deadline after planning reads prevents any apply', async () => {
-    useFreeDefaultProject();
-    const hash = await planHash();
-    const service = mockServiceClient();
-    const auth = mockAuthService();
-    const command = new SetupCommand({}, false, undefined, {
-      authService: auth, serviceClient: service,
-      checkOperation: () => {
-        if (service.getDecryptData.mock.calls.length >= 2) throw new CapyError('Expired', 'INIT_RUN_EXPIRED');
-      },
-    });
-    await expect(command.execute({ confirm: hash })).rejects.toMatchObject({ code: 'INIT_RUN_EXPIRED' });
-    expect(service.pushSecrets).not.toHaveBeenCalled();
-    expect(mockFileManager().writeSyncState).not.toHaveBeenCalled();
-  });
-
-  test('hosted authority loss after key resolution prevents push and local writes', async () => {
-    useFreeDefaultProject();
-    const hash = await planHash();
-    const service = mockServiceClient();
-    const command = new SetupCommand({}, false, undefined, {
-      authService: mockAuthService(), serviceClient: service,
-      checkOperation: () => {
-        if (MockResolveFreeSyncProjectKey.mock.calls.length > 0) throw new CapyError('Authority changed', 'INIT_BINDING_MISMATCH');
-      },
-    });
-    await expect(command.execute({ confirm: hash })).rejects.toMatchObject({ code: 'INIT_BINDING_MISMATCH' });
-    expect(service.pushSecrets).not.toHaveBeenCalled();
-    expect(mockFileManager().writeSyncState).not.toHaveBeenCalled();
-  });
-
-  test('hosted expiry after an in-flight push prevents subsequent local effects', async () => {
-    useFreeDefaultProject();
-    const hash = await planHash();
-    const service = mockServiceClient();
-    const command = new SetupCommand({}, false, undefined, {
-      authService: mockAuthService(), serviceClient: service,
-      checkOperation: () => {
-        if (service.pushSecrets.mock.calls.length > 0) throw new CapyError('Expired', 'INIT_RUN_EXPIRED');
-      },
-    });
-    await expect(command.execute({ confirm: hash })).rejects.toMatchObject({ code: 'INIT_RUN_EXPIRED' });
-    expect(service.pushSecrets).toHaveBeenCalledTimes(1);
-    expect(mockFileManager().writeSyncState).not.toHaveBeenCalled();
-    expect(mockFileManager().writeEncryptedEnvFile).not.toHaveBeenCalled();
   });
 
   test('grandfathered free billing delegates to the unchanged paid manifest executor', async () => {
