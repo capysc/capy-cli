@@ -24,7 +24,7 @@ import { join } from 'path';
 const TEMP_HOME = mkdtempSync(join(require('os').tmpdir(), 'capy-conflictux-home-'));
 mock.module('os', () => {
   const actual = require('os');
-  return { ...actual, homedir: () => TEMP_HOME };
+  return { ...actual, default: actual, homedir: () => TEMP_HOME };
 });
 
 const PROJECT_KEY = 'c'.repeat(64);
@@ -177,6 +177,7 @@ function resetState(): void {
 }
 
 beforeEach(() => {
+  process.exitCode = 0;
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
   mkdirSync(TEST_DIR, { recursive: true });
   process.chdir(TEST_DIR);
@@ -184,6 +185,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  process.exitCode = 0;
   process.chdir(ORIGINAL_CWD);
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
 });
@@ -196,6 +198,19 @@ function writeEnvHeader(): void {
     version: '3.0',
     org_id: 'org-header',
     project_id: 'proj-header',
+    project_name: 'default',
+    variables: {},
+  }));
+}
+
+function writeEditProject(): void {
+  writeFileSync(join(TEST_DIR, '.env'), '# capy:org_id=org-1\n# capy:project_id=proj-1\n\n');
+  mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+  writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development');
+  writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({
+    version: '3.0',
+    org_id: 'org-1',
+    project_id: 'proj-1',
     project_name: 'default',
     variables: {},
   }));
@@ -409,6 +424,7 @@ describe('addCommand — enriched overwrite/conflict gates', () => {
 
 describe('editCommand — same-key CAS conflict now offers the addCommand-style confirm', () => {
   test('decline refuses coded; the confirm carries the server-side context lines', async () => {
+    writeEditProject();
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
     listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
     const baseServerKeep: KeepFile = {
@@ -481,6 +497,7 @@ describe('editCommand — same-key CAS conflict now offers the addCommand-style 
   });
 
   test('accept lets the retried push land', async () => {
+    writeEditProject();
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
     listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
     const baseServerKeep: KeepFile = {
