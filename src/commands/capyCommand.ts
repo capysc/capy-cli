@@ -2876,7 +2876,6 @@ export class CapyCommand {
         remote: remotePlaintext[diff.variable] === undefined ? null : formatSnippet(remotePlaintext[diff.variable]),
       }));
       const unresolvable = new Set(diffs.filter((diff) => pinned[diff.variable] !== undefined && pinnedPlaintext[diff.variable] === undefined).map((diff) => diff.variable));
-      await interaction.output({ text: conflictSummary, level: 'info' });
       await interaction.output({ text: '', sync_conflict: buildConflictData({
         rows,
         unresolvable,
