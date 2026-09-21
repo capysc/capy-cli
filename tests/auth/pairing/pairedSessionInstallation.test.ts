@@ -86,10 +86,11 @@ test('per-subject snapshots preserve unrelated accounts without selecting one', 
   expect(backend.load('user_2')).toEqual(session('B1', 'user_2'));
 });
 
-test('fence-only subject refuses capture before device authorization', () => {
+test('fence-only subject is retained as unavailable and refuses installation', async () => {
   fence();
-  expect(() => capture()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
-  expect(() => capture('user_1')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  const baseline = capture();
+  expect(baseline.authorities).toEqual([{ userId: 'user_1', refreshAuthoritySha256: null, unavailable: true }]);
+  await expect(install(session('R1'), baseline)).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
 });
 
 test('a fence arriving after capture prevents installation without clearing it', async () => {
@@ -102,11 +103,15 @@ test('a fence arriving after capture prevents installation without clearing it',
   expect(JSON.parse(readFileSync(path(), 'utf8'))).toEqual(session('R0'));
 });
 
-test('malformed or scope-mismatched existing state refuses capture', () => {
+test('malformed or scope-mismatched existing state is retained as unavailable', async () => {
   backend.save(session('R0', 'user_2'), 'user_1');
-  expect(() => capture()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  const mismatched = capture();
+  expect(mismatched.authorities).toEqual([{ userId: 'user_1', refreshAuthoritySha256: null, unavailable: true }]);
+  await expect(install(session('R1'), mismatched)).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
   writeFileSync(path(), 'not-json', { mode: 0o600 });
-  expect(() => capture()).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  const malformed = capture();
+  expect(malformed.authorities).toEqual([{ userId: 'user_1', refreshAuthoritySha256: null, unavailable: true }]);
+  await expect(install(session('R1'), malformed)).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
 });
 
 test('legacy identity constrains the subject but never substitutes its token for target authority', async () => {

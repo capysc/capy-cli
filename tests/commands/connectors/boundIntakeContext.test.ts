@@ -43,22 +43,24 @@ beforeEach(() => {
   resolveKey.mockClear();
 });
 describe('same-repository bound intake context', () => {
-  test('changed paid branch and foreign encrypted environment refuse before key access', async () => {
+  test('changed branch and foreign encrypted environment refuse before key access', async () => {
     readKeep.mockReturnValue(keep);
     readBranch.mockReturnValue('other');
     const paid = dependencies();
     await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...paid })).rejects.toThrow('Repository binding changed');
-    readKeep.mockReturnValue(null);
+    readKeep.mockReturnValue(keep);
+    readBranch.mockReturnValue('development');
     readEnv.mockReturnValue({ LOCAL: 'capy:foreign' });
     readMeta.mockReturnValue({ org_id: 'different', project_id: 'project', branch: 'development' });
     const free = dependencies();
     await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...free })).rejects.toThrow('encrypted environment belongs to another target');
     expect(resolveKey).not.toHaveBeenCalled();
   });
-  test('free uses exact default and preserves remote plus local snapshot without a local manifest', async () => {
+  test('configured project preserves remote plus local snapshot', async () => {
+    readKeep.mockReturnValue(keep);
     const deps = dependencies();
     const ctx = await resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...deps });
-    expect(ctx.lockless).toBe(true);
+    expect(ctx.lockless).toBe(false);
     expect(ctx.localPlaintext).toEqual({ REMOTE: 'decrypted-value', LOCAL: 'local-value' });
     expect(deps.authenticateSilent).toHaveBeenCalledWith('org_test');
     expect(resolveKey.mock.calls[0]?.slice(0, 3)).toEqual(['org_test', 'project', 'user_test']);
@@ -72,29 +74,26 @@ describe('same-repository bound intake context', () => {
     expect(ctx.keep).toEqual(keep);
     expect(deps.listProjects).not.toHaveBeenCalled();
   });
-  test('free unexpected lock and paid absent lock fail before auth or key resolution', async () => {
+  test('a missing or mismatched manifest fails before auth or key resolution', async () => {
     readKeep.mockReturnValue(keep);
-    const free = dependencies();
-    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...free })).rejects.toThrow('Repository binding changed');
-    expect(free.authenticateSilent).not.toHaveBeenCalled();
+    readBranch.mockReturnValue('other');
+    const mismatched = dependencies();
+    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...mismatched })).rejects.toThrow('Repository binding changed');
+    expect(mismatched.authenticateSilent).not.toHaveBeenCalled();
     readKeep.mockReturnValue(null);
-    const paid = dependencies();
-    await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...paid })).rejects.toThrow('Repository binding changed');
+    const absent = dependencies();
+    await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...absent })).rejects.toThrow('Repository binding changed');
     expect(resolveKey).not.toHaveBeenCalled();
   });
-  test('wrong user, billing change and different free default cannot resolve project keys', async () => {
+  test('wrong user cannot resolve project keys', async () => {
+    readKeep.mockReturnValue(keep);
     const wrong = dependencies();
     wrong.authenticateSilent.mockResolvedValue({ success: true, user_id: 'other', organization_id: 'org_test' });
     await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...wrong })).rejects.toThrow('Resume sign-in');
-    const billing = dependencies();
-    billing.getBillingStatus.mockResolvedValue({ tier: 'team', grandfathered: false });
-    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...billing })).rejects.toThrow('Billing context changed');
-    const project = dependencies();
-    project.listProjects.mockResolvedValue([{ id: 'other', organization_id: 'org_test', name: 'default' }]);
-    await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...project })).rejects.toThrow('default project changed');
     expect(resolveKey).not.toHaveBeenCalled();
   });
   test('unreadable encrypted values fail instead of silently deleting remote keys', async () => {
+    readKeep.mockReturnValue(keep);
     const deps = dependencies();
     decrypt.mockImplementation(() => { throw new Error('fixture-secret-must-not-escape'); });
     await expect(resolveBoundIntakeContext({ target, expectedUserId: 'user_test', ...deps })).rejects.toThrow('A stored value cannot be decrypted');
@@ -103,6 +102,6 @@ describe('same-repository bound intake context', () => {
     readKeep.mockReturnValue({ ...keep, variables: { OLD: [{ branch: 'development', resource_id: 'resource', value_hash: 'hash' }] } });
     const deps = dependencies();
     deps.getBillingStatus.mockResolvedValue({ tier: 'team', grandfathered: false });
-    await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...deps })).rejects.toThrow('local paid manifest is stale');
+    await expect(resolveBoundIntakeContext({ target: { ...target, sync_mode: 'paid' }, expectedUserId: 'user_test', ...deps })).rejects.toThrow('local Keep manifest is stale');
   });
 });
