@@ -724,7 +724,7 @@ program
     }
     const { PairCommand } = await import('./commands/pairCommand');
     const cmd = new PairCommand();
-    const exitCode = await cmd.execute({ json: options.json });
+    const exitCode = await cmd.execute({ json: options.json === true || command.optsWithGlobals().json === true });
     if (exitCode !== 0) process.exit(exitCode);
   });
 
@@ -960,11 +960,11 @@ deviceKeyCmd
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--label <name>', 'display label the ceremony page shows (defaults to this host\'s name)')
   .option('--ttl-minutes <n>', 'grant lifetime in minutes (default 30)', (v) => parseInt(v, 10))
-  .action(async (options) => {
+  .action(async (options, command) => {
     assertNotLocalOnly('device-key grant');
     const { DeviceKeyGrantCommand } = await import('./commands/deviceKeyCommand');
     const cmd = new DeviceKeyGrantCommand();
-    await cmd.execute({ json: options.json, label: options.label, ttlMinutes: options.ttlMinutes });
+    await cmd.execute({ json: options.json === true || command.optsWithGlobals().json === true, label: options.label, ttlMinutes: options.ttlMinutes });
   });
 
 // CAP-384: internal-only. Never invoked directly by a human — spawnGrantDaemon
