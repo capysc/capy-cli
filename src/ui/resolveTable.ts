@@ -63,6 +63,7 @@ export class ResolveTable {
   private colIndex = 0;
   private confirmed: Set<number> = new Set();
   private selections: ColumnKey[];
+  private defaults: ColumnKey[];
   private cleanedUp = false;
   private totalLines = 0;
 
@@ -80,11 +81,12 @@ export class ResolveTable {
     // available column ('pinned'). A per-row default lets the caller pick a
     // safe, non-destructive value (e.g. avoid an unresolvable pinned value that
     // would silently drop the variable).
-    this.selections = rows.map((row, i) => {
+    this.defaults = rows.map((row, i) => {
       const avail = this.getAvailableColumns(row);
       const wanted = defaults?.[i];
       return wanted && avail.includes(wanted) ? wanted : avail[0];
     });
+    this.selections = [...this.defaults];
     // Highlight the active cell on the initial row's default so ← → move from
     // the right starting point instead of always from column 0 ('pinned').
     if (this.rows.length > 0) {
@@ -175,6 +177,14 @@ export class ResolveTable {
           return;
         }
 
+        if (key === ' ') {
+          this.confirmed.delete(this.rowIndex);
+          this.selections[this.rowIndex] = this.defaults[this.rowIndex];
+          this.colIndex = availCols.indexOf(this.defaults[this.rowIndex]);
+          this.draw();
+          return;
+        }
+
         if (key === '\r' || key === '\n') {
           this.confirmed.add(this.rowIndex);
 
@@ -241,7 +251,7 @@ export class ResolveTable {
     const lines: string[] = [];
 
     // Instructions above the table
-    lines.push(m + DIM + '← → select value   ↑ ↓ move between rows   Enter confirm   q cancel' + RESET);
+    lines.push(m + DIM + '← → select value   Space reset value   ↑ ↓ move between rows   Enter confirm   q cancel' + RESET);
     lines.push(m + `Resolved: ${this.confirmed.size}/${this.rows.length}`);
     lines.push('');
 
