@@ -6,7 +6,7 @@
  */
 import { spawn } from 'child_process';
 import { join } from 'path';
-import { writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import { Encryptor } from '../../src/crypto/encryptor';
 
 export function capyRun(
@@ -16,6 +16,12 @@ export function capyRun(
   args: string[],
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const cliPath = join(__dirname, '../../dist/index.js');
+  mkdirSync(join(home, '.capy'), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(home, '.capy', 'config.json'),
+    JSON.stringify({ default: 'test', profiles: { test: { url: serviceUrl } } }),
+    { mode: 0o600 },
+  );
   return new Promise((resolve) => {
     const child = spawn('node', [cliPath, 'run', ...args], {
       cwd,
