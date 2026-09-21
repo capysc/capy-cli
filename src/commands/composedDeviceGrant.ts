@@ -339,7 +339,7 @@ const startGrant = async (
   const identity = await auth.authenticateSilent();
   const token = identity.success ? await auth.getValidToken() : null;
   const baseline = capturePairedSessionInstallationBaseline(expectedUserId ?? token?.user_id ?? null);
-  const response = await request(origin, '/auth/device/authorize', token ? {} : { compose: 'signup', machine_name: hostname() })
+  const response = await request(origin, '/auth/device/authorize', token ? {} : { compose: 'signin', machine_name: hostname() })
     .catch(() => reject('AUTH_DEVICE_START_FAILED'));
   const authorization = await responseRecord(response);
   if (!response.ok || !authorization) return reject('AUTH_DEVICE_START_FAILED');
