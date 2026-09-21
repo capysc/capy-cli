@@ -19,6 +19,8 @@ export interface ResolveRow {
   variable: string;
   /** Snippet display for each column. null = value doesn't exist in that source. */
   pinned: string | null;
+  /** The prior pin exists but no concrete value can be reconstructed. */
+  pinnedUnresolvable?: boolean;
   local: string | null;
   remote: string | null;
 }
@@ -93,12 +95,13 @@ export class ResolveTable {
     }
   }
 
-  private getAvailableColumns(_row: ResolveRow): ColumnKey[] {
-    const cols: ColumnKey[] = ['pinned'];
-    if (this.showLocal) cols.push('local');
-    if (this.showRemote) cols.push('remote');
-    cols.push('delete');
-    return cols;
+  private getAvailableColumns(row: ResolveRow): ColumnKey[] {
+    return [
+      ...(row.pinnedUnresolvable ? [] : ['pinned' as const]),
+      ...(this.showLocal && row.local !== null ? ['local' as const] : []),
+      ...(this.showRemote && row.remote !== null ? ['remote' as const] : []),
+      'delete',
+    ];
   }
 
   private getVisibleColumns(): string[] {

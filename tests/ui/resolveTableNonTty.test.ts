@@ -76,3 +76,15 @@ describe('the conflict table with no terminal', () => {
     expect((table as unknown as { selections: ColumnKey[] }).selections).toEqual(defaults);
   });
 });
+
+test('never offers an unresolvable or absent source as a choice', () => {
+  const rows: ResolveRow[] = [{
+    variable: 'UNAVAILABLE_PIN',
+    pinned: 'unresolvable',
+    pinnedUnresolvable: true,
+    local: 'loc...001',
+    remote: null,
+  }];
+  const table = new ResolveTable(rows, true, true, ['pinned']);
+  expect((table as unknown as { selections: ColumnKey[] }).selections).toEqual(['local']);
+});

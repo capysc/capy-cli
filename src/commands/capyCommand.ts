@@ -3291,7 +3291,8 @@ export class CapyCommand {
     const rows: Row[] = diffs.map(diff => ({
       variable: diff.variable,
       pinned: pinnedSnippetFor(diff.variable),
-        local: localPlaintext[diff.variable]
+      pinnedUnresolvable: pinned[diff.variable] !== undefined && pinnedPlaintext[diff.variable] === undefined,
+      local: localPlaintext[diff.variable]
           ? formatSnippet(localPlaintext[diff.variable])
           : null,
         remote: remotePlaintext[diff.variable]
@@ -3301,18 +3302,40 @@ export class CapyCommand {
 
     const interaction = currentInteraction();
     if (interaction) {
-      const choices = await prompt<Record<string, 'pinned' | 'local' | 'remote' | 'delete'>>(rows.map((row) => ({
-        type: 'list',
-        name: row.variable,
-        message: `Choose a value for ${row.variable}`,
-        choices: [
-          { name: 'Pinned', value: 'pinned' },
-          ...(showLocal ? [{ name: 'Local', value: 'local' }] : []),
-          ...(showRemote ? [{ name: 'Remote', value: 'remote' }] : []),
-          { name: 'Delete', value: 'delete' },
-        ],
-      })));
-      return this.mapResolveChoicesToEnv(choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
+      const resolverRows = rows.map((row, index) => ({
+        variable: row.variable,
+        pinned: row.pinnedUnresolvable ? null : row.pinned,
+        pinnedUnresolvable: row.pinnedUnresolvable === true,
+        local: row.local,
+        remote: row.remote,
+        defaultSource: defaults[index],
+      }));
+      const available = (row: typeof resolverRows[number]): readonly ColumnKey[] => [
+        ...(row.pinnedUnresolvable ? [] : ['pinned' as const]),
+        ...(showLocal && row.local !== null ? ['local' as const] : []),
+        ...(showRemote && row.remote !== null ? ['remote' as const] : []),
+        'delete',
+      ];
+      const response = await interaction.prompt<Readonly<{ readonly choices: Record<string, ColumnKey> }>>({
+        view: {
+          text: 'Resolve conflicting values',
+          input: { kind: 'sync-conflict-resolver', showLocal, showRemote, rows: resolverRows },
+        },
+        decide: (payload) => {
+          const value = payload.value;
+          if (value === null || typeof value !== 'object' || Array.isArray(value)) return { error: 'Choose a value for every conflicting variable.' };
+          const choices = Object.fromEntries(resolverRows.flatMap((row) => {
+            const choice = (value as Readonly<Record<string, unknown>>)[row.variable];
+            return typeof choice === 'string' && available(row).includes(choice as ColumnKey)
+              ? [[row.variable, choice as ColumnKey] as const]
+              : [];
+          }));
+          return Object.keys(choices).length === resolverRows.length && Object.keys(value).length === resolverRows.length
+            ? { value: { choices } }
+            : { error: 'Choose an available value for every conflicting variable.' };
+        },
+      });
+      return response === null ? null : this.mapResolveChoicesToEnv(response.choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
     }
 
     const table = new ResolveTable(rows, showLocal, showRemote, defaults);
