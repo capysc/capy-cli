@@ -2873,7 +2873,7 @@ export class CapyCommand {
         localMode,
         isOnboarding,
         isBehind,
-        remoteState: showRemote ? 'ok' : 'empty',
+        remoteState: !networkAvailable ? 'unreachable' : showRemote ? 'ok' : 'empty',
         actions: menuChoices.map((choice) => ({ value: choice.value as never, label: choice.name })),
         projectName: projectState.projectName || 'project',
         branch,
@@ -2919,7 +2919,7 @@ export class CapyCommand {
           localMode,
           isOnboarding,
           isBehind,
-          remoteState: showRemote ? 'ok' : 'empty',
+          remoteState: !networkAvailable ? 'unreachable' : showRemote ? 'ok' : 'empty',
           actions: menuChoices.map(c => ({ value: c.value, label: c.name })),
         },
       );
