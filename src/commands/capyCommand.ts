@@ -2794,14 +2794,6 @@ export class CapyCommand {
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
-    human(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
-
-    // Display comparison table (TTY only — the --web resolver renders its own).
-    if (!this.options.web) {
-      this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
-      human(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
-    }
-
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
@@ -2869,6 +2861,39 @@ export class CapyCommand {
       for (const c of menuChoices) {
         if (c.value === 'commit_local') c.name = 'Commit all local values';
       }
+    }
+
+    const conflictSummary = `  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`;
+    const interaction = currentInteraction();
+    if (interaction) {
+      const { buildConflictData } = await import('../ui/syncConflictScreen');
+      const rows = diffs.map((diff) => ({
+        variable: diff.variable,
+        pinned: pinnedPlaintext[diff.variable] === undefined
+          ? pinned[diff.variable] === undefined ? null : ''
+          : formatSnippet(pinnedPlaintext[diff.variable]),
+        local: localPlaintext[diff.variable] === undefined ? null : formatSnippet(localPlaintext[diff.variable]),
+        remote: remotePlaintext[diff.variable] === undefined ? null : formatSnippet(remotePlaintext[diff.variable]),
+      }));
+      const unresolvable = new Set(diffs.filter((diff) => pinned[diff.variable] !== undefined && pinnedPlaintext[diff.variable] === undefined).map((diff) => diff.variable));
+      await interaction.output({ text: conflictSummary, level: 'info' });
+      await interaction.output({ text: '', sync_conflict: buildConflictData({
+        rows,
+        unresolvable,
+        showLocal: effectiveShowLocal,
+        showRemote,
+        localMode,
+        isOnboarding,
+        isBehind,
+        remoteState: showRemote ? 'ok' : 'empty',
+        actions: menuChoices.map((choice) => ({ value: choice.value as never, label: choice.name })),
+        projectName: projectState.projectName || 'project',
+        branch,
+      }, randomUUID()) });
+    } else {
+      human(conflictSummary);
+      this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
+      human(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
     }
 
     // A menu with exactly one real action is not a decision.
@@ -3274,6 +3299,22 @@ export class CapyCommand {
           ? formatSnippet(remotePlaintext[diff.variable])
           : null,
     }));
+
+    const interaction = currentInteraction();
+    if (interaction) {
+      const choices = await prompt<Record<string, 'pinned' | 'local' | 'remote' | 'delete'>>(rows.map((row) => ({
+        type: 'list',
+        name: row.variable,
+        message: `Choose a value for ${row.variable}`,
+        choices: [
+          { name: 'Pinned', value: 'pinned' },
+          ...(showLocal ? [{ name: 'Local', value: 'local' }] : []),
+          ...(showRemote ? [{ name: 'Remote', value: 'remote' }] : []),
+          { name: 'Delete', value: 'delete' },
+        ],
+      })));
+      return this.mapResolveChoicesToEnv(choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
+    }
 
     const table = new ResolveTable(rows, showLocal, showRemote, defaults);
     const { choices, outcome } = await table.run();

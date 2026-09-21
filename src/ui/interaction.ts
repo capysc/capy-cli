@@ -2,8 +2,14 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import inquirer from 'inquirer';
+import type { SyncConflictData } from './screens/contract';
 
-export type InteractionOutput = Readonly<{ readonly text: string; readonly level?: 'info' | 'warning' | 'error' }>;
+export type InteractionOutput = Readonly<{
+  readonly text: string;
+  readonly level?: 'info' | 'warning' | 'error';
+  /** Structured sync state for a browser conversation. Terminal copy remains terminal-owned. */
+  readonly sync_conflict?: SyncConflictData;
+}>;
 /**
  * Optional rendering hint supplied by the command that owns a turn.  It is
  * deliberately descriptive only: transports must never derive it from text.
