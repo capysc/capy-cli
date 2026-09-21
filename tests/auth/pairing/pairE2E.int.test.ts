@@ -93,6 +93,12 @@ function spawnCli(
   serviceUrl: string,
   extraEnv: Record<string, string | undefined> = {},
 ): { stdoutSoFar: () => string; done: Promise<SpawnResult> } {
+  mkdirSync(join(home, '.capy'), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(home, '.capy', 'config.json'),
+    JSON.stringify({ default: 'test', profiles: { test: { url: serviceUrl } } }),
+    { mode: 0o600 },
+  );
   const captureDirectory = mkdtempSync(join(tmpdir(), 'capy-pair-e2e-capture-'));
   const stdoutPath = join(captureDirectory, 'stdout');
   const stderrPath = join(captureDirectory, 'stderr');
