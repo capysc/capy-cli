@@ -16,6 +16,8 @@ import { CapyError, ERROR_CODES, setSyncKeepHash, getSyncKeepHash, KeepFile } fr
 import { isReservedRuntimeVar } from '../core/reservedVars';
 import { keepScreensEnabled } from '../ui/screens/keepScreens';
 import { pushKeepWithRetry, conflictOverwriteQuestion } from './connectors/shared';
+import { requireListIdentity } from './listMetadata';
+import type { AuthResult } from '../types/index';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -46,9 +48,40 @@ export interface EditOpts {
    * both ends (see `editSurfaceIsSafe`), so this is the only way a headless
    * caller can inspect or edit secrets.
    */
-  web?: boolean;
+  readonly web?: boolean;
   /** false when --no-open was passed: print the URL, do not open a browser. */
-  open?: boolean;
+  readonly open?: boolean;
+  /** Require the signed-in account selected by the hosted launcher. */
+  readonly expectedUserId?: string;
+}
+
+export interface EditAuthenticator {
+  readonly authenticateSilent: (organizationId?: string) => Promise<AuthResult>;
+  readonly authenticate: (organizationId?: string) => Promise<AuthResult>;
+}
+
+/**
+ * Hosted edit calls must use only the already-signed-in account selected by
+ * the launcher. They never start repair or interactive authentication, which
+ * could switch the account after the launcher established its identity.
+ */
+export async function authenticateForEdit(
+  authService: EditAuthenticator,
+  orgId: string,
+  expectedUserId?: string,
+): Promise<AuthResult> {
+  if (expectedUserId !== undefined) {
+    return requireListIdentity(
+      { authenticate: (organizationId) => authService.authenticateSilent(organizationId) },
+      expectedUserId,
+      orgId,
+    );
+  }
+  const scoped = await authService.authenticateSilent(orgId);
+  if (scoped.success) return scoped;
+  const unscoped = await authService.authenticateSilent();
+  if (unscoped.success) return unscoped;
+  return authService.authenticate(orgId);
 }
 
 /**
@@ -155,6 +188,9 @@ export class EditCommand {
       localMode = isLocalOnly();
 
       if (localMode) {
+        if (opts.expectedUserId !== undefined) {
+          throw new CapyError('No matching signed-in session. Ask your agent to reconnect Capy.', ERROR_CODES.AUTH_FAILED);
+        }
         userId = LOCAL_USER_ID;
         try {
           projectKey = await resolveLocalProjectKey(projectId);
@@ -169,12 +205,10 @@ export class EditCommand {
         }
       } else {
         // Auth — silent first, then interactive (mirrors usersCommand pattern)
-        authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
+        authService = new AuthService(this.apiUrl, this.devMode, opts.expectedUserId ?? projectState.userId);
         serviceClient = new ServiceClient(this.apiUrl, this.devMode);
         serviceClient.setTokenProvider(() => authService!.getValidToken());
-        let authResult = await authService.authenticateSilent(orgId);
-        if (!authResult.success) authResult = await authService.authenticateSilent();
-        if (!authResult.success) authResult = await authService.authenticate(orgId);
+        const authResult = await authenticateForEdit(authService, orgId, opts.expectedUserId);
         if (!authResult.success || !authResult.user_id) {
           // `displayErrorAndExit` rather than console.error + process.exit: it is
           // what serves the command-error page under `--web` and holds the process

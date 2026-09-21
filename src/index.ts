@@ -215,7 +215,7 @@ program
   .action(async (_options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const cmd = new EditCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({ web: command.optsWithGlobals().web === true, expectedUserId: expectedUserIdFor(command) });
   });
 
 program

@@ -414,7 +414,7 @@ program
   .action(async (_options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const cmd = new EditCommand(process.env.CAPY_API_URL, true);
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({ web: command.optsWithGlobals().web === true, expectedUserId: expectedUserIdFor(command) });
   });
 
 const deploy = program
