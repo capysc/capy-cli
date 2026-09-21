@@ -283,6 +283,54 @@ describe('CapyCommand', () => {
     });
   });
 
+  describe('conversation conflict resolver', () => {
+    test('keeps empty sources selectable and maps the submitted choices back to empty env values', async () => {
+      const prompted = mock(async (question: { readonly view: unknown; readonly decide: (payload: Readonly<Record<string, unknown>>) => { readonly value: unknown } | { readonly error: string } }) => {
+        expect(question.view).toMatchObject({
+          input: {
+            kind: 'sync-conflict-resolver',
+            rows: [
+              { variable: 'EMPTY_LOCAL', local: '-' },
+              { variable: 'EMPTY_REMOTE', remote: '-' },
+              { variable: 'EMPTY_PINNED', pinned: '-' },
+              { variable: 'REMOVE_ME', defaultSource: 'delete' },
+            ],
+          },
+        });
+        const decision = question.decide({ value: {
+          EMPTY_LOCAL: 'local', EMPTY_REMOTE: 'remote', EMPTY_PINNED: 'pinned', REMOVE_ME: 'delete',
+        } });
+        if ('error' in decision) throw new Error(decision.error);
+        return decision.value;
+      });
+      const resolved = await runWithInteraction({
+        output: () => undefined,
+        progress: () => undefined,
+        goal: () => undefined,
+        prompt: prompted,
+      }, () => capyCommand['resolveIndividually'](
+        [
+          { variable: 'EMPTY_LOCAL', type: 'changed' },
+          { variable: 'EMPTY_REMOTE', type: 'changed' },
+          { variable: 'EMPTY_PINNED', type: 'changed' },
+          { variable: 'REMOVE_ME', type: 'changed' },
+        ],
+        true,
+        true,
+        { EMPTY_PINNED: 'synthetic-pinned-hash' },
+        { EMPTY_LOCAL: '', UNCHANGED: 'unchanged-value' },
+        { EMPTY_REMOTE: '' },
+        { EMPTY_PINNED: '' },
+      ));
+      expect(resolved).toEqual({
+        EMPTY_LOCAL: '',
+        EMPTY_REMOTE: '',
+        EMPTY_PINNED: '',
+        UNCHANGED: 'unchanged-value',
+      });
+    });
+  });
+
   describe('execute', () => {
     test('should initialize project when not initialized', async () => {
       mockProjectManager.detectProjectState.mockResolvedValue({

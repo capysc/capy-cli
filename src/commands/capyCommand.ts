@@ -3279,12 +3279,12 @@ export class CapyCommand {
       if (pinnedResolves(diff.variable)) return 'pinned';
       if (showLocal && localPlaintext[diff.variable] !== undefined) return 'local';
       if (showRemote && remotePlaintext[diff.variable] !== undefined) return 'remote';
-      return 'pinned';
+      return 'delete';
     });
 
     const pinnedSnippetFor = (variable: string): string | null => {
-      if (!pinned[variable]) return null;
-      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      if (pinned[variable] === undefined) return null;
+      if (pinnedPlaintext[variable] !== undefined) return formatSnippet(pinnedPlaintext[variable]);
       return '\x1b[3munresolvable\x1b[0m';
     };
 
@@ -3292,12 +3292,12 @@ export class CapyCommand {
       variable: diff.variable,
       pinned: pinnedSnippetFor(diff.variable),
       pinnedUnresolvable: pinned[diff.variable] !== undefined && pinnedPlaintext[diff.variable] === undefined,
-      local: localPlaintext[diff.variable]
-          ? formatSnippet(localPlaintext[diff.variable])
-          : null,
-        remote: remotePlaintext[diff.variable]
-          ? formatSnippet(remotePlaintext[diff.variable])
-          : null,
+      local: localPlaintext[diff.variable] === undefined
+        ? null
+        : formatSnippet(localPlaintext[diff.variable]),
+      remote: remotePlaintext[diff.variable] === undefined
+        ? null
+        : formatSnippet(remotePlaintext[diff.variable]),
     }));
 
     const interaction = currentInteraction();
@@ -3376,41 +3376,32 @@ export class CapyCommand {
     remotePlaintext: Record<string, string>,
     pinnedPlaintext: Record<string, string> = {},
   ): Record<string, string> {
-    const result: Record<string, string> = {};
+    const valueFor = (variable: string, choice: 'pinned' | 'local' | 'remote' | 'delete'): string | undefined => {
+      if (choice === 'local') return localPlaintext[variable];
+      if (choice === 'remote') return remotePlaintext[variable];
+      if (choice !== 'pinned') return undefined;
 
-    for (const [variable, choice] of Object.entries(choices)) {
-      if (choice === 'pinned') {
-        const pinnedHash = pinned[variable];
-        // Prefer the resolved pinned plaintext (from the keep cache / remote
-        // fetch). Without it, "pinned" could only be reconstructed when the
-        // pinned value happened to equal local or remote — so in local-only
-        // mode, choosing "pinned" for a locally-EDITED var matched nothing and
-        // the keep.lock cleanup then silently DELETED the variable. The cache
-        // holds the baseline, so consult it first.
-        // `!== undefined` throughout: '' is a valid pinned value.
-        if (pinnedPlaintext[variable] !== undefined) {
-          result[variable] = pinnedPlaintext[variable];
-        } else if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) {
-          result[variable] = localPlaintext[variable];
-        } else if (remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash) {
-          result[variable] = remotePlaintext[variable];
-        }
-      } else if (choice === 'local' && localPlaintext[variable] !== undefined) {
-        result[variable] = localPlaintext[variable];
-      } else if (choice === 'remote' && remotePlaintext[variable] !== undefined) {
-        result[variable] = remotePlaintext[variable];
-      }
-      // 'delete' — don't add to result
-    }
-
-    // Add unchanged variables from local
-    for (const [key, value] of Object.entries(localPlaintext)) {
-      if (!(key in result) && !diffs.some(d => d.variable === key)) {
-        result[key] = value;
-      }
-    }
-
-    return result;
+      // Prefer the resolved pinned plaintext (from the keep cache / remote
+      // fetch). Without it, "pinned" could only be reconstructed when the
+      // pinned value happened to equal local or remote — so in local-only
+      // mode, choosing "pinned" for a locally-EDITED var matched nothing and
+      // the keep.lock cleanup then silently DELETED the variable. The cache
+      // holds the baseline, so consult it first.
+      // `!== undefined` throughout: '' is a valid pinned value.
+      if (pinnedPlaintext[variable] !== undefined) return pinnedPlaintext[variable];
+      const pinnedHash = pinned[variable];
+      if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) return localPlaintext[variable];
+      return remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash
+        ? remotePlaintext[variable]
+        : undefined;
+    };
+    const resolved = Object.fromEntries(Object.entries(choices).flatMap(([variable, choice]) => {
+      const value = valueFor(variable, choice);
+      return value === undefined ? [] : [[variable, value]];
+    }));
+    const conflictNames = new Set(diffs.map((diff) => diff.variable));
+    const unchanged = Object.fromEntries(Object.entries(localPlaintext).filter(([key]) => !conflictNames.has(key)));
+    return { ...unchanged, ...resolved };
   }
 
   /**
@@ -3460,13 +3451,13 @@ export class CapyCommand {
 
     const rows = diffs.map(diff => ({
       variable: diff.variable,
-      pinned: pinnedPlaintext[diff.variable]
+      pinned: pinnedPlaintext[diff.variable] !== undefined
         ? formatSnippet(pinnedPlaintext[diff.variable])
         : pinned[diff.variable] !== undefined
           ? ''
           : null,
-      local: localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : null,
-      remote: remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : null,
+      local: localPlaintext[diff.variable] === undefined ? null : formatSnippet(localPlaintext[diff.variable]),
+      remote: remotePlaintext[diff.variable] === undefined ? null : formatSnippet(remotePlaintext[diff.variable]),
     }));
 
     const { action, choices, cancelled } = await resolveConflictInBrowser({
