@@ -1,8 +1,9 @@
 /**
  * Interactive arrow-key table for individually resolving secret values.
  *
- * Each row can have up to 3 options: pinned, local, remote (plus "delete").
- * "-" means the value doesn't exist in that source.
+ * Each row can choose a concrete pinned, local, or remote source, or delete.
+ * A rest control applies one source to every row that has not already been
+ * individually confirmed.
  */
 
 const ESC = '\x1b';
@@ -12,90 +13,78 @@ const CLEAR_EOL = `${ESC}[K`;
 const RESET = `${ESC}[0m`;
 const DIM = `${ESC}[90m`;
 const GREEN = `${ESC}[32m`;
-// White background selection box
-const BG_SELECT = `${ESC}[47m${ESC}[30m`; // white bg + black text
+const BG_SELECT = `${ESC}[47m${ESC}[30m`;
 
 export interface ResolveRow {
-  variable: string;
-  /** Snippet display for each column. null = value doesn't exist in that source. */
-  pinned: string | null;
+  readonly variable: string;
+  /** Snippet display for each column. null = value does not exist in that source. */
+  readonly pinned: string | null;
   /** The prior pin exists but no concrete value can be reconstructed. */
-  pinnedUnresolvable?: boolean;
-  local: string | null;
-  remote: string | null;
+  readonly pinnedUnresolvable?: boolean;
+  readonly local: string | null;
+  readonly remote: string | null;
 }
 
-/**
- * How the table ended. Three outcomes, not two, and the third is the point.
- *
- * `cancelled: boolean` could not express "nobody was asked", so off a TTY this
- * returned the DEFAULTS with `cancelled: false` — a conflict on every variable
- * silently resolved and reported as a person's answer. The defaults are the
- * safe picks, so nothing was destroyed; what was wrong is that a run with
- * nobody watching wrote a resolution and called it consent. The screens state
- * the rule the terminal was breaking: an unanswered step is a refusal.
- */
-export type ResolveOutcome =
-  /** Every row carries a choice somebody made. */
-  | 'resolved'
-  /** They quit. Change nothing. */
-  | 'cancelled'
-  /** No TTY, so nobody was asked. Not an answer, and not a cancel either. */
-  | 'needs-input';
+export type ResolveOutcome = 'resolved' | 'cancelled' | 'needs-input';
 
 export interface ResolveResult {
-  /**
-   * Variable name -> chosen source. EMPTY unless `outcome` is `resolved`.
-   *
-   * Deliberately empty on the other two: a caller that reads `choices` without
-   * checking the outcome gets nothing to apply rather than a plausible set of
-   * answers nobody gave.
-   */
-  choices: Record<string, 'pinned' | 'local' | 'remote' | 'delete'>;
-  outcome: ResolveOutcome;
+  readonly choices: Record<string, ColumnKey>;
+  readonly outcome: ResolveOutcome;
 }
 
 export type ColumnKey = 'pinned' | 'local' | 'remote' | 'delete';
 
+type ResolverState = Readonly<{
+  readonly rowIndex: number;
+  readonly colIndex: number;
+  readonly selections: readonly ColumnKey[];
+  readonly confirmed: readonly number[];
+  readonly totalLines: number;
+}>;
+
+type Resolution = Readonly<{
+  readonly outcome: 'resolved';
+  readonly state: ResolverState;
+  readonly choices: Record<string, ColumnKey>;
+}> | Readonly<{
+  readonly outcome: 'cancelled';
+}> | Readonly<{
+  readonly outcome: 'continue';
+  readonly state: ResolverState;
+}>;
+
+const stripAnsi = (value: string): string => value.replace(/\x1b\[[0-9;]*m/g, '');
+const pad = (value: string, width: number): string => {
+  const clean = stripAnsi(value);
+  return clean.length >= width ? value : value + ' '.repeat(width - clean.length);
+};
+const indices = (count: number): readonly number[] => Array.from({ length: count }, (_, index) => index);
+
+/** The terminal counterpart of the Kit resolver table. */
 export class ResolveTable {
-  private rows: ResolveRow[];
-  private showLocal: boolean;
-  private showRemote: boolean;
-  private rowIndex = 0;
-  private colIndex = 0;
-  private confirmed: Set<number> = new Set();
-  private selections: ColumnKey[];
-  private cleanedUp = false;
-  private totalLines = 0;
+  private readonly rows: readonly ResolveRow[];
+  private readonly showLocal: boolean;
+  private readonly showRemote: boolean;
+  /** Kept for the non-TTY safety test: these are the untouched initial choices. */
+  private readonly selections: readonly ColumnKey[];
 
   constructor(
-    rows: ResolveRow[],
+    rows: readonly ResolveRow[],
     showLocal: boolean,
     showRemote: boolean,
-    defaults?: ColumnKey[],
+    defaults: readonly ColumnKey[] = [],
   ) {
     this.rows = rows;
     this.showLocal = showLocal;
     this.showRemote = showRemote;
-    // Default each row's selection to the caller-provided choice when it's a
-    // valid (available) column for that row, otherwise fall back to the first
-    // available column ('pinned'). A per-row default lets the caller pick a
-    // safe, non-destructive value (e.g. avoid an unresolvable pinned value that
-    // would silently drop the variable).
-    this.selections = rows.map((row, i) => {
-      const avail = this.getAvailableColumns(row);
-      const wanted = defaults?.[i];
-      return wanted && avail.includes(wanted) ? wanted : avail[0];
+    this.selections = rows.map((row, index) => {
+      const available = this.available(row);
+      const wanted = defaults[index];
+      return wanted !== undefined && available.includes(wanted) ? wanted : available[0];
     });
-    // Highlight the active cell on the initial row's default so ← → move from
-    // the right starting point instead of always from column 0 ('pinned').
-    if (this.rows.length > 0) {
-      const avail0 = this.getAvailableColumns(this.rows[0]);
-      this.colIndex = Math.max(0, avail0.indexOf(this.selections[0]));
-    }
   }
 
-  private getAvailableColumns(row: ResolveRow): ColumnKey[] {
+  private available(row: ResolveRow): readonly ColumnKey[] {
     return [
       ...(row.pinnedUnresolvable ? [] : ['pinned' as const]),
       ...(this.showLocal && row.local !== null ? ['local' as const] : []),
@@ -104,244 +93,160 @@ export class ResolveTable {
     ];
   }
 
-  private getVisibleColumns(): string[] {
-    const cols = ['Variable', 'Pinned'];
-    if (this.showLocal) cols.push('Local');
-    if (this.showRemote) cols.push('Remote');
-    cols.push('Choice');
-    return cols;
+  private visibleColumns(): readonly string[] {
+    return [
+      'Variable',
+      'Pinned',
+      ...(this.showLocal ? ['Local'] : []),
+      ...(this.showRemote ? ['Remote'] : []),
+      'Choice',
+    ];
   }
 
-  run(): Promise<ResolveResult> {
-    return new Promise<ResolveResult>((resolve) => {
-      if (!process.stdin.isTTY) {
-        // There is no arrow-key table without a terminal, so there is nobody
-        // to answer — which is a different fact from "they answered with the
-        // defaults", and this used to report the second one. The caller
-        // refuses; see `resolveIndividually`.
-        resolve({ choices: {}, outcome: 'needs-input' });
-        return;
-      }
-
-      process.stdout.write(HIDE_CURSOR);
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-
-      this.draw();
-
-      const onData = (data: Buffer) => {
-        const key = data.toString();
-
-        if (key === '\x03' || key === 'q') {
-          this.cleanup(onData);
-          resolve({ choices: {}, outcome: 'cancelled' });
-          return;
-        }
-
-        const availCols = this.getAvailableColumns(this.rows[this.rowIndex]);
-
-        if (key === `${ESC}[A`) {
-          if (this.rowIndex > 0) {
-            this.rowIndex--;
-            const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
-            this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-            this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
-            this.draw();
-          }
-          return;
-        }
-
-        if (key === `${ESC}[B`) {
-          if (this.rowIndex < this.rows.length - 1) {
-            this.rowIndex++;
-            const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
-            this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-            this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
-            this.draw();
-          }
-          return;
-        }
-
-        if (key === `${ESC}[D`) {
-          this.confirmed.delete(this.rowIndex);
-          this.colIndex = Math.max(0, this.colIndex - 1);
-          this.selections[this.rowIndex] = availCols[this.colIndex];
-          this.draw();
-          return;
-        }
-
-        if (key === `${ESC}[C`) {
-          this.confirmed.delete(this.rowIndex);
-          this.colIndex = Math.min(availCols.length - 1, this.colIndex + 1);
-          this.selections[this.rowIndex] = availCols[this.colIndex];
-          this.draw();
-          return;
-        }
-
-        if (key === '\r' || key === '\n') {
-          this.confirmed.add(this.rowIndex);
-
-          if (this.confirmed.size === this.rows.length) {
-            this.draw();
-            this.cleanup(onData);
-            const choices: Record<string, ColumnKey> = {};
-            for (let i = 0; i < this.rows.length; i++) {
-              choices[this.rows[i].variable] = this.selections[i];
-            }
-            resolve({ choices, outcome: 'resolved' });
-            return;
-          }
-
-          // Find next unconfirmed row, wrapping around
-          for (let offset = 1; offset < this.rows.length; offset++) {
-            const i = (this.rowIndex + offset) % this.rows.length;
-            if (!this.confirmed.has(i)) {
-              this.rowIndex = i;
-              const newAvail = this.getAvailableColumns(this.rows[this.rowIndex]);
-              this.colIndex = newAvail.indexOf(this.selections[this.rowIndex]);
-              this.colIndex = Math.max(0, Math.min(this.colIndex, newAvail.length - 1));
-              break;
-            }
-          }
-          this.draw();
-          return;
-        }
-      };
-
-      process.stdin.on('data', onData);
-    });
+  private initialState(): ResolverState {
+    const row = this.rows[0];
+    const available = row === undefined ? [] : this.available(row);
+    return {
+      rowIndex: 0,
+      colIndex: Math.max(0, available.indexOf(this.selections[0])),
+      selections: this.selections,
+      confirmed: [],
+      totalLines: 0,
+    };
   }
 
-  private draw(): void {
-    // Move cursor up to overwrite previous output
-    if (this.totalLines > 0) {
-      process.stdout.write(`${ESC}[${this.totalLines}A`);
-    }
+  private choices(state: ResolverState): Record<string, ColumnKey> {
+    return Object.fromEntries(this.rows.map((row, index) => [row.variable, state.selections[index]]));
+  }
 
-    const visibleCols = this.getVisibleColumns();
-    const m = '  ';
+  private stateForRow(state: ResolverState, rowIndex: number): ResolverState {
+    const available = this.available(this.rows[rowIndex]);
+    return {
+      ...state,
+      rowIndex,
+      colIndex: Math.max(0, available.indexOf(state.selections[rowIndex])),
+    };
+  }
 
-    // Calculate column widths
-    const colWidths: number[] = visibleCols.map(h => h.length);
-    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
-    for (const row of this.rows) {
-      colWidths[0] = Math.max(colWidths[0], row.variable.length);
-      colWidths[1] = Math.max(colWidths[1], stripAnsi(row.pinned || '-').length);
-      let ci = 2;
-      if (this.showLocal) {
-        colWidths[ci] = Math.max(colWidths[ci] || 0, stripAnsi(row.local || '-').length);
-        ci++;
-      }
-      if (this.showRemote) {
-        colWidths[ci] = Math.max(colWidths[ci] || 0, stripAnsi(row.remote || '-').length);
-        ci++;
-      }
-      // Choice column
-      colWidths[ci] = Math.max(colWidths[ci] || 0, 8); // "remote" is longest at 6, pad a bit
-    }
-    colWidths.forEach((w, i) => { colWidths[i] = w + 2; });
+  private moveRow(state: ResolverState, offset: -1 | 1): ResolverState {
+    const nextIndex = Math.max(0, Math.min(this.rows.length - 1, state.rowIndex + offset));
+    return nextIndex === state.rowIndex ? state : this.stateForRow(state, nextIndex);
+  }
 
-    const lines: string[] = [];
+  private selectColumn(state: ResolverState, offset: -1 | 1): ResolverState {
+    const available = this.available(this.rows[state.rowIndex]);
+    const colIndex = Math.max(0, Math.min(available.length - 1, state.colIndex + offset));
+    return {
+      ...state,
+      colIndex,
+      selections: state.selections.map((selection, index) => index === state.rowIndex ? available[colIndex] : selection),
+      confirmed: state.confirmed.filter((index) => index !== state.rowIndex),
+    };
+  }
 
-    // Instructions above the table
-    lines.push(m + DIM + '← → select value   ↑ ↓ move between rows   Enter confirm   q cancel' + RESET);
-    lines.push(m + `Resolved: ${this.confirmed.size}/${this.rows.length}`);
-    lines.push('');
+  private confirm(state: ResolverState): Resolution {
+    const confirmed = state.confirmed.includes(state.rowIndex) ? state.confirmed : [...state.confirmed, state.rowIndex];
+    const completed = confirmed.length === this.rows.length;
+    const confirmedState = { ...state, confirmed };
+    if (completed) return { outcome: 'resolved', state: confirmedState, choices: this.choices(confirmedState) };
+    const nextRow = indices(this.rows.length).map((offset) => (state.rowIndex + offset + 1) % this.rows.length).find((index) => !confirmed.includes(index));
+    return { outcome: 'continue', state: nextRow === undefined ? confirmedState : this.stateForRow(confirmedState, nextRow) };
+  }
 
-    // Header
-    const header = visibleCols.map((h, i) => this.pad(h, colWidths[i])).join('');
-    lines.push(m + header);
-    lines.push(m + '─'.repeat(colWidths.reduce((a, b) => a + b, 0)));
+  private applyRest(state: ResolverState, source: Exclude<ColumnKey, 'delete'>): Resolution {
+    const selections = state.selections.map((selection, index) => state.confirmed.includes(index)
+      ? selection
+      : this.available(this.rows[index]).includes(source) ? source : selection);
+    const completedState: ResolverState = { ...state, selections, confirmed: indices(this.rows.length) };
+    return { outcome: 'resolved', state: completedState, choices: this.choices(completedState) };
+  }
 
-    // Rows
-    for (let ri = 0; ri < this.rows.length; ri++) {
-      const row = this.rows[ri];
-      const isActive = ri === this.rowIndex;
-      const isConfirmed = this.confirmed.has(ri);
-      const selection = this.selections[ri];
+  private transition(state: ResolverState, key: string): Resolution {
+    if (key === '\x03' || key === 'q') return { outcome: 'cancelled' };
+    if (key === 'p' || key === 'P') return this.applyRest(state, 'pinned');
+    if (key === 'l' || key === 'L') return this.applyRest(state, 'local');
+    if (key === 'r' || key === 'R') return this.applyRest(state, 'remote');
+    if (key === `${ESC}[A`) return { outcome: 'continue', state: this.moveRow(state, -1) };
+    if (key === `${ESC}[B`) return { outcome: 'continue', state: this.moveRow(state, 1) };
+    if (key === `${ESC}[D`) return { outcome: 'continue', state: this.selectColumn(state, -1) };
+    if (key === `${ESC}[C`) return { outcome: 'continue', state: this.selectColumn(state, 1) };
+    if (key === '\r' || key === '\n') return this.confirm(state);
+    return { outcome: 'continue', state };
+  }
 
-      // Build cell values
-      const cells: string[] = [row.variable];
-      const cellKeys: (ColumnKey | null)[] = [null];
-
-      cells.push(row.pinned || '-');
-      cellKeys.push('pinned');
-
-      if (this.showLocal) {
-        cells.push(row.local || '-');
-        cellKeys.push('local');
-      }
-      if (this.showRemote) {
-        cells.push(row.remote || '-');
-        cellKeys.push('remote');
-      }
-
-      // Choice column
-      const choiceLabel = isConfirmed ? selection : (isActive ? selection : '');
-      cells.push(choiceLabel);
-      cellKeys.push(null);
-      const choiceColIdx = cells.length - 1;
-
-      // Format each cell — active row always shows selection box, even if confirmed
-      const formatted = cells.map((cell, ci) => {
-        const key = cellKeys[ci];
-        const width = colWidths[ci];
-
-        // Choice column
-        if (ci === choiceColIdx) {
-          if (isConfirmed && !isActive) return GREEN + this.pad(cell, width) + RESET;
-          if (isActive) return DIM + this.pad(cell, width) + RESET;
-          return this.pad(cell, width);
-        }
-
-        // Variable name column
-        if (ci === 0) {
-          if (isConfirmed && !isActive) return GREEN + this.pad(cell, width) + RESET;
-          return this.pad(cell, width);
-        }
-
-        if (key === null) return this.pad(cell, width);
-
-        const isSelected = key === selection;
-
-        if (isActive && isSelected) {
-          return BG_SELECT + this.pad(cell, width) + RESET;
-        }
-        if (isActive) {
-          return this.pad(cell, width);
-        }
-        if (isConfirmed && isSelected) {
-          return GREEN + this.pad(cell, width) + RESET;
-        }
-        if (isConfirmed) {
-          return DIM + this.pad(cell, width) + RESET;
-        }
-        return this.pad(cell, width);
-      });
-
-      lines.push(m + formatted.join(''));
-    }
-
-    // Write all lines, clearing to end of each line
-    const output = lines.map(l => l + CLEAR_EOL).join('\n') + '\n';
-    process.stdout.write(output);
-    this.totalLines = lines.length;
+  private draw(state: ResolverState): ResolverState {
+    if (state.totalLines > 0) process.stdout.write(`${ESC}[${state.totalLines}A`);
+    const visibleColumns = this.visibleColumns();
+    const widths = visibleColumns.map((header, column) => Math.max(header.length, ...this.rows.map((row) => {
+      const values = [row.variable, row.pinned ?? '-', ...(this.showLocal ? [row.local ?? '-'] : []), ...(this.showRemote ? [row.remote ?? '-'] : []), 'remote'];
+      return stripAnsi(values[column]).length;
+    })) + 2);
+    const prefix = '  ';
+    const lines = [
+      prefix + DIM + '← → select value   ↑ ↓ move between rows   Enter confirm   p rest pinned   l rest local   r rest remote   q cancel' + RESET,
+      prefix + `Resolved: ${state.confirmed.length}/${this.rows.length}`,
+      '',
+      prefix + visibleColumns.map((column, index) => pad(column, widths[index])).join(''),
+      prefix + '─'.repeat(widths.reduce((total, width) => total + width, 0)),
+      ...this.rows.map((row, rowIndex) => {
+        const active = rowIndex === state.rowIndex;
+        const confirmed = state.confirmed.includes(rowIndex);
+        const selection = state.selections[rowIndex];
+        const values = [row.variable, row.pinned ?? '-', ...(this.showLocal ? [row.local ?? '-'] : []), ...(this.showRemote ? [row.remote ?? '-'] : []), confirmed || active ? selection : ''];
+        const keys: readonly (ColumnKey | null)[] = [null, 'pinned', ...(this.showLocal ? ['local' as const] : []), ...(this.showRemote ? ['remote' as const] : []), null];
+        const choiceColumn = values.length - 1;
+        const formatted = values.map((value, column) => {
+          const key = keys[column];
+          const width = widths[column];
+          if (column === choiceColumn) return confirmed && !active ? GREEN + pad(value, width) + RESET : active ? DIM + pad(value, width) + RESET : pad(value, width);
+          if (column === 0) return confirmed && !active ? GREEN + pad(value, width) + RESET : pad(value, width);
+          if (key === null) return pad(value, width);
+          if (active && key === selection) return BG_SELECT + pad(value, width) + RESET;
+          if (active) return pad(value, width);
+          if (confirmed && key === selection) return GREEN + pad(value, width) + RESET;
+          return confirmed ? DIM + pad(value, width) + RESET : pad(value, width);
+        });
+        return prefix + formatted.join('');
+      }),
+    ];
+    process.stdout.write(lines.map((line) => line + CLEAR_EOL).join('\n') + '\n');
+    return { ...state, totalLines: lines.length };
   }
 
   private cleanup(onData: (data: Buffer) => void): void {
-    if (this.cleanedUp) return;
-    this.cleanedUp = true;
     process.stdout.write(SHOW_CURSOR);
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(false);
-    }
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
     process.stdin.pause();
     process.stdin.removeListener('data', onData);
   }
 
-  private pad(str: string, width: number): string {
-    const clean = str.replace(/\x1b\[[0-9;]*m/g, '');
-    if (clean.length >= width) return str;
-    return str + ' '.repeat(width - clean.length);
+  run(): Promise<ResolveResult> {
+    if (!process.stdin.isTTY) return Promise.resolve({ choices: {}, outcome: 'needs-input' });
+    return new Promise<ResolveResult>((resolve) => {
+      process.stdout.write(HIDE_CURSOR);
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      const listen = (state: ResolverState): void => {
+        const drawn = this.draw(state);
+        const onData = (data: Buffer): void => {
+          const result = this.transition(drawn, data.toString());
+          process.stdin.removeListener('data', onData);
+          if (result.outcome === 'cancelled') {
+            this.cleanup(onData);
+            resolve({ choices: {}, outcome: 'cancelled' });
+            return;
+          }
+          if (result.outcome === 'resolved') {
+            this.draw(result.state);
+            this.cleanup(onData);
+            resolve({ choices: result.choices, outcome: 'resolved' });
+            return;
+          }
+          listen(result.state);
+        };
+        process.stdin.on('data', onData);
+      };
+      listen(this.initialState());
+    });
   }
 }

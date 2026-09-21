@@ -88,3 +88,18 @@ test('never offers an unresolvable or absent source as a choice', () => {
   const table = new ResolveTable(rows, true, true, ['pinned']);
   expect((table as unknown as { selections: ColumnKey[] }).selections).toEqual(['local']);
 });
+
+test('a rest source preserves earlier per-row confirmations', () => {
+  const table = new ResolveTable(ROWS, true, true, ['pinned', 'local']);
+  const internals = table as unknown as {
+    initialState: () => unknown;
+    transition: (state: unknown, key: string) => { readonly outcome: string; readonly state?: unknown; readonly choices?: Record<string, ColumnKey> };
+  };
+  const individuallyConfirmed = internals.transition(internals.initialState(), '\r');
+  expect(individuallyConfirmed.outcome).toBe('continue');
+  const restRemote = internals.transition(individuallyConfirmed.state, 'r');
+  expect(restRemote).toMatchObject({
+    outcome: 'resolved',
+    choices: { STRIPE_SECRET_KEY: 'pinned', DATABASE_URL: 'remote' },
+  });
+});
