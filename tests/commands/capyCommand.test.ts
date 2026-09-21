@@ -186,6 +186,7 @@ describe('CapyCommand', () => {
       writeKeepFile: mock(() => undefined),
       writeSyncState: mock(() => undefined),
       writeEncryptedEnvFile: mock(() => undefined),
+      createEmptyEnvFile: mock(() => undefined),
       readEnvFile: mock(() => ({})),
       readEncryptedEnvFile: mock(() => ({})),
       readEnvMeta: mock(() => ({})),
@@ -545,7 +546,7 @@ describe('CapyCommand', () => {
       expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
     });
 
-    test('bootstrap existing project leaves absent .env absent when remote marker is empty', async () => {
+    test('bootstrap existing project asks Flow before creating a missing .env when the remote marker is empty', async () => {
       mockProjectManager.getEnvPath.mockReturnValue('/test/path/.env');
       const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(false as any);
       mockServiceClient.getDecryptData.mockResolvedValue({
@@ -559,9 +560,19 @@ describe('CapyCommand', () => {
         env_content: '',
       });
       mockFileManager.parseEnvContent.mockReturnValue({});
+      const flowPrompt = mock(async (question: any) => {
+        const decision = question.decide({ value: true });
+        if ('error' in decision) throw new Error(decision.error);
+        return decision.value;
+      });
 
       try {
-        await (capyCommand as any).bootstrapExistingProject(
+        await runWithInteraction({
+          output: () => undefined,
+          progress: () => undefined,
+          goal: () => undefined,
+          prompt: flowPrompt,
+        }, () => (capyCommand as any).bootstrapExistingProject(
           { id: 'proj-123', name: 'test-project', organization_id: 'org-123' },
           'org-123',
           'user-456',
@@ -569,7 +580,7 @@ describe('CapyCommand', () => {
           { success: true, user_id: 'user-456', organizations: [{ id: 'org-123', name: 'Test Org' }] },
           { id: 'org-123', name: 'Test Org' },
           null,
-        );
+        ));
 
         expect(mockFileManager.writeKeepFile).toHaveBeenCalledWith(expect.objectContaining({
           org_id: 'org-123',
@@ -579,6 +590,8 @@ describe('CapyCommand', () => {
         }));
         expect(mockProjectManager.writeActiveBranch).toHaveBeenCalledWith('development');
         expect(mockFileManager.writeEncryptedEnvFile).not.toHaveBeenCalled();
+        expect(flowPrompt).toHaveBeenCalledTimes(1);
+        expect(mockFileManager.createEmptyEnvFile).toHaveBeenCalledWith(undefined);
       } finally {
         existsSyncSpy.mockRestore();
       }
@@ -726,14 +739,21 @@ describe('CapyCommand', () => {
       const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(true as any);
       
       mockFileManager.readEnvFile.mockReturnValue({});
+      const consoleSpy = spyOn(console, 'log').mockImplementation(() => {});
 
-      await (capyCommand as any).initializeProject();
+      try {
+        await (capyCommand as any).initializeProject();
 
-      // Should not attempt to push empty variables
-      expect(mockServiceClient.pushVariables).not.toHaveBeenCalled();
-      expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
-      
-      existsSyncSpy.mockRestore();
+        // Should not attempt to push empty variables or describe this file as absent.
+        expect(mockServiceClient.pushVariables).not.toHaveBeenCalled();
+        expect(mockFileManager.createEmptyEnvFile).not.toHaveBeenCalled();
+        expect(mockFileManager.ensureCapyGitignore).toHaveBeenCalled();
+        expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('An empty .env file is ready'));
+        expect(consoleSpy).not.toHaveBeenCalledWith(expect.stringContaining('No .env file found'));
+      } finally {
+        existsSyncSpy.mockRestore();
+        consoleSpy.mockRestore();
+      }
     });
 
     test('should complete initialization even if auto-sync fails', async () => {
@@ -953,6 +973,80 @@ describe('CapyCommand', () => {
 
       // Auth service should be called exactly once (no retry loops)
       expect(mockAuthService.authenticate).toHaveBeenCalledTimes(1);
+    });
+
+    test('asks Flow before creating an empty .env that is genuinely absent', async () => {
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(false as any);
+      const flowPrompt = mock(async (question: any) => {
+        expect(question.view).toEqual({
+          text: 'No .env file found. Create an empty .env file?',
+          input: { kind: 'confirm', default: true },
+        });
+        expect(question.presentation).toEqual({ title: 'Create an empty .env', component: 'environment-file' });
+        const decision = question.decide({ value: true });
+        if ('error' in decision) throw new Error(decision.error);
+        return decision.value;
+      });
+
+      try {
+        const result = await runWithInteraction({
+          output: () => undefined,
+          progress: () => undefined,
+          goal: () => undefined,
+          prompt: flowPrompt,
+        }, () => (capyCommand as any).finishInitialSecrets(
+          { transport: 'local', operationDeadline: null, authService: mockAuthService, serviceClient: mockServiceClient },
+          { success: true, user_id: 'user-456' },
+          { id: 'org-123', name: 'Test Org' },
+          null,
+          { org_id: 'org-123', project_id: 'proj-new' },
+          'fresh-project',
+          'development',
+          'project-key',
+          { version: '3.0', org_id: 'org-123', project_id: 'proj-new', project_name: 'fresh-project', variables: {} },
+        ));
+
+        expect(flowPrompt).toHaveBeenCalledTimes(1);
+        expect(mockFileManager.createEmptyEnvFile).toHaveBeenCalledWith(undefined);
+        expect(mockServiceClient.pushSecrets).not.toHaveBeenCalled();
+        expect(result).toMatchObject({ status: 'succeeded', target: { branch: 'development' } });
+      } finally {
+        existsSyncSpy.mockRestore();
+      }
+    });
+
+    test('leaves a missing .env absent when Flow declines creation', async () => {
+      const existsSyncSpy = spyOn(fs, 'existsSync').mockReturnValue(false as any);
+      const flowPrompt = mock(async (question: any) => {
+        const decision = question.decide({ value: false });
+        if ('error' in decision) throw new Error(decision.error);
+        return decision.value;
+      });
+
+      try {
+        await runWithInteraction({
+          output: () => undefined,
+          progress: () => undefined,
+          goal: () => undefined,
+          prompt: flowPrompt,
+        }, () => (capyCommand as any).finishInitialSecrets(
+          { transport: 'local', operationDeadline: null, authService: mockAuthService, serviceClient: mockServiceClient },
+          { success: true, user_id: 'user-456' },
+          { id: 'org-123', name: 'Test Org' },
+          null,
+          { org_id: 'org-123', project_id: 'proj-new' },
+          'fresh-project',
+          'development',
+          'project-key',
+          { version: '3.0', org_id: 'org-123', project_id: 'proj-new', project_name: 'fresh-project', variables: {} },
+        ));
+
+        expect(flowPrompt).toHaveBeenCalledTimes(1);
+        expect(mockFileManager.createEmptyEnvFile).not.toHaveBeenCalled();
+        expect(mockServiceClient.pushSecrets).not.toHaveBeenCalled();
+      } finally {
+        existsSyncSpy.mockRestore();
+      }
     });
   });
 

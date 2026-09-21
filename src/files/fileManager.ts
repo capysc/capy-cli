@@ -94,6 +94,20 @@ export class FileManager {
     }
   }
 
+  /** Create a deliberately blank environment file without replacing one that appeared meanwhile. */
+  createEmptyEnvFile(path?: string): void {
+    const envPath = path || join(this.projectRoot, '.env');
+    try {
+      writeFileSync(envPath, '', { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+    } catch (error) {
+      throw new CapyError(
+        `Failed to create empty .env file at ${envPath}`,
+        ERROR_CODES.PERMISSION_DENIED,
+        { error, path: envPath },
+      );
+    }
+  }
+
   readEnvMeta(path?: string): { org_id?: string; project_id?: string; branch?: string } {
     const envPath = path || join(this.projectRoot, '.env');
     if (!existsSync(envPath)) return {};

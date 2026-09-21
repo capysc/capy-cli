@@ -85,6 +85,23 @@ describe('FileManager', () => {
     });
   });
 
+  describe('createEmptyEnvFile', () => {
+    test('creates a new empty file with owner-only permissions', () => {
+      fileManager.createEmptyEnvFile();
+
+      expect(mockWriteFileSync).toHaveBeenCalledWith(join(testRoot, '.env'), '', {
+        encoding: 'utf-8', mode: 0o600, flag: 'wx',
+      });
+    });
+
+    test('does not hide a concurrent file creation', () => {
+      mockWriteFileSync.mockImplementation(() => { throw new Error('EEXIST'); });
+
+      expect(() => fileManager.createEmptyEnvFile()).toThrow(CapyError);
+      expect(() => fileManager.createEmptyEnvFile()).toThrow('Failed to create empty .env file');
+    });
+  });
+
   describe('parseEnvContent', () => {
     test('should parse env content string', () => {
       const content = 'API_KEY=test123\nDB_URL=postgres://localhost\n# Comment\nEMPTY=';

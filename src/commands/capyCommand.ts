@@ -2017,7 +2017,7 @@ export class CapyCommand {
           context,
         };
       } else {
-        human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+        human(`\nAn empty .env file is ready. Add secrets to .env, then run ${B('capy push')}`);
         human('to share them with your team.');
 
         // Install git hooks
@@ -2037,7 +2037,19 @@ export class CapyCommand {
       }
     } else {
       const wizardWithoutEnv = recordWizard(wizardAfterBranch, { localEnvCount: 0 });
-      human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+      const { createEmptyEnv } = await prompt<{ readonly createEmptyEnv: boolean }>([{
+        type: 'confirm',
+        name: 'createEmptyEnv',
+        message: 'No .env file found. Create an empty .env file?',
+        default: true,
+        presentation: { title: 'Create an empty .env', component: 'environment-file' },
+      }]);
+      if (createEmptyEnv) {
+        this.fileManager.createEmptyEnvFile(this.options.envPath);
+        human(`\nCreated an empty .env file. Add secrets to .env, then run ${B('capy push')}`);
+      } else {
+        human(`\nSkipped creating .env. Add secrets to .env, then run ${B('capy push')}`);
+      }
       human('to share them with your team.');
 
       // Install git hooks
