@@ -1,4 +1,5 @@
 import ora from '../ui/spinner';
+import { quotaBillingUrl } from '../ui/quotaUpgrade';
 import { human } from '../ui/webMode';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
@@ -11,7 +12,7 @@ import { existsSync, unlinkSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { randomUUID, createHash } from 'crypto';
-import { currentInteraction, emitInteractionGoal, prompt } from '../ui/interaction';
+import { currentInteraction, runInteractionOperation, type InteractionGoal, prompt } from '../ui/interaction';
 import {
   CliOptions,
   Organization,
@@ -238,6 +239,7 @@ type InitWorkflowResult = Readonly<{
   wizard: InitWizardTransport | null;
   target: InitRepositoryTarget;
   status: 'succeeded' | 'cancelled' | 'failed-after-consent';
+  failure?: Readonly<{ code: string; reason: string }>;
   context: InitCommandContext;
 }>;
 
@@ -448,52 +450,49 @@ export class CapyCommand {
   }
 
   async execute(): Promise<void> {
-    try {
-      // Detect project state
-      const detectedProjectState = await this.projectManager.detectProjectState();
-      if (detectedProjectState.userId) this.authService.setSessionUserId(detectedProjectState.userId);
-      const projectState = detectedProjectState;
-
+    const detected = await capture(() => this.projectManager.detectProjectState());
+    const invocation = detected.ok && !detected.value.initialized
+      ? { flow: 'init-wizard', goal: 'repository_onboarded' } as const
+      : undefined;
+    const completed = await runInteractionOperation(invocation, async () => {
+      if (!detected.ok) throw detected.error;
+      const projectState = detected.value;
+      if (projectState.userId) this.authService.setSessionUserId(projectState.userId);
       if (!projectState.initialized) {
         assertSupportedKeepMode(this.projectManager.readSyncState());
-        // Check if .env has metadata we can recover from (e.g. keep.lock was deleted)
         if (isLocalOnly()) {
-          // Local-only mode: bootstrap a project entirely on this machine
-          // (synthetic org, generated projectId) instead of server onboarding.
           await this.initializeProjectLocal();
-          emitInteractionGoal({ status: 'succeeded' });
-          return;
-        } else {
-          await this.initializeProject();
-          emitInteractionGoal({ status: 'succeeded' });
-          return;
+          return { status: 'succeeded' };
         }
+        return this.initializeProject();
       }
-
       await this.syncProject(projectState);
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
-      emitInteractionGoal({ status: 'succeeded' });
-    } catch (error: any) {
+      return { status: 'succeeded' };
+    }, (error) => {
       const original = error instanceof HostedInitTerminalError ? error.original : error;
       this.debugError('execute caught error', original);
-      if (error instanceof InteractionSkippedError) {
-        emitInteractionGoal({ status: 'skipped', message: error.message });
-        return;
-      }
-      emitInteractionGoal({
-        status: error?.name === 'ExitPromptError' ? 'cancelled' : 'failed',
+      if (original instanceof CapyError && original.code === 'INIT_RUN_EXPIRED') throw original;
+      if (error instanceof InteractionSkippedError) return { status: 'skipped', message: error.message };
+      const billingUrl = original instanceof CapyError && original.code === ERROR_CODES.QUOTA_EXCEEDED
+        ? quotaBillingUrl(original.details ?? {}) : null;
+      return {
+        ...(billingUrl ? { result: { billing_url: billingUrl } } : {}),
+        status: error instanceof InitWizardCancelledError || (error instanceof Error && error.name === 'ExitPromptError') ? 'cancelled' : 'failed',
         code: original instanceof CapyError ? original.code : ERROR_CODES.SERVICE_ERROR,
         message: original instanceof Error ? original.message : undefined,
-      });
-      if (currentInteraction()) return;
-      if (error instanceof HostedInitTerminalError) {
-        await flushHostedTerminalOutput();
-        process.exit(1);
-      }
-      const { displayErrorAndExit } = await import('../ui/errorScreen');
-      await displayErrorAndExit(original);
+      };
+    });
+    if (!('error' in completed) || currentInteraction() || completed.outcome.status === 'skipped') return;
+    const error = completed.error;
+    const original = error instanceof HostedInitTerminalError ? error.original : error;
+    if (error instanceof HostedInitTerminalError) {
+      await flushHostedTerminalOutput();
+      process.exit(1);
     }
+    const { displayErrorAndExit } = await import('../ui/errorScreen');
+    await displayErrorAndExit(original);
   }
 
   /**
@@ -714,7 +713,7 @@ export class CapyCommand {
    * through a failure, so a run that dies between two stops does not leave a
    * page claiming to still be working on it.
    */
-  private async initializeProject(): Promise<void> {
+  private async initializeProject(): Promise<InteractionGoal> {
     const mode = this.options.web
       ? await (async () => {
           const selected = await capture(() => resolveInitRunTransportMode(process.env.CAPY_INIT_TRANSPORT));
@@ -729,13 +728,13 @@ export class CapyCommand {
     if (mode === 'hosted') {
       const result = await capture(() => this.initializeProjectHosted());
       if (!result.ok) throw new HostedInitTerminalError(result.error);
-      return;
+      return result.value;
     }
-    await this.initializeProjectWithLocalWizard();
+    return this.initializeProjectWithLocalWizard();
   }
 
   /** Explicit rollback transport and the unchanged terminal workflow. */
-  private async initializeProjectWithLocalWizard(): Promise<void> {
+  private async initializeProjectWithLocalWizard(): Promise<InteractionGoal> {
     // Imported only on the `--web` path: the module pulls in every compiled
     // screen, and a terminal run has no use for them.
     //
@@ -748,12 +747,17 @@ export class CapyCommand {
       : null;
     try {
       const completed = await this.runInitialization(wizard);
-      if (completed.wizard?.kind === 'local') await completed.wizard.session.finish();
+      if (completed.status === 'succeeded' && completed.wizard?.kind === 'local') await completed.wizard.session.finish();
+      return {
+        status: completed.status === 'failed-after-consent' ? 'failed' : completed.status,
+        ...(completed.status === 'failed-after-consent' ? { code: completed.failure?.code ?? ERROR_CODES.SERVICE_ERROR, message: completed.failure?.reason ?? 'The initial secret sync failed.' } : {}),
+        result: { organization_id: completed.target.orgId, project_id: completed.target.projectId, branch: completed.target.branch },
+      };
     } catch (err) {
       if (err instanceof InitWizardPostConsentError) {
         if (err.initWizard.kind === 'local') {
           await err.initWizard.session.reportEncryptFailure(err.failure);
-          return;
+          return { status: 'failed', code: err.failure.code, message: err.failure.reason };
         }
         throw err;
       }
@@ -769,7 +773,7 @@ export class CapyCommand {
     }
   }
 
-  private async initializeProjectHosted(): Promise<void> {
+  private async initializeProjectHosted(): Promise<InteractionGoal> {
     const preparation = await capture(() => ({
       serviceOrigin: exactConfiguredOrigin(resolveActiveUrl(this.devMode)),
       keepOrigin: exactConfiguredOrigin(keepOrigin()),
@@ -907,7 +911,7 @@ export class CapyCommand {
         'indeterminate',
       );
     }
-    await this.completeHostedInitialization(
+    return this.completeHostedInitialization(
       {
         ...execution,
         authorized: { ...execution.authorized, authService: initialized.value.context.authService },
@@ -981,7 +985,7 @@ export class CapyCommand {
   private async completeHostedInitialization(
     execution: HostedInitExecution,
     result: InitWorkflowResult,
-  ): Promise<void> {
+  ): Promise<InteractionGoal> {
     const verificationAttempt = await capture(() => this.verifyHostedInitialization(
       execution.context,
       result.target,
@@ -1036,6 +1040,8 @@ export class CapyCommand {
     if (plan.failureCode) {
       throw new CapyError('Initialization effects could not be verified', plan.failureCode);
     }
+    if (plan.status === 'expired') throw new CapyError('Hosted initialization expired', 'INIT_RUN_EXPIRED');
+    return { status: plan.status };
   }
 
   private async verifyHostedInitialization(
@@ -1284,7 +1290,6 @@ export class CapyCommand {
               name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
               value: o.id,
             })),
-            { name: 'Create new organization +', value: CREATE_NEW_ORG },
           ],
           default: currentOrgId,
         }]);
@@ -1617,16 +1622,17 @@ export class CapyCommand {
         })),
       ];
 
+      const projectSelection = projectQuestion(existingProjects.map(p => ({ id: p.id, name: p.name })));
       const choice = await askWizard(
         wizardAfterProjects,
-        projectQuestion(existingProjects.map(p => ({ id: p.id, name: p.name }))),
+        projectSelection,
         async () => {
           const answer = await prompt([{
           type: 'list',
           name: 'projectChoice',
           message: 'Which project do you want to use?',
           choices,
-          default: CREATE_NEW_PROJECT,
+          default: projectSelection.view.value === 'new' ? CREATE_NEW_PROJECT : projectSelection.view.value,
           }]);
           return String(answer.projectChoice);
         },
@@ -1641,24 +1647,15 @@ export class CapyCommand {
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
-        await withWizard(choice.wizard, () => this.bootstrapExistingProject(
+        return withWizard(choice.wizard, () => this.bootstrapExistingProject(
           picked,
           selectedOrg.id,
           selectedAuth.user_id!,
           selectedContext,
+          selectedAuth,
+          selectedOrg,
+          choice.wizard,
         ), selectedContext.operationDeadline);
-        return {
-          wizard: choice.wizard,
-          target: {
-            orgId: selectedOrg.id,
-            orgName: selectedOrg.name,
-            projectId: picked.id,
-            projectName: picked.name,
-            branch: 'development',
-          },
-          status: 'succeeded',
-          context: selectedContext,
-        };
       }
       return await this.initializeNewProject(
         selectedContext,
@@ -1743,13 +1740,15 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
+    const branchSelection = branchChoiceQuestion();
     const branchChoice = await askWizard(
       wizardAfterProjectName,
-      branchChoiceQuestion(),
+      branchSelection,
       async () => {
         const answer = await prompt([{
         type: 'list',
         name: 'initialBranchChoice',
+        default: branchSelection.view.value,
         message: 'What branch should this project start with?',
         choices: [
           { name: 'development (default)', value: 'development' },
@@ -1825,6 +1824,22 @@ export class CapyCommand {
       // Not a git repo — fine
     }
 
+    return this.finishInitialSecrets(context, authResult, selectedOrg, wizardAfterBranch,
+      projectResult, projectName, initialBranchName, encryptionKey, keep);
+  }
+
+  /** Shared first-sync consent and writes for both new and existing remote projects. */
+  private async finishInitialSecrets(
+    context: InitCommandContext,
+    authResult: AuthResult,
+    selectedOrg: Organization,
+    wizardAfterBranch: InitWizardTransport | null,
+    projectResult: Readonly<{ org_id: string; project_id: string }>,
+    projectName: string,
+    initialBranchName: string,
+    encryptionKey: string,
+    keep: KeepFile,
+  ): Promise<InitWorkflowResult> {
     // Check if there's an existing .env file with variables to sync
     const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
     const hasLocalEnv = existsSync(localEnvPath);
@@ -1917,6 +1932,7 @@ export class CapyCommand {
           const answer = await prompt([{
             type: 'confirm',
             name: 'confirmEncrypt',
+            secretSummary: { count: localVarCount, names: varNames },
             message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
             default: true,
           }]);
@@ -1983,6 +1999,7 @@ export class CapyCommand {
               branch: initBranch,
             },
             status: 'failed-after-consent',
+            failure,
             context,
           };
         }
@@ -2154,74 +2171,40 @@ export class CapyCommand {
     project: { id: string; name: string; organization_id: string },
     orgId: string,
     userId: string,
-    context: InitCommandContext = {
-      transport: 'local',
-      operationDeadline: null,
-      authService: this.authService,
-      serviceClient: this.serviceClient,
-    },
-  ): Promise<void> {
+    context: InitCommandContext,
+    authResult: AuthResult,
+    selectedOrg: Organization,
+    wizard: InitWizardTransport | null,
+  ): Promise<InitWorkflowResult> {
     const branch = 'development';
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps(context.serviceClient));
-
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
-
     const decryptData = await (async () => {
       try {
-        return await context.serviceClient.getDecryptData(
-          project.id,
-          branch,
-          undefined, // ask for latest
-          true,
-        );
-      } catch (err: any) {
-        // 404 with "No secrets" → empty project, write a stub keep.lock and exit
-        if (err instanceof CapyError && err.details?.status === 404 && /No secrets/i.test(err.message)) {
-          fetchSpinner.stop();
-          const stub: KeepFile = {
-            version: '3.0',
-            org_id: orgId,
-            project_id: project.id,
-            project_name: project.name,
-            variables: {},
-          };
-          this.fileManager.writeKeepFile(stub);
-          this.projectManager.writeActiveBranch(branch);
-          this.fileManager.ensureCapyGitignore();
-          human(`\n${B(project.name)} has no secrets yet.`);
-          human(`Add secrets to .env, then run ${B('capy push')}.`);
-          this.installGitHooks();
-          return null;
-        }
+        return await context.serviceClient.getDecryptData(project.id, branch, undefined, true);
+      } catch (error) {
+        if (error instanceof CapyError && error.details?.status === 404 && /No secrets/i.test(error.message)) return null;
         fetchSpinner.fail(`Failed to pull from ${B(project.name)}.`);
-        throw err;
+        throw error;
       }
     })();
-
-    if (!decryptData) {
-      return;
-    }
-
-    if (!decryptData.keep_file) {
-      // No keep_file means the project exists but has never been pushed to.
-      // Treat it like an empty project — write a stub keep.lock.
+    const remoteKeep = decryptData?.keep_file ? JSON.parse(decryptData.keep_file) as KeepFile : null;
+    const remoteEnv = decryptData?.env_content ? this.fileManager.parseEnvContent(decryptData.env_content) : {};
+    const remoteBranchHasVariables = remoteKeep
+      ? Object.values(remoteKeep.variables).some(entries => entries.some(entry => entry.branch === branch)) : false;
+    if (!remoteBranchHasVariables && Object.keys(remoteEnv).length === 0) {
       fetchSpinner.stop();
-      const stub: KeepFile = {
-        version: '3.0',
-        org_id: orgId,
-        project_id: project.id,
-        project_name: project.name,
-        variables: {},
+      const keep: KeepFile = {
+        ...(remoteKeep ?? { version: '3.0' as const, variables: {} }),
+        org_id: orgId, project_id: project.id, project_name: project.name,
       };
-      this.fileManager.writeKeepFile(stub);
+      this.fileManager.writeKeepFile(keep);
       this.projectManager.writeActiveBranch(branch);
       this.fileManager.ensureCapyGitignore();
-      // Same routing rule as the 404-stub branch above.
-      human(`\n${B(project.name)} has no secrets yet.`);
-      human(`Add secrets to .env, then run ${B('capy push')}.`);
-      this.installGitHooks();
-      return;
+      return this.finishInitialSecrets(context, authResult, selectedOrg, wizard,
+        { org_id: orgId, project_id: project.id }, project.name, branch, encryptionKey, keep);
     }
+    if (!decryptData?.keep_file) throw new CapyError('Remote secrets are missing their Keep metadata.', ERROR_CODES.SERVICE_ERROR);
 
     // Parse the keep.json the server sent us
     const parsedServerKeep = JSON.parse(decryptData.keep_file) as KeepFile;
@@ -2251,8 +2234,7 @@ export class CapyCommand {
         )
       : {};
 
-    const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
-    const shouldWriteLocalEnv = Object.keys(plaintext).length > 0 || existsSync(localEnvPath);
+    const shouldWriteLocalEnv = Object.keys(plaintext).length > 0;
 
     // Write keep.lock + encrypted .env locally
     this.fileManager.writeKeepFile(serverKeep);
@@ -2281,6 +2263,7 @@ export class CapyCommand {
     }
 
     this.installGitHooks();
+    return { wizard, target: { orgId, orgName: selectedOrg.name, projectId: project.id, projectName: project.name, branch }, status: 'succeeded', context };
   }
 
   /**

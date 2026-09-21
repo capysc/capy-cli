@@ -8,7 +8,7 @@ import { resolveActiveUrl } from '../config/profileConfig';
 import { readLocalRoot } from '../config/globalConfig';
 import { keepOrigin } from './screens/keepScreens';
 import { mintConnectionKeypair, openEnvelope, sealRequestEnvelope } from '../service/brokerEnvelope';
-import { runWithInteraction, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
+import { runWithInteraction, currentInteractionInvocation, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
 
 type Data = Readonly<Record<string, unknown>>;
 type MessageType = 'output' | 'progress' | 'prompt' | 'answer' | 'goal' | 'ping' | 'pong';
@@ -44,6 +44,7 @@ export const flowTurnPayload = (
   return {
     type: 'turn',
     messages,
+    ...(boundary.data.invocation === undefined ? {} : { invocation: boundary.data.invocation }),
     ...(boundary.type === 'prompt' ? { question: boundary.data.question } : { outcome: turnOutcome(boundary.data) }),
     ...(presentation === undefined ? {} : { presentation }),
   };
@@ -74,7 +75,7 @@ export const flowQueueStep = (
 };
 
 /** Adapter only: executes the ordinary command under the encrypted Flow I/O boundary. */
-export async function runWithFlowInteraction(operation: () => Promise<void>, devMode: boolean, descriptor: Readonly<{ command: 'capy' | 'rotate'; continuationTool: 'capy_onboard_continue' | 'capy_rotate_continue'; expectedUserId?: string }> = { command: 'capy', continuationTool: 'capy_onboard_continue' }): Promise<void> {
+export async function runWithFlowInteraction(operation: () => Promise<void>, devMode: boolean, descriptor: Readonly<{ command: 'capy' | 'rotate'; continuationTool: 'capy_onboard_continue' | 'capy_rotate_continue'; expectedUserId?: string; organizationId?: string }> = { command: 'capy', continuationTool: 'capy_onboard_continue' }): Promise<void> {
   const project = await new ProjectManager().detectProjectState();
   const auth = (() => {
     try { return new AuthService(undefined, devMode, project.userId); }
@@ -83,7 +84,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       throw error;
     }
   })();
-  const identity = await auth.authenticateSilent();
+  const identity = await auth.authenticateSilent(descriptor.organizationId);
   if (!identity.success || !identity.user_id || !identity.organization_id
     || !readLocalRoot(identity.organization_id, identity.user_id)) throw new Error('PAIR_REQUIRED');
   if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new Error('AUTH_ACCOUNT_MISMATCH');
@@ -217,6 +218,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       if (controller.signal.aborted) failed(controller.signal.reason);
     });
     await emit('prompt', { question: question.view,
+      ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}),
       ...(question.presentation === undefined ? {} : { presentation: question.presentation }) }, id);
     const payload = await answer;
     const decision = question.decide(payload);
@@ -230,8 +232,8 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     return decision.value;
   };
   const interaction: Interaction = {
-    output: event => emit('output', { ...event }),
-    progress: event => emit('progress', { ...event }),
+    output: event => emit('output', { ...event, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
+    progress: event => emit('progress', { ...event, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
     prompt: ask,
     goal: outcome => emit('goal', { ...outcome }),
   };

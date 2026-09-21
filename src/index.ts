@@ -839,10 +839,12 @@ program
   .command('doctor')
   .description('Report local Capy facts: binary, version, state dir, API/Keep origins, session presence (read-only, no network)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { DoctorCommand } = await import('./commands/doctorCommand');
     const cmd = new DoctorCommand();
-    await cmd.execute({ json: options.json });
+    // `--json` is also a global interaction flag. Commander assigns the
+    // duplicated option to the root command, so read inherited options too.
+    await cmd.execute({ json: options.json === true || command.optsWithGlobals().json === true });
   });
 
 program

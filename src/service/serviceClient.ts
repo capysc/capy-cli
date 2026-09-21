@@ -14,6 +14,7 @@ import { createHash } from 'crypto';
 import { Encryptor } from '../crypto/encryptor';
 import { deriveResourceId } from '../crypto/resourceId';
 import { debug } from '../ui/debug';
+import { requestQuotaUpgrade } from '../ui/quotaUpgrade';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -251,27 +252,24 @@ export class ServiceClient {
   }
 
   private async request<T>(method: string, path: string, body?: unknown, options?: { timeout?: number; _retried?: boolean }): Promise<T> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
     const token = this.tokenProvider ? await this.tokenProvider() : null;
-    if (token) {
-      headers['Authorization'] = `Bearer ${token.access_token}`;
-    }
+    const headers: Readonly<Record<string, string>> = {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token.access_token}` } : {}),
+    };
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options?.timeout ?? 30000);
 
-    let res: Response;
+    const res = await (async (): Promise<Response> => {
     try {
-      res = await fetch(`${this.apiUrl}${path}`, {
+      return await fetch(`${this.apiUrl}${path}`, {
         method,
         headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
     } catch (err: any) {
-      clearTimeout(timeout);
       if (err.name === 'AbortError') {
         throw new CapyError(
           `Failed to connect to ${B('Capy')} service. Please check your internet connection.`,
@@ -284,8 +282,8 @@ export class ServiceClient {
         ERROR_CODES.NETWORK_ERROR,
         { code: err.code || err.cause?.code }
       );
-    }
-    clearTimeout(timeout);
+    } finally { clearTimeout(timeout); }
+    })();
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({})) as Record<string, any>;
@@ -323,6 +321,7 @@ export class ServiceClient {
       }
 
       if (res.status === 402 && data.code === 'QUOTA_EXCEEDED') {
+        if (await requestQuotaUpgrade(data)) return this.request<T>(method, path, body, options);
         throw new CapyError(
           data.error || 'Account quota exceeded',
           ERROR_CODES.QUOTA_EXCEEDED,

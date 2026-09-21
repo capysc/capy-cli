@@ -37,6 +37,14 @@ describe('Flow turn payloads', () => {
     });
   });
 
+  test('persists the declared invocation and terminal goal inside encrypted turn payloads', () => {
+    const invocation = { flow: 'init-wizard', goal: 'repository_onboarded' };
+    expect(flowTurnPayload([], { type: 'prompt', data: { invocation, question: { text: 'Encrypt?' } } }))
+      .toMatchObject({ invocation, question: { text: 'Encrypt?' } });
+    expect(flowTurnPayload([], { type: 'goal', data: { ...invocation, status: 'succeeded', result: { secrets_encrypted: true } } }))
+      .toMatchObject({ outcome: { ...invocation, status: 'succeeded', result: { secrets_encrypted: true } } });
+  });
+
   test('does not infer presentation from ordinary CLI text', () => {
     expect(flowTurnPayload([], {
       type: 'goal',

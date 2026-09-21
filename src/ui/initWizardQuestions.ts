@@ -24,7 +24,7 @@ export function organizationQuestion(orgs: readonly Immutable<InitOrg>[]): InitQ
   return {
     view: { step: 'organization', orgs },
     decide: payload => {
-      if (payload.createOrganization === true) return { value: 'create', record: { organization: { kind: 'new' } } };
+      if (payload.createOrganization === true) return { error: 'Create your organization in Keep before initializing this repository.' };
       const id = typeof payload.organizationId === 'string' ? payload.organizationId : '';
       const org = orgs.find(item => item.id === id);
       return org ? { value: id, record: { organization: { kind: 'existing', name: org.name } } }
@@ -35,7 +35,7 @@ export function organizationQuestion(orgs: readonly Immutable<InitOrg>[]): InitQ
 
 export function projectQuestion(projects: readonly Immutable<InitProject>[]): InitQuestion<string | 'new'> {
   return {
-    view: { step: 'project', projects },
+    view: { step: 'project', projects, value: projects.find(project => project.name === 'default')?.id ?? 'new' },
     decide: payload => {
       if (payload.newProject === true) return { value: 'new', record: { project: { kind: 'new' } } };
       const id = typeof payload.projectId === 'string' ? payload.projectId : '';
@@ -59,7 +59,7 @@ export function projectNameQuestion(defaultName: string): InitQuestion<string> {
 
 export function branchChoiceQuestion(): InitQuestion<'development' | 'other'> {
   return {
-    view: { step: 'branch' },
+    view: { step: 'branch', value: 'development' },
     decide: payload => payload.branchChoice === 'development' || payload.branchChoice === 'other'
       ? { value: payload.branchChoice, record: { branchChoice: payload.branchChoice } }
       : { error: 'That is not a branch this step offers.' },
