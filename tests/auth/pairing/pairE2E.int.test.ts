@@ -31,13 +31,12 @@
  *      returns the coded already-active success without starting either
  *      human ceremony or replacing the daemon.
  *   3. `dist/index.js run -- node -e '...'` — a SEPARATE process, with no
- *      CAPY_DEVICE_KEY_GRANT_SOCKET and no prior local.key/key.enc anywhere —
- *      discovers the persisted runtime pair and decrypts a real secret using
- *      ONLY the unwrapped K_local and the session `pair` just wrote.
+ *      CAPY_DEVICE_KEY_GRANT_SOCKET — discovers the persisted runtime pair
+ *      and decrypts a real secret using the scoped K_local and the session
+ *      `pair` just wrote.
  *
- * Then walks the ENTIRE temp HOME tree and asserts no file named `local.key`
- * or `key.enc` exists anywhere under it — the literal proof that pairing a
- * headless machine never leaves recovery-equivalent material on disk.
+ * Then verifies pairing created exactly its scoped protected `local.key`
+ * recovery custody and no project `key.enc` file.
  *
  * A second test proves an unanswered/expired device code expires end to end:
  * exit EXIT_NEEDS_INPUT (3), coded PAIR_CODE_EXPIRED in the --json output,
@@ -467,8 +466,8 @@ async function withPairE2EFixture<T>(run: (fixture: PairE2EFixture) => Promise<T
   }
 }
 
-describe('CAP-409 pair E2E: real session + no durable key material, over real subprocesses', () => {
-  it('pair -> pair no-op -> capy run resolves the real secret without an exported socket or durable key material', async () => {
+describe('CAP-409 pair E2E: real session + persisted runtime custody, over real subprocesses', () => {
+  it('pair -> pair no-op -> capy run resolves the real secret through persisted runtime custody', async () => {
     const masterKey = randomBytes(32);
     const projectDir = projectDirWithSecret(masterKey, 'shh-pair-e2e-secret');
     try {
@@ -574,9 +573,11 @@ describe('CAP-409 pair E2E: real session + no durable key material, over real su
     expect(runResult.exitCode).toBe(0);
     expect(runResult.stdout.trim()).toBe('shh-pair-e2e-secret');
 
-    // THE PROOF: walk the entire HOME tree, find zero durable key files —
-    // pairing a headless machine must never write local.key/key.enc.
-    expect(findFilesNamed(home, 'local.key')).toEqual([]);
+    // Pairing retains only its user- and organization-scoped recovery root;
+    // it never creates a project master-key envelope on this machine.
+    expect(findFilesNamed(home, 'local.key')).toEqual([
+      join(home, '.capy', 'orgs', ORG_ID, 'users', USER_ID, 'local.key'),
+    ]);
     expect(findFilesNamed(home, 'key.enc')).toEqual([]);
       });
     } finally {
