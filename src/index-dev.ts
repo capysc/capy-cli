@@ -8,7 +8,7 @@ import { config } from 'dotenv';
 import { resolve } from 'path';
 import { Command } from 'commander';
 import { CapyCommand } from './commands/capyCommand';
-import { CliOptions } from './types/index';
+import { CapyError, CliOptions, ERROR_CODES } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
 import { GRANT_DAEMON_SUBCOMMAND } from './auth/deviceKey/grantHolder';
@@ -24,7 +24,9 @@ function collectProjects(val: string, acc: string[]): string[] {
 /** Resolve a repeated child option after Commander's non-positional parent parse. */
 function expectedUserIdFor(command: Command): string | undefined {
   const value = (command.optsWithGlobals() as Readonly<Record<string, unknown>>).expectedUserId;
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  if (value.trim().length === 0) throw new CapyError('Expected user ID cannot be empty.', ERROR_CODES.AUTH_FAILED);
+  return value;
 }
 
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace

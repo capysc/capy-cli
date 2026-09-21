@@ -27,7 +27,9 @@ function collectProjects(val: string, acc: string[]): string[] {
 /** Resolve a repeated child option after Commander's non-positional parent parse. */
 function expectedUserIdFor(command: Command): string | undefined {
   const value = (command.optsWithGlobals() as Readonly<Record<string, unknown>>).expectedUserId;
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  if (value.trim().length === 0) throw new CapyError('Expected user ID cannot be empty.', ERROR_CODES.AUTH_FAILED);
+  return value;
 }
 
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace

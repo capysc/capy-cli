@@ -27,6 +27,20 @@ function editRegistration(entrypoint: 'index.ts' | 'index-dev.ts') {
   return { program, execute } as const;
 }
 
+function expectedUserIdResolver(entrypoint: 'index.ts' | 'index-dev.ts'): (command: Command) => string | undefined {
+  const source = readFileSync(resolve(import.meta.dir, '../../src', entrypoint), 'utf8');
+  const start = source.indexOf('function expectedUserIdFor(command: Command): string | undefined {');
+  const end = source.indexOf('\n}\n\n// Handle Ctrl+C gracefully', start) + 2;
+  if (start < 0 || end < 2) throw new Error('expectedUserIdFor registration missing');
+  return new Function(
+    'CapyError',
+    'ERROR_CODES',
+    `${source.slice(start, end)
+      .replace('function expectedUserIdFor(command: Command): string | undefined {', 'function expectedUserIdFor(command) {')
+      .replace(' as Readonly<Record<string, unknown>>', '')}; return expectedUserIdFor;`,
+  )(Error, { AUTH_FAILED: 'AUTH_FAILED' }) as (command: Command) => string | undefined;
+}
+
 for (const entrypoint of ['index.ts', 'index-dev.ts'] as const) {
   describe(`${entrypoint} edit expected-user-id`, () => {
     test('passes the hosted identity and web surface to EditCommand', async () => {
@@ -41,6 +55,13 @@ for (const entrypoint of ['index.ts', 'index-dev.ts'] as const) {
         web: true,
         expectedUserId: EXPECTED_USER_ID,
       });
+    });
+
+    test('rejects an empty hosted identity instead of falling back to an unpinned session', () => {
+      const expectedUserIdFor = expectedUserIdResolver(entrypoint);
+      const command = { optsWithGlobals: () => ({ expectedUserId: '   ' }) } as Command;
+
+      expect(() => expectedUserIdFor(command)).toThrow('Expected user ID cannot be empty.');
     });
   });
 }

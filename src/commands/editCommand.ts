@@ -104,14 +104,225 @@ export function editSurfaceIsSafe(
   return stdinIsTty === true && stdoutIsTty === true;
 }
 
-export class EditCommand {
-  private apiUrl?: string;
-  private devMode: boolean;
+interface EditProjectContext {
+  readonly orgId: string;
+  readonly projectId: string;
+  readonly keep: KeepFile;
+  readonly branch: string;
+  readonly projectUserId?: string;
+}
 
-  constructor(apiUrl?: string, devMode: boolean = false) {
-    this.apiUrl = apiUrl;
-    this.devMode = devMode;
+interface EditAccessContext {
+  readonly localMode: boolean;
+  readonly authService?: AuthService;
+  readonly serviceClient?: ServiceClient;
+  readonly userId: string;
+  readonly projectKey: string;
+}
+
+interface LocalValues {
+  readonly plaintext: Record<string, string>;
+  readonly undecryptableKeys: readonly string[];
+}
+
+interface RemoteBaseline {
+  readonly plaintext: Record<string, string>;
+  readonly available: boolean;
+  readonly gap: 'never_pushed' | 'fetch_failed' | 'local_mode' | undefined;
+  readonly fromCache: boolean;
+}
+
+async function displayEditError(error: unknown, context?: EditProjectContext): Promise<void> {
+  const { displayErrorAndExit } = await import('../ui/errorScreen');
+  if (context === undefined) {
+    await displayErrorAndExit(error);
+    return;
   }
+  await displayErrorAndExit(error, {
+    projectName: context.keep.project_name,
+    projectId: context.keep.project_id,
+    branch: context.branch,
+  });
+}
+
+async function readEditProjectContext(pm: ProjectManager): Promise<EditProjectContext | undefined> {
+  const projectState = await pm.detectProjectState();
+  if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
+    await displayEditError(new CapyError('Could not read keep.lock', ERROR_CODES.NO_KEEP_FILE));
+    return undefined;
+  }
+
+  const keep = pm.readKeepFile();
+  if (!keep) {
+    await displayEditError(new CapyError('Could not read keep.lock', ERROR_CODES.NO_KEEP_FILE));
+    return undefined;
+  }
+
+  const branch = projectState.activeBranch;
+  if (!branch) {
+    await displayEditError(
+      new CapyError(`No active branch. Run ${B('capy')} to select a branch.`, ERROR_CODES.NO_ACTIVE_BRANCH),
+    );
+    return undefined;
+  }
+
+  return {
+    orgId: projectState.organizationId,
+    projectId: projectState.projectId,
+    keep,
+    branch,
+    projectUserId: projectState.userId,
+  };
+}
+
+async function resolveEditAccess(
+  context: EditProjectContext,
+  opts: EditOpts,
+  apiUrl: string | undefined,
+  devMode: boolean,
+): Promise<EditAccessContext | undefined> {
+  const localMode = isLocalOnly();
+  if (localMode) {
+    if (opts.expectedUserId !== undefined) {
+      throw new CapyError('No matching signed-in session. Ask your agent to reconnect Capy.', ERROR_CODES.AUTH_FAILED);
+    }
+    try {
+      const projectKey = await resolveLocalProjectKey(context.projectId);
+      return { localMode, userId: LOCAL_USER_ID, projectKey };
+    } catch (error: unknown) {
+      await displayEditError(error, context);
+      return undefined;
+    }
+  }
+
+  const authService = new AuthService(apiUrl, devMode, opts.expectedUserId ?? context.projectUserId);
+  const serviceClient = new ServiceClient(apiUrl, devMode);
+  serviceClient.setTokenProvider(() => authService.getValidToken());
+  const authResult = await authenticateForEdit(authService, context.orgId, opts.expectedUserId);
+  if (!authResult.success || !authResult.user_id) {
+    await displayEditError(new CapyError('Authentication failed', ERROR_CODES.AUTH_FAILED), context);
+    return undefined;
+  }
+
+  try {
+    const { resolveProjectKeyWithMintFallback } = await import('../auth/masterKeyMint');
+    const projectKey = await resolveProjectKeyWithMintFallback({
+      orgId: context.orgId,
+      projectId: context.projectId,
+      userId: authResult.user_id,
+      serviceClient,
+      keyServiceOps: {
+        coDecrypt: (oid: string, ciphertext: string) => serviceClient.coDecrypt(oid, ciphertext).then((result) => result.plaintext),
+        wrapOuterLayer: (oid: string, plaintext: string) => serviceClient.wrapOuterLayer(oid, plaintext).then((result) => result.ciphertext),
+      },
+      orgKeyState: authResult.organizations?.find((organization) => organization.id === context.orgId)?.key_state,
+    });
+    return { localMode, authService, serviceClient, userId: authResult.user_id, projectKey };
+  } catch (error: unknown) {
+    await displayEditError(error, context);
+    return undefined;
+  }
+}
+
+function pinnedHashesFor(keep: KeepFile, branch: string): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(keep.variables).flatMap(([varName, entries]) => {
+      const entry = entries.find((candidate) => candidate.branch === branch);
+      return entry === undefined ? [] : [[varName, entry.value_hash]];
+    }),
+  );
+}
+
+function localValuesFor(fileManager: FileManager, projectKey: string): LocalValues {
+  return Object.entries(fileManager.readEnvFile()).reduce<LocalValues>(
+    (values, [key, value]) => {
+      if (isReservedRuntimeVar(key)) return values;
+      if (!value.startsWith('capy:')) {
+        return { ...values, plaintext: { ...values.plaintext, [key]: value } };
+      }
+      try {
+        return { ...values, plaintext: { ...values.plaintext, [key]: fileManager.decryptValue(value, projectKey) } };
+      } catch {
+        return { ...values, undecryptableKeys: [...values.undecryptableKeys, key] };
+      }
+    },
+    { plaintext: {}, undecryptableKeys: [] },
+  );
+}
+
+async function remoteBaselineFor(
+  fileManager: FileManager,
+  context: EditProjectContext,
+  access: EditAccessContext,
+): Promise<RemoteBaseline> {
+  const keepHash = SyncEngine.computeKeepHash(context.keep, context.branch);
+  try {
+    const fromCache = access.localMode ? false : readKeepCache(context.orgId, context.projectId, keepHash) !== null;
+    const blob = access.localMode
+      ? readSecretsLocal(context.orgId, context.projectId, keepHash)
+      : await fetchSecretsWithCache(access.serviceClient!, context.orgId, context.projectId, keepHash);
+    if (!blob?.env_file) {
+      return {
+        plaintext: {},
+        available: false,
+        gap: access.localMode ? 'local_mode' : 'never_pushed',
+        fromCache,
+      };
+    }
+    const plaintext = Object.fromEntries(
+      Object.entries(fileManager.parseEnvContent(blob.env_file)).flatMap(([key, value]) => {
+        try {
+          return [[key, fileManager.decryptValue(value, access.projectKey)]];
+        } catch {
+          return [];
+        }
+      }),
+    );
+    return { plaintext, available: !access.localMode, gap: undefined, fromCache };
+  } catch {
+    return {
+      plaintext: {},
+      available: false,
+      gap: access.localMode ? 'local_mode' : 'fetch_failed',
+      fromCache: false,
+    };
+  }
+}
+
+function editRowsFor(
+  context: EditProjectContext,
+  access: EditAccessContext,
+  pinned: Record<string, string>,
+  localPlaintext: Record<string, string>,
+  remote: RemoteBaseline,
+): EditRow[] {
+  return Array.from(new Set([...Object.keys(pinned), ...Object.keys(localPlaintext), ...Object.keys(remote.plaintext)]))
+    .toSorted()
+    .map((key) => {
+      const localValue = localPlaintext[key];
+      const remoteValue = remote.plaintext[key];
+      const changedAt = context.keep.variables[key]?.find((entry) => entry.branch === context.branch)?.changed_at;
+      const localRow = classifyLocalRow(localValue, remoteValue);
+      return {
+        key,
+        localValue,
+        remoteValue,
+        status: access.localMode
+          ? localRow.status
+          : classifyStatus(
+              pinned[key],
+              localValue === undefined ? undefined : hashValue(localValue),
+              remoteValue === undefined ? undefined : hashValue(remoteValue),
+              remote.available,
+            ),
+        updatedLabel: access.localMode ? localRow.updatedLabel : changedAt ? formatRelativeTime(changedAt) : '—',
+        changedAt,
+      };
+    });
+}
+
+export class EditCommand {
+  constructor(private readonly apiUrl?: string, private readonly devMode: boolean = false) {}
 
   async execute(opts: EditOpts = {}): Promise<void> {
     // Decide before doing ANY work, let alone rendering: `EditScreen.run()`
@@ -129,126 +340,13 @@ export class EditCommand {
     }
 
     const pm = new ProjectManager();
-    const projectState = await pm.detectProjectState();
     const fileManager = new FileManager();
-
-    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) {
-      const { displayErrorAndExit } = await import("../ui/errorScreen");
-      await displayErrorAndExit(new CapyError("Could not read keep.lock", ERROR_CODES.NO_KEEP_FILE));
-      return;
-    }
-
-    let orgId: string;
-    let projectId: string;
-    let keep: KeepFile;
-    let branch: string;
-    let localMode: boolean;
-    let authService: AuthService | undefined;
-    let serviceClient: ServiceClient | undefined;
-    let userId: string;
-    let projectKey: string;
-
-      orgId = projectState.organizationId!;
-      projectId = projectState.projectId!;
-
-      const foundKeep = pm.readKeepFile();
-      if (!foundKeep) {
-        // `displayErrorAndExit` rather than console.error + process.exit: it is
-        // what serves the command-error page under `--web` and holds the process
-        // open until the browser has fetched it, and it still prints to the
-        // terminal and still exits 1. Called directly rather than thrown because
-        // there is no enclosing try here — the same shape this file already uses
-        // for the local-key failure a few lines down.
-        const { displayErrorAndExit } = await import('../ui/errorScreen');
-        await displayErrorAndExit(new CapyError('Could not read keep.lock', ERROR_CODES.NO_KEEP_FILE));
-        return;
-      }
-      keep = foundKeep;
-
-      const activeBranch = projectState.activeBranch;
-      if (!activeBranch) {
-        // `displayErrorAndExit` rather than console.error + process.exit: it is
-        // what serves the command-error page under `--web` and holds the process
-        // open until the browser has fetched it, and it still prints to the
-        // terminal and still exits 1. Called directly rather than thrown because
-        // there is no enclosing try here — the same shape this file already uses
-        // for the local-key failure a few lines down.
-        const { displayErrorAndExit } = await import('../ui/errorScreen');
-        await displayErrorAndExit(
-          new CapyError(`No active branch. Run ${B('capy')} to select a branch.`, ERROR_CODES.NO_ACTIVE_BRANCH),
-        );
-        return;
-      }
-      branch = activeBranch;
-
-      // Local-only mode: no auth, no server. Identity is synthetic; the key is
-      // unwrapped from the passphrase session. No AuthService/ServiceClient is
-      // constructed (avoids the dev-mode "[dev] AuthService → …" log and any
-      // accidental server use).
-      localMode = isLocalOnly();
-
-      if (localMode) {
-        if (opts.expectedUserId !== undefined) {
-          throw new CapyError('No matching signed-in session. Ask your agent to reconnect Capy.', ERROR_CODES.AUTH_FAILED);
-        }
-        userId = LOCAL_USER_ID;
-        try {
-          projectKey = await resolveLocalProjectKey(projectId);
-        } catch (err: any) {
-          const { displayErrorAndExit } = await import('../ui/errorScreen');
-          await displayErrorAndExit(err, {
-            projectName: keep.project_name,
-            projectId: keep.project_id,
-            branch,
-          });
-          return;
-        }
-      } else {
-        // Auth — silent first, then interactive (mirrors usersCommand pattern)
-        authService = new AuthService(this.apiUrl, this.devMode, opts.expectedUserId ?? projectState.userId);
-        serviceClient = new ServiceClient(this.apiUrl, this.devMode);
-        serviceClient.setTokenProvider(() => authService!.getValidToken());
-        const authResult = await authenticateForEdit(authService, orgId, opts.expectedUserId);
-        if (!authResult.success || !authResult.user_id) {
-          // `displayErrorAndExit` rather than console.error + process.exit: it is
-          // what serves the command-error page under `--web` and holds the process
-          // open until the browser has fetched it, and it still prints to the
-          // terminal and still exits 1. Called directly rather than thrown because
-          // there is no enclosing try here — the same shape this file already uses
-          // for the local-key failure a few lines down.
-          const { displayErrorAndExit } = await import('../ui/errorScreen');
-          await displayErrorAndExit(new CapyError('Authentication failed', ERROR_CODES.AUTH_FAILED), {
-            projectName: keep.project_name,
-            projectId: keep.project_id,
-            branch,
-          });
-          return;
-        }
-        userId = authResult.user_id;
-
-        try {
-          const { resolveProjectKeyWithMintFallback } = await import('../auth/masterKeyMint');
-          projectKey = await resolveProjectKeyWithMintFallback({
-            orgId,
-            projectId,
-            userId,
-            serviceClient: serviceClient!,
-            keyServiceOps: {
-              coDecrypt: (oid: string, ct: string) => serviceClient!.coDecrypt(oid, ct).then((r) => r.plaintext),
-              wrapOuterLayer: (oid: string, pt: string) => serviceClient!.wrapOuterLayer(oid, pt).then((r) => r.ciphertext),
-            },
-            orgKeyState: authResult.organizations?.find((o) => o.id === orgId)?.key_state,
-          });
-        } catch (err: any) {
-          const { displayErrorAndExit } = await import('../ui/errorScreen');
-          await displayErrorAndExit(err, {
-            projectName: keep.project_name,
-            projectId: keep.project_id,
-            branch,
-          });
-          return;
-        }
-      }
+    const context = await readEditProjectContext(pm);
+    if (!context) return;
+    const access = await resolveEditAccess(context, opts, this.apiUrl, this.devMode);
+    if (!access) return;
+    const { orgId, projectId, keep, branch } = context;
+    const { localMode, authService, serviceClient, userId, projectKey } = access;
     // CAS precondition for the eventual save's push — the branch's keep_hash
     // this command started from. Lock-less mode always has one (resolved
     // above, real or the well-known empty-state hash); lock-full mode has one
@@ -256,126 +354,19 @@ export class EditCommand {
     // the eventual push omits base_keep_hash entirely (legacy behavior).
     const baseKeepHash: string | undefined = getSyncKeepHash(pm.readSyncState(), branch);
 
-    // Pinned hashes for the active branch
-    const pinned: Record<string, string> = {};
-    for (const [varName, entries] of Object.entries(keep.variables)) {
-      const entry = entries.find((e) => e.branch === branch);
-      if (entry) pinned[varName] = entry.value_hash;
-    }
-
-    // Decrypt local .env values
-    const localPlaintext: Record<string, string> = {};
-    // Local ciphertext this profile does not hold the key for. The TUI drops
-    // these on the floor and says nothing, and the next commit then deletes
-    // their pins — so the browser table names them.
-    const undecryptableKeys: string[] = [];
-      const rawLocal = fileManager.readEnvFile();
-      for (const [key, value] of Object.entries(rawLocal)) {
-        // Reserved runtime variables are not editable secrets (CAP-424). They
-        // are long opaque blobs that crowd out the real list, and editing one
-        // silently breaks that machine's boot while deleting one is worse.
-        if (isReservedRuntimeVar(key)) continue;
-        if (value.startsWith('capy:')) {
-          try {
-            localPlaintext[key] = fileManager.decryptValue(value, projectKey);
-          } catch {
-            // Skip values we can't decrypt
-            undecryptableKeys.push(key);
-          }
-        } else {
-          localPlaintext[key] = value;
-        }
-      }
-    // Baseline the working copy is compared against:
-    //  - remote mode: the latest committed blob fetched from the server.
-    //  - local mode:  the committed blob from the local keep cache (no server).
-    // In both cases it lands in `remotePlaintext` so the TUI's reclassify can
-    // compare working-vs-baseline.
-    const remotePlaintext: Record<string, string> = {};
-    let remoteAvailable = false;
-    // Why there is no other copy to compare against, when there is none. The
-    // terminal renders all three the same way — `{n} ? / remote unavailable` —
-    // so an offline run, a project nobody has pushed and a cold local cache are
-    // indistinguishable. Minted here, where the condition is actually known.
-    let remoteGap: 'never_pushed' | 'fetch_failed' | 'local_mode' | undefined;
-    // Whether the comparison ran against the on-disk cache rather than the
-    // service. A warm cache computes the whole status column while offline with
-    // nothing on screen to say so.
-    let remoteFromCache = false;
-    {
-      const keepHash = SyncEngine.computeKeepHash(keep, branch);
-      try {
-        if (!localMode) remoteFromCache = readKeepCache(orgId, projectId, keepHash) !== null;
-        const blob = localMode
-          ? readSecretsLocal(orgId, projectId, keepHash)
-          : await fetchSecretsWithCache(serviceClient!, orgId, projectId, keepHash);
-        if (blob?.env_file) {
-          const encrypted = fileManager.parseEnvContent(blob.env_file);
-          for (const [key, value] of Object.entries(encrypted)) {
-            try {
-              remotePlaintext[key] = fileManager.decryptValue(value, projectKey);
-            } catch {
-              // Skip values we can't decrypt
-            }
-          }
-          // Remote column only applies to server mode; local mode uses the
-          // committed baseline with local-mode wording instead.
-          if (!localMode) remoteAvailable = true;
-        } else {
-          remoteGap = localMode ? 'local_mode' : 'never_pushed';
-        }
-      } catch {
-        // Remote fetch failed (server mode) — fall back to pinned-only.
-        remoteGap = localMode ? 'local_mode' : 'fetch_failed';
-      }
-    }
-
-    // Build rows for every variable known to any source
-    const allKeys = new Set<string>([
-      ...Object.keys(pinned),
-      ...Object.keys(localPlaintext),
-      ...Object.keys(remotePlaintext),
-    ]);
-
-    const rows: EditRow[] = [];
-    for (const key of Array.from(allKeys).sort()) {
-      const localVal = localPlaintext[key];
-      const remoteVal = remotePlaintext[key];
-      const pinnedHash = pinned[key];
-      const localHash = localVal !== undefined ? hashValue(localVal) : undefined;
-      const remoteHash = remoteVal !== undefined ? hashValue(remoteVal) : undefined;
-
-      let status: EditRow['status'];
-      let updatedLabel: string;
-      // Server-assigned changed_at for this branch — drives the UPDATED
-      // column's recency label ("5 hours ago"). Absent in local mode and for
-      // entries that predate rotation tracking.
-      const changedAt = keep.variables[key]?.find((e) => e.branch === branch)?.changed_at;
-      if (localMode) {
-        // committed-vs-working, via the shared classifier so the initial build
-        // and the in-TUI reclassify can't drift. `remoteVal` holds the
-        // committed value from the local keep cache.
-        ({ status, updatedLabel } = classifyLocalRow(localVal, remoteVal));
-      } else {
-        status = classifyStatus(pinnedHash, localHash, remoteHash, remoteAvailable);
-        updatedLabel = changedAt ? formatRelativeTime(changedAt) : '—';
-      }
-
-      rows.push({
-        key,
-        localValue: localVal,
-        remoteValue: remoteVal,
-        status,
-        updatedLabel,
-        changedAt,
-      });
-    }
+    // Pinned hashes and the local working copy are immutable snapshots. The
+    // baseline is either the server blob or the local committed cache.
+    const pinned = pinnedHashesFor(keep, branch);
+    const localValues = localValuesFor(fileManager, projectKey);
+    const { plaintext: localPlaintext, undecryptableKeys } = localValues;
+    const remote = await remoteBaselineFor(fileManager, context, access);
+    const rows = editRowsFor(context, access, pinned, localPlaintext, remote);
 
     const state: EditState = {
       projectName: keep.project_name,
       branch,
       rows,
-      remoteAvailable,
+      remoteAvailable: remote.available,
       localMode,
     };
 
@@ -384,9 +375,9 @@ export class EditCommand {
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
     };
-    // Set when a save rewrote keep.lock. The auto-commit runs after the TUI
-    // exits — committing (and printing) mid-screen would corrupt the display.
-    let keepDirty = false;
+    // Resolve when a save rewrites keep.lock. The auto-commit runs only after
+    // the UI exits, so its terminal output cannot corrupt the alternate screen.
+    const saveCompletion = Promise.withResolvers<boolean>();
 
     // The same-key CAS conflict confirm `addCommand` uses, adapted to this
     // screen's terminal: `--web` has no secondary confirm surface (Save is
@@ -421,27 +412,30 @@ export class EditCommand {
         // to the server, then cache + write keep.lock + .env + sync state.
         const finalEnv: Record<string, string> = { ...localPlaintext, ...edits };
 
-        const encrypted: Record<string, string> = {};
-        for (const [key, value] of Object.entries(finalEnv)) {
-          const resourceId = deriveResourceId(branch, key);
-          const enc = Encryptor.encrypt(value, projectKey);
-          encrypted[key] = `capy:${resourceId}:${enc}`;
-        }
+        const encrypted = Object.fromEntries(
+          Object.entries(finalEnv).map(([key, value]) => {
+            const resourceId = deriveResourceId(branch, key);
+            const encryptedValue = Encryptor.encrypt(value, projectKey);
+            return [key, `capy:${resourceId}:${encryptedValue}`];
+          }),
+        );
         const envBlob = Object.entries(encrypted)
           .map(([k, v]) => `${k}=${v}`)
           .join('\n');
 
-        const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-        for (const [key, value] of Object.entries(finalEnv)) {
-          pushedVars[key] = {
-            resource_id: deriveResourceId(branch, key),
-            value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-          };
-        }
+        const pushedVars = Object.fromEntries(
+          Object.entries(finalEnv).map(([key, value]) => [
+            key,
+            {
+              resource_id: deriveResourceId(branch, key),
+              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+            },
+          ]),
+        );
 
         const syncEngine = new SyncEngine();
         const buildFinalKeep = (base: KeepFile): KeepFile => {
-          const fk = syncEngine.mergeWithKeep(base, pushedVars, branch);
+          const merged = syncEngine.mergeWithKeep(base, pushedVars, branch);
           // Drop branch entries for variables no longer in finalEnv.
           // Prune against `keep` (this command's original local basis), not
           // `base` (which a CAS retry replaces with a rebase onto the
@@ -450,15 +444,16 @@ export class EditCommand {
           // visible only because of the rebase, not something the user
           // deleted in this screen. Pruning it would be a data-loss bug on
           // exactly the retry path meant to avoid one.
-          for (const varName of Object.keys(fk.variables)) {
-            if (varName in finalEnv) continue;
-            const wasInLocalBasis = keep.variables[varName]?.some((e) => e.branch === branch);
-            if (!wasInLocalBasis) continue;
-            const entries = fk.variables[varName].filter((e) => e.branch !== branch);
-            if (entries.length > 0) fk.variables[varName] = entries;
-            else delete fk.variables[varName];
-          }
-          return fk;
+          const variables = Object.fromEntries(
+            Object.entries(merged.variables).flatMap(([varName, entries]) => {
+              if (varName in finalEnv) return [[varName, entries]];
+              const wasInLocalBasis = keep.variables[varName]?.some((entry) => entry.branch === branch);
+              if (!wasInLocalBasis) return [[varName, entries]];
+              const withoutActiveBranch = entries.filter((entry) => entry.branch !== branch);
+              return withoutActiveBranch.length === 0 ? [] : [[varName, withoutActiveBranch]];
+            }),
+          );
+          return { ...merged, variables };
         };
 
         // In local-only mode there is no push — the local writes below ARE
@@ -467,10 +462,8 @@ export class EditCommand {
         // offers the same
         // `confirmOverwrite` gate `addCommand` uses (see above) instead of
         // refusing unconditionally.
-        let finalKeep = buildFinalKeep(keep);
-        let pushedEnvBlob = envBlob;
-        const pushResult = localMode
-          ? null
+        const pushOutcome = localMode
+          ? { finalKeep: buildFinalKeep(keep), envBlob, pushResult: null }
           : await pushKeepWithRetry({
               serviceClient: serviceClient!,
               projectId,
@@ -482,11 +475,13 @@ export class EditCommand {
               buildFinalKeep,
               primaryVarNames: Object.keys(edits),
               confirmOverwrite,
-            }).then((r) => {
-              finalKeep = r.finalKeep;
-              pushedEnvBlob = r.envBlob;
-              return r;
-            });
+            }).then((pushResult) => ({
+              finalKeep: pushResult.finalKeep,
+              envBlob: pushResult.envBlob,
+              pushResult,
+            }));
+
+        const { finalKeep, envBlob: pushedEnvBlob, pushResult } = pushOutcome;
 
         // keep_hash is computed locally from what was actually pushed (after
         // any CAS rebase); the server returns the same value on push.
@@ -498,7 +493,7 @@ export class EditCommand {
         // Lock-less mode never writes keep.lock — there is none for this dir.
         const adoptedKeep = SyncEngine.adoptServerKeep(pushResult?.keep_file, finalKeep, branch);
         fileManager.writeKeepFile(adoptedKeep);
-        keepDirty = true;
+        saveCompletion.resolve(true);
         fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
 
         const existingSyncState = pm.readSyncState();
@@ -513,12 +508,12 @@ export class EditCommand {
         // Hand the server-assigned changed_at back to the TUI so the UPDATED
         // column reflects the authoritative stamp for this commit, not a
         // client-side guess.
-        const changedAtByKey: Record<string, string> = {};
-        for (const [varName, entries] of Object.entries(adoptedKeep.variables)) {
-          const stamp = entries.find((e) => e.branch === branch)?.changed_at;
-          if (stamp) changedAtByKey[varName] = stamp;
-        }
-        return changedAtByKey;
+        return Object.fromEntries(
+          Object.entries(adoptedKeep.variables).flatMap(([varName, entries]) => {
+            const stamp = entries.find((entry) => entry.branch === branch)?.changed_at;
+            return stamp === undefined ? [] : [[varName, stamp]];
+          }),
+        );
       },
     };
 
@@ -583,10 +578,10 @@ export class EditCommand {
             branch,
             mode: localMode ? 'local' : 'server',
             rows,
-            remoteAvailable,
-            remoteGap,
-            remoteFromCache,
-            undecryptableKeys,
+            remoteAvailable: remote.available,
+            remoteGap: remote.gap,
+            remoteFromCache: remote.fromCache,
+            undecryptableKeys: [...undecryptableKeys],
             // Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI and
             // headless runs drive the loopback without hijacking a real browser.
             open: opts.open !== false && !process.env.CAPY_WEB_NO_OPEN,
@@ -597,7 +592,8 @@ export class EditCommand {
     } else {
       await screen.run(state, editContext);
     }
-    if (keepDirty) {
+    const didSave = await Promise.race([saveCompletion.promise, Promise.resolve(false)]);
+    if (didSave) {
       const { autoCommitKeep } = await import('../git/autoCommitKeep');
       autoCommitKeep(branch);
     }
