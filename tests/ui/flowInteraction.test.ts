@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test';
-import { flowQueueStep, flowTurnPayload } from '../../src/ui/flowInteraction';
+import { describe, expect, mock, test } from 'bun:test';
+import { flowQueueStep, flowTurnPayload, isHumanFlowRun } from '../../src/ui/flowInteraction';
 
 describe('Flow turn payloads', () => {
   test('preserves CLI event order and omits presentation when the CLI did not supply it', () => {
@@ -79,5 +79,30 @@ describe('Flow turn payloads', () => {
         },
       }],
     });
+  });
+});
+
+describe('Who gets the human path', () => {
+  const opened = () => 'default-browser';
+  const suppressed = () => 'suppressed';
+
+  test('only a terminal run that asked for the handoff and may open a browser', () => {
+    expect(isHumanFlowRun(true, true, opened)).toBe(true);
+  });
+
+  test('an agent or piped stdout keeps the JSON contract', () => {
+    expect(isHumanFlowRun(true, undefined, opened)).toBe(false);
+    expect(isHumanFlowRun(true, false, opened)).toBe(false);
+  });
+
+  test('a run that may not open a browser keeps the JSON contract', () => {
+    expect(isHumanFlowRun(true, true, suppressed)).toBe(false);
+  });
+
+  test('a command that never asked for the handoff never consults the browser plan', () => {
+    const plan = mock(() => 'default-browser');
+    expect(isHumanFlowRun(undefined, true, plan)).toBe(false);
+    expect(isHumanFlowRun(false, true, plan)).toBe(false);
+    expect(plan).not.toHaveBeenCalled();
   });
 });

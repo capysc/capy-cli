@@ -6,7 +6,7 @@ import { runWithFlowInteraction } from './flowInteraction';
 
 /** Pair supplies identity/custody; the existing root command owns everything after it. */
 export async function runCapyFlow(options: CliOptions, devMode: boolean): Promise<void> {
-  const execute = () => runWithFlowInteraction(() => new CapyCommand({...options, web:false}, devMode).execute(), devMode);
+  const execute = () => runWithFlowInteraction(() => new CapyCommand({...options, web:false}, devMode).execute(), devMode, { command: 'capy', continuationTool: 'capy_onboard_continue', localHandoff: true });
   try { await execute(); }
   catch (error) {
     if (!(error instanceof Error)

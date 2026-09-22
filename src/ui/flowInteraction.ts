@@ -9,6 +9,8 @@ import { readLocalRoot } from '../config/globalConfig';
 import { keepOrigin } from './screens/keepScreens';
 import { mintConnectionKeypair, openEnvelope, sealRequestEnvelope } from '../service/brokerEnvelope';
 import { runWithInteraction, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
+import { planOpen, openScreen } from './openScreen';
+import { startLocalHandoff, type LocalHandoffHandle } from './localHandoff';
 
 type Data = Readonly<Record<string, unknown>>;
 type MessageType = 'output' | 'progress' | 'prompt' | 'answer' | 'goal' | 'ping' | 'pong';
@@ -73,8 +75,22 @@ export const flowQueueStep = (
   };
 };
 
+/**
+ * The one condition that turns on the human path: a person watching a real
+ * terminal, on a run that is allowed to open a browser itself. Every other
+ * run — an agent's piped stdout, `CAPY_WEB_NO_OPEN`, a test, or any command
+ * that did not ask for the handoff — keeps the byte-identical JSON contract.
+ * The browser-open plan is a thunk so a run that never wanted the handoff
+ * does not consult it at all.
+ */
+export const isHumanFlowRun = (
+  localHandoff: boolean | undefined,
+  stdoutIsTty: boolean | undefined,
+  plannedOpen: () => string,
+): boolean => localHandoff === true && stdoutIsTty === true && plannedOpen() !== 'suppressed';
+
 /** Adapter only: executes the ordinary command under the encrypted Flow I/O boundary. */
-export async function runWithFlowInteraction(operation: () => Promise<void>, devMode: boolean, descriptor: Readonly<{ command: 'capy' | 'rotate'; continuationTool: 'capy_onboard_continue' | 'capy_rotate_continue'; expectedUserId?: string }> = { command: 'capy', continuationTool: 'capy_onboard_continue' }): Promise<void> {
+export async function runWithFlowInteraction(operation: () => Promise<void>, devMode: boolean, descriptor: Readonly<{ command: 'capy' | 'rotate'; continuationTool: 'capy_onboard_continue' | 'capy_rotate_continue'; expectedUserId?: string; localHandoff?: boolean }> = { command: 'capy', continuationTool: 'capy_onboard_continue' }): Promise<void> {
   const project = await new ProjectManager().detectProjectState();
   const auth = (() => {
     try { return new AuthService(undefined, devMode, project.userId); }
@@ -115,14 +131,42 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     if (!response.ok) throw new Error(result.code ?? 'CONVERSATION_SERVICE_ERROR');
     return result;
   };
-  const created = await request<{ readonly flow_id: string; readonly client_pubkey: string }>('/flows/conversation', signed('create', runtimeId, 'create', {
+  const created = await request<{ readonly flow_id: string; readonly client_pubkey: string; readonly page_pubkey?: string | null }>('/flows/conversation', signed('create', runtimeId, 'create', {
     command: descriptor.command, runtime_id: runtimeId, repo_fingerprint: binding.repositoryFingerprint, client_pubkey: keys.publicKeyB64, machine_name: binding.machineName,
   }));
   if (created.client_pubkey !== keys.publicKeyB64) throw new Error('CONVERSATION_BINDING_MISMATCH');
   const flowId = created.flow_id;
   const url = `${keepOrigin()}/flow/conversation?f=${encodeURIComponent(flowId)}`;
+  // Local auth + custody handoff (docs/flows/local-handoff.md): only when this
+  // exact invocation is allowed to open a browser itself, and only when no
+  // page has attached to the conversation yet. Everything else — MCP runs,
+  // non-TTY output, CAPY_WEB_NO_OPEN — stays on the byte-identical JSON path
+  // below, unchanged.
+  const isHuman = isHumanFlowRun(
+    descriptor.localHandoff,
+    process.stdout.isTTY,
+    () => planOpen(url, { kind: 'handoff' }).via,
+  );
+  const handoff: LocalHandoffHandle | null = isHuman && !created.page_pubkey
+    ? await startLocalHandoff({
+        origin,
+        keepOrigin: keepOrigin(),
+        conversationFlowId: flowId,
+        clientPubkeyB64: keys.publicKeyB64,
+        userId: identity.user_id,
+        orgId: identity.organization_id,
+        bearer: async () => (await auth.getValidToken())?.access_token ?? '',
+        sign: signed,
+        readLocalRoot,
+      })
+    : null;
   // Only the public handoff goes to stdout. Workflow content always uses the encrypted adapter.
-  process.stdout.write(`${JSON.stringify({ ok: true, command: descriptor.command, flow_id: flowId, url, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: true}} })}\n`);
+  if (isHuman) {
+    process.stdout.write(`\nOpening Capy…\n${url}\n`);
+    void openScreen(handoff?.url ?? url, { kind: 'handoff' });
+  } else {
+    process.stdout.write(`${JSON.stringify({ ok: true, command: descriptor.command, flow_id: flowId, url, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: true}} })}\n`);
+  }
   const detach = async (): Promise<void> => {
     try {
       const token = await auth.getValidToken();
@@ -153,6 +197,9 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   };
   const attached = await waitForPage();
   const pageKey = attached.page_pubkey!;
+  // The page has what it needs (or has already fallen back on its own); the
+  // loopback listener has nothing left to answer.
+  if (handoff) await handoff.close();
   const incoming = new EventEmitter();
   const append = async (type: MessageType, data: Data, correlationId?: string): Promise<void> => {
     const id = randomUUID();
@@ -176,7 +223,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     try {
       const step = flowQueueStep(items, item);
       for (const write of step.writes) await append(write.type, write.data, write.correlation);
-      if (item.type === 'goal') process.stdout.write(`${JSON.stringify({ok: true, command: descriptor.command, flow_id: flowId, outcome: item.data.status, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: false}}})}\n`);
+      if (item.type === 'goal' && !isHuman) process.stdout.write(`${JSON.stringify({ok: true, command: descriptor.command, flow_id: flowId, outcome: item.data.status, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: false}}})}\n`);
       item.resolve();
       return consume(step.nextItems);
     } catch (error) {
@@ -243,6 +290,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   } finally {
     process.removeListener('SIGINT', interrupted);
     process.removeListener('SIGTERM', terminated);
+    if (handoff) await handoff.close();
     await detach();
   }
 }
