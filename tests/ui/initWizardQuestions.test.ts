@@ -4,12 +4,12 @@ import {
   organizationQuestion, projectNameQuestion, projectQuestion,
 } from '../../src/ui/initWizardQuestions';
 
-test('organization and project questions accept only listed IDs, with existing create precedence', () => {
+test('organization accepts only existing memberships while projects retain creation', () => {
   const orgs = [{ id: 'org_beta', name: 'Beta', isCurrent: false }] as const;
   const org = organizationQuestion(orgs);
   expect(org.decide({ organizationId: 'org_beta' })).toEqual({ value: 'org_beta', record: { organization: { kind: 'existing', name: 'Beta' } } });
   expect(org.decide({ organizationId: 'org_unknown' })).toEqual({ error: 'That organization is not one this session can reach.' });
-  expect(org.decide({ createOrganization: true, organizationId: 'org_beta' })).toEqual({ value: 'create', record: { organization: { kind: 'new' } } });
+  expect(org.decide({ createOrganization: true, organizationId: 'org_beta' })).toEqual({ error: 'Create your organization in Keep before initializing this repository.' });
   expect(org.view.orgs).toEqual(orgs);
   const project = projectQuestion([{ id: 'project_beta', name: 'Payments' }]);
   expect(project.decide({ projectId: 'project_unknown' })).toEqual({ error: 'That project is not in this organization.' });

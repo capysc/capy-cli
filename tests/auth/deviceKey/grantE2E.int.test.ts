@@ -82,6 +82,12 @@ function spawnCli(
   serviceUrl: string,
   extraEnv: Record<string, string | undefined> = {},
 ): { child: ReturnType<typeof spawn>; stdoutSoFar: () => string; done: Promise<SpawnResult> } {
+  mkdirSync(join(home, '.capy'), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(home, '.capy', 'config.json'),
+    JSON.stringify({ default: 'test', profiles: { test: { url: serviceUrl } } }),
+    { mode: 0o600 },
+  );
   const outputId = randomBytes(8).toString('hex');
   const stdoutPath = join(home, `.grant-child-${outputId}.stdout`);
   const stderrPath = join(home, `.grant-child-${outputId}.stderr`);

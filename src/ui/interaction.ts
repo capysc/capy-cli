@@ -2,8 +2,14 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import inquirer from 'inquirer';
+import type { SyncConflictData } from './screens/contract';
 
-export type InteractionOutput = Readonly<{ readonly text: string; readonly level?: 'info' | 'warning' | 'error' }>;
+export type InteractionOutput = Readonly<{
+  readonly text: string;
+  readonly level?: 'info' | 'warning' | 'error';
+  /** Structured sync state for a browser conversation. Terminal copy remains terminal-owned. */
+  readonly sync_conflict?: SyncConflictData;
+}>;
 /**
  * Optional rendering hint supplied by the command that owns a turn.  It is
  * deliberately descriptive only: transports must never derive it from text.
@@ -17,7 +23,11 @@ export type ProviderAuthentication = Readonly<{
   state: 'starting' | 'pending' | 'authorized' | 'failed'; expires_at: string | null; failure_code?: string;
 }>;
 export type InteractionProgress = Readonly<{ readonly status: 'start' | 'success' | 'failure' | 'warning'; readonly text: string; readonly provider_auth?: ProviderAuthentication }>;
+export type InteractionInvocation = Readonly<{ flow: string; goal: string }>;
 export type InteractionGoal = Readonly<{
+  readonly flow?: string;
+  readonly goal?: string;
+  readonly result?: Readonly<Record<string, unknown>>;
   readonly status: 'succeeded' | 'failed' | 'cancelled' | 'skipped';
   readonly code?: string;
   readonly message?: string;
@@ -62,9 +72,32 @@ export const emitInteractionProgress = (event: InteractionProgress): void => {
   if (interaction) void interaction.progress(event);
 };
 
-export const emitInteractionGoal = (outcome: InteractionGoal): void => {
-  const interaction = currentInteraction();
-  if (interaction) void interaction.goal(outcome);
+export const emitInteractionGoal = async (outcome: InteractionGoal): Promise<void> => {
+  await currentInteraction()?.goal(outcome);
+};
+
+const invocations = new AsyncLocalStorage<InteractionInvocation>();
+export const currentInteractionInvocation = (): InteractionInvocation | undefined => invocations.getStore();
+
+/** Prerequisites cannot terminate their owning operation. Only its returned outcome can. */
+export const runInteractionOperation = async (
+  invocation: InteractionInvocation | undefined,
+  operation: () => Promise<InteractionGoal>,
+  onError: (error: unknown) => InteractionGoal,
+): Promise<Readonly<{ outcome: InteractionGoal; error?: unknown }>> => {
+  const parent = currentInteraction();
+  const execute = async (): Promise<Readonly<{ outcome: InteractionGoal; error?: unknown }>> => {
+    try { return { outcome: await operation() }; }
+    catch (error) { return { outcome: onError(error), error }; }
+  };
+  const prerequisite = (): ReturnType<typeof execute> => parent
+    ? runWithInteraction({ ...parent, goal: async () => undefined }, execute)
+    : execute();
+  const completed = invocation ? await invocations.run(invocation, prerequisite) : await prerequisite();
+  const outcome = { ...completed.outcome, ...invocation };
+  // Outside the operation catch: an unacknowledged terminal write must not become a second goal.
+  await emitInteractionGoal(outcome);
+  return { ...completed, outcome };
 };
 
 /** Returns undefined outside an interaction so callers can retain their TTY prompt. */
@@ -174,6 +207,7 @@ const askTerminalQuestion = async (question: TerminalQuestion, answers: Terminal
     : defaultValue;
   const answer = await interaction.prompt<Readonly<{ answer: unknown }>>({
     view: { text: String(resolveSetting(question.message, answers) ?? ''),
+      ...(question.secretSummary === undefined ? {} : { secretSummary: question.secretSummary }),
       input: { kind, ...(choices ? { choices: choices.map(({ label, value, disabled }) => ({ label, value, disabled })) } : {}),
         ...(initial === undefined ? {} : { default: initial }) } },
     ...(question.presentation === undefined ? {} : { presentation: question.presentation }),

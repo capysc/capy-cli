@@ -19,14 +19,14 @@
  * is proven end-to-end by spawning the built CLI with piped stdio, which is
  * deterministically non-TTY on both streams in every environment.
  */
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, mock } from 'bun:test';
 import { mkdirSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 
-import { editSurfaceIsSafe } from '../../src/commands/editCommand';
-import { ERROR_CODES } from '../../src/types/index';
+import { authenticateForEdit, editSurfaceIsSafe } from '../../src/commands/editCommand';
+import { ERROR_CODES, type AuthResult } from '../../src/types/index';
 
 const CLI = join(__dirname, '../../dist/index.js');
 
@@ -76,6 +76,62 @@ describe('editSurfaceIsSafe — the decision table', () => {
     expect(editSurfaceIsSafe(undefined, undefined, undefined)).toBe(false);
     expect(editSurfaceIsSafe(undefined, true, undefined)).toBe(false);
     expect(editSurfaceIsSafe(undefined, undefined, true)).toBe(false);
+  });
+});
+
+const authenticated = (userId: string): AuthResult => ({ success: true, user_id: userId });
+const notAuthenticated = (): AuthResult => ({ success: false });
+
+describe('authenticateForEdit', () => {
+  test('uses one scoped silent check for a hosted identity and never repairs authentication', async () => {
+    const authenticateSilent = mock(async () => authenticated('user_fixture'));
+    const authenticate = mock(async () => authenticated('user_fixture'));
+
+    const result = await authenticateForEdit(
+      { authenticateSilent, authenticate },
+      'org_fixture',
+      'user_fixture',
+    );
+
+    expect(result).toEqual(authenticated('user_fixture'));
+    expect(authenticateSilent).toHaveBeenCalledTimes(1);
+    expect(authenticateSilent).toHaveBeenCalledWith('org_fixture');
+    expect(authenticate).not.toHaveBeenCalled();
+  });
+
+  test('rejects a missing or mismatched hosted session without an account-switch fallback', async () => {
+    const missingSilent = mock(async () => notAuthenticated());
+    const missingInteractive = mock(async () => authenticated('user_fixture'));
+    const mismatchSilent = mock(async () => authenticated('other_user'));
+    const mismatchInteractive = mock(async () => authenticated('user_fixture'));
+
+    await expect(authenticateForEdit(
+      { authenticateSilent: missingSilent, authenticate: missingInteractive },
+      'org_fixture',
+      'user_fixture',
+    )).rejects.toMatchObject({ code: ERROR_CODES.AUTH_FAILED });
+    await expect(authenticateForEdit(
+      { authenticateSilent: mismatchSilent, authenticate: mismatchInteractive },
+      'org_fixture',
+      'user_fixture',
+    )).rejects.toMatchObject({ code: ERROR_CODES.AUTH_FAILED });
+
+    expect(missingSilent).toHaveBeenCalledWith('org_fixture');
+    expect(missingInteractive).not.toHaveBeenCalled();
+    expect(mismatchSilent).toHaveBeenCalledWith('org_fixture');
+    expect(mismatchInteractive).not.toHaveBeenCalled();
+  });
+
+  test('retains the ordinary interactive fallback after both silent checks fail', async () => {
+    const authenticateSilent = mock(async () => notAuthenticated());
+    const authenticate = mock(async () => authenticated('user_fixture'));
+
+    const result = await authenticateForEdit({ authenticateSilent, authenticate }, 'org_fixture');
+
+    expect(result).toEqual(authenticated('user_fixture'));
+    expect(authenticateSilent).toHaveBeenNthCalledWith(1, 'org_fixture');
+    expect(authenticateSilent).toHaveBeenNthCalledWith(2);
+    expect(authenticate).toHaveBeenCalledWith('org_fixture');
   });
 });
 

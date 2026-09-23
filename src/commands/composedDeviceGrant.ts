@@ -339,7 +339,7 @@ const startGrant = async (
   const identity = await auth.authenticateSilent();
   const token = identity.success ? await auth.getValidToken() : null;
   const baseline = capturePairedSessionInstallationBaseline(expectedUserId ?? token?.user_id ?? null);
-  const response = await request(origin, '/auth/device/authorize', token ? {} : { compose: 'signup', machine_name: hostname() })
+  const response = await request(origin, '/auth/device/authorize', token ? {} : { compose: 'signin', machine_name: hostname() })
     .catch(() => reject('AUTH_DEVICE_START_FAILED'));
   const authorization = await responseRecord(response);
   if (!response.ok || !authorization) return reject('AUTH_DEVICE_START_FAILED');
@@ -486,7 +486,7 @@ async function reuseExistingCustody(origin: string, expectedUserId?: string): Pr
 export async function runComposedDeviceGrant(
   resumeFlowId?: string,
   expectedUserId?: string,
-  onCustodyReady?: (continuation: ComposedAuthenticatedContinuation) => Promise<void>,
+  onCustodyReady?: (continuation: ComposedAuthenticatedContinuation & Readonly<{ organizationId: string }>) => Promise<void>,
 ): Promise<number> {
   if (resumeFlowId !== undefined && !UUID.test(resumeFlowId)
     || expectedUserId !== undefined && !USER_ID.test(expectedUserId)) {
@@ -518,7 +518,7 @@ export async function runComposedDeviceGrant(
     const { continueComposedCustody } = await import('../auth/pairing/composedCustody');
     const custody = await continueComposedCustody(continuation);
     if (custody.kind !== 'complete') return reject(custody.code);
-    if (onCustodyReady) await onCustodyReady(continuation);
+    if (onCustodyReady) await onCustodyReady({ ...continuation, organizationId: custody.orgId });
     removeCheckpoint(path);
     console.log(JSON.stringify({ ok: true, stage: 'custody_ready', flow_id: continuation.flowId,
       user_id: continuation.userId, org_id: custody.orgId, custody: 'filesystem' }));

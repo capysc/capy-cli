@@ -1,5 +1,5 @@
 /**
- * Conflict/overwrite UX polish on top of single-user lock-less mode:
+ * Conflict/overwrite UX polish for explicitly configured Keep projects:
  *
  *  1. `conflictContextLines` — connector metadata + relative "last written"
  *     time rendered ABOVE the existing overwrite/CAS confirm questions,
@@ -8,12 +8,8 @@
  *  2. `editCommand`'s save path and `pushCommand` now offer the same TTY
  *     inquirer confirm `addCommand` already used for a same-key CAS
  *     conflict, instead of refusing unconditionally.
- *  3. `maybeWarnPersonalEnv` — a one-line, non-blocking heads-up on the
- *     FIRST lock-less write in a directory that git recognizes as a team
- *     project (a repo with a remote) but whose `.env` has no capy identity
- *     header yet.
  *
- * Same harness convention as `locklessContext.test.ts`: AuthService,
+ * AuthService,
  * ServiceClient and keyResolver.resolveProjectKey are mocked (no network/
  * crypto in a unit test); ProjectManager, FileManager, SyncEngine and the
  * real AES-GCM Encryptor are the real thing against real temp directories.
@@ -22,14 +18,13 @@
  */
 import { mock, spyOn, describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'fs';
-import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
 const TEMP_HOME = mkdtempSync(join(require('os').tmpdir(), 'capy-conflictux-home-'));
 mock.module('os', () => {
   const actual = require('os');
-  return { ...actual, homedir: () => TEMP_HOME };
+  return { ...actual, default: actual, homedir: () => TEMP_HOME };
 });
 
 const PROJECT_KEY = 'c'.repeat(64);
@@ -154,8 +149,6 @@ import {
   conflictContextLines,
   describeConnector,
   conflictOverwriteQuestion,
-  initialPersonalEnvWarningState,
-  maybeWarnPersonalEnv,
   keepEntryFor,
 } from '../../../src/commands/connectors/shared';
 import { CapyError, ERROR_CODES, KeepFile, ConnectorMetadata } from '../../../src/types/index';
@@ -184,6 +177,7 @@ function resetState(): void {
 }
 
 beforeEach(() => {
+  process.exitCode = 0;
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
   mkdirSync(TEST_DIR, { recursive: true });
   process.chdir(TEST_DIR);
@@ -191,12 +185,35 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  process.exitCode = 0;
   process.chdir(ORIGINAL_CWD);
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
 function writeEnvHeader(): void {
   writeFileSync(join(TEST_DIR, '.env'), '# capy:org_id=org-header\n# capy:project_id=proj-header\n\n');
+  mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+  writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development');
+  writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({
+    version: '3.0',
+    org_id: 'org-header',
+    project_id: 'proj-header',
+    project_name: 'default',
+    variables: {},
+  }));
+}
+
+function writeEditProject(): void {
+  writeFileSync(join(TEST_DIR, '.env'), '# capy:org_id=org-1\n# capy:project_id=proj-1\n\n');
+  mkdirSync(join(TEST_DIR, '.capy'), { recursive: true });
+  writeFileSync(join(TEST_DIR, '.capy', 'branch'), 'development');
+  writeFileSync(join(TEST_DIR, 'keep.lock'), JSON.stringify({
+    version: '3.0',
+    org_id: 'org-1',
+    project_id: 'proj-1',
+    project_name: 'default',
+    variables: {},
+  }));
 }
 
 async function withTTY<T>(fn: () => Promise<T>): Promise<T> {
@@ -313,54 +330,6 @@ describe('conflictContextLines / describeConnector / conflictOverwriteQuestion',
 });
 
 describe('addCommand — enriched overwrite/conflict gates', () => {
-  test('local "already exists" gate: context lines print above the confirm; decline aborts without a second push', async () => {
-    writeEnvHeader();
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-header' }];
-    const changedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1 hour ago
-    const serverKeep: KeepFile = {
-      version: '3.0',
-      org_id: 'org-header',
-      project_id: 'proj-header',
-      project_name: 'default',
-      variables: {
-        STRIPE_KEY: [
-          {
-            resource_id: deriveResourceId('development', 'STRIPE_KEY'),
-            branch: 'development',
-            value_hash: 'h1',
-            connector: CONNECTOR,
-            changed_at: changedAt,
-          },
-        ],
-      },
-    };
-    getDecryptDataResult = {
-      env_content: cipherLine('development', 'STRIPE_KEY', 'existing-value'),
-      decrypt_key: '',
-      expires_at: new Date().toISOString(),
-      keep_hash: 'server-base-hash',
-      keep_file: JSON.stringify(serverKeep),
-    };
-
-    promptAnswers = { ok: false };
-    const { lines: logs, restore } = captureLogs();
-    try {
-      const { AddCommand } = await import('../../../src/commands/addCommand');
-      await new AddCommand(true).execute(['STRIPE_KEY'], {});
-    } finally {
-      restore();
-    }
-
-    // Context line printed above the (unchanged) confirm question.
-    expect(logs.some((l) => l.includes('STRIPE_KEY') && l.includes('stripe (test)') && l.includes('last written'))).toBe(
-      true,
-    );
-    expect(promptCalls.some((q) => q.message === 'STRIPE_KEY already exist(s). Overwrite?')).toBe(true);
-    // Declined — no push attempted.
-    expect(serviceCalls.filter((c) => c[0] === 'pushSecrets').length).toBe(0);
-    expect(logs.some((l) => l.includes('Aborted.'))).toBe(true);
-  });
-
   test('CAS gate: same-key server conflict shows context lines from the server\'s copy; decline refuses coded', async () => {
     writeEnvHeader();
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-header' }];
@@ -455,6 +424,7 @@ describe('addCommand — enriched overwrite/conflict gates', () => {
 
 describe('editCommand — same-key CAS conflict now offers the addCommand-style confirm', () => {
   test('decline refuses coded; the confirm carries the server-side context lines', async () => {
+    writeEditProject();
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
     listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
     const baseServerKeep: KeepFile = {
@@ -527,6 +497,7 @@ describe('editCommand — same-key CAS conflict now offers the addCommand-style 
   });
 
   test('accept lets the retried push land', async () => {
+    writeEditProject();
     authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
     listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
     const baseServerKeep: KeepFile = {
@@ -797,112 +768,5 @@ describe('pushCommand — same-key CAS conflict now offers the addCommand-style 
       push.mockRestore();
       auth.mockRestore();
     }
-  });
-});
-
-describe('maybeWarnPersonalEnv — soft, non-blocking personal-env-in-a-team-project note', () => {
-  function gitInit(withRemote: boolean): void {
-    execFileSync('git', ['init', '-q'], { cwd: TEST_DIR });
-    if (withRemote) {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://example.com/team/repo.git'], { cwd: TEST_DIR });
-    }
-  }
-
-  test('fires once for a lock-less write whose identity came from the server, in a repo with a remote', async () => {
-    gitInit(true);
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    expect(ctx.identitySource).toBe('server');
-
-    const { lines: errs, restore } = captureErrors();
-    try {
-      const warningState = maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-      maybeWarnPersonalEnv(ctx, warningState, TEST_DIR); // same state threaded through — no second line
-    } finally {
-      restore();
-    }
-
-    expect(errs).toEqual(['Heads up: this saves to your personal env, not a team project.']);
-  });
-
-  test('stays silent when the .env identity header already exists (not the first write)', async () => {
-    gitInit(true);
-    writeEnvHeader();
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-header' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    expect(ctx.identitySource).toBe('header');
-
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('stays silent in a git repo with no remote configured', async () => {
-    gitInit(false);
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('stays silent outside a git repo entirely', async () => {
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-
-    const ctx = await resolveContext({ devMode: true });
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(ctx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('stays silent for lock-full contexts (keep.lock present) regardless of git state', () => {
-    gitInit(true);
-    const fauxLockFullCtx = { lockless: false, identitySource: undefined } as any;
-    const { lines: errs, restore } = captureErrors();
-    try {
-      maybeWarnPersonalEnv(fauxLockFullCtx, initialPersonalEnvWarningState(), TEST_DIR);
-    } finally {
-      restore();
-    }
-    expect(errs).toEqual([]);
-  });
-
-  test('writeAndSync wires the warning in automatically on a real lock-less write', async () => {
-    gitInit(true);
-    authResultQueue = [{ success: true, user_id: 'user-1', organization_id: 'org-1' }];
-    listProjectsResult = [{ id: 'proj-1', name: 'default', organization_id: 'org-1' }];
-    pushSecretsQueue = [async () => ({ keep_hash: 'h'.repeat(64) })];
-
-    const ctx = await resolveContext({ devMode: true });
-    const { lines: errs, restore } = captureErrors();
-    try {
-      await writeAndSync(ctx, 'NEW_VAR', 'value', { push: true });
-    } finally {
-      restore();
-    }
-
-    expect(errs).toEqual(['Heads up: this saves to your personal env, not a team project.']);
-    // The write itself left the identity header behind — the on-disk proof
-    // that the next command in this directory would see identitySource
-    // 'header' and stay silent.
-    expect(existsSync(join(TEST_DIR, '.env'))).toBe(true);
   });
 });

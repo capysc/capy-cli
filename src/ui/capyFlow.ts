@@ -6,8 +6,16 @@ import { runWithFlowInteraction } from './flowInteraction';
 
 /** Pair supplies identity/custody; the existing root command owns everything after it. */
 export async function runCapyFlow(options: CliOptions, devMode: boolean): Promise<void> {
-  const execute = () => runWithFlowInteraction(() => new CapyCommand({...options, web:false}, devMode).execute(), devMode, { command: 'capy', continuationTool: 'capy_onboard_continue', localHandoff: true });
-  try { await execute(); }
+  // The local handoff belongs to the run that is already paired. After a
+  // first-time pairing, the Keep tab that did the pairing carries on into the
+  // same conversation by itself; a second tab opened here would race it for
+  // the conversation's one page key.
+  const execute = (organizationId?: string, expectedUserId?: string, localHandoff = false) => runWithFlowInteraction(
+    () => new CapyCommand({...options, web:false}, devMode).execute(),
+    devMode,
+    { command: 'capy', continuationTool: 'capy_onboard_continue', organizationId, expectedUserId, localHandoff },
+  );
+  try { await execute(undefined, undefined, true); }
   catch (error) {
     if (!(error instanceof Error)
       || !['PAIR_REQUIRED', 'CONVERSATION_RUNTIME_UNAVAILABLE'].includes(error.message)) throw error;
@@ -18,7 +26,7 @@ export async function runCapyFlow(options: CliOptions, devMode: boolean): Promis
       const project = await manager.detectProjectState();
       if (project.initialized && project.userId && project.userId !== continuation.userId) throw new Error('AUTH_ACCOUNT_MISMATCH');
       manager.writeSyncStateUserId(continuation.userId);
-      await execute();
+      await execute(continuation.organizationId, continuation.userId);
     });
     if (code !== 0) throw new Error('PAIR_FAILED');
   }

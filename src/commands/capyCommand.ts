@@ -1,4 +1,5 @@
 import ora from '../ui/spinner';
+import { quotaBillingUrl } from '../ui/quotaUpgrade';
 import { human } from '../ui/webMode';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
@@ -11,7 +12,7 @@ import { existsSync, unlinkSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { randomUUID, createHash } from 'crypto';
-import { currentInteraction, emitInteractionGoal, prompt } from '../ui/interaction';
+import { currentInteraction, runInteractionOperation, type InteractionGoal, prompt } from '../ui/interaction';
 import {
   CliOptions,
   Organization,
@@ -238,6 +239,7 @@ type InitWorkflowResult = Readonly<{
   wizard: InitWizardTransport | null;
   target: InitRepositoryTarget;
   status: 'succeeded' | 'cancelled' | 'failed-after-consent';
+  failure?: Readonly<{ code: string; reason: string }>;
   context: InitCommandContext;
 }>;
 
@@ -448,52 +450,49 @@ export class CapyCommand {
   }
 
   async execute(): Promise<void> {
-    try {
-      // Detect project state
-      const detectedProjectState = await this.projectManager.detectProjectState();
-      if (detectedProjectState.userId) this.authService.setSessionUserId(detectedProjectState.userId);
-      const projectState = detectedProjectState;
-
+    const detected = await capture(() => this.projectManager.detectProjectState());
+    const invocation = detected.ok && !detected.value.initialized
+      ? { flow: 'init-wizard', goal: 'repository_onboarded' } as const
+      : undefined;
+    const completed = await runInteractionOperation(invocation, async () => {
+      if (!detected.ok) throw detected.error;
+      const projectState = detected.value;
+      if (projectState.userId) this.authService.setSessionUserId(projectState.userId);
       if (!projectState.initialized) {
         assertSupportedKeepMode(this.projectManager.readSyncState());
-        // Check if .env has metadata we can recover from (e.g. keep.lock was deleted)
         if (isLocalOnly()) {
-          // Local-only mode: bootstrap a project entirely on this machine
-          // (synthetic org, generated projectId) instead of server onboarding.
           await this.initializeProjectLocal();
-          emitInteractionGoal({ status: 'succeeded' });
-          return;
-        } else {
-          await this.initializeProject();
-          emitInteractionGoal({ status: 'succeeded' });
-          return;
+          return { status: 'succeeded' };
         }
+        return this.initializeProject();
       }
-
       await this.syncProject(projectState);
       const { printExpiryWarnings } = await import('./connectors/shared');
       printExpiryWarnings();
-      emitInteractionGoal({ status: 'succeeded' });
-    } catch (error: any) {
+      return { status: 'succeeded' };
+    }, (error) => {
       const original = error instanceof HostedInitTerminalError ? error.original : error;
       this.debugError('execute caught error', original);
-      if (error instanceof InteractionSkippedError) {
-        emitInteractionGoal({ status: 'skipped', message: error.message });
-        return;
-      }
-      emitInteractionGoal({
-        status: error?.name === 'ExitPromptError' ? 'cancelled' : 'failed',
+      if (original instanceof CapyError && original.code === 'INIT_RUN_EXPIRED') throw original;
+      if (error instanceof InteractionSkippedError) return { status: 'skipped', message: error.message };
+      const billingUrl = original instanceof CapyError && original.code === ERROR_CODES.QUOTA_EXCEEDED
+        ? quotaBillingUrl(original.details ?? {}) : null;
+      return {
+        ...(billingUrl ? { result: { billing_url: billingUrl } } : {}),
+        status: error instanceof InitWizardCancelledError || (error instanceof Error && error.name === 'ExitPromptError') ? 'cancelled' : 'failed',
         code: original instanceof CapyError ? original.code : ERROR_CODES.SERVICE_ERROR,
         message: original instanceof Error ? original.message : undefined,
-      });
-      if (currentInteraction()) return;
-      if (error instanceof HostedInitTerminalError) {
-        await flushHostedTerminalOutput();
-        process.exit(1);
-      }
-      const { displayErrorAndExit } = await import('../ui/errorScreen');
-      await displayErrorAndExit(original);
+      };
+    });
+    if (!('error' in completed) || currentInteraction() || completed.outcome.status === 'skipped') return;
+    const error = completed.error;
+    const original = error instanceof HostedInitTerminalError ? error.original : error;
+    if (error instanceof HostedInitTerminalError) {
+      await flushHostedTerminalOutput();
+      process.exit(1);
     }
+    const { displayErrorAndExit } = await import('../ui/errorScreen');
+    await displayErrorAndExit(original);
   }
 
   /**
@@ -714,7 +713,7 @@ export class CapyCommand {
    * through a failure, so a run that dies between two stops does not leave a
    * page claiming to still be working on it.
    */
-  private async initializeProject(): Promise<void> {
+  private async initializeProject(): Promise<InteractionGoal> {
     const mode = this.options.web
       ? await (async () => {
           const selected = await capture(() => resolveInitRunTransportMode(process.env.CAPY_INIT_TRANSPORT));
@@ -729,13 +728,13 @@ export class CapyCommand {
     if (mode === 'hosted') {
       const result = await capture(() => this.initializeProjectHosted());
       if (!result.ok) throw new HostedInitTerminalError(result.error);
-      return;
+      return result.value;
     }
-    await this.initializeProjectWithLocalWizard();
+    return this.initializeProjectWithLocalWizard();
   }
 
   /** Explicit rollback transport and the unchanged terminal workflow. */
-  private async initializeProjectWithLocalWizard(): Promise<void> {
+  private async initializeProjectWithLocalWizard(): Promise<InteractionGoal> {
     // Imported only on the `--web` path: the module pulls in every compiled
     // screen, and a terminal run has no use for them.
     //
@@ -748,12 +747,17 @@ export class CapyCommand {
       : null;
     try {
       const completed = await this.runInitialization(wizard);
-      if (completed.wizard?.kind === 'local') await completed.wizard.session.finish();
+      if (completed.status === 'succeeded' && completed.wizard?.kind === 'local') await completed.wizard.session.finish();
+      return {
+        status: completed.status === 'failed-after-consent' ? 'failed' : completed.status,
+        ...(completed.status === 'failed-after-consent' ? { code: completed.failure?.code ?? ERROR_CODES.SERVICE_ERROR, message: completed.failure?.reason ?? 'The initial secret sync failed.' } : {}),
+        result: { organization_id: completed.target.orgId, project_id: completed.target.projectId, branch: completed.target.branch },
+      };
     } catch (err) {
       if (err instanceof InitWizardPostConsentError) {
         if (err.initWizard.kind === 'local') {
           await err.initWizard.session.reportEncryptFailure(err.failure);
-          return;
+          return { status: 'failed', code: err.failure.code, message: err.failure.reason };
         }
         throw err;
       }
@@ -769,7 +773,7 @@ export class CapyCommand {
     }
   }
 
-  private async initializeProjectHosted(): Promise<void> {
+  private async initializeProjectHosted(): Promise<InteractionGoal> {
     const preparation = await capture(() => ({
       serviceOrigin: exactConfiguredOrigin(resolveActiveUrl(this.devMode)),
       keepOrigin: exactConfiguredOrigin(keepOrigin()),
@@ -907,7 +911,7 @@ export class CapyCommand {
         'indeterminate',
       );
     }
-    await this.completeHostedInitialization(
+    return this.completeHostedInitialization(
       {
         ...execution,
         authorized: { ...execution.authorized, authService: initialized.value.context.authService },
@@ -981,7 +985,7 @@ export class CapyCommand {
   private async completeHostedInitialization(
     execution: HostedInitExecution,
     result: InitWorkflowResult,
-  ): Promise<void> {
+  ): Promise<InteractionGoal> {
     const verificationAttempt = await capture(() => this.verifyHostedInitialization(
       execution.context,
       result.target,
@@ -1036,6 +1040,8 @@ export class CapyCommand {
     if (plan.failureCode) {
       throw new CapyError('Initialization effects could not be verified', plan.failureCode);
     }
+    if (plan.status === 'expired') throw new CapyError('Hosted initialization expired', 'INIT_RUN_EXPIRED');
+    return { status: plan.status };
   }
 
   private async verifyHostedInitialization(
@@ -1284,7 +1290,6 @@ export class CapyCommand {
               name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
               value: o.id,
             })),
-            { name: 'Create new organization +', value: CREATE_NEW_ORG },
           ],
           default: currentOrgId,
         }]);
@@ -1617,16 +1622,17 @@ export class CapyCommand {
         })),
       ];
 
+      const projectSelection = projectQuestion(existingProjects.map(p => ({ id: p.id, name: p.name })));
       const choice = await askWizard(
         wizardAfterProjects,
-        projectQuestion(existingProjects.map(p => ({ id: p.id, name: p.name }))),
+        projectSelection,
         async () => {
           const answer = await prompt([{
           type: 'list',
           name: 'projectChoice',
           message: 'Which project do you want to use?',
           choices,
-          default: CREATE_NEW_PROJECT,
+          default: projectSelection.view.value === 'new' ? CREATE_NEW_PROJECT : projectSelection.view.value,
           }]);
           return String(answer.projectChoice);
         },
@@ -1641,24 +1647,15 @@ export class CapyCommand {
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
-        await withWizard(choice.wizard, () => this.bootstrapExistingProject(
+        return withWizard(choice.wizard, () => this.bootstrapExistingProject(
           picked,
           selectedOrg.id,
           selectedAuth.user_id!,
           selectedContext,
+          selectedAuth,
+          selectedOrg,
+          choice.wizard,
         ), selectedContext.operationDeadline);
-        return {
-          wizard: choice.wizard,
-          target: {
-            orgId: selectedOrg.id,
-            orgName: selectedOrg.name,
-            projectId: picked.id,
-            projectName: picked.name,
-            branch: 'development',
-          },
-          status: 'succeeded',
-          context: selectedContext,
-        };
       }
       return await this.initializeNewProject(
         selectedContext,
@@ -1743,13 +1740,15 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
+    const branchSelection = branchChoiceQuestion();
     const branchChoice = await askWizard(
       wizardAfterProjectName,
-      branchChoiceQuestion(),
+      branchSelection,
       async () => {
         const answer = await prompt([{
         type: 'list',
         name: 'initialBranchChoice',
+        default: branchSelection.view.value,
         message: 'What branch should this project start with?',
         choices: [
           { name: 'development (default)', value: 'development' },
@@ -1825,6 +1824,22 @@ export class CapyCommand {
       // Not a git repo — fine
     }
 
+    return this.finishInitialSecrets(context, authResult, selectedOrg, wizardAfterBranch,
+      projectResult, projectName, initialBranchName, encryptionKey, keep);
+  }
+
+  /** Shared first-sync consent and writes for both new and existing remote projects. */
+  private async finishInitialSecrets(
+    context: InitCommandContext,
+    authResult: AuthResult,
+    selectedOrg: Organization,
+    wizardAfterBranch: InitWizardTransport | null,
+    projectResult: Readonly<{ org_id: string; project_id: string }>,
+    projectName: string,
+    initialBranchName: string,
+    encryptionKey: string,
+    keep: KeepFile,
+  ): Promise<InitWorkflowResult> {
     // Check if there's an existing .env file with variables to sync
     const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
     const hasLocalEnv = existsSync(localEnvPath);
@@ -1917,6 +1932,7 @@ export class CapyCommand {
           const answer = await prompt([{
             type: 'confirm',
             name: 'confirmEncrypt',
+            secretSummary: { count: localVarCount, names: varNames },
             message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
             default: true,
           }]);
@@ -1983,6 +1999,7 @@ export class CapyCommand {
               branch: initBranch,
             },
             status: 'failed-after-consent',
+            failure,
             context,
           };
         }
@@ -2000,7 +2017,7 @@ export class CapyCommand {
           context,
         };
       } else {
-        human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+        human(`\nAn empty .env file is ready. Add secrets to .env, then run ${B('capy push')}`);
         human('to share them with your team.');
 
         // Install git hooks
@@ -2020,7 +2037,19 @@ export class CapyCommand {
       }
     } else {
       const wizardWithoutEnv = recordWizard(wizardAfterBranch, { localEnvCount: 0 });
-      human(`\nNo .env file found. Add secrets to .env, then run ${B('capy push')}`);
+      const { createEmptyEnv } = await prompt<{ readonly createEmptyEnv: boolean }>([{
+        type: 'confirm',
+        name: 'createEmptyEnv',
+        message: 'No .env file found. Create an empty .env file?',
+        default: true,
+        presentation: { title: 'Create an empty .env', component: 'environment-file' },
+      }]);
+      if (createEmptyEnv) {
+        this.fileManager.createEmptyEnvFile(this.options.envPath);
+        human(`\nCreated an empty .env file. Add secrets to .env, then run ${B('capy push')}`);
+      } else {
+        human(`\nSkipped creating .env. Add secrets to .env, then run ${B('capy push')}`);
+      }
       human('to share them with your team.');
 
       // Install git hooks
@@ -2154,74 +2183,40 @@ export class CapyCommand {
     project: { id: string; name: string; organization_id: string },
     orgId: string,
     userId: string,
-    context: InitCommandContext = {
-      transport: 'local',
-      operationDeadline: null,
-      authService: this.authService,
-      serviceClient: this.serviceClient,
-    },
-  ): Promise<void> {
+    context: InitCommandContext,
+    authResult: AuthResult,
+    selectedOrg: Organization,
+    wizard: InitWizardTransport | null,
+  ): Promise<InitWorkflowResult> {
     const branch = 'development';
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps(context.serviceClient));
-
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
-
     const decryptData = await (async () => {
       try {
-        return await context.serviceClient.getDecryptData(
-          project.id,
-          branch,
-          undefined, // ask for latest
-          true,
-        );
-      } catch (err: any) {
-        // 404 with "No secrets" → empty project, write a stub keep.lock and exit
-        if (err instanceof CapyError && err.details?.status === 404 && /No secrets/i.test(err.message)) {
-          fetchSpinner.stop();
-          const stub: KeepFile = {
-            version: '3.0',
-            org_id: orgId,
-            project_id: project.id,
-            project_name: project.name,
-            variables: {},
-          };
-          this.fileManager.writeKeepFile(stub);
-          this.projectManager.writeActiveBranch(branch);
-          this.fileManager.ensureCapyGitignore();
-          human(`\n${B(project.name)} has no secrets yet.`);
-          human(`Add secrets to .env, then run ${B('capy push')}.`);
-          this.installGitHooks();
-          return null;
-        }
+        return await context.serviceClient.getDecryptData(project.id, branch, undefined, true);
+      } catch (error) {
+        if (error instanceof CapyError && error.details?.status === 404 && /No secrets/i.test(error.message)) return null;
         fetchSpinner.fail(`Failed to pull from ${B(project.name)}.`);
-        throw err;
+        throw error;
       }
     })();
-
-    if (!decryptData) {
-      return;
-    }
-
-    if (!decryptData.keep_file) {
-      // No keep_file means the project exists but has never been pushed to.
-      // Treat it like an empty project — write a stub keep.lock.
+    const remoteKeep = decryptData?.keep_file ? JSON.parse(decryptData.keep_file) as KeepFile : null;
+    const remoteEnv = decryptData?.env_content ? this.fileManager.parseEnvContent(decryptData.env_content) : {};
+    const remoteBranchHasVariables = remoteKeep
+      ? Object.values(remoteKeep.variables).some(entries => entries.some(entry => entry.branch === branch)) : false;
+    if (!remoteBranchHasVariables && Object.keys(remoteEnv).length === 0) {
       fetchSpinner.stop();
-      const stub: KeepFile = {
-        version: '3.0',
-        org_id: orgId,
-        project_id: project.id,
-        project_name: project.name,
-        variables: {},
+      const keep: KeepFile = {
+        ...(remoteKeep ?? { version: '3.0' as const, variables: {} }),
+        org_id: orgId, project_id: project.id, project_name: project.name,
       };
-      this.fileManager.writeKeepFile(stub);
+      this.fileManager.writeKeepFile(keep);
       this.projectManager.writeActiveBranch(branch);
       this.fileManager.ensureCapyGitignore();
-      // Same routing rule as the 404-stub branch above.
-      human(`\n${B(project.name)} has no secrets yet.`);
-      human(`Add secrets to .env, then run ${B('capy push')}.`);
-      this.installGitHooks();
-      return;
+      return this.finishInitialSecrets(context, authResult, selectedOrg, wizard,
+        { org_id: orgId, project_id: project.id }, project.name, branch, encryptionKey, keep);
     }
+    if (!decryptData?.keep_file) throw new CapyError('Remote secrets are missing their Keep metadata.', ERROR_CODES.SERVICE_ERROR);
 
     // Parse the keep.json the server sent us
     const parsedServerKeep = JSON.parse(decryptData.keep_file) as KeepFile;
@@ -2251,8 +2246,7 @@ export class CapyCommand {
         )
       : {};
 
-    const localEnvPath = this.projectManager.getEnvPath(this.options.envPath);
-    const shouldWriteLocalEnv = Object.keys(plaintext).length > 0 || existsSync(localEnvPath);
+    const shouldWriteLocalEnv = Object.keys(plaintext).length > 0;
 
     // Write keep.lock + encrypted .env locally
     this.fileManager.writeKeepFile(serverKeep);
@@ -2281,6 +2275,7 @@ export class CapyCommand {
     }
 
     this.installGitHooks();
+    return { wizard, target: { orgId, orgName: selectedOrg.name, projectId: project.id, projectName: project.name, branch }, status: 'succeeded', context };
   }
 
   /**
@@ -2799,14 +2794,6 @@ export class CapyCommand {
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
 
-    human(`  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`);
-
-    // Display comparison table (TTY only — the --web resolver renders its own).
-    if (!this.options.web) {
-      this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
-      human(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
-    }
-
     // Build menu options based on what columns are visible
     const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
@@ -2874,6 +2861,38 @@ export class CapyCommand {
       for (const c of menuChoices) {
         if (c.value === 'commit_local') c.name = 'Commit all local values';
       }
+    }
+
+    const conflictSummary = `  You have unsynced environment variables (${diffs.length} difference${diffs.length !== 1 ? 's' : ''} found).\n`;
+    const interaction = currentInteraction();
+    if (interaction) {
+      const { buildConflictData } = await import('../ui/syncConflictScreen');
+      const rows = diffs.map((diff) => ({
+        variable: diff.variable,
+        pinned: pinnedPlaintext[diff.variable] === undefined
+          ? pinned[diff.variable] === undefined ? null : ''
+          : formatSnippet(pinnedPlaintext[diff.variable]),
+        local: localPlaintext[diff.variable] === undefined ? null : formatSnippet(localPlaintext[diff.variable]),
+        remote: remotePlaintext[diff.variable] === undefined ? null : formatSnippet(remotePlaintext[diff.variable]),
+      }));
+      const unresolvable = new Set(diffs.filter((diff) => pinned[diff.variable] !== undefined && pinnedPlaintext[diff.variable] === undefined).map((diff) => diff.variable));
+      await interaction.output({ text: '', sync_conflict: buildConflictData({
+        rows,
+        unresolvable,
+        showLocal: effectiveShowLocal,
+        showRemote,
+        localMode,
+        isOnboarding,
+        isBehind,
+        remoteState: showRemote ? 'ok' : 'empty',
+        actions: menuChoices.map((choice) => ({ value: choice.value as never, label: choice.name })),
+        projectName: projectState.projectName || 'project',
+        branch,
+      }, randomUUID()) });
+    } else {
+      human(conflictSummary);
+      this.displayComparisonTable(diffs, effectiveShowLocal, showRemote, pinned, localHashes, remoteHashes, localPlaintext, remotePlaintext, pinnedPlaintext);
+      human(`\n  ${DIM}← → select value   ↑ ↓ move between rows   Enter confirm   q cancel${RST}\n`);
     }
 
     // A menu with exactly one real action is not a decision.
@@ -3260,25 +3279,64 @@ export class CapyCommand {
       if (pinnedResolves(diff.variable)) return 'pinned';
       if (showLocal && localPlaintext[diff.variable] !== undefined) return 'local';
       if (showRemote && remotePlaintext[diff.variable] !== undefined) return 'remote';
-      return 'pinned';
+      return 'delete';
     });
 
     const pinnedSnippetFor = (variable: string): string | null => {
-      if (!pinned[variable]) return null;
-      if (pinnedPlaintext[variable]) return formatSnippet(pinnedPlaintext[variable]);
+      if (pinned[variable] === undefined) return null;
+      if (pinnedPlaintext[variable] !== undefined) return formatSnippet(pinnedPlaintext[variable]);
       return '\x1b[3munresolvable\x1b[0m';
     };
 
     const rows: Row[] = diffs.map(diff => ({
       variable: diff.variable,
       pinned: pinnedSnippetFor(diff.variable),
-        local: localPlaintext[diff.variable]
-          ? formatSnippet(localPlaintext[diff.variable])
-          : null,
-        remote: remotePlaintext[diff.variable]
-          ? formatSnippet(remotePlaintext[diff.variable])
-          : null,
+      pinnedUnresolvable: pinned[diff.variable] !== undefined && pinnedPlaintext[diff.variable] === undefined,
+      local: localPlaintext[diff.variable] === undefined
+        ? null
+        : formatSnippet(localPlaintext[diff.variable]),
+      remote: remotePlaintext[diff.variable] === undefined
+        ? null
+        : formatSnippet(remotePlaintext[diff.variable]),
     }));
+
+    const interaction = currentInteraction();
+    if (interaction) {
+      const resolverRows = rows.map((row, index) => ({
+        variable: row.variable,
+        pinned: row.pinnedUnresolvable ? null : row.pinned,
+        pinnedUnresolvable: row.pinnedUnresolvable === true,
+        local: row.local,
+        remote: row.remote,
+        defaultSource: defaults[index],
+      }));
+      const available = (row: typeof resolverRows[number]): readonly ColumnKey[] => [
+        ...(row.pinnedUnresolvable ? [] : ['pinned' as const]),
+        ...(showLocal && row.local !== null ? ['local' as const] : []),
+        ...(showRemote && row.remote !== null ? ['remote' as const] : []),
+        'delete',
+      ];
+      const response = await interaction.prompt<Readonly<{ readonly choices: Record<string, ColumnKey> }>>({
+        view: {
+          text: 'Resolve conflicting values',
+          input: { kind: 'sync-conflict-resolver', showLocal, showRemote, rows: resolverRows },
+        },
+        decide: (payload) => {
+          const value = payload.value;
+          if (value === null || typeof value !== 'object' || Array.isArray(value)) return { error: 'Choose a value for every conflicting variable.' };
+          const choices = Object.fromEntries(resolverRows.flatMap((row) => {
+            const choice = (value as Readonly<Record<string, unknown>>)[row.variable];
+            return typeof choice === 'string' && available(row).includes(choice as ColumnKey)
+              ? [[row.variable, choice as ColumnKey] as const]
+              : [];
+          }));
+          return Object.keys(choices).length === resolverRows.length && Object.keys(value).length === resolverRows.length
+            ? { value: { choices } }
+            : { error: 'Choose an available value for every conflicting variable.' };
+        },
+      });
+      return response === null ? null : this.mapResolveChoicesToEnv(response.choices, diffs, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
+    }
 
     const table = new ResolveTable(rows, showLocal, showRemote, defaults);
     const { choices, outcome } = await table.run();
@@ -3318,41 +3376,32 @@ export class CapyCommand {
     remotePlaintext: Record<string, string>,
     pinnedPlaintext: Record<string, string> = {},
   ): Record<string, string> {
-    const result: Record<string, string> = {};
+    const valueFor = (variable: string, choice: 'pinned' | 'local' | 'remote' | 'delete'): string | undefined => {
+      if (choice === 'local') return localPlaintext[variable];
+      if (choice === 'remote') return remotePlaintext[variable];
+      if (choice !== 'pinned') return undefined;
 
-    for (const [variable, choice] of Object.entries(choices)) {
-      if (choice === 'pinned') {
-        const pinnedHash = pinned[variable];
-        // Prefer the resolved pinned plaintext (from the keep cache / remote
-        // fetch). Without it, "pinned" could only be reconstructed when the
-        // pinned value happened to equal local or remote — so in local-only
-        // mode, choosing "pinned" for a locally-EDITED var matched nothing and
-        // the keep.lock cleanup then silently DELETED the variable. The cache
-        // holds the baseline, so consult it first.
-        // `!== undefined` throughout: '' is a valid pinned value.
-        if (pinnedPlaintext[variable] !== undefined) {
-          result[variable] = pinnedPlaintext[variable];
-        } else if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) {
-          result[variable] = localPlaintext[variable];
-        } else if (remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash) {
-          result[variable] = remotePlaintext[variable];
-        }
-      } else if (choice === 'local' && localPlaintext[variable] !== undefined) {
-        result[variable] = localPlaintext[variable];
-      } else if (choice === 'remote' && remotePlaintext[variable] !== undefined) {
-        result[variable] = remotePlaintext[variable];
-      }
-      // 'delete' — don't add to result
-    }
-
-    // Add unchanged variables from local
-    for (const [key, value] of Object.entries(localPlaintext)) {
-      if (!(key in result) && !diffs.some(d => d.variable === key)) {
-        result[key] = value;
-      }
-    }
-
-    return result;
+      // Prefer the resolved pinned plaintext (from the keep cache / remote
+      // fetch). Without it, "pinned" could only be reconstructed when the
+      // pinned value happened to equal local or remote — so in local-only
+      // mode, choosing "pinned" for a locally-EDITED var matched nothing and
+      // the keep.lock cleanup then silently DELETED the variable. The cache
+      // holds the baseline, so consult it first.
+      // `!== undefined` throughout: '' is a valid pinned value.
+      if (pinnedPlaintext[variable] !== undefined) return pinnedPlaintext[variable];
+      const pinnedHash = pinned[variable];
+      if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinnedHash) return localPlaintext[variable];
+      return remotePlaintext[variable] !== undefined && hashValue(remotePlaintext[variable]) === pinnedHash
+        ? remotePlaintext[variable]
+        : undefined;
+    };
+    const resolved = Object.fromEntries(Object.entries(choices).flatMap(([variable, choice]) => {
+      const value = valueFor(variable, choice);
+      return value === undefined ? [] : [[variable, value]];
+    }));
+    const conflictNames = new Set(diffs.map((diff) => diff.variable));
+    const unchanged = Object.fromEntries(Object.entries(localPlaintext).filter(([key]) => !conflictNames.has(key)));
+    return { ...unchanged, ...resolved };
   }
 
   /**
@@ -3402,13 +3451,13 @@ export class CapyCommand {
 
     const rows = diffs.map(diff => ({
       variable: diff.variable,
-      pinned: pinnedPlaintext[diff.variable]
+      pinned: pinnedPlaintext[diff.variable] !== undefined
         ? formatSnippet(pinnedPlaintext[diff.variable])
         : pinned[diff.variable] !== undefined
           ? ''
           : null,
-      local: localPlaintext[diff.variable] ? formatSnippet(localPlaintext[diff.variable]) : null,
-      remote: remotePlaintext[diff.variable] ? formatSnippet(remotePlaintext[diff.variable]) : null,
+      local: localPlaintext[diff.variable] === undefined ? null : formatSnippet(localPlaintext[diff.variable]),
+      remote: remotePlaintext[diff.variable] === undefined ? null : formatSnippet(remotePlaintext[diff.variable]),
     }));
 
     const { action, choices, cancelled } = await resolveConflictInBrowser({

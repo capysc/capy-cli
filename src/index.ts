@@ -27,7 +27,9 @@ function collectProjects(val: string, acc: string[]): string[] {
 /** Resolve a repeated child option after Commander's non-positional parent parse. */
 function expectedUserIdFor(command: Command): string | undefined {
   const value = (command.optsWithGlobals() as Readonly<Record<string, unknown>>).expectedUserId;
-  return typeof value === 'string' ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  if (value.trim().length === 0) throw new CapyError('Expected user ID cannot be empty.', ERROR_CODES.AUTH_FAILED);
+  return value;
 }
 
 // Handle Ctrl+C gracefully — exit cleanly instead of dumping a stack trace
@@ -215,7 +217,7 @@ program
   .action(async (_options, command) => {
     const { EditCommand } = await import('./commands/editCommand');
     const cmd = new EditCommand();
-    await cmd.execute({ web: command.optsWithGlobals().web === true });
+    await cmd.execute({ web: command.optsWithGlobals().web === true, expectedUserId: expectedUserIdFor(command) });
   });
 
 program
@@ -724,7 +726,7 @@ program
     }
     const { PairCommand } = await import('./commands/pairCommand');
     const cmd = new PairCommand();
-    const exitCode = await cmd.execute({ json: options.json });
+    const exitCode = await cmd.execute({ json: options.json === true || command.optsWithGlobals().json === true });
     if (exitCode !== 0) process.exit(exitCode);
   });
 
@@ -839,10 +841,12 @@ program
   .command('doctor')
   .description('Report local Capy facts: binary, version, state dir, API/Keep origins, session presence (read-only, no network)')
   .option('--json', 'emit machine-readable JSON instead of the human UI')
-  .action(async (options) => {
+  .action(async (options, command) => {
     const { DoctorCommand } = await import('./commands/doctorCommand');
     const cmd = new DoctorCommand();
-    await cmd.execute({ json: options.json });
+    // `--json` is also a global interaction flag. Commander assigns the
+    // duplicated option to the root command, so read inherited options too.
+    await cmd.execute({ json: options.json === true || command.optsWithGlobals().json === true });
   });
 
 program
@@ -958,11 +962,11 @@ deviceKeyCmd
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--label <name>', 'display label the ceremony page shows (defaults to this host\'s name)')
   .option('--ttl-minutes <n>', 'grant lifetime in minutes (default 30)', (v) => parseInt(v, 10))
-  .action(async (options) => {
+  .action(async (options, command) => {
     assertNotLocalOnly('device-key grant');
     const { DeviceKeyGrantCommand } = await import('./commands/deviceKeyCommand');
     const cmd = new DeviceKeyGrantCommand();
-    await cmd.execute({ json: options.json, label: options.label, ttlMinutes: options.ttlMinutes });
+    await cmd.execute({ json: options.json === true || command.optsWithGlobals().json === true, label: options.label, ttlMinutes: options.ttlMinutes });
   });
 
 // CAP-384: internal-only. Never invoked directly by a human — spawnGrantDaemon

@@ -6,8 +6,11 @@ export interface ListMetadataDependencies {
 }
 
 export async function requireListIdentity(deps: Pick<ListMetadataDependencies, 'authenticate'>, expectedUserId?: string, orgId?: string): Promise<AuthResult> {
+  if (expectedUserId !== undefined && expectedUserId.trim().length === 0) {
+    throw new CapyError('No matching signed-in session. Ask your agent to reconnect Capy.', ERROR_CODES.AUTH_FAILED);
+  }
   const auth = await deps.authenticate(orgId);
-  if (!auth.success || !auth.user_id || (expectedUserId && auth.user_id !== expectedUserId)) {
+  if (!auth.success || !auth.user_id || (expectedUserId !== undefined && auth.user_id !== expectedUserId)) {
     throw new CapyError('No matching signed-in session. Ask your agent to reconnect Capy.', ERROR_CODES.AUTH_FAILED);
   }
   return auth;

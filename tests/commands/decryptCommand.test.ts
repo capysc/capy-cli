@@ -6,7 +6,7 @@ import { join } from 'path';
 const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-decrypt-test-'));
 mock.module('os', () => {
   const actual = require('os');
-  return { ...actual, homedir: () => tempHome };
+  return { ...actual, default: actual, homedir: () => tempHome };
 });
 
 // Mock cwd to use a temp project directory

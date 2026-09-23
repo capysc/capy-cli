@@ -6,7 +6,7 @@ import { join } from 'path';
 const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-localflow-home-'));
 mock.module('os', () => {
   const actual = require('os');
-  return { ...actual, homedir: () => tempHome };
+  return { ...actual, default: actual, homedir: () => tempHome };
 });
 
 // Network tripwire: any fetch in local-only mode is a leak.
