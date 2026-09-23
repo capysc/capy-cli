@@ -279,8 +279,15 @@ export async function startLocalHandoff(opts: StartLocalHandoffOptions): Promise
   // success / TTL / external close() gets there first.
   const lifecycle = new AbortController();
 
+  // Nothing a request does may escape as a rejection: the CLI treats any
+  // unhandled rejection as fatal and exits, which would end the whole flow
+  // over one bad loopback request (e.g. a well-shaped page key that is not a
+  // point on the curve, which the sealer rejects by throwing).
   const server = createServer((req, res) => {
-    void handle(req, res);
+    void handle(req, res).catch(() => {
+      if (res.headersSent) { res.destroy(); return; }
+      respondJson(res, 500, { code: 'LOCAL_HANDOFF_FAILED' }, corsHeaders(opts.keepOrigin));
+    });
   });
 
   const listen = await new Promise<{ ok: true; port: number } | { ok: false }>((resolve) => {

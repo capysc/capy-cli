@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, mock } from 'bun:test';
 import { request as httpRequestRaw, type IncomingHttpHeaders, type IncomingMessage } from 'http';
 import { createConnection } from 'net';
 import { randomUUID, createHmac } from 'crypto';
@@ -156,13 +156,18 @@ const GRANT = 'test-grant-value';
 
 interface Recorded { readonly url: string; readonly body: string }
 
+/** Every service call the fake receives, recorded by the test runner's own
+ * spy rather than by pushing into an array the fake shares with the test. */
+const recorder = () => mock((_call: Recorded): void => undefined);
+type Recorder = ReturnType<typeof recorder>;
+
 /** A same-shape, deterministic stand-in for the service's two calls — no
  * network, so these tests observe only the listener's own behaviour. */
-function fakeServiceFetch(calls: Recorded[], opts: { handoffId: string; expiresAt: string; authorizeStatus?: number; authorizeBody?: unknown }): typeof fetch {
+function fakeServiceFetch(calls: Recorder, opts: { handoffId: string; expiresAt: string; authorizeStatus?: number; authorizeBody?: unknown }): typeof fetch {
   return (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     const bodyText = typeof init?.body === 'string' ? init.body : '';
-    calls.push({ url, body: bodyText });
+    calls({ url, body: bodyText });
     if (url.endsWith('/flows/local-handoff')) {
       return new Response(JSON.stringify({ handoff_id: opts.handoffId, handoff_secret: FIXTURE_SECRET, expires_at: opts.expiresAt }), { status: 201 });
     }
@@ -175,7 +180,7 @@ function fakeServiceFetch(calls: Recorded[], opts: { handoffId: string; expiresA
   }) as unknown as typeof fetch;
 }
 
-function baseDeps(overrides: Partial<StartLocalHandoffOptions> & { calls: Recorded[]; handoffId?: string; expiresAt?: string; authorizeStatus?: number; authorizeBody?: unknown }): StartLocalHandoffOptions {
+function baseDeps(overrides: Partial<StartLocalHandoffOptions> & { calls: Recorder; handoffId?: string; expiresAt?: string; authorizeStatus?: number; authorizeBody?: unknown }): StartLocalHandoffOptions {
   const handoffId = overrides.handoffId ?? randomUUID();
   const expiresAt = overrides.expiresAt ?? new Date(Date.now() + 300_000).toISOString();
   const keys = mintConnectionKeypair();
@@ -207,7 +212,7 @@ const CODE_CHALLENGE = 'vC_2LhB6HPwvyKEGRMmpy218v0HaFdXn3q5GzarIPyI';
 
 describe('startLocalHandoff — live loopback listener', () => {
   test('binds only 127.0.0.1 — reachable there, not on the IPv6 loopback', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handle = await startLocalHandoff(baseDeps({ calls }));
     expect(handle).not.toBeNull();
     const { port } = parseHandoffUrl(handle!.url);
@@ -225,7 +230,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('OPTIONS preflight: exact CORS headers for the right Origin, 403 for a wrong or missing Host/Origin', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handle = await startLocalHandoff(baseDeps({ calls }));
     const { port } = parseHandoffUrl(handle!.url);
 
@@ -250,7 +255,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('POST rejects a wrong Host and a wrong/missing Origin with 403', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handle = await startLocalHandoff(baseDeps({ calls }));
     const { port } = parseHandoffUrl(handle!.url);
     const goodHeaders = { host: `127.0.0.1:${port}`, origin: KEEP_ORIGIN, 'content-type': 'application/json' };
@@ -268,7 +273,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('POST rejects non-JSON content types', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handle = await startLocalHandoff(baseDeps({ calls }));
     const { port } = parseHandoffUrl(handle!.url);
 
@@ -284,7 +289,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('POST rejects a body over 8 KiB with 413', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handle = await startLocalHandoff(baseDeps({ calls }));
     const { port } = parseHandoffUrl(handle!.url);
 
@@ -300,7 +305,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('POST with the wrong handoff_id is refused without spending the latch', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handoffId = randomUUID();
     const handle = await startLocalHandoff(baseDeps({ calls, handoffId }));
     const { port } = parseHandoffUrl(handle!.url);
@@ -321,7 +326,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('POST with a bad HMAC proof is refused with 403', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handoffId = randomUUID();
     const handle = await startLocalHandoff(baseDeps({ calls, handoffId }));
     const { port } = parseHandoffUrl(handle!.url);
@@ -343,7 +348,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('a valid POST succeeds, opens to k_local, and the service never received the handoff secret', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handoffId = randomUUID();
     const deps = baseDeps({ calls, handoffId });
     const handle = await startLocalHandoff(deps);
@@ -385,13 +390,13 @@ describe('startLocalHandoff — live loopback listener', () => {
     });
 
     // The service (both create and authorize calls) never sees H.
-    for (const call of calls) expect(call.body.includes(FIXTURE_SECRET)).toBe(false);
+    for (const [call] of calls.mock.calls) expect(call.body.includes(FIXTURE_SECRET)).toBe(false);
 
     await handle!.close();
   });
 
   test('a second request after success is refused as single-use', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handoffId = randomUUID();
     const handle = await startLocalHandoff(baseDeps({ calls, handoffId }));
     const { port } = parseHandoffUrl(handle!.url);
@@ -413,7 +418,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('a request after the TTL has passed is refused, using the injected clock', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handoffId = randomUUID();
     const nowMs = Date.now();
     const expiresAt = new Date(nowMs + 300_000).toISOString();
@@ -438,7 +443,7 @@ describe('startLocalHandoff — live loopback listener', () => {
   });
 
   test('an authorize failure is refused and the handoff stays single-use', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const handoffId = randomUUID();
     const deps = baseDeps({ calls, handoffId, authorizeStatus: 409, authorizeBody: { code: 'LOCAL_HANDOFF_STATE_CONFLICT' } });
     const handle = await startLocalHandoff(deps);
@@ -461,8 +466,38 @@ describe('startLocalHandoff — live loopback listener', () => {
     await handle!.close();
   });
 
+  test('a well-shaped page key that is not a curve point is refused without taking the CLI down', async () => {
+    const calls = recorder();
+    const handoffId = randomUUID();
+    const handle = await startLocalHandoff(baseDeps({ calls, handoffId }));
+    const { port } = parseHandoffUrl(handle!.url);
+    // 65 bytes with the uncompressed-point prefix, but not on P-256: the
+    // request parser accepts the shape, and the sealer throws on it.
+    const offCurve = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 2)]).toString('base64');
+    const escaped = new AbortController();
+    const onRejection = (): void => { escaped.abort(); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      const response = await httpRequest({
+        port, method: 'POST', path: '/v1/local-handoff',
+        headers: { host: `127.0.0.1:${port}`, origin: KEEP_ORIGIN, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          v: 1, handoff_id: handoffId, code_challenge: CODE_CHALLENGE, page_pubkey: offCurve,
+          proof: pageProof(handoffId, CODE_CHALLENGE, offCurve),
+        }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(response.status).toBe(500);
+      expect(JSON.parse(response.body)).toEqual({ code: 'LOCAL_HANDOFF_FAILED' });
+      expect(escaped.signal.aborted).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+      await handle!.close();
+    }
+  });
+
   test('a create-call failure returns null rather than throwing', async () => {
-    const calls: Recorded[] = [];
+    const calls = recorder();
     const deps = baseDeps({ calls });
     const failingFetch = (async () => new Response(JSON.stringify({ code: 'LOCAL_HANDOFF_UNAVAILABLE' }), { status: 403 })) as unknown as typeof fetch;
     const handle = await startLocalHandoff({ ...deps, fetchImpl: failingFetch });
