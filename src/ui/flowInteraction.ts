@@ -238,10 +238,26 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     goal: outcome => emit('goal', { ...outcome }),
   };
   try {
-    await runWithInteraction(interaction, operation);
+    try {
+      await runWithInteraction(interaction, operation);
+    } catch (error) {
+      // Flush buffered CLI output and the command failure through the same
+      // encrypted terminal boundary before transport cleanup detaches the CLI.
+      if (!controller.signal.aborted) {
+        const code = error !== null && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+          ? error.code : 'COMMAND_FAILED';
+        const message = error instanceof Error ? error.message : 'The CLI command failed.';
+        try {
+          await emit('goal', { status: 'failed', code, message });
+        } catch {
+          // Preserve the original command failure if delivery is unavailable.
+        }
+      }
+      throw error;
+    }
     queue.end();
     await writer;
-  } finally { controller.abort(); await reader; }
+  } finally { queue.end(); controller.abort(); await reader; }
   } finally {
     process.removeListener('SIGINT', interrupted);
     process.removeListener('SIGTERM', terminated);

@@ -117,6 +117,7 @@ ISOLATED_FILES=(
   tests/auth/pairing/pairE2E.int.test.ts
   tests/files/reservedVarsWrite.test.ts
   # <<< isolated test files (mock.module): append below >>>
+  "tests/ui/flowCommandFailure.test.ts"
   # setupCommand.test.ts / syncCommand.test.ts mock projectManager/fileManager/
   # authService/serviceClient/syncEngine/keyResolver/globalConfig/
   # installGitHooks the same shape as capyCommand.test.ts, for the
