@@ -8,11 +8,19 @@ for (const entrypoint of ['index.ts', 'index-dev.ts'] as const) {
   const entry = resolve(import.meta.dir, '../../src', entrypoint);
   function invoke(args: readonly string[]) {
     const cwd = mkdtempSync(join(tmpdir(), 'capy-checkout-entry-'));
+    // A fresh HOME per call is what actually isolates each run — CAPY_GLOBAL_DIR_NAME
+    // is on top of that, and only the dev entrypoint honours it (see prodPins.ts: the
+    // prod entrypoint deliberately strips CAPY_GLOBAL_DIR_NAME / CAPY_API_URL /
+    // CAPY_KEEP_ORIGIN and prints a stderr notice when it finds them). None of these
+    // tests reach a network call or read the global dir before returning, so prod
+    // simply doesn't need them — passing them would only trip the notice.
     const configRoot = mkdtempSync(join(tmpdir(), 'capy-checkout-home-'));
+    const devOnlyEnv = entrypoint === 'index-dev.ts'
+      ? { CAPY_GLOBAL_DIR_NAME: '.capy-checkout-fixture', CAPY_API_URL: 'http://127.0.0.1:9', CAPY_KEEP_ORIGIN: 'http://127.0.0.1:9' }
+      : {};
     const result = spawnSync(process.execPath, [entry, 'checkout', 'preview', ...args], {
       cwd, encoding: 'utf8', timeout: 10_000,
-      env: { PATH: process.env.PATH, HOME: configRoot, CAPY_GLOBAL_DIR_NAME: '.capy-checkout-fixture',
-        CAPY_API_URL: 'http://127.0.0.1:9', CAPY_KEEP_ORIGIN: 'http://127.0.0.1:9', NO_COLOR: '1' },
+      env: { PATH: process.env.PATH, HOME: configRoot, ...devOnlyEnv, NO_COLOR: '1' },
     });
     expect(result.error).toBeUndefined();
     expect(readdirSync(cwd)).toEqual([]);

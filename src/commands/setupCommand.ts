@@ -28,7 +28,7 @@ import { existsSync } from 'fs';
 import { resolve } from 'path';
 import { ProjectManager } from '../core/projectManager';
 import { FileManager } from '../files/fileManager';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { ServiceClient } from '../service/serviceClient';
 import { SyncEngine } from '../sync/syncEngine';
 import { installGitHooks } from '../git/installGitHooks';
@@ -177,6 +177,7 @@ async function resolveIdentity(authService: AuthService, selectedOrg?: string): 
     if (!selected) return { ok: false, code: ERROR_CODES.PERMISSION_DENIED, detail: 'The selected organization is not available to this account.' };
     const scoped = await authService.authenticateSilent(selectedOrg);
     if (!scoped.success || scoped.user_id !== first.user_id || scoped.organization_id !== selectedOrg) {
+      console.error(`setup: ${silentAuthFailureMessage(scoped)}`);
       return { ok: false, code: ERROR_CODES.AUTH_FAILED, detail: 'Could not authenticate this account in the selected organization.' };
     }
     return { ok: true, authResult: scoped, org: { id: selected.id, name: selected.name } };

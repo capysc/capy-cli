@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'crypto';
 import { execFileSync } from 'child_process';
 import { existsSync, realpathSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { FileSessionStorageBackend } from '../auth/session/fileBackend';
 import { assertRuntimePairingUser, recoverFilesystemRuntimePairing } from '../auth/pairing/runtimePairing';
 import { runtimePairingEnvironment } from '../auth/pairing/runtimePairingEnvironment';
@@ -160,7 +160,10 @@ export async function runFlowSetupCommand(flowId: string, options: FlowSetupOpti
     if (!restored || restored.credentialId !== paired.credentialId) return reject('SETUP_PAIRING_REQUIRED');
     const auth = new AuthService(options.serviceOrigin, devMode, options.expectedUserId);
     const identity = await auth.authenticateSilent(paired.custodyOrgId);
-    if (!identity.success || identity.user_id !== options.expectedUserId) return reject('SETUP_SIGN_IN_REQUIRED');
+    if (!identity.success || identity.user_id !== options.expectedUserId) {
+      console.error(`flow setup: ${silentAuthFailureMessage(identity)}`);
+      return reject('SETUP_SIGN_IN_REQUIRED');
+    }
     const request = async (body?: JsonResult): Promise<RepositoryView> => {
       const token = await auth.getValidToken();
       if (!token?.access_token) return reject('SETUP_SIGN_IN_REQUIRED');
@@ -223,7 +226,10 @@ export async function runFlowSetupCommand(flowId: string, options: FlowSetupOpti
             || Object.values(values).some((value) => !value.startsWith('capy:'))) return reject('SETUP_LOCAL_TARGET_MISMATCH');
         }
         const scoped = await auth.authenticateSilent(target.org_id);
-        if (!scoped.success || scoped.user_id !== options.expectedUserId) return reject('SETUP_SIGN_IN_REQUIRED');
+        if (!scoped.success || scoped.user_id !== options.expectedUserId) {
+          console.error(`flow setup: ${silentAuthFailureMessage(scoped)}`);
+          return reject('SETUP_SIGN_IN_REQUIRED');
+        }
         const service = new ServiceClient(options.serviceOrigin, devMode);
         service.setTokenProvider(() => auth.getValidToken());
         const remote = await service.getDecryptData(target.project_id, target.branch, undefined, true);

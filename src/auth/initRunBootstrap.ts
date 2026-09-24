@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { setTimeout as delay } from 'timers/promises';
-import { AuthService } from './authService';
+import { AuthService, silentAuthFailureMessage } from './authService';
 import {
   isInitRunOrigin,
   normalizeRepositoryFingerprint,
@@ -639,8 +639,10 @@ export async function continueInitRunFromDeviceGrant(
   const authService = new AuthService(bootstrap.request.serviceOrigin, false, continuation.userId);
   const auth = await authService.authenticateSilent();
   const token = await authService.getValidToken();
-  if (!auth.success || !token || auth.user_id !== continuation.userId || token.user_id !== continuation.userId)
+  if (!auth.success || !token || auth.user_id !== continuation.userId || token.user_id !== continuation.userId) {
+    console.error(`init-run: ${silentAuthFailureMessage(auth)}`);
     throw initRunFailure('INIT_BINDING_MISMATCH');
+  }
   const status = parseInitRunContinueResponse(await post(defaultTransport,
     `${bootstrap.request.serviceOrigin}/init-runs/${bootstrap.response.run_id}/device-grant`,
     { run_secret: bootstrap.response.run_secret, authentication_flow_id: continuation.flowId }, token.access_token));

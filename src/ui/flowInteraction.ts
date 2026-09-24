@@ -2,7 +2,7 @@ import { randomUUID, sign } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { ProjectManager } from '../core/projectManager';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { resolveInitRunIdentity } from '../auth/initRunIdentity';
 import { resolveActiveUrl } from '../config/profileConfig';
 import { readLocalRoot } from '../config/globalConfig';
@@ -86,7 +86,10 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   })();
   const identity = await auth.authenticateSilent(descriptor.organizationId);
   if (!identity.success || !identity.user_id || !identity.organization_id
-    || !readLocalRoot(identity.organization_id, identity.user_id)) throw new Error('PAIR_REQUIRED');
+    || !readLocalRoot(identity.organization_id, identity.user_id)) {
+    console.error(`flow: ${silentAuthFailureMessage(identity)}`);
+    throw new Error('PAIR_REQUIRED');
+  }
   if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new Error('AUTH_ACCOUNT_MISMATCH');
   const transportToken = await auth.getValidToken();
   if (!transportToken?.access_token) throw new Error('PAIR_REQUIRED');

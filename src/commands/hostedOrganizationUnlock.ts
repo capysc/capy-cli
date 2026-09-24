@@ -1,4 +1,4 @@
-import type { AuthService } from '../auth/authService';
+import { silentAuthFailureMessage, type AuthService } from '../auth/authService';
 import type { CeremonyFailure, CeremonyTransport, UnlockRequest, UnlockSuccess } from '../auth/deviceKey/ceremonyTransport';
 import { MAX_CREDENTIAL_ID_LENGTH, MAX_UNLOCK_CANDIDATES } from '../auth/deviceKey/brokerCeremonyTransport';
 import { isWellFormedPrfOutput } from '../auth/deviceKey/crypto';
@@ -156,6 +156,7 @@ export async function unlockHostedOrganization(input: Readonly<{
     // before the CLI continues with its existing service client and session.
     const restored = await guarded(() => input.authService.authenticateSilent(input.organizationId));
     if (!restored.success || restored.user_id !== userId || restored.organization_id !== input.organizationId) {
+      console.error(`hosted org unlock: ${silentAuthFailureMessage(restored)}`);
       throw new CapyError('Could not restore the selected organization session.', ERROR_CODES.AUTH_FAILED);
     }
     return {

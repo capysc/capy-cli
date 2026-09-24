@@ -188,10 +188,16 @@ describe('rotation repository attribution without a local manifest', () => {
   const sync = { last_sync: '2026-09-14', synced_variables: ['WORKOS_API_KEY'], user_id: 'user_1',
     org_id: 'org_1', project_id: 'project_1', project_name: 'default', sync_mode: 'free' as const,
     keep_hash: { development: 'remote-hash' } };
-  test('completed free sync supplies attribution without keep.lock', () => {
-    expect(rotateRepositoryContext(null, sync, 'development')).toEqual(capyContext);
-  });
-  test('incomplete or non-free metadata cannot substitute for a manifest', () => {
+  // The lockless "free" rotation target (readFreeRotationTarget /
+  // resolveFixedRotationContext in the now-deleted src/commands/rotateContext.ts,
+  // and the matching `sync?.sync_mode !== 'free' ... return null` branch this
+  // function used to have) was deliberately removed by commit b910c372
+  // ("refactor: require explicit Keep project context"). rotateRepositoryContext
+  // now returns null whenever there is no local keep.lock, regardless of
+  // sync-state contents, so no persisted sync metadata can substitute for a
+  // manifest any more.
+  test('no persisted sync metadata can substitute for a missing manifest', () => {
+    expect(rotateRepositoryContext(null, sync, 'development')).toBeNull();
     expect(rotateRepositoryContext(null, { ...sync, keep_hash: undefined }, 'development')).toBeNull();
     expect(rotateRepositoryContext(null, { ...sync, sync_mode: 'paid' }, 'development')).toBeNull();
     expect(rotateRepositoryContext(null, sync, 'other')).toBeNull();

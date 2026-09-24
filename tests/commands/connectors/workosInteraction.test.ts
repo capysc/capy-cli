@@ -39,8 +39,14 @@ const run = (scenario: 'success' | 'expiry-fails' | 'client-id' | 'ambiguous') =
     const interaction = {output,progress:output,goal:output,prompt:async question=> {
       const view = question.view;
       call('prompt',view);
-      const selected = view.input.choices.find(choice=>choice.label.includes('app_other')) ?? view.input.choices[0];
-      const answer = question.decide({value:selected.value});
+      // Rotation now asks a mandatory confirm question before mutating
+      // anything (commit 5150bb1, "authorize WorkOS rotation within Keep").
+      // A confirm question carries no choices; approve it so the scenario
+      // can reach create/expire. A list question (application/environment
+      // pickers) keeps picking the app_other candidate when present.
+      const choices = view.input.choices;
+      const value = choices ? (choices.find(choice=>choice.label.includes('app_other')) ?? choices[0]).value : true;
+      const answer = question.decide({value});
       if ('error' in answer) throw new Error(answer.error);
       return answer.value;
     }};
@@ -65,7 +71,9 @@ const run = (scenario: 'success' | 'expiry-fails' | 'client-id' | 'ambiguous') =
 describe('real WorkOS connector through Interaction with isolated fake I/O', () => {
   test('creates replacement then schedules one-hour overlap without revealing keys', () => {
     const result = run('success');
-    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'createKey', 'expireKey']);
+    // The mandatory pre-mutation confirm (commit 5150bb1) inserts a 'prompt'
+    // call between the key lookup and the mutation.
+    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'prompt', 'createKey', 'expireKey']);
     expect(result.result).toEqual({ok:true,mode:'sandbox',valueMatches:true});
     expect(result.expiry.id).toBe('key_old'); expect(result.expiry.delay).toBeGreaterThanOrEqual(3600000);
     expect(result.expiry.delay).toBeLessThan(3605000); expect(result.leaked).toBe(false);
@@ -81,7 +89,9 @@ describe('real WorkOS connector through Interaction with isolated fake I/O', () 
   });
   test('ambiguous application uses the common typed question and selected application', () => {
     const result = run('ambiguous');
-    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'prompt', 'createKey']);
+    // Application-choice prompt, then the mandatory pre-mutation confirm
+    // (commit 5150bb1) — two 'prompt' calls before createKey.
+    expect(result.names).toEqual(['teamProjectsV2', 'keys', 'prompt', 'prompt', 'createKey']);
     expect(result.create.applicationId).toBe('app_other'); expect(result.result.ok).toBe(true);
   });
 });

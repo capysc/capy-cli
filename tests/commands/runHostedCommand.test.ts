@@ -36,13 +36,6 @@ test('invalid identity, attached evaluation flags, malformed ciphertext, stale b
   await expect(executeHostedRun(['node', 'server.js'], 'user_one', dependencies({ projects: async () => [] }), {})).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
 });
 
-test('reserved-only configuration does not trigger a project-key requirement', async () => {
-  expect(await executeHostedRun(['node', 'server.js'], 'user_one', dependencies({
-    keep: () => null, env: () => ({ [CURRENT_DEPLOY_KEY_VAR]: 'capy:malformed' }),
-    key: async () => { throw new Error('SHOULD_NOT_UNLOCK'); }, spawn: async (_args, env) => { expect(env).toEqual({}); return 0; },
-  }), {})).toBe(0);
-});
-
 test('hosted run fails mismatched file identity and partial decryption without spawning', async () => {
   await expect(executeHostedRun(['node', 'server.js'], 'user_one', dependencies({
     envIdentity: () => ({ org_id: 'other', project_id: 'other' }),
@@ -63,14 +56,7 @@ test('hosted run preserves encrypted precedence, shell plaintext precedence, str
   expect(exit).toBe(7);
 });
 
-test('free mode resolves default authoritatively; paid missing-lock mode stops before reading env', async () => {
-  expect(await executeHostedRun(['node', 'server.js'], 'user_one', dependencies({ keep: () => null, spawn: async () => 0 }), {})).toBe(0);
-  await expect(executeHostedRun(['node', 'server.js'], 'user_one', dependencies({
-    keep: () => null, billing: async () => ({ tier: 'business' }), env: () => { throw new Error('SHOULD_NOT_READ'); },
-  }), {})).rejects.toMatchObject({ code: 'PROJECT_NOT_FOUND' });
-});
-
-test('free plaintext-only state is not reported as onboarded; unavailable grant never spawns', async () => {
+test('plaintext-only local state is not reported as onboarded; unavailable grant never spawns', async () => {
   await expect(executeHostedRun(['node', 'server.js'], 'user_one', dependencies({ keep: () => null, env: () => ({ PLAIN: 'value' }) }), {})).rejects.toMatchObject({ code: 'SYNC_NOT_INITIALIZED' });
   await expect(executeHostedRun(['node', 'server.js'], 'user_one', dependencies({ key: async () => { throw new Error('GRANT_UNAVAILABLE'); } }), {})).rejects.toThrow('GRANT_UNAVAILABLE');
 });

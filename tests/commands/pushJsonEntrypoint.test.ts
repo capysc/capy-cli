@@ -6,17 +6,27 @@
 import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 const entrypoint = resolve(import.meta.dir, '../../src/index.ts');
 
 function isolatedInvocation(args: readonly string[]) {
   const root = mkdtempSync(join(tmpdir(), 'capy-push-json-refusal-'));
   const repository = join(root, 'repository');
-  const globalState = join(root, 'global');
+  // Never the developer's real HOME/~/.capy* — a throwaway home is what
+  // actually isolates this run. The prod entrypoint (index.ts) deliberately
+  // strips CAPY_GLOBAL_DIR_NAME / CAPY_API_URL / CAPY_KEEP_ORIGIN from its own
+  // environment and resolves its target from ~/.capy/config.json instead (see
+  // src/config/prodPins.ts), so passing them here would do nothing but trip
+  // its stderr notice — and every case below fails at the (non-interactive,
+  // sessionless) authentication step, before the service-origin check that
+  // would otherwise want a matching profile.
+  const fakeHome = join(root, 'home');
   mkdirSync(repository);
-  mkdirSync(globalState);
+  mkdirSync(fakeHome, { recursive: true });
+  const globalState = join(fakeHome, '.capy');
+  mkdirSync(globalState, { recursive: true });
   const sentinel = join(repository, 'existing.txt');
   writeFileSync(sentinel, 'Preserve this existing repository file.\n', { flag: 'wx' });
   const outcome = spawnSync(process.execPath, [entrypoint, 'push', ...args], {
@@ -26,9 +36,7 @@ function isolatedInvocation(args: readonly string[]) {
     // Do not inherit credentials, profile selection, debug flags or a real API.
     env: {
       PATH: process.env.PATH,
-      CAPY_GLOBAL_DIR_NAME: relative(homedir(), globalState),
-      CAPY_API_URL: 'http://127.0.0.1:9',
-      CAPY_KEEP_ORIGIN: 'http://127.0.0.1:9',
+      HOME: fakeHome,
       CAPY_WEB_NO_OPEN: '1',
       NO_COLOR: '1',
     },
@@ -87,7 +95,15 @@ test('a supplied environment cannot redirect a reviewed push away from the activ
   expect(outcome.status).toBe(1);
   expect(JSON.parse(outcome.stdout.trim())).toEqual({ ok: false, code: 'AUTH_FAILED' });
   expect(readdirSync(repository)).toEqual(['existing.txt']);
-  expect(readdirSync(globalState)).toEqual([]);
+  // With both an expected user and a service origin present, this run reaches
+  // real (silent, non-interactive) authentication before the origin check —
+  // and the fenced-refresh recovery added in 6a9b0c0 ("fix(auth): recover
+  // from an indeterminate refresh by signing in again") takes the session
+  // lock for that check unconditionally, which creates the (empty) auth/
+  // directory as a side effect even when there is no session to find. Empty
+  // state directories are harmless, as the sibling assertion above already
+  // documents; only a written session, key or config file would matter.
+  expect(readdirSync(globalState, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile())).toEqual([]);
 });
 
 test('review flags cannot fall through to the ordinary interactive push path', () => {

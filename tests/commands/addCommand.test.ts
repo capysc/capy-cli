@@ -8,14 +8,7 @@
  * `--help-url NAME=URL` flags into per-variable links.
  */
 import { describe, test, expect } from 'bun:test';
-import {
-  AddCommand,
-  firstSecretEnvDecision,
-  parseHelpUrls,
-  overwriteNotice,
-  type AddCommandDependencies,
-} from '../../src/commands/addCommand';
-import { CapyError, ERROR_CODES } from '../../src/types';
+import { parseHelpUrls, overwriteNotice } from '../../src/commands/addCommand';
 
 describe('parseHelpUrls (repeatable --help-url NAME=URL)', () => {
   test('maps valid http(s) pairs by name', () => {
@@ -51,64 +44,5 @@ describe('overwriteNotice', () => {
   });
 });
 
-describe('firstSecretEnvDecision', () => {
-  const missingLocklessEnvironment = {
-    lockless: true,
-    localEnvExists: false,
-    remoteEnvExists: false,
-    createEnvApproved: false,
-  } as const;
-
-  test('returns a coded approval decision before the first lockless secret intake', () => {
-    expect(firstSecretEnvDecision(missingLocklessEnvironment)).toEqual({
-      code: ERROR_CODES.FIRST_SECRET_ENV_REQUIRED,
-      question: 'Create .env for this project?',
-      retryFlag: '--create-env',
-    });
-  });
-
-  test('the explicit approval retry clears only the missing-environment decision', () => {
-    expect(firstSecretEnvDecision({ ...missingLocklessEnvironment, createEnvApproved: true })).toBeNull();
-  });
-
-  test('an existing local or remote environment stays on the established intake path', () => {
-    expect(firstSecretEnvDecision({ ...missingLocklessEnvironment, localEnvExists: true })).toBeNull();
-    expect(firstSecretEnvDecision({ ...missingLocklessEnvironment, remoteEnvExists: true })).toBeNull();
-  });
-
-  test('paid keep.lock behavior is unaffected even when no environment exists', () => {
-    expect(firstSecretEnvDecision({ ...missingLocklessEnvironment, lockless: false })).toBeNull();
-  });
-
-  test('non-TTY execution fails coded before secret intake can open', async () => {
-    const dependencies = {
-      resolveContext: async () => ({
-        lockless: true,
-        branch: 'development',
-        keep: { variables: {} },
-        pm: { detectProjectState: async () => ({ hasEnvFile: false }) },
-      }) as unknown as Awaited<ReturnType<AddCommandDependencies['resolveContext']>>,
-      writeAndSync: async () => {
-        throw new Error('writeAndSync must not run before environment approval');
-      },
-      runWebIntake: async () => {
-        throw new Error('secret intake must not open before environment approval');
-      },
-    } as AddCommandDependencies;
-    const outcome = await new AddCommand(true, dependencies)
-      .execute(['EXAMPLE_KEY'], { web: true, nonTty: true })
-      .then(
-        () => ({ ok: true as const }),
-        (error: unknown) => ({ ok: false as const, error }),
-      );
-
-    expect(outcome.ok).toBeFalse();
-    expect(outcome.ok ? null : outcome.error).toBeInstanceOf(CapyError);
-    expect(outcome.ok ? null : (outcome.error as CapyError).code).toBe(ERROR_CODES.FIRST_SECRET_ENV_REQUIRED);
-    expect(outcome.ok ? null : (outcome.error as CapyError).details).toEqual({
-      decision: 'create_env',
-      question: 'Create .env for this project?',
-      retry_flag: '--create-env',
-    });
-  });
-});
+// The lockless first-secret `.env` approval (firstSecretEnvDecision) was retired
+// with the free lockless product in b910c37; `capy add` now requires keep.lock.

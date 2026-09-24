@@ -1,5 +1,5 @@
 /** Strict consumer adapter; ordinary interactive Add context and paid behavior stay unchanged. */
-import { AuthService } from '../../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../../auth/authService';
 import { createGrantResolutionOps } from '../../auth/deviceKey/grantResolver';
 import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
@@ -30,6 +30,7 @@ export async function resolveBoundIntakeContext(input: {
   }
   const identity = await auth.authenticateSilent(target.org_id);
   if (!identity.success || identity.user_id !== input.expectedUserId || identity.organization_id !== target.org_id) {
+    console.error(`bound intake: ${silentAuthFailureMessage(identity)}`);
     throw new CapyError('Resume sign-in for this account.', ERROR_CODES.AUTH_FAILED);
   }
   const projectKey = await resolveConfiguredProjectKey(target.org_id, target.project_id, input.expectedUserId, {

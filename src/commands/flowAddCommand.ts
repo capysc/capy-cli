@@ -5,7 +5,7 @@ import { existsSync, readFileSync, realpathSync } from 'fs';
 import { join } from 'path';
 import { hostname } from 'os';
 import { lock } from 'proper-lockfile';
-import { AuthService } from '../auth/authService';
+import { AuthService, silentAuthFailureMessage } from '../auth/authService';
 import { FileSessionStorageBackend } from '../auth/session/fileBackend';
 import { assertRuntimePairingUser, recoverFilesystemRuntimePairing } from '../auth/pairing/runtimePairing';
 import { runtimePairingEnvironment } from '../auth/pairing/runtimePairingEnvironment';
@@ -194,7 +194,10 @@ export async function runFlowAddCommand(flowId: string, options: FlowAddOptions,
     if (!restored) return fail('INTAKE_PAIRING_REQUIRED');
     const auth = new AuthService(options.serviceOrigin, devMode, options.expectedUserId);
     const identity = await auth.authenticateSilent(restored.filesystemCustody?.orgId);
-    if (!identity.success || identity.user_id !== options.expectedUserId) return fail('INTAKE_SIGN_IN_REQUIRED');
+    if (!identity.success || identity.user_id !== options.expectedUserId) {
+      console.error(`flow add: ${silentAuthFailureMessage(identity)}`);
+      return fail('INTAKE_SIGN_IN_REQUIRED');
+    }
     const token = async () => (await auth.getValidToken())?.access_token ?? fail('INTAKE_SIGN_IN_REQUIRED');
     const request = async (body?: Json): Promise<IntakeView> => {
       const response = await fetch(`${options.serviceOrigin}/flows/${flowId}/secret-intake`, {

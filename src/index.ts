@@ -65,6 +65,23 @@ if (pinNotice) console.error(pinNotice);
 
 const program = new Command();
 
+/**
+ * Same resolution as `expectedUserIdFor`, but for the non-interactive checkout
+ * route specifically: an explicitly empty `--expected-user-id` has to reach
+ * `checkoutJson`'s own CHECKOUT_TARGET_REQUIRED refusal, exactly like its
+ * sibling `--expected-org-id` / `--expected-project-id` / `--expected-branch-id`
+ * flags already do when passed empty — not crash the process with an
+ * uncaught CapyError before that shared refusal path is ever reached.
+ */
+function expectedUserIdForCheckout(command: Command): string | undefined {
+  try {
+    return expectedUserIdFor(command);
+  } catch (error) {
+    if (error instanceof CapyError && error.code === ERROR_CODES.AUTH_FAILED) return '';
+    throw error;
+  }
+}
+
 program
   // Bin name is overridable so sibling wrappers (e.g. bin/capy-staging) render
   // their own name in --help/usage instead of the hardcoded "capy".
@@ -383,7 +400,13 @@ program
   .action(async (branch, options, command) => {
     assertNotLocalOnly('checkout');
 
-    const mergedOptions = { ...options, expectedUserId: expectedUserIdFor(command) };
+    // `--json` is declared on both the root program and this subcommand, so
+    // Commander binds the parsed flag to the parent scope — see 848d6a0's
+    // identical fix for `pair` / `device-key grant`, which missed this
+    // command. `options.json` below is always undefined; read the merged
+    // globals instead.
+    const json = command.optsWithGlobals().json === true;
+    const mergedOptions = { ...options, json, expectedUserId: expectedUserIdForCheckout(command) };
     const hosted = mergedOptions.nonTty || [mergedOptions.expectedUserId, mergedOptions.expectedOrgId, mergedOptions.expectedProjectId, mergedOptions.expectedBranchId]
       .some(value => value !== undefined);
     if (hosted || (mergedOptions.json && !mergedOptions.create)) {
@@ -396,7 +419,7 @@ program
     // see which stops a flag already settled and which it would be asked
     // about. Printed before any network call, because the plan is knowable
     // without one — that is what makes it a plan.
-    if (options.json && options.create) {
+    if (json && options.create) {
       const { branchCreatePlan, unansweredStops } = await import('./core/branchCreatePlan');
       // Commander sets `protected` to false only when `--no-protected` was
       // typed; an untouched flag leaves it undefined, which is the difference
@@ -429,16 +452,22 @@ program
     json?: boolean; plan?: boolean; confirm?: string; nonTty?: boolean; expectedUserId?: string; serviceOrigin?: string;
   }>, command) => {
     const expectedUserId = expectedUserIdFor(command);
+    // `--json` is declared on both the root program and this subcommand, so
+    // Commander binds the parsed flag to the parent scope — see 848d6a0's
+    // identical fix for `pair` / `device-key grant`, which missed this
+    // command. `options.json` below is always undefined; read the merged
+    // globals instead.
+    const json = command.optsWithGlobals().json === true;
     if (options.plan || options.confirm) {
       const { runPushJsonCommand } = await import('./commands/pushJsonCommand');
-      if (!options.json) {
+      if (!json) {
         console.log(JSON.stringify({ ok: false, code: 'PUSH_JSON_REQUIRED' }));
         process.exit(1);
       }
       process.exit(await runPushJsonCommand({ plan: options.plan, confirm: options.confirm,
         expectedUserId, serviceOrigin: options.serviceOrigin }));
     }
-    if (options.json) {
+    if (json) {
       console.log(JSON.stringify({ ok: false, code: 'PUSH_REVIEW_ARGUMENT_INVALID' }));
       process.exit(1);
     }
@@ -713,7 +742,11 @@ program
     const instrumented = options.flowId !== undefined || options.authenticationFlowId !== undefined
       || expectedUserId !== undefined || options.serviceOrigin !== undefined || options.runtimeOnly === true;
     if (instrumented) {
-      if (!options.json || !options.flowId || !options.authenticationFlowId || !expectedUserId || !options.serviceOrigin) {
+      // `--json` is declared on both the root program and this subcommand, so Commander
+      // binds the parsed flag to the parent scope — see 848d6a0's identical fix a few
+      // lines below for `PairCommand.execute()`, which missed this earlier check.
+      const json = options.json === true || command.optsWithGlobals().json === true;
+      if (!json || !options.flowId || !options.authenticationFlowId || !expectedUserId || !options.serviceOrigin) {
         console.log(JSON.stringify({ ok: false, code: 'READINESS_ARGUMENT_INVALID' }));
         process.exit(1);
       }
@@ -787,12 +820,16 @@ flow
   .option('--json', 'emit machine-readable JSON instead of the human UI, on success AND failure')
   .option('--yes', 'skip the confirmation prompt')
   .option('--non-tty', 'treat stdin as non-interactive even if it is a TTY (agents/CI)')
-  .action(async (id: string, options: { json?: boolean; yes?: boolean; nonTty?: boolean }) => {
+  .action(async (id: string, options: { json?: boolean; yes?: boolean; nonTty?: boolean }, command) => {
     assertNotLocalOnly('flow cancel');
     const { FlowCancelCommand } = await import('./commands/flowCancelCommand');
     const cmd = new FlowCancelCommand();
     await cmd.execute(id, {
-      json: options.json === true,
+      // `--json` is declared on both the root program and this subcommand, so
+      // Commander binds the parsed flag to the parent scope — see 848d6a0's
+      // identical fix for `pair` / `device-key grant`, which missed this
+      // command. `options.json` is always undefined; read the merged globals.
+      json: command.optsWithGlobals().json === true,
       yes: options.yes === true,
       nonTty: options.nonTty === true,
     });

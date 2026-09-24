@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 const AUTHENTICATION_FLOW_ID = '22222222-2222-4222-8222-222222222222';
 const EXPECTED_USER_ID = 'user_entrypointfixture';
@@ -13,19 +13,39 @@ function invoke(
   args: readonly string[],
   extraEnv: Readonly<Record<string, string>> = {},
 ) {
-  const globalDirectory = mkdtempSync(join(tmpdir(), 'capy-expected-user-entrypoint-'));
+  // Never the developer's real HOME/~/.capy* — a throwaway home isolates every
+  // run regardless of which entrypoint it drives.
+  const fakeHome = mkdtempSync(join(tmpdir(), 'capy-expected-user-home-'));
   const cwd = mkdtempSync(join(tmpdir(), 'capy-expected-user-project-'));
+  // Prod ignores CAPY_API_URL (see prodPins.ts) and resolves its target from
+  // ~/.capy/config.json instead. A BYOC-style profile pointed at
+  // SERVICE_ORIGIN is how a prod run ever reaches the same origin the test
+  // passes via --service-origin, so tests that must get past the "does this
+  // origin match the active service" guard and into the real executor need
+  // it laid out where prod actually reads it. Harmless for the dev entrypoint,
+  // which resolves CAPY_API_URL first and never consults this file.
+  const capyDir = join(fakeHome, '.capy');
+  mkdirSync(capyDir, { recursive: true });
+  writeFileSync(join(capyDir, 'config.json'), JSON.stringify({
+    default: 'fixture', profiles: { fixture: { url: SERVICE_ORIGIN } },
+  }));
   try {
+    // The prod entrypoint (index.ts) deliberately strips CAPY_GLOBAL_DIR_NAME /
+    // CAPY_API_URL / CAPY_KEEP_ORIGIN from its environment and prints a stderr
+    // notice when it finds them (see src/config/prodPins.ts) — so only hand
+    // them to the dev entrypoint, which still honours them. Prod's isolation
+    // comes from the throwaway HOME above; it never reads these regardless.
+    const devOnlyEnv = entrypoint === 'index-dev.ts'
+      ? { CAPY_GLOBAL_DIR_NAME: '.capy-dev-fixture', CAPY_API_URL: SERVICE_ORIGIN, CAPY_KEEP_ORIGIN: 'http://127.0.0.1:8' }
+      : {};
     const result = spawnSync(process.execPath, [resolve(import.meta.dir, '../../src', entrypoint), ...args], {
       cwd,
       encoding: 'utf8',
       timeout: 15_000,
       env: {
         PATH: process.env.PATH,
-        HOME: homedir(),
-        CAPY_GLOBAL_DIR_NAME: relative(homedir(), globalDirectory),
-        CAPY_API_URL: SERVICE_ORIGIN,
-        CAPY_KEEP_ORIGIN: 'http://127.0.0.1:8',
+        HOME: fakeHome,
+        ...devOnlyEnv,
         CAPY_WEB_NO_OPEN: '1',
         NO_COLOR: '1',
         ...extraEnv,
@@ -35,7 +55,7 @@ function invoke(
     return { status: result.status, stdout: result.stdout, stderr: result.stderr } as const;
   } finally {
     rmSync(cwd, { recursive: true, force: true });
-    rmSync(globalDirectory, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
   }
 }
 

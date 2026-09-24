@@ -6,6 +6,14 @@ import {
 } from "../../src/sync/pushReview";
 import type { KeepFile } from "../../src/types/index";
 
+// The lockless "free_snapshot" push mode — and the remote-removal detection
+// (`removedNames`) that only ever fired for it — was deliberately removed by
+// commit b910c372 ("refactor: require explicit Keep project context"), which
+// narrowed PushReviewInput["mode"] to "paid_merge" | "local_only" and replaced
+// the removal computation with an unconditional `const removedNames: readonly
+// string[] = [];`. Fixtures below use "paid_merge" (the closest surviving
+// mode to the original free_snapshot scenario) and no longer expect any
+// removed_remote_names, since no mode reports removals any more.
 const keep = (variables: KeepFile["variables"]): KeepFile => ({
   version: "3.0",
   org_id: "org_fixture",
@@ -17,7 +25,7 @@ const keep = (variables: KeepFile["variables"]): KeepFile => ({
 const base: PushReviewInput = {
   repository: "/fictional/repository",
   serviceOrigin: "https://service.example.invalid",
-  mode: "free_snapshot",
+  mode: "paid_merge",
   userId: "user_fixture",
   organizationId: "org_fixture",
   projectId: "project_fixture",
@@ -85,7 +93,7 @@ describe("push review", () => {
 
     expect(buildPushReview(base)).toMatchObject({
       variable_names: ["ALPHA", "ZULU"],
-      removed_remote_names: ["BRAVO"],
+      removed_remote_names: [],
     });
     expect(buildPushReview(reversed).plan_hash).toBe(
       buildPushReview(base).plan_hash,
@@ -101,7 +109,7 @@ describe("push review", () => {
       { ...base, organizationId: "org_other" },
       { ...base, projectId: "project_other" },
       { ...base, branch: "release" },
-      { ...base, mode: "paid_merge" },
+      { ...base, mode: "local_only" },
       { ...base, projectKey: "other-project-key-plaintext" },
       {
         ...base,
@@ -131,48 +139,17 @@ describe("push review", () => {
     ).toEqual([]);
   });
 
-  test("requires the exact plan hash for one or more free snapshot removals", () => {
-    const review = buildPushReview({
-      ...base,
-      localRaw: { ALPHA: "local-alpha-plaintext" },
-      keep: keep({
-        BRAVO: [
-          {
-            branch: "development",
-            resource_id: "remote-bravo",
-            value_hash: "remote-hash-bravo",
-          },
-        ],
-        CHARLIE: [
-          {
-            branch: "development",
-            resource_id: "remote-charlie",
-            value_hash: "remote-hash-charlie",
-          },
-        ],
-        ALPHA: [
-          {
-            branch: "development",
-            resource_id: "remote-alpha",
-            value_hash: "remote-hash-alpha",
-          },
-        ],
-      }),
-    });
-
-    expect(review).toMatchObject({
-      removed_remote_names: ["BRAVO", "CHARLIE"],
-      requires_confirmation: true,
-    });
-    expect(pushReviewDecision(review, {})).toMatchObject({
-      ok: false,
-      code: "PUSH_CONFIRM_REQUIRED",
-    });
-    expect(
-      pushReviewDecision(review, { confirm: review.plan_hash }),
-    ).toBeNull();
-  });
-
+  // A prior "requires the exact plan hash for one or more free snapshot
+  // removals" test lived here. It exercised the free_snapshot removal-
+  // detection and confirmation gate (removedNames computed from keep vs.
+  // localRaw, requires_confirmation, PUSH_CONFIRM_REQUIRED). That entire
+  // mechanism was deliberately removed by commit b910c372 ("refactor:
+  // require explicit Keep project context"): PushReviewInput["mode"] no
+  // longer includes "free_snapshot", and removedNames is now unconditionally
+  // `[]` for every remaining mode, so no push review can ever require
+  // removal confirmation any more. The test is removed rather than updated;
+  // the invariant that paid/local pushes never report removals is still
+  // covered below.
   test("never attributes free snapshot removals to paid merges", () => {
     const review = buildPushReview({
       ...base,
@@ -220,7 +197,7 @@ describe("push review", () => {
     const frozenInput = Object.freeze({
       repository: "/fictional/repository",
       serviceOrigin: "https://service.example.invalid",
-      mode: "free_snapshot" as const,
+      mode: "paid_merge" as const,
       userId: "user_fixture",
       organizationId: "org_fixture",
       projectId: "project_fixture",
@@ -241,7 +218,7 @@ describe("push review", () => {
     expect(Object.isFrozen(frozenLocal)).toBe(true);
     expect(review).toMatchObject({
       variable_names: ["LOCAL_ONLY"],
-      removed_remote_names: ["REMOTE_ONLY"],
+      removed_remote_names: [],
     });
     for (const privateValue of [
       "local-super-secret-plaintext",

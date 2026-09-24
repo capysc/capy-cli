@@ -148,6 +148,38 @@ ISOLATED_FILES=(
   # flowRunCommand.test.ts mocks authService/serviceClient (flowCancelCommand.test.ts's
   # shape) plus crypto/keyResolver's resolveProjectKey.
   tests/commands/flowRunCommand.test.ts
+  # pushJsonCommand.test.ts mock.module()s config/profileConfig,
+  # config/globalConfig, sync/projectKeyResolver, auth/deviceKey/grantResolver
+  # and git/autoCommitKeep for its dependency-injected paid-push fixture, but
+  # was never added here. Batched, its grantResolver/autoCommitKeep stand-ins
+  # (a bare `{}` and an always-"unchanged" fake) permanently replace the real
+  # modules for every later file in the same process: tests/auth/deviceKey/
+  # grantResolver.test.ts started throwing "ops.fetchKeyEnc is not a
+  # function" and tests/git/autoCommitKeep.test.ts started getting
+  # `{committed:false,reason:'unchanged'}` back from every call, no matter
+  # what it wrote to disk — both reproduced exactly, in isolation, by pairing
+  # this file with either of theirs. They pass alone and in every batch that
+  # excludes this file.
+  tests/commands/pushJsonCommand.test.ts
+  # rotateRefusals.test.ts drives `capy rotate`'s six early `--web` refusals
+  # for real: six live loopback ScreenServers, six real `fetch()` round trips,
+  # each polled for up to 10s. No mock.module, and its process.exit/console
+  # spies and chdir are correctly paired (try/finally, beforeEach/afterEach) —
+  # nothing here is left un-restored. But queued behind ~80 other files it
+  # still measures 15-20x slower than its ~1s solo run (bisected: batches
+  # ending at tests/commands/rotatePicker.test.ts pass in ~30s; adding just
+  # this one file pushes the SAME batch to 50s+), and that is real OS socket
+  # pressure — accumulated TIME_WAIT state on 127.0.0.1 from every earlier
+  # test's own loopback server — not a leak this file can restore. The
+  # collateral damage lands on whichever pure/synchronous file bun happens to
+  # schedule right after it: tests/commands/compareSecrets.test.ts's four
+  # tests do zero I/O and zero awaits yet started timing out at the default
+  # 5000ms, purely because the process was too busy draining this file's
+  # backlog to schedule them in time (confirmed by swapping an unrelated file
+  # into the same batch slot: compareSecrets stays green). Isolating the
+  # heavy aggressor here — rather than only the one victim this run happened
+  # to expose — protects every other fast test from the same fate.
+  tests/commands/rotateRefusals.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { buildHostedCompletionPlan, CapyCommand } from '../../src/commands/capyCommand';
 import { SyncEngine } from '../../src/sync/syncEngine';
-import type { KeepFile, SyncState } from '../../src/types';
+import type { KeepFile } from '../../src/types';
 
 const target = {
   orgId: 'org-one',
@@ -224,33 +224,13 @@ describe('CapyCommand hosted terminal verification', () => {
     });
   });
 
-  test('free completion requires exact runtime metadata, remote hash and ciphertext without keep.lock', async () => {
-    const freeTarget = { ...target, projectName: 'default', syncMode: 'free' } as const;
-    const freeKeep = { ...keep, project_name: 'default' };
-    const sync: SyncState = {
-      last_sync: '2026-09-11T17:00:00.000Z', synced_variables: ['SENTINEL'], user_id: 'user_test',
-      org_id: target.orgId, project_id: target.projectId, project_name: 'default', sync_mode: 'free',
-      keep_hash: { development: SyncEngine.computeKeepHash(freeKeep, target.branch) },
-    };
-    const freeSubject = (input: Readonly<{ state?: SyncState; localKeep?: KeepFile; values?: Readonly<Record<string, string>> }> = {}) => ({
-      options: {},
-      projectManager: { readKeepFile: () => input.localKeep ?? null, readActiveBranch: () => target.branch,
-        readSyncState: () => input.state ?? sync },
-      fileManager: { readEnvFile: () => input.values ?? { SENTINEL: 'capy:development:SENTINEL:sealed' },
-        readEnvMeta: () => ({ org_id: target.orgId, project_id: target.projectId, branch: target.branch }) },
-    });
-    const remote = context({ free: true, projectName: 'default', remoteKeep: freeKeep });
-    expect(await verifyHostedInitialization.call(freeSubject(), remote, freeTarget))
-      .toEqual({ repositoryVerified: true, custodyVerified: true });
-    for (const invalid of [
-      { state: { ...sync, project_id: 'other' } },
-      { state: { ...sync, keep_hash: { development: 'stale' } } },
-      { state: { ...sync, synced_variables: [] } },
-      { localKeep: freeKeep }, { values: { SENTINEL: 'plaintext' } },
-    ]) expect((await verifyHostedInitialization.call(freeSubject(invalid), remote, freeTarget)).repositoryVerified).toBe(false);
-    expect((await verifyHostedInitialization.call(freeSubject(),
-      context({ free: false, projectName: 'default', remoteKeep: freeKeep }), freeTarget)).repositoryVerified).toBe(false);
-    expect((await verifyHostedInitialization.call(freeSubject(),
-      context({ free: true, projectName: 'default', remoteKeep: null }), freeTarget)).repositoryVerified).toBe(false);
-  });
+  // The lockless "free" completion path (InitRepositoryTarget.syncMode === 'free',
+  // SyncState-based verification without a local keep.lock) was deliberately
+  // removed by commit b910c372 ("refactor: require explicit Keep project
+  // context"), which dropped `syncMode` from InitRepositoryTarget entirely and
+  // now unconditionally requires a local keep.lock (`keep`) to compute
+  // `targetMatches`/`expectedKeep` in verifyHostedInitialization. That commit's
+  // src/sync/legacyKeepMode.ts documents `sync_mode: 'free'` as "persisted
+  // evidence of the retired lockless storage product." This test exercised
+  // only that retired path, so it is removed rather than updated.
 });
