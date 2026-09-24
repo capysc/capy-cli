@@ -19,6 +19,7 @@ import {
   currentVerifiedAuthInstallationContext,
   runWithVerifiedAuthInstallation,
 } from './authInstallationContext';
+import { RefreshFencedError, RefreshLockUnavailableError } from './refreshErrors';
 
 const FENCE_LIMIT = 16 * 1024;
 type RefreshFence = Readonly<{
@@ -159,7 +160,7 @@ const withStableSessionLockSync = <T>(
     try {
       return lockSync(sessionPath, { realpath: false });
     } catch {
-      throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      throw new RefreshLockUnavailableError();
     }
   })();
   try {
@@ -168,6 +169,30 @@ const withStableSessionLockSync = <T>(
     release();
   }
 };
+
+/**
+ * Remove one user's session and fence only while both still hold the exact
+ * fenced authority the caller confirmed. A newer session, a different fence,
+ * or a missing fence is left untouched. Runs under the session lock.
+ */
+const removeFencedAuthorityIfMatches = (
+  userId: string,
+  expectedRefreshAuthoritySha256: string,
+  expectedFenceId: string,
+): boolean => withStableSessionLockSync(userId, (sessionPath) => {
+  const fence = readFence(userId);
+  const current = readProtectedSession(userId);
+  const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
+  if (!fence || fence.id !== expectedFenceId || fence.user_id !== userId
+    || fence.authority_sha256 !== expectedRefreshAuthoritySha256
+    || current?.user_id !== userId || currentDigest !== expectedRefreshAuthoritySha256) return false;
+  if (existsSync(sessionPath)) {
+    unlinkSync(sessionPath);
+    syncDirectory(dirname(sessionPath));
+  }
+  removeFenceDurably(userId);
+  return true;
+});
 
 const sessionMatches = (left: SessionStore | null, right: SessionStore): boolean =>
   left !== null && JSON.stringify(left) === JSON.stringify(right);
@@ -203,7 +228,7 @@ const saveSessionDurably = (session: SessionStore, userId: string | undefined): 
 export class FileSessionStorageBackend implements SessionStorageBackend {
   assertRefreshAuthorityAvailable(userId: string | undefined): void {
     withStableSessionLockSync(userId, () => {
-      if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      if (readFence(userId)) throw new RefreshFencedError();
     });
   }
 
@@ -227,7 +252,7 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
 
   load(userId: string | undefined): SessionStore | null {
     return withStableSessionLockSync(userId, () => {
-      if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      if (readFence(userId)) throw new RefreshFencedError();
       return readProtectedSession(userId);
     });
   }
@@ -342,20 +367,15 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
     expectedRefreshAuthoritySha256: string,
     expectedFenceId: string,
   ): boolean {
-    return withStableSessionLockSync(userId, (sessionPath) => {
-      const fence = readFence(userId);
-      const current = readProtectedSession(userId);
-      const currentDigest = current?.refresh_token ? digest(current.refresh_token) : null;
-      if (!fence || fence.id !== expectedFenceId || fence.user_id !== userId
-        || fence.authority_sha256 !== expectedRefreshAuthoritySha256
-        || current?.user_id !== userId || currentDigest !== expectedRefreshAuthoritySha256) return false;
-      if (existsSync(sessionPath)) {
-        unlinkSync(sessionPath);
-        syncDirectory(dirname(sessionPath));
-      }
-      removeFenceDurably(userId);
-      return true;
-    });
+    return removeFencedAuthorityIfMatches(userId, expectedRefreshAuthoritySha256, expectedFenceId);
+  }
+
+  clearIndeterminateFencedSessionIfMatches(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+    expectedFenceId: string,
+  ): boolean {
+    return removeFencedAuthorityIfMatches(userId, expectedRefreshAuthoritySha256, expectedFenceId);
   }
 
   discover(): DiscoveredSession | null {
@@ -392,10 +412,10 @@ export class FileSessionStorageBackend implements SessionStorageBackend {
       realpath: false,
       retries: { retries: 3, minTimeout: 100 },
     }).catch(() => {
-      throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      throw new RefreshLockUnavailableError();
     });
     try {
-      if (readFence(userId)) throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      if (readFence(userId)) throw new RefreshFencedError();
       const fresh = readProtectedSession(userId);
       if (!fresh?.refresh_token) throw new Error('AUTH_REFRESH_AUTHORITY_MISSING');
       const fence: RefreshFence = {

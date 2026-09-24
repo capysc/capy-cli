@@ -123,3 +123,27 @@ test('legacy identity constrains the subject but never substitutes its token for
   expect(backend.load('user_1')).toEqual(session('R1'));
   expect(backend.load(undefined)).toEqual(session('legacy'));
 });
+
+test('after an indeterminate fence is cleared, a new device sign-in for the same user installs', async () => {
+  backend.save(session('R0'), 'user_1');
+  fence();
+  expect(backend.clearIndeterminateFencedSessionIfMatches(
+    'user_1', digest('R0'), '11223344-1234-4234-8234-123456789012',
+  )).toBe(true);
+  const baseline = capture('user_1');
+  expect(baseline.authorities).toEqual([{ userId: 'user_1', refreshAuthoritySha256: null }]);
+  await install(session('R1'), baseline);
+  expect(backend.load('user_1')).toEqual(session('R1'));
+});
+
+test('an indeterminate fence that was not cleared still refuses the new device sign-in', async () => {
+  backend.save(session('R0'), 'user_1');
+  fence();
+  expect(backend.clearIndeterminateFencedSessionIfMatches(
+    'user_1', digest('R0'), '00000000-0000-4000-8000-000000000001',
+  )).toBe(false);
+  const baseline = capture('user_1');
+  expect(baseline.authorities).toEqual([{ userId: 'user_1', refreshAuthoritySha256: null, unavailable: true }]);
+  await expect(install(session('R1'), baseline)).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+  expect(JSON.parse(readFileSync(path(), 'utf8'))).toEqual(session('R0'));
+});

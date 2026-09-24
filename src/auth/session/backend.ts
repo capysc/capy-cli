@@ -90,6 +90,18 @@ export interface SessionStorageBackend {
   ): boolean;
 
   /**
+   * Drop the exact fenced authority whose signed subject the service
+   * confirmed is still present, so the user can sign in again without the
+   * possibly-consumed refresh token ever being sent. Must hold the session
+   * lock, and must leave a newer session or a different fence untouched.
+   */
+  clearIndeterminateFencedSessionIfMatches?(
+    userId: string,
+    expectedRefreshAuthoritySha256: string,
+    expectedFenceId: string,
+  ): boolean;
+
+  /**
    * Locate a session when the caller has no userId hint (e.g. the post-redeem
    * flow where a fresh checkout has no sync-state). Only sessions whose
    * storage scope agrees with the content's `user_id` may be returned — a

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -49,6 +49,7 @@ const safeError = (cause) => {
     'AUTH_REFRESH_AUTHORITY_CHANGED',
     'AUTH_REFRESH_AUTHORITY_INDETERMINATE',
     'AUTH_REFRESH_AUTHORITY_MISSING',
+    'AUTH_REFRESH_LOCK_UNAVAILABLE',
   ].includes(message)
     ? message
     : 'PROCESS_OPERATION_REFUSED';
@@ -295,6 +296,20 @@ const withFixture = async (run: (
   }
 };
 
+/**
+ * proper-lockfile treats a lock as abandoned once its mtime is older than its
+ * 10s stale window. Until then a load is refused by the lock, not the fence,
+ * so a fixed sleep cannot prove the fence refusal below.
+ */
+const LOCK_STALE_MS = 10_000;
+const waitForStaleLock = async (lockPath: string, deadline = Date.now() + 15_000): Promise<void> => {
+  const age = existsSync(lockPath) ? Date.now() - statSync(lockPath).mtimeMs : Number.POSITIVE_INFINITY;
+  if (age > LOCK_STALE_MS + 250) return;
+  if (Date.now() > deadline) throw new Error('TEST_LOCK_NEVER_STALE');
+  await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(500, LOCK_STALE_MS + 300 - age)));
+  return waitForStaleLock(lockPath, deadline);
+};
+
 describe('refresh fence process coordination', () => {
   it('serializes same-process contenders so only one burns the old authority', () => withFixture(async (home, paths) => {
     expect(await runChild(home, 'seed-old', paths)).toEqual({ status: 'seeded' });
@@ -350,7 +365,7 @@ describe('refresh fence process coordination', () => {
     const immediate = await runChild(home, 'load', paths);
     expect(immediate.status).toBe('refused');
     expect(['AUTH_REFRESH_AUTHORITY_INDETERMINATE', 'AUTH_REFRESH_LOCK_UNAVAILABLE']).toContain(immediate.code);
-    await new Promise((resolveWait) => setTimeout(resolveWait, 10_500));
+    await waitForStaleLock(`${paths.session}.lock`);
     expect(await runChild(home, 'load', paths)).toEqual({
       status: 'refused', code: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE',
     });

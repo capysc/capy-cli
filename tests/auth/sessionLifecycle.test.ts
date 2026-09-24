@@ -176,7 +176,75 @@ describe('SessionLifecycle with an injected backend', () => {
       } }]);
     });
 
-    test('keeps a fenced session when the service reports that its subject is still present', async () => {
+    test('drops the exact fenced authority when the service reports its subject present', async () => {
+      const priorAccessToken = fakeJwt();
+      const digest = createHash('sha256').update('rt-original').digest('hex');
+      const retire = mock(() => true);
+      const clearFenced = mock(() => true);
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => ({
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken,
+        }),
+        retireFencedDeletedUserIfMatches: retire,
+        clearIndeterminateFencedSessionIfMatches: clearFenced,
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      const calls = stubFetch([{ status: 200, body: { status: 'present' } }]);
+
+      const service = new AuthService(API, false, 'user-1', fencedBackend);
+      const result = await service.authenticateSilent('org-1');
+
+      expect(result.error_code).toBe('session_ended');
+      expect(service.getLastRefreshFailure()).toEqual({
+        reason: 'session_ended', detail: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE',
+      });
+      expect(clearFenced).toHaveBeenCalledWith('user-1', digest, 'fence-1');
+      expect(retire).not.toHaveBeenCalled();
+      expect(calls.map(({ url }) => url)).toEqual([`${API}/auth/session-status`]);
+    });
+
+    test('reports indeterminate when the conditional clear finds a changed fence', async () => {
+      const digest = createHash('sha256').update('rt-original').digest('hex');
+      const fencedBackend: SessionStorageBackend = {
+        load: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        save: () => undefined,
+        clear: () => undefined,
+        discover: () => null,
+        getFencedIdentityProof: () => ({
+          userId: 'user-1', refreshAuthoritySha256: digest, fenceId: 'fence-1', priorAccessToken: fakeJwt(),
+        }),
+        clearIndeterminateFencedSessionIfMatches: () => false,
+        // The fence is still on disk, exactly as the file backend reports it.
+        assertRefreshAuthorityAvailable: () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); },
+        withRefreshLock: async (_userId, fn) => fn(null),
+      };
+      stubFetch([
+        { status: 200, body: { status: 'present' } },
+        { status: 200, body: { status: 'present' } },
+      ]);
+      const authPrototype = AuthService.prototype as unknown as {
+        startOAuthFlow: (organizationId?: string) => Promise<unknown>;
+      };
+      const startOAuthFlow = spyOn(authPrototype, 'startOAuthFlow').mockResolvedValue({ success: true });
+      try {
+        const service = new AuthService(API, false, 'user-1', fencedBackend);
+        const silent = await service.authenticateSilent('org-1');
+        const interactive = await service.authenticate('org-1');
+
+        expect(silent.error_code).toBe('server_error');
+        expect(silent.error).toBe('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+        expect(interactive).toEqual({ success: false, error: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE' });
+        expect(startOAuthFlow).not.toHaveBeenCalled();
+      } finally {
+        startOAuthFlow.mockRestore();
+      }
+    });
+
+    test('keeps a fenced session when the backend cannot clear it conditionally', async () => {
       const digest = createHash('sha256').update('rt-original').digest('hex');
       const retire = mock(() => true);
       const fencedBackend: SessionStorageBackend = {

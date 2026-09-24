@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { debug } from '../../ui/debug';
 import { SessionStorageBackend } from './backend';
 import { HttpStatusError, postJson } from './http';
+import { RefreshFencedError, RefreshLockUnavailableError } from './refreshErrors';
 
 /**
  * Why the last token refresh failed. Callers use this to pick the right
@@ -60,7 +61,44 @@ const deletedUserRefreshError = (
       : new Error('AUTH_REFRESH_FAILURE');
 };
 
+const INDETERMINATE_REFRESH_FAILURE: RefreshFailure = {
+  reason: 'server_error',
+  detail: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE',
+};
+
+/** The fenced authority was dropped; the same user must sign in again. */
+const FENCED_SESSION_ENDED: RefreshFailure = {
+  reason: 'session_ended',
+  detail: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE',
+};
+
+const USER_DELETED_FAILURE: RefreshFailure = {
+  reason: 'user_deleted',
+  status: 401,
+  detail: 'The signed-in account no longer exists',
+};
+
+/** Use the org the new access token is scoped to; the caller's id may be stale. */
+const resolveRefreshedOrgId = (
+  organizations: SessionStore['organizations'],
+  requestedOrgId: string,
+  accessToken: string,
+): string => {
+  try {
+    const payload = decodeJwtPayload(accessToken);
+    if (!payload.org_id) return requestedOrgId;
+    return organizations.find(o => o.workos_org_id === payload.org_id)?.id ?? requestedOrgId;
+  } catch {
+    // JWT decode failed — use the orgId as-is
+    return requestedOrgId;
+  }
+};
+
 export function classifyRefreshFailure(error: any): RefreshFailure {
+  if (error instanceof RefreshLockUnavailableError) {
+    // Another process may be mid-rotation: retry later, never clear.
+    return { reason: 'server_error', detail: error.code };
+  }
   if (error instanceof RefreshAuthorityChangedError) {
     return { reason: 'server_error', detail: error.message };
   }
@@ -175,12 +213,7 @@ export class SessionLifecycle {
       error.refreshAuthoritySha256,
     ) ?? false;
     if (!retired) return 'changed';
-    this.session = null;
-    this.sessionUserId = undefined;
-    this.currentOrgId = null;
-    this.loadedRefreshToken = null;
-    this.orglessAccessToken = null;
-    this.retiredDeletedUserId = error.userId;
+    this.forgetDeletedUser(error.userId);
     try {
       await this.onDeletedUser?.(error.userId);
     } catch {
@@ -190,13 +223,39 @@ export class SessionLifecycle {
     return 'retired';
   }
 
+  /** Drop in-memory authority. `sessionUserId` still names who must sign in. */
+  private forgetSession(): void {
+    this.session = null;
+    this.currentOrgId = null;
+    this.loadedRefreshToken = null;
+    this.orglessAccessToken = null;
+  }
+
+  private forgetDeletedUser(userId: string): void {
+    this.forgetSession();
+    this.sessionUserId = undefined;
+    this.retiredDeletedUserId = userId;
+  }
+
   /**
    * A durable fence means the provider might have consumed the refresh token.
    * Never replay it. The Service verifies a prior access token only as proof
    * of the former subject, then reports whether that WorkOS user was deleted.
+   *
+   * Deleted: retire the exact fenced authority so a new user can sign up.
+   * Present: drop the exact fenced authority so the same user signs in again
+   * (`session_ended`). Anything unconfirmed leaves both files in place.
+   *
+   * Sets and returns the resulting failure; returns null (and leaves
+   * `lastRefreshFailure` alone) when there is no fenced authority to prove.
    */
-  async recoverConfirmedFencedDeletion(): Promise<void> {
-    const userId = this.sessionUserId;
+  async recoverConfirmedFencedDeletion(userId: string | undefined = this.sessionUserId): Promise<RefreshFailure | null> {
+    const failure = await this.resolveFencedAuthority(userId);
+    if (failure !== null) this.lastRefreshFailure = failure;
+    return failure;
+  }
+
+  private async resolveFencedAuthority(userId: string | undefined): Promise<RefreshFailure | null> {
     const proofResult = (() => {
       try {
         return { proof: userId ? this.storage.getFencedIdentityProof?.(userId) ?? null : null } as const;
@@ -204,12 +263,9 @@ export class SessionLifecycle {
         return { error: error instanceof Error ? error.message : 'Could not read fenced session status' } as const;
       }
     })();
-    if ('error' in proofResult) {
-      this.lastRefreshFailure = { reason: 'server_error', detail: proofResult.error };
-      return;
-    }
+    if ('error' in proofResult) return { reason: 'server_error', detail: proofResult.error };
     const proof = proofResult.proof;
-    if (!proof) return;
+    if (!proof) return null;
     try {
       const response = await postJson<FencedSessionStatusResponse>(
         `${this.serviceApiUrl}/auth/session-status`,
@@ -221,31 +277,43 @@ export class SessionLifecycle {
           proof.refreshAuthoritySha256,
           proof.fenceId,
         ) ?? false;
-        if (retired) {
-          this.session = null;
-          this.sessionUserId = undefined;
-          this.currentOrgId = null;
-          this.loadedRefreshToken = null;
-          this.orglessAccessToken = null;
-          this.retiredDeletedUserId = proof.userId;
-          try {
-            await this.onDeletedUser?.(proof.userId);
-          } catch {
-            // The confirmed session retirement is still valid without its diagnostic checkpoint.
-          }
+        if (!retired) return classifyRefreshFailure(new RefreshAuthorityChangedError());
+        this.forgetDeletedUser(proof.userId);
+        try {
+          await this.onDeletedUser?.(proof.userId);
+        } catch {
+          // The confirmed session retirement is still valid without its diagnostic checkpoint.
         }
-        this.lastRefreshFailure = retired
-          ? { reason: 'user_deleted', status: 401, detail: 'The signed-in account no longer exists' }
-          : classifyRefreshFailure(new RefreshAuthorityChangedError());
-        return;
+        return USER_DELETED_FAILURE;
       }
-      this.lastRefreshFailure = { reason: 'server_error', detail: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE' };
+      const present = response.status === 'present'
+        && (response.user_id === undefined || response.user_id === proof.userId);
+      const cleared = present && (this.storage.clearIndeterminateFencedSessionIfMatches?.(
+        proof.userId,
+        proof.refreshAuthoritySha256,
+        proof.fenceId,
+      ) ?? false);
+      if (!cleared) return INDETERMINATE_REFRESH_FAILURE;
+      this.forgetSession();
+      return FENCED_SESSION_ENDED;
     } catch (error) {
-      this.lastRefreshFailure = {
+      return {
         reason: 'server_error',
         detail: error instanceof Error ? error.message : 'Could not confirm fenced session status',
       };
     }
+  }
+
+  /**
+   * A refresh refused before any provider request because a fence already
+   * existed. The stored refresh token is not sent; the Service decides
+   * whether the fenced authority is retired, dropped, or left in place.
+   */
+  private async recoverFencedRefresh(userId: string, scope: string): Promise<false> {
+    const failure = await this.recoverConfirmedFencedDeletion(userId) ?? INDETERMINATE_REFRESH_FAILURE;
+    this.lastRefreshFailure = failure;
+    debug(`[auth] ${scope} refresh refused by an existing fence (${failure.reason}): ${failure.detail || 'no detail'}`);
+    return false;
   }
 
   /**
@@ -269,12 +337,10 @@ export class SessionLifecycle {
         // Prune sessions for orgs not in the organizations list (stale/deleted).
         // Keep all sessions for known orgs — multi-org users need tokens for each.
         const knownOrgIds = new Set(data.organizations.map(o => o.id));
-        for (const key of Object.keys(data.sessions)) {
-          if (!knownOrgIds.has(key)) {
-            delete data.sessions[key];
-          }
-        }
-        this.session = data;
+        this.session = {
+          ...data,
+          sessions: Object.fromEntries(Object.entries(data.sessions).filter(([key]) => knownOrgIds.has(key))),
+        };
         this.loadedRefreshToken = data.refresh_token ?? null;
         return;
       }
@@ -321,7 +387,7 @@ export class SessionLifecycle {
       // rotating save its own token is the newest; after a preserving save
       // it adopted the disk's — so a later save from this same instance
       // stays non-rotating unless it genuinely rotates again.
-      this.session.refresh_token = tokenToWrite;
+      this.session = { ...this.session, refresh_token: tokenToWrite };
       this.loadedRefreshToken = tokenToWrite;
     } catch {
       // Failed to save session
@@ -433,7 +499,7 @@ export class SessionLifecycle {
             this.session = freshSession;
             return false;
           }
-          this.session!.refresh_token = freshSession.refresh_token;
+          this.session = { ...this.session!, refresh_token: freshSession.refresh_token };
         }
 
         const refreshSession = freshSession?.version === 2 ? freshSession : this.session!;
@@ -442,7 +508,7 @@ export class SessionLifecycle {
           { refresh_token: refreshSession.refresh_token, expected_user_id: refreshSession.user_id },
         ).catch((error) => { throw deletedUserRefreshError(error, refreshSession); });
 
-        this.session!.refresh_token = data.refresh_token;
+        this.session = { ...this.session!, refresh_token: data.refresh_token };
         this.orglessAccessToken = data.access_token;
         this.save();
         return true;
@@ -457,9 +523,10 @@ export class SessionLifecycle {
         // refresh failure, just means this branch no longer applies.
         return false;
       }
+      if (error instanceof RefreshFencedError) return this.recoverFencedRefresh(userId, 'org-less');
       const retirement = await this.retireDeletedUser(error);
       const failure = retirement === 'retired'
-        ? { reason: 'user_deleted' as const, status: 401, detail: 'The signed-in account no longer exists' }
+        ? USER_DELETED_FAILURE
         : retirement === 'changed'
           ? classifyRefreshFailure(new RefreshAuthorityChangedError())
           : classifyRefreshFailure(error);
@@ -518,7 +585,7 @@ export class SessionLifecycle {
             return true;
           }
           // Use the latest refresh token
-          this.session!.refresh_token = freshSession.refresh_token;
+          this.session = { ...this.session!, refresh_token: freshSession.refresh_token };
         }
 
         const refreshSession = freshSession?.version === 2 ? freshSession : this.session!;
@@ -533,50 +600,46 @@ export class SessionLifecycle {
 
         // Resolve the actual org from the JWT — the caller may have passed a
         // stale internal org ID but the token is scoped to the canonical one.
-        let resolvedOrgId = orgId;
-        try {
-          const payload = decodeJwtPayload(data.access_token);
-          if (payload.org_id) {
-            const match = this.session!.organizations.find(o => o.workos_org_id === payload.org_id);
-            if (match) resolvedOrgId = match.id;
-          }
-        } catch {
-          // JWT decode failed — use the orgId as-is
-        }
-
-        // Add/update the session for this org. Other org sessions are preserved —
-        // the KMS co-decrypt endpoint is the security gate per-org, not the client.
-        this.session!.sessions[resolvedOrgId] = {
-          access_token: data.access_token,
-          expires_at: resolveExpiresAt(data.expires_in),
-        };
-        this.session!.refresh_token = data.refresh_token;
+        const current = this.session!;
+        const resolvedOrgId = resolveRefreshedOrgId(current.organizations, orgId, data.access_token);
 
         // If this org isn't in the organizations list yet (e.g. user was just
         // invited and we refreshed into the new org), add it from the response.
-        if (!this.session!.organizations.some(o => o.id === resolvedOrgId) && data.organization) {
-          this.session!.organizations.push({
+        const organizations = !current.organizations.some(o => o.id === resolvedOrgId) && data.organization
+          ? [...current.organizations, {
             id: data.organization.id,
             workos_org_id: data.organization.workos_org_id,
             name: data.organization.name,
-          });
-        }
+          }]
+          : current.organizations;
 
-        if (data.user) {
-          this.session!.user_id = data.user.id;
-          this.session!.user_email = data.user.email;
-          this.session!.user_first_name = data.user.first_name;
-          this.session!.user_last_name = data.user.last_name;
-        }
+        // Add/update the session for this org. Other org sessions are preserved —
+        // the KMS co-decrypt endpoint is the security gate per-org, not the client.
+        this.session = {
+          ...current,
+          sessions: {
+            ...current.sessions,
+            [resolvedOrgId]: { access_token: data.access_token, expires_at: resolveExpiresAt(data.expires_in) },
+          },
+          refresh_token: data.refresh_token,
+          organizations,
+          ...(data.user ? {
+            user_id: data.user.id,
+            user_email: data.user.email,
+            user_first_name: data.user.first_name,
+            user_last_name: data.user.last_name,
+          } : {}),
+        };
 
         this.currentOrgId = resolvedOrgId;
         this.save();
         return true;
       });
     } catch (error: any) {
+      if (error instanceof RefreshFencedError) return this.recoverFencedRefresh(userId, `org ${orgId}`);
       const retirement = await this.retireDeletedUser(error);
       const failure = retirement === 'retired'
-        ? { reason: 'user_deleted' as const, status: 401, detail: 'The signed-in account no longer exists' }
+        ? USER_DELETED_FAILURE
         : retirement === 'changed'
           ? classifyRefreshFailure(new RefreshAuthorityChangedError())
           : classifyRefreshFailure(error);
@@ -598,21 +661,10 @@ export class SessionLifecycle {
     // we're in. A mismatch means stale client state — the token grants
     // access to a different org than intended.
     const org = this.session.organizations.find(o => o.id === this.currentOrgId);
-    if (org) {
-      try {
-        const payload = decodeJwtPayload(orgSession.access_token);
-        if (payload.org_id && payload.org_id !== org.workos_org_id) {
-          // Token is for a different org — discard it.
-          delete this.session.sessions[this.currentOrgId];
-          this.save();
-          return null;
-        }
-      } catch {
-        // Can't decode token — treat as invalid
-        delete this.session.sessions[this.currentOrgId];
-        this.save();
-        return null;
-      }
+    if (org && !this.tokenMatchesOrg(org.workos_org_id, orgSession.access_token)) {
+      // Token is for a different org, or can't be decoded — discard it.
+      this.discardOrgSession(this.currentOrgId);
+      return null;
     }
 
     return {
@@ -626,6 +678,22 @@ export class SessionLifecycle {
       user_last_name: this.session.user_last_name,
       organizations: this.session.organizations,
     };
+  }
+
+  private tokenMatchesOrg(workosOrgId: string, accessToken: string): boolean {
+    try {
+      const payload = decodeJwtPayload(accessToken);
+      return !payload.org_id || payload.org_id === workosOrgId;
+    } catch {
+      return false;
+    }
+  }
+
+  private discardOrgSession(orgId: string): void {
+    if (!this.session) return;
+    const { [orgId]: _discarded, ...sessions } = this.session.sessions;
+    this.session = { ...this.session, sessions };
+    this.save();
   }
 
   /**

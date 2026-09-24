@@ -1,4 +1,4 @@
-import { mock, describe, test, expect, beforeEach, afterAll } from 'bun:test';
+import { mock, describe, test, expect, beforeEach, afterAll, spyOn } from 'bun:test';
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'fs';
@@ -21,6 +21,8 @@ afterAll(() => {
 
 import { FileSessionStorageBackend } from '../../src/auth/session/fileBackend';
 import { AuthService } from '../../src/auth/authService';
+import { SessionLifecycle } from '../../src/auth/session/lifecycle';
+import { lockSync } from 'proper-lockfile';
 import { SessionStore } from '../../src/types/index';
 
 const CAPY_DIR = join(tempHome, '.capy');
@@ -435,6 +437,215 @@ describe('FileSessionStorageBackend', () => {
         },
       )).rejects.toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
       expect(existsSync(join(SESSIONS_DIR, 'user-a.json.refresh-in-flight'))).toBeTrue();
+    });
+  });
+
+  describe('indeterminate refresh recovery', () => {
+    const API = 'https://service.example.test';
+    const fencePath = (userId: string): string => join(SESSIONS_DIR, `${userId}.json.refresh-in-flight`);
+    const sessionPath = (userId: string): string => join(SESSIONS_DIR, `${userId}.json`);
+    const FENCED_SESSION_ENDED = { reason: 'session_ended', detail: 'AUTH_REFRESH_AUTHORITY_INDETERMINATE' };
+
+    /** A killed rotation owner: the fence is written, the matching save never ran. */
+    const leaveFence = async (userId: string): Promise<void> => {
+      await expect(backend.withRefreshLock(userId, async (_fresh, beginRotation) => {
+        beginRotation();
+        throw new Error('provider outcome lost');
+      })).rejects.toThrow('provider outcome lost');
+      expect(existsSync(fencePath(userId))).toBeTrue();
+    };
+
+    type Call = Readonly<{ url: string; body: string }>;
+    /** Answers every request with `reply`; records what was sent. */
+    const withFetch = async (
+      reply: () => Response,
+      run: (calls: readonly Call[]) => Promise<void>,
+    ): Promise<void> => {
+      const realFetch = globalThis.fetch;
+      const calls: Call[] = [];
+      globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), body: String(init?.body ?? '') });
+        return reply();
+      }) as typeof fetch;
+      try {
+        await run(calls);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    };
+    const json = (status: number, body: unknown) => (): Response => new Response(JSON.stringify(body), {
+      status, headers: { 'Content-Type': 'application/json' },
+    });
+    const present = json(200, { status: 'present' });
+
+    test('drops a fenced session the service reports present, without sending its refresh token', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      await leaveFence('user-a');
+
+      await withFetch(present, async (calls) => {
+        const auth = new AuthService(API, false, 'user-a', backend);
+        const result = await auth.authenticateSilent('org-1');
+
+        expect(result.success).toBeFalse();
+        expect(result.error_code).toBe('session_ended');
+        expect(auth.getLastRefreshFailure()).toEqual(FENCED_SESSION_ENDED);
+        expect(calls.map(({ url }) => url)).toEqual([`${API}/auth/session-status`]);
+        expect(calls.some(({ body }) => body.includes('rt_user-a'))).toBeFalse();
+      });
+      expect(existsSync(sessionPath('user-a'))).toBeFalse();
+      expect(existsSync(fencePath('user-a'))).toBeFalse();
+      expect(backend.load('user-a')).toBeNull();
+    });
+
+    test('authenticate starts sign-in for the same org once the fenced session is dropped', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      await leaveFence('user-a');
+      const authPrototype = AuthService.prototype as unknown as {
+        startOAuthFlow: (organizationId?: string) => Promise<unknown>;
+      };
+      const startOAuthFlow = spyOn(authPrototype, 'startOAuthFlow').mockResolvedValue({ success: false });
+      try {
+        await withFetch(present, async (calls) => {
+          await new AuthService(API, false, 'user-a', backend).authenticate('org-1');
+          expect(calls.map(({ url }) => url)).toEqual([`${API}/auth/session-status`]);
+        });
+        expect(startOAuthFlow).toHaveBeenCalledTimes(1);
+        expect(startOAuthFlow).toHaveBeenCalledWith('org-1');
+      } finally {
+        startOAuthFlow.mockRestore();
+      }
+    });
+
+    test('an org refresh refused by an existing fence drops only that authority and never calls the provider', async () => {
+      backend.save({
+        ...makeSession('user-a'),
+        sessions: { 'org-1': { access_token: 'at_user-a_org-1', expires_at: Date.now() - 1000 } },
+      }, 'user-a');
+      const unrelated = makeSession('user-b');
+      backend.save(unrelated, 'user-b');
+      const lifecycle = new SessionLifecycle(backend, API, 'user-a');
+      lifecycle.load();
+      await leaveFence('user-a');
+
+      await withFetch(present, async (calls) => {
+        expect(await lifecycle.refreshForOrg('org-1')).toBeFalse();
+        expect(calls.map(({ url }) => url)).toEqual([`${API}/auth/session-status`]);
+        expect(calls.some(({ body }) => body.includes('rt_user-a'))).toBeFalse();
+      });
+      expect(lifecycle.lastRefreshFailure).toEqual(FENCED_SESSION_ENDED);
+      expect(lifecycle.session).toBeNull();
+      expect(lifecycle.currentOrgId).toBeNull();
+      expect(lifecycle.sessionUserId).toBe('user-a');
+      expect(lifecycle.retiredDeletedUserId).toBeNull();
+      expect(existsSync(sessionPath('user-a'))).toBeFalse();
+      expect(existsSync(fencePath('user-a'))).toBeFalse();
+      expect(backend.load('user-b')).toEqual(unrelated);
+    });
+
+    test('an org-less refresh refused by an existing fence drops that authority and never calls the provider', async () => {
+      backend.save({
+        ...makeSession('user-a'),
+        organizations: [],
+        sessions: {},
+        identity_session: { access_token: 'at_identity', expires_at: Date.now() + 60_000, root_authority_sha256: 'a'.repeat(64) },
+      }, 'user-a');
+      const lifecycle = new SessionLifecycle(backend, API, 'user-a');
+      lifecycle.load();
+      await leaveFence('user-a');
+
+      await withFetch(present, async (calls) => {
+        expect(await lifecycle.refreshOrgless()).toBeFalse();
+        expect(calls.map(({ url }) => url)).toEqual([`${API}/auth/session-status`]);
+      });
+      expect(lifecycle.lastRefreshFailure).toEqual(FENCED_SESSION_ENDED);
+      expect(lifecycle.orglessAccessToken).toBeNull();
+      expect(existsSync(sessionPath('user-a'))).toBeFalse();
+      expect(existsSync(fencePath('user-a'))).toBeFalse();
+    });
+
+    test('keeps the fenced session when session status cannot be confirmed', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      await leaveFence('user-a');
+      const fenceBytes = readFileSync(fencePath('user-a'), 'utf-8');
+
+      await withFetch(() => { throw new TypeError('fetch failed'); }, async () => {
+        const result = await new AuthService(API, false, 'user-a', backend).authenticateSilent('org-1');
+        expect(result.error_code).toBe('server_error');
+      });
+      await withFetch(json(503, { error: 'unavailable' }), async () => {
+        const result = await new AuthService(API, false, 'user-a', backend).authenticateSilent('org-1');
+        expect(result.error_code).toBe('server_error');
+      });
+      expect(readFileSync(fencePath('user-a'), 'utf-8')).toBe(fenceBytes);
+      expect(existsSync(sessionPath('user-a'))).toBeTrue();
+    });
+
+    test('still retires the fenced authority when the service confirms deletion', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      await leaveFence('user-a');
+
+      await withFetch(json(200, { status: 'deleted', user_id: 'user-a' }), async () => {
+        const auth = new AuthService(API, false, 'user-a', backend);
+        expect((await auth.authenticateSilent('org-1')).error_code).toBe('user_deleted');
+      });
+      expect(existsSync(sessionPath('user-a'))).toBeFalse();
+      expect(existsSync(fencePath('user-a'))).toBeFalse();
+    });
+
+    test('leaves a fence whose id or authority changed between the check and the clear', async () => {
+      const stored = makeSession('user-a');
+      backend.save(stored, 'user-a');
+      await leaveFence('user-a');
+      const proof = backend.getFencedIdentityProof('user-a')!;
+
+      expect(backend.clearIndeterminateFencedSessionIfMatches(
+        'user-a', proof.refreshAuthoritySha256, '00000000-0000-4000-8000-000000000001',
+      )).toBeFalse();
+      expect(backend.clearIndeterminateFencedSessionIfMatches(
+        'user-a', authorityDigest('rt_other'), proof.fenceId,
+      )).toBeFalse();
+      expect(existsSync(sessionPath('user-a'))).toBeTrue();
+      expect(existsSync(fencePath('user-a'))).toBeTrue();
+
+      const changedFence = { ...JSON.parse(readFileSync(fencePath('user-a'), 'utf-8')), id: '00000000-0000-4000-8000-000000000002' };
+      writeFileSync(fencePath('user-a'), JSON.stringify(changedFence), { mode: 0o600 });
+      expect(backend.clearIndeterminateFencedSessionIfMatches(
+        'user-a', proof.refreshAuthoritySha256, proof.fenceId,
+      )).toBeFalse();
+      expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+    });
+
+    test('a present response for another subject is not permission to clear', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      await leaveFence('user-a');
+
+      await withFetch(json(200, { status: 'present', user_id: 'user-other' }), async () => {
+        const result = await new AuthService(API, false, 'user-a', backend).authenticateSilent('org-1');
+        expect(result.error_code).toBe('server_error');
+        expect(result.error).toBe('AUTH_REFRESH_AUTHORITY_INDETERMINATE');
+      });
+      expect(existsSync(fencePath('user-a'))).toBeTrue();
+    });
+
+    test('a held session lock refuses with its own error and clears nothing', async () => {
+      backend.save(makeSession('user-a'), 'user-a');
+      await leaveFence('user-a');
+      const release = lockSync(sessionPath('user-a'), { realpath: false });
+      try {
+        expect(() => backend.load('user-a')).toThrow('AUTH_REFRESH_LOCK_UNAVAILABLE');
+        await expect(backend.withRefreshLock('user-a', async () => 'unreachable'))
+          .rejects.toThrow('AUTH_REFRESH_LOCK_UNAVAILABLE');
+        await withFetch(present, async (calls) => {
+          const result = await new AuthService(API, false, 'user-a', backend).authenticateSilent('org-1');
+          expect(result.error_code).toBe('server_error');
+          expect(result.error).toBe('AUTH_REFRESH_LOCK_UNAVAILABLE');
+          expect(calls).toEqual([]);
+        });
+      } finally {
+        release();
+      }
+      expect(existsSync(sessionPath('user-a'))).toBeTrue();
+      expect(existsSync(fencePath('user-a'))).toBeTrue();
     });
   });
 
