@@ -775,7 +775,16 @@ program
 
 const flow = program
   .command('flow')
-  .description('Flow-service instance management');
+  .description('Attach to a running encrypted Flow or manage a Flow instance')
+  .option('--id <id>', 'attach this agent to an existing conversation on this runtime')
+  .option('--json', 'exchange agent requests and responses as JSON lines')
+  .action(async (options: Readonly<{ id?: string }>, command: Command) => {
+    if (!options.id) { command.outputHelp(); return; }
+    assertNotLocalOnly('flow');
+    const { runFlowAgentCommand } = await import('./commands/flowAgentCommand');
+    const code = await runFlowAgentCommand(process.stdin, process.stdout, { flowId: options.id, devMode: false });
+    if (code !== 0) process.exit(code);
+  });
 
 flow
   .command('setup <id>')
