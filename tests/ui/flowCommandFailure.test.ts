@@ -23,6 +23,7 @@ mock.module('../../src/core/projectManager', () => ({
     }
   },
 }));
+const tokenProvider = mock(async () => ({ access_token: ACCESS_TOKEN, user_id: USER_ID }));
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
     async authenticateSilent(): Promise<Readonly<{ readonly success: true; readonly user_id: string; readonly organization_id: string }>> {
@@ -30,7 +31,7 @@ mock.module('../../src/auth/authService', () => ({
     }
 
     async getValidToken(): Promise<Readonly<{ readonly access_token: string; readonly user_id: string }>> {
-      return { access_token: ACCESS_TOKEN, user_id: USER_ID };
+      return tokenProvider();
     }
   },
 }));
@@ -180,7 +181,7 @@ describe('Flow command failure delivery', () => {
     const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
     const failure = new Error('The repository organization is no longer accessible.');
     try {
-      await expect(runWithFlowInteraction(async () => { throw failure; }, false)).rejects.toBe(failure);
+      await expect(runWithFlowInteraction(async () => { tokenProvider.mockImplementation(async () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); }); throw failure; }, false)).rejects.toBe(failure);
       const writes = await service.observed();
       expect(writes).toHaveLength(1);
       expect(writes[0]).toMatchObject({
@@ -190,6 +191,7 @@ describe('Flow command failure delivery', () => {
       });
       expect(writes[0]?.body.envelope).not.toContain(failure.message);
     } finally {
+      tokenProvider.mockImplementation(async () => ({ access_token: ACCESS_TOKEN, user_id: USER_ID }));
       stdout.mockRestore();
       fetchSpy.mockRestore();
     }

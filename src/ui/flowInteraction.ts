@@ -88,6 +88,15 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   if (!identity.success || !identity.user_id || !identity.organization_id
     || !readLocalRoot(identity.organization_id, identity.user_id)) throw new Error('PAIR_REQUIRED');
   if (descriptor.expectedUserId && identity.user_id !== descriptor.expectedUserId) throw new Error('AUTH_ACCOUNT_MISMATCH');
+  const transportToken = await auth.getValidToken();
+  if (!transportToken?.access_token) throw new Error('PAIR_REQUIRED');
+  // The Flow owns this already-issued access token. A later command's failed
+  // refresh must not prevent reporting its error. The Service still enforces
+  // expiry, revocation, subject and invocation proofs on every request.
+  const accessToken = async (): Promise<string> => {
+    try { return (await auth.getValidToken())?.access_token ?? transportToken.access_token; }
+    catch { return transportToken.access_token; }
+  };
   const binding = resolveInitRunIdentity();
   const runtimeId = randomUUID();
   const keys = mintConnectionKeypair();
@@ -97,8 +106,9 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     proof: sign('sha256', Buffer.from(`capy.conversation.v1\n${method}\n${flowId}\n${id}\n${canonical(body)}`), keys.privateKey).toString('base64') });
   const request = async <T>(path: string, body?: Data, extraHeaders?: () => Readonly<Record<string, string>>): Promise<T> => {
     const perform = async (): Promise<Response> => {
+      const token = await accessToken();
       try { const response = await fetch(`${origin}${path}`, {
-        method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${(await auth.getValidToken())?.access_token ?? ''}`, 'Content-Type': 'application/json', ...extraHeaders?.() },
+        method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...extraHeaders?.() },
         ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(35_000)]),
       });
       if (response.status >= 500 || response.status === 429) {
@@ -126,9 +136,9 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   process.stdout.write(`${JSON.stringify({ ok: true, command: descriptor.command, flow_id: flowId, url, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: true}} })}\n`);
   const detach = async (): Promise<void> => {
     try {
-      const token = await auth.getValidToken();
+      const token = await accessToken();
       await fetch(`${origin}/flows/${flowId}/detach`, {method: 'POST', signal: AbortSignal.timeout(5000),
-        headers: {Authorization: `Bearer ${token?.access_token ?? ''}`, 'Content-Type': 'application/json'},
+        headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'},
         body: JSON.stringify(signed('detach', flowId, 'detach', {}))});
     } catch { /* The service's attachment lease expires after abrupt disconnects. */ }
   };
