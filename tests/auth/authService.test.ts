@@ -319,7 +319,8 @@ describe('AuthService', () => {
 
       const result = await service.authenticate();
 
-      expect(result).toEqual({ success: false, error: 'Invalid credentials' });
+      // f79b9c2: provider errors keep their text and gain the HTTP status.
+      expect(result).toEqual({ success: false, error: 'Invalid credentials (HTTP 401)' });
     });
 
     test('should handle network errors', async () => {
