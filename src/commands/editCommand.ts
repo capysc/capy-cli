@@ -534,17 +534,15 @@ export class EditCommand {
       const attemptKeepEdit = async (): Promise<boolean> => {
         if (localMode || !authService || !serviceClient || !keepScreensEnabled()) return false;
         const { runSecretEditViaKeep } = await import('../ui/secretEditScreen');
-        const { createDeviceKeyServiceOps } = await import('../auth/deviceKey/serviceOps');
-        const { ops } = createDeviceKeyServiceOps(serviceClient, authService);
         const outcome = await runSecretEditViaKeep({
           serviceApiUrl: authService.getServiceApiUrl(),
           getToken: async () => (await authService!.getValidToken())?.access_token ?? null,
           userId,
+          orgId,
           projectName: keep.project_name,
           branchName: branch,
           vars: rows.map((r) => ({ name: r.key, value: r.localValue ?? r.remoteValue ?? '' })),
           keepHash: SyncEngine.computeKeepHash(keep, branch),
-          ops,
           applyEdits: async (edits, expectedKeepHash) => {
             // CAS, re-checked against a FRESH on-disk read immediately before
             // writing — catches a concurrent `capy push`/`capy pull` that

@@ -1,59 +1,42 @@
-/**
- * CAP-540 session-envelope value layer, CLI side. Pins the round trip and
- * that the derivation is connection-bound (a key derived for one
- * connection id cannot open an envelope sealed for another) — the same
- * property keep-app's editSession/crypto.ts tests pin on the WebCrypto
- * side. Cross-repo agreement between the two implementations was verified
- * manually (both derive the identical 32-byte key for the same
- * prfOutput/connectionId) rather than re-asserted here, since this repo
- * cannot import keep-app's TypeScript.
- */
 import { describe, expect, test } from 'bun:test';
 import { randomBytes } from 'crypto';
 
 import { deriveEditSessionKey, openEditValue, sealEditValue } from '../../src/service/editSessionCrypto';
 
-describe('deriveEditSessionKey / sealEditValue / openEditValue', () => {
-  test('round-trips a value, and the ciphertext never contains the plaintext', () => {
-    const prfOutput = randomBytes(32);
-    const connectionId = '11111111-1111-4111-8111-111111111111';
-    const key = deriveEditSessionKey(prfOutput, connectionId);
+const AAD = JSON.stringify([
+  'capy/secret-edit',
+  'flow-1',
+  'user-1',
+  'org-1',
+  'cli-to-browser',
+  'API_KEY',
+  'keep-hash-1',
+]);
 
-    const sentinel = 'sk_test_CAP540_never_leak';
-    const sealed = sealEditValue(key, sentinel);
+describe('secret-edit session crypto', () => {
+  test('derives a stable 32-byte key from K_local and a 32-byte flow secret', () => {
+    const kLocal = Buffer.alloc(32, 7);
+    const flowSecret = Buffer.alloc(32, 9).toString('base64');
+    const first = deriveEditSessionKey(kLocal, flowSecret);
+    const second = deriveEditSessionKey(kLocal, flowSecret);
 
-    expect(sealed.ct).not.toContain(sentinel);
-    expect(Buffer.from(sealed.ct, 'base64').toString('latin1')).not.toContain(sentinel);
-
-    expect(openEditValue(key, sealed)).toBe(sentinel);
+    expect(first).toHaveLength(32);
+    expect(first.equals(second)).toBe(true);
+    expect(first.equals(deriveEditSessionKey(Buffer.alloc(32, 8), flowSecret))).toBe(false);
   });
 
-  test('is connection-bound: a key derived for a different connection id cannot open the envelope', () => {
-    const prfOutput = randomBytes(32);
-    const keyA = deriveEditSessionKey(prfOutput, '22222222-2222-4222-8222-222222222222');
-    const keyB = deriveEditSessionKey(prfOutput, '33333333-3333-4333-8333-333333333333');
-
-    const sealed = sealEditValue(keyA, 'value');
-    expect(openEditValue(keyB, sealed)).toBeNull();
+  test('requires canonical base64 for an exactly 32-byte flow secret', () => {
+    expect(() => deriveEditSessionKey(Buffer.alloc(32), Buffer.alloc(31).toString('base64'))).toThrow();
+    expect(() => deriveEditSessionKey(Buffer.alloc(32), 'not valid base64')).toThrow();
   });
 
-  test('is deterministic for identical inputs and distinct for different PRF outputs', () => {
-    const connectionId = '44444444-4444-4444-8444-444444444444';
-    const prfA = randomBytes(32);
-    const prfB = randomBytes(32);
+  test('round-trips only under the exact directional AAD', () => {
+    const key = deriveEditSessionKey(randomBytes(32), randomBytes(32).toString('base64'));
+    const secret = 'sk_test_CAP540_never_leak';
+    const sealed = sealEditValue(key, secret, AAD);
 
-    const keyA1 = deriveEditSessionKey(prfA, connectionId);
-    const keyA2 = deriveEditSessionKey(prfA, connectionId);
-    expect(keyA1.equals(keyA2)).toBe(true);
-
-    const keyB = deriveEditSessionKey(prfB, connectionId);
-    expect(keyA1.equals(keyB)).toBe(false);
-  });
-
-  test('tampered ciphertext fails closed rather than returning garbage plaintext', () => {
-    const key = deriveEditSessionKey(randomBytes(32), 'conn-1');
-    const sealed = sealEditValue(key, 'value');
-    const tampered = { iv: sealed.iv, ct: Buffer.from('not the real ciphertext').toString('base64') };
-    expect(openEditValue(key, tampered)).toBeNull();
+    expect(Buffer.from(sealed.ct, 'base64').toString('latin1')).not.toContain(secret);
+    expect(openEditValue(key, sealed, AAD)).toBe(secret);
+    expect(openEditValue(key, sealed, AAD.replace('cli-to-browser', 'browser-to-cli'))).toBeNull();
   });
 });
