@@ -186,7 +186,7 @@ export async function runSecretEditViaKeep(params: SecretEditKeepParams): Promis
     ]);
     return { kind: 'declined', code: saveAnswer.kind };
   }
-  await cancelQuietly(broker, unlockConn.connectionId);
+  // Keep the encrypted request readable until expiry so the browser can reload.
   const savePayload = parseJsonSafe(saveAnswer.plaintext);
   const resultPageKey = await broker.awaitPagePubkey(resultConn, { deadlineMs });
   if (resultPageKey.kind !== 'ready') return { kind: 'declined', code: resultPageKey.kind };
