@@ -354,7 +354,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
           emitOutput: async data => emit('output', data),
           emitProgress: async data => emit('progress', data),
           emitCompleted: async (goal, result) => emit('goal_completed', { ...goal, status: 'succeeded', ...(result === undefined ? {} : { result }) }),
-          askPlanApproval: async (goal, plan) => askConfirmation('Review plan', `Approve this plan for ${goal.goal_name}?`, goal),
+          askPlanApproval: async (goal, plan) => askConfirmation('Review plan', `Approve this plan for ${goal.goal_name}?`, goal, true),
           askContinuation: async offer => askConfirmation('Continue', offer.prompt),
           emitTerminal: async data => emit('goal', data),
           signChallenge: nonce => sign('sha256', Buffer.from(`capy.flow.agent.v1\n${flowId}\n${nonce}`), keys.privateKey).toString('base64'),
