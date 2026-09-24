@@ -333,7 +333,7 @@ export class BrokerClient {
       const response = await (async () => {
         try {
           return { ok: true as const, value: await fetch(
-            `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${waitSeconds}`,
+            `${this.serviceUrl}/connections/${connection.connectionId}/result?wait_seconds=${waitSeconds}&wait_for=page_key`,
             { method: 'GET', headers },
           ) };
         } catch (error: any) {
