@@ -141,7 +141,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   const flowId = created.flow_id;
   const url = `${keepOrigin()}/flow/conversation?f=${encodeURIComponent(flowId)}`;
   // Only the public handoff goes to stdout. Workflow content always uses the encrypted adapter.
-  process.stdout.write(`${JSON.stringify({ ok: true, command: descriptor.command, flow_id: flowId, url, continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: true}} })}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, command: descriptor.command, flow_id: flowId, url, instructions: ['Show this URL immediately in visible chat, then keep this process alive and read its output with bounded waits. Do not wait for another user chat message.', 'An empty read or wait timeout is not completion. Handle type=agent_handoff immediately using its attachment instructions; a URL in that event is not a reason to stop.', 'Only a terminal outcome completes the flow. If your client cannot keep waiting, tell the user to ask you to resume this same process, not restart onboarding.'], continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: true}} })}\n`);
   const detach = async (): Promise<void> => {
     try {
       const token = await accessToken();
@@ -279,8 +279,8 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   };
   const rootGoal = new Promise<Data | null>(resolve => incoming.once('root-goal', resolve));
   const rootCompletion = (outcome: Data): boolean => shouldOfferProjectSetup(descriptor.command, outcome);
-  const askConfirmation = async (title: string, text: string, goalMetadata: Data = {}): Promise<boolean> => (await ask<boolean>({
-    view: { text, input: { kind: 'confirm', default: false } },
+  const askConfirmation = async (title: string, text: string, goalMetadata: Data = {}, defaultValue = false): Promise<boolean> => (await ask<boolean>({
+    view: { text, input: { kind: 'confirm', default: defaultValue } },
     presentation: { title, component: 'agent-plan' },
     decide: payload => typeof payload.value === 'boolean' ? { value: payload.value } : { error: 'Choose yes or no.' },
   }, goalMetadata)) === true;
@@ -315,7 +315,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       const completedGoal: FlowGoal = { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' };
       const firstOffer: FlowNextOffer = { goal_id: 'project_setup', goal_name: 'Project Setup', prompt: 'Would you like your agent to analyze and configure this project?' };
       await emit('goal_completed', { ...completedGoal, status: 'succeeded', result: initial.result ?? {} });
-      const accepted = await askConfirmation('Continue with project setup', firstOffer.prompt);
+      const accepted = await askConfirmation('Continue with project setup', firstOffer.prompt, {}, true);
       if (!accepted) {
         await emit('goal', { flow: 'init-wizard', goal: 'repository_onboarded', ...completedGoal, status: 'succeeded', result: { continuation_declined: true } });
       } else {
@@ -366,12 +366,14 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
           attachment: { command: executable, args: ['flow', '--id', flowId, '--json'], protocol: 'capy.flow.agent.v1' },
           instructions: [
             'Keep this original CLI process running. Attach from the same repository and authenticated account.',
-            'Read status/history. Analyze repository boundaries and submodules, stack and package managers, run commands, environment loading, services and deployment configuration. Never disclose secret values.',
+            'Send the status and read requests below to inspect current state/history. Analyze repository boundaries and submodules, stack and package managers, run commands, environment loading, services and deployment configuration. Never disclose secret values.',
             'Post structured analysis, then a concrete plan with files, changes, reasons and checks. Wait for its plan-decision in Keep.',
             'After yes, request begin_apply with the returned plan_id and plan_hash. Apply only after receiving application_id; never repeat an application already started.',
             'Report complete with plan_id, plan_hash, application_id and actual results, or terminal failed/cancelled. A next_offer is optional and requires user acceptance before another goal is appended.',
           ],
           requests: {
+            status: { id: 'unique-status-request-id', action: 'status' },
+            read: { id: 'unique-read-request-id', action: 'read' },
             analysis: { id: 'unique-request-id', action: 'analysis', analysis: { summary: 'Findings', findings: ['Evidence and paths'] } },
             plan: { id: 'unique-plan-request-id', action: 'plan', plan: { plan_id: 'unique-plan-id', summary: 'Proposed setup', files: [{ path: 'relative/path', change: 'Exact change', reason: 'Why' }], checks: ['Planned verification'] } },
             begin_apply: { id: 'unique-apply-request-id', action: 'begin_apply', plan_id: 'returned-plan-id', plan_hash: 'returned-plan-hash' },

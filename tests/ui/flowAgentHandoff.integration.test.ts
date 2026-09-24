@@ -208,6 +208,8 @@ describe('Flow agent handoff integration', () => {
       const publicHandoff = await handoff(publicLines);
       expect(publicHandoff).toMatchObject({ ok: true, type: 'agent_handoff', flow_id: FLOW_ID, attachment: { command: 'capy', args: ['flow', '--id', FLOW_ID, '--json'] } });
 
+      expect(publicHandoff.requests).toMatchObject({ status: { action: 'status' }, read: { action: 'read' } });
+      expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain('Do not wait for another user chat message');
       const analysis = await invokeAgent({ v: 1, id: 'analysis-1', action: 'analysis', analysis: { summary: 'Repository inspected', findings: ['package.json is present'] } });
       expect(analysis).toMatchObject({ ok: true, accepted: 'analysis' });
       const plan = await invokeAgent({ v: 1, id: 'plan-1', action: 'plan', plan: { plan_id: 'plan-1', summary: 'Configure project setup', files: [{ path: 'package.json', change: 'add setup command', reason: 'configure the project' }], checks: ['bun test'] } });
