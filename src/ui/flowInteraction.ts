@@ -388,9 +388,13 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
           attachment: { command: executable, args: ['flow', '--id', flowId, '--json'], protocol: 'capy.flow.agent.v1' },
           instructions: [
             'Keep this original CLI process running. Attach from the same repository and authenticated account.',
+            'If your host supports subagents, delegate this entire Project Setup handoff to one dedicated worker. Give it the repository path, flow_id, attachment command/protocol, requests, approval requirements and these instructions. The worker owns analysis, plan submission, waiting for approval, authorized application, verification and completion in this same flow.',
+            'The parent retains ownership: keep the original process alive, track the worker and use bounded waits until a terminal result or an explicit blocker. Continue monitoring during unrelated user discussion. Do not start a second worker or duplicate attachment for the same work; resume the existing worker after an interruption and inspect status/history before continuing.',
+            'If subagents are unavailable or cannot remain active, perform the same work directly with bounded reads. A URL, empty read, timeout, submitted plan or dispatched worker is not completion. Do not claim background monitoring unless a worker is actually running.',
             'Send the status and read requests below to inspect current state/history. Analyze repository boundaries and submodules, stack and package managers, run commands, environment loading, services and deployment configuration. Never disclose secret values.',
             'Post structured analysis, then a concrete plan with files, changes, reasons and checks. Wait for its plan-decision in Keep.',
             'After yes, request begin_apply with the returned plan_id and plan_hash. Apply only after receiving application_id; never repeat an application already started.',
+            'Keep approval does not override host permission requirements. If the host requires direct user confirmation or rejects an action, surface the exact blocker to the parent/user and retain this flow and approved plan. Do not bypass the restriction or restart onboarding.',
             'Report complete with plan_id, plan_hash, application_id and actual results, or terminal failed/cancelled. A next_offer is optional and requires user acceptance before another goal is appended.',
           ],
           requests: {
