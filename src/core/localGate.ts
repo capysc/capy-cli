@@ -29,6 +29,9 @@ export const LOCAL_ONLY_DISABLED_COMMANDS = [
   // 'development'); multi-branch support is deferred.
   'branch',
   'checkout',
+  // The org system store (CAP-664) is an org-level, server-enforced store —
+  // there is no org, no master key, and no admin-role check in local-only mode.
+  'system',
 ] as const;
 
 /**

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from '
 import { join, basename } from 'path';
 import { ProjectState, KeepFile, SyncState, CapyError, ERROR_CODES } from '../types/index';
 import { branchesFromKeep, syncedBranchNames } from './branchResolver';
+import { isReservedProjectName } from '../system/reservedProjectName';
 
 export class ProjectManager {
   private projectRoot: string;
@@ -155,12 +156,21 @@ export class ProjectManager {
 
   getDefaultProjectName(): string {
     const raw = basename(this.projectRoot) || '';
+    // `_system` is reserved for the org's system store (CAP-664). Checked
+    // against the RAW folder name: the normalization below converts every
+    // underscore to a dash, so a folder literally named `_system` would
+    // otherwise default to the unreserved-looking "system" — but checking the
+    // raw name is what actually matches the intent ("this folder is named
+    // after the reserved word") and stays correct if the normalization regex
+    // ever changes to allow underscores through.
+    if (isReservedProjectName(raw)) return 'my-project';
     const normalized = raw
       .toLowerCase()
       .replace(/[^a-z0-9-]+/gi, '-')
       .replace(/-+/g, '-')
       .replace(/^-+|-+$/g, '');
     if (!normalized) return 'my-project';
+    if (isReservedProjectName(normalized)) return 'my-project';
     return normalized;
   }
 

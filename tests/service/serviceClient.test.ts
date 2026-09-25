@@ -1,6 +1,25 @@
 import { jest, describe, test, expect, beforeEach } from 'bun:test';
-import { ServiceClient } from '../../src/service/serviceClient';
+import { ServiceClient, classifyResponse } from '../../src/service/serviceClient';
 import { ServiceToken, CapyError, ERROR_CODES } from '../../src/types/index';
+
+describe('classifyResponse', () => {
+  // CAP-664: `code` is the primary signal; the message-text bridge is a
+  // fallback for a 404 from a server old enough not to send one.
+  test('a recognised `code` wins even over a message the legacy bridge would classify differently', () => {
+    const result = classifyResponse(404, { code: 'NO_SECRETS' }, 'Branch not found');
+    expect(result).toBe(ERROR_CODES.NO_SECRETS);
+  });
+
+  test('falls back to the legacy text bridge on a 404 with no code', () => {
+    const result = classifyResponse(404, {}, 'No secrets have been pushed to this project yet.');
+    expect(result).toBe(ERROR_CODES.NO_SECRETS);
+  });
+
+  test('an unrecognised code is ignored, not trusted', () => {
+    const result = classifyResponse(404, { code: 'SOMETHING_THE_CLIENT_HAS_NEVER_HEARD_OF' }, 'No secrets have been pushed to this project yet.');
+    expect(result).toBe(ERROR_CODES.NO_SECRETS);
+  });
+});
 
 // Mock global fetch
 const mockFetch = jest.fn();
@@ -85,6 +104,29 @@ describe('ServiceClient', () => {
     test('should return empty data on 404 (new project with no secrets)', async () => {
       mockFetch.mockResolvedValue(mockFetchResponse(
         { error: 'No secrets stored for this project' }, false, 404
+      ));
+
+      const result = await serviceClient.getDecryptData('new_proj');
+      expect(result.env_content).toBe('');
+    });
+
+    // CAP-664: the service now mints `code: 'NO_SECRETS'` on this 404 (see
+    // service/src/routes/secrets.ts + errorCodes.ts) — classifyResponse must
+    // take that code as the primary signal, with the legacy `message.includes`
+    // bridge kept only as a fallback for older servers. Both shapes must
+    // resolve to the same empty-state result.
+    test('should return empty data on 404 with code NO_SECRETS (current server)', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'No secrets have been pushed to this project yet.', code: 'NO_SECRETS' }, false, 404
+      ));
+
+      const result = await serviceClient.getDecryptData('new_proj');
+      expect(result.env_content).toBe('');
+    });
+
+    test('should return empty data on 404 with the real message and no code (legacy server)', async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse(
+        { error: 'No secrets have been pushed to this project yet.' }, false, 404
       ));
 
       const result = await serviceClient.getDecryptData('new_proj');

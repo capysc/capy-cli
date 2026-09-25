@@ -36,6 +36,7 @@ import { runBrowserWizard, type WizardDecision } from './browserWizard';
 import { renderScreen } from './screens/serve';
 import { initWizardPlan, type InitWizardInput } from '../core/initWizardPlan';
 import { CapyError, ERROR_CODES } from '../types';
+import { isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
 import type {
   Blocked,
   InitEncryptFailure,
@@ -218,6 +219,11 @@ export function projectNameProblem(name: string): string | undefined {
   if (!/^[a-zA-Z0-9-_]+$/.test(trimmed)) {
     return 'Project name can only contain letters, numbers, hyphens, and underscores';
   }
+  // `_system` is reserved for the org's system store (CAP-664) — see
+  // src/system/reservedProjectName.ts. Same refusal `initializeProject`'s
+  // terminal validator gives (promptEngine.ts), so the screen holds its
+  // button for the same reason the terminal would.
+  if (isReservedProjectName(trimmed)) return PROJECT_NAME_RESERVED_MESSAGE;
   return undefined;
 }
 

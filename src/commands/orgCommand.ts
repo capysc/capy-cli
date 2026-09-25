@@ -7,6 +7,7 @@ import { ServiceClient } from '../service/serviceClient';
 import { AuthResult, Organization, KeepFile, CapyError, ERROR_CODES } from '../types/index';
 import { hasOrgKey, resolveProjectKey, KeyServiceOps } from '../crypto/keyResolver';
 import { createNewOrganization } from './orgCreation';
+import { excludeSystemProject, assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
 import { execSync } from 'child_process';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
@@ -173,8 +174,9 @@ export class OrgCommand {
       );
     }
 
-    // List projects in the new org
-    const projects = await this.serviceClient.listProjects();
+    // List projects in the new org. Belt-and-braces filter (CAP-664): the
+    // service already hides the org's `_system` project from this listing.
+    const projects = excludeSystemProject(await this.serviceClient.listProjects());
     const orgProjects = projects.filter(p => p.organization_id === selectedOrg.id);
 
     if (orgProjects.length === 0) {
@@ -269,7 +271,6 @@ export class OrgCommand {
       firstBranchName: FIRST_BRANCH,
     };
 
-    let switchedTo: Organization | undefined;
     const picked = await switchOrganizationInBrowser({
       ...facts,
       onOrgChosen: async (orgId: string) => {
@@ -282,8 +283,7 @@ export class OrgCommand {
         if (!scopedAuth.success) {
           return { ok: false as const, reason: scopedAuth.error || 'Organization switch failed' };
         }
-        switchedTo = org;
-        const projects = await this.serviceClient.listProjects();
+        const projects = excludeSystemProject(await this.serviceClient.listProjects());
         const orgProjects = projects.filter(p => p.organization_id === org.id);
         if (orgProjects.length === 0) {
           const refusal = this.firstProjectRefusal(org, hasProject);
@@ -340,7 +340,10 @@ export class OrgCommand {
       return;
     }
 
-    const selectedOrg = switchedTo!;
+    // `picked` here is 'select-project' or 'create-project' (the 'cancel' and
+    // 'create' actions already returned above), and both carry the id of
+    // whichever org `onOrgChosen` last switched into successfully.
+    const selectedOrg = orgs.find(o => o.id === picked.orgId)!;
     if (!hasOrgKey(selectedOrg.id, userId)) {
       // Unreachable through the screen, which disables a row with no key —
       // and still checked, because the throw is what stops a switch this
@@ -359,7 +362,7 @@ export class OrgCommand {
       return;
     }
 
-    const projects = await this.serviceClient.listProjects();
+    const projects = excludeSystemProject(await this.serviceClient.listProjects());
     const selectedProject = projects.find(p => p.id === picked.projectId)!;
     this.bindToProject(selectedOrg, selectedProject, userId, hasProject);
   }
@@ -406,7 +409,12 @@ export class OrgCommand {
       name: 'projectName',
       message: 'Project name:',
       default: defaultName,
-      validate: (input: string) => input.trim().length > 0 || 'Project name cannot be empty',
+      validate: (input: string) => {
+        if (input.trim().length === 0) return 'Project name cannot be empty';
+        // `_system` is reserved for the org's system store (CAP-664).
+        if (isReservedProjectName(input)) return PROJECT_NAME_RESERVED_MESSAGE;
+        return true;
+      },
     }]);
 
     await this.bootstrapFirstProject(selectedOrg, userId, projectName);
@@ -441,6 +449,11 @@ export class OrgCommand {
     userId: string,
     projectName: string,
   ): Promise<void> {
+    // Choke point for both callers (terminal prompt above and the browser
+    // wizard's create-project path, which has no synchronous validate hook of
+    // its own) — the reserved name must never reach the service either way.
+    assertProjectNameAllowed(projectName.trim());
+
     const initSpinner = ora('Creating project...').start();
     const projectResult = await this.serviceClient.initializeProject(
       projectName.trim(),

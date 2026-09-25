@@ -642,4 +642,14 @@ export class ServiceClient {
   async listDeployTokens(orgId: string, projectId: string): Promise<{ tokens: Array<{ deploy_id: string; label: string | null; created_by: string; created_at: string; revoked_at: string | null }> }> {
     return this.request('GET', `/orgs/${orgId}/projects/${encodeURIComponent(projectId)}/deploy-tokens`);
   }
+
+  /**
+   * Create-or-get the org's system store (CAP-664): a hidden `system`-kind
+   * project, owner/admin only, idempotent. Every other read/write against it
+   * goes through the normal `/secrets/:projectId` routes — this is the only
+   * system-store-specific endpoint the client calls.
+   */
+  async getOrCreateSystemStore(orgId: string): Promise<{ project_id: string; branch: string }> {
+    return this.request('POST', `/orgs/${orgId}/system-store`, {});
+  }
 }

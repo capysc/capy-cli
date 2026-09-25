@@ -11,6 +11,7 @@ import {
   MAX_INVITE_TTL_MS,
 } from '../crypto/inviteCrypto';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
+import { excludeSystemProject } from '../system/reservedProjectName';
 import {
   invitePlan,
   unansweredInviteStops,
@@ -214,17 +215,7 @@ export class InviteCommand {
         process.exit(1);
       }
 
-      let masterKey: Buffer;
-      try {
-        const keyOps = {
-          coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
-          wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
-        };
-        masterKey = await unwrapMasterKey(orgId, userId, keyOps);
-      } catch {
-        console.error('Failed to unwrap master key. Re-authenticate and try again.');
-        process.exit(1);
-      }
+      const masterKey = await this.unwrapMasterKeyOrExit(orgId, userId, serviceClient);
 
       // If this email already belongs to an org member, reuse their role and
       // project assignments instead of prompting. Re-inviting an existing
@@ -234,21 +225,6 @@ export class InviteCommand {
         (m) => m.email && m.email.toLowerCase() === email.toLowerCase(),
       );
 
-      let role: string;
-      let projectId: string | undefined;
-      let extraProjectIds: string[] = [];
-      /**
-       * What settled each answer, for the marker on the finished rail.
-       *
-       * `undefined` means somebody was asked and answered — a prompt, or a
-       * control on a page. Anything else is a source the run picked without
-       * asking, and naming it is the whole point: off a TTY this command
-       * silently falls back to `member` and to whichever project you happen to
-       * be standing in, and `Role · member` with no marker is indistinguishable
-       * from a choice a person made.
-       */
-      let roleSource: string | undefined;
-      let projectSource: string | undefined;
       const reissuing = !!existingMember;
       const existingProjectIds = existingMember
         ? (existingMember.projects || []).map((p) => p.id)
@@ -278,161 +254,24 @@ export class InviteCommand {
       };
       const plan = invitePlan(planInput);
 
-      /** The lifetime the browser's expiry stop answered, when it asked. */
-      let chosenTtl: string | undefined;
       /** Everything the browser needs, gathered once so both pages share it. */
-      let webParams: WebInviteParams | undefined;
+      const webParams = opts.web
+        ? await this.gatherWebParams(
+            email, orgId, me, invitable, existingMember, planInput, authService, serviceClient, userEmail,
+          )
+        : undefined;
 
-      if (opts.web) {
-        webParams = await this.gatherWebParams(
-          email, orgId, me, invitable, existingMember, planInput, authService, serviceClient, userEmail,
-        );
+      const resolution = await this.resolveInviteRoleAndProjects({
+        email, opts, me, invitable, existingMember, reissuing, existingProjectIds,
+        webParams, plan, planInput, serviceClient, interactive,
+      });
+      // Cancelling is a refusal: nothing was minted and nothing below may
+      // run, because everything below hands somebody a copy of the org key.
+      if (resolution.cancelled) {
+        console.log('\n  No invite created.\n');
+        return;
       }
-
-      // Pure re-issue (existing member, no explicit --role): reuse their current
-      // role + projects. But an explicit --role MUST be honored so admins can
-      // promote/demote on re-invite — and so a re-invite that races a just-issued
-      // `kick` (a not-yet-propagated member read) still applies the requested
-      // role instead of silently keeping the stale one.
-      if (existingMember && !opts.role) {
-        role = existingMember.role;
-        projectId = existingProjectIds[0];
-        extraProjectIds = existingProjectIds.slice(1);
-        roleSource = 'existing membership';
-        projectSource = 'existing membership';
-      } else if (webParams && unansweredInviteStops(plan).length > 0) {
-        // `--role` is validated first either way: a role this caller cannot
-        // grant is refused before a browser opens, not after somebody answers
-        // two more questions on top of it.
-        if (opts.role && !invitable.includes(opts.role as typeof ROLES[number]['value'])) {
-          console.error(
-            `\n  Your role (${me.role}) can't grant "${opts.role}". Allowed: ${invitable.join(', ')}.\n`,
-          );
-          process.exit(1);
-        }
-        // `--project` settles the projects stop, so the browser never serves
-        // it — and an unknown token is refused here, before a browser opens,
-        // rather than after somebody has answered two questions on top of it.
-        const flagProjectIds =
-          opts.projects && opts.projects.length > 0
-            ? resolveProjectTokens(
-                opts.projects,
-                webParams.projects,
-                webParams.projects.find((p) => p.isCwd)?.id,
-              )
-            : [];
-
-        const { askInviteInBrowser } = await import('../ui/memberScreens');
-        const answered = await askInviteInBrowser(webParams);
-        // Cancelling is a refusal: nothing was minted and nothing below may
-        // run, because everything below hands somebody a copy of the org key.
-        if (answered.cancelled) {
-          console.log('\n  No invite created.\n');
-          return;
-        }
-        role = answered.role;
-        const ids = grantedProjects(role, answered.projectIds, flagProjectIds);
-        projectId = ids[0];
-        extraProjectIds = ids.slice(1);
-        chosenTtl = answered.ttl;
-        // A stop a flag settled is never served, so anything the browser did
-        // NOT answer keeps the marker argv gave it.
-        roleSource = opts.role ? `--role ${opts.role}` : undefined;
-        projectSource = answered.projectIds.length > 0 ? undefined : planInput.projects?.flag;
-      } else {
-        // ── Role ────────────────────────────────────────────────────────────
-        const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
-        if (opts.role) {
-          if (!invitable.includes(opts.role as typeof ROLES[number]['value'])) {
-            console.error(
-              `\n  Your role (${me.role}) can't grant "${opts.role}". Allowed: ${invitable.join(', ')}.\n`,
-            );
-            process.exit(1);
-          }
-          role = opts.role;
-          roleSource = `--role ${opts.role}`;
-        } else if (!interactive) {
-          // No --role given and can't prompt: default to the safe baseline
-          // (same default the interactive picker uses). Override with --role.
-          role = 'member';
-          roleSource = 'non-interactive default';
-        } else {
-          const answer = await inquirer.prompt([{
-            type: 'list',
-            name: 'role',
-            message: `Select a role for ${email}:`,
-            choices: allowedChoices,
-            default: 'member',
-          }]);
-          role = answer.role;
-        }
-
-        // ── Project scope (required for project-admin and member) ─────────────
-        if (role === 'project-admin' || role === 'member') {
-          const projects = await serviceClient.listProjects();
-          if (projects.length === 0) {
-            console.error('No projects in this organization. Create one with `capy` first.');
-            process.exit(1);
-          }
-          // The cwd project sorts first (it's the most likely intent) and is
-          // the non-interactive default when --project is omitted.
-          let cwdProjectId: string | undefined;
-          try {
-            const pm = new ProjectManager();
-            const ps = await pm.detectProjectState();
-            if (ps.projectId && projects.some((p) => p.id === ps.projectId)) {
-              cwdProjectId = ps.projectId;
-            }
-          } catch {
-            // ignore — cwd detection is best-effort
-          }
-          const cwdFirst = <T extends { id: string }>(a: T, b: T) =>
-            a.id === cwdProjectId ? -1 : b.id === cwdProjectId ? 1 : 0;
-
-          if (opts.projects && opts.projects.length > 0) {
-            const resolved = resolveProjectTokens(opts.projects, projects, cwdProjectId);
-            projectId = resolved[0];
-            extraProjectIds = resolved.slice(1);
-            projectSource = planInput.projects?.flag;
-          } else if (!interactive) {
-            // No --project: keep the member's existing projects on re-issue, else
-            // fall back to the cwd project, else refuse — we won't silently grant
-            // access to a project the caller didn't name.
-            if (reissuing && existingProjectIds.length > 0) {
-              projectId = existingProjectIds[0];
-              extraProjectIds = existingProjectIds.slice(1);
-              projectSource = 'existing membership';
-            } else if (cwdProjectId) {
-              projectId = cwdProjectId;
-              projectSource = 'this directory';
-            } else {
-              refuseNonInteractive(
-                `role "${role}" needs project access and none was given`,
-                `Pass --project <id|name> (available: ${projects.map((p) => p.name).join(', ')}).`,
-              );
-            }
-          } else {
-            const { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
-            const ordered = [...projects].sort(cwdFirst);
-            const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
-              type: 'checkbox',
-              name: 'chosenProjectIds',
-              message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
-              instructions: CHECKBOX_INSTRUCTIONS,
-              theme: CHECKBOX_THEME,
-              choices: ordered.map((p) => ({
-                name: p.name,
-                value: p.id,
-                checked: p.id === cwdProjectId,
-              })),
-              validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
-            } as any);
-            const ids: string[] = chosenProjectIds;
-            projectId = ids[0];
-            extraProjectIds = ids.slice(1);
-          }
-        }
-      }
+      const { role, projectId, extraProjectIds, roleSource, projectSource, chosenTtl } = resolution;
 
       // 1. Generate invite token T
       const inviteToken = generateInviteToken();
@@ -455,14 +294,7 @@ export class InviteCommand {
 
       // 4b. Fan out any additional project assignments picked in the checkbox.
       // Abort noisily only if every extra assignment fails.
-      const failures: Array<{ projectId: string; error: string }> = [];
-      for (const extraId of extraProjectIds) {
-        try {
-          await serviceClient.inviteToProject(orgId, extraId, email, role as 'project-admin' | 'member');
-        } catch (err: any) {
-          failures.push({ projectId: extraId, error: err?.message ?? String(err) });
-        }
-      }
+      const failures = await this.fanOutExtraProjectInvites(orgId, email, role, extraProjectIds, serviceClient);
       void inviteResult;
 
       // 5. Build redeem code (carries the same notAfter the wrap was bound to).
@@ -612,6 +444,281 @@ export class InviteCommand {
     }
   }
 
+  /** Reads and unwraps the org master key (double-wrapped: KMS outer + K_local inner). Exits on failure. */
+  private async unwrapMasterKeyOrExit(
+    orgId: string,
+    userId: string,
+    serviceClient: { coDecrypt: (oid: string, ct: string) => Promise<{ plaintext: string }>; wrapOuterLayer: (oid: string, pt: string) => Promise<{ ciphertext: string }> },
+  ): Promise<Buffer> {
+    try {
+      const keyOps = {
+        coDecrypt: (oid: string, ct: string) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
+        wrapOuterLayer: (oid: string, pt: string) => serviceClient.wrapOuterLayer(oid, pt).then(r => r.ciphertext),
+      };
+      return await unwrapMasterKey(orgId, userId, keyOps);
+    } catch {
+      console.error('Failed to unwrap master key. Re-authenticate and try again.');
+      process.exit(1);
+    }
+  }
+
+  /** The cwd's project id, when it's one of `projects` — best-effort, `undefined` on any detection failure. */
+  private async resolveCwdProjectId(projects: ReadonlyArray<{ id: string }>): Promise<string | undefined> {
+    try {
+      const pm = new ProjectManager();
+      const ps = await pm.detectProjectState();
+      return ps.projectId && projects.some((p) => p.id === ps.projectId) ? ps.projectId : undefined;
+    } catch {
+      // ignore — cwd detection is best-effort
+      return undefined;
+    }
+  }
+
+  /**
+   * Resolves who this invite grants what: the role, the primary + extra
+   * project ids, and (for the finished rail) what settled each answer.
+   * `undefined` for a source means somebody was asked and answered; anything
+   * else is a source the run picked without asking. Each branch below
+   * returns its answer directly — nothing here is reassigned.
+   */
+  private async resolveInviteRoleAndProjects(ctx: {
+    email: string;
+    opts: InviteOpts;
+    me: { role: string };
+    invitable: ReadonlyArray<typeof ROLES[number]['value']>;
+    existingMember: { role: string; status: string; projects?: Array<{ id: string; name: string }> } | undefined;
+    reissuing: boolean;
+    existingProjectIds: string[];
+    webParams: WebInviteParams | undefined;
+    plan: InviteTeammateStop[];
+    planInput: InvitePlanInput;
+    serviceClient: { listProjects: () => Promise<Array<{ id: string; name: string }>> };
+    interactive: boolean;
+  }): Promise<
+    | { cancelled: true }
+    | {
+        cancelled: false;
+        role: string;
+        projectId: string | undefined;
+        extraProjectIds: string[];
+        roleSource: string | undefined;
+        projectSource: string | undefined;
+        chosenTtl: string | undefined;
+      }
+  > {
+    const {
+      email, opts, me, invitable, existingMember, reissuing, existingProjectIds,
+      webParams, plan, planInput, serviceClient, interactive,
+    } = ctx;
+
+    // Pure re-issue (existing member, no explicit --role): reuse their current
+    // role + projects. But an explicit --role MUST be honored so admins can
+    // promote/demote on re-invite — and so a re-invite that races a just-issued
+    // `kick` (a not-yet-propagated member read) still applies the requested
+    // role instead of silently keeping the stale one.
+    if (existingMember && !opts.role) {
+      return {
+        cancelled: false,
+        role: existingMember.role,
+        projectId: existingProjectIds[0],
+        extraProjectIds: existingProjectIds.slice(1),
+        roleSource: 'existing membership',
+        projectSource: 'existing membership',
+        chosenTtl: undefined,
+      };
+    }
+
+    if (webParams && unansweredInviteStops(plan).length > 0) {
+      // `--role` is validated first either way: a role this caller cannot
+      // grant is refused before a browser opens, not after somebody answers
+      // two more questions on top of it.
+      if (opts.role && !invitable.includes(opts.role as typeof ROLES[number]['value'])) {
+        console.error(
+          `\n  Your role (${me.role}) can't grant "${opts.role}". Allowed: ${invitable.join(', ')}.\n`,
+        );
+        process.exit(1);
+      }
+      // `--project` settles the projects stop, so the browser never serves
+      // it — and an unknown token is refused here, before a browser opens,
+      // rather than after somebody has answered two questions on top of it.
+      const flagProjectIds =
+        opts.projects && opts.projects.length > 0
+          ? resolveProjectTokens(
+              opts.projects,
+              webParams.projects,
+              webParams.projects.find((p) => p.isCwd)?.id,
+            )
+          : [];
+
+      const { askInviteInBrowser } = await import('../ui/memberScreens');
+      const answered = await askInviteInBrowser(webParams);
+      if (answered.cancelled) {
+        return { cancelled: true };
+      }
+      const ids = grantedProjects(answered.role, answered.projectIds, flagProjectIds);
+      return {
+        cancelled: false,
+        role: answered.role,
+        projectId: ids[0],
+        extraProjectIds: ids.slice(1),
+        chosenTtl: answered.ttl,
+        // A stop a flag settled is never served, so anything the browser did
+        // NOT answer keeps the marker argv gave it.
+        roleSource: opts.role ? `--role ${opts.role}` : undefined,
+        projectSource: answered.projectIds.length > 0 ? undefined : planInput.projects?.flag,
+      };
+    }
+
+    const { role, roleSource } = await this.resolveInviteeRole(email, opts, me, invitable, interactive);
+
+    // Project scope is only required for project-admin and member.
+    if (role !== 'project-admin' && role !== 'member') {
+      return {
+        cancelled: false, role, projectId: undefined, extraProjectIds: [], roleSource, projectSource: undefined, chosenTtl: undefined,
+      };
+    }
+
+    const { projectId, extraProjectIds, projectSource } = await this.resolveInviteeProjects(
+      role, opts, serviceClient, interactive, reissuing, existingProjectIds, planInput,
+    );
+    return { cancelled: false, role, projectId, extraProjectIds, roleSource, projectSource, chosenTtl: undefined };
+  }
+
+  /** Asks (flag, non-interactive default, or inquirer) which role to grant. Exits on an ungrantable --role. */
+  private async resolveInviteeRole(
+    email: string,
+    opts: InviteOpts,
+    me: { role: string },
+    invitable: ReadonlyArray<typeof ROLES[number]['value']>,
+    interactive: boolean,
+  ): Promise<{ role: string; roleSource: string | undefined }> {
+    if (opts.role) {
+      if (!invitable.includes(opts.role as typeof ROLES[number]['value'])) {
+        console.error(
+          `\n  Your role (${me.role}) can't grant "${opts.role}". Allowed: ${invitable.join(', ')}.\n`,
+        );
+        process.exit(1);
+      }
+      return { role: opts.role, roleSource: `--role ${opts.role}` };
+    }
+    if (!interactive) {
+      // No --role given and can't prompt: default to the safe baseline
+      // (same default the interactive picker uses). Override with --role.
+      return { role: 'member', roleSource: 'non-interactive default' };
+    }
+    const allowedChoices = ROLES.filter(r => invitable.includes(r.value));
+    const answer = await inquirer.prompt([{
+      type: 'list',
+      name: 'role',
+      message: `Select a role for ${email}:`,
+      choices: allowedChoices,
+      default: 'member',
+    }]);
+    return { role: answer.role, roleSource: undefined };
+  }
+
+  /** Resolves which project(s) a project-admin/member invite grants: by flag, non-interactive default, or checkbox. */
+  private async resolveInviteeProjects(
+    role: string,
+    opts: InviteOpts,
+    serviceClient: { listProjects: () => Promise<Array<{ id: string; name: string }>> },
+    interactive: boolean,
+    reissuing: boolean,
+    existingProjectIds: string[],
+    planInput: InvitePlanInput,
+  ): Promise<{ projectId: string | undefined; extraProjectIds: string[]; projectSource: string | undefined }> {
+    const projects = excludeSystemProject(await serviceClient.listProjects());
+    if (projects.length === 0) {
+      console.error('No projects in this organization. Create one with `capy` first.');
+      process.exit(1);
+    }
+    // The cwd project sorts first (it's the most likely intent) and is
+    // the non-interactive default when --project is omitted.
+    const cwdProjectId = await this.resolveCwdProjectId(projects);
+    const cwdFirst = <T extends { id: string }>(a: T, b: T) =>
+      a.id === cwdProjectId ? -1 : b.id === cwdProjectId ? 1 : 0;
+
+    if (opts.projects && opts.projects.length > 0) {
+      const resolved = resolveProjectTokens(opts.projects, projects, cwdProjectId);
+      return { projectId: resolved[0], extraProjectIds: resolved.slice(1), projectSource: planInput.projects?.flag };
+    }
+
+    if (!interactive) {
+      // No --project: keep the member's existing projects on re-issue, else
+      // fall back to the cwd project, else refuse — we won't silently grant
+      // access to a project the caller didn't name.
+      if (reissuing && existingProjectIds.length > 0) {
+        return { projectId: existingProjectIds[0], extraProjectIds: existingProjectIds.slice(1), projectSource: 'existing membership' };
+      }
+      if (cwdProjectId) {
+        return { projectId: cwdProjectId, extraProjectIds: [], projectSource: 'this directory' };
+      }
+      refuseNonInteractive(
+        `role "${role}" needs project access and none was given`,
+        `Pass --project <id|name> (available: ${projects.map((p) => p.name).join(', ')}).`,
+      );
+    }
+
+    const { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME } = await import('../ui/promptStyle');
+    const ordered = [...projects].sort(cwdFirst);
+    const { chosenProjectIds } = await inquirer.prompt<{ chosenProjectIds: string[] }>({
+      type: 'checkbox',
+      name: 'chosenProjectIds',
+      message: `Grant ${role === 'project-admin' ? 'Project Admin' : 'Member'} access to which projects?`,
+      instructions: CHECKBOX_INSTRUCTIONS,
+      theme: CHECKBOX_THEME,
+      choices: ordered.map((p) => ({
+        name: p.name,
+        value: p.id,
+        checked: p.id === cwdProjectId,
+      })),
+      validate: (v: ReadonlyArray<unknown>) => v.length > 0 || 'Pick at least one project',
+    } as any);
+    const ids: string[] = chosenProjectIds;
+    return { projectId: ids[0], extraProjectIds: ids.slice(1), projectSource: undefined };
+  }
+
+  /**
+   * Invites `extraProjectIds` one at a time (sequential, matching the
+   * original loop — not concurrent), collecting a failure per id that
+   * refused rather than aborting the rest. Recursion accumulates the result
+   * instead of an array a loop body would push into.
+   */
+  private async fanOutExtraProjectInvites(
+    orgId: string,
+    email: string,
+    role: string,
+    extraProjectIds: ReadonlyArray<string>,
+    serviceClient: { inviteToProject: (orgId: string, projectId: string, email: string, role: 'project-admin' | 'member') => Promise<unknown> },
+  ): Promise<Array<{ projectId: string; error: string }>> {
+    if (extraProjectIds.length === 0) return [];
+    const [first, ...rest] = extraProjectIds;
+    const firstFailure = await (async (): Promise<{ projectId: string; error: string } | null> => {
+      try {
+        await serviceClient.inviteToProject(orgId, first, email, role as 'project-admin' | 'member');
+        return null;
+      } catch (err: any) {
+        return { projectId: first, error: err?.message ?? String(err) };
+      }
+    })();
+    const restFailures = await this.fanOutExtraProjectInvites(orgId, email, role, rest, serviceClient);
+    return firstFailure ? [firstFailure, ...restFailures] : restFailures;
+  }
+
+  /** The org's display name, re-asked from the cached session — falls back to `orgId` on any failure. */
+  private async resolveOrgName(
+    authService: { authenticateSilent: (orgId?: string) => Promise<{ organization_name?: string }> },
+    orgId: string,
+  ): Promise<string> {
+    try {
+      const again = await authService.authenticateSilent(orgId);
+      return again.organization_name || orgId;
+    } catch {
+      // ignore — the id still identifies the organization unambiguously
+      return orgId;
+    }
+  }
+
   /**
    * Everything the two browser pages need, gathered once.
    *
@@ -634,18 +741,12 @@ export class InviteCommand {
     serviceClient: { listProjects: () => Promise<Array<{ id: string; name: string }>> },
     callerEmail: string | undefined,
   ): Promise<WebInviteParams> {
-    const projects = await serviceClient.listProjects();
+    const projects = excludeSystemProject(await serviceClient.listProjects());
 
     // The cwd project sorts first and is ticked by default — the same order and
     // the same default the terminal checkbox uses. The screen keeps both and
     // drops the silence: the row says where the tick came from.
-    let cwdProjectId: string | undefined;
-    try {
-      const ps = await new ProjectManager().detectProjectState();
-      if (ps.projectId && projects.some((p) => p.id === ps.projectId)) cwdProjectId = ps.projectId;
-    } catch {
-      // ignore — cwd detection is best-effort
-    }
+    const cwdProjectId = await this.resolveCwdProjectId(projects);
     const ordered = [...projects].sort((a, b) =>
       a.id === cwdProjectId ? -1 : b.id === cwdProjectId ? 1 : 0,
     );
@@ -655,13 +756,7 @@ export class InviteCommand {
     // wrong organization. Re-asking the cached session for it costs nothing —
     // a live token short-circuits before any request — and the id is the
     // fallback rather than a blank.
-    let orgName = orgId;
-    try {
-      const again = await authService.authenticateSilent(orgId);
-      if (again.organization_name) orgName = again.organization_name;
-    } catch {
-      // ignore — the id still identifies the organization unambiguously
-    }
+    const orgName = await this.resolveOrgName(authService, orgId);
 
     return {
       // What the CODE is bound to, not what argv typed. `innerWrap` derives the

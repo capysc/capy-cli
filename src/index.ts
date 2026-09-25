@@ -601,6 +601,44 @@ program
     await cmd.execute(email, { web: command.optsWithGlobals().web === true });
   });
 
+const systemCmd = program
+  .command('system')
+  .description('Manage this org\'s system store (connector credentials, CAP-664)');
+
+systemCmd
+  .command('set <name>')
+  .description('Set a connector credential (hidden prompt; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string, options: any) => {
+    assertNotLocalOnly('system set');
+    const { systemSetCommand } = await import('./commands/systemCommand');
+    await systemSetCommand(name, { org: options.org, json: options.json });
+  });
+
+systemCmd
+  .command('list')
+  .description('List connector credential names (never values; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options: any) => {
+    assertNotLocalOnly('system list');
+    const { systemListCommand } = await import('./commands/systemCommand');
+    await systemListCommand({ org: options.org, json: options.json });
+  });
+
+systemCmd
+  .command('rm <name>')
+  .description('Remove a connector credential (asks for confirmation; owners/admins only)')
+  .option('--org <id>', 'org id, if you belong to more than one')
+  .option('--yes', 'skip the confirmation prompt')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (name: string, options: any) => {
+    assertNotLocalOnly('system rm');
+    const { systemRmCommand } = await import('./commands/systemCommand');
+    await systemRmCommand(name, { org: options.org, json: options.json, yes: options.yes });
+  });
+
 program
   .command('org')
   .description('Switch organization')

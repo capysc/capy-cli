@@ -18,6 +18,7 @@ import {
   KeepVariableEntry,
   SyncState,
   AuthResult,
+  ProjectInitResult,
   CapyError,
   ERROR_CODES,
   getSyncKeepHash,
@@ -36,6 +37,7 @@ import {
   KeyServiceOps,
 } from '../crypto/keyResolver';
 import { writeKeepCache, fetchSecretsWithCache, readSecretsLocal, LOCAL_ORG_ID, LOCAL_USER_ID } from '../config/globalConfig';
+import { excludeSystemProject, assertProjectNameAllowed } from '../system/reservedProjectName';
 import { isLocalOnly } from '../config/profileConfig';
 import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
@@ -347,6 +349,112 @@ export class CapyCommand {
     }
   }
 
+  /**
+   * Resolves which org this init run targets. Each branch (no orgs yet /
+   * create new / switch to current / switch to another) returns its answer
+   * directly rather than assigning an outer variable, so there is exactly
+   * one place `selectedOrg` is bound.
+   */
+  private async resolveSelectedOrganization(
+    orgs: Organization[],
+    authResult: AuthResult,
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+    refreshToken: string | undefined,
+  ): Promise<Organization> {
+    const CREATE_NEW_ORG = '__create_new__';
+    const currentOrgId = authResult.organization_id;
+    const currentOrg = orgs.find(o => o.id === currentOrgId);
+
+    if (orgs.length === 0) {
+      console.log('\nNo organization found. Let\'s create one.');
+      const created = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+      wizard?.record({
+        organization: { kind: 'new', name: created.name },
+        recoveryShown: true,
+      });
+      return created;
+    }
+
+    const orgId = await this.resolveOrgIdChoice(wizard, orgs, currentOrgId, CREATE_NEW_ORG);
+
+    if (orgId === CREATE_NEW_ORG) {
+      const created = await this.createNewOrganization(refreshToken!, authResult.user_id!);
+      // Naming it and being shown the phrase both happened, elsewhere. The
+      // rail settles those two stops rather than leaving them ◌ behind a
+      // fork this run has already taken.
+      wizard?.record({
+        organization: { kind: 'new', name: created.name },
+        recoveryShown: true,
+      });
+      return created;
+    }
+
+    if (currentOrg && orgId === currentOrg.id) {
+      return currentOrg;
+    }
+
+    const target = orgs.find(o => o.id === orgId)!;
+    await this.switchToOrganization(refreshToken!, target, authResult.user_id);
+    return target;
+  }
+
+  /** Asks (wizard or inquirer) which org id was chosen. Throws on cancel. */
+  private async resolveOrgIdChoice(
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+    orgs: Organization[],
+    currentOrgId: string | undefined,
+    createNewOrgValue: string,
+  ): Promise<string> {
+    if (wizard) {
+      // No TTY under --web (e.g. driven through the MCP): the picker is the
+      // wizard's `organization` stop, which carries the same list and the
+      // same "create new" row an inquirer prompt would have shown — and, on
+      // the rail beside it, the five stops that come after.
+      const chosen = await wizard.askOrganization(
+        orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId })),
+      );
+      if (chosen === null) {
+        throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return chosen === 'create' ? createNewOrgValue : chosen;
+    }
+    const { orgId } = await inquirer.prompt([{
+      type: 'list',
+      name: 'orgId',
+      message: 'Select organization for project:',
+      choices: [
+        ...orgs.map(o => ({
+          name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+          value: o.id,
+        })),
+        { name: 'Create new organization +', value: createNewOrgValue },
+      ],
+      default: currentOrgId,
+    }]);
+    return orgId;
+  }
+
+  /** Switches the active session into `org`, refreshing or re-authenticating as needed. Throws on failure. */
+  private async switchToOrganization(refreshToken: string, org: Organization, userId: string | undefined): Promise<void> {
+    const orgSpinner = ora('Switching organization...').start();
+    const scopedAuth = await this.authService.refreshWithCredentials(refreshToken, org.id, userId);
+    if (scopedAuth.success) {
+      orgSpinner.succeed(`Organization: ${org.name}`);
+      return;
+    }
+    orgSpinner.text = 'Re-authenticating...';
+    this.authService.clearToken();
+    const reauthed = await this.authService.authenticate(org.id);
+    if (!reauthed.success) {
+      orgSpinner.fail('Failed to authenticate with organization');
+      throw new CapyError(
+        reauthed.error || 'Organization authentication failed',
+        ERROR_CODES.AUTH_FAILED
+      );
+    }
+    orgSpinner.succeed(`Organization: ${org.name}`);
+  }
+
   private async runInitialization(
     wizard: import('../ui/initWizardScreen').InitWizardSession | null,
   ): Promise<void> {
@@ -397,88 +505,8 @@ export class CapyCommand {
 
     // Resolve organization
     const orgs = authResult.organizations || [];
-    let selectedOrg: Organization;
-    const CREATE_NEW_ORG = '__create_new__';
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
-
-    const currentOrgId = authResult.organization_id;
-    const currentOrg = orgs.find(o => o.id === currentOrgId);
-
-    if (orgs.length === 0) {
-      console.log('\nNo organization found. Let\'s create one.');
-      selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-      wizard?.record({
-        organization: { kind: 'new', name: selectedOrg.name },
-        recoveryShown: true,
-      });
-
-    } else {
-      let orgId: string;
-      if (wizard) {
-        // No TTY under --web (e.g. driven through the MCP): the picker is the
-        // wizard's `organization` stop, which carries the same list and the
-        // same "create new" row an inquirer prompt would have shown — and, on
-        // the rail beside it, the five stops that come after.
-        const chosen = await wizard.askOrganization(
-          orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId })),
-        );
-        if (chosen === null) {
-          throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
-      } else {
-        ({ orgId } = await inquirer.prompt([{
-          type: 'list',
-          name: 'orgId',
-          message: 'Select organization for project:',
-          choices: [
-            ...orgs.map(o => ({
-              name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
-              value: o.id,
-            })),
-            { name: 'Create new organization +', value: CREATE_NEW_ORG },
-          ],
-          default: currentOrgId,
-        }]));
-      }
-
-      if (orgId === CREATE_NEW_ORG) {
-        selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-        // Naming it and being shown the phrase both happened, elsewhere. The
-        // rail settles those two stops rather than leaving them ◌ behind a
-        // fork this run has already taken.
-        wizard?.record({
-          organization: { kind: 'new', name: selectedOrg.name },
-          recoveryShown: true,
-        });
-
-      } else if (currentOrg && orgId === currentOrg.id) {
-        selectedOrg = currentOrg;
-
-      } else {
-        selectedOrg = orgs.find(o => o.id === orgId)!;
-
-        const orgSpinner = ora('Switching organization...').start();
-        let scopedAuth = await this.authService.refreshWithCredentials(
-          refreshToken!,
-          selectedOrg.id,
-          authResult.user_id,
-        );
-        if (!scopedAuth.success) {
-          orgSpinner.text = 'Re-authenticating...';
-          this.authService.clearToken();
-          scopedAuth = await this.authService.authenticate(selectedOrg.id);
-          if (!scopedAuth.success) {
-            orgSpinner.fail('Failed to authenticate with organization');
-            throw new CapyError(
-              scopedAuth.error || 'Organization authentication failed',
-              ERROR_CODES.AUTH_FAILED
-            );
-          }
-        }
-        orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
-      }
-    }
+    const selectedOrg = await this.resolveSelectedOrganization(orgs, authResult, wizard, refreshToken);
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
@@ -517,51 +545,14 @@ export class CapyCommand {
     // choice to bootstrap one of them OR create a new project. This is the path
     // a teammate hits when cloning a repo with no committed keep.lock.
     const CREATE_NEW_PROJECT = '__create_new_project__';
-    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
     // "The lookup failed" and "this org has none" both end up as an empty list
     // here, and they are not the same fact: one walks the user into creating a
     // second project alongside one they already have. The rail says which.
-    let projectsUnavailable = false;
-    try {
-      const listSpinner = ora('Looking for existing projects...').start();
-      existingProjects = await this.serviceClient.listProjects();
-      listSpinner.stop();
-      this.debug('listProjects response', existingProjects);
-    } catch (err) {
-      this.debugError('listProjects failed', err);
-      // Network or auth issue — fall through to new-project flow
-      existingProjects = [];
-      projectsUnavailable = true;
-    }
+    const { existingProjects, projectsUnavailable } = await this.listExistingProjectsOrUnavailable();
     wizard?.record({ projectCount: existingProjects.length, projectsUnavailable });
 
     if (existingProjects.length > 0) {
-      const choices = [
-        { name: 'New project', value: CREATE_NEW_PROJECT },
-        ...existingProjects.map(p => ({
-          name: p.name,
-          value: p.id,
-        })),
-      ];
-
-      let projectChoice: string;
-      if (wizard) {
-        const chosen = await wizard.askProject(
-          existingProjects.map(p => ({ id: p.id, name: p.name })),
-        );
-        if (chosen === null) {
-          throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        projectChoice = chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
-      } else {
-        ({ projectChoice } = await inquirer.prompt([{
-          type: 'list',
-          name: 'projectChoice',
-          message: 'Which project do you want to use?',
-          choices,
-          default: CREATE_NEW_PROJECT,
-        }]));
-      }
+      const projectChoice = await this.resolveProjectChoice(wizard, existingProjects, CREATE_NEW_PROJECT);
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
@@ -576,19 +567,12 @@ export class CapyCommand {
 
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
-    let projectName: string;
-    if (wizard) {
-      // Same two refusals the TTY validator makes, in the same words — the
-      // screen holds its button on both, so either arriving here means the
-      // submit did not come from the screen.
-      const entered = await wizard.askProjectName(defaultName);
-      if (entered === null) {
-        throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
-      }
-      projectName = entered;
-    } else {
-      projectName = await this.promptEngine.promptForProjectName(defaultName);
-    }
+    const projectName = await this.resolveProjectName(wizard, defaultName);
+
+    // Defense in depth: the prompt/wizard validators above already refuse
+    // "_system" (CAP-664), but this is the actual choke point before the
+    // service is asked to create anything, so it's checked again here.
+    assertProjectNameAllowed(projectName);
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();
@@ -625,47 +609,10 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
-    let initialBranchChoice: string;
-    if (wizard) {
-      // No TTY under --web: without a browser screen here, init dies one step
-      // before createBranch/writeActiveBranch and leaves a branchless project.
-      const chosen = await wizard.askBranchChoice();
-      if (chosen === null) {
-        throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
-      }
-      initialBranchChoice = chosen;
-    } else {
-      ({ initialBranchChoice } = await inquirer.prompt([{
-        type: 'list',
-        name: 'initialBranchChoice',
-        message: 'What branch should this project start with?',
-        choices: [
-          { name: 'development (default)', value: 'development' },
-          { name: 'another branch', value: 'other' },
-        ],
-      }]));
-    }
-
-    let initialBranchName: string;
-    if (initialBranchChoice === 'other') {
-      if (wizard) {
-        const entered = await wizard.askBranchName();
-        if (entered === null) {
-          throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        initialBranchName = entered;
-      } else {
-        const { branchName } = await inquirer.prompt([{
-          type: 'input',
-          name: 'branchName',
-          message: 'Branch name:',
-          validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-        }]);
-        initialBranchName = String(branchName).trim();
-      }
-    } else {
-      initialBranchName = 'development';
-    }
+    const initialBranchChoice = await this.resolveInitialBranchChoice(wizard);
+    const initialBranchName = initialBranchChoice === 'other'
+      ? await this.resolveCustomBranchName(wizard)
+      : 'development';
     const initialBranchProtected = false;
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
@@ -712,57 +659,12 @@ export class CapyCommand {
       wizard?.record({ localEnvCount: localVarCount });
 
       if (localVarCount > 0) {
-        // Cross-org exfiltration guard
-        const encryptedEntries = Object.entries(localEnv)
-          .filter(([_, value]) => value.startsWith('capy:'));
-
-        if (encryptedEntries.length > 0) {
-          const foreignKeys: string[] = [];
-          for (const [key, value] of encryptedEntries) {
-            try {
-              this.fileManager.decryptValue(value, encryptionKey);
-            } catch {
-              foreignKeys.push(key);
-            }
-          }
-
-          if (foreignKeys.length > 0) {
-            console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted with a different project's key:`);
-            for (const key of foreignKeys) {
-              console.error(`  ${key}`);
-            }
-            console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
-            // The stop this run dies at is the consent gate, and the variables
-            // are the whole subject — so they go as NAMES, in the field that
-            // draws them as a list of things to go and find in a file, rather
-            // than as a count inside a red sentence. Names only: these values
-            // cannot be read by this key, which is the problem.
-            wizard?.willBlock(
-              'encrypt',
-              {
-                code: ERROR_CODES.PERMISSION_DENIED,
-                title: 'This .env holds values encrypted to a different project',
-                detail:
-                  'These variables cannot be read with this organization\'s key, so they cannot be pushed to it. Delete the .env file, or replace those values with plaintext, and run capy again.',
-                remedy: 'capy',
-              },
-              { names: foreignKeys },
-            );
-            throw new CapyError(
-              'Cannot push secrets encrypted with a different project\'s key to a new org',
-              ERROR_CODES.PERMISSION_DENIED,
-              { foreignKeys }
-            );
-          }
-
-          // Values are encrypted but belong to this project — decrypt them for push
-          for (const [key, value] of encryptedEntries) {
-            localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
-          }
-        }
+        // Cross-org exfiltration guard — throws (via wizard.willBlock + CapyError)
+        // if any encrypted entry can't be read with this project's key.
+        const decryptedLocalEnv = this.resolveDecryptedLocalEnv(localEnv, encryptionKey, wizard);
 
         // Show found variables (max 5 names, "etc." for 6+)
-        const varNames = Object.keys(localEnv);
+        const varNames = Object.keys(decryptedLocalEnv);
         const displayNames = varNames.length > 5
           ? varNames.slice(0, 5).join(', ') + ', etc.'
           : varNames.join(', ');
@@ -779,27 +681,9 @@ export class CapyCommand {
         // Confirm before encrypting + pushing — user may not be in the
         // right project on first setup. After this step .env is rewritten
         // with ciphertext, so getting it wrong is painful to recover from.
-        let confirmEncrypt: boolean;
-        if (wizard) {
-          // NAMES and a count reach the page — never a value, and not even a
-          // snippet of one. The whole question this stop asks is whether these
-          // may stop being plaintext, and showing more than the terminal shows
-          // in order to ask it would answer part of it first.
-          //
-          // A closed window is a "no": `askEncrypt` resolves false on cancel,
-          // which is the same thing `chosen === 'yes'` already meant.
-          confirmEncrypt = await wizard.askEncrypt(
-            { count: localVarCount, names: varNames },
-            { projectName, orgName: selectedOrg.name, branch: initBranch },
-          );
-        } else {
-          ({ confirmEncrypt } = await inquirer.prompt([{
-            type: 'confirm',
-            name: 'confirmEncrypt',
-            message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
-            default: true,
-          }]));
-        }
+        const confirmEncrypt = await this.resolveConfirmEncrypt(
+          wizard, localVarCount, varNames, projectName, selectedOrg.name, initBranch,
+        );
 
         if (!confirmEncrypt) {
           console.log(`\nSkipped. Your .env was not modified.`);
@@ -808,74 +692,11 @@ export class CapyCommand {
         }
 
         const syncSpinner = ora('Syncing local variables...').start();
+        const syncResult = await this.pushAndEncryptLocalEnv(
+          decryptedLocalEnv, encryptionKey, initBranch, keep, projectResult, authResult,
+        );
 
-        // What this actually got done, for the report a failure has to make.
-        // Read off the writes themselves rather than inferred afterwards: the
-        // three facts that matter are whether the values reached Keep, whether
-        // the plaintext copy was kept, and whether the .env in this directory
-        // is now ciphertext — and the third one is the reason this cannot be
-        // answered by looking at the error.
-        let pushedToKeep = false;
-        let backupWritten = false;
-        let envRewritten = false;
-
-        try {
-          const { createHash } = await import('crypto');
-          const { deriveResourceId } = await import('../crypto/resourceId');
-          const { Encryptor } = await import('../crypto/encryptor');
-
-          // Build encrypted env blob and keep.lock hashes
-          const encrypted: Record<string, string> = {};
-          const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-          for (const [key, value] of Object.entries(localEnv)) {
-            const resourceId = deriveResourceId(initBranch, key);
-            const enc = Encryptor.encrypt(value, encryptionKey);
-            encrypted[key] = `capy:${resourceId}:${enc}`;
-            pushedVars[key] = {
-              resource_id: resourceId,
-              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-            };
-          }
-
-          const envBlob = Object.entries(encrypted)
-            .map(([k, v]) => `${k}=${v}`)
-            .join('\n');
-
-          const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
-          const keepJson = JSON.stringify(updatedKeep);
-
-          const initPushResult = await this.serviceClient.pushSecrets(
-            projectResult.project_id,
-            keepJson,
-            envBlob,
-            initBranch,
-          );
-          pushedToKeep = true;
-
-          // Prefer the server's copy — it carries server-assigned changed_at
-          this.fileManager.writeKeepFile(
-            SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep, initBranch),
-          );
-
-          // Cache encrypted blob locally
-          const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
-          writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
-
-          this.fileManager.writeSyncState({
-            last_sync: new Date().toISOString(),
-            synced_variables: Object.keys(localEnv),
-            user_id: authResult.user_id,
-            keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
-          });
-
-          // Backup plaintext .env before encrypting
-          this.fileManager.backupPlaintextEnv(this.options.envPath);
-          backupWritten = true;
-
-          // Encrypt the local .env file
-          this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
-          envRewritten = true;
-
+        if (syncResult.ok) {
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
 
           // The freshly created pin only reaches teammates once committed —
@@ -890,7 +711,8 @@ export class CapyCommand {
           console.log(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
           console.log(`See: https://docs.capy.sc/using/running-your-app`);
           console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
-        } catch (syncError: any) {
+        } else {
+          const syncError: any = syncResult.error;
           syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
           console.log(`You can run ${B('capy')} again to retry syncing`);
           // This is the one failure that happens after the last question, and
@@ -903,9 +725,9 @@ export class CapyCommand {
           await wizard?.reportEncryptFailure({
             code: syncError instanceof CapyError ? syncError.code : ERROR_CODES.SERVICE_ERROR,
             reason: syncError?.message ? String(syncError.message) : 'The push failed.',
-            envRewritten,
-            backupWritten,
-            pushed: pushedToKeep,
+            envRewritten: syncResult.envRewritten,
+            backupWritten: syncResult.backupWritten,
+            pushed: syncResult.pushedToKeep,
           });
         }
       } else {
@@ -922,6 +744,322 @@ export class CapyCommand {
 
       // Install git hooks
       this.installGitHooks();
+    }
+  }
+
+  /**
+   * Lists the org's existing (non-system) projects for the bootstrap-or-create
+   * choice. "The lookup failed" and "this org has none" both surface as an
+   * empty list to the caller, but `projectsUnavailable` says which — a network
+   * or auth error must not be read as "you have no projects yet".
+   */
+  private async listExistingProjectsOrUnavailable(): Promise<{
+    existingProjects: Array<{ id: string; name: string; organization_id: string }>;
+    projectsUnavailable: boolean;
+  }> {
+    try {
+      const listSpinner = ora('Looking for existing projects...').start();
+      // Belt-and-braces: the service already hides the org's `_system`
+      // project from this listing (CAP-664). Filtered again here so it can
+      // never be offered as a bootstrap target even against an older service.
+      const existingProjects = excludeSystemProject(await this.serviceClient.listProjects());
+      listSpinner.stop();
+      this.debug('listProjects response', existingProjects);
+      return { existingProjects, projectsUnavailable: false };
+    } catch (err) {
+      this.debugError('listProjects failed', err);
+      // Network or auth issue — fall through to new-project flow
+      return { existingProjects: [], projectsUnavailable: true };
+    }
+  }
+
+  /** Asks (wizard or inquirer) which existing project to bootstrap, or "new". Throws on cancel. */
+  private async resolveProjectChoice(
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+    existingProjects: Array<{ id: string; name: string; organization_id: string }>,
+    createNewProjectValue: string,
+  ): Promise<string> {
+    if (wizard) {
+      const chosen = await wizard.askProject(
+        existingProjects.map(p => ({ id: p.id, name: p.name })),
+      );
+      if (chosen === null) {
+        throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return chosen === 'new' ? createNewProjectValue : chosen;
+    }
+    const choices = [
+      { name: 'New project', value: createNewProjectValue },
+      ...existingProjects.map(p => ({
+        name: p.name,
+        value: p.id,
+      })),
+    ];
+    const { projectChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'projectChoice',
+      message: 'Which project do you want to use?',
+      choices,
+      default: createNewProjectValue,
+    }]);
+    return projectChoice;
+  }
+
+  /** Asks (wizard or the prompt engine) for the new project's name. Throws on cancel. */
+  private async resolveProjectName(
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+    defaultName: string,
+  ): Promise<string> {
+    if (wizard) {
+      // Same two refusals the TTY validator makes, in the same words — the
+      // screen holds its button on both, so either arriving here means the
+      // submit did not come from the screen.
+      const entered = await wizard.askProjectName(defaultName);
+      if (entered === null) {
+        throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return entered;
+    }
+    return this.promptEngine.promptForProjectName(defaultName);
+  }
+
+  /** Asks (wizard or inquirer) whether the initial branch is 'development' or a custom name. Throws on cancel. */
+  private async resolveInitialBranchChoice(
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+  ): Promise<string> {
+    if (wizard) {
+      // No TTY under --web: without a browser screen here, init dies one step
+      // before createBranch/writeActiveBranch and leaves a branchless project.
+      const chosen = await wizard.askBranchChoice();
+      if (chosen === null) {
+        throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return chosen;
+    }
+    const { initialBranchChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'initialBranchChoice',
+      message: 'What branch should this project start with?',
+      choices: [
+        { name: 'development (default)', value: 'development' },
+        { name: 'another branch', value: 'other' },
+      ],
+    }]);
+    return initialBranchChoice;
+  }
+
+  /** Asks (wizard or inquirer) for the custom initial branch name. Throws on cancel. */
+  private async resolveCustomBranchName(
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+  ): Promise<string> {
+    if (wizard) {
+      const entered = await wizard.askBranchName();
+      if (entered === null) {
+        throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return entered;
+    }
+    const { branchName } = await inquirer.prompt([{
+      type: 'input',
+      name: 'branchName',
+      message: 'Branch name:',
+      validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+    }]);
+    return String(branchName).trim();
+  }
+
+  /**
+   * Cross-org exfiltration guard: any `.env` entry already shaped like an
+   * encrypted value must decrypt with THIS project's key, or it was written
+   * for a different project and must not be silently carried into this one.
+   * Returns a new object — `localEnv` itself is never mutated — with every
+   * such entry replaced by its decrypted plaintext. Throws (after telling the
+   * wizard which stop this blocks) when any entry fails to decrypt.
+   */
+  private resolveDecryptedLocalEnv(
+    localEnv: Readonly<Record<string, string>>,
+    encryptionKey: string,
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+  ): Record<string, string> {
+    const encryptedEntries = Object.entries(localEnv)
+      .filter(([, value]) => value.startsWith('capy:'));
+    if (encryptedEntries.length === 0) {
+      return { ...localEnv };
+    }
+
+    const foreignKeys = encryptedEntries
+      .filter(([, value]) => {
+        try {
+          this.fileManager.decryptValue(value, encryptionKey);
+          return false;
+        } catch {
+          return true;
+        }
+      })
+      .map(([key]) => key);
+
+    if (foreignKeys.length > 0) {
+      console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted with a different project's key:`);
+      for (const key of foreignKeys) {
+        console.error(`  ${key}`);
+      }
+      console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
+      // The stop this run dies at is the consent gate, and the variables
+      // are the whole subject — so they go as NAMES, in the field that
+      // draws them as a list of things to go and find in a file, rather
+      // than as a count inside a red sentence. Names only: these values
+      // cannot be read by this key, which is the problem.
+      wizard?.willBlock(
+        'encrypt',
+        {
+          code: ERROR_CODES.PERMISSION_DENIED,
+          title: 'This .env holds values encrypted to a different project',
+          detail:
+            'These variables cannot be read with this organization\'s key, so they cannot be pushed to it. Delete the .env file, or replace those values with plaintext, and run capy again.',
+          remedy: 'capy',
+        },
+        { names: foreignKeys },
+      );
+      throw new CapyError(
+        'Cannot push secrets encrypted with a different project\'s key to a new org',
+        ERROR_CODES.PERMISSION_DENIED,
+        { foreignKeys }
+      );
+    }
+
+    // Values are encrypted but belong to this project — decrypt them for push
+    return {
+      ...localEnv,
+      ...Object.fromEntries(
+        encryptedEntries.map(([key, value]) => [key, this.fileManager.decryptValue(value, encryptionKey)]),
+      ),
+    };
+  }
+
+  /** Asks (wizard or inquirer) to confirm encrypting + pushing the local .env. A closed wizard window is a "no". */
+  private async resolveConfirmEncrypt(
+    wizard: import('../ui/initWizardScreen').InitWizardSession | null,
+    localVarCount: number,
+    varNames: string[],
+    projectName: string,
+    orgName: string,
+    initBranch: string,
+  ): Promise<boolean> {
+    if (wizard) {
+      // NAMES and a count reach the page — never a value, and not even a
+      // snippet of one. The whole question this stop asks is whether these
+      // may stop being plaintext, and showing more than the terminal shows
+      // in order to ask it would answer part of it first.
+      //
+      // A closed window is a "no": `askEncrypt` resolves false on cancel,
+      // which is the same thing `chosen === 'yes'` already meant.
+      return wizard.askEncrypt(
+        { count: localVarCount, names: varNames },
+        { projectName, orgName, branch: initBranch },
+      );
+    }
+    const { confirmEncrypt } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmEncrypt',
+      message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${orgName}) on ${B(initBranch)}?`,
+      default: true,
+    }]);
+    return confirmEncrypt;
+  }
+
+  /**
+   * Encrypts `localEnv`, pushes it to the newly created project, and rewrites
+   * the local `.env` to ciphertext. Never throws: every checkpoint below
+   * ("reached Keep" / "plaintext backed up" / ".env rewritten") is captured in
+   * the RETURNED result exactly as far as execution got, since a caller that
+   * swallows a mid-sync failure still has to report precisely which of those
+   * three things happened before it did — a `let` mutated as each step
+   * completes would say the same thing, but only by being reassigned; nesting
+   * the failure branches says it by construction instead.
+   */
+  private async pushAndEncryptLocalEnv(
+    localEnv: Readonly<Record<string, string>>,
+    encryptionKey: string,
+    initBranch: string,
+    keep: KeepFile,
+    projectResult: ProjectInitResult,
+    authResult: AuthResult,
+  ): Promise<
+    | { ok: true }
+    | { ok: false; error: unknown; pushedToKeep: boolean; backupWritten: boolean; envRewritten: boolean }
+  > {
+    try {
+      const { createHash } = await import('crypto');
+      const { deriveResourceId } = await import('../crypto/resourceId');
+      const { Encryptor } = await import('../crypto/encryptor');
+
+      // Derive the encrypted env blob and keep.lock hashes from localEnv —
+      // built once as plain values, never mutated in place.
+      const derivedEntries = Object.entries(localEnv).map(([key, value]) => {
+        const resourceId = deriveResourceId(initBranch, key);
+        return {
+          key,
+          envLine: `${key}=capy:${resourceId}:${Encryptor.encrypt(value, encryptionKey)}`,
+          pushedVar: {
+            resource_id: resourceId,
+            value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+          },
+        };
+      });
+      const envBlob = derivedEntries.map((e) => e.envLine).join('\n');
+      const pushedVars = Object.fromEntries(derivedEntries.map((e) => [e.key, e.pushedVar]));
+
+      const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
+      const keepJson = JSON.stringify(updatedKeep);
+
+      const initPushResult = await this.serviceClient.pushSecrets(
+        projectResult.project_id,
+        keepJson,
+        envBlob,
+        initBranch,
+      );
+      // pushedToKeep is true for every outcome from here down.
+
+      try {
+        // Prefer the server's copy — it carries server-assigned changed_at
+        this.fileManager.writeKeepFile(
+          SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep, initBranch),
+        );
+
+        // Cache encrypted blob locally
+        const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
+        writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
+
+        this.fileManager.writeSyncState({
+          last_sync: new Date().toISOString(),
+          synced_variables: Object.keys(localEnv),
+          user_id: authResult.user_id,
+          keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
+        });
+      } catch (error) {
+        return { ok: false, error, pushedToKeep: true, backupWritten: false, envRewritten: false };
+      }
+
+      try {
+        // Backup plaintext .env before encrypting
+        this.fileManager.backupPlaintextEnv(this.options.envPath);
+      } catch (error) {
+        return { ok: false, error, pushedToKeep: true, backupWritten: false, envRewritten: false };
+      }
+      // backupWritten is true for every outcome from here down.
+
+      try {
+        // Encrypt the local .env file
+        this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
+      } catch (error) {
+        return { ok: false, error, pushedToKeep: true, backupWritten: true, envRewritten: false };
+      }
+
+      return { ok: true };
+    } catch (error) {
+      // Either building the blob/keep or the initial push itself failed —
+      // nothing reached Keep.
+      return { ok: false, error, pushedToKeep: false, backupWritten: false, envRewritten: false };
     }
   }
 

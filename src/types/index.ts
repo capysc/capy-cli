@@ -353,6 +353,17 @@ export const ERROR_CODES = {
   NO_CONNECTORS: 'NO_CONNECTORS',
   /** `capy-dev` reached a live-mode credential. Dev never touches live. */
   DEV_LIVE_FIREWALL: 'DEV_LIVE_FIREWALL',
+  // --- Org system store (CAP-664) ---
+  /** Caller's live org role is not owner/admin. Mirrors the server's 403 `code`. */
+  SYSTEM_STORE_ADMIN_ONLY: 'SYSTEM_STORE_ADMIN_ONLY',
+  /** Entry name doesn't match `^_CONNECTOR_[A-Z0-9]+_[A-Z0-9_]+$`. */
+  SYSTEM_STORE_BAD_NAME: 'SYSTEM_STORE_BAD_NAME',
+  /** `capy system set/rm` needs a human (hidden prompt / confirmation) and there is no TTY. */
+  SYSTEM_STORE_NEEDS_TTY: 'SYSTEM_STORE_NEEDS_TTY',
+  /** `_system` is reserved for the org's system store and can't be used as a project name. */
+  PROJECT_NAME_RESERVED: 'PROJECT_NAME_RESERVED',
+  /** The human declined a confirmation prompt (e.g. `capy system rm`'s default-no). Not an error — a choice. */
+  CANCELLED: 'CANCELLED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

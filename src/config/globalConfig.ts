@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import type { KeepFile, SyncState } from '../types/index';
 
 // Resolved lazily so `capy-dev` can isolate its state at `~/.capy-dev/` by
 // setting CAPY_GLOBAL_DIR_NAME at startup — without this, dev tooling like
@@ -202,6 +203,53 @@ export function writeKeepCache(orgId: string, projectId: string, keepHash: strin
 
 export function readKeepCache(orgId: string, projectId: string, keepHash: string): string | null {
   return readFileOrNull(getKeepCachePath(orgId, projectId, keepHash));
+}
+
+// --- Org system store (~/.capy/orgs/<orgId>/system/) ---
+//
+// CAP-664. Its own internal keep.lock + sync-state, entirely separate from any
+// repo's — nothing here is ever written into a repo, and nothing here is ever
+// read by `capy run` (see src/system/systemStore.ts). Same 0700/0600 modes as
+// every other secret-adjacent path in this file.
+
+export function getSystemStoreDir(orgId: string): string {
+  return join(getGlobalCapyDir(), 'orgs', orgId, 'system');
+}
+
+export function getSystemKeepPath(orgId: string): string {
+  return join(getSystemStoreDir(orgId), 'keep.lock');
+}
+
+export function getSystemSyncStatePath(orgId: string): string {
+  return join(getSystemStoreDir(orgId), 'sync-state');
+}
+
+export function saveSystemKeepFile(orgId: string, keep: KeepFile): void {
+  writeSecureFile(getSystemKeepPath(orgId), JSON.stringify(keep, null, 2));
+}
+
+export function readSystemKeepFile(orgId: string): KeepFile | null {
+  const content = readFileOrNull(getSystemKeepPath(orgId));
+  if (!content) return null;
+  try {
+    return JSON.parse(content) as KeepFile;
+  } catch {
+    return null;
+  }
+}
+
+export function saveSystemSyncState(orgId: string, state: SyncState): void {
+  writeSecureFile(getSystemSyncStatePath(orgId), JSON.stringify(state, null, 2));
+}
+
+export function readSystemSyncState(orgId: string): SyncState | null {
+  const content = readFileOrNull(getSystemSyncStatePath(orgId));
+  if (!content) return null;
+  try {
+    return JSON.parse(content) as SyncState;
+  } catch {
+    return null;
+  }
 }
 
 // --- Recovery session (~/.capy/recover/) ---
