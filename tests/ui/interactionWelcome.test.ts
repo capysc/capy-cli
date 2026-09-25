@@ -10,12 +10,12 @@ describe('Interaction welcome metadata', () => {
       prompt: async () => null,
       goal: () => undefined,
     }, async () => {
-      emitInteractionWelcome({ username: null, project: 'web', organization: 'Northwind', branch: 'main', flowName: 'Sync' });
+      emitInteractionWelcome({ username: 'Ada', project: 'web', organization: 'Northwind', branch: 'main', flowName: 'Sync' });
     });
 
     expect(await received.promise).toEqual({
       text: '',
-      welcome: { username: null, project: 'web', organization: 'Northwind', branch: 'main', flowName: 'Sync' },
+      welcome: { username: 'Ada', project: 'web', organization: 'Northwind', branch: 'main', flowName: 'Sync' },
     });
   });
 });

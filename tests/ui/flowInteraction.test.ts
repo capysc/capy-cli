@@ -3,16 +3,20 @@ import { flowQueueStep, flowTurnPayload, flowWelcome } from '../../src/ui/flowIn
 
 describe('Flow turn payloads', () => {
   test('emits an immediate structured welcome with only safe repository context', () => {
-    const welcome = flowWelcome({ command: 'capy', initialized: false, project: undefined, organization: 'Northwind', branch: null });
+    const welcome = flowWelcome({ command: 'capy', initialized: false, username: 'Ada', project: undefined, organization: 'Northwind', branch: null });
     const step = flowQueueStep([], { type: 'output', data: { kind: 'welcome', welcome } });
 
-    expect(welcome).toEqual({ username: null, project: null, organization: 'Northwind', branch: null, flowName: 'Secrets Setup' });
+    expect(welcome).toEqual({ username: 'Ada', project: null, organization: 'Northwind', branch: null, flowName: 'Secrets Setup' });
     expect(step).toEqual({ nextItems: [], writes: [{ type: 'output', data: { kind: 'welcome', welcome } }] });
   });
 
   test('names initialized capy and rotate flows without deriving a title from text', () => {
-    expect(flowWelcome({ command: 'capy', initialized: true, project: 'web', organization: 'Northwind', branch: 'main' }).flowName).toBe('Sync');
-    expect(flowWelcome({ command: 'rotate', initialized: true, project: 'web', organization: 'Northwind', branch: 'main' }).flowName).toBe('Rotate');
+    expect(flowWelcome({ command: 'capy', initialized: true, username: null, project: 'web', organization: 'Northwind', branch: 'main' }).flowName).toBe('Sync');
+    expect(flowWelcome({ command: 'rotate', initialized: true, username: null, project: 'web', organization: 'Northwind', branch: 'main' }).flowName).toBe('Rotate');
+  });
+
+  test('preserves an unavailable authenticated first name as null without deriving one', () => {
+    expect(flowWelcome({ command: 'capy', initialized: false, username: undefined, project: 'web', organization: 'Northwind', branch: 'main' }).username).toBeNull();
   });
 
   test('keeps ordinary output buffered when no welcome context is present', () => {

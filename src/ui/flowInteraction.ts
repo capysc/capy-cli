@@ -25,11 +25,12 @@ type FlowQueueWrite = Readonly<{ readonly type: MessageType; readonly data: Data
 export const flowWelcome = (input: Readonly<{
   readonly command: 'capy' | 'rotate';
   readonly initialized: boolean;
+  readonly username: string | null | undefined;
   readonly project: string | undefined;
   readonly organization: string | undefined;
   readonly branch: string | null;
-}>): Readonly<{ readonly username: null; readonly project: string | null; readonly organization: string | null; readonly branch: string | null; readonly flowName: string }> => ({
-  username: null,
+}>): Readonly<{ readonly username: string | null; readonly project: string | null; readonly organization: string | null; readonly branch: string | null; readonly flowName: string }> => ({
+  username: input.username ?? null,
   project: input.project ?? null,
   organization: input.organization ?? null,
   branch: input.branch,
@@ -249,6 +250,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   await emit('output', { kind: 'welcome', welcome: flowWelcome({
     command: descriptor.command,
     initialized: project.initialized,
+    username: identity.user_first_name,
     project: project.projectName,
     organization: identity.organization_name,
     branch: project.activeBranch,

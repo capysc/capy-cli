@@ -25,8 +25,8 @@ mock.module('../../src/core/projectManager', () => ({
 }));
 mock.module('../../src/auth/authService', () => ({
   AuthService: class {
-    async authenticateSilent(): Promise<Readonly<{ readonly success: true; readonly user_id: string; readonly organization_id: string }>> {
-      return { success: true, user_id: USER_ID, organization_id: ORG_ID };
+    async authenticateSilent(): Promise<Readonly<{ readonly success: true; readonly user_id: string; readonly organization_id: string; readonly user_first_name: string }>> {
+      return { success: true, user_id: USER_ID, organization_id: ORG_ID, user_first_name: 'Ada' };
     }
 
     async getValidToken(): Promise<Readonly<{ readonly access_token: string; readonly user_id: string }>> {
@@ -281,7 +281,7 @@ describe('Flow agent handoff integration', () => {
       const terminal = writes.find(write => write.plaintext.type === 'goal');
       expect(welcome).toMatchObject({
         plaintext: { type: 'output', data: { kind: 'welcome', welcome: {
-          username: null, project: null, organization: null, branch: null, flowName: 'Secrets Setup',
+          username: 'Ada', project: null, organization: null, branch: null, flowName: 'Secrets Setup',
         } } },
       });
       expect(terminal).toMatchObject({
@@ -310,7 +310,7 @@ describe('Flow agent handoff integration', () => {
       const terminal = writes.find(write => write.plaintext.type === 'goal');
       expect(welcome).toMatchObject({
         plaintext: { type: 'output', data: { kind: 'welcome', welcome: {
-          username: null, project: null, organization: null, branch: null, flowName: 'Secrets Setup',
+          username: 'Ada', project: null, organization: null, branch: null, flowName: 'Secrets Setup',
         } } },
       });
       expect(terminal).toMatchObject({
