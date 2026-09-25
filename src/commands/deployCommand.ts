@@ -19,6 +19,7 @@ import {
   DeployContext,
   DeployMode,
   DeployResult,
+  PreflightResult,
   TargetConfig,
 } from '../deploy/adapter';
 import {
@@ -46,6 +47,11 @@ import { KeepFile } from '../types/index';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
+import {
+  DEFAULT_TOKEN_ENV,
+  baseUrlProblem,
+  tokenEnvProblem,
+} from '../deploy/adapters/dokploy';
 import { classify, isBuildTime } from '../deploy/classify';
 import type { WebDeployAdapterContext } from '../ui/deployScreens';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
@@ -226,12 +232,14 @@ async function decryptCurrentBranch(
 /**
  * Mint the SECRETS_BLOB + PROJECT_KEY pair for build-time injection (what
  * `capy run` consumes). Same devMode-aware auth as decryptCurrentBranch — so
- * under capy-dev it talks to the dev service, not prod.
+ * under capy-dev it talks to the dev service, not prod. The bundle carries
+ * only `vars` — the target's selection — never the whole `.env`.
  */
 async function mintForDeploy(
   cwd: string,
+  vars: readonly string[],
   devMode: boolean = false,
-): Promise<{ secretsBlob: string; projectKey: string }> {
+): Promise<{ secretsBlob: string; projectKey: string; deployId: string }> {
   const keep = readKeep(cwd);
   if (!keep) throw new Error('no keep.lock — run `capy` to sync first.');
 
@@ -252,8 +260,49 @@ async function mintForDeploy(
     orgId: keep.orgId,
     projectId: keep.projectId,
     userId: result.user_id,
+    vars,
   });
-  return { secretsBlob: minted.secretsBlob, projectKey: minted.projectKey };
+  return {
+    secretsBlob: minted.secretsBlob,
+    projectKey: minted.projectKey,
+    deployId: minted.deployId,
+  };
+}
+
+/** What the deploy hands its adapter, or `null` once the failure is printed. */
+interface DeploySecrets {
+  env: Record<string, string>;
+  deployToken?: { secretsBlob: string; projectKey: string; deployId: string };
+}
+
+/**
+ * Decrypt the secrets we're about to push — or, for an adapter that ships the
+ * `capy run` pair, mint it. Runs only after preflight has passed.
+ */
+async function loadDeploySecrets(
+  cwd: string,
+  adapter: DeployAdapter,
+  target: TargetConfig,
+  options: DeployCliOptions,
+): Promise<DeploySecrets | null> {
+  if (options.dryRun) {
+    console.log(YELLOW('  --dry-run: no secrets will be decrypted or pushed.'));
+    return { env: {} };
+  }
+  if (adapter.needsDeployToken) {
+    try {
+      return { env: {}, deployToken: await mintForDeploy(cwd, target.vars, options.devMode) };
+    } catch (err: any) {
+      console.error(`${RED('✗')} mint deploy token: ${err.message}`);
+      return null;
+    }
+  }
+  try {
+    return { env: await decryptCurrentBranch(cwd, options.devMode) };
+  } catch (err: any) {
+    console.error(`${RED('✗')} decrypt: ${err.message}`);
+    return null;
+  }
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -321,9 +370,20 @@ async function promptVercelGitBranch(
  * until they land. Keeping them is right: "Fly.io is coming" is the answer a
  * Fly user actually has.
  */
+/**
+ * Adapters whose settings step has no browser screen yet. They are left out of
+ * the browser's adapter list, and a run that already knows it is one of them
+ * asks its questions in the terminal instead.
+ */
+const TERMINAL_ONLY_SETUP: ReadonlySet<string> = new Set(['dokploy']);
+
 function adapterChoices(): DeployAdapterChoice[] {
   return [
-    ...ALL_ADAPTERS.map((a) => ({ id: a.id, label: a.label, detail: [a.description] })),
+    ...ALL_ADAPTERS.filter((a) => !TERMINAL_ONLY_SETUP.has(a.id)).map((a) => ({
+      id: a.id,
+      label: a.label,
+      detail: [a.description],
+    })),
     ...listPlanned()
       .filter((p) => !ALL_ADAPTERS.some((a) => a.id === p.id))
       .map((p) => ({
@@ -382,6 +442,12 @@ function settingsDefaults(
           detectedOpts.pathPrefix ??
           `/capy/${basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-')}/`,
         naming: existingOpts.naming ?? detectedOpts.naming ?? 'verbatim',
+      };
+    case 'dokploy':
+      return {
+        baseUrl: existingOpts.baseUrl ?? '',
+        applicationId: existingOpts.applicationId ?? '',
+        tokenEnv: existingOpts.tokenEnv ?? detectedOpts.tokenEnv ?? DEFAULT_TOKEN_ENV,
       };
     default:
       return {};
@@ -499,6 +565,286 @@ interface WebPickerOptions extends WebContext {
   intent?: 'create' | 'edit' | 'reconfirm';
 }
 
+/**
+ * Which adapter this run targets. An existing target's kind wins (the picker
+ * is re-editing it), then a caller-preselected id, and only then does the
+ * interactive "Where are you deploying?" list get asked — planned-but-unshipped
+ * adapters appear disabled with a fallback hint.
+ */
+async function resolveAdapterChoice(
+  existing: TargetConfig | undefined,
+  preselectedAdapterId: string | undefined,
+): Promise<string> {
+  if (existing) return existing.kind;
+  if (preselectedAdapterId) return preselectedAdapterId;
+  const realChoices = ALL_ADAPTERS.map((a) => ({
+    name: `${a.label}  ${DIM('— ' + a.description)}`,
+    value: a.id,
+    short: a.label,
+  }));
+  const planned = listPlanned().filter((p) => !ALL_ADAPTERS.some((a) => a.id === p.id));
+  const plannedChoices = planned.map((p) => ({
+    name: `${p.label}  ${DIM('(coming soon — ' + p.fallbackHint + ')')}`,
+    value: p.id,
+    short: p.label,
+    disabled: 'use capy export until adapter lands',
+  }));
+  const choices: any[] = [...realChoices];
+  if (plannedChoices.length > 0) {
+    choices.push(new inquirer.Separator() as any, ...plannedChoices);
+  }
+  const ans: { kind: string } = (await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'kind',
+      message: 'Where are you deploying?',
+      theme: LIST_THEME,
+      choices,
+    } as any,
+  ])) as any;
+  return ans.kind;
+}
+
+/** Adapter-specific options, asked once the adapter and branch are known. */
+async function resolveAdapterOptions(
+  adapter: DeployAdapter,
+  cwd: string,
+  branchVars: string[],
+  detectedOpts: Record<string, string>,
+  existingOpts: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  if (adapter.id === 'cf-worker') {
+    return await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'workerName',
+        message: 'Worker name (from wrangler.toml):',
+        default: existingOpts.workerName ?? detectedOpts.workerName ?? '',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'workerDir',
+        message: 'Worker directory (contains wrangler.toml):',
+        default: existingOpts.workerDir ?? detectedOpts.workerDir ?? '.',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+    ]);
+  }
+  if (adapter.id === 'vercel') {
+    // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
+    // but capy pushes each var as a plaintext Environment Variable into the
+    // chosen Vercel environment via the vercel CLI — so the build reads them
+    // natively with no `capy run` decrypt step. Capture the app dir, which
+    // Vercel environment these vars go to, and — for Preview — exactly which
+    // git branch that Preview env is wired to. The Preview scope is a GIT
+    // branch Vercel knows about, which is NOT a capy branch name nor necessarily
+    // the branch you're checked out on, so we pick from the repo's real branches.
+    const ans = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'projectDir',
+        message: 'Project directory (contains .vercel/project.json or package.json):',
+        default: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'list',
+        name: 'vercelEnv',
+        message: 'Which Vercel environment should these secrets go to?',
+        choices: [
+          { name: 'Preview — scoped to a specific git branch', value: 'preview' },
+          { name: 'Production', value: 'production' },
+        ],
+        default: existingOpts.vercelEnv ?? 'preview',
+      },
+    ]);
+    // Drop gitBranch entirely for production — it has no meaning there.
+    return ans.vercelEnv === 'preview'
+      ? {
+          projectDir: ans.projectDir,
+          vercelEnv: 'preview',
+          gitBranch: await promptVercelGitBranch(cwd, existingOpts.gitBranch),
+        }
+      : { projectDir: ans.projectDir, vercelEnv: 'production' };
+  }
+  if (adapter.id === 'cf-pages') {
+    return await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'projectName',
+        message: 'Pages project name (from wrangler pages project list):',
+        default: existingOpts.projectName ?? detectedOpts.projectName ?? '',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'buildCwd',
+        message: 'Build directory (contains package.json):',
+        default: existingOpts.buildCwd ?? detectedOpts.buildCwd ?? '.',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'buildCmd',
+        message: 'Build command (run inside the build directory):',
+        default: existingOpts.buildCmd ?? detectedOpts.buildCmd ?? 'bun run build',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'distDir',
+        message: 'Dist directory (relative to build directory):',
+        default: existingOpts.distDir ?? detectedOpts.distDir ?? 'dist',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+    ]);
+  }
+  if (adapter.id === 'aws-ssm') {
+    // Show the live name transformation in the naming prompt so the
+    // env-var ↔ parameter mapping is never abstract.
+    const exampleVar = classify(branchVars).runtime[0] ?? 'DATABASE_URL';
+    return await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'region',
+        message: 'AWS region:',
+        default: existingOpts.region ?? detectedOpts.region ?? detectAwsRegion() ?? 'us-east-1',
+        validate: (v: string) => (v.trim() ? true : 'required'),
+      },
+      {
+        type: 'input',
+        name: 'pathPrefix',
+        message: 'Parameter path prefix:',
+        default:
+          existingOpts.pathPrefix ??
+          detectedOpts.pathPrefix ??
+          `/capy/${basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-')}/`,
+        validate: (v: string) =>
+          /^\/[a-zA-Z0-9_.\-/]*\/$/.test(v.trim()) ? true : "must start and end with '/' (e.g. /capy/prod/)",
+        filter: (v: string) => v.trim(),
+      },
+      {
+        type: 'list',
+        name: 'naming',
+        message: 'Parameter naming:',
+        theme: LIST_THEME,
+        choices: [
+          {
+            name: `verbatim    ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'verbatim')}`)}`,
+            value: 'verbatim',
+            short: 'verbatim',
+          },
+          {
+            name: `kebab-case  ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'kebab')}`)}`,
+            value: 'kebab',
+            short: 'kebab',
+          },
+        ],
+        default: existingOpts.naming ?? detectedOpts.naming ?? 'verbatim',
+      },
+    ]);
+  }
+  if (adapter.id === 'dokploy') {
+    // The API token itself is never asked for or saved — only the name of the
+    // environment variable that holds it at deploy time.
+    return await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'baseUrl',
+        message: 'Dokploy URL:',
+        default: existingOpts.baseUrl,
+        validate: (v: string) => baseUrlProblem(v) ?? true,
+        filter: (v: string) => v.trim(),
+      },
+      {
+        type: 'input',
+        name: 'applicationId',
+        message: 'Dokploy application ID:',
+        default: existingOpts.applicationId,
+        validate: (v: string) => (v.trim() ? true : 'required'),
+        filter: (v: string) => v.trim(),
+      },
+      {
+        type: 'input',
+        name: 'tokenEnv',
+        message: 'Environment variable that holds your Dokploy API token:',
+        default: existingOpts.tokenEnv ?? detectedOpts.tokenEnv ?? DEFAULT_TOKEN_ENV,
+        validate: (v: string) => tokenEnvProblem(v) ?? true,
+        filter: (v: string) => v.trim(),
+      },
+    ]);
+  }
+  return {};
+}
+
+/**
+ * CI vs direct. CI-only adapters (Vercel) have no direct mode at all — capy
+ * never runs their CLI — so the question is skipped and 'ci' is forced.
+ */
+async function resolveMode(
+  adapter: DeployAdapter,
+  existing: TargetConfig | undefined,
+): Promise<DeployMode> {
+  if (adapter.ciOnly) return 'ci';
+  const ciHelp = adapter.ciOnly
+    ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
+    : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
+  const ans = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'mode',
+      message: 'How should this target deploy?',
+      theme: LIST_THEME,
+      choices: [
+        {
+          name: `Via CI/CD        ${DIM('— ' + ciHelp)}`,
+          value: 'ci',
+          short: 'ci',
+        },
+        {
+          name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
+          value: 'direct',
+          short: 'direct',
+        },
+      ],
+      // Existing target's mode wins over the adapter default on subsequent
+      // picker passes.
+      default: existing?.mode ?? adapter.defaultMode,
+    } as any,
+  ]);
+  return ans.mode as DeployMode;
+}
+
+/**
+ * CI mode only — type the git branch the deploy PR opens against. Repos can
+ * have hundreds of branches, so a list picker is the wrong shape. Text entry
+ * defaulting to the current branch (you usually open the PR against the
+ * branch you're on), then the existing target's saved value, then main/master.
+ */
+async function resolveGitBaseBranch(
+  cwd: string,
+  mode: DeployMode,
+  existing: TargetConfig | undefined,
+): Promise<string | undefined> {
+  if (mode !== 'ci') return undefined;
+  const local = listLocalBranches(cwd);
+  const fallback =
+    currentBranch(cwd) ??
+    existing?.gitBaseBranch ??
+    (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main');
+  const ans = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'gitBaseBranch',
+      message: 'Open the deploy PR against which target branch?',
+      default: fallback,
+      validate: (v: string) => (v.trim().length > 0 ? true : 'enter a branch name'),
+    },
+  ]);
+  return ans.gitBaseBranch.trim();
+}
+
 async function runPicker(
   cwd: string,
   keep: KeepInfo,
@@ -520,7 +866,15 @@ async function runPicker(
   const branchVarSet = new Set(Object.keys(new FileManager(cwd).readEnvFile()));
   const branchVars = keep.variables.filter((v) => branchVarSet.has(v));
 
-  if (web?.web) {
+  // Dokploy has no browser settings screen yet (browser screens are built in
+  // the Keep workbench first), so its setup stays in the terminal.
+  const knownAdapterId = existing?.kind ?? preselectedAdapterId;
+  const browserSetup = !!web?.web && !(knownAdapterId && TERMINAL_ONLY_SETUP.has(knownAdapterId));
+  if (web?.web && !browserSetup) {
+    console.log(`  ${DIM('Dokploy setup runs in the terminal.')}`);
+  }
+
+  if (web?.web && browserSetup) {
     // Same computation, same defaults, same validators — only the surface the
     // questions are drawn on differs. The route is declared before the first
     // page opens, including the adapter stop a preselected run never visits.
@@ -575,41 +929,7 @@ async function runPicker(
   // planned-but-not-shipped ones appear disabled with a fallback hint, so
   // the picker doubles as a roadmap and points users at `capy export` until
   // each adapter lands.
-  let adapterChoice: string;
-  if (existing) {
-    adapterChoice = existing.kind;
-  } else if (preselectedAdapterId) {
-    adapterChoice = preselectedAdapterId;
-  } else {
-    const realChoices = ALL_ADAPTERS.map((a) => ({
-      name: `${a.label}  ${DIM('— ' + a.description)}`,
-      value: a.id,
-      short: a.label,
-    }));
-    const planned = listPlanned().filter(
-      (p) => !ALL_ADAPTERS.some((a) => a.id === p.id),
-    );
-    const plannedChoices = planned.map((p) => ({
-      name: `${p.label}  ${DIM('(coming soon — ' + p.fallbackHint + ')')}`,
-      value: p.id,
-      short: p.label,
-      disabled: 'use capy export until adapter lands',
-    }));
-    const choices: any[] = [...realChoices];
-    if (plannedChoices.length > 0) {
-      choices.push(new inquirer.Separator() as any, ...plannedChoices);
-    }
-    const ans: { kind: string } = (await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'kind',
-        message: 'Where are you deploying?',
-        theme: LIST_THEME,
-        choices,
-      } as any,
-    ])) as any;
-    adapterChoice = ans.kind;
-  }
+  const adapterChoice = await resolveAdapterChoice(existing, preselectedAdapterId);
 
   const adapter = getAdapter(adapterChoice);
   if (!adapter) throw new Error(`Unknown adapter: ${adapterChoice}`);
@@ -637,145 +957,7 @@ async function runPicker(
   // 4. Adapter-specific options.
   const detectedOpts = (detected.options ?? {}) as Record<string, string>;
   const existingOpts = (existing?.options ?? {}) as Record<string, string>;
-  let options: Record<string, unknown> = {};
-  if (adapter.id === 'cf-worker') {
-    const ans = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'workerName',
-        message: 'Worker name (from wrangler.toml):',
-        default: existingOpts.workerName ?? detectedOpts.workerName ?? '',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'input',
-        name: 'workerDir',
-        message: 'Worker directory (contains wrangler.toml):',
-        default: existingOpts.workerDir ?? detectedOpts.workerDir ?? '.',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-    ]);
-    options = ans;
-  } else if (adapter.id === 'vercel') {
-    // Vercel: code ships via the keep.lock PR (Vercel git CI builds on merge),
-    // but capy pushes each var as a plaintext Environment Variable into the
-    // chosen Vercel environment via the vercel CLI — so the build reads them
-    // natively with no `capy run` decrypt step. Capture the app dir, which
-    // Vercel environment these vars go to, and — for Preview — exactly which
-    // git branch that Preview env is wired to. The Preview scope is a GIT
-    // branch Vercel knows about, which is NOT a capy branch name nor necessarily
-    // the branch you're checked out on, so we pick from the repo's real branches.
-    const ans = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'projectDir',
-        message: 'Project directory (contains .vercel/project.json or package.json):',
-        default: existingOpts.projectDir ?? detectedOpts.projectDir ?? '.',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'list',
-        name: 'vercelEnv',
-        message: 'Which Vercel environment should these secrets go to?',
-        choices: [
-          { name: 'Preview — scoped to a specific git branch', value: 'preview' },
-          { name: 'Production', value: 'production' },
-        ],
-        default: existingOpts.vercelEnv ?? 'preview',
-      },
-    ]);
-    // Drop gitBranch entirely for production — it has no meaning there.
-    options =
-      ans.vercelEnv === 'preview'
-        ? {
-            projectDir: ans.projectDir,
-            vercelEnv: 'preview',
-            gitBranch: await promptVercelGitBranch(cwd, existingOpts.gitBranch),
-          }
-        : { projectDir: ans.projectDir, vercelEnv: 'production' };
-  } else if (adapter.id === 'cf-pages') {
-    const ans = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'projectName',
-        message: 'Pages project name (from wrangler pages project list):',
-        default: existingOpts.projectName ?? detectedOpts.projectName ?? '',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'input',
-        name: 'buildCwd',
-        message: 'Build directory (contains package.json):',
-        default: existingOpts.buildCwd ?? detectedOpts.buildCwd ?? '.',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'input',
-        name: 'buildCmd',
-        message: 'Build command (run inside the build directory):',
-        default:
-          existingOpts.buildCmd ?? detectedOpts.buildCmd ?? 'bun run build',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'input',
-        name: 'distDir',
-        message: 'Dist directory (relative to build directory):',
-        default: existingOpts.distDir ?? detectedOpts.distDir ?? 'dist',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-    ]);
-    options = ans;
-  } else if (adapter.id === 'aws-ssm') {
-    // Show the live name transformation in the naming prompt so the
-    // env-var ↔ parameter mapping is never abstract.
-    const exampleVar =
-      classify(branchVars).runtime[0] ?? 'DATABASE_URL';
-    const ans = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'region',
-        message: 'AWS region:',
-        default:
-          existingOpts.region ?? detectedOpts.region ?? detectAwsRegion() ?? 'us-east-1',
-        validate: (v: string) => (v.trim() ? true : 'required'),
-      },
-      {
-        type: 'input',
-        name: 'pathPrefix',
-        message: 'Parameter path prefix:',
-        default:
-          existingOpts.pathPrefix ??
-          detectedOpts.pathPrefix ??
-          `/capy/${basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, '-')}/`,
-        validate: (v: string) =>
-          /^\/[a-zA-Z0-9_.\-/]*\/$/.test(v.trim())
-            ? true
-            : "must start and end with '/' (e.g. /capy/prod/)",
-        filter: (v: string) => v.trim(),
-      },
-      {
-        type: 'list',
-        name: 'naming',
-        message: 'Parameter naming:',
-        theme: LIST_THEME,
-        choices: [
-          {
-            name: `verbatim    ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'verbatim')}`)}`,
-            value: 'verbatim',
-            short: 'verbatim',
-          },
-          {
-            name: `kebab-case  ${DIM(`${exampleVar} → ${leafFor(exampleVar, 'kebab')}`)}`,
-            value: 'kebab',
-            short: 'kebab',
-          },
-        ],
-        default: existingOpts.naming ?? detectedOpts.naming ?? 'verbatim',
-      },
-    ]);
-    options = ans;
-  }
+  const options = await resolveAdapterOptions(adapter, cwd, branchVars, detectedOpts, existingOpts);
 
   // 5. Var picking — show every var in keep.lock and pre-select the ones
   // most likely to be relevant for this adapter (runtime for cf-worker,
@@ -824,60 +1006,14 @@ async function runPicker(
   //
   // CI-only adapters (Vercel) have no direct mode at all — capy never runs
   // their CLI — so skip the question and force 'ci'.
-  let mode: DeployMode;
-  if (adapter.ciOnly) {
-    mode = 'ci';
-  } else {
-    const ciHelp =
-      adapter.ciOnly
-        ? `commit keep.lock on a branch + open PR; ${adapter.label}'s git CI deploys on merge`
-        : `commit keep.lock on a branch + push secrets + open PR; CI deploys on merge`;
-    mode = (await inquirer.prompt([
-      {
-        type: 'list',
-        name: 'mode',
-        message: 'How should this target deploy?',
-        theme: LIST_THEME,
-        choices: [
-          {
-            name: `Via CI/CD        ${DIM('— ' + ciHelp)}`,
-            value: 'ci',
-            short: 'ci',
-          },
-          {
-            name: `Deploy directly  ${DIM('— commit keep.lock + push secrets + deploy now')}`,
-            value: 'direct',
-            short: 'direct',
-          },
-        ],
-        default: existing?.mode ?? adapter.defaultMode,
-      } as any,
-    ])).mode as DeployMode;
-  }
+  const mode = await resolveMode(adapter, existing);
 
   // 6b. CI mode only — type the git branch the deploy PR opens against.
   // Repos can have hundreds of branches, so a list picker is the wrong
   // shape. Text entry defaulting to the current branch (you usually open the
   // PR against the branch you're on), then the existing target's saved value,
   // then main/master.
-  let gitBaseBranch: string | undefined;
-  if (mode === 'ci') {
-    const local = listLocalBranches(cwd);
-    const fallback =
-      currentBranch(cwd) ??
-      existing?.gitBaseBranch ??
-      (local.includes('main') ? 'main' : local.includes('master') ? 'master' : 'main');
-    gitBaseBranch = (await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'gitBaseBranch',
-        message: 'Open the deploy PR against which target branch?',
-        default: fallback,
-        validate: (v: string) =>
-          v.trim().length > 0 ? true : 'enter a branch name',
-      },
-    ])).gitBaseBranch.trim();
-  }
+  const gitBaseBranch = await resolveGitBaseBranch(cwd, mode, existing);
 
   // 7. Target name.
   const defaultName = existing?.name ?? `${adapter.id}-${branch}`;
@@ -931,6 +1067,11 @@ function renderResult(result: DeployResult): void {
     const url = step.url ? `  ${step.url}` : '';
     console.log(`  ${mark} ${step.label}${detail}${url}`);
   }
+  // `result.warnings` (e.g. Dokploy's DOKPLOY_SHADOWED_VAR) is printed once,
+  // right after preflight (see the `preflight.warnings` loop above this
+  // function's call site) — not here too. The data still rides on
+  // `DeployResult` for any caller reading it structurally; this function just
+  // doesn't ALSO print it, so one deploy prints one line, not two or three.
   console.log('');
   if (result.epilogue) {
     console.log(result.epilogue);
@@ -1077,29 +1218,48 @@ export async function deployRemove(
       return 1;
     }
     const { chooseDeployTargetInBrowser } = await import('../ui/deployScreens');
-    let picked: { action: string | null; target: string };
-    try {
-      picked = await chooseDeployTargetInBrowser({
-        projectName: basename(cwd),
-        configPath: deployConfigPath(cwd),
-        purpose: 'browse',
-        targets: targetRows(cwd, targets),
-        view: 'confirm-remove',
-        subjectTarget: name,
-        allow: ['remove'],
-        open: openBrowser(),
-      });
-    } catch (err) {
+    const picked = await chooseDeployTargetInBrowser({
+      projectName: basename(cwd),
+      configPath: deployConfigPath(cwd),
+      purpose: 'browse',
+      targets: targetRows(cwd, targets),
+      view: 'confirm-remove',
+      subjectTarget: name,
+      allow: ['remove'],
+      open: openBrowser(),
+    }).catch((err: unknown) => {
       // An unanswered delete is a refusal and the screen resolves it as one —
       // clicking "Keep it" ends the run at once, and a window nobody came back
       // to ends on the screen's deadline. So a throw here is the SERVER, which
       // is a different fact and must not read as a decline.
       console.error(`${RED('✗')} could not open the confirm page: ${err instanceof Error ? err.message : err}`);
-      return 1;
-    }
+      return null;
+    });
+    if (picked === null) return 1;
     if (picked.action !== 'remove') {
       console.log(`Kept target ${B(name)}.`);
       return 0;
+    }
+  }
+
+  // Best-effort cleanup for adapters that left something outside
+  // `.capy/deploy.json` (Dokploy's Capy-managed env block). Never gates the
+  // local removal below — it is an offer, not a precondition.
+  const target = getTarget(cwd, name);
+  const adapter = target ? getAdapter(target.kind) : null;
+  if (target && adapter?.onRemove) {
+    const interactive = process.stdin.isTTY === true;
+    const confirm = async (message: string): Promise<boolean> => {
+      if (!interactive) return false;
+      const ans = await inquirer.prompt([
+        { type: 'confirm', name: 'yes', message, default: false },
+      ]);
+      return !!ans.yes;
+    };
+    const offer = await adapter.onRemove(target, { cwd, interactive, confirm });
+    if (offer) {
+      console.log(`  ${offer.ok ? GREEN('✓') : DIM('·')} ${offer.detail}`);
+      if (offer.manualHint) console.log(`  ${DIM(offer.manualHint)}`);
     }
   }
 
@@ -1448,29 +1608,32 @@ export function describeDeployRoute(
   options: DeployCliOptions,
   cwd: string,
 ): { stops: DeployPlanConfirmStop[]; unanswered: string[] } {
-  const answers: Partial<Record<DeployStopId, string>> = {};
-  const skipped: DeployStopId[] = [];
-
-  if (options.platformAnswer) answers.platform = stripAnsiText(options.platformAnswer);
-  if (options.modeAnswer) answers.mode = stripAnsiText(options.modeAnswer);
-  else skipped.push('mode');
-
   const saved = nameArg ? getTarget(cwd, nameArg) : null;
-  if (saved) {
-    const adapter = getAdapter(saved.kind);
-    answers.platform = stripAnsiText(adapter?.label ?? saved.kind);
-    answers.branch = saved.branch;
-    answers.variables = `${saved.vars.length} ${saved.vars.length === 1 ? 'variable' : 'variables'}`;
-    answers.delivery = (adapter?.ciOnly ? 'ci' : saved.mode ?? 'direct') === 'ci' ? 'CI' : 'Direct';
-    answers.name = saved.name;
-    if (Object.keys(saved.options).length > 0) answers.settings = 'saved';
-  } else if (options.target) {
-    const adapter = getAdapter(options.target);
-    if (adapter) answers.platform = stripAnsiText(adapter.label);
-    // `--target <id>` builds an ad-hoc target that is never written to disk,
-    // so the naming question does not happen rather than going unanswered.
-    skipped.push('name');
-  }
+  const savedAdapter = saved ? getAdapter(saved.kind) : null;
+  // `--target <id>` builds an ad-hoc target that is never written to disk,
+  // so the naming question does not happen rather than going unanswered.
+  const targetAdapter = !saved && options.target ? getAdapter(options.target) : null;
+
+  const answers: Partial<Record<DeployStopId, string>> = {
+    ...(options.platformAnswer ? { platform: stripAnsiText(options.platformAnswer) } : {}),
+    ...(options.modeAnswer ? { mode: stripAnsiText(options.modeAnswer) } : {}),
+    ...(saved
+      ? {
+          platform: stripAnsiText(savedAdapter?.label ?? saved.kind),
+          branch: saved.branch,
+          variables: `${saved.vars.length} ${saved.vars.length === 1 ? 'variable' : 'variables'}`,
+          delivery: (savedAdapter?.ciOnly ? 'ci' : saved.mode ?? 'direct') === 'ci' ? 'CI' : 'Direct',
+          name: saved.name,
+          ...(Object.keys(saved.options).length > 0 ? { settings: 'saved' } : {}),
+        }
+      : targetAdapter
+        ? { platform: stripAnsiText(targetAdapter.label) }
+        : {}),
+  };
+  const skipped: DeployStopId[] = [
+    ...(options.modeAnswer ? [] : (['mode'] as DeployStopId[])),
+    ...(!saved && options.target ? (['name'] as DeployStopId[]) : []),
+  ];
 
   // Where the traveller stands is the FIRST outstanding stop, taken off the
   // plan itself so the two can never disagree about what is left.
@@ -1482,7 +1645,233 @@ export function describeDeployRoute(
     skipped,
     dryRun,
   });
-  return { stops, unanswered: unansweredDeployStops(stops) };
+  return {
+    stops,
+    unanswered: unansweredDeployStops(stops),
+  };
+}
+
+/**
+ * Whether to touch `keep.lock`'s `changed_at` and re-trigger CI when the
+ * decrypted secrets did not actually change vs. `baseBranch` — `--force`,
+ * or (only absent that) a confirm, on the terminal or the browser page,
+ * whichever is asking this run's questions. Declining (or nobody able to
+ * ask — no TTY, no `--web`) leaves it false, the CLI's own default.
+ */
+async function resolveForceRedeploy(
+  options: DeployCliOptions,
+  web: WebContext,
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  mode: DeployMode,
+  preflight: PreflightResult,
+  baseBranch: string,
+): Promise<boolean> {
+  if (options.force) return true;
+  if (options.yes) return false;
+  if (web.web) {
+    // Its own gate, because the change gate can only be evaluated after the
+    // secrets are decrypted — the terminal asks it here for the same reason.
+    // Declining is the CLI's own default of `false`, and the page says out
+    // loud what the terminal leaves implicit: without a forced redeploy this
+    // run pushes the secrets, opens no pull request, and nothing deploys.
+    const gate = await confirmDeployOnScreen(cwd, target, adapter, mode, options, web, preflight, {
+      baseBranch,
+      changed: false,
+    });
+    return gate.action === 'confirm' && gate.force;
+  }
+  if (process.stdin.isTTY) {
+    const ans = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'force',
+        message:
+          `No secret changes vs origin/${baseBranch} — force a redeploy ` +
+          `(touch keep.lock to re-trigger CI)?`,
+        default: false,
+      },
+    ]);
+    return !!ans.force;
+  }
+  return false;
+}
+
+/** What the CI change-gate settled on, or why the deploy must stop before anything ships. */
+type CiChangeGate = { ok: true; keepLockChanged: boolean; deployKeepContent: string } | { ok: false };
+
+/**
+ * "Does this deploy change what's recorded on the target branch?" — keyed off
+ * the decrypted values being pushed, folded into origin/<base>'s keep.lock,
+ * NOT the local keep.lock file (which can lag .env). The folded keep IS what
+ * gets committed for the PR, so the gate and the committed artifact can't
+ * disagree.
+ *
+ * Only called when `gitOk && mode === 'ci' && !options.dryRun` — direct mode
+ * and dry runs never reach this, and the caller's own fallback (unchanged,
+ * empty content) covers them without calling in here at all.
+ */
+async function computeCiChangeGate(
+  cwd: string,
+  baseBranch: string,
+  env: Record<string, string>,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  mode: DeployMode,
+  options: DeployCliOptions,
+  web: WebContext,
+  preflight: PreflightResult,
+): Promise<CiChangeGate> {
+  const fetched = fetchRemoteBranch(cwd, baseBranch);
+  if (!fetched.ok) {
+    console.error(`${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`);
+    return { ok: false };
+  }
+  const relKeep = repoRelPath(cwd, 'keep.lock');
+  const baseRaw = readFileAtRef(cwd, `origin/${baseBranch}`, relKeep);
+  // base branch has no keep.lock yet — scaffold identity from the local keep
+  // with no variables, so the PR creates keep.lock from the deploy.
+  const baseKeep: KeepFile = baseRaw
+    ? JSON.parse(baseRaw)
+    : { ...JSON.parse(readFileSync(join(cwd, 'keep.lock'), 'utf-8')), variables: {} };
+
+  const built = buildDeployKeep(baseKeep, env, target.vars, target.branch);
+  if (built.changed) {
+    return { ok: true, keepLockChanged: true, deployKeepContent: built.content };
+  }
+
+  // No secret change vs the target. --force (or a confirm) touches
+  // keep.lock's changed_at so there's a real diff to PR + re-trigger CI.
+  const force = await resolveForceRedeploy(options, web, cwd, target, adapter, mode, preflight, baseBranch);
+  if (force) {
+    return {
+      ok: true,
+      keepLockChanged: true,
+      deployKeepContent: touchDeployKeep(baseKeep, target.vars, target.branch),
+    };
+  }
+
+  console.log(
+    `  ${DIM('·')} no secret changes vs origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to re-trigger CI.')}`,
+  );
+  return { ok: true, keepLockChanged: false, deployKeepContent: built.content };
+}
+
+/** Everything `deployRemove` needs after `showRunResult`'s `pr` field. */
+type OpenedPr = { branch: string; base: string; url?: string; title?: string; manualUrl?: string };
+
+/**
+ * Commit the deploy-PR keep.lock in the isolated worktree, push it, and open
+ * the PR — the part of the CI-mode flow that happens INSIDE the worktree
+ * `openCiDeployPr` (below) creates and always tears down.
+ */
+async function commitAndOpenDeployPr(
+  cwd: string,
+  wt: string,
+  branchName: string,
+  baseBranch: string,
+  msg: string,
+  target: TargetConfig,
+  deployKeepContent: string,
+): Promise<{ ok: true; openedPr?: OpenedPr; prUrl?: string } | { ok: false }> {
+  try {
+    const relKeep = repoRelPath(cwd, 'keep.lock');
+    writeFileSync(join(wt, relKeep), deployKeepContent);
+    const commit = stageAndCommit(wt, [relKeep], msg);
+    if (!commit.ok) {
+      console.error(`${RED('✗')} ${commit.error}`);
+      return { ok: false };
+    }
+    const push = pushBranch(wt, branchName);
+    if (!push.ok) {
+      console.error(`${RED('✗')} git push: ${push.error}`);
+      return { ok: false };
+    }
+    console.log(`  ${GREEN('✓')} push    ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
+    const title = `deploy: ${target.name} → ${target.branch} (${target.kind})`;
+    const body = buildDeployPrBody(target);
+    const pr = createPr(wt, title, body, baseBranch);
+    if (pr.ok) {
+      console.log(`  ${GREEN('✓')} PR      ${pr.url ?? '(open)'}`);
+      return { ok: true, openedPr: { branch: branchName, base: baseBranch, url: pr.url, title }, prUrl: pr.url };
+    }
+    if (pr.manualHint) {
+      console.log(`  ${YELLOW('!')} ${pr.manualHint}`);
+      return { ok: true, openedPr: { branch: branchName, base: baseBranch, title } };
+    }
+    console.error(`${RED('✗')} gh pr create: ${pr.error}`);
+    return { ok: false };
+  } finally {
+    // Always tear down the worktree + local branch ref (the branch lives on
+    // origin once pushed). The user's tree was never touched, so there is
+    // nothing to restore and nothing to strand.
+    worktreeRemove(cwd, wt);
+    deleteLocalBranch(cwd, branchName);
+  }
+}
+
+/**
+ * CI mode: open the keep.lock PR in an ISOLATED git worktree. The user's
+ * working tree and current branch are NEVER touched — no stash, no
+ * checkout-back, nothing to strand on failure.
+ */
+async function openCiDeployPr(
+  cwd: string,
+  baseBranch: string,
+  msg: string,
+  target: TargetConfig,
+  deployKeepContent: string,
+): Promise<{ ok: true; openedPr?: OpenedPr } | { ok: false }> {
+  const now = new Date();
+  const ts = now.toISOString().slice(0, 10).replace(/-/g, '') + '-' + now.toISOString().slice(11, 19).replace(/:/g, '');
+  const rand = Math.random().toString(36).slice(2, 6);
+  const branchName = `capy-deploy-${ts}-${rand}`;
+  const wt = join(tmpdir(), `capy-deploy-${ts}-${rand}`);
+
+  const added = worktreeAddNewBranch(cwd, wt, branchName, `origin/${baseBranch}`);
+  if (!added.ok) {
+    console.error(`${RED('✗')} git worktree add (off origin/${baseBranch}): ${added.error}`);
+    return { ok: false };
+  }
+
+  const committed = await commitAndOpenDeployPr(cwd, wt, branchName, baseBranch, msg, target, deployKeepContent);
+  if (!committed.ok) return { ok: false };
+
+  console.log('');
+  console.log(`  ${B('Review and merge to deploy:')}`);
+  if (committed.prUrl) console.log(`    ${committed.prUrl}`);
+  console.log(`    ${DIM('branch')}    ${branchName} ${DIM(`→ ${baseBranch}`)}`);
+  console.log('');
+  return { ok: true, openedPr: committed.openedPr };
+}
+
+/**
+ * Stash other working-tree changes and commit `keep.lock` on the current
+ * branch — direct mode only. CI mode never touches the user's tree; it
+ * builds the PR commit in an isolated worktree instead (`openCiDeployPr`).
+ */
+async function commitDirectModeKeepLock(
+  cwd: string,
+  msg: string,
+): Promise<{ ok: true; stashed: boolean } | { ok: false }> {
+  const stash = stashOtherChanges(cwd);
+  if (!stash.ok) {
+    console.error(`${RED('✗')} git stash: ${stash.error}`);
+    return { ok: false };
+  }
+  const stashed = stash.stashed;
+  if (stashed) {
+    console.log(`  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`);
+  }
+  const commit = stageAndCommit(cwd, ['keep.lock'], msg);
+  if (!commit.ok) {
+    console.error(`${RED('✗')} ${commit.error}`);
+    await unwindGitState(cwd, null, stashed);
+    return { ok: false };
+  }
+  console.log(`  ${GREEN('✓')} commit  ${msg}`);
+  return { ok: true, stashed };
 }
 
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
@@ -1798,6 +2187,9 @@ export async function deployCommand(
     if (preflight.hint) console.error('\n' + preflight.hint);
     return 1;
   }
+  for (const w of preflight.warnings ?? []) {
+    console.log(`  ${YELLOW('!')} ${w.message}`);
+  }
 
   // capy never blocks on uncommitted source changes. It only ever stages and
   // commits keep.lock — your work-in-progress is left exactly as it was.
@@ -1862,124 +2254,31 @@ export async function deployCommand(
 
   // ── Decrypt the secrets we're about to push. In CI mode these same values
   //    drive the change-gate, so it measures exactly what ships.
-  let env: Record<string, string> = {};
-  let deployToken: { secretsBlob: string; projectKey: string } | undefined;
-  if (options.dryRun) {
-    console.log(YELLOW('  --dry-run: no secrets will be decrypted or pushed.'));
-  } else if (adapter.needsDeployToken) {
-    try {
-      deployToken = await mintForDeploy(cwd, options.devMode);
-    } catch (err: any) {
-      console.error(`${RED('✗')} mint deploy token: ${err.message}`);
-      return 1;
-    }
-  } else {
-    try {
-      env = await decryptCurrentBranch(cwd, options.devMode);
-    } catch (err: any) {
-      console.error(`${RED('✗')} decrypt: ${err.message}`);
-      return 1;
-    }
-  }
+  const secrets = await loadDeploySecrets(cwd, adapter, target, options);
+  if (!secrets) return 1;
+  const { env, deployToken } = secrets;
 
   // ── CI change-gate ────────────────────────────────────────────
   // "Does this deploy change what's recorded on the target branch?" — keyed off
   // the decrypted values being pushed, folded into origin/<base>'s keep.lock,
   // NOT the local keep.lock file (which can lag .env). The folded keep IS what
   // we commit for the PR, so the gate and the committed artifact can't disagree.
-  let keepLockChanged = false;
-  let deployKeepContent = '';
-  if (gitOk && mode === 'ci' && !options.dryRun) {
-    const fetched = fetchRemoteBranch(cwd, baseBranch);
-    if (!fetched.ok) {
-      console.error(`${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`);
-      return 1;
-    }
-    const relKeep = repoRelPath(cwd, 'keep.lock');
-    const baseRaw = readFileAtRef(cwd, `origin/${baseBranch}`, relKeep);
-    let baseKeep: KeepFile;
-    if (baseRaw) {
-      baseKeep = JSON.parse(baseRaw);
-    } else {
-      // base branch has no keep.lock yet — scaffold identity from the local
-      // keep with no variables, so the PR creates keep.lock from the deploy.
-      const local = JSON.parse(readFileSync(join(cwd, 'keep.lock'), 'utf-8'));
-      baseKeep = { ...local, variables: {} };
-    }
-    const nowIso = new Date().toISOString();
-    const built = buildDeployKeep(baseKeep, env, target.vars, target.branch);
-    keepLockChanged = built.changed;
-    deployKeepContent = built.content;
-
-    // No secret change vs the target. --force (or an interactive confirm) touches
-    // keep.lock's changed_at so there's a real diff to PR + re-trigger CI.
-    if (!keepLockChanged) {
-      let force = !!options.force;
-      if (!force && !options.yes && web.web) {
-        // Its own gate, because the change gate can only be evaluated after
-        // the secrets are decrypted — the terminal asks it here for the same
-        // reason. Declining is the CLI's own default of `false`, and the page
-        // says out loud what the terminal leaves implicit: without a forced
-        // redeploy this run pushes the secrets, opens no pull request, and
-        // nothing ever deploys.
-        const gate = await confirmDeployOnScreen(
-          cwd,
-          target,
-          adapter,
-          mode,
-          options,
-          web,
-          preflight,
-          { baseBranch, changed: false },
-        );
-        force = gate.action === 'confirm' && gate.force;
-      } else if (!force && !options.yes && process.stdin.isTTY) {
-        const ans = await inquirer.prompt([
-          {
-            type: 'confirm',
-            name: 'force',
-            message:
-              `No secret changes vs origin/${baseBranch} — force a redeploy ` +
-              `(touch keep.lock to re-trigger CI)?`,
-            default: false,
-          },
-        ]);
-        force = !!ans.force;
-      }
-      if (force) {
-        deployKeepContent = touchDeployKeep(baseKeep, target.vars, target.branch);
-        keepLockChanged = true;
-      }
-    }
-    if (!keepLockChanged) {
-      console.log(
-        `  ${DIM('·')} no secret changes vs origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to re-trigger CI.')}`,
-      );
-    }
-  }
+  const changeGate: CiChangeGate =
+    gitOk && mode === 'ci' && !options.dryRun
+      ? await computeCiChangeGate(cwd, baseBranch, env, target, adapter, mode, options, web, preflight)
+      : { ok: true, keepLockChanged: false, deployKeepContent: '' };
+  if (!changeGate.ok) return 1;
+  const { keepLockChanged, deployKeepContent } = changeGate;
 
   // ── Direct mode only: commit keep.lock on the current branch, stashing other
   //    WIP. CI mode never touches the user's tree — it builds the PR commit in
   //    an isolated worktree below.
-  let directStashed = false;
-  if (gitOk && mode === 'direct' && keepLockDirty) {
-    const stash = stashOtherChanges(cwd);
-    if (!stash.ok) {
-      console.error(`${RED('✗')} git stash: ${stash.error}`);
-      return 1;
-    }
-    directStashed = stash.stashed;
-    if (directStashed) {
-      console.log(`  ${GREEN('✓')} stash   set aside other working-tree changes (will restore)`);
-    }
-    const commit = stageAndCommit(cwd, ['keep.lock'], msg);
-    if (!commit.ok) {
-      console.error(`${RED('✗')} ${commit.error}`);
-      await unwindGitState(cwd, null, directStashed);
-      return 1;
-    }
-    console.log(`  ${GREEN('✓')} commit  ${msg}`);
-  }
+  const directCommit =
+    gitOk && mode === 'direct' && keepLockDirty
+      ? await commitDirectModeKeepLock(cwd, msg)
+      : { ok: true as const, stashed: false };
+  if (!directCommit.ok) return 1;
+  const directStashed = directCommit.stashed;
 
   // ── Push the secrets.
   const result = await adapter.deploy(target, {
@@ -2006,75 +2305,16 @@ export async function deployCommand(
   // The pull request this run opened, for the result page. Held rather than
   // printed-and-forgotten: `✓ PR (open)` with no URL row is the terminal
   // saying a pull request exists and giving you no way to reach it.
-  let openedPr:
-    | { branch: string; base: string; url?: string; title?: string; manualUrl?: string }
-    | undefined;
-
-  // ── CI mode: open the keep.lock PR in an ISOLATED git worktree.
-  //    The user's working tree and current branch are NEVER touched — no stash,
-  //    no checkout-back, nothing to strand on failure.
-  if (mode === 'ci' && !options.dryRun && keepLockChanged) {
-    const now = new Date();
-    const ts =
-      now.toISOString().slice(0, 10).replace(/-/g, '') + '-' +
-      now.toISOString().slice(11, 19).replace(/:/g, '');
-    const rand = Math.random().toString(36).slice(2, 6);
-    const branchName = `capy-deploy-${ts}-${rand}`;
-    const wt = join(tmpdir(), `capy-deploy-${ts}-${rand}`);
-
-    const added = worktreeAddNewBranch(cwd, wt, branchName, `origin/${baseBranch}`);
-    if (!added.ok) {
-      console.error(`${RED('✗')} git worktree add (off origin/${baseBranch}): ${added.error}`);
-      return 1;
-    }
-
-    let prUrl: string | undefined;
-    let failed = false;
-    try {
-      const relKeep = repoRelPath(cwd, 'keep.lock');
-      writeFileSync(join(wt, relKeep), deployKeepContent);
-      const commit = stageAndCommit(wt, [relKeep], msg);
-      if (!commit.ok) {
-        console.error(`${RED('✗')} ${commit.error}`);
-        failed = true;
-      } else {
-        const push = pushBranch(wt, branchName);
-        if (!push.ok) {
-          console.error(`${RED('✗')} git push: ${push.error}`);
-          failed = true;
-        } else {
-          console.log(`  ${GREEN('✓')} push    ${branchName} ${DIM(`(off origin/${baseBranch})`)}`);
-          const title = `deploy: ${target.name} → ${target.branch} (${target.kind})`;
-          const body = buildDeployPrBody(target);
-          const pr = createPr(wt, title, body, baseBranch);
-          if (pr.ok) {
-            prUrl = pr.url;
-            openedPr = { branch: branchName, base: baseBranch, url: pr.url, title };
-            console.log(`  ${GREEN('✓')} PR      ${pr.url ?? '(open)'}`);
-          } else if (pr.manualHint) {
-            openedPr = { branch: branchName, base: baseBranch, title };
-            console.log(`  ${YELLOW('!')} ${pr.manualHint}`);
-          } else {
-            console.error(`${RED('✗')} gh pr create: ${pr.error}`);
-            failed = true;
-          }
-        }
-      }
-    } finally {
-      // Always tear down the worktree + local branch ref (the branch lives on
-      // origin once pushed). The user's tree was never touched, so there is
-      // nothing to restore and nothing to strand.
-      worktreeRemove(cwd, wt);
-      deleteLocalBranch(cwd, branchName);
-    }
-    if (failed) return 1;
-
-    console.log('');
-    console.log(`  ${B('Review and merge to deploy:')}`);
-    if (prUrl) console.log(`    ${prUrl}`);
-    console.log(`    ${DIM('branch')}    ${branchName} ${DIM(`→ ${baseBranch}`)}`);
-    console.log('');
-  }
+  //
+  // CI mode: open the keep.lock PR in an ISOLATED git worktree (see
+  // `openCiDeployPr`). The user's working tree and current branch are NEVER
+  // touched — no stash, no checkout-back, nothing to strand on failure.
+  const prOutcome =
+    mode === 'ci' && !options.dryRun && keepLockChanged
+      ? await openCiDeployPr(cwd, baseBranch, msg, target, deployKeepContent)
+      : { ok: true as const, openedPr: undefined as OpenedPr | undefined };
+  if (!prOutcome.ok) return 1;
+  const openedPr = prOutcome.openedPr;
 
   if (web.web) {
     await showRunResult(cwd, target, adapter, mode, options, result, {

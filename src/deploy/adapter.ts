@@ -58,12 +58,27 @@ export interface DetectedDefaults {
   summary?: string;
 }
 
+/**
+ * A non-blocking heads-up an adapter wants shown either way — e.g. Dokploy's
+ * "this var is also set on the platform and will be ignored at boot". `code`
+ * is the stable signal a caller could branch on; `message` is what the CLI
+ * prints, pre-composed by the adapter so no generic code has to know every
+ * adapter's warning vocabulary.
+ */
+export interface DeployWarning {
+  code: string;
+  names: readonly string[];
+  message: string;
+}
+
 export interface PreflightResult {
   ok: boolean;
   /** Human-readable explanation if ok=false; the deploy flow prints this. */
   reason?: string;
   /** Optional fix-it hint shown alongside reason. */
   hint?: string;
+  /** Non-blocking heads-up(s), shown whether or not ok is true. */
+  warnings?: readonly DeployWarning[];
 }
 
 export interface DeployStep {
@@ -82,6 +97,8 @@ export interface DeployResult {
    * user must do by hand (e.g. aws-ssm's task-definition wiring snippet).
    */
   epilogue?: string;
+  /** Non-blocking heads-up(s) about the deploy that just ran. */
+  warnings?: readonly DeployWarning[];
 }
 
 export interface DeployContext {
@@ -91,8 +108,10 @@ export interface DeployContext {
    * Minted SECRETS_BLOB + PROJECT_KEY for build-time secret injection (the
    * pair `capy run` consumes). Present only when the adapter sets
    * `needsDeployToken`; the deploy flow mints it instead of decrypting `env`.
+   * The bundle holds only the target's selected `vars`. `deployId` is what
+   * `capy deploy revoke` takes.
    */
-  deployToken?: { secretsBlob: string; projectKey: string };
+  deployToken?: { secretsBlob: string; projectKey: string; deployId?: string };
   /** Set by `capy deploy --dry-run`. Adapter must not push anything. */
   dryRun: boolean;
   /**
@@ -105,6 +124,32 @@ export interface DeployContext {
 }
 
 export type AdapterVarKind = 'runtime' | 'build-time';
+
+/**
+ * What happened (or didn't) when `onRemove` offered to clean up something an
+ * adapter left outside `.capy/deploy.json` — e.g. Dokploy's Capy-managed env
+ * block. `code` is the stable signal; `detail` and `manualHint` are prose
+ * the adapter composed for the terminal to print verbatim.
+ */
+export interface RemoveOfferResult {
+  /** Whether the adapter changed anything outside the local target config. */
+  ok: boolean;
+  /** Stable reason code — never parsed as prose by the caller. */
+  code: string;
+  /** One line printed either way. */
+  detail: string;
+  /** Shown only when nothing was changed automatically — the manual steps. */
+  manualHint?: string;
+}
+
+/** What `onRemove` needs from the caller to ask its yes/no question. */
+export interface RemoveOfferContext {
+  cwd: string;
+  /** False outside a TTY — `confirm` never prompts when this is false. */
+  interactive: boolean;
+  /** Asks a yes/no question; resolves `false` without prompting when !interactive. */
+  confirm(message: string): Promise<boolean>;
+}
 
 export interface DeployAdapter {
   /** Stable canonical id used in CLI flags and config files. */
@@ -173,4 +218,12 @@ export interface DeployAdapter {
   preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult>;
   /** Push secrets + deploy code. Adapter prints its own progress. */
   deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult>;
+  /**
+   * Optional side effect run when `capy deploy remove` drops this target,
+   * for adapters that left something outside `.capy/deploy.json` (Dokploy's
+   * Capy-managed env block). Returning `null` means there is nothing to
+   * offer for this config. Local target removal always proceeds regardless
+   * of this hook's outcome — it is a best-effort cleanup, not a gate.
+   */
+  onRemove?(config: TargetConfig, ctx: RemoveOfferContext): Promise<RemoveOfferResult | null>;
 }

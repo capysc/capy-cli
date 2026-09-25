@@ -1,0 +1,485 @@
+/**
+ * Dokploy API client + env-block primitives, shared by the `dokploy` deploy
+ * adapter and (later) a `capy connect dokploy` import flow.
+ *
+ * Kept separate from the adapter so a second consumer never has to import
+ * deploy-flow types (`DeployAdapter`, `DeployContext`, …) just to talk to
+ * Dokploy or read its env blob.
+ */
+
+/**
+ * Sort a copy, never the input. `Array.prototype.toSorted` would do this in
+ * one call but is Node 20+ only — this package's `engines.node` is
+ * `>=18.0.0`, and `dist/` ships to whatever Node the installer has.
+ */
+export function sortedCopy<T>(xs: readonly T[], cmp?: (a: T, b: T) => number): T[] {
+  return Array.from(xs).sort(cmp);
+}
+
+// ── Dokploy API shapes (only the fields we read) ───────────────────────────
+
+export interface DokployApplication {
+  applicationId: string;
+  name?: string;
+  appName?: string;
+  env: string | null;
+  buildArgs: string | null;
+  buildSecrets: string | null;
+  createEnvFile: boolean;
+}
+
+export type DokployDeploymentStatus = 'running' | 'done' | 'error' | 'cancelled';
+
+export interface DokployDeployment {
+  deploymentId: string;
+  status: DokployDeploymentStatus | null;
+  createdAt: string;
+  errorMessage?: string | null;
+}
+
+// ── HTTP client ────────────────────────────────────────────────────────────
+
+/** Why a Dokploy call failed, as a code the caller branches on. */
+export type DokployErrorCode =
+  | 'unreachable'
+  | 'unauthorized'
+  | 'not_found'
+  | 'bad_request'
+  | 'server_error'
+  | 'bad_response';
+
+export class DokployApiError extends Error {
+  constructor(
+    public readonly code: DokployErrorCode,
+    public readonly status: number | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'DokployApiError';
+  }
+}
+
+function codeForStatus(status: number): DokployErrorCode {
+  if (status === 401 || status === 403) return 'unauthorized';
+  if (status === 404) return 'not_found';
+  if (status >= 400 && status < 500) return 'bad_request';
+  return 'server_error';
+}
+
+export type FetchLike = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body?: string },
+) => Promise<{ status: number; ok: boolean; text(): Promise<string> }>;
+
+export interface DokployClient {
+  getApplication(applicationId: string): Promise<DokployApplication>;
+  saveEnvironment(app: Omit<DokployApplication, 'name' | 'appName'>): Promise<void>;
+  deploy(applicationId: string, title: string): Promise<void>;
+  listDeployments(applicationId: string): Promise<readonly DokployDeployment[]>;
+  readLogs(deploymentId: string): Promise<string>;
+}
+
+/** `https://host/` and `https://host/api` both mean the same dashboard. */
+export function apiBase(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/+$/, '');
+  return trimmed.endsWith('/api') ? trimmed : `${trimmed}/api`;
+}
+
+export function createDokployClient(
+  baseUrl: string,
+  token: string,
+  fetchImpl: FetchLike = fetch as unknown as FetchLike,
+): DokployClient {
+  const base = apiBase(baseUrl);
+  const headers = {
+    'x-api-key': token,
+    accept: 'application/json',
+    'content-type': 'application/json',
+  };
+
+  const call = async (
+    method: 'GET' | 'POST',
+    procedure: string,
+    params: Record<string, unknown>,
+  ): Promise<string> => {
+    const url =
+      method === 'GET'
+        ? `${base}/${procedure}?${new URLSearchParams(params as Record<string, string>).toString()}`
+        : `${base}/${procedure}`;
+    const res = await fetchImpl(url, {
+      method,
+      headers,
+      ...(method === 'POST' ? { body: JSON.stringify(params) } : {}),
+    }).catch((err: unknown) => {
+      throw new DokployApiError(
+        'unreachable',
+        null,
+        `cannot reach ${base}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      throw new DokployApiError(
+        codeForStatus(res.status),
+        res.status,
+        `${procedure} returned HTTP ${res.status}`,
+      );
+    }
+    return text;
+  };
+
+  const json = (procedure: string, text: string): unknown => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new DokployApiError('bad_response', null, `${procedure} did not return JSON`);
+    }
+  };
+
+  return {
+    async getApplication(applicationId) {
+      const body = json(
+        'application.one',
+        await call('GET', 'application.one', { applicationId }),
+      ) as Partial<DokployApplication> | null;
+      if (!body || typeof body !== 'object' || body.applicationId !== applicationId) {
+        throw new DokployApiError(
+          'bad_response',
+          null,
+          'application.one did not return the requested application',
+        );
+      }
+      return {
+        applicationId: body.applicationId,
+        name: body.name,
+        appName: body.appName,
+        env: typeof body.env === 'string' ? body.env : null,
+        buildArgs: typeof body.buildArgs === 'string' ? body.buildArgs : null,
+        buildSecrets: typeof body.buildSecrets === 'string' ? body.buildSecrets : null,
+        createEnvFile: body.createEnvFile !== false,
+      };
+    },
+    async saveEnvironment(app) {
+      await call('POST', 'application.saveEnvironment', {
+        applicationId: app.applicationId,
+        env: app.env,
+        buildArgs: app.buildArgs,
+        buildSecrets: app.buildSecrets,
+        createEnvFile: app.createEnvFile,
+      });
+    },
+    async deploy(applicationId, title) {
+      await call('POST', 'application.deploy', { applicationId, title });
+    },
+    async listDeployments(applicationId) {
+      const body = json(
+        'deployment.all',
+        await call('GET', 'deployment.all', { applicationId }),
+      );
+      if (!Array.isArray(body)) {
+        throw new DokployApiError('bad_response', null, 'deployment.all did not return a list');
+      }
+      return body.filter(
+        (d): d is DokployDeployment =>
+          !!d && typeof d === 'object' && typeof d.deploymentId === 'string',
+      );
+    },
+    async readLogs(deploymentId) {
+      const text = await call('GET', 'deployment.readLogs', { deploymentId });
+      // tRPC-OpenAPI serialises a string result as a JSON string.
+      const parsed = (() => {
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          return text;
+        }
+      })();
+      return typeof parsed === 'string' ? parsed : '';
+    },
+  };
+}
+
+// ── Token resolution ─────────────────────────────────────────────────────
+
+/** The env var name `capy deploy dokploy` reads by default, absent an override. */
+export const DEFAULT_TOKEN_ENV = 'DOKPLOY_API_KEY';
+
+/**
+ * The Dokploy API token, read from the variable NAME the target configured
+ * (never from the target itself — the token is never persisted to
+ * `.capy/deploy.json`).
+ */
+export function resolveDokployToken(
+  tokenEnv: string,
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  return env[tokenEnv] || null;
+}
+
+// ── Env block: parse / find / replace / strip ─────────────────────────────
+
+/** Exact marker lines around the block Capy owns inside Dokploy's `env`. */
+export const MANAGED_BEGIN = '# capy:managed:begin — written by `capy deploy`, do not edit';
+export const MANAGED_END = '# capy:managed:end';
+
+/**
+ * The two names `capy run` reads FIRST in deployed mode, and what `capy
+ * deploy` writes today. Chosen so a stale plaintext var of the same NAME the
+ * user already had on the platform never wins over the decrypted value —
+ * see `capy run`'s precedence rules in `runCommand.ts`.
+ *
+ * NOT `_DEPLOY_KEY`: that name is reserved for the OIDC design's per-deploy
+ * key (`<deployId>.<K_deploy>`, see `docs/oidc-ci-auth-spec.md`, CAP-54).
+ * This variable holds the project key, so it is `_PROJECT_KEY`.
+ */
+export const RUNTIME_PAIR = ['_SECRETS_BLOB', '_PROJECT_KEY'] as const;
+
+/**
+ * The pair `capy run` still reads for back-compat, in the platform's own
+ * env-wins-over-blob precedence. No adapter writes these names anymore, but
+ * a leftover pair from an older deploy is still a name Capy must never
+ * silently collide with.
+ */
+export const OLD_RUNTIME_PAIR = ['SECRETS_BLOB', 'PROJECT_KEY'] as const;
+
+const KEY_VALUE_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
+
+export interface DotenvEntry {
+  name: string;
+  value: string;
+}
+
+/** Dotenv-style lines as name/value pairs. Comments and blanks skipped. */
+export function parseDotenvEntries(lines: readonly string[]): readonly DotenvEntry[] {
+  return lines.flatMap((line) => {
+    const m = KEY_VALUE_LINE.exec(line);
+    return m ? [{ name: m[1], value: m[2] }] : [];
+  });
+}
+
+/** Variable names defined by dotenv-style lines. Comments and blanks ignored. */
+export function envKeys(lines: readonly string[]): readonly string[] {
+  return parseDotenvEntries(lines).map((e) => e.name);
+}
+
+export type EnvMergeProblemCode = 'malformed_block' | 'reserved_outside_block';
+
+export interface EnvMergeProblem {
+  code: EnvMergeProblemCode;
+  names: readonly string[];
+}
+
+export type EnvWarningCode = 'DOKPLOY_SHADOWED_VAR';
+
+export interface EnvWarning {
+  code: EnvWarningCode;
+  names: readonly string[];
+}
+
+export interface EnvSplit {
+  /** Text before the Capy block, byte for byte (the WHOLE env when no block was found). */
+  before: string;
+  /** Text after the Capy block, byte for byte (empty when no block was found). */
+  after: string;
+  /** Whether a Capy-managed block was found. */
+  hadBlock: boolean;
+  /**
+   * The line ending found inside/around the existing block (right after the
+   * begin marker). Only set when `hadBlock` is true — a replace reuses this
+   * rather than guessing, so the block's own framing never drifts across
+   * repeated writes.
+   */
+  blockEol?: '\n' | '\r\n';
+}
+
+interface RawLine {
+  content: string;
+  eol: '' | '\n' | '\r\n';
+}
+
+/**
+ * Every line of `text`, each paired with its OWN original terminator (`''`
+ * for a final unterminated line). One-to-one with `text.split(/\r?\n/)` —
+ * same length, same content per index — but keeps the byte each line
+ * actually ended with, which a plain `.split()` throws away.
+ */
+function splitPreservingEol(text: string): readonly RawLine[] {
+  const m = /\r\n|\n/.exec(text);
+  if (!m) return [{ content: text, eol: '' }];
+  const eol = m[0] as '\n' | '\r\n';
+  return [{ content: text.slice(0, m.index), eol }, ...splitPreservingEol(text.slice(m.index + eol.length))];
+}
+
+/** The more common line ending in `text`; `\n` when there's no clear majority or no line ending at all. */
+function dominantEol(text: string): '\n' | '\r\n' {
+  const crlf = text.match(/\r\n/g)?.length ?? 0;
+  const bareLf = (text.match(/\n/g)?.length ?? 0) - crlf;
+  return crlf > bareLf ? '\r\n' : '\n';
+}
+
+/**
+ * Split Dokploy's env into the text Capy owns and everything else. Exactly
+ * zero or one well-formed block is accepted — anything else means someone
+ * edited the markers, and guessing which lines are ours could delete theirs.
+ *
+ * `before`/`after` are exact substrings of the original text — never
+ * re-joined, re-terminated, or trimmed — so `mergeManagedBlock` and
+ * `stripManagedBlock` can round-trip every byte outside the block.
+ */
+export function splitManagedBlock(env: string | null): EnvSplit | EnvMergeProblem {
+  const text = env ?? '';
+  const rawLines = splitPreservingEol(text);
+  const begins = rawLines.flatMap((l, i) => (l.content.trim() === MANAGED_BEGIN ? [i] : []));
+  const ends = rawLines.flatMap((l, i) => (l.content.trim() === MANAGED_END ? [i] : []));
+  if (begins.length === 0 && ends.length === 0) {
+    return { before: text, after: '', hadBlock: false };
+  }
+  if (begins.length !== 1 || ends.length !== 1 || ends[0] < begins[0]) {
+    return { code: 'malformed_block', names: [] };
+  }
+  const offsetOf = (idx: number): number =>
+    rawLines.slice(0, idx).reduce((acc, l) => acc + l.content.length + l.eol.length, 0);
+  const beginStart = offsetOf(begins[0]);
+  const endEnd = offsetOf(ends[0]) + rawLines[ends[0]].content.length + rawLines[ends[0]].eol.length;
+  return {
+    before: text.slice(0, beginStart),
+    after: text.slice(endEnd),
+    hadBlock: true,
+    blockEol: rawLines[begins[0]].eol || '\n',
+  };
+}
+
+/**
+ * The lines Capy does not own, ready for name/value parsing: CRLF-safe (no
+ * line carries a trailing `\r`), same shape `envKeys`/`parseDotenvEntries`
+ * always took. `splitManagedBlock`'s `before`/`after` stay byte-exact for
+ * reconstruction; this is the parsing-only view over the same text.
+ */
+export function outsideLines(split: EnvSplit): readonly string[] {
+  return (split.before + split.after).split(/\r?\n/);
+}
+
+/**
+ * Everything that must stop a deploy before anything is minted or written: an
+ * edited/duplicated block, or a runtime pair (old or new name) that Capy did
+ * not write sitting outside the block — an unknown pair would be silently
+ * replaced or would shadow ours.
+ */
+export function envProblems(env: string | null): EnvMergeProblem | null {
+  const split = splitManagedBlock(env);
+  if ('code' in split) return split;
+  const keys = new Set(envKeys(outsideLines(split)));
+  const reserved = [...RUNTIME_PAIR, ...OLD_RUNTIME_PAIR].filter((k) => keys.has(k));
+  return reserved.length > 0 ? { code: 'reserved_outside_block', names: reserved } : null;
+}
+
+/**
+ * A selected variable ALSO set as a plain Dokploy value, outside the block.
+ * `capy run`'s new pair lets the decrypted value win (see `RUNTIME_PAIR`
+ * doc), so the stale dashboard value is shadowed rather than dangerous — this
+ * is a warning, not a reason to refuse the deploy.
+ */
+export function envWarnings(
+  env: string | null,
+  selectedVars: readonly string[],
+): EnvWarning | null {
+  const split = splitManagedBlock(env);
+  if ('code' in split) return null;
+  const keys = new Set(envKeys(outsideLines(split)));
+  const shadowed = sortedCopy(selectedVars.filter((k) => keys.has(k)));
+  return shadowed.length > 0 ? { code: 'DOKPLOY_SHADOWED_VAR', names: shadowed } : null;
+}
+
+/**
+ * Dokploy's env with Capy's block replaced (or appended for a first write).
+ * Everything outside the block — every byte, every line's own terminator,
+ * the trailing-newline state — is carried through exactly, so
+ * `stripManagedBlock` can undo this precisely (see its own doc).
+ */
+export function mergeManagedBlock(
+  split: EnvSplit,
+  pair: { secretsBlob: string; projectKey: string },
+): string {
+  const eol = split.hadBlock ? (split.blockEol ?? '\n') : dominantEol(split.before);
+  const block = [
+    MANAGED_BEGIN,
+    `${RUNTIME_PAIR[0]}=${pair.secretsBlob}`,
+    `${RUNTIME_PAIR[1]}=${pair.projectKey}`,
+    MANAGED_END,
+  ].join(eol);
+  if (split.hadBlock) {
+    // Replace in place: swap only the block's own 4 lines. `before`/`after`
+    // — including whatever separator the FIRST write added — are untouched.
+    return split.before + block + split.after;
+  }
+  // First write: append at the end. Exactly one separator line ending is
+  // added, and ONLY when there is existing content to separate the block
+  // from — one deterministic rule, so `stripManagedBlock` can undo it
+  // exactly, no matter how many replaces happen after this first write.
+  return split.before.length > 0 ? split.before + eol + block : block;
+}
+
+/**
+ * Dokploy's env with Capy's block removed entirely — the exact revert of
+ * `mergeManagedBlock`'s first write. Undoes ONLY the one separator line
+ * ending that write added (when it added one) — every other byte outside the
+ * block, including however many trailing blank lines the user already had,
+ * comes back exactly as it was before Capy ever touched this environment.
+ */
+export function stripManagedBlock(split: EnvSplit): string {
+  if (!split.hadBlock) return split.before + split.after;
+  return split.before.replace(/\r?\n$/, '') + split.after;
+}
+
+export function describeEnvProblem(p: EnvMergeProblem): { reason: string; hint: string } {
+  switch (p.code) {
+    case 'malformed_block':
+      return {
+        reason: 'the Capy block in the Dokploy environment is incomplete or duplicated',
+        hint:
+          'In the Dokploy Environment tab, keep one begin line and one end line of the Capy block,\n' +
+          'or delete the block. Then re-run `capy deploy`.',
+      };
+    case 'reserved_outside_block':
+      return {
+        reason: `the Dokploy environment already sets ${p.names.join(', ')}`,
+        hint: `Remove ${p.names.join(', ')} from the Dokploy Environment tab, then re-run \`capy deploy\`.`,
+      };
+  }
+}
+
+/**
+ * The line printed for a `DOKPLOY_SHADOWED_VAR` warning. Names only, never
+ * values.
+ */
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+export function describeEnvWarning(w: EnvWarning): string {
+  const verb = w.names.length === 1 ? 'is' : 'are';
+  return `${w.names.join(', ')} ${verb} set in Dokploy too; ignored at boot.`;
+}
+
+// ── Importable entries (for a future `capy connect dokploy`) ─────────────
+
+export type ImportSkipReason = 'DOKPLOY_REFERENCE_VALUE';
+
+export interface ImportableEnvEntry {
+  name: string;
+  value: string;
+  /** Present when this entry should not be offered for import, and why. */
+  skip?: ImportSkipReason;
+}
+
+/**
+ * Entries a `capy connect dokploy` import could offer: every name outside
+ * the Capy block, minus the runtime pairs (Capy's own machinery, never a
+ * project secret), with a reference value like `${{project.SOME_VAR}}`
+ * flagged rather than silently imported as a literal string.
+ */
+export function listImportableEntries(env: string | null): readonly ImportableEnvEntry[] {
+  const split = splitManagedBlock(env);
+  if ('code' in split) return [];
+  const reserved = new Set<string>([...RUNTIME_PAIR, ...OLD_RUNTIME_PAIR]);
+  return parseDotenvEntries(outsideLines(split))
+    .filter((e) => !reserved.has(e.name))
+    .map((e) => (e.value.includes('${{') ? { ...e, skip: 'DOKPLOY_REFERENCE_VALUE' as const } : e));
+}

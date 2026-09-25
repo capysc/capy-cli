@@ -857,6 +857,10 @@ program
   .option('--no-push', 'record the link locally; do not push it to Capy')
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--reauth', 'pair with the provider again even if a usable session exists')
+  .option('--base-url <url>', 'dokploy import: dashboard URL')
+  .option('--application <id>', 'dokploy import: Application id')
+  .option('--token-env <name>', 'dokploy import: env var holding the API token')
+  .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
@@ -880,6 +884,10 @@ program
       noPush: options.push === false,
       nonTty: options.nonTty,
       reauth: options.reauth === true,
+      baseUrl: options.baseUrl,
+      application: options.application,
+      tokenEnv: options.tokenEnv,
+      json: options.json,
     });
   });
 

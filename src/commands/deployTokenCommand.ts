@@ -32,6 +32,7 @@ const PLATFORM_TO_CONNECTOR: Record<string, string> = {
   'vercel': 'vercel',
   'github-actions': 'gh-actions',
   'aws-ecs': 'aws-ssm',
+  'dokploy': 'dokploy',
   // Future:
   // 'fly':              'fly',
 };
@@ -50,6 +51,7 @@ const PLATFORMS = [
   { name: 'Docker', value: 'docker' },
   { name: 'Docker Compose', value: 'docker-compose' },
   { name: 'Dokku', value: 'dokku' },
+  { name: 'Dokploy', value: 'dokploy' },
   { name: 'Fly.io', value: 'fly' },
   { name: 'GitHub Actions', value: 'github-actions' },
   { name: 'GitLab CI', value: 'gitlab-ci' },
@@ -150,6 +152,12 @@ export interface MintDeployTokenDeps {
   orgId: string;
   projectId: string;
   userId: string;
+  /**
+   * Only these variables go into the bundle. Omitted → every `.env` value
+   * (the token+docs flow and the github-actions connector, which have no
+   * per-target selection).
+   */
+  vars?: readonly string[];
 }
 
 /** Thrown by mintDeployToken when .env has nothing to encrypt. Callers
@@ -161,6 +169,29 @@ export class EmptyEnvError extends Error {
   }
 }
 
+/** Thrown by mintDeployToken when a selected variable is not in `.env`, so a
+ * deploy never ships a bundle quietly missing a secret the target expects. */
+export class MissingSelectedVarsError extends Error {
+  constructor(public readonly missing: readonly string[]) {
+    super(
+      `Selected variable(s) not in .env: ${missing.join(', ')}. ` +
+        'Run capy to sync, or untick them with `capy deploy --edit`.',
+    );
+    this.name = 'MissingSelectedVarsError';
+  }
+}
+
+/** The `.env` entries a mint covers: all of them, or exactly the selection. */
+function selectEnv(
+  rawEnv: Record<string, string>,
+  vars: readonly string[] | undefined,
+): Record<string, string> {
+  if (!vars) return rawEnv;
+  const missing = vars.filter((k) => !(k in rawEnv));
+  if (missing.length > 0) throw new MissingSelectedVarsError(missing);
+  return Object.fromEntries(vars.map((k) => [k, rawEnv[k]]));
+}
+
 /**
  * Resolve the project key, mint a deploy id, KMS-wrap, and produce the
  * SECRETS_BLOB + PROJECT_KEY pair the deployed app feeds into `capy run`.
@@ -170,7 +201,11 @@ export class EmptyEnvError extends Error {
  * minted material. It does not exit, log, or render — throws on error.
  */
 export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<MintedDeployToken> {
-  const { serviceClient, fm, orgId, projectId, userId } = deps;
+  const { serviceClient, fm, orgId, projectId, userId, vars } = deps;
+  // Before any service call: an empty or incomplete selection must not leave
+  // a registered deploy token behind.
+  const selected = selectEnv(fm.readEnvFile(), vars);
+  if (Object.keys(selected).length === 0) throw new EmptyEnvError();
 
   const keyOps: KeyServiceOps = {
     coDecrypt: (oid, ct) => serviceClient.coDecrypt(oid, ct).then(r => r.plaintext),
@@ -190,12 +225,12 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
     innerBlob,
   );
 
-  const rawEnv = fm.readEnvFile();
-  const plaintextEnv: Record<string, string> = {};
-  for (const [key, value] of Object.entries(rawEnv)) {
-    plaintextEnv[key] = value.startsWith('capy:') ? fm.decryptValue(value, pkHex) : value;
-  }
-  if (Object.keys(plaintextEnv).length === 0) throw new EmptyEnvError();
+  const plaintextEnv: Record<string, string> = Object.fromEntries(
+    Object.entries(selected).map(([key, value]) => [
+      key,
+      value.startsWith('capy:') ? fm.decryptValue(value, pkHex) : value,
+    ]),
+  );
 
   // Encrypt env vars with DECRYPT_KEY derived from pk + service_key, where
   // service_key is derived deterministically from innerBlob. projectKey

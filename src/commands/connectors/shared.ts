@@ -212,6 +212,92 @@ export async function writeAndSync(
 }
 
 /**
+ * Write SEVERAL NEW variables at once — a `capy connect <import-connector>`
+ * import — and sync, in one push/commit rather than one per variable.
+ *
+ * Mirrors `writeAndSync`, but that function's `(varName, value)` pair is for
+ * ONE variable's value; an import adds N brand-new key/value pairs
+ * simultaneously. Chaining `writeAndSync` calls per variable would each read
+ * `ctx.localPlaintext`/`ctx.keep` as they stood BEFORE the run started, so a
+ * second call would push a snapshot missing the first call's write — this
+ * function builds the one final `env`/`keep.lock` state and writes it once.
+ *
+ * Every entry becomes a managed connector on its own (varName, branch) entry,
+ * same as `writeAndSync`'s `alsoConnect`.
+ */
+export async function writeImportedAndSync(
+  ctx: ResolvedContext,
+  entries: ReadonlyArray<{ varName: string; value: string; entry: ConnectorMetadata }>,
+  opts: { push: boolean; quiet?: boolean },
+): Promise<void> {
+  if (entries.length === 0) return;
+  const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
+
+  const finalEnv: Record<string, string> = {
+    ...localPlaintext,
+    ...Object.fromEntries(entries.map((e) => [e.varName, e.value])),
+  };
+  const also = entries.map((e) => ({ varName: e.varName, entry: e.entry }));
+  const attachAll = (k: KeepFile): KeepFile => applyConnectors(k, branch, entries[0].varName, undefined, also);
+
+  if (!opts.push) {
+    const merged = attachAll(keep);
+    if (merged !== keep) fileManager.writeKeepFile(merged);
+    fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, merged, branch);
+    return;
+  }
+
+  const encrypted: Record<string, string> = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      `capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`,
+    ]),
+  );
+  const envBlob = Object.entries(encrypted)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
+
+  const pushedVars: Record<string, { resource_id: string; value_hash: string }> = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      { resource_id: deriveResourceId(branch, k), value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16) },
+    ]),
+  );
+
+  const syncEngine = new SyncEngine();
+  const merged = syncEngine.mergeWithKeep(keep, pushedVars, branch);
+  const pruned: KeepFile = {
+    ...merged,
+    variables: Object.fromEntries(
+      Object.entries(merged.variables).flatMap(([name, varEntries]) => {
+        if (name in finalEnv) return [[name, varEntries]] as const;
+        const filtered = varEntries.filter((e) => e.branch !== branch);
+        return filtered.length > 0 ? ([[name, filtered]] as const) : [];
+      }),
+    ),
+  };
+  const finalKeep = attachAll(pruned);
+
+  const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
+
+  writeKeepCache(orgId, projectId, result.keep_hash, envBlob);
+  fileManager.writeKeepFile(SyncEngine.adoptServerKeep(result.keep_file, finalKeep, branch));
+  fileManager.writeEncryptedEnvFile(finalEnv, projectKey, undefined, finalKeep, branch);
+
+  const existingSyncState = pm.readSyncState();
+  fileManager.writeSyncState({
+    ...existingSyncState,
+    last_sync: new Date().toISOString(),
+    synced_variables: Object.keys(finalEnv),
+    user_id: userId,
+    keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
+  });
+
+  const { autoCommitKeep } = await import('../../git/autoCommitKeep');
+  autoCommitKeep(branch, process.cwd(), { quiet: opts.quiet });
+}
+
+/**
  * Attach the primary connector and any extras in one pass.
  *
  * Returns `keep` unchanged when there is nothing to attach, so the local-only

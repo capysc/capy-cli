@@ -36,6 +36,8 @@ ISOLATED_FILES=(
   tests/crypto/keyStability.test.ts
   tests/crypto/zeroTrust.test.ts
   tests/commands/logoutCleanup.test.ts
+  tests/commands/mintDeployTokenScope.test.ts
+  tests/commands/deployDokployWarningOnce.test.ts
   tests/files/fileManager.test.ts
   tests/ui/promptEngine.test.ts
   tests/commands/decryptCommand.test.ts

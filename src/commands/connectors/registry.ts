@@ -47,6 +47,27 @@ export interface ConnectOpts {
    * says so beside the option rather than accepting it and exiting afterwards.
    */
   devMode?: boolean;
+  /**
+   * Dokploy import only: dashboard URL (flag `--base-url`). Other connectors
+   * never read this.
+   */
+  baseUrl?: string;
+  /**
+   * Dokploy import only: Application id (flag `--application`). Other
+   * connectors never read this.
+   */
+  application?: string;
+  /**
+   * Dokploy import only: name of the env var holding the API token (flag
+   * `--token-env`). Other connectors never read this.
+   */
+  tokenEnv?: string;
+  /**
+   * Emit machine-readable JSON on stdout instead of the human UI. Currently
+   * read only by import-kind connectors (`dokploy`); a link-kind connector
+   * ignores it.
+   */
+  json?: boolean;
 }
 
 export interface RotateOpts {
@@ -96,9 +117,60 @@ export interface RotateResult {
   entry: ConnectorMetadata;
 }
 
+/** One variable an `import`-kind connector pulled in, ready for `writeImportedAndSync`. */
+export interface ImportedVarEntry {
+  varName: string;
+  value: string;
+  entry: ConnectorMetadata;
+}
+
+/** A candidate that was NOT imported, and why — a stable code, never a sentence. */
+export interface ImportSkip {
+  name: string;
+  code: string;
+}
+
+/** A non-blocking heads-up about the import, grouped by code like `DeployWarning`. */
+export interface ImportWarning {
+  code: string;
+  names: readonly string[];
+}
+
+/** Result of provider.import(): what `capy connect <import-connector>` pulled in, or why it refused. */
+export type ImportOutcome =
+  | {
+      ok: true;
+      applicationId: string;
+      imported: readonly ImportedVarEntry[];
+      unchanged: readonly string[];
+      skipped: readonly ImportSkip[];
+      warnings: readonly ImportWarning[];
+      deployTargetSaved: boolean;
+    }
+  | {
+      ok: false;
+      /** Stable refusal code — branch on this, never on `message`. */
+      code: string;
+      message: string;
+    };
+
 export interface ConnectorModule {
   name: string;
   description: string;
+  /**
+   * 'link' (default, omitted) — `connect()` associates ONE existing `.env`
+   * variable with a provider credential; nothing is pulled from the provider
+   * except that one value's fingerprint/type.
+   *
+   * 'import' — a ONE-TIME pull of MANY variables from the provider into
+   * `.env`. `connectCommand` routes to `import()` instead of `connect()`,
+   * skipping the var-picking and live-mode questions that only make sense for
+   * a single linked credential. `capy rotate` refuses on any var this kind of
+   * connector manages (CAP-662): there is nothing to rotate through a one-time
+   * import. Keyed off this field rather than the provider's name string, so
+   * the refusal is not `=== 'dokploy'` reasoning about a human-readable id.
+   */
+  kind?: 'link' | 'import';
   /**
    * Set when rotating runs an interactive auth step the user must complete by
    * hand (e.g. Stripe shells out to `stripe login`, which opens a browser).
@@ -137,18 +209,23 @@ export interface ConnectorModule {
     previous: ConnectorMetadata,
     opts: RotateOpts,
   ): Promise<RotateResult>;
+  /** Present only when `kind === 'import'`. See `kind`'s doc above. */
+  import?(ctx: ResolvedContext, opts: ConnectOpts): Promise<ImportOutcome>;
 }
 
 /** Registered providers, keyed by name (matches `connector.provider` on each keep.lock entry). */
 export const providers: Record<string, () => Promise<ConnectorModule>> = {
   stripe: async () => (await import('./stripe')).stripeConnector,
   workos: async () => (await import('./workos')).workosConnector,
+  dokploy: async () => (await import('./dokploy')).dokployConnector,
 };
 
 export function listProviders(): { name: string; description: string }[] {
   return [
     { name: 'stripe', description: 'Stripe API key (test or live, restricted)' },
     { name: 'workos', description: 'WorkOS environment API key (sandbox or production)' },
+    // COPY-FLAG: new user-facing string, minimal/neutral wording.
+    { name: 'dokploy', description: 'One-time import of env vars from a Dokploy Application' },
   ];
 }
 

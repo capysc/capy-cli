@@ -38,6 +38,18 @@ export interface ConnectorMetadata {
    * entries written before this field existed, which is why it is optional.
    */
   key_prefix?: string;
+  /**
+   * Dokploy import only: which Application the credential came from. Absent
+   * for every other provider.
+   */
+  application_id?: string;
+  /**
+   * Dokploy import only: ISO8601 UTC when `capy connect dokploy` imported this
+   * var. Distinct from `created_at` (unix seconds, every provider) — kept as
+   * its own field so a re-import's timestamp doesn't collide with the
+   * generic one other providers already rely on.
+   */
+  imported_at?: string;
 }
 
 /** v3 keep.lock variable entry — per-branch value hashes */
@@ -364,6 +376,11 @@ export const ERROR_CODES = {
   PROJECT_NAME_RESERVED: 'PROJECT_NAME_RESERVED',
   /** The human declined a confirmation prompt (e.g. `capy system rm`'s default-no). Not an error — a choice. */
   CANCELLED: 'CANCELLED',
+  /**
+   * `capy rotate` refused on a var whose connector is import-only (e.g.
+   * `dokploy`) — there is nothing to rotate through a one-time import.
+   */
+  ROTATE_NOT_SUPPORTED_IMPORTED: 'ROTATE_NOT_SUPPORTED_IMPORTED',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

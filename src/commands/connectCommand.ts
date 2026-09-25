@@ -1,5 +1,5 @@
-import { resolveContext, writeAndSync, listManagedKeys } from './connectors/shared';
-import { listProviders, loadProvider, ConnectOpts, ConnectorModule } from './connectors/registry';
+import { resolveContext, writeAndSync, writeImportedAndSync, listManagedKeys, ResolvedContext } from './connectors/shared';
+import { listProviders, loadProvider, ConnectOpts, ConnectorModule, ConnectResult } from './connectors/registry';
 import { connectPlan } from './connectors/plans';
 import { isInteractive } from '../ui/interactive';
 import { ProjectManager } from '../core/projectManager';
@@ -129,6 +129,68 @@ export class ConnectCommand {
   }
 
   /**
+   * Loads the named connector, or — under `--web` with an unknown provider —
+   * lets the browser picker choose a real one and finishes the WHOLE command
+   * from there, which is why the failure path returns a `shortCircuit`
+   * carrying `execute`'s own result rather than just a module.
+   */
+  private async resolveProviderOrShortCircuit(
+    provider: string,
+    opts: ConnectOpts,
+  ): Promise<{ kind: 'ok'; mod: ConnectorModule } | { kind: 'shortCircuit'; result: { linked: boolean } }> {
+    try {
+      return { kind: 'ok', mod: await loadProvider(provider) };
+    } catch (err) {
+      if (opts.web) {
+        // The terminal answers a bad provider with `Unknown connector: x` and a
+        // pointer back to the bare `capy connect`, which is a second command
+        // for a list the CLI could have shown with the mistake. Here it does.
+        const picked = await this.chooseProviderInBrowser(opts, provider);
+        if (picked) {
+          // RETURN, never `process.exit(0)`: the run that just finished served
+          // its own ending page from a loopback server in this process, and
+          // exiting here would close the socket underneath it. Returning lets
+          // the process end on its own once that page has been read, carrying
+          // whatever exit code the inner run set.
+          return { kind: 'shortCircuit', result: await this.execute(picked, opts) };
+        }
+      }
+      console.error(`\n  ${(err as Error).message}`);
+      console.error('  Run `capy connect` to see available providers.\n');
+      process.exit(1);
+    }
+  }
+
+  /**
+   * `writeAndSync`, mapped down to the two states `execute`'s ending needs: a
+   * push that fails after the local write leaves `.env` holding a key nobody
+   * else has, which is a different next move than a clean write, so the
+   * outcome (and, on failure, the detail string) come back rather than being
+   * assigned onto a variable the try/catch closes over.
+   */
+  private async writeConnectResult(
+    ctx: ResolvedContext,
+    opts: ConnectOpts,
+    result: Pick<ConnectResult, 'varName' | 'value' | 'entry' | 'also'>,
+  ): Promise<{ outcome: ConnectOutcome; detail?: string }> {
+    const initialOutcome: ConnectOutcome = opts.noPush ? 'local-only' : 'pushed';
+    try {
+      await writeAndSync(ctx, result.varName, result.value, {
+        push: !opts.noPush,
+        connector: result.entry,
+        alsoConnect: result.also,
+      });
+      return { outcome: initialOutcome };
+    } catch (err) {
+      if (!opts.web) throw err;
+      return {
+        outcome: opts.noPush ? 'write-failed' : 'push-failed',
+        detail: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
    * Returns whether the link was actually recorded.
    *
    * A caller that has more journey after this one — `capy rotate` promoting an
@@ -150,32 +212,21 @@ export class ConnectCommand {
     // exiting two screens later.
     const effective: ConnectOpts = { ...opts, devMode: this.devMode };
 
-    let mod: ConnectorModule;
-    try {
-      mod = await loadProvider(provider);
-    } catch (err) {
-      if (opts.web) {
-        // The terminal answers a bad provider with `Unknown connector: x` and a
-        // pointer back to the bare `capy connect`, which is a second command
-        // for a list the CLI could have shown with the mistake. Here it does.
-        const picked = await this.chooseProviderInBrowser(opts, provider);
-        if (picked) {
-          // RETURN, never `process.exit(0)`: the run that just finished served
-          // its own ending page from a loopback server in this process, and
-          // exiting here would close the socket underneath it. Returning lets
-          // the process end on its own once that page has been read, carrying
-          // whatever exit code the inner run set.
-          return await this.execute(picked, opts);
-        }
-      }
-      console.error(`\n  ${(err as Error).message}`);
-      console.error('  Run `capy connect` to see available providers.\n');
-      process.exit(1);
-    }
+    const resolved = await this.resolveProviderOrShortCircuit(provider, opts);
+    if (resolved.kind === 'shortCircuit') return resolved.result;
+    const mod = resolved.mod;
 
     if (mod.precheck) mod.precheck();
 
     const ctx = await resolveContext({ devMode: this.devMode });
+
+    // Import-kind connectors (CAP-662: `dokploy`) pull MANY variables in one
+    // run rather than linking one existing one, so they skip the var-picking
+    // and live-mode questions below entirely — they never apply to a pull.
+    if (mod.kind === 'import') {
+      return await this.executeImport(mod, provider, ctx, effective);
+    }
+
     const { varName, value, entry, also } = await mod.connect(ctx, effective);
 
     // Belt-and-suspenders: if a provider returned mode:'live' (e.g. via an
@@ -258,15 +309,7 @@ export class ConnectCommand {
     // A push that fails after the local write leaves .env holding a key nobody
     // else has, and the terminal reports that as a stack trace. The two states
     // need different next moves, so the browser result names which one happened.
-    let outcome: ConnectOutcome = opts.noPush ? 'local-only' : 'pushed';
-    let detail: string | undefined;
-    try {
-      await writeAndSync(ctx, varName, value, { push: !opts.noPush, connector: entry, alsoConnect: also });
-    } catch (err) {
-      if (!opts.web) throw err;
-      outcome = opts.noPush ? 'write-failed' : 'push-failed';
-      detail = err instanceof Error ? err.message : String(err);
-    }
+    const { outcome, detail } = await this.writeConnectResult(ctx, opts, { varName, value, entry, also });
 
     // The terminal's own lines first, then the page. The other order made the
     // whole summary wait on a human loading a browser tab, because the ending
@@ -328,6 +371,84 @@ export class ConnectCommand {
     // delivered when the loop drains, which is after the browser has the page.
     if (failed) process.exitCode = 1;
     return { linked: !failed };
+  }
+
+  /**
+   * `capy connect <import-connector>` — pulls the provider's variables into
+   * `.env` in one pass, then reports. No browser ending page exists for this
+   * yet (no screen has been built for an import run); `--json` and the
+   * terminal are the only two surfaces today.
+   *
+   * Names and codes only, everywhere — never a value. `outcome.imported`
+   * carries the actual values (needed for the write below); every printed or
+   * JSON line below maps it down to `.varName` before it is ever rendered.
+   */
+  private async executeImport(
+    mod: ConnectorModule,
+    provider: string,
+    ctx: ResolvedContext,
+    opts: ConnectOpts,
+  ): Promise<{ linked: boolean }> {
+    const outcome = await mod.import!(ctx, opts);
+
+    if (!outcome.ok) {
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: false, code: outcome.code, message: outcome.message }));
+      } else {
+        console.error(`\n  ${outcome.message}\n`);
+      }
+      process.exitCode = 1;
+      return { linked: false };
+    }
+
+    if (outcome.imported.length > 0) {
+      // Under `--json`, stdout must be exactly one JSON object — the
+      // "keep.lock committed" line autoCommitKeep would otherwise print
+      // goes to stderr instead (see autoCommitKeep.ts's `quiet` option).
+      await writeImportedAndSync(ctx, outcome.imported, { push: !opts.noPush, quiet: opts.json });
+    }
+    const pushed = !opts.noPush && outcome.imported.length > 0;
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          provider,
+          applicationId: outcome.applicationId,
+          imported: outcome.imported.map((e) => e.varName),
+          unchanged: outcome.unchanged,
+          skipped: outcome.skipped,
+          warnings: outcome.warnings,
+          pushed,
+          deployTargetSaved: outcome.deployTargetSaved,
+        }),
+      );
+      return { linked: outcome.imported.length > 0 };
+    }
+
+    console.log('');
+    if (outcome.imported.length === 0) {
+      console.log('  Nothing new to import.');
+    } else {
+      console.log(
+        `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy` +
+          `${pushed ? ' and pushed' : ' (not pushed)'}.`,
+      );
+    }
+    if (outcome.unchanged.length > 0) {
+      console.log(`  Unchanged (already matched locally): ${outcome.unchanged.join(', ')}`);
+    }
+    if (outcome.skipped.length > 0) {
+      console.log(`  Skipped: ${outcome.skipped.map((s) => `${s.name} (${s.code})`).join(', ')}`);
+    }
+    for (const w of outcome.warnings) {
+      console.log(`  ⚠ ${w.code}: ${w.names.join(', ')}`);
+    }
+    if (outcome.deployTargetSaved) {
+      console.log(`  Saved a Dokploy deploy target for application ${outcome.applicationId}.`);
+    }
+    console.log('');
+    return { linked: outcome.imported.length > 0 };
   }
 
   /** The tail of the command, as a page. Reports only — nothing here decides. */

@@ -159,4 +159,5 @@ export const SIGNIN_COMMAND: Readonly<Record<string, string>> = {
   vercel: 'vercel link',
   'aws-ssm': 'aws configure',
   'gh-actions': 'gh auth login',
+  dokploy: 'export DOKPLOY_API_KEY=<token>',
 };
