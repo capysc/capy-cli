@@ -18,8 +18,8 @@ const SERVICE_ORIGIN = 'https://flow.fixture.test';
 
 mock.module('../../src/core/projectManager', () => ({
   ProjectManager: class {
-    async detectProjectState(): Promise<Readonly<{ readonly initialized: false; readonly userId: string }>> {
-      return { initialized: false, userId: USER_ID };
+    async detectProjectState(): Promise<Readonly<{ readonly initialized: false; readonly userId: string; readonly projectName: undefined; readonly activeBranch: null }>> {
+      return { initialized: false, userId: USER_ID, projectName: undefined, activeBranch: null };
     }
   },
 }));
@@ -266,7 +266,7 @@ describe('Flow agent handoff integration', () => {
     }
   });
 
-  test('keeps a skipped root goal as the single encrypted terminal outcome', async () => {
+  test('sends encrypted welcome context before a skipped root terminal without prompting or attaching an agent', async () => {
     const service = await fixtureServiceWithAnswers([]);
     const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(service.fetch);
     const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
@@ -276,11 +276,19 @@ describe('Flow agent handoff integration', () => {
       }, false);
       const writes = await service.observed();
       const payloads = writes.map(write => write.plaintext);
-      expect(writes).toHaveLength(1);
-      expect(writes[0]).toMatchObject({
+      expect(writes).toHaveLength(2);
+      const welcome = writes.find(write => write.plaintext.type === 'output');
+      const terminal = writes.find(write => write.plaintext.type === 'goal');
+      expect(welcome).toMatchObject({
+        plaintext: { type: 'output', data: { kind: 'welcome', welcome: {
+          username: null, project: null, organization: null, branch: null, flowName: 'Secrets Setup',
+        } } },
+      });
+      expect(terminal).toMatchObject({
         plaintext: { type: 'goal', data: { type: 'turn', outcome: { goal: 'repository_onboarded', status: 'skipped', code: 'SETUP_SKIPPED' } } },
       });
-      expect(writes[0]?.body.envelope).not.toContain('repository_onboarded');
+      expect(payloads.findIndex(payload => payload.type === 'output')).toBeLessThan(payloads.findIndex(payload => payload.type === 'goal'));
+      expect(terminal?.body.envelope).not.toContain('repository_onboarded');
       expect(payloads.some(payload => payload.type === 'goal_completed' || payload.type === 'prompt')).toBe(false);
       expect(payloads.some(payload => payload.type === 'progress' && (payload.data as Json).kind === 'goal_start')).toBe(false);
     } finally {
@@ -288,7 +296,7 @@ describe('Flow agent handoff integration', () => {
       fetchSpy.mockRestore();
     }
   });
-  test('delivers a thrown command failure as an encrypted terminal goal before detaching', async () => {
+  test('sends encrypted welcome context before a thrown terminal failure without prompting or attaching an agent', async () => {
     const service = await fixtureServiceWithAnswers([]);
     const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(service.fetch);
     const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
@@ -296,13 +304,24 @@ describe('Flow agent handoff integration', () => {
     try {
       await expect(runWithFlowInteraction(async () => { throw failure; }, false)).rejects.toBe(failure);
       const writes = await service.observed();
-      expect(writes).toHaveLength(1);
-      expect(writes[0]).toMatchObject({
+      const payloads = writes.map(write => write.plaintext);
+      expect(writes).toHaveLength(2);
+      const welcome = writes.find(write => write.plaintext.type === 'output');
+      const terminal = writes.find(write => write.plaintext.type === 'goal');
+      expect(welcome).toMatchObject({
+        plaintext: { type: 'output', data: { kind: 'welcome', welcome: {
+          username: null, project: null, organization: null, branch: null, flowName: 'Secrets Setup',
+        } } },
+      });
+      expect(terminal).toMatchObject({
         plaintext: { type: 'goal', data: { outcome: {
           status: 'failed', code: 'COMMAND_FAILED', message: failure.message,
         } } },
       });
-      expect(writes[0]?.body.envelope).not.toContain(failure.message);
+      expect(payloads.findIndex(payload => payload.type === 'output')).toBeLessThan(payloads.findIndex(payload => payload.type === 'goal'));
+      expect(terminal?.body.envelope).not.toContain(failure.message);
+      expect(payloads.some(payload => payload.type === 'goal_completed' || payload.type === 'prompt')).toBe(false);
+      expect(payloads.some(payload => payload.type === 'progress' && (payload.data as Json).kind === 'goal_start')).toBe(false);
     } finally {
       stdout.mockRestore();
       fetchSpy.mockRestore();
