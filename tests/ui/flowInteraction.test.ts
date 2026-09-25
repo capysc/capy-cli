@@ -1,7 +1,27 @@
 import { describe, expect, test } from 'bun:test';
-import { flowQueueStep, flowTurnPayload } from '../../src/ui/flowInteraction';
+import { flowQueueStep, flowTurnPayload, flowWelcome } from '../../src/ui/flowInteraction';
 
 describe('Flow turn payloads', () => {
+  test('emits an immediate structured welcome with only safe repository context', () => {
+    const welcome = flowWelcome({ command: 'capy', initialized: false, project: undefined, organization: 'Northwind', branch: null });
+    const step = flowQueueStep([], { type: 'output', data: { kind: 'welcome', welcome } });
+
+    expect(welcome).toEqual({ username: null, project: null, organization: 'Northwind', branch: null, flowName: 'Secrets Setup' });
+    expect(step).toEqual({ nextItems: [], writes: [{ type: 'output', data: { kind: 'welcome', welcome } }] });
+  });
+
+  test('names initialized capy and rotate flows without deriving a title from text', () => {
+    expect(flowWelcome({ command: 'capy', initialized: true, project: 'web', organization: 'Northwind', branch: 'main' }).flowName).toBe('Sync');
+    expect(flowWelcome({ command: 'rotate', initialized: true, project: 'web', organization: 'Northwind', branch: 'main' }).flowName).toBe('Rotate');
+  });
+
+  test('keeps ordinary output buffered when no welcome context is present', () => {
+    expect(flowQueueStep([], { type: 'output', data: { text: 'Preparing repository' } })).toEqual({
+      nextItems: [{ type: 'output', data: { text: 'Preparing repository' } }],
+      writes: [],
+    });
+  });
+
   test('preserves CLI event order and omits presentation when the CLI did not supply it', () => {
     const messages = [
       { type: 'output' as const, data: { text: 'Preparing repository' } },

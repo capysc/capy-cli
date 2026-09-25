@@ -12,7 +12,7 @@ import { existsSync, unlinkSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { randomUUID, createHash } from 'crypto';
-import { currentInteraction, runInteractionOperation, type InteractionGoal, prompt } from '../ui/interaction';
+import { currentInteraction, emitInteractionWelcome, runInteractionOperation, type InteractionGoal, prompt } from '../ui/interaction';
 import {
   CliOptions,
   Organization,
@@ -1419,6 +1419,7 @@ export class CapyCommand {
     const initialOrganizationWizard = organizationSelection.wizard;
     const selectedContext = organizationSelection.context;
     const selectedAuth = organizationSelection.auth;
+    emitInteractionWelcome({ username: null, project: null, organization: selectedOrg.name, branch: null, flowName: 'Secrets Setup' });
     const initiallyHasOrgKey = hasOrgKey(selectedOrg.id, selectedAuth.user_id!);
     const hostedUnlock = selectedContext.transport === 'hosted' && !initiallyHasOrgKey
       && initialOrganizationWizard?.kind === 'hosted'
@@ -1700,6 +1701,7 @@ export class CapyCommand {
     }
     const projectName = named.value;
     const wizardAfterProjectName = named.wizard;
+    emitInteractionWelcome({ username: null, project: projectName, organization: selectedOrg.name, branch: null, flowName: 'Secrets Setup' });
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();
@@ -1783,6 +1785,7 @@ export class CapyCommand {
     }
     const initialBranchName = branchName.value;
     const wizardAfterBranch = branchName.wizard;
+    emitInteractionWelcome({ username: null, project: projectName, organization: selectedOrg.name, branch: initialBranchName, flowName: 'Secrets Setup' });
     const initialBranchProtected = false;
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
@@ -2189,6 +2192,7 @@ export class CapyCommand {
     wizard: InitWizardTransport | null,
   ): Promise<InitWorkflowResult> {
     const branch = 'development';
+    emitInteractionWelcome({ username: null, project: project.name, organization: selectedOrg.name, branch, flowName: 'Secrets Setup' });
     const encryptionKey = await resolveProjectKey(orgId, project.id, userId, this.keyServiceOps(context.serviceClient));
     const fetchSpinner = ora(`Pulling ${project.name} (${branch})...`).start();
     const decryptData = await (async () => {

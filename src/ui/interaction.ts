@@ -9,6 +9,15 @@ export type InteractionOutput = Readonly<{
   readonly level?: 'info' | 'warning' | 'error';
   /** Structured sync state for a browser conversation. Terminal copy remains terminal-owned. */
   readonly sync_conflict?: SyncConflictData;
+  /** Conversation-only context. It never contains secret values or terminal copy. */
+  readonly welcome?: InteractionWelcome;
+}>;
+export type InteractionWelcome = Readonly<{
+  readonly username: string | null;
+  readonly project: string | null;
+  readonly organization: string | null;
+  readonly branch: string | null;
+  readonly flowName: string | null;
 }>;
 /**
  * Optional rendering hint supplied by the command that owns a turn.  It is
@@ -65,6 +74,12 @@ export const currentInteraction = (): Interaction | undefined => interactions.ge
 export const emitInteractionOutput = (message: string): void => {
   const interaction = currentInteraction();
   if (interaction) void interaction.output({ text: message });
+};
+
+/** Emits encrypted conversation context without changing terminal output. */
+export const emitInteractionWelcome = (welcome: InteractionWelcome): void => {
+  const interaction = currentInteraction();
+  if (interaction) void interaction.output({ text: '', welcome });
 };
 
 export const emitInteractionProgress = (event: InteractionProgress): void => {

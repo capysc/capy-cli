@@ -22,6 +22,19 @@ const canonical = (value: unknown): string => Array.isArray(value) ? `[${value.m
 type TurnItem = Readonly<{ readonly type: 'output' | 'progress'; readonly data: Data }>;
 type FlowQueueItem = Readonly<{ readonly type: MessageType; readonly data: Data; readonly correlation?: string }>;
 type FlowQueueWrite = Readonly<{ readonly type: MessageType; readonly data: Data; readonly correlation?: string }>;
+export const flowWelcome = (input: Readonly<{
+  readonly command: 'capy' | 'rotate';
+  readonly initialized: boolean;
+  readonly project: string | undefined;
+  readonly organization: string | undefined;
+  readonly branch: string | null;
+}>): Readonly<{ readonly username: null; readonly project: string | null; readonly organization: string | null; readonly branch: string | null; readonly flowName: string }> => ({
+  username: null,
+  project: input.project ?? null,
+  organization: input.organization ?? null,
+  branch: input.branch,
+  flowName: input.command === 'rotate' ? 'Rotate' : input.initialized ? 'Sync' : 'Secrets Setup',
+});
 export const shouldOfferProjectSetup = (command: 'capy' | 'rotate', outcome: Data): boolean => command === 'capy'
   && outcome.flow === 'init-wizard' && outcome.goal === 'repository_onboarded' && outcome.status === 'succeeded';
 const turnPresentation = (data: Data): InteractionPresentation | undefined => {
@@ -65,7 +78,7 @@ export const flowQueueStep = (
   item: FlowQueueItem,
 ): Readonly<{ readonly nextItems: readonly TurnItem[]; readonly writes: readonly FlowQueueWrite[] }> => {
   const immediate = item.type === 'progress' && (item.data.provider_auth || item.data.kind === 'goal_start' || item.data.kind === 'plan' || item.data.kind === 'apply_started' || item.data.kind === 'apply_result');
-  if (immediate || (item.type === 'output' && item.data.kind === 'analysis')) {
+  if (immediate || (item.type === 'output' && (item.data.kind === 'analysis' || item.data.welcome !== undefined))) {
     return { nextItems: [], writes: [...items, { type: item.type, data: item.data }] };
   }
   if (item.type === 'output' || item.type === 'progress') {
@@ -233,6 +246,13 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     if (queue.destroyed || controller.signal.aborted) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
     queue.write({ type: 'snapshot', resolve, reject } satisfies Queued);
   });
+  await emit('output', { kind: 'welcome', welcome: flowWelcome({
+    command: descriptor.command,
+    initialized: project.initialized,
+    project: project.projectName,
+    organization: identity.organization_name,
+    branch: project.activeBranch,
+  }) });
   const receive = async (cursor: number): Promise<void> => {
     if (controller.signal.aborted) return;
     const result = await history(cursor, pageKey);
