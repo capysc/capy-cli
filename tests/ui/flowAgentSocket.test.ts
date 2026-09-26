@@ -4,7 +4,7 @@ import { existsSync, unlinkSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { describe, expect, test } from 'bun:test';
-import { attachFlowAgentRuntime, flowAgentPlanHash, type FlowAgentPlan } from '../../src/ui/flowAgentBridge';
+import { attachFlowAgentRuntime, flowAgentPlanHash, initialFlowAgentState, type FlowAgentPlan } from '../../src/ui/flowAgentBridge';
 
 type Json = Readonly<Record<string, unknown>>;
 const socketPath = (): string => `${process.cwd()}/.flow-agent-${randomUUID()}.sock`;
@@ -113,7 +113,7 @@ describe('Flow agent Unix-socket bridge', () => {
   socketTest('starts an explicit dynamic next goal, then accepts a terminal cancellation', async () => {
     const path = socketPath();
     const emitted = events();
-    const runtime = await attachFlowAgentRuntime({ ...runtimeInput('flow-next', emitted.stream, true, true), socketPath: path });
+    const runtime = await attachFlowAgentRuntime({ ...runtimeInput('flow-next', emitted.stream, true, true), initialState: { ...initialFlowAgentState(), goal: { goal_id: 'review', goal_name: 'Review' } }, socketPath: path });
     const plan = planInput('plan-next');
     await exchange(path, [request('plan', 'plan', { plan })]);
     const grant = await exchange(path, [request('grant', 'begin_apply', { plan_id: plan.plan_id, plan_hash: plan.plan_hash })]);
@@ -136,4 +136,28 @@ describe('Flow agent Unix-socket bridge', () => {
     emitted.stream.end();
     expect(await emitted.collect()).toEqual([]);
   });
+});
+
+socketTest('a replacement runtime restores an existing application without granting it again', async () => {
+  const path = socketPath();
+  const emitted = events();
+  const persisted = (await import('bun:test')).mock(async (_state: import('../../src/ui/flowAgentBridge').FlowAgentState) => undefined);
+  const first = await attachFlowAgentRuntime({ ...runtimeInput('flow-resume', emitted.stream, true, false), socketPath: path, saveState: persisted });
+  const plan = planInput('resume-plan');
+  await exchange(path, [request('plan', 'plan', { plan })]);
+  const granted = await exchange(path, [request('apply', 'begin_apply', { plan_id: plan.plan_id, plan_hash: plan.plan_hash })]);
+  const snapshot = JSON.parse(JSON.stringify(persisted.mock.calls.at(-1)?.[0]));
+  await first.close();
+  await first.finished;
+  const second = await attachFlowAgentRuntime({ ...runtimeInput('flow-resume', emitted.stream, true, false), socketPath: path, initialState: snapshot });
+  const status = await exchange(path, [request('status', 'status')]);
+  expect(status[0]).toMatchObject({ state: 'applying', application_id: granted[0].application_id });
+  const denied = await exchange(path, [request('apply-again', 'begin_apply', { plan_id: plan.plan_id, plan_hash: plan.plan_hash })]);
+  expect(denied[0].code).toBe('APPLY_ALREADY_STARTED');
+  await exchange(path, [request('complete', 'complete', { plan_id: plan.plan_id, plan_hash: plan.plan_hash, application_id: granted[0].application_id, result: { summary: 'Reconciled existing application', checks: [] } })]);
+  await second.finished;
+  emitted.stream.end();
+  const all = await emitted.collect();
+  expect(all.filter(event => event.kind === 'apply_started')).toHaveLength(1);
+  expect(all.filter(event => event.type === 'terminal')).toHaveLength(1);
 });

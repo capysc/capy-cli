@@ -30,3 +30,67 @@ describe('Flow agent bridge', () => {
     expect(completed.state.terminal).toBe(true);
   });
 });
+
+test('durable application grant is saved before it is emitted and survives reconnection', async () => {
+  const saveState = (await import('bun:test')).mock(async (_state: import('../../src/ui/flowAgentBridge').FlowAgentState) => undefined);
+  const approved = { ...initialFlowAgentState(), plan, approved: true };
+  const granted = await processFlowAgentRequest(approved, request('apply-durable', 'begin_apply', { plan_id: plan.plan_id, plan_hash: plan.plan_hash }), 'apply-durable', {
+    ...runtime, saveState,
+    emitProgress: async () => { expect(saveState.mock.calls[0]?.[0].application_id).toBeString(); },
+  });
+  const restored = JSON.parse(JSON.stringify(saveState.mock.calls.at(-1)?.[0]));
+  const duplicate = await processFlowAgentRequest(restored, request('apply-again', 'begin_apply', { plan_id: plan.plan_id, plan_hash: plan.plan_hash }), 'apply-again', runtime);
+  expect(duplicate.response.code).toBe('APPLY_ALREADY_STARTED');
+  expect(restored.application_id).toBe(granted.response.application_id);
+});
+
+test('checkpoint failure cannot grant apply', async () => {
+  const emitProgress = (await import('bun:test')).mock(async () => undefined);
+  await expect(processFlowAgentRequest({ ...initialFlowAgentState(), plan, approved: true }, request('apply', 'begin_apply', { plan_id: plan.plan_id, plan_hash: plan.plan_hash }), 'apply', {
+    ...runtime, emitProgress, saveState: async () => { throw new Error('checkpoint unavailable'); },
+  })).rejects.toThrow('checkpoint unavailable');
+  expect(emitProgress).not.toHaveBeenCalled();
+});
+
+test('onboarding apply is terminal even when caller supplies another offer', async () => {
+  const askContinuation = (await import('bun:test')).mock(async () => true);
+  const completed = await processFlowAgentRequest({ ...initialFlowAgentState(), plan, approved: true, application_id: 'apply-1' }, request('done', 'complete', {
+    plan_id: plan.plan_id, plan_hash: plan.plan_hash, application_id: 'apply-1', result: { summary: 'Configured', checks: [] },
+    next_offer: { goal_id: 'another', goal_name: 'Another', prompt: 'Continue?' },
+  }), 'done', { ...runtime, askContinuation });
+  expect(completed.state.terminal).toBe(true);
+  expect(askContinuation).not.toHaveBeenCalled();
+});
+
+test('explicit closure preserves an unaccomplished goal as skipped', async () => {
+  const emitTerminal = (await import('bun:test')).mock(async (_data: Readonly<Record<string, unknown>>) => undefined);
+  const closed = await processFlowAgentRequest(initialFlowAgentState(), { v: 1, id: 'close', action: 'terminal', token: 'local-token', outcome: 'skipped', reason: 'User chose to finish without project configuration.' }, 'close', { ...runtime, emitTerminal });
+  expect(closed.state.terminal).toBe(true);
+  expect(closed.state.approved).toBe(false);
+  expect(emitTerminal.mock.calls[0]?.[0].status).toBe('skipped');
+});
+
+test('status and history reads do not rewrite the durable checkpoint', async () => {
+  const saveState = (await import('bun:test')).mock(async () => undefined);
+  const state = initialFlowAgentState();
+  for (const action of ['status', 'read'] as const) {
+    const response = await processFlowAgentRequest(state, { v: 1, id: action, action, token: 'local-token' }, action, { ...runtime, saveState });
+    expect(response.state).toBe(state);
+  }
+  expect(saveState).not.toHaveBeenCalled();
+});
+
+test('the emitted approval prompt is checkpointed before waiting for the answer', async () => {
+  const saveState = (await import('bun:test')).mock(async (_state: import('../../src/ui/flowAgentBridge').FlowAgentState) => undefined);
+  await processFlowAgentRequest(initialFlowAgentState(), request('prompt', 'plan', { plan }), 'prompt', {
+    ...runtime, saveState,
+    askPlanApproval: async (_goal, _plan, onPromptEmitted) => {
+      expect(saveState).toHaveBeenCalledTimes(1);
+      await onPromptEmitted?.();
+      expect(saveState).toHaveBeenCalledTimes(2);
+      expect(saveState.mock.calls[1]?.[0]).toMatchObject({ plan, approved: false });
+      return true;
+    },
+  });
+  expect(saveState.mock.calls.at(-1)?.[0].approved).toBe(true);
+});

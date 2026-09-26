@@ -630,13 +630,32 @@ program
 
 const flow = program
   .command('flow')
-  .description('Attach to a running encrypted Flow or manage a Flow instance')
+  .description('Attach to, resume, or abandon an encrypted Flow')
   .option('--id <id>', 'attach this agent to an existing conversation on this runtime')
+  .option('--resume <id>', 'restore a disconnected flow in this repository without rerunning onboarding')
+  .option('--abandon <id>', 'explicitly cancel a disconnected flow while preserving completed work')
   .option('--json', 'exchange agent requests and responses as JSON lines')
-  .action(async (options: Readonly<{ id?: string }>, command: Command) => {
-    if (!options.id) { command.outputHelp(); return; }
+  .action(async (options: Readonly<{ id?: string; resume?: string; abandon?: string }>, command: Command) => {
+    const selected = [options.id, options.resume, options.abandon].filter(value => value !== undefined);
+    if (selected.length === 0) { command.outputHelp(); return; }
+    if (selected.length !== 1) {
+      console.log(JSON.stringify({ v: 1, ok: false, code: 'FLOW_ACTION_CONFLICT' }));
+      process.exit(1);
+    }
+
+    if (options.resume || options.abandon) {
+      const { runResumedFlowInteraction } = await import('./ui/flowInteraction');
+      try { await runResumedFlowInteraction((options.resume ?? options.abandon)!, true, options.abandon !== undefined); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        console.log(JSON.stringify({ v: 1, ok: false, flow_id: options.resume ?? options.abandon,
+          code: /^[A-Z][A-Z0-9_]+$/u.test(message) ? message : 'FLOW_RECOVERY_FAILED' }));
+        process.exit(1);
+      }
+      return;
+    }
     const { runFlowAgentCommand } = await import('./commands/flowAgentCommand');
-    const code = await runFlowAgentCommand(process.stdin, process.stdout, { flowId: options.id, devMode: true });
+    const code = await runFlowAgentCommand(process.stdin, process.stdout, { flowId: options.id!, devMode: true });
     if (code !== 0) process.exit(code);
   });
 

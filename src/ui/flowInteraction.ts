@@ -9,7 +9,8 @@ import { readLocalRoot } from '../config/globalConfig';
 import { keepOrigin } from './screens/keepScreens';
 import { mintConnectionKeypair, openEnvelope, sealRequestEnvelope } from '../service/brokerEnvelope';
 import { runWithInteraction, currentInteractionInvocation, type Interaction, type InteractionPresentation, type InteractionQuestion } from './interaction';
-import { attachFlowAgentRuntime, type FlowGoal, type FlowNextOffer } from './flowAgentBridge';
+import { attachFlowAgentRuntime, initialFlowAgentState, type FlowAgentState, type FlowGoal, type FlowNextOffer } from './flowAgentBridge';
+import { loadFlowRecoveryBootstrap, openFlowRecoveryCheckpoint, saveFlowRecoveryBootstrap, sealFlowRecoveryCheckpoint, type FlowRecoveryBinding } from './flowRecoveryStore';
 
 type Data = Readonly<Record<string, unknown>>;
 type MessageType = 'output' | 'progress' | 'prompt' | 'answer' | 'goal' | 'goal_completed' | 'ping' | 'pong';
@@ -108,8 +109,9 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     }
   })();
   const identity = await auth.authenticateSilent(descriptor.organizationId);
-  if (!identity.success || !identity.user_id || !identity.organization_id
-    || !readLocalRoot(identity.organization_id, identity.user_id)) {
+  const localRoot = identity.success && identity.user_id && identity.organization_id
+    ? readLocalRoot(identity.organization_id, identity.user_id) : null;
+  if (!identity.success || !identity.user_id || !identity.organization_id || !localRoot) {
     console.error(`flow: ${silentAuthFailureMessage(identity)}`);
     throw new Error('PAIR_REQUIRED');
   }
@@ -153,6 +155,11 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   }));
   if (created.client_pubkey !== keys.publicKeyB64) throw new Error('CONVERSATION_BINDING_MISMATCH');
   const flowId = created.flow_id;
+  const flowBinding: FlowRecoveryBinding = {
+    flow_id: flowId, runtime_id: runtimeId, origin, owner_id: identity.user_id,
+    organization_id: identity.organization_id, repo_fingerprint: binding.repositoryFingerprint, client_pubkey: keys.publicKeyB64,
+  };
+  saveFlowRecoveryBootstrap(localRoot, flowBinding, keys);
   const url = `${keepOrigin()}/flow/conversation?f=${encodeURIComponent(flowId)}`;
   // Only the public handoff goes to stdout. Workflow content always uses the encrypted adapter.
   process.stdout.write(`${JSON.stringify({ ok: true, command: descriptor.command, flow_id: flowId, url, instructions: ['Show this URL immediately in visible chat, then keep this process alive and read its output with bounded waits. Do not wait for another user chat message.', 'An empty read or wait timeout is not completion. Handle type=agent_handoff immediately using its attachment instructions; a URL in that event is not a reason to stop.', 'Only a terminal outcome completes the flow. If your client cannot keep waiting, tell the user to ask you to resume this same process, not restart onboarding.'], continuation: {tool: descriptor.continuationTool, args: {command: descriptor.command, flow_id: flowId, wait: true}} })}\n`);
@@ -186,13 +193,29 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   };
   const attached = await waitForPage();
   const pageKey = attached.page_pubkey!;
+  type CheckpointResponse = Readonly<{
+    readonly flow_id: string;
+    readonly runtime_id: string;
+    readonly repo_fingerprint: string;
+    readonly client_pubkey: string;
+    readonly revision: string | null;
+    readonly envelope: string | null;
+  }>;
+  const checkpoint = async (): Promise<CheckpointResponse> => {
+    const proof = signed('checkpoint-read', flowId, 'checkpoint', {}).proof as string;
+    const result = await request<CheckpointResponse>(`/flows/${flowId}/checkpoint`, undefined, () => ({ 'x-capy-cli-proof': proof }));
+    if (result.flow_id !== flowId || result.runtime_id !== runtimeId || result.repo_fingerprint !== binding.repositoryFingerprint || result.client_pubkey !== keys.publicKeyB64) {
+      throw new Error('CONVERSATION_BINDING_MISMATCH');
+    }
+    return result;
+  };
   const incoming = new EventEmitter();
   // The runtime's plaintext journal is never persisted. It lets an explicit,
   // authenticated local read join acknowledged service records to their local
   // structured payloads; the page decrypts the corresponding envelopes.
   type JournalEntry = Readonly<{ readonly id: string; readonly type: MessageType; readonly data: Data; readonly envelope: string }>;
   type Journal = ReadonlyMap<string, JournalEntry>;
-  const append = async (type: MessageType, data: Data, correlationId?: string): Promise<JournalEntry> => {
+  const append = async (type: MessageType, data: Data, journal: Journal, correlationId?: string): Promise<JournalEntry> => {
     const id = randomUUID();
     const correlation = correlationId ?? id;
     const content = { v: 1, flow_id: flowId, id, correlation_id: correlation, type, data };
@@ -200,8 +223,10 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     if (!sealed.ok) throw new Error('CONVERSATION_ENCRYPTION_FAILED');
     const body = signed('append', flowId, id, { v: 1, id, correlation_id: correlation, direction: 'cli_to_browser', type, envelope: sealed.ciphertextB64,
       ...((type === 'goal' || type === 'goal_completed') ? {outcome: (data.outcome as Data | undefined)?.status ?? data.status} : {}) });
+    const entry = { id, type, data, envelope: sealed.ciphertextB64 };
+    await enqueueCheckpoint(undefined, new Map([...journal, [entry.id, entry]]));
     await request(`/flows/${flowId}/messages`, body);
-    return { id, type, data, envelope: sealed.ciphertextB64 };
+    return entry;
   };
   type QueuedMessage = Readonly<{ readonly type: MessageType; readonly data: Data; readonly correlation?: string; readonly resolve: () => void; readonly reject: (reason: unknown) => void }>;
   type QueuedSnapshot = Readonly<{ readonly type: 'snapshot'; readonly resolve: (journal: Journal) => void; readonly reject: (reason: unknown) => void }>;
@@ -213,7 +238,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   const appendWrites = async (writes: readonly FlowQueueWrite[], journal: Journal): Promise<Journal> => {
     const write = writes[0];
     if (!write) return journal;
-    const entry = await append(write.type, write.data, write.correlation);
+    const entry = await append(write.type, write.data, journal, write.correlation);
     return appendWrites(writes.slice(1), new Map([...journal, [entry.id, entry]]));
   };
   const consume = async (items: readonly TurnItem[], journal: Journal): Promise<void> => {
@@ -247,6 +272,52 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     if (queue.destroyed || controller.signal.aborted) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
     queue.write({ type: 'snapshot', resolve, reject } satisfies Queued);
   });
+  type CheckpointTask = Readonly<{ readonly state?: Data; readonly journal: Journal; readonly resolve: () => void; readonly reject: (reason: unknown) => void }>;
+  const checkpointQueue = new PassThrough({ objectMode: true });
+  const checkpointIterator = checkpointQueue[Symbol.asyncIterator]();
+  const checkpointWrite = async (revision: string | null, envelope: string): Promise<CheckpointResponse> => {
+    const unsigned = { revision, envelope } as const;
+    const body = signed('checkpoint-write', flowId, revision ?? 'null', unsigned);
+    const saved = await request<CheckpointResponse>(`/flows/${flowId}/checkpoint`, body);
+    if (saved.flow_id !== flowId || saved.runtime_id !== runtimeId || saved.repo_fingerprint !== binding.repositoryFingerprint || saved.client_pubkey !== keys.publicKeyB64 || typeof saved.revision !== 'string') {
+      throw new Error('CONVERSATION_BINDING_MISMATCH');
+    }
+    return saved;
+  };
+  const persistCheckpoint = async (revision: string | null, phase: Data | null): Promise<void> => {
+    const next = await checkpointIterator.next();
+    if (next.done) return;
+    const task = next.value as CheckpointTask;
+    const nextPhase = task.state ?? phase;
+    // Before the handoff starts there is no replayable command checkpoint.
+    if (nextPhase === null) {
+      task.resolve();
+      return persistCheckpoint(revision, phase);
+    }
+    try {
+      const expectedRevision = phase === null ? (await checkpoint()).revision : revision;
+      const envelope = sealFlowRecoveryCheckpoint(localRoot, flowBinding, {
+        v: 1, page_pubkey: pageKey, journal: [...task.journal.values()], ...nextPhase,
+      });
+      const saved = await checkpointWrite(expectedRevision, envelope).catch(error => error instanceof Error && error.message === 'CONVERSATION_CHECKPOINT_CONFLICT'
+        ? Promise.reject(error) : checkpointWrite(expectedRevision, envelope));
+      task.resolve();
+      return persistCheckpoint(saved.revision, nextPhase);
+    } catch (error) {
+      task.reject(error);
+      incoming.emit('failure', error);
+      controller.abort(error);
+      throw error;
+    }
+  };
+  const checkpointWriter = persistCheckpoint(null, null);
+  void checkpointWriter.catch(() => undefined);
+  const enqueueCheckpoint = (state: Data | undefined, journal: Journal): Promise<void> => new Promise((resolve, reject) => {
+    if (controller.signal.aborted || checkpointQueue.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    checkpointQueue.write({ ...(state === undefined ? {} : { state }), journal, resolve, reject } satisfies CheckpointTask);
+  });
+  const saveCheckpoint = async (state: Data): Promise<void> => enqueueCheckpoint(state, await snapshotJournal());
+  const saveAgentCheckpoint = (state: FlowAgentState): Promise<void> => saveCheckpoint({ phase: 'agent', agent_state: state as unknown as Data });
   await emit('output', { kind: 'welcome', welcome: flowWelcome({
     command: descriptor.command,
     initialized: project.initialized,
@@ -276,7 +347,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     return receive(result.cursor);
   };
   const reader = receive(0).catch(error => { if (!controller.signal.aborted) { incoming.emit('failure', error); controller.abort(error); } });
-  const ask = async <T>(question: InteractionQuestion<T>, goalMetadata: Data = {}): Promise<T | null> => {
+  const ask = async <T>(question: InteractionQuestion<T>, goalMetadata: Data = {}, onPromptEmitted?: () => Promise<void>): Promise<T | null> => {
     const id = randomUUID();
     const answer = new Promise<Data>((resolve, reject) => {
       const failed = (error: unknown): void => { incoming.removeListener(id, answered); reject(error); };
@@ -288,6 +359,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}),
       ...goalMetadata,
       ...(question.presentation === undefined ? {} : { presentation: question.presentation }) }, id);
+    await onPromptEmitted?.();
     const payload = await answer;
     const decision = question.decide(payload);
     if ('error' in decision) { await emit('output', { message: decision.error, level: 'error', ...goalMetadata }); return ask(question, goalMetadata); }
@@ -301,11 +373,11 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   };
   const rootGoal = new Promise<Data | null>(resolve => incoming.once('root-goal', resolve));
   const rootCompletion = (outcome: Data): boolean => shouldOfferProjectSetup(descriptor.command, outcome);
-  const askConfirmation = async (title: string, text: string, goalMetadata: Data = {}, defaultValue = false): Promise<boolean> => (await ask<boolean>({
+  const askConfirmation = async (title: string, text: string, goalMetadata: Data = {}, defaultValue = false, onPromptEmitted?: () => Promise<void>): Promise<boolean> => (await ask<boolean>({
     view: { text, input: { kind: 'confirm', default: defaultValue } },
     presentation: { title, component: 'agent-plan' },
     decide: payload => typeof payload.value === 'boolean' ? { value: payload.value } : { error: 'Choose yes or no.' },
-  }, goalMetadata)) === true;
+  }, goalMetadata, onPromptEmitted)) === true;
   const interaction: Interaction = {
     output: event => emit('output', { ...event, ...rootGoalMetadata, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
     progress: event => emit('progress', { ...event, ...rootGoalMetadata, ...(currentInteractionInvocation() ? { invocation: currentInteractionInvocation() } : {}) }),
@@ -337,15 +409,20 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       const completedGoal: FlowGoal = { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' };
       const firstOffer: FlowNextOffer = { goal_id: 'project_setup', goal_name: 'Project Setup', prompt: 'Would you like your agent to analyze and configure this project?' };
       await emit('goal_completed', { ...completedGoal, status: 'succeeded', result: initial.result ?? {} });
+      await saveCheckpoint({ phase: 'continuation_offer', offer: firstOffer, agent_state: null });
       const accepted = await askConfirmation('Continue with project setup', firstOffer.prompt, {}, true);
       if (!accepted) {
         await emit('goal', { flow: 'init-wizard', goal: 'repository_onboarded', ...completedGoal, status: 'succeeded', result: { continuation_declined: true } });
       } else {
         await emit('progress', { kind: 'goal_start', ...firstOffer });
+        const initialAgentState = initialFlowAgentState();
+        await saveAgentCheckpoint(initialAgentState);
         const runtime = await attachFlowAgentRuntime({
           flowId,
           ownerId: identity.user_id,
           signal: controller.signal,
+          initialState: initialAgentState,
+          saveState: saveAgentCheckpoint,
           authenticate: async token => {
             // Authentication is a local attachment preflight, not a browser
             // turn: it must not consume the conversation's long-poll budget.
@@ -376,7 +453,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
           emitOutput: async data => emit('output', data),
           emitProgress: async data => emit('progress', data),
           emitCompleted: async (goal, result) => emit('goal_completed', { ...goal, status: 'succeeded', ...(result === undefined ? {} : { result }) }),
-          askPlanApproval: async (goal, plan) => askConfirmation('Review plan', `Approve this plan for ${goal.goal_name}?`, goal, true),
+          askPlanApproval: async (goal, plan, onPromptEmitted?: () => Promise<void>) => askConfirmation('Review plan', `Approve this plan for ${goal.goal_name}?`, goal, true, onPromptEmitted),
           askContinuation: async offer => askConfirmation('Continue', offer.prompt),
           emitTerminal: async data => emit('goal', data),
           signChallenge: nonce => sign('sha256', Buffer.from(`capy.flow.agent.v1\n${flowId}\n${nonce}`), keys.privateKey).toString('base64'),
@@ -395,7 +472,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
             'Post structured analysis, then a concrete plan with files, changes, reasons and checks. Wait for its plan-decision in Keep.',
             'After yes, request begin_apply with the returned plan_id and plan_hash. Apply only after receiving application_id; never repeat an application already started.',
             'Keep approval does not override host permission requirements. If the host requires direct user confirmation or rejects an action, surface the exact blocker to the parent/user and retain this flow and approved plan. Do not bypass the restriction or restart onboarding.',
-            'Report complete with plan_id, plan_hash, application_id and actual results, or terminal failed/cancelled. A next_offer is optional and requires user acceptance before another goal is appended.',
+            'Report complete with plan_id, plan_hash, application_id and actual results. Completing Project Setup closes onboarding; if intentionally leaving it unaccomplished, send an explicit terminal skipped outcome with a reason.',
           ],
           requests: {
             status: { id: 'unique-status-request-id', action: 'status' },
@@ -412,10 +489,288 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
     }
     queue.end();
     await writer;
-  } finally { queue.end(); controller.abort(); await reader; }
+  } finally { checkpointQueue.end(); queue.end(); controller.abort(); await reader; await checkpointWriter; }
   } finally {
     process.removeListener('SIGINT', interrupted);
     process.removeListener('SIGTERM', terminated);
     await detach();
   }
 }
+
+type RecoveryCheckpoint = Readonly<{ readonly phase: 'continuation_offer' | 'agent'; readonly offer?: FlowNextOffer; readonly agent_state: FlowAgentState | null; readonly journal: readonly JournalEntry[] }>;
+type JournalEntry = Readonly<{ readonly id: string; readonly type: MessageType; readonly data: Data; readonly envelope: string }>;
+const recoveryCheckpoint = (value: Data): RecoveryCheckpoint | null => {
+  const phase = value.phase;
+  const agentState = value.agent_state;
+  const journal = value.journal;
+  const parsedOffer = value.offer !== null && typeof value.offer === 'object' ? value.offer as FlowNextOffer : undefined;
+  const validJournal = Array.isArray(journal) && journal.every(entry => entry !== null && typeof entry === 'object'
+    && typeof (entry as Data).id === 'string' && typeof (entry as Data).type === 'string'
+    && typeof (entry as Data).envelope === 'string' && (entry as Data).data !== null && typeof (entry as Data).data === 'object');
+  const validState = agentState === null || (typeof agentState === 'object' && !Array.isArray(agentState)
+    && typeof (agentState as Data).goal === 'object' && typeof (agentState as Data).approved === 'boolean'
+    && typeof (agentState as Data).terminal === 'boolean');
+  return (phase === 'continuation_offer' || phase === 'agent') && validJournal && validState
+    ? { phase, ...(parsedOffer ? { offer: parsedOffer } : {}), agent_state: agentState as FlowAgentState | null, journal: journal as readonly JournalEntry[] }
+    : null;
+};
+
+/** Reconnects the encrypted project-setup handoff without replaying the root command. */
+export const runResumedFlowInteraction = async (flowId: string, devMode: boolean, abandon = false): Promise<void> => {
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(flowId)) throw new Error('FLOW_RESUME_INVALID');
+  const project = await new ProjectManager().detectProjectState();
+  const auth = new AuthService(undefined, devMode, project.userId);
+  const identity = await auth.authenticateSilent();
+  const root = identity.success && identity.user_id && identity.organization_id ? readLocalRoot(identity.organization_id, identity.user_id) : null;
+  if (!identity.success || !identity.user_id || !identity.organization_id || !root) throw new Error('PAIR_REQUIRED');
+  const origin = resolveActiveUrl(devMode);
+  const runIdentity = resolveInitRunIdentity();
+  const bootstrap = loadFlowRecoveryBootstrap(root, {
+    flow_id: flowId, origin, owner_id: identity.user_id, organization_id: identity.organization_id, repo_fingerprint: runIdentity.repositoryFingerprint,
+  });
+  if (!bootstrap) throw new Error('FLOW_RECOVERY_NOT_FOUND');
+  const binding = bootstrap.binding;
+  const keys = bootstrap.keys;
+  const controller = new AbortController();
+  const token = async (): Promise<string> => {
+    const current = await auth.getValidToken();
+    if (!current?.access_token || current.user_id !== identity.user_id) throw new Error('PAIR_REQUIRED');
+    return current.access_token;
+  };
+  const signed = (method: string, id: string, body: Data): Data => ({ ...body,
+    proof: sign('sha256', Buffer.from(`capy.conversation.v1\n${method}\n${flowId}\n${id}\n${canonical(body)}`), keys.privateKey).toString('base64') });
+  const request = async <T>(path: string, body?: Data, headers: Readonly<Record<string, string>> = {}, tokenOverride?: string): Promise<T> => {
+    const response = await fetch(`${origin}${path}`, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${tokenOverride ?? await token()}`, 'Content-Type': 'application/json', ...headers }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(35_000)]) });
+    const result = await response.json() as T & { readonly code?: string };
+    if (!response.ok) throw new Error(result.code ?? 'CONVERSATION_SERVICE_ERROR');
+    return result;
+  };
+  const resumed = await request<Readonly<{ readonly flow_id: string; readonly state: string; readonly cli_attached: boolean; readonly page_pubkey: string | null; readonly cursor: number; readonly expires_at: string; readonly lease_id: string }>>(
+    `/flows/${flowId}/resume`, signed('resume', 'resume', { runtime_id: binding.runtime_id, repo_fingerprint: binding.repo_fingerprint }),
+  );
+  if (resumed.flow_id !== flowId || resumed.state !== 'active' || !resumed.cli_attached || typeof resumed.lease_id !== 'string') throw new Error('FLOW_RESUME_UNAVAILABLE');
+  const leaseId = resumed.lease_id;
+  if (abandon) {
+    await request(`/flows/${flowId}/abandon`, signed('abandon', 'abandon', { lease_id: leaseId }));
+    process.stdout.write(`${JSON.stringify({ ok: true, flow_id: flowId, outcome: 'cancelled' })}\n`);
+    return;
+  }
+  type ResumeHistory = History & Readonly<{ readonly cli_attached?: boolean }>;
+  const history = async (after: number, pageKey: string | null, waitMs: number, tokenOverride?: string): Promise<ResumeHistory> => {
+    const attachedAt = String(Date.now());
+    const proof = signed('read', attachedAt, { after, page_key: pageKey ?? 'null', attached_at: attachedAt, lease_id: leaseId }).proof as string;
+    const result = await request<ResumeHistory>(`/flows/${flowId}/messages?after=${after}&after_page_pubkey=${encodeURIComponent(pageKey ?? 'null')}&wait_ms=${waitMs}`, undefined, {
+      'x-capy-cli-attached-at': attachedAt, 'x-capy-cli-proof': proof, 'x-capy-cli-lease-id': leaseId,
+    }, tokenOverride);
+    if (result.flow_id !== flowId || result.owner !== identity.user_id || result.runtime_id !== binding.runtime_id || result.repo_fingerprint !== binding.repo_fingerprint || result.client_pubkey !== binding.client_pubkey) throw new Error('CONVERSATION_BINDING_MISMATCH');
+    return result;
+  };
+  const attached = resumed.page_pubkey ? await history(0, resumed.page_pubkey, 0) : await history(0, null, 25_000);
+  if (attached.state !== 'active' || !attached.page_pubkey) throw new Error('CONVERSATION_ENDED');
+  const checkpointProof = signed('checkpoint-read', 'checkpoint', { lease_id: leaseId }).proof as string;
+  const stored = await request<Readonly<{ readonly flow_id: string; readonly runtime_id: string; readonly repo_fingerprint: string; readonly client_pubkey: string; readonly revision: string | null; readonly envelope: string | null }>>(
+    `/flows/${flowId}/checkpoint`, undefined, { 'x-capy-cli-proof': checkpointProof, 'x-capy-cli-lease-id': leaseId },
+  );
+  if (stored.flow_id !== flowId || stored.runtime_id !== binding.runtime_id || stored.repo_fingerprint !== binding.repo_fingerprint || stored.client_pubkey !== binding.client_pubkey || !stored.envelope) throw new Error('FLOW_RECOVERY_CHECKPOINT_UNAVAILABLE');
+  const recovered = recoveryCheckpoint(openFlowRecoveryCheckpoint(root, binding, stored.envelope) ?? {});
+  if (!recovered || recovered.agent_state?.terminal) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
+  process.stdout.write(`${JSON.stringify({ ok: true, command: 'flow', flow_id: flowId, resumed: true, state: recovered.phase })}\n`);
+  // The resumed runtime deliberately does not rerun ordinary CLI work. The persisted
+  // agent state blocks a second application grant and lets the agent inspect status.
+  const currentState = recovered.agent_state;
+  if (recovered.phase === 'agent' && !currentState) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
+  const incoming = new EventEmitter();
+  type Delivery = Readonly<{ readonly type: MessageType; readonly data: Data; readonly correlation?: string; readonly resolve: () => void; readonly reject: (reason: unknown) => void }>;
+  type DeliverySnapshot = Readonly<{ readonly type: 'snapshot'; readonly resolve: (journal: ReadonlyMap<string, JournalEntry>) => void; readonly reject: (reason: unknown) => void }>;
+  const deliveries = new PassThrough({ objectMode: true });
+  const deliveryIterator = deliveries[Symbol.asyncIterator]();
+  type PreparedAppend = Readonly<{ readonly entry: JournalEntry; readonly body: Data }>;
+  const prepareAppend = (type: MessageType, data: Data, correlation?: string): PreparedAppend => {
+    const id = randomUUID();
+    const correlationId = correlation ?? id;
+    const payload = type === 'prompt' || type === 'goal' || type === 'goal_completed'
+      ? flowTurnPayload([], { type, data }) : data;
+    const content = { v: 1, flow_id: flowId, id, correlation_id: correlationId, type, data: payload };
+    const sealed = sealRequestEnvelope({ connectionId: `${flowId}:${id}`, clientPubkeyB64: binding.client_pubkey, pagePubkeyB64: attached.page_pubkey!, payload: JSON.stringify(content) });
+    if (!sealed.ok) throw new Error('CONVERSATION_ENCRYPTION_FAILED');
+    const unsigned = { v: 1, id, correlation_id: correlationId, direction: 'cli_to_browser', type, envelope: sealed.ciphertextB64, lease_id: leaseId,
+      ...((type === 'goal' || type === 'goal_completed') ? { outcome: (payload.outcome as Data | undefined)?.status ?? payload.status } : {}) } as const;
+    return { entry: { id, type, data: payload, envelope: sealed.ciphertextB64 }, body: signed('append', id, unsigned) };
+  };
+  const append = async (prepared: PreparedAppend): Promise<void> => { await request(`/flows/${flowId}/messages`, prepared.body); };
+  const consumeDeliveries = async (journal: ReadonlyMap<string, JournalEntry>): Promise<void> => {
+    const next = await deliveryIterator.next();
+    if (next.done) return;
+    const delivery = next.value as Delivery | DeliverySnapshot;
+    if (delivery.type === 'snapshot') { delivery.resolve(journal); return consumeDeliveries(journal); }
+    try {
+      const prepared = prepareAppend(delivery.type, delivery.data, delivery.correlation);
+      const nextJournal = new Map([...journal, [prepared.entry.id, prepared.entry]]);
+      await saveJournal(nextJournal);
+      await append(prepared);
+      delivery.resolve();
+      return consumeDeliveries(nextJournal);
+    } catch (error) { delivery.reject(error); incoming.emit('failure', error); controller.abort(error); throw error; }
+  };
+  const deliveryWriter = consumeDeliveries(new Map(recovered.journal.map(entry => [entry.id, entry])));
+  void deliveryWriter.catch(() => undefined);
+  const emit = (type: MessageType, data: Data, correlation?: string): Promise<void> => new Promise((resolve, reject) => {
+    if (controller.signal.aborted || deliveries.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    deliveries.write({ type, data, correlation, resolve, reject } satisfies Delivery);
+  });
+  const snapshot = (): Promise<ReadonlyMap<string, JournalEntry>> => new Promise((resolve, reject) => {
+    if (controller.signal.aborted || deliveries.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    deliveries.write({ type: 'snapshot', resolve, reject } satisfies DeliverySnapshot);
+  });
+  type SavedState = Readonly<{ readonly phase?: Data; readonly journal: ReadonlyMap<string, JournalEntry>; readonly resolve: () => void; readonly reject: (error: unknown) => void }>;
+  const saves = new PassThrough({ objectMode: true });
+  const saveIterator = saves[Symbol.asyncIterator]();
+  const rawRecoveredPhase: Data = { v: 1, phase: recovered.phase, ...(recovered.offer === undefined ? {} : { offer: recovered.offer }), agent_state: recovered.agent_state as unknown as Data };
+  const writeSave = async (revision: string | null, phase: Data): Promise<void> => {
+    const next = await saveIterator.next();
+    if (next.done) return;
+    const save = next.value as SavedState;
+    try {
+      const nextPhase = save.phase ?? phase;
+      const envelope = sealFlowRecoveryCheckpoint(root, binding, { ...nextPhase, journal: [...save.journal.values()] });
+      const unsigned = { revision, envelope, lease_id: leaseId } as const;
+      const saved = await request<Readonly<{ readonly revision: string; readonly flow_id: string; readonly runtime_id: string; readonly repo_fingerprint: string; readonly client_pubkey: string }>>(`/flows/${flowId}/checkpoint`, signed('checkpoint-write', revision ?? 'null', unsigned));
+      if (saved.flow_id !== flowId || saved.runtime_id !== binding.runtime_id || saved.repo_fingerprint !== binding.repo_fingerprint || saved.client_pubkey !== binding.client_pubkey) throw new Error('CONVERSATION_BINDING_MISMATCH');
+      save.resolve();
+      return writeSave(saved.revision, nextPhase);
+    } catch (error) { save.reject(error); incoming.emit('failure', error); controller.abort(error); throw error; }
+  };
+  const saveWriter = writeSave(stored.revision, rawRecoveredPhase);
+  void saveWriter.catch(() => undefined);
+  const save = async (phase: Data | undefined, journal: ReadonlyMap<string, JournalEntry>): Promise<void> => new Promise((resolve, reject) => {
+    if (controller.signal.aborted || saves.destroyed) { reject(new Error('CONVERSATION_TRANSPORT_CLOSED')); return; }
+    saves.write({ ...(phase === undefined ? {} : { phase }), journal, resolve, reject } satisfies SavedState);
+  });
+  const saveState = async (state: FlowAgentState): Promise<void> => {
+    const journal = await snapshot();
+    return save({ v: 1, phase: 'agent', agent_state: state as unknown as Data }, journal);
+  };
+  const saveJournal = (journal: ReadonlyMap<string, JournalEntry>): Promise<void> => save(undefined, journal);
+  const receive = async (cursor: number): Promise<void> => {
+    const result = await history(cursor, attached.page_pubkey, 25_000);
+    for (const message of result.messages) {
+      if (message.direction !== 'browser_to_cli') continue;
+      const opened = openEnvelope({ ciphertextB64: message.envelope, connectionId: `${flowId}:${message.id}`, keypair: keys });
+      if (!opened.ok) throw new Error('CONVERSATION_DECRYPTION_FAILED');
+      const content = JSON.parse(opened.plaintext) as Readonly<{ readonly v: number; readonly flow_id: string; readonly id: string; readonly correlation_id: string; readonly type: MessageType; readonly data: Data }>;
+      if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new Error('CONVERSATION_BINDING_MISMATCH');
+      if (content.type === 'answer') incoming.emit(content.correlation_id, content.data);
+      if (content.type === 'ping' && cursor !== 0) await emit('pong', { message: 'CLI is running.' }, content.correlation_id);
+    }
+    if (result.state !== 'active') { const error = new Error('CONVERSATION_ENDED'); incoming.emit('failure', error); controller.abort(error); return; }
+    return receive(result.cursor);
+  };
+  // Prompts are reissued on recovery, so replaying encrypted answers from zero
+  // is safe and prevents a service cursor from hiding an answer after a drop.
+  const reader = receive(0).catch(error => { incoming.emit('failure', error); controller.abort(error); });
+  const askApproval = async (goal: FlowGoal, plan: Readonly<{ readonly summary: string }>, onPromptEmitted?: () => Promise<void>): Promise<boolean> => {
+    const id = randomUUID();
+    const answer = new Promise<Data>((resolve, reject) => {
+      const failed = (error: unknown): void => { incoming.removeListener(id, answered); reject(error); };
+      const answered = (data: Data): void => { incoming.removeListener('failure', failed); resolve(data); };
+      incoming.once(id, answered); incoming.once('failure', failed);
+    });
+    await emit('prompt', { question: { text: `Approve this plan for ${goal.goal_name}?`, input: { kind: 'confirm', default: true } }, presentation: { title: 'Review plan', component: 'agent-plan' }, ...goal }, id);
+    await onPromptEmitted?.();
+    const value = (await answer).value;
+    await emit('output', { message: value === true ? 'Yes' : 'No', answer_to: id, value, ...goal });
+    return value === true;
+  };
+  const askContinuation = async (offer: FlowNextOffer): Promise<boolean> => {
+    const id = randomUUID();
+    const answer = new Promise<Data>((resolve, reject) => {
+      const failed = (error: unknown): void => { incoming.removeListener(id, answered); reject(error); };
+      const answered = (data: Data): void => { incoming.removeListener('failure', failed); resolve(data); };
+      incoming.once(id, answered); incoming.once('failure', failed);
+    });
+    await emit('prompt', { question: { text: offer.prompt, input: { kind: 'confirm', default: true } }, presentation: { title: 'Continue with project setup', component: 'agent-plan' } }, id);
+    const value = (await answer).value;
+    await emit('output', { message: value === true ? 'Yes' : 'No', answer_to: id, value });
+    return value === true;
+  };
+  const stateForRuntime = async (): Promise<FlowAgentState | null> => {
+    if (recovered.phase === 'continuation_offer') {
+      if (!recovered.offer) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
+      const accepted = await askContinuation(recovered.offer);
+      if (!accepted) {
+        await emit('goal', { ...recovered.offer, status: 'succeeded', result: { continuation_declined: true } });
+        return null;
+      }
+      await emit('progress', { kind: 'goal_start', ...recovered.offer });
+      const state = initialFlowAgentState();
+      await saveState(state);
+      return state;
+    }
+    const restored = currentState!;
+    if (!restored.plan || restored.approved || restored.application_id) return restored;
+    const approved = await askApproval(restored.goal, restored.plan, () => saveState(restored));
+    if (!approved) {
+      await emit('goal', { ...restored.goal, status: 'cancelled', code: 'PLAN_DECLINED', result: { plan_id: restored.plan.plan_id, plan_hash: restored.plan.plan_hash } });
+      return null;
+    }
+    const state = { ...restored, approved: true };
+    await saveState(state);
+    return state;
+  };
+  try {
+  const resumedState = await stateForRuntime();
+  if (!resumedState) return;
+  const runtime = await attachFlowAgentRuntime({
+    flowId,
+    ownerId: identity.user_id,
+    signal: controller.signal,
+    initialState: resumedState,
+    saveState,
+    authenticate: async supplied => (await history(0, attached.page_pubkey, 0, supplied)).owner === identity.user_id,
+    readHistory: async () => {
+      const collect = async (after: number, messages: readonly Message[]): Promise<readonly Message[]> => {
+        const page = await history(after, attached.page_pubkey, 0);
+        const combined = [...messages, ...page.messages];
+        return page.messages.length === 100 && page.cursor > after ? collect(page.cursor, combined) : combined;
+      };
+      const persisted = await collect(0, []);
+      const journal = await snapshot();
+      return persisted.flatMap(message => {
+        if (message.direction === 'cli_to_browser') {
+          const entry = journal.get(message.id);
+          // Every delivered record must have its encrypted journal entry saved
+          // first. Never silently hide history if that durability invariant fails.
+          if (!entry) throw new Error('FLOW_RECOVERY_HISTORY_UNAVAILABLE');
+          if (entry.type !== message.type || entry.envelope !== message.envelope) throw new Error('CONVERSATION_BINDING_MISMATCH');
+          return [{ id: message.id, type: message.type, data: entry.data }];
+        }
+        const opened = openEnvelope({ ciphertextB64: message.envelope, connectionId: `${flowId}:${message.id}`, keypair: keys });
+        if (!opened.ok) throw new Error('CONVERSATION_DECRYPTION_FAILED');
+        const content = JSON.parse(opened.plaintext) as Readonly<{ readonly v: number; readonly flow_id: string; readonly id: string; readonly correlation_id: string; readonly type: MessageType; readonly data: Data }>;
+        if (content.v !== 1 || content.flow_id !== flowId || content.id !== message.id || content.correlation_id !== message.correlation_id || content.type !== message.type) throw new Error('CONVERSATION_BINDING_MISMATCH');
+        return [{ id: message.id, type: message.type, data: content.data }];
+      });
+    },
+    emitOutput: async data => emit('output', data),
+    emitProgress: async data => emit('progress', data),
+    emitCompleted: async (goal, result) => emit('goal_completed', { ...goal, status: 'succeeded', ...(result === undefined ? {} : { result }) }),
+    askPlanApproval: askApproval,
+    askContinuation: async () => false,
+    emitTerminal: async data => emit('goal', data),
+    signChallenge: nonce => sign('sha256', Buffer.from(`capy.flow.agent.v1\n${flowId}\n${nonce}`), keys.privateKey).toString('base64'),
+  });
+  const executable = process.env.CAPY_BIN_NAME ?? (devMode ? 'capy-dev' : 'capy');
+  process.stdout.write(`${JSON.stringify({
+    ok: true, type: 'agent_handoff', command: 'flow', flow_id: flowId,
+    url: `${keepOrigin()}/flow/conversation?f=${encodeURIComponent(flowId)}`,
+    attachment: { command: executable, args: ['flow', '--id', flowId, '--json'], protocol: 'capy.flow.agent.v1' },
+    instructions: [
+      'Keep this resumed CLI process running and attach a single dedicated agent from the same repository and authenticated account.',
+      'Inspect status and history before acting. If applying is already recorded, inspect the repository and report its outcome; never request another application grant.',
+      'Submit analysis and a plan, wait for approval, then request begin_apply before making changes. Completing Project Setup closes onboarding; if intentionally leaving it unaccomplished, send an explicit terminal skipped outcome with a reason.',
+    ],
+  })}\n`);
+  try { await runtime.finished; }
+  finally { await runtime.close(); }
+  } finally { saves.end(); deliveries.end(); controller.abort(); await reader; await saveWriter; }
+};

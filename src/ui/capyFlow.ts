@@ -3,9 +3,12 @@ import { CapyCommand } from '../commands/capyCommand';
 import { ProjectManager } from '../core/projectManager';
 import { runComposedDeviceGrant } from '../commands/composedDeviceGrant';
 import { runWithFlowInteraction } from './flowInteraction';
+import { discoverOpenRecoveryFlows, reportOpenRecoveryFlows } from './flowDiscovery';
 
 /** Pair supplies identity/custody; the existing root command owns everything after it. */
 export async function runCapyFlow(options: CliOptions, devMode: boolean): Promise<void> {
+  const openFlows = await discoverOpenRecoveryFlows(devMode, options.expectedUserId);
+  if (openFlows.length > 0) { reportOpenRecoveryFlows(openFlows, devMode); return; }
   const execute = (organizationId?: string, expectedUserId?: string) => runWithFlowInteraction(
     () => new CapyCommand({...options, web:false}, devMode).execute(),
     devMode,

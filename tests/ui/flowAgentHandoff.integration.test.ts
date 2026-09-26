@@ -34,7 +34,7 @@ mock.module('../../src/auth/authService', () => ({
     }
   },
 }));
-mock.module('../../src/config/globalConfig', () => ({ readLocalRoot: () => Buffer.alloc(32, 7) }));
+mock.module('../../src/config/globalConfig', () => ({ readLocalRoot: () => Buffer.alloc(32, 7), getGlobalCapyDir: () => '/tmp/capy-flow-handoff-fixture' }));
 mock.module('../../src/config/profileConfig', () => ({ resolveActiveUrl: () => SERVICE_ORIGIN }));
 mock.module('../../src/auth/initRunIdentity', () => ({
   resolveInitRunIdentity: () => ({
@@ -169,6 +169,14 @@ const fixtureServiceWithAnswers = async (answers: readonly boolean[]): Promise<R
       }
       return responseJson({ ok: true });
     }
+    if (method === 'GET' && url.pathname === `/flows/${FLOW_ID}/checkpoint`) return responseJson({
+      flow_id: FLOW_ID, runtime_id: (await creation).runtime_id, repo_fingerprint: REPOSITORY_FINGERPRINT,
+      client_pubkey: await client, revision: null, envelope: null,
+    });
+    if (method === 'POST' && url.pathname === `/flows/${FLOW_ID}/checkpoint`) return responseJson({
+      flow_id: FLOW_ID, runtime_id: (await creation).runtime_id, repo_fingerprint: REPOSITORY_FINGERPRINT,
+      client_pubkey: await client, revision: 'checkpoint-fixture', envelope: body.envelope,
+    });
     if (method === 'POST' && url.pathname === `/flows/${FLOW_ID}/detach`) return responseJson({ ok: true });
     return Response.json({ code: 'UNEXPECTED_FIXTURE_REQUEST' }, { status: 404 });
   };

@@ -30,7 +30,8 @@ export type FlowAgentRequest = Readonly<{
   readonly application_id?: string;
   readonly result?: FlowAgentResult;
   readonly next_offer?: FlowNextOffer;
-  readonly outcome?: 'failed' | 'cancelled';
+  readonly outcome?: 'failed' | 'cancelled' | 'skipped';
+  readonly reason?: string;
   readonly code?: string;
 }>;
 type AgentResponse = Json;
@@ -43,6 +44,9 @@ export type FlowAgentRuntimeInput = Readonly<{
   readonly ownerId: string;
   readonly socketPath?: string;
   readonly signal?: AbortSignal;
+  readonly initialState?: FlowAgentState;
+  /** Encrypted durable checkpoint; must succeed before granting application. */
+  readonly saveState?: (state: FlowAgentState) => Promise<void>;
   /** Uses the connecting caller's bearer token with the live runtime proof. */
   readonly authenticate: (token: string) => Promise<boolean>;
   /** Decrypts persisted records only when the local caller explicitly asks. */
@@ -50,7 +54,7 @@ export type FlowAgentRuntimeInput = Readonly<{
   readonly emitOutput: (data: Json) => Promise<void>;
   readonly emitProgress: (data: Json) => Promise<void>;
   readonly emitCompleted: (goal: FlowGoal, result?: Json) => Promise<void>;
-  readonly askPlanApproval: (goal: FlowGoal, plan: FlowAgentPlan) => Promise<boolean>;
+  readonly askPlanApproval: (goal: FlowGoal, plan: FlowAgentPlan, onPromptEmitted?: () => Promise<void>) => Promise<boolean>;
   readonly askContinuation: (offer: FlowNextOffer) => Promise<boolean>;
   readonly emitTerminal: (data: Json) => Promise<void>;
   readonly signChallenge: (nonce: string) => string;
@@ -127,7 +131,7 @@ const parseRequest = (value: unknown): FlowAgentRequest | null => {
     && (action !== 'analysis' || parsedAnalysis !== null)
     && (action !== 'plan' || parsedPlan !== null)
     && (action !== 'complete' || parsedResult !== null)
-    && (action !== 'terminal' || candidate?.outcome === 'failed' || candidate?.outcome === 'cancelled')
+    && (action !== 'terminal' || candidate?.outcome === 'failed' || candidate?.outcome === 'cancelled' || (candidate?.outcome === 'skipped' && string(candidate?.reason) !== null))
     && (candidate?.next_offer === undefined || parsedOffer !== null)
     ? { v: 1, id, token, action,
       ...(parsedAnalysis ? { analysis: parsedAnalysis } : {}),
@@ -137,7 +141,8 @@ const parseRequest = (value: unknown): FlowAgentRequest | null => {
       ...(string(candidate?.application_id) ? { application_id: string(candidate?.application_id)! } : {}),
       ...(parsedResult ? { result: parsedResult } : {}),
       ...(parsedOffer ? { next_offer: parsedOffer } : {}),
-      ...(candidate?.outcome === 'failed' || candidate?.outcome === 'cancelled' ? { outcome: candidate.outcome } : {}),
+      ...(candidate?.outcome === 'failed' || candidate?.outcome === 'cancelled' || candidate?.outcome === 'skipped' ? { outcome: candidate.outcome } : {}),
+      ...(string(candidate?.reason) ? { reason: string(candidate?.reason)! } : {}),
       ...(string(candidate?.code) ? { code: string(candidate?.code)! } : {}),
     } : null;
 };
@@ -155,18 +160,18 @@ const remembered = (state: State, request: FlowAgentRequest, body: string, respo
 });
 export const flowAgentPlanHash = (value: FlowAgentPlan): string => createHash('sha256').update(canonical({ summary: value.summary, files: value.files, checks: value.checks })).digest('hex');
 
-export const processFlowAgentRequest = async (state: State, request: FlowAgentRequest, body: string, input: FlowAgentRuntimeInput): Promise<Readonly<{ readonly state: State; readonly response: AgentResponse }>> => {
+const processRequest = async (state: State, request: FlowAgentRequest, body: string, input: FlowAgentRuntimeInput): Promise<Readonly<{ readonly state: State; readonly response: AgentResponse }>> => {
   if (!(await input.authenticate(request.token).catch(() => false))) return { state, response: requestError(request.id, 'FLOW_ATTACHMENT_FORBIDDEN') };
   const duplicate = replay(state, request, body);
   if (duplicate) return duplicate;
   if (request.action === 'status') {
     const response = success(request.id, { flow_id: input.flowId, goal: state.goal, state: state.terminal ? 'terminal' : state.application_id ? 'applying' : state.approved ? 'approved' : 'awaiting_approval', approved_plan: state.approved && state.plan ? { plan_id: state.plan.plan_id, plan_hash: state.plan.plan_hash } : null, ...(state.application_id ? { application_id: state.application_id } : {}) });
-    return { state: remembered(state, request, body, response), response };
+    return { state, response };
   }
   if (request.action === 'read') {
     const history = await input.readHistory();
     const response = success(request.id, { flow_id: input.flowId, history });
-    return { state: remembered(state, request, body, response), response };
+    return { state, response };
   }
   if (state.terminal) return { state, response: requestError(request.id, 'FLOW_TERMINAL') };
   if (request.action === 'analysis') {
@@ -175,7 +180,7 @@ export const processFlowAgentRequest = async (state: State, request: FlowAgentRe
     return { state: remembered(state, request, body, response), response };
   }
   if (request.action === 'terminal') {
-    await input.emitTerminal({ ...state.goal, status: request.outcome!, ...(request.code ? { code: request.code } : {}) });
+    await input.emitTerminal({ ...state.goal, status: request.outcome!, ...(request.code ? { code: request.code } : {}), ...(request.reason ? { message: request.reason } : {}) });
     const response = success(request.id, { outcome: request.outcome });
     return { state: remembered(state, request, body, response, { terminal: true }), response };
   }
@@ -184,7 +189,10 @@ export const processFlowAgentRequest = async (state: State, request: FlowAgentRe
     const submitted = request.plan!;
     if (submitted.plan_hash !== flowAgentPlanHash(submitted)) return { state, response: requestError(request.id, 'PLAN_HASH_MISMATCH') };
     await input.emitProgress({ kind: 'plan', ...state.goal, plan: submitted, plan_id: submitted.plan_id, plan_hash: submitted.plan_hash });
-    const approved = await input.askPlanApproval(state.goal, submitted);
+    await input.saveState?.({ ...state, plan: submitted, approved: false, application_id: null });
+    const approved = await input.askPlanApproval(state.goal, submitted, async () => {
+      await input.saveState?.({ ...state, plan: submitted, approved: false, application_id: null });
+    });
     const response = success(request.id, { type: 'plan-decision', decision: approved ? 'yes' : 'no', plan_id: submitted.plan_id, plan_hash: submitted.plan_hash });
     if (!approved) {
       await input.emitTerminal({ ...state.goal, status: 'cancelled', code: 'PLAN_DECLINED', result: { plan_id: submitted.plan_id, plan_hash: submitted.plan_hash } });
@@ -197,9 +205,11 @@ export const processFlowAgentRequest = async (state: State, request: FlowAgentRe
     if (!matches) return { state, response: requestError(request.id, 'PLAN_NOT_APPROVED') };
     if (state.application_id) return { state, response: requestError(request.id, 'APPLY_ALREADY_STARTED') };
     const applicationId = randomUUID();
-    await input.emitProgress({ kind: 'apply_started', ...state.goal, plan_id: state.plan.plan_id, plan_hash: state.plan.plan_hash, application_id: applicationId });
     const response = success(request.id, { application_id: applicationId, authorization: 'granted' });
-    return { state: remembered(state, request, body, response, { application_id: applicationId }), response };
+    const nextState = remembered(state, request, body, response, { application_id: applicationId });
+    await input.saveState?.(nextState);
+    await input.emitProgress({ kind: 'apply_started', ...state.goal, plan_id: state.plan.plan_id, plan_hash: state.plan.plan_hash, application_id: applicationId });
+    return { state: nextState, response };
   }
   const approved = state.approved && state.plan !== null && request.plan_id === state.plan.plan_id && request.plan_hash === state.plan.plan_hash;
   if (!approved || !state.application_id || request.application_id !== state.application_id) return { state, response: requestError(request.id, 'APPLICATION_NOT_AUTHORIZED') };
@@ -207,7 +217,7 @@ export const processFlowAgentRequest = async (state: State, request: FlowAgentRe
   const completedResult = { ...request.result!, plan_id: state.plan.plan_id, plan_hash: state.plan.plan_hash, application_id: state.application_id };
   await input.emitProgress({ kind: 'apply_result', ...state.goal, result: completedResult });
   await input.emitCompleted(state.goal, completedResult);
-  if (!request.next_offer) {
+  if (state.goal.goal_id === 'project_setup' || !request.next_offer) {
     await input.emitTerminal({ ...state.goal, status: 'succeeded', result: completedResult });
     const response = success(request.id, { outcome: 'succeeded' });
     return { state: remembered(state, request, body, response, { terminal: true }), response };
@@ -221,6 +231,14 @@ export const processFlowAgentRequest = async (state: State, request: FlowAgentRe
   await input.emitProgress({ kind: 'goal_start', ...request.next_offer });
   const response = success(request.id, { continuation: 'accepted', goal: request.next_offer });
   return { state: remembered(state, request, body, response, { goal: request.next_offer, completedGoalIds: [...state.completedGoalIds, state.goal.goal_id], plan: null, approved: false, application_id: null }), response };
+};
+
+export const processFlowAgentRequest = async (state: State, request: FlowAgentRequest, body: string, input: FlowAgentRuntimeInput): Promise<Readonly<{ readonly state: State; readonly response: AgentResponse }>> => {
+  const processed = await processRequest(state, request, body, input);
+  // Terminal goal emission already closed the authoritative service record.
+  // Do not attempt to update an open-flow checkpoint after closure.
+  if (processed.state !== state && !processed.state.terminal) await input.saveState?.(processed.state);
+  return processed;
 };
 
 const readJson = async (line: string): Promise<unknown> => {
@@ -289,7 +307,8 @@ export const attachFlowAgentRuntime = async (input: FlowAgentRuntimeInput): Prom
     const socket = next.value as Socket;
     if (socket.destroyed) return consume(state);
     const nextState = await serve(socket, state, input).catch(async error => {
-      if (!stopping.signal.aborted) await input.emitTerminal({ ...state.goal, status: 'failed', code: 'FLOW_AGENT_ERROR' });
+      // A transport/checkpoint failure is disconnection, not a goal outcome.
+      // Leave the persisted flow open for an authenticated recovery.
       if (stopping.signal.aborted) return { ...state, terminal: true };
       throw error;
     });
@@ -310,7 +329,7 @@ export const attachFlowAgentRuntime = async (input: FlowAgentRuntimeInput): Prom
   const abort = (): void => { void close(); };
   input.signal?.addEventListener('abort', abort, { once: true });
   if (input.signal?.aborted) abort();
-  const finished = consume(initialFlowAgentState()).finally(async () => {
+  const finished = consume(input.initialState ?? initialFlowAgentState()).finally(async () => {
     input.signal?.removeEventListener('abort', abort);
     await close();
   });

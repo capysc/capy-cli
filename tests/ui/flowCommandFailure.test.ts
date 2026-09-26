@@ -4,10 +4,16 @@
  * Authentication, project discovery, and the conversation service are the
  * only synthetic prerequisites; no account, provider, or key store is used.
  */
-import { describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, describe, expect, mock, spyOn, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Writable } from 'node:stream';
 import { mintPageKeypairPageSide, openRequestEnvelopePageSide, sealEnvelopePageSide } from '../helpers/sealEnvelope';
+
+const fixtureDirectory = mkdtempSync(join(tmpdir(), 'capy-flow-failure-'));
+afterAll(() => rmSync(fixtureDirectory, { recursive: true, force: true }));
 
 const FLOW_ID = '11111111-1111-4111-8111-111111111111';
 const USER_ID = 'user-flow-agent';
@@ -35,7 +41,7 @@ mock.module('../../src/auth/authService', () => ({
     }
   },
 }));
-mock.module('../../src/config/globalConfig', () => ({ readLocalRoot: () => Buffer.alloc(32, 7) }));
+mock.module('../../src/config/globalConfig', () => ({ readLocalRoot: () => Buffer.alloc(32, 7), getGlobalCapyDir: () => fixtureDirectory }));
 mock.module('../../src/config/profileConfig', () => ({ resolveActiveUrl: () => SERVICE_ORIGIN }));
 mock.module('../../src/auth/initRunIdentity', () => ({
   resolveInitRunIdentity: () => ({
@@ -183,13 +189,15 @@ describe('Flow command failure delivery', () => {
     try {
       await expect(runWithFlowInteraction(async () => { tokenProvider.mockImplementation(async () => { throw new Error('AUTH_REFRESH_AUTHORITY_INDETERMINATE'); }); throw failure; }, false)).rejects.toBe(failure);
       const writes = await service.observed();
-      expect(writes).toHaveLength(1);
-      expect(writes[0]).toMatchObject({
+      const goals = writes.filter(write => write.plaintext.type === 'goal');
+      expect(goals).toHaveLength(1);
+      expect(writes[0]?.plaintext).toMatchObject({ type: 'output', data: { kind: 'welcome' } });
+      expect(goals[0]).toMatchObject({
         plaintext: { type: 'goal', data: { outcome: {
           status: 'failed', code: 'COMMAND_FAILED', message: failure.message,
         } } },
       });
-      expect(writes[0]?.body.envelope).not.toContain(failure.message);
+      expect(goals[0]?.body.envelope).not.toContain(failure.message);
     } finally {
       tokenProvider.mockImplementation(async () => ({ access_token: ACCESS_TOKEN, user_id: USER_ID }));
       stdout.mockRestore();
