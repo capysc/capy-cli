@@ -1,5 +1,7 @@
 import { ConnectorMetadata } from '../../types/index';
 import type { Blocked } from '../../ui/screens/contract';
+import type { DokployImportSource } from '../../deploy/dokployApi';
+import type { DiscoveryContext, DiscoveryOutcome } from './dokployDiscovery';
 import { ResolvedContext } from './shared';
 
 export interface ConnectOpts {
@@ -54,9 +56,17 @@ export interface ConnectOpts {
   baseUrl?: string;
   /**
    * Dokploy import only: Application id (flag `--application`). Other
-   * connectors never read this.
+   * connectors never read this. Mutually exclusive with `compose` — both set
+   * is `DOKPLOY_SOURCE_AMBIGUOUS`, checked before any Dokploy request.
    */
   application?: string;
+  /**
+   * Dokploy import only: Compose service id (flag `--compose`). Every one of
+   * a `compose.one` org's Dokploy services is a Compose service, never an
+   * Application — this is the other half of `--application`. Other
+   * connectors never read this. Mutually exclusive with `application`.
+   */
+  compose?: string;
   /**
    * Dokploy import only: name of the env var holding the API token (flag
    * `--token-env`). Other connectors never read this.
@@ -68,6 +78,55 @@ export interface ConnectOpts {
    * ignores it.
    */
   json?: boolean;
+  /**
+   * Dokploy import only: preview the plan — resolve the key, read the source
+   * (`application.one` or `compose.one`), and print/emit what WOULD happen —
+   * without writing anything locally (`.env`, keep.lock) or pushing anything
+   * to Capy, and without prompting for the API key (see
+   * `dokployApi.ts#dokploySecretsMayPrompt`). Vince's rule: a dry run changes
+   * nothing. A link-kind connector ignores it. Also read by discovery mode
+   * (`discover`, below) — same "changes nothing" contract.
+   */
+  dryRun?: boolean;
+  /**
+   * Dokploy DISCOVERY mode only (CAP-657 follow-up): find every Dokploy
+   * service whose git source matches a repo reachable from `cwd`, rather
+   * than importing one named `--application`/`--compose`. Mutually
+   * exclusive in PURPOSE with the single-service path, though not refused
+   * when combined with `application`/`compose` — under `discover`, those two
+   * instead name the service that should win a mapping collision (see
+   * `DOKPLOY_MAPPING_COLLISION`), a different meaning from the single-
+   * service import's "which one to read". Other connectors never read this.
+   */
+  discover?: boolean;
+  /**
+   * Dokploy DISCOVERY mode only: skip the interactive "write this?"
+   * confirmation and apply directly. Required for a non-interactive
+   * (including `--json`) real (non-dry-run) discovery run to write
+   * anything at all — without it, that combination refuses
+   * `DOKPLOY_CONFIRMATION_REQUIRED` with zero writes, exactly like an
+   * interactive run that declines the same confirmation. Other connectors
+   * never read this (`rotate`'s own `-y/--yes` is a separate flag on a
+   * separate command).
+   */
+  yes?: boolean;
+  /**
+   * Dokploy import only (usable on the plain single-service import, and
+   * threaded through unchanged by discovery to every environment it runs):
+   * set the branch's vars to EXACTLY Dokploy's importable set for this
+   * service — names not in Dokploy are CLEARED, names in both with a
+   * different value are REPLACED with Dokploy's, names only in Dokploy are
+   * a plain import. A reference value (`${{...}}`) is never cleared for —
+   * skipped and reported instead, same as every other import. Without this
+   * flag, import behaves exactly as it always has: it never clears
+   * anything, and a differing value is asked about (or skipped
+   * non-interactively) rather than silently overwritten. Gated the same way
+   * discovery's own real-run confirmation is: interactive asks (default
+   * no), `--yes` skips the ask, non-interactive without `--yes` refuses
+   * `DOKPLOY_CONFIRMATION_REQUIRED`, and `--dry-run` shows the by-name
+   * lists without writing anything.
+   */
+  overwrite?: boolean;
 }
 
 export interface RotateOpts {
@@ -140,12 +199,42 @@ export interface ImportWarning {
 export type ImportOutcome =
   | {
       ok: true;
-      applicationId: string;
+      /**
+       * Dokploy import only, back-compat: set when `source.kind ===
+       * 'application'`, absent for a Compose import — see `source` below,
+       * which every dokploy import now sets. Additive: existing callers
+       * reading this for an application import see the exact same value as
+       * before.
+       */
+      applicationId?: string;
+      /** Dokploy import only: which Dokploy object this import read from. */
+      source?: DokployImportSource;
       imported: readonly ImportedVarEntry[];
       unchanged: readonly string[];
       skipped: readonly ImportSkip[];
       warnings: readonly ImportWarning[];
       deployTargetSaved: boolean;
+      /**
+       * Dokploy import only: names with a different local value that a real
+       * (non-dry-run) run would have prompted about. Only populated under
+       * `ConnectOpts.dryRun` — a dry run never prompts, so these conflicts
+       * are reported rather than resolved.
+       */
+      wouldAsk?: readonly string[];
+      /**
+       * `--overwrite` only: local names Dokploy no longer has — removed
+       * from the branch entirely (never a reference-valued name — those are
+       * skipped, not cleared). Absent when `--overwrite` wasn't passed.
+       */
+      cleared?: readonly string[];
+      /**
+       * `--overwrite` only: names present in both with a DIFFERENT value,
+       * overwritten with Dokploy's — a subset of `imported`'s names (both
+       * fields carry the same entries; this one is purely which of them
+       * were a change rather than a brand-new write). Absent when
+       * `--overwrite` wasn't passed.
+       */
+      replacedNames?: readonly string[];
     }
   | {
       ok: false;
@@ -211,6 +300,16 @@ export interface ConnectorModule {
   ): Promise<RotateResult>;
   /** Present only when `kind === 'import'`. See `kind`'s doc above. */
   import?(ctx: ResolvedContext, opts: ConnectOpts): Promise<ImportOutcome>;
+  /**
+   * Discovery mode (CAP-657 follow-up, `dokploy` only): find every matching
+   * Dokploy service rather than importing one named id. `connectCommand.ts`
+   * routes here instead of `import()` when `opts.discover` is set — with its
+   * OWN, lighter context (`DiscoveryContext`, no keep.lock/project key
+   * required — see that type's own doc), resolved BEFORE the ordinary
+   * `resolveContext()` a `ResolvedContext` needs. Present only on connectors
+   * that implement it — no other provider does today.
+   */
+  discover?(ctx: DiscoveryContext, opts: ConnectOpts): Promise<DiscoveryOutcome>;
 }
 
 /** Registered providers, keyed by name (matches `connector.provider` on each keep.lock entry). */
@@ -225,7 +324,7 @@ export function listProviders(): { name: string; description: string }[] {
     { name: 'stripe', description: 'Stripe API key (test or live, restricted)' },
     { name: 'workos', description: 'WorkOS environment API key (sandbox or production)' },
     // COPY-FLAG: new user-facing string, minimal/neutral wording.
-    { name: 'dokploy', description: 'One-time import of env vars from a Dokploy Application' },
+    { name: 'dokploy', description: 'One-time import of env vars from a Dokploy Application or Compose service' },
   ];
 }
 

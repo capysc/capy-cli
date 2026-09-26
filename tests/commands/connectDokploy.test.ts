@@ -13,17 +13,21 @@
  * `mock.module()` and does not have to run in `run-tests.sh`'s isolated list.
  */
 import { describe, test, expect, spyOn, mock, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   createDokployConnector,
   mapImportApiError,
+  mapImportComposeApiError,
   resolveDokploySettings,
+  resolveDokployImportSource,
   type DokploySettingsDeps,
+  type DokploySourceDeps,
 } from '../../src/commands/connectors/dokploy';
 import type { ResolvedContext } from '../../src/commands/connectors/shared';
 import { writeImportedAndSync } from '../../src/commands/connectors/shared';
+import { FileManager } from '../../src/files/fileManager';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import { DokployApiError } from '../../src/deploy/dokployApi';
 import type { DokploySystemStoreCallOptions, FetchLike } from '../../src/deploy/dokployApi';
@@ -64,6 +68,10 @@ interface FakeCall {
 function fakeFetch(opts: { env: string | null; status?: number; calls: FakeCall[] }): FetchLike {
   const { env, status = 200, calls } = opts;
   return (async (url: string, init: { method: string }) => {
+    // Import is READ-ONLY on the Dokploy side — a write here is a bug in
+    // the code under test, not something to merely record and let an
+    // `expect` catch later.
+    if (init.method !== 'GET') throw new Error(`fakeFetch: unexpected non-GET ${init.method} ${url}`);
     calls.push({ method: init.method, url });
     if (status !== 200) {
       return { status, ok: false, text: async () => JSON.stringify({ message: 'error' }) };
@@ -81,6 +89,30 @@ function fakeFetch(opts: { env: string | null; status?: number; calls: FakeCall[
           buildSecrets: null,
           createEnvFile: true,
         }),
+    };
+  }) as FetchLike;
+}
+
+/**
+ * `fakeFetch`'s Compose sibling: answers `compose.one` instead of
+ * `application.one`, echoing back the requested `composeId` the same way.
+ */
+function fakeComposeFetch(opts: { env: string | null; status?: number; calls: FakeCall[] }): FetchLike {
+  const { env, status = 200, calls } = opts;
+  return (async (url: string, init: { method: string }) => {
+    // Import is READ-ONLY on the Dokploy side — a write here is a bug in
+    // the code under test, not something to merely record and let an
+    // `expect` catch later.
+    if (init.method !== 'GET') throw new Error(`fakeComposeFetch: unexpected non-GET ${init.method} ${url}`);
+    calls.push({ method: init.method, url });
+    if (status !== 200) {
+      return { status, ok: false, text: async () => JSON.stringify({ message: 'error' }) };
+    }
+    const composeId = new URL(url).searchParams.get('composeId') ?? 'compose_1';
+    return {
+      status: 200,
+      ok: true,
+      text: async () => JSON.stringify({ composeId, name: 'demo-compose', env, createEnvFile: true }),
     };
   }) as FetchLike;
 }
@@ -1140,5 +1172,850 @@ describe('dokploy import — system store token resolution', () => {
     );
     expect(outcome.ok).toBe(true);
     expect(promptFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Compose Docker Compose support (CAP-657 follow-up) ──────────────────────
+//
+// Every one of the target org's Dokploy services is a Compose service
+// (compose.one), not an Application — the import only read application.one
+// before this. Covers: `--application` + `--compose` refused before any
+// request, `compose.one` request shape (GET-only, x-api-key, never
+// application.one), error mapping, keep.lock's `compose_id` field, and that
+// a compose import never offers a deploy target (there is no compose deploy
+// adapter yet).
+
+describe('resolveDokployImportSource', () => {
+  const deps: DokploySourceDeps = {
+    pickTarget: async () => {
+      throw new Error('pickTarget should not be called in this test');
+    },
+    askSettings: async () => {
+      throw new Error('askSettings should not be called in this test');
+    },
+    askComposeSettings: async () => {
+      throw new Error('askComposeSettings should not be called in this test');
+    },
+    askSourceKind: async () => {
+      throw new Error('askSourceKind should not be called in this test');
+    },
+  };
+
+  test('--application + --compose → DOKPLOY_SOURCE_AMBIGUOUS', async () => {
+    const r = await resolveDokployImportSource(
+      { application: 'app_1', compose: 'compose_1', baseUrl: 'https://d' },
+      [],
+      true,
+      deps,
+    );
+    expect(r).toEqual({
+      ok: false,
+      code: 'DOKPLOY_SOURCE_AMBIGUOUS',
+      message: '--application and --compose are mutually exclusive. Pass exactly one.',
+    });
+  });
+
+  test('--compose + --base-url resolves a compose source, tokenEnv defaulted', async () => {
+    const r = await resolveDokployImportSource({ compose: 'compose_1', baseUrl: 'https://d.example.com' }, [], true, deps);
+    expect(r).toEqual({
+      ok: true,
+      baseUrl: 'https://d.example.com',
+      source: { kind: 'compose', id: 'compose_1' },
+      tokenEnv: 'DOKPLOY_API_KEY',
+    });
+  });
+
+  test('--compose without --base-url, non-interactive: refuses DOKPLOY_SETTINGS_MISSING', async () => {
+    const r = await resolveDokployImportSource({ compose: 'compose_1' }, [], false, deps);
+    expect(r.ok).toBe(false);
+    expect((r as { code: string }).code).toBe('DOKPLOY_SETTINGS_MISSING');
+  });
+
+  test('--compose without --base-url, interactive: asks for base URL + compose id', async () => {
+    const r = await resolveDokployImportSource({ compose: 'compose_1' }, [], true, {
+      ...deps,
+      askComposeSettings: async () => ({ baseUrl: 'https://asked.example.com', composeId: 'compose_asked' }),
+    });
+    expect(r).toEqual({
+      ok: true,
+      baseUrl: 'https://asked.example.com',
+      source: { kind: 'compose', id: 'compose_asked' },
+      tokenEnv: 'DOKPLOY_API_KEY',
+    });
+  });
+
+  test('an --application flag delegates to resolveDokploySettings unchanged', async () => {
+    const r = await resolveDokployImportSource(
+      { application: 'app_1', baseUrl: 'https://d.example.com' },
+      [],
+      true,
+      deps,
+    );
+    expect(r).toEqual({
+      ok: true,
+      baseUrl: 'https://d.example.com',
+      source: { kind: 'application', id: 'app_1' },
+      tokenEnv: 'DOKPLOY_API_KEY',
+    });
+  });
+
+  test('a saved (Application) target delegates to resolveDokploySettings unchanged', async () => {
+    const r = await resolveDokployImportSource({}, [DOKPLOY_TARGET()], true, deps);
+    expect(r).toEqual({
+      ok: true,
+      baseUrl: 'https://dokploy.example.com',
+      source: { kind: 'application', id: 'app_1' },
+      tokenEnv: 'DOKPLOY_API_KEY',
+    });
+  });
+
+  test('neither flag, no saved target, non-interactive: refuses DOKPLOY_SETTINGS_MISSING', async () => {
+    const r = await resolveDokployImportSource({}, [], false, deps);
+    expect(r.ok).toBe(false);
+    expect((r as { code: string }).code).toBe('DOKPLOY_SETTINGS_MISSING');
+  });
+
+  test('neither flag, no saved target, interactive: asks which KIND first, then compose settings', async () => {
+    const r = await resolveDokployImportSource({}, [], true, {
+      ...deps,
+      askSourceKind: async () => 'compose',
+      askComposeSettings: async () => ({ baseUrl: 'https://asked.example.com', composeId: 'compose_asked' }),
+    });
+    expect(r).toEqual({
+      ok: true,
+      baseUrl: 'https://asked.example.com',
+      source: { kind: 'compose', id: 'compose_asked' },
+      tokenEnv: 'DOKPLOY_API_KEY',
+    });
+  });
+
+  test('neither flag, no saved target, interactive, kind=application: falls through to askSettings', async () => {
+    const r = await resolveDokployImportSource({}, [], true, {
+      ...deps,
+      askSourceKind: async () => 'application',
+      askSettings: async () => ({ baseUrl: 'https://asked.example.com', applicationId: 'app_asked' }),
+    });
+    expect(r).toEqual({
+      ok: true,
+      baseUrl: 'https://asked.example.com',
+      source: { kind: 'application', id: 'app_asked' },
+      tokenEnv: 'DOKPLOY_API_KEY',
+    });
+  });
+});
+
+describe('mapImportComposeApiError', () => {
+  test('401/403 → DOKPLOY_AUTH_FAILED, 404 → DOKPLOY_APP_NOT_FOUND, other → DOKPLOY_API_ERROR', () => {
+    expect(mapImportComposeApiError(new DokployApiError('unauthorized', 401, 'x'), 'c_1').code).toBe(
+      'DOKPLOY_AUTH_FAILED',
+    );
+    expect(mapImportComposeApiError(new DokployApiError('not_found', 404, 'x'), 'c_1').code).toBe(
+      'DOKPLOY_APP_NOT_FOUND',
+    );
+    expect(mapImportComposeApiError(new DokployApiError('server_error', 500, 'x'), 'c_1').code).toBe(
+      'DOKPLOY_API_ERROR',
+    );
+    expect(mapImportComposeApiError(new Error('boom'), 'c_1').code).toBe('DOKPLOY_API_ERROR');
+  });
+});
+
+describe('dokploy import — compose source, end to end', () => {
+  test('--application + --compose together: DOKPLOY_SOURCE_AMBIGUOUS, zero Dokploy requests', async () => {
+    const connector = createDokployConnector({ fetch: unreachableFetch, env: { T: 'x' } });
+    const outcome = await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d',
+      application: 'app_1',
+      compose: 'compose_1',
+      tokenEnv: 'T',
+    });
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { code: string }).code).toBe('DOKPLOY_SOURCE_AMBIGUOUS');
+  });
+
+  test('a compose import only ever GETs compose.one — never application.one, never a write', async () => {
+    const calls: FakeCall[] = [];
+    const connector = createDokployConnector({ fetch: fakeComposeFetch({ env: 'A=1', calls }), env: { T: 'x' } });
+    const outcome = await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d',
+      compose: 'compose_1',
+      tokenEnv: 'T',
+    });
+    expect(outcome.ok).toBe(true);
+    expect(calls.length).toBe(1);
+    expect(calls[0].method).toBe('GET');
+    expect(calls[0].url).toContain('compose.one');
+    expect(calls[0].url).not.toContain('application.one');
+  });
+
+  test('the token is sent as x-api-key for a compose read too', async () => {
+    const seenHeaders: string[] = [];
+    const fetchImpl: FetchLike = (async (url: string, init: { method: string; headers: Record<string, string> }) => {
+      if (init.method !== 'GET') throw new Error(`unexpected non-GET ${init.method} ${url}`);
+      seenHeaders.push(init.headers['x-api-key']);
+      return {
+        status: 200,
+        ok: true,
+        text: async () => JSON.stringify({ composeId: 'compose_1', env: null, createEnvFile: true }),
+      };
+    }) as FetchLike;
+    const connector = createDokployConnector({ fetch: fetchImpl, env: { CUSTOM_TOKEN_VAR: 'tok_xyz' } });
+    await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d',
+      compose: 'compose_1',
+      tokenEnv: 'CUSTOM_TOKEN_VAR',
+    });
+    expect(seenHeaders).toEqual(['tok_xyz']);
+  });
+
+  test('401 → DOKPLOY_AUTH_FAILED, 404 → DOKPLOY_APP_NOT_FOUND for a compose read', async () => {
+    const unauthorized = createDokployConnector({
+      fetch: fakeComposeFetch({ env: null, status: 401, calls: [] }),
+      env: { T: 'x' },
+    });
+    const r1 = await unauthorized.import!(ctxWith(), { ...BASE_OPTS, baseUrl: 'https://d', compose: 'c_1', tokenEnv: 'T' });
+    expect((r1 as { code: string }).code).toBe('DOKPLOY_AUTH_FAILED');
+
+    const notFound = createDokployConnector({
+      fetch: fakeComposeFetch({ env: null, status: 404, calls: [] }),
+      env: { T: 'x' },
+    });
+    const r2 = await notFound.import!(ctxWith(), { ...BASE_OPTS, baseUrl: 'https://d', compose: 'c_1', tokenEnv: 'T' });
+    expect((r2 as { code: string }).code).toBe('DOKPLOY_APP_NOT_FOUND');
+  });
+
+  test('a compose import records compose_id on the keep.lock entry, never application_id', async () => {
+    const connector = createDokployConnector({
+      fetch: fakeComposeFetch({ env: 'SECRET=abc', calls: [] }),
+      env: { T: 'x' },
+    });
+    const outcome = await connector.import!(ctxWith(), {
+      nonTty: true,
+      baseUrl: 'https://d',
+      compose: 'compose_xyz',
+      tokenEnv: 'T',
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const entry = outcome.imported[0].entry as ConnectorMetadata;
+    expect(entry.compose_id).toBe('compose_xyz');
+    expect(entry.application_id).toBeUndefined();
+    expect(outcome.applicationId).toBeUndefined();
+    expect(outcome.source).toEqual({ kind: 'compose', id: 'compose_xyz' });
+  });
+
+  test('a compose import never offers a deploy target — no ask, no save, even interactive', async () => {
+    const ROOT = mkdtempSync(join(tmpdir(), 'capy-dokploy-compose-notarget-'));
+    try {
+      const confirmCalls: true[] = [];
+      const connector = createDokployConnector({
+        fetch: fakeComposeFetch({ env: 'A=1', calls: [] }),
+        env: { T: 'x' },
+        cwd: ROOT,
+        selectVars: async (c: readonly string[]) => c,
+        confirm: async () => {
+          confirmCalls.push(true);
+          return true;
+        },
+      });
+      const outcome = await withTTY(() =>
+        connector.import!(ctxWith(), { nonTty: false, baseUrl: 'https://d', compose: 'compose_1', tokenEnv: 'T' }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.deployTargetSaved).toBe(false);
+      expect(confirmCalls.length).toBe(0);
+      expect(listTargets(ROOT)).toEqual([]);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  test('a compose import lands encrypted locally, and the sentinel never reaches stdout/stderr/--json', async () => {
+    const SENTINEL = 'compose-e2e-sentinel-3f9a7c1d';
+    const ROOT = mkdtempSync(join(tmpdir(), 'capy-dokploy-compose-e2e-'));
+    const fileManager = new FileManager(ROOT);
+    try {
+      const keep: KeepFile = { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} };
+      const ctx = {
+        pm: { readSyncState: () => null },
+        fileManager,
+        serviceClient: {
+          pushSecrets: () => {
+            throw new Error('must not push — this test passes noPush: true');
+          },
+        },
+        orgId: 'o',
+        projectId: 'p',
+        branch: 'development',
+        userId: 'u',
+        projectKey: 'e2e-project-key-0123456789',
+        keep,
+        localPlaintext: {},
+      } as unknown as ResolvedContext;
+
+      const outcome: ImportOutcome = {
+        ok: true,
+        source: { kind: 'compose', id: 'compose_e2e' },
+        imported: [
+          {
+            varName: 'SECRET_TOKEN',
+            value: SENTINEL,
+            entry: {
+              provider: 'dokploy',
+              source: 'import',
+              created_at: 1,
+              fingerprint: 'x…y',
+              compose_id: 'compose_e2e',
+              imported_at: '2026-01-01T00:00:00.000Z',
+            } as ConnectorMetadata,
+          },
+        ],
+        unchanged: [],
+        skipped: [],
+        warnings: [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: ['SECRET_TOKEN'] }],
+        deployTargetSaved: false,
+      };
+
+      const fakeMod: ConnectorModule = {
+        name: 'dokploy',
+        description: 'test double',
+        kind: 'import',
+        connect: async () => {
+          throw new Error('connect() must not be called for an import-kind connector');
+        },
+        rotate: async () => {
+          throw new Error('rotate() must not be called for an import-kind connector');
+        },
+        import: async () => outcome,
+      };
+
+      const chunks: string[] = [];
+      const record = (...a: unknown[]) => void chunks.push(a.map(String).join(' '));
+      const logSpy = spyOn(console, 'log').mockImplementation(record as never);
+      const errSpy = spyOn(console, 'error').mockImplementation(record as never);
+
+      const command = new ConnectCommand(false);
+      try {
+        await (command as unknown as { executeImport: Function }).executeImport(fakeMod, 'dokploy', ctx, {
+          json: true,
+          noPush: true,
+        } as ConnectOpts);
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+
+      const printed = chunks.join('\n');
+      expect(printed).not.toContain(SENTINEL);
+      const parsed = JSON.parse(printed.trim());
+      expect(parsed.imported).toEqual(['SECRET_TOKEN']);
+      expect(parsed.source).toEqual({ kind: 'compose', id: 'compose_e2e' });
+      expect(parsed.applicationId).toBeUndefined();
+
+      // "lands encrypted": the on-disk .env line for SECRET_TOKEN is never the
+      // plaintext sentinel, and decrypts back to it with the SAME project key.
+      const written = readFileSync(join(ROOT, '.env'), 'utf-8');
+      expect(written).not.toContain(SENTINEL);
+      expect(written).toMatch(/SECRET_TOKEN=capy:/);
+      const decrypted = fileManager.readEncryptedEnvFile('e2e-project-key-0123456789');
+      expect(decrypted.SECRET_TOKEN).toBe(SENTINEL);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Dry run (`--dry-run`): Vince's rule — a dry run changes nothing ─────────
+
+describe('dokploy import — dry run', () => {
+  test('never prompts for the key, even with a real TTY and no other suppressor', async () => {
+    const promptCalls: boolean[] = [];
+    const getConnectorSecret = async (_name: string, opts: { interactive: boolean }) => {
+      if (opts.interactive) promptCalls.push(true);
+      return null;
+    };
+    const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith(), {
+        nonTty: false,
+        dryRun: true,
+        baseUrl: 'https://d.example.com',
+        application: 'app_1',
+      }),
+    );
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { code: string }).code).toBe('DOKPLOY_TOKEN_MISSING');
+    expect(promptCalls.length).toBe(0);
+  });
+
+  test('never selects via the checkbox picker — previews every candidate, even with a real TTY', async () => {
+    const selectVarsCalls: true[] = [];
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'A=1\nB=2', calls: [] }),
+      env: { T: 'x' },
+      selectVars: async (c: readonly string[]) => {
+        selectVarsCalls.push(true);
+        return c;
+      },
+    });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith(), {
+        nonTty: false,
+        dryRun: true,
+        baseUrl: 'https://d',
+        application: 'app_1',
+        tokenEnv: 'T',
+      }),
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(selectVarsCalls.length).toBe(0);
+    expect(outcome.imported.map((e) => e.varName).sort()).toEqual(['A', 'B']);
+  });
+
+  test('a conflicting local value is reported as `wouldAsk`, never prompted, even with a real TTY', async () => {
+    const confirmCalls: true[] = [];
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'PORT=3000', calls: [] }),
+      env: { T: 'x' },
+      confirm: async () => {
+        confirmCalls.push(true);
+        return true;
+      },
+    });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith({ localPlaintext: { PORT: '8080' } }), {
+        nonTty: false,
+        dryRun: true,
+        baseUrl: 'https://d',
+        application: 'app_1',
+        tokenEnv: 'T',
+      }),
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(confirmCalls.length).toBe(0);
+    expect(outcome.wouldAsk).toEqual(['PORT']);
+    expect(outcome.imported.map((e) => e.varName)).not.toContain('PORT');
+    expect(outcome.skipped).toEqual([]);
+  });
+
+  test('never offers (or saves) a deploy target, even with something to import and a real TTY', async () => {
+    const ROOT = mkdtempSync(join(tmpdir(), 'capy-dokploy-dryrun-notarget-'));
+    try {
+      const confirmCalls: true[] = [];
+      const connector = createDokployConnector({
+        fetch: fakeFetch({ env: 'A=1', calls: [] }),
+        env: { T: 'x' },
+        cwd: ROOT,
+        confirm: async () => {
+          confirmCalls.push(true);
+          return true;
+        },
+      });
+      const outcome = await withTTY(() =>
+        connector.import!(ctxWith(), {
+          nonTty: false,
+          dryRun: true,
+          baseUrl: 'https://d',
+          application: 'app_dry',
+          tokenEnv: 'T',
+        }),
+      );
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.deployTargetSaved).toBe(false);
+      expect(confirmCalls.length).toBe(0);
+      expect(listTargets(ROOT)).toEqual([]);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  describe('ConnectCommand.executeImport under --dry-run: zero writes, names only', () => {
+    const SENTINEL = 'dry-run-sentinel-9f8e7d6c5b4a';
+
+    /** Throws on ANY write/push attempt — a dry run must never reach one. */
+    function throwingCtx(): ResolvedContext {
+      const keep: KeepFile = { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} };
+      return {
+        pm: {
+          readSyncState: () => {
+            throw new Error('must not read sync state — dry run writes nothing');
+          },
+        },
+        fileManager: {
+          writeKeepFile: () => {
+            throw new Error('must not write keep.lock — dry run writes nothing');
+          },
+          writeEncryptedEnvFile: () => {
+            throw new Error('must not write .env — dry run writes nothing');
+          },
+        },
+        serviceClient: {
+          pushSecrets: () => {
+            throw new Error('must not push — dry run writes nothing');
+          },
+        },
+        orgId: 'o',
+        projectId: 'p',
+        branch: 'development',
+        userId: 'u',
+        projectKey: 'k',
+        keep,
+        localPlaintext: {},
+      } as unknown as ResolvedContext;
+    }
+
+    function planOutcome(): ImportOutcome {
+      return {
+        ok: true,
+        source: { kind: 'compose', id: 'compose_dry' },
+        imported: [
+          {
+            varName: 'DRY_VAR',
+            value: SENTINEL,
+            entry: { provider: 'dokploy', source: 'import', created_at: 1, fingerprint: 'x…y' } as ConnectorMetadata,
+          },
+        ],
+        unchanged: ['UNCHANGED_VAR'],
+        skipped: [{ name: 'SKIPPED_VAR', code: 'IMPORT_CONFLICT_SKIPPED' }],
+        warnings: [],
+        deployTargetSaved: false,
+        wouldAsk: ['CONFLICT_VAR'],
+      };
+    }
+
+    function fakeModule(outcome: ImportOutcome): ConnectorModule {
+      return {
+        name: 'dokploy',
+        description: 'test double',
+        kind: 'import',
+        connect: async () => {
+          throw new Error('not used');
+        },
+        rotate: async () => {
+          throw new Error('not used');
+        },
+        import: async () => outcome,
+      };
+    }
+
+    test('--json: no write/push, one JSON object with dryRun:true and names only', async () => {
+      const chunks: string[] = [];
+      const record = (...a: unknown[]) => void chunks.push(a.map(String).join(' '));
+      const logSpy = spyOn(console, 'log').mockImplementation(record as never);
+      const errSpy = spyOn(console, 'error').mockImplementation(record as never);
+
+      const command = new ConnectCommand(false);
+      const result = await (async () => {
+        try {
+          return await (command as unknown as { executeImport: Function }).executeImport(
+            fakeModule(planOutcome()),
+            'dokploy',
+            throwingCtx(),
+            { json: true, dryRun: true } as ConnectOpts,
+          );
+        } finally {
+          logSpy.mockRestore();
+          errSpy.mockRestore();
+        }
+      })();
+
+      expect(result).toEqual({ linked: false });
+      const printed = chunks.join('\n');
+      expect(printed).not.toContain(SENTINEL);
+      const parsed = JSON.parse(printed.trim());
+      expect(parsed.ok).toBe(true);
+      expect(parsed.dryRun).toBe(true);
+      expect(parsed.imported).toEqual(['DRY_VAR']);
+      expect(parsed.unchanged).toEqual(['UNCHANGED_VAR']);
+      expect(parsed.wouldAsk).toEqual(['CONFLICT_VAR']);
+      expect(parsed.skipped).toEqual([{ name: 'SKIPPED_VAR', code: 'IMPORT_CONFLICT_SKIPPED' }]);
+      expect(parsed.pushed).toBe(false);
+      expect(parsed.deployTargetSaved).toBe(false);
+    });
+
+    test('terminal: no write/push, prints names only (never the sentinel value)', async () => {
+      const chunks: string[] = [];
+      const record = (...a: unknown[]) => void chunks.push(a.map(String).join(' '));
+      const logSpy = spyOn(console, 'log').mockImplementation(record as never);
+      const errSpy = spyOn(console, 'error').mockImplementation(record as never);
+
+      const command = new ConnectCommand(false);
+      const result = await (async () => {
+        try {
+          return await (command as unknown as { executeImport: Function }).executeImport(
+            fakeModule(planOutcome()),
+            'dokploy',
+            throwingCtx(),
+            { dryRun: true } as ConnectOpts,
+          );
+        } finally {
+          logSpy.mockRestore();
+          errSpy.mockRestore();
+        }
+      })();
+
+      expect(result).toEqual({ linked: false });
+      const printed = chunks.join('\n');
+      expect(printed).not.toContain(SENTINEL);
+      expect(printed).toContain('DRY_VAR');
+      expect(printed).toContain('UNCHANGED_VAR');
+      expect(printed).toContain('CONFLICT_VAR');
+      expect(printed).toContain('SKIPPED_VAR');
+    });
+  });
+});
+
+// ── --overwrite: set the branch's vars to EXACTLY Dokploy's set ────────────
+//
+// By-name lists (never a value), confirm defaults to no, `--yes` skips it,
+// non-interactive without `--yes` refuses, `--dry-run` shows the lists and
+// writes nothing, a reference value is never cleared, and — without
+// `--overwrite` at all — behavior is byte-for-byte what it always was.
+
+describe('dokploy import — --overwrite', () => {
+  test('by-name lists: clear / replace / import / unchanged, computed against the FULL Dokploy set', async () => {
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'SAME=1\nCHANGED=dokploy-value\nNEW=v', calls: [] }),
+      env: { T: 'x' },
+    });
+    const outcome = await connector.import!(
+      ctxWith({ localPlaintext: { SAME: '1', CHANGED: 'local-value', GONE: 'local-only' } }),
+      { ...BASE_OPTS, baseUrl: 'https://d', application: 'app_1', tokenEnv: 'T', overwrite: true, yes: true },
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.imported.map((e) => e.varName).sort()).toEqual(['CHANGED', 'NEW']);
+    expect(outcome.replacedNames).toEqual(['CHANGED']);
+    expect(outcome.cleared).toEqual(['GONE']);
+    expect(outcome.unchanged).toEqual(['SAME']);
+  });
+
+  test('a reference value (${{...}}) is never cleared — skipped and reported, not removed', async () => {
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'PLAIN=1\nREF=${{project.OTHER}}', calls: [] }),
+      env: { T: 'x' },
+    });
+    const outcome = await connector.import!(
+      ctxWith({ localPlaintext: { PLAIN: '1', REF: 'old-local-value', GONE: 'x' } }),
+      { ...BASE_OPTS, baseUrl: 'https://d', application: 'app_1', tokenEnv: 'T', overwrite: true, yes: true },
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.cleared).toEqual(['GONE']);
+    expect(outcome.cleared).not.toContain('REF');
+    expect(outcome.warnings).toEqual([{ code: 'DOKPLOY_REFERENCE_VALUE', names: ['REF'] }]);
+  });
+
+  test('confirm defaults to no: interactive + decline leaves everything unwritten, reports nothing changed', async () => {
+    const confirmCalls: string[] = [];
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'NEW=v', calls: [] }),
+      env: { T: 'x' },
+      confirm: async (message: string, defaultValue: boolean) => {
+        confirmCalls.push(message);
+        expect(defaultValue).toBe(false);
+        return false;
+      },
+    });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith({ localPlaintext: { GONE: 'x' } }), {
+        nonTty: false,
+        baseUrl: 'https://d',
+        application: 'app_1',
+        tokenEnv: 'T',
+        overwrite: true,
+      }),
+    );
+    expect(confirmCalls.length).toBe(1);
+    expect(confirmCalls[0]).toContain('NEW');
+    expect(confirmCalls[0]).toContain('GONE');
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.imported).toEqual([]);
+    expect(outcome.cleared).toEqual([]);
+  });
+
+  test('--yes skips the confirm entirely, even on a real TTY', async () => {
+    const confirmCalls: true[] = [];
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'NEW=v', calls: [] }),
+      env: { T: 'x' },
+      confirm: async () => {
+        confirmCalls.push(true);
+        return false;
+      },
+    });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith(), {
+        nonTty: false,
+        baseUrl: 'https://d',
+        application: 'app_1',
+        tokenEnv: 'T',
+        overwrite: true,
+        yes: true,
+      }),
+    );
+    expect(confirmCalls.length).toBe(0);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.imported.map((e) => e.varName)).toEqual(['NEW']);
+  });
+
+  test('non-interactive without --yes: DOKPLOY_CONFIRMATION_REQUIRED, zero requests to write anything', async () => {
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'NEW=v', calls: [] }),
+      env: { T: 'x' },
+    });
+    const outcome = await connector.import!(ctxWith({ localPlaintext: { GONE: 'x' } }), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d',
+      application: 'app_1',
+      tokenEnv: 'T',
+      overwrite: true,
+    });
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { code: string }).code).toBe('DOKPLOY_CONFIRMATION_REQUIRED');
+  });
+
+  test('--dry-run: shows the by-name lists, never prompts, and the caller writes nothing (Vince\'s rule)', async () => {
+    const confirmCalls: true[] = [];
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'SAME=1\nNEW=v', calls: [] }),
+      env: { T: 'x' },
+      confirm: async () => {
+        confirmCalls.push(true);
+        return true;
+      },
+    });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith({ localPlaintext: { SAME: '1', GONE: 'x' } }), {
+        nonTty: false,
+        dryRun: true,
+        baseUrl: 'https://d',
+        application: 'app_1',
+        tokenEnv: 'T',
+        overwrite: true,
+      }),
+    );
+    expect(confirmCalls.length).toBe(0);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // The PLAN is still reported by name — a dry run previews, it doesn't hide.
+    expect(outcome.imported.map((e) => e.varName)).toEqual(['NEW']);
+    expect(outcome.cleared).toEqual(['GONE']);
+    expect(outcome.unchanged).toEqual(['SAME']);
+  });
+
+  test('without --overwrite: identical to today — no cleared/replacedNames fields at all, existing conflict rule applies', async () => {
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'CHANGED=dokploy-value\nNEW=v', calls: [] }),
+      env: { T: 'x' },
+    });
+    const outcome = await connector.import!(ctxWith({ localPlaintext: { CHANGED: 'local-value', GONE: 'x' } }), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d',
+      application: 'app_1',
+      tokenEnv: 'T',
+      // overwrite intentionally omitted
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.cleared).toBeUndefined();
+    expect(outcome.replacedNames).toBeUndefined();
+    // GONE is untouched — plain import never clears anything.
+    expect(outcome.imported.map((e) => e.varName)).toEqual(['NEW']);
+    expect(outcome.wouldAsk).toBeUndefined(); // non-dry-run, non-interactive → CHANGED is skipped, not asked
+    expect(outcome.skipped).toEqual([{ name: 'CHANGED', code: 'IMPORT_CONFLICT_SKIPPED' }]);
+  });
+
+  test('--var is ignored entirely under --overwrite — a name outside the restriction is never wrongly cleared', async () => {
+    // `--overwrite` acts on Dokploy's FULL importable set regardless of
+    // `--var` (see `computeOverwritePlan`'s own doc): a restricted overwrite
+    // that only looked at `--var`'s subset would otherwise clear a name
+    // Dokploy still has, just because `--var` excluded it from view. The
+    // property under test is exactly that — `RESTRICTED_OUT` is NOT in the
+    // clear list — not that `--var` narrows an overwrite the way it narrows
+    // a plain import.
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'RESTRICTED_OUT=dokploy-value\nOTHER=v', calls: [] }),
+      env: { T: 'x' },
+    });
+    const outcome = await connector.import!(
+      ctxWith({ localPlaintext: { RESTRICTED_OUT: 'local-value' } }),
+      { ...BASE_OPTS, baseUrl: 'https://d', application: 'app_1', tokenEnv: 'T', overwrite: true, yes: true, var: 'OTHER' },
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.cleared).not.toContain('RESTRICTED_OUT');
+    expect(outcome.replacedNames).toContain('RESTRICTED_OUT');
+  });
+
+  describe('ConnectCommand.executeImport — a clear-only --overwrite actually removes the var on disk', () => {
+    test('decrypt-verified: a cleared name is gone from .env and from keep.lock\'s entry for this branch', async () => {
+      const ROOT = mkdtempSync(join(tmpdir(), 'capy-dokploy-overwrite-clear-'));
+      try {
+        const fm = new FileManager(ROOT);
+        const projectKey = 'a'.repeat(64);
+        const keep: KeepFile = {
+          version: '3.0',
+          org_id: 'o',
+          project_id: 'p',
+          project_name: 'demo',
+          variables: {
+            GONE: [{ resource_id: 'r1', branch: 'development', value_hash: 'h1' }],
+            KEPT: [{ resource_id: 'r2', branch: 'development', value_hash: 'h2' }],
+          },
+        };
+        fm.writeEncryptedEnvFile({ GONE: 'old-value', KEPT: 'still-here' }, projectKey, undefined, keep, 'development');
+
+        const ctx = {
+          pm: { readSyncState: () => null },
+          fileManager: fm,
+          serviceClient: {
+            pushSecrets: () => {
+              throw new Error('must not push — this test writes locally only');
+            },
+          },
+          orgId: 'o',
+          projectId: 'p',
+          branch: 'development',
+          userId: 'u',
+          projectKey,
+          keep,
+          localPlaintext: { GONE: 'old-value', KEPT: 'still-here' },
+        } as unknown as ResolvedContext;
+
+        const outcome: ImportOutcome = { ok: true, source: { kind: 'compose', id: 'c1' }, imported: [], cleared: ['GONE'], replacedNames: [], unchanged: ['KEPT'], skipped: [], warnings: [], deployTargetSaved: false };
+        const fakeModule: ConnectorModule = {
+          name: 'dokploy',
+          description: 'test double',
+          kind: 'import',
+          connect: async () => { throw new Error('not used'); },
+          rotate: async () => { throw new Error('not used'); },
+          import: async () => outcome,
+        };
+
+        const command = new ConnectCommand(false);
+        const result = await (command as unknown as { executeImport: Function }).executeImport(
+          fakeModule,
+          'dokploy',
+          ctx,
+          { noPush: true } as ConnectOpts,
+        );
+        expect(result).toEqual({ linked: true });
+
+        const onDisk = fm.readEncryptedEnvFile(projectKey);
+        expect(onDisk.GONE).toBeUndefined();
+        expect(onDisk.KEPT).toBe('still-here');
+      } finally {
+        rmSync(ROOT, { recursive: true, force: true });
+      }
+    });
   });
 });

@@ -8,6 +8,7 @@ import { Encryptor } from '../../crypto/encryptor';
 import { deriveResourceId } from '../../crypto/resourceId';
 import { writeKeepCache } from '../../config/globalConfig';
 import { setSyncKeepHash, KeepFile, ConnectorMetadata } from '../../types/index';
+import type { ImportOutcome } from './registry';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -228,9 +229,23 @@ export async function writeAndSync(
 export async function writeImportedAndSync(
   ctx: ResolvedContext,
   entries: ReadonlyArray<{ varName: string; value: string; entry: ConnectorMetadata }>,
-  opts: { push: boolean; quiet?: boolean },
+  opts: {
+    push: boolean;
+    quiet?: boolean;
+    /** Dokploy DISCOVERY import only: skip the git auto-commit entirely — the discovery run commits nothing on the user's behalf (Vince's rule). Default false preserves every other caller's behavior. */
+    skipAutoCommit?: boolean;
+    /**
+     * `--overwrite` clear-only writes: proceed even when `entries` is empty.
+     * Clearing removes names from `ctx.localPlaintext` (the caller passes a
+     * PRUNED context — see `writeImportOutcome`) rather than adding an
+     * entry, so a clear-only run has nothing in `entries` at all; without
+     * this flag that would hit the early return below and write nothing.
+     * Default false preserves every other caller's "nothing to do" no-op.
+     */
+    forceWrite?: boolean;
+  },
 ): Promise<void> {
-  if (entries.length === 0) return;
+  if (entries.length === 0 && !opts.forceWrite) return;
   const { pm, fileManager, serviceClient, orgId, projectId, branch, userId, projectKey, keep, localPlaintext } = ctx;
 
   const finalEnv: Record<string, string> = {
@@ -238,7 +253,12 @@ export async function writeImportedAndSync(
     ...Object.fromEntries(entries.map((e) => [e.varName, e.value])),
   };
   const also = entries.map((e) => ({ varName: e.varName, entry: e.entry }));
-  const attachAll = (k: KeepFile): KeepFile => applyConnectors(k, branch, entries[0].varName, undefined, also);
+  // `entries[0]?.varName ?? ''`: the positional `varName` argument below is
+  // only ever READ by `applyConnectors` when its own `connector` argument
+  // (always `undefined` here) is set — so on a clear-only call (`entries`
+  // empty, `forceWrite: true`) this placeholder is never actually consulted,
+  // but `entries[0].varName` would still throw evaluating it eagerly.
+  const attachAll = (k: KeepFile): KeepFile => applyConnectors(k, branch, entries[0]?.varName ?? '', undefined, also);
 
   if (!opts.push) {
     const merged = attachAll(keep);
@@ -293,8 +313,48 @@ export async function writeImportedAndSync(
     keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
   });
 
+  if (opts.skipAutoCommit) return;
   const { autoCommitKeep } = await import('../../git/autoCommitKeep');
   autoCommitKeep(branch, process.cwd(), { quiet: opts.quiet });
+}
+
+/**
+ * Given a successful `ImportOutcome` (dokploy import, plain or
+ * `--overwrite`), performs the write `executeImport` used to do inline —
+ * factored out so discovery's own per-environment import step (which never
+ * goes through `ConnectCommand.executeImport`, see `dokploy.ts`) writes
+ * through the exact same path rather than a second copy of this logic.
+ *
+ * Vince's rule: a dry run changes nothing — `opts.dryRun` short-circuits
+ * before anything is read even from `outcome`. Otherwise writes when there
+ * is either something to import OR (an `--overwrite` run) something to
+ * clear; a clear-only overwrite (nothing new or changed, only removals) has
+ * an empty `entries` array, so `ctx.localPlaintext` is pruned of the
+ * cleared names and `forceWrite` is set so `writeImportedAndSync` does not
+ * take its normal "nothing to do" early return.
+ */
+export async function writeImportOutcome(
+  ctx: ResolvedContext,
+  outcome: Extract<ImportOutcome, { ok: true }>,
+  opts: { push: boolean; quiet?: boolean; skipAutoCommit?: boolean; dryRun: boolean },
+): Promise<{ wrote: boolean }> {
+  if (opts.dryRun) return { wrote: false };
+  const cleared = outcome.cleared ?? [];
+  const hasWrite = outcome.imported.length > 0 || cleared.length > 0;
+  if (!hasWrite) return { wrote: false };
+
+  const prunedCtx: ResolvedContext =
+    cleared.length > 0
+      ? { ...ctx, localPlaintext: Object.fromEntries(Object.entries(ctx.localPlaintext).filter(([k]) => !cleared.includes(k))) }
+      : ctx;
+
+  await writeImportedAndSync(prunedCtx, outcome.imported, {
+    push: opts.push,
+    quiet: opts.quiet,
+    skipAutoCommit: opts.skipAutoCommit,
+    forceWrite: cleared.length > 0,
+  });
+  return { wrote: true };
 }
 
 /**

@@ -30,7 +30,90 @@ export interface DokployApplication {
   buildArgs: string | null;
   buildSecrets: string | null;
   createEnvFile: boolean;
+  /**
+   * Git-source detail fields (CAP-657 discovery follow-up) — ASSUMED to
+   * mirror `DokployCompose`'s (unverified live for Applications; Compose's
+   * shape was checked live — see that interface's doc). Absent/undefined
+   * for a non-git source (e.g. `sourceType: 'raw'` or a Docker-image app);
+   * discovery reports those as unmatched rather than guessing.
+   */
+  sourceType?: string;
+  repository?: string;
+  owner?: string;
+  branch?: string;
+  /** Which Dokploy environment this Application belongs to, within its project. */
+  environmentId?: string;
 }
+
+/**
+ * A Dokploy Compose service (`compose.one`) — every one of a `compose.one`
+ * org's Dokploy services is one of these, never an Application (CAP-657
+ * follow-up). Same `env` shape as `DokployApplication`; no `buildArgs` /
+ * `buildSecrets` — Dokploy's compose services don't have them.
+ */
+export interface DokployCompose {
+  composeId: string;
+  name?: string;
+  appName?: string;
+  env: string | null;
+  createEnvFile: boolean;
+  /** Git-source detail fields, as returned by a live `compose.one` (CAP-657 original spike). */
+  sourceType?: string;
+  repository?: string;
+  owner?: string;
+  branch?: string;
+  /** The compose file's path within the repo, e.g. `backend/deployment/production/docker-compose.yml`. */
+  composePath?: string;
+  /** Which Dokploy environment this Compose service belongs to, within its project. */
+  environmentId?: string;
+}
+
+// ── Discovery (CAP-657 follow-up): `project.all` ────────────────────────────
+
+/**
+ * One service entry inside a `project.all` environment's summary — just
+ * enough to fetch the FULL detail (`application.one` / `compose.one`) for
+ * matching: discovery reads `project.all` first for the id/kind/environment
+ * tree, then the per-service detail call for the git-source fields
+ * (`owner`/`repository`/`sourceType`/…) actually used to match a repo.
+ *
+ * CONFIRMED LIVE (2026-09-26): each environment carries its applications and
+ * compose services as separate arrays, keyed `applications` / `compose` — a
+ * read-only inventory ran against exactly this shape and found 49 compose
+ * services. (`application.one`'s own git-source detail fields are the one
+ * part of this still unverified — see `DokployApplication`'s doc.)
+ */
+export interface DokployProjectServiceRef {
+  id: string;
+  kind: 'application' | 'compose';
+  name?: string;
+  appName?: string;
+}
+
+export interface DokployProjectEnvironment {
+  environmentId: string;
+  /** e.g. 'production', 'staging' — becomes the Capy branch name. */
+  name: string;
+  applications: readonly DokployProjectServiceRef[];
+  composes: readonly DokployProjectServiceRef[];
+}
+
+export interface DokployProjectSummary {
+  projectId: string;
+  name: string;
+  environments: readonly DokployProjectEnvironment[];
+}
+
+/**
+ * Which Dokploy object a `capy connect dokploy` import is reading from.
+ * Exported so callers branch on `.kind`, never on a provider name string
+ * (Rule 4) — `import()`'s settings resolution, the request it fires, and the
+ * keep.lock field it writes (`application_id` vs `compose_id`) all key off
+ * this.
+ */
+export type DokployImportSource =
+  | { kind: 'application'; id: string }
+  | { kind: 'compose'; id: string };
 
 export type DokployDeploymentStatus = 'running' | 'done' | 'error' | 'cancelled';
 
@@ -81,6 +164,78 @@ export interface DokployClient {
   deploy(applicationId: string, title: string): Promise<void>;
   listDeployments(applicationId: string): Promise<readonly DokployDeployment[]>;
   readLogs(deploymentId: string): Promise<string>;
+  /**
+   * `GET compose.one` — read-only, mirrors `getApplication`. No write
+   * counterpart exists on this client: the Compose side of `capy connect
+   * dokploy` never writes to Dokploy (there is no compose deploy adapter yet).
+   */
+  getCompose(composeId: string): Promise<DokployCompose>;
+  /**
+   * `GET project.all` — read-only. The whole project/environment/service
+   * tree, at summary depth (CAP-657 discovery follow-up): enough to walk
+   * every service's id/kind/environment, not enough to match a repo (that
+   * needs `getApplication`/`getCompose`'s detail fields per candidate).
+   */
+  listProjects(): Promise<readonly DokployProjectSummary[]>;
+}
+
+// ── `project.all` parsing (defensive: unknown-shaped JSON in, typed tree out) ─
+
+function parseProjectServiceRef(
+  raw: unknown,
+  kind: 'application' | 'compose',
+): DokployProjectServiceRef | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = r[kind === 'application' ? 'applicationId' : 'composeId'];
+  if (typeof id !== 'string') return null;
+  return {
+    id,
+    kind,
+    name: typeof r.name === 'string' ? r.name : undefined,
+    appName: typeof r.appName === 'string' ? r.appName : undefined,
+  };
+}
+
+function parseProjectEnvironment(raw: unknown): DokployProjectEnvironment | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.environmentId !== 'string') return null;
+  const applications = Array.isArray(r.applications)
+    ? r.applications.flatMap((a) => {
+        const parsed = parseProjectServiceRef(a, 'application');
+        return parsed ? [parsed] : [];
+      })
+    : [];
+  const composes = Array.isArray(r.compose)
+    ? r.compose.flatMap((c) => {
+        const parsed = parseProjectServiceRef(c, 'compose');
+        return parsed ? [parsed] : [];
+      })
+    : [];
+  return {
+    environmentId: r.environmentId,
+    name: typeof r.name === 'string' ? r.name : r.environmentId,
+    applications,
+    composes,
+  };
+}
+
+function parseProjectSummary(raw: unknown): DokployProjectSummary | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.projectId !== 'string') return null;
+  const environments = Array.isArray(r.environments)
+    ? r.environments.flatMap((e) => {
+        const parsed = parseProjectEnvironment(e);
+        return parsed ? [parsed] : [];
+      })
+    : [];
+  return {
+    projectId: r.projectId,
+    name: typeof r.name === 'string' ? r.name : r.projectId,
+    environments,
+  };
 }
 
 /** `https://host/` and `https://host/api` both mean the same dashboard. */
@@ -161,6 +316,11 @@ export function createDokployClient(
         buildArgs: typeof body.buildArgs === 'string' ? body.buildArgs : null,
         buildSecrets: typeof body.buildSecrets === 'string' ? body.buildSecrets : null,
         createEnvFile: body.createEnvFile !== false,
+        sourceType: typeof body.sourceType === 'string' ? body.sourceType : undefined,
+        repository: typeof body.repository === 'string' ? body.repository : undefined,
+        owner: typeof body.owner === 'string' ? body.owner : undefined,
+        branch: typeof body.branch === 'string' ? body.branch : undefined,
+        environmentId: typeof body.environmentId === 'string' ? body.environmentId : undefined,
       };
     },
     async saveEnvironment(app) {
@@ -188,6 +348,32 @@ export function createDokployClient(
           !!d && typeof d === 'object' && typeof d.deploymentId === 'string',
       );
     },
+    async getCompose(composeId) {
+      const body = json(
+        'compose.one',
+        await call('GET', 'compose.one', { composeId }),
+      ) as Partial<DokployCompose> | null;
+      if (!body || typeof body !== 'object' || body.composeId !== composeId) {
+        throw new DokployApiError(
+          'bad_response',
+          null,
+          'compose.one did not return the requested compose service',
+        );
+      }
+      return {
+        composeId: body.composeId,
+        name: body.name,
+        appName: body.appName,
+        env: typeof body.env === 'string' ? body.env : null,
+        createEnvFile: body.createEnvFile !== false,
+        sourceType: typeof body.sourceType === 'string' ? body.sourceType : undefined,
+        repository: typeof body.repository === 'string' ? body.repository : undefined,
+        owner: typeof body.owner === 'string' ? body.owner : undefined,
+        branch: typeof body.branch === 'string' ? body.branch : undefined,
+        composePath: typeof body.composePath === 'string' ? body.composePath : undefined,
+        environmentId: typeof body.environmentId === 'string' ? body.environmentId : undefined,
+      };
+    },
     async readLogs(deploymentId) {
       const text = await call('GET', 'deployment.readLogs', { deploymentId });
       // tRPC-OpenAPI serialises a string result as a JSON string.
@@ -199,6 +385,16 @@ export function createDokployClient(
         }
       })();
       return typeof parsed === 'string' ? parsed : '';
+    },
+    async listProjects() {
+      const body = json('project.all', await call('GET', 'project.all', {}));
+      if (!Array.isArray(body)) {
+        throw new DokployApiError('bad_response', null, 'project.all did not return a list');
+      }
+      return body.flatMap((p) => {
+        const parsed = parseProjectSummary(p);
+        return parsed ? [parsed] : [];
+      });
     },
   };
 }
@@ -353,7 +549,7 @@ export async function resolveDokployApiKey(
  * Dokploy key. `baseInteractive` is the caller's ordinary TTY check;
  * `suppressed` covers every reason that overrides a real TTY back to "never
  * ask" — shared by `deployCommand.ts` (`--web`, `--yes`, `--dry-run`) and
- * the import connector (`--web`, `--json`):
+ * the import connector (`--web`, `--json`, `--dry-run`):
  *
  *   - `--web`: the store's own prompt is a raw terminal `inquirer` prompt,
  *     not a browser screen — asking there could hang a browser-driven run.
@@ -361,8 +557,8 @@ export async function resolveDokployApiKey(
  *     interleaved with it.
  *   - `--yes` (deploy only): never ask, resolve from what's already there
  *     or fail fast — the same contract every other picker/confirm honors.
- *   - `--dry-run` (deploy only): a preview must never have the side effect
- *     of saving a new key into the org store.
+ *   - `--dry-run` (deploy AND the import connector): a preview must never
+ *     have the side effect of saving a new key into the org store.
  */
 export function dokploySecretsMayPrompt(baseInteractive: boolean, suppressed: boolean): boolean {
   return baseInteractive && !suppressed;
@@ -665,4 +861,74 @@ export function listImportableEntries(env: string | null): readonly ImportableEn
   return parseDotenvEntries(outsideLines(split))
     .filter((e) => !reserved.has(e.name))
     .map((e) => (e.value.includes('${{') ? { ...e, skip: 'DOKPLOY_REFERENCE_VALUE' as const } : e));
+}
+
+// ── Import conflict classification (shared by the single-service import and
+// the discovery apply — ONE rule, never two) ────────────────────────────────
+
+export interface ImportClassified {
+  unchanged: readonly string[];
+  skipped: ReadonlyArray<{ name: string; code: string }>;
+  toImport: ReadonlyArray<{ name: string; value: string }>;
+  /** Dry run only: a conflict a real run would have prompted about. */
+  wouldAsk: readonly string[];
+}
+
+const EMPTY_IMPORT_CLASSIFIED: ImportClassified = { unchanged: [], skipped: [], toImport: [], wouldAsk: [] };
+
+/**
+ * Classifies importable candidates against a local plaintext env, one rule
+ * for every caller that pulls Dokploy values into `.env` — the single-
+ * service import (`capy connect dokploy --application/--compose`) AND
+ * discovery's apply step (`--discover`, CAP-657 follow-up) call this SAME
+ * function rather than each keeping their own copy of the conflict rule:
+ *
+ *   - Missing locally → import.
+ *   - Same value locally → `unchanged`, a no-op.
+ *   - Different value locally, dry run → `wouldAsk` (never prompts — a dry
+ *     run changes nothing, regardless of TTY).
+ *   - Different value locally, interactive → asks replace/keep (default
+ *     KEEP — declining, or any non-interactive run, never silently
+ *     overwrites a different local value).
+ *   - Different value locally, non-interactive → keeps local,
+ *     `IMPORT_CONFLICT_SKIPPED`.
+ *
+ * Sequential (not parallel): a conflict's `confirm()` is a real prompt when
+ * interactive, and every entry is classified in selection order — a
+ * `.reduce` over a promise keeps that order without a mutable accumulator.
+ */
+export async function classifyImportCandidates(
+  candidates: ReadonlyArray<{ name: string; value: string }>,
+  localPlaintext: Readonly<Record<string, string>>,
+  opts: {
+    dryRun: boolean;
+    interactive: boolean;
+    /** Names only — never the value on either side. */
+    confirm: (message: string, defaultValue: boolean) => Promise<boolean>;
+  },
+): Promise<ImportClassified> {
+  return candidates.reduce<Promise<ImportClassified>>(async (accPromise, e) => {
+    const acc = await accPromise;
+    const local = localPlaintext[e.name];
+    if (local === undefined) {
+      return { ...acc, toImport: [...acc.toImport, { name: e.name, value: e.value }] };
+    }
+    if (local === e.value) {
+      return { ...acc, unchanged: [...acc.unchanged, e.name] };
+    }
+    if (opts.dryRun) {
+      return { ...acc, wouldAsk: [...acc.wouldAsk, e.name] };
+    }
+    if (opts.interactive) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      const replace = await opts.confirm(
+        `${e.name} is already set locally with a different value. Replace it with the Dokploy value?`,
+        false,
+      );
+      return replace
+        ? { ...acc, toImport: [...acc.toImport, { name: e.name, value: e.value }] }
+        : { ...acc, skipped: [...acc.skipped, { name: e.name, code: 'IMPORT_CONFLICT_SKIPPED' }] };
+    }
+    return { ...acc, skipped: [...acc.skipped, { name: e.name, code: 'IMPORT_CONFLICT_SKIPPED' }] };
+  }, Promise.resolve(EMPTY_IMPORT_CLASSIFIED));
 }

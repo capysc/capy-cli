@@ -860,9 +860,26 @@ program
   .option('--non-tty', 'never prompt; resolve choices from flags or fail fast (agents/CI)')
   .option('--reauth', 'pair with the provider again even if a usable session exists')
   .option('--base-url <url>', 'dokploy import: dashboard URL')
-  .option('--application <id>', 'dokploy import: Application id')
+  .option('--application <id>', 'dokploy import: Application id (mutually exclusive with --compose)')
+  .option('--compose <id>', 'dokploy import: Compose service id (mutually exclusive with --application)')
   .option('--token-env <name>', 'dokploy import: env var holding the API token')
   .option('--json', 'emit machine-readable JSON instead of the human UI (import connectors)')
+  .option(
+    '--dry-run',
+    'dokploy import/discover: preview the plan only — resolve settings + read Dokploy, write/push nothing',
+  )
+  .option(
+    '--discover',
+    'dokploy: find every Dokploy service matching a repo under cwd, instead of one named --application/--compose',
+  )
+  .option(
+    '-y, --yes',
+    'dokploy import/discover: skip the confirmation prompt (import: --overwrite\'s clear/replace/import ask; discover: the real-run "proceed?" ask) — required non-interactively',
+  )
+  .option(
+    '--overwrite',
+    'dokploy import: set the branch\'s vars to EXACTLY Dokploy\'s set — clear names not in Dokploy, replace differing values, import new ones',
+  )
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
@@ -888,8 +905,13 @@ program
       reauth: options.reauth === true,
       baseUrl: options.baseUrl,
       application: options.application,
+      compose: options.compose,
       tokenEnv: options.tokenEnv,
       json: options.json,
+      dryRun: options.dryRun ?? merged.dryRun,
+      discover: options.discover === true,
+      yes: options.yes === true,
+      overwrite: options.overwrite === true,
     });
   });
 

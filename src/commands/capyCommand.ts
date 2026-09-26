@@ -46,6 +46,37 @@ import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/**
+ * The org project listing's own core: "the lookup failed" and "this org has
+ * none" both surface as an empty list, but `projectsUnavailable` says
+ * which — a network/auth error must not be read as "you have no projects
+ * yet" (that misread is what let `capy connect dokploy --discover` offer
+ * only "create new" on a transient lookup failure, silently risking a
+ * duplicate project — CAP-657 follow-up). Extracted so `CapyCommand`'s own
+ * `listExistingProjectsOrUnavailable` (below, with its spinner/debug
+ * wrapping) and `dokploy.ts`'s discovery both call ONE function rather than
+ * two copies of this try/catch. `onError` is optional so a caller with no
+ * debug-logging concept of its own isn't forced to fake one.
+ */
+export async function listOrgProjectsOrUnavailable(
+  serviceClient: ServiceClient,
+  onError?: (err: unknown) => void,
+): Promise<{
+  existingProjects: Array<{ id: string; name: string; organization_id: string }>;
+  projectsUnavailable: boolean;
+}> {
+  try {
+    // Belt-and-braces: the service already hides the org's `_system`
+    // project from this listing (CAP-664). Filtered again here so it can
+    // never be offered as a bootstrap target even against an older service.
+    const existingProjects = excludeSystemProject(await serviceClient.listProjects());
+    return { existingProjects, projectsUnavailable: false };
+  } catch (err) {
+    onError?.(err);
+    return { existingProjects: [], projectsUnavailable: true };
+  }
+}
+
 export class CapyCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
@@ -751,26 +782,24 @@ export class CapyCommand {
    * Lists the org's existing (non-system) projects for the bootstrap-or-create
    * choice. "The lookup failed" and "this org has none" both surface as an
    * empty list to the caller, but `projectsUnavailable` says which — a network
-   * or auth error must not be read as "you have no projects yet".
+   * or auth error must not be read as "you have no projects yet". Wraps the
+   * extracted `listOrgProjectsOrUnavailable` (below) with THIS class's own
+   * spinner/debug reporting — kept here rather than folded into the
+   * extracted core so a caller with no spinner/debug concept of its own
+   * (e.g. `dokploy.ts`'s discovery, which reuses the core directly) isn't
+   * forced to carry them.
    */
   private async listExistingProjectsOrUnavailable(): Promise<{
     existingProjects: Array<{ id: string; name: string; organization_id: string }>;
     projectsUnavailable: boolean;
   }> {
-    try {
-      const listSpinner = ora('Looking for existing projects...').start();
-      // Belt-and-braces: the service already hides the org's `_system`
-      // project from this listing (CAP-664). Filtered again here so it can
-      // never be offered as a bootstrap target even against an older service.
-      const existingProjects = excludeSystemProject(await this.serviceClient.listProjects());
+    const listSpinner = ora('Looking for existing projects...').start();
+    const result = await listOrgProjectsOrUnavailable(this.serviceClient, (err) => this.debugError('listProjects failed', err));
+    if (!result.projectsUnavailable) {
       listSpinner.stop();
-      this.debug('listProjects response', existingProjects);
-      return { existingProjects, projectsUnavailable: false };
-    } catch (err) {
-      this.debugError('listProjects failed', err);
-      // Network or auth issue — fall through to new-project flow
-      return { existingProjects: [], projectsUnavailable: true };
+      this.debug('listProjects response', result.existingProjects);
     }
+    return result;
   }
 
   /** Asks (wizard or inquirer) which existing project to bootstrap, or "new". Throws on cancel. */

@@ -40,9 +40,16 @@ export interface ConnectorMetadata {
   key_prefix?: string;
   /**
    * Dokploy import only: which Application the credential came from. Absent
-   * for every other provider.
+   * for every other provider, and absent for a Compose import — see
+   * `compose_id`, its sibling field for that source.
    */
   application_id?: string;
+  /**
+   * Dokploy import only: which Compose service the credential came from.
+   * Mutually exclusive with `application_id` on the same entry — a dokploy
+   * import sets exactly one of the two, matching the source it actually read.
+   */
+  compose_id?: string;
   /**
    * Dokploy import only: ISO8601 UTC when `capy connect dokploy` imported this
    * var. Distinct from `created_at` (unix seconds, every provider) — kept as
@@ -50,6 +57,14 @@ export interface ConnectorMetadata {
    * generic one other providers already rely on.
    */
   imported_at?: string;
+  /**
+   * Dokploy DISCOVERY import only (CAP-657 follow-up): the git branch the
+   * matched Dokploy service builds from (its `branch` field), recorded as
+   * information only — it is never read back to decide anything, and it is
+   * NOT the Capy branch (the Dokploy ENVIRONMENT name is — see
+   * `docs/dokploy-deploy-adapter.md`'s "Discovery" section).
+   */
+  git_branch?: string;
 }
 
 /** v3 keep.lock variable entry — per-branch value hashes */

@@ -1,9 +1,11 @@
-import { resolveContext, writeAndSync, writeImportedAndSync, listManagedKeys, ResolvedContext } from './connectors/shared';
+import { resolveContext, writeAndSync, writeImportOutcome, listManagedKeys, ResolvedContext } from './connectors/shared';
 import { listProviders, loadProvider, ConnectOpts, ConnectorModule, ConnectResult } from './connectors/registry';
 import { connectPlan } from './connectors/plans';
 import { isInteractive } from '../ui/interactive';
 import { ProjectManager } from '../core/projectManager';
+import { resolveOrgContext } from '../core/orgContext';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
+import type { DiscoveryContext } from './connectors/dokployDiscovery';
 import type {
   ConnectLiveGateStop,
   ConnectorChoice,
@@ -26,39 +28,42 @@ const shouldOpen = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
  * is best-effort: `capy connect` runs outside an initialised project too, and a
  * missing count is not a reason to refuse the list.
  */
-export async function describeConnectors(): Promise<ConnectorChoice[]> {
-  let managed: Record<string, number> = {};
+/** Managed-variable counts per provider, on the active branch. `{}` on any failure (see `describeConnectors`'s own doc) — never partial. */
+function computeManagedCounts(): Record<string, number> {
   try {
     const pm = new ProjectManager();
     const keep = pm.readKeepFile();
     const branch = pm.deriveActiveBranch();
-    if (keep && branch) {
-      for (const { connector } of listManagedKeys(keep, branch)) {
-        managed[connector.provider] = (managed[connector.provider] ?? 0) + 1;
-      }
-    }
+    if (!keep || !branch) return {};
+    return listManagedKeys(keep, branch).reduce<Record<string, number>>(
+      (acc, { connector }) => ({ ...acc, [connector.provider]: (acc[connector.provider] ?? 0) + 1 }),
+      {},
+    );
   } catch {
-    managed = {};
+    return {};
   }
+}
 
-  const out: ConnectorChoice[] = [];
-  for (const p of listProviders()) {
-    const mod = await loadProvider(p.name);
-    const found = mod.toolInstalled ? mod.toolInstalled() : undefined;
-    out.push({
-      id: p.name,
-      description: p.description,
-      ...(mod.requiresAuth ? { requiresAuth: true } : {}),
-      ...(mod.requiresTool ? { requiresTool: mod.requiresTool } : {}),
-      ...(found === undefined ? {} : { toolFound: found }),
-      // The identical refusal `capy connect <id>` would run into, previewed
-      // here rather than discovered one command later. Same object, so the two
-      // cannot word one condition differently.
-      ...(found === false && mod.toolMissing ? { blocked: mod.toolMissing } : {}),
-      ...(managed[p.name] ? { managedCount: managed[p.name] } : {}),
-    });
-  }
-  return out;
+export async function describeConnectors(): Promise<ConnectorChoice[]> {
+  const managed = computeManagedCounts();
+  return Promise.all(
+    listProviders().map(async (p) => {
+      const mod = await loadProvider(p.name);
+      const found = mod.toolInstalled ? mod.toolInstalled() : undefined;
+      return {
+        id: p.name,
+        description: p.description,
+        ...(mod.requiresAuth ? { requiresAuth: true } : {}),
+        ...(mod.requiresTool ? { requiresTool: mod.requiresTool } : {}),
+        ...(found === undefined ? {} : { toolFound: found }),
+        // The identical refusal `capy connect <id>` would run into, previewed
+        // here rather than discovered one command later. Same object, so the two
+        // cannot word one condition differently.
+        ...(found === false && mod.toolMissing ? { blocked: mod.toolMissing } : {}),
+        ...(managed[p.name] ? { managedCount: managed[p.name] } : {}),
+      };
+    }),
+  );
 }
 
 /**
@@ -75,6 +80,21 @@ export function pushOutcomeFor(outcome: ConnectOutcome): 'landed' | 'failed' | '
   // `local-only` never attempted it, `write-failed` never got that far, and
   // `cancelled` stopped at the gate before it.
   return 'not-reached';
+}
+
+/**
+ * Discovery's own context — org + auth + serviceClient, exactly what
+ * `resolveOrgContext` already gives org-level commands (`invite`, `kick`,
+ * the system store) that don't require a project either. Deliberately NOT
+ * `resolveContext()`: that function exits "No keep.lock found" outside an
+ * already-initialized project, and requires a project key + `.env` decrypt
+ * neither of which discovery's PLAN phase needs — a discovered folder only
+ * resolves its own project key during APPLY, once that folder's project is
+ * known to exist (see `DiscoveryApplyDeps.ensureProject`).
+ */
+async function resolveDiscoveryContext(devMode: boolean): Promise<DiscoveryContext> {
+  const { orgId, userId, authService, serviceClient } = await resolveOrgContext(undefined, devMode);
+  return { orgId, userId, authService, serviceClient };
 }
 
 export class ConnectCommand {
@@ -217,6 +237,20 @@ export class ConnectCommand {
     const mod = resolved.mod;
 
     if (mod.precheck) mod.precheck();
+
+    // Discovery mode (CAP-657 follow-up, `dokploy` only): finds every
+    // matching Dokploy service itself rather than importing one named id.
+    // Checked BEFORE `resolveContext()` below, not after: `resolveContext`
+    // exits "No keep.lock found" outside an already-initialized project, but
+    // discovery's whole point is running from exactly the opposite — an
+    // uninitialized clone, or a parent folder of several repos, neither of
+    // which has (or needs) a keep.lock yet. Discovery gets its OWN, lighter
+    // context instead: org + auth + serviceClient only, no project key, no
+    // `.env` decrypt — see `resolveDiscoveryContext`'s own doc.
+    if (effective.discover && mod.discover) {
+      const discoveryCtx = await resolveDiscoveryContext(this.devMode);
+      return await this.executeDiscovery(mod, provider, discoveryCtx, effective);
+    }
 
     const ctx = await resolveContext({ devMode: this.devMode });
 
@@ -401,42 +435,74 @@ export class ConnectCommand {
       return { linked: false };
     }
 
-    if (outcome.imported.length > 0) {
-      // Under `--json`, stdout must be exactly one JSON object — the
-      // "keep.lock committed" line autoCommitKeep would otherwise print
-      // goes to stderr instead (see autoCommitKeep.ts's `quiet` option).
-      await writeImportedAndSync(ctx, outcome.imported, { push: !opts.noPush, quiet: opts.json });
-    }
-    const pushed = !opts.noPush && outcome.imported.length > 0;
+    // Vince's rule: a dry run changes nothing. Under `opts.dryRun`,
+    // `outcome.imported`/`outcome.cleared` are a PLAN (what a real run
+    // WOULD import/clear) — never actually written, locally or to Capy.
+    const dryRun = !!opts.dryRun;
+
+    // Under `--json`, stdout must be exactly one JSON object — the
+    // "keep.lock committed" line autoCommitKeep would otherwise print goes
+    // to stderr instead (see autoCommitKeep.ts's `quiet` option).
+    const { wrote } = await writeImportOutcome(ctx, outcome, { push: !opts.noPush, quiet: opts.json, dryRun });
+    const pushed = !opts.noPush && wrote;
+    const cleared = outcome.cleared ?? [];
+    const hasChange = outcome.imported.length > 0 || cleared.length > 0;
 
     if (opts.json) {
       console.log(
         JSON.stringify({
           ok: true,
+          dryRun,
           provider,
-          applicationId: outcome.applicationId,
+          ...(outcome.source ? { source: outcome.source } : {}),
+          // Additive, application-only back-compat — see `ImportOutcome.applicationId`.
+          ...(outcome.applicationId !== undefined ? { applicationId: outcome.applicationId } : {}),
           imported: outcome.imported.map((e) => e.varName),
+          ...(outcome.replacedNames ? { replacedNames: outcome.replacedNames } : {}),
+          ...(outcome.cleared ? { cleared: outcome.cleared } : {}),
           unchanged: outcome.unchanged,
+          ...(outcome.wouldAsk ? { wouldAsk: outcome.wouldAsk } : {}),
           skipped: outcome.skipped,
           warnings: outcome.warnings,
           pushed,
           deployTargetSaved: outcome.deployTargetSaved,
         }),
       );
-      return { linked: outcome.imported.length > 0 };
+      return { linked: wrote };
     }
 
     console.log('');
-    if (outcome.imported.length === 0) {
-      console.log('  Nothing new to import.');
+    if (dryRun) console.log('  Dry run — nothing written.');
+    if (!hasChange) {
+      console.log(dryRun ? '  Nothing to import.' : '  Nothing new to import.');
+    } else if (dryRun) {
+      if (outcome.imported.length > 0) {
+        console.log(`  Would import ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy.`);
+      }
+      if (cleared.length > 0) {
+        console.log(`  Would clear: ${cleared.join(', ')}`);
+      }
     } else {
-      console.log(
-        `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy` +
-          `${pushed ? ' and pushed' : ' (not pushed)'}.`,
-      );
+      if (outcome.imported.length > 0) {
+        console.log(
+          `  ✓ Imported ${outcome.imported.map((e) => B(e.varName)).join(', ')} from Dokploy` +
+            `${pushed ? ' and pushed' : ' (not pushed)'}.`,
+        );
+      } else {
+        console.log(`  ✓ Cleared from Dokploy${pushed ? ' and pushed' : ' (not pushed)'}.`);
+      }
+      if (cleared.length > 0) {
+        console.log(`  Cleared: ${cleared.join(', ')}`);
+      }
+    }
+    if (outcome.replacedNames && outcome.replacedNames.length > 0) {
+      console.log(`  Replaced: ${outcome.replacedNames.join(', ')}`);
     }
     if (outcome.unchanged.length > 0) {
       console.log(`  Unchanged (already matched locally): ${outcome.unchanged.join(', ')}`);
+    }
+    if (outcome.wouldAsk && outcome.wouldAsk.length > 0) {
+      console.log(`  Conflicts (would ask): ${outcome.wouldAsk.join(', ')}`);
     }
     if (outcome.skipped.length > 0) {
       console.log(`  Skipped: ${outcome.skipped.map((s) => `${s.name} (${s.code})`).join(', ')}`);
@@ -448,7 +514,168 @@ export class ConnectCommand {
       console.log(`  Saved a Dokploy deploy target for application ${outcome.applicationId}.`);
     }
     console.log('');
-    return { linked: outcome.imported.length > 0 };
+    return { linked: wrote };
+  }
+
+  /**
+   * `capy connect dokploy --discover` (CAP-657 follow-up) — reports the plan
+   * (names/counts only, never a value), then — for a real, confirmed,
+   * non-empty run — what was actually written. No browser ending page exists
+   * for this yet, same as `executeImport`.
+   */
+  private async executeDiscovery(
+    mod: ConnectorModule,
+    provider: string,
+    ctx: DiscoveryContext,
+    opts: ConnectOpts,
+  ): Promise<{ linked: boolean }> {
+    const outcome = await mod.discover!(ctx, opts);
+
+    if (!outcome.ok) {
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: false, code: outcome.code, message: outcome.message }));
+      } else {
+        console.error(`\n  ${outcome.message}\n`);
+      }
+      process.exitCode = 1;
+      return { linked: false };
+    }
+
+    const planForOutput = {
+      folders: outcome.plan.folders.map((f) => ({
+        repoDir: f.repoDir,
+        folder: f.folder || '.',
+        dokployProject: f.projectName,
+        service: f.serviceName,
+        initialized: f.initialized,
+        environments: f.environments.map((e) => ({
+          branch: e.environmentName,
+          variableCount: e.variableCount,
+          skippedCount: e.skippedCount,
+          // Preview only (see `DiscoveryPlanEnv.branchExists`'s own doc) —
+          // undefined for an uninitialized folder, where it isn't knowable
+          // yet. The real run always re-checks for itself regardless.
+          ...(e.branchExists !== undefined ? { branchExists: e.branchExists } : {}),
+        })),
+      })),
+      collisions: outcome.plan.collisions.map((c) => ({
+        folder: c.folder || '.',
+        branch: c.environmentName,
+        candidates: c.candidates.map((cand) => `${cand.projectName}/${cand.serviceName}`),
+      })),
+      unmatched: outcome.plan.unmatched.map((u) => ({
+        dokployProject: u.projectName,
+        service: u.serviceName,
+        reason: u.reason,
+      })),
+    };
+    const appliedForOutput = outcome.applied?.map((f) =>
+      f.ok
+        ? {
+            repoDir: f.repoDir,
+            folder: f.folder || '.',
+            ok: true as const,
+            projectCreated: f.projectCreated,
+            activeBranch: f.activeBranch,
+            environments: f.environments.map((e) => ({
+              branch: e.environmentName,
+              branchCreated: e.branchCreated,
+              imported: e.outcome.imported.map((i) => i.varName),
+              ...(e.outcome.replacedNames ? { replacedNames: e.outcome.replacedNames } : {}),
+              ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
+              unchanged: e.outcome.unchanged,
+              skipped: e.outcome.skipped,
+            })),
+          }
+        : {
+            repoDir: f.repoDir,
+            folder: f.folder || '.',
+            ok: false as const,
+            code: f.code,
+            message: f.message,
+            environments: f.environments.map((e) => ({
+              branch: e.environmentName,
+              branchCreated: e.branchCreated,
+              imported: e.outcome.imported.map((i) => i.varName),
+              ...(e.outcome.replacedNames ? { replacedNames: e.outcome.replacedNames } : {}),
+              ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
+              unchanged: e.outcome.unchanged,
+              skipped: e.outcome.skipped,
+            })),
+          },
+    );
+    const linked =
+      !!outcome.applied &&
+      outcome.applied.some((f) =>
+        f.environments.some((e) => e.outcome.imported.length > 0 || (e.outcome.cleared?.length ?? 0) > 0),
+      );
+    // A per-folder failure still lets the OTHER folders' steps run (see
+    // `runDiscoverySequences`) — but the run as a whole did not fully
+    // succeed, so CI watching the exit code still sees it.
+    if (outcome.applied?.some((f) => !f.ok)) process.exitCode = 1;
+
+    if (opts.json) {
+      console.log(
+        JSON.stringify({
+          ok: true,
+          provider,
+          dryRun: outcome.dryRun,
+          cancelled: !!outcome.cancelled,
+          plan: planForOutput,
+          ...(appliedForOutput ? { applied: appliedForOutput } : {}),
+        }),
+      );
+      return { linked };
+    }
+
+    console.log('');
+    console.log(outcome.dryRun ? '  Dry run — nothing written.' : '  Discovery plan:');
+    if (planForOutput.folders.length === 0) {
+      console.log('  No matching Dokploy services found.');
+    }
+    for (const f of planForOutput.folders) {
+      console.log(`  ${B(f.folder)}  (${f.dokployProject} / ${f.service})${f.initialized ? '' : ' — capy (init)'}`);
+      for (const e of f.environments) {
+        const checkoutCmd = e.branchExists === true ? `checkout ${e.branch}` : `checkout -b ${e.branch}`;
+        console.log(`    ${checkoutCmd}: ${e.variableCount} var(s), ${e.skippedCount} skipped`);
+      }
+    }
+    if (planForOutput.collisions.length > 0) {
+      console.log('  Collisions:');
+      for (const c of planForOutput.collisions) {
+        console.log(`    ${c.folder} / ${c.branch}: ${c.candidates.join(', ')}`);
+      }
+    }
+    if (planForOutput.unmatched.length > 0) {
+      console.log('  Unmatched:');
+      for (const u of planForOutput.unmatched) {
+        console.log(`    ${u.dokployProject} / ${u.service} (${u.reason})`);
+      }
+    }
+    if (outcome.cancelled) {
+      console.log('  Cancelled — nothing written.');
+    } else if (appliedForOutput) {
+      for (const f of appliedForOutput) {
+        console.log(`  ${B(f.folder)}${f.ok && f.projectCreated ? ' (new project)' : ''}`);
+        for (const e of f.environments) {
+          const clearedCount = e.cleared?.length ?? 0;
+          console.log(
+            `    ${e.branch}${e.branchCreated ? ' (new branch)' : ''}: ` +
+              `imported ${e.imported.length}, unchanged ${e.unchanged.length}, skipped ${e.skipped.length}` +
+              (clearedCount > 0 ? `, cleared ${clearedCount}` : ''),
+          );
+        }
+        if (!f.ok) {
+          console.log(`    ✗ ${f.code}: ${f.message}`);
+        } else if (f.activeBranch) {
+          // Names only — which branch the folder's LOCAL .env/.capy/branch
+          // ended on (Vince: "folder is on branch X").
+          console.log(`    folder is on branch ${f.activeBranch}`);
+        }
+      }
+    }
+    console.log('');
+    return { linked };
   }
 
   /** The tail of the command, as a page. Reports only — nothing here decides. */
