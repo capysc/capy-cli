@@ -542,12 +542,16 @@ export class ConnectCommand {
     }
 
     const planForOutput = {
+      ...(outcome.plan.environmentFilter ? { environmentFilter: outcome.plan.environmentFilter } : {}),
       folders: outcome.plan.folders.map((f) => ({
         repoDir: f.repoDir,
         folder: f.folder || '.',
         dokployProject: f.projectName,
         service: f.serviceName,
         initialized: f.initialized,
+        ...(f.mergedServices
+          ? { mergedServices: f.mergedServices.map((m) => ({ dokployProject: m.projectName, service: m.serviceName, branches: m.environmentNames })) }
+          : {}),
         environments: f.environments.map((e) => ({
           branch: e.environmentName,
           variableCount: e.variableCount,
@@ -556,6 +560,7 @@ export class ConnectCommand {
           // undefined for an uninitialized folder, where it isn't knowable
           // yet. The real run always re-checks for itself regardless.
           ...(e.branchExists !== undefined ? { branchExists: e.branchExists } : {}),
+          willAutoOverwrite: e.willAutoOverwrite,
         })),
       })),
       collisions: outcome.plan.collisions.map((c) => ({
@@ -568,6 +573,10 @@ export class ConnectCommand {
         service: u.serviceName,
         reason: u.reason,
       })),
+      // Repos git itself refused to read (e.g. "dubious ownership") — shown
+      // PROMINENTLY: a repo here means every one of its services silently
+      // would have come back `no_remote_match` before this defect fix.
+      unreadableRepos: outcome.plan.unreadableRepos.map((r) => ({ repoDir: r.repoDir, code: r.code, message: r.message })),
     };
     const appliedForOutput = outcome.applied?.map((f) =>
       f.ok
@@ -580,6 +589,7 @@ export class ConnectCommand {
             environments: f.environments.map((e) => ({
               branch: e.environmentName,
               branchCreated: e.branchCreated,
+              overwrote: e.overwrote,
               imported: e.outcome.imported.map((i) => i.varName),
               ...(e.outcome.replacedNames ? { replacedNames: e.outcome.replacedNames } : {}),
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
@@ -596,6 +606,7 @@ export class ConnectCommand {
             environments: f.environments.map((e) => ({
               branch: e.environmentName,
               branchCreated: e.branchCreated,
+              overwrote: e.overwrote,
               imported: e.outcome.imported.map((i) => i.varName),
               ...(e.outcome.replacedNames ? { replacedNames: e.outcome.replacedNames } : {}),
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
@@ -603,6 +614,13 @@ export class ConnectCommand {
               skipped: e.outcome.skipped,
             })),
           },
+    );
+    const commitsForOutput = outcome.commits?.map((c) =>
+      c.ok
+        ? c.dryRun
+          ? { repoDir: c.repoDir, ok: true as const, dryRun: true as const, branch: c.branch, wouldCommitFiles: c.wouldCommitFiles }
+          : { repoDir: c.repoDir, ok: true as const, dryRun: false as const, branch: c.branch, sha: c.sha, committedFiles: c.committedFiles }
+        : { repoDir: c.repoDir, ok: false as const, code: c.code, message: c.message },
     );
     const linked =
       !!outcome.applied &&
@@ -623,21 +641,36 @@ export class ConnectCommand {
           cancelled: !!outcome.cancelled,
           plan: planForOutput,
           ...(appliedForOutput ? { applied: appliedForOutput } : {}),
+          ...(commitsForOutput ? { commits: commitsForOutput } : {}),
         }),
       );
       return { linked };
     }
 
     console.log('');
-    console.log(outcome.dryRun ? '  Dry run — nothing written.' : '  Discovery plan:');
+    const filterNote = planForOutput.environmentFilter ? ` (--environment ${planForOutput.environmentFilter.join(',')})` : '';
+    console.log(outcome.dryRun ? `  Dry run — nothing written.${filterNote}` : `  Discovery plan:${filterNote}`);
+    if (planForOutput.unreadableRepos.length > 0) {
+      // Shown BEFORE the folders — a repo git itself refused to read means
+      // every one of its services would otherwise silently look unmatched.
+      console.log('  ⚠ Repos git could not read:');
+      for (const r of planForOutput.unreadableRepos) {
+        console.log(`    ${r.repoDir} (${r.code}): ${r.message}`);
+      }
+    }
     if (planForOutput.folders.length === 0) {
       console.log('  No matching Dokploy services found.');
     }
     for (const f of planForOutput.folders) {
       console.log(`  ${B(f.folder)}  (${f.dokployProject} / ${f.service})${f.initialized ? '' : ' — capy (init)'}`);
+      for (const m of f.mergedServices ?? []) {
+        console.log(`    + ${m.dokployProject} / ${m.service} → ${f.folder} (branch ${m.branches.join(', ')})`);
+      }
       for (const e of f.environments) {
         const checkoutCmd = e.branchExists === true ? `checkout ${e.branch}` : `checkout -b ${e.branch}`;
-        console.log(`    ${checkoutCmd}: ${e.variableCount} var(s), ${e.skippedCount} skipped`);
+        console.log(
+          `    ${checkoutCmd}: ${e.variableCount} var(s), ${e.skippedCount} skipped${e.willAutoOverwrite ? ' [auto-overwrite]' : ''}`,
+        );
       }
     }
     if (planForOutput.collisions.length > 0) {
@@ -660,7 +693,7 @@ export class ConnectCommand {
         for (const e of f.environments) {
           const clearedCount = e.cleared?.length ?? 0;
           console.log(
-            `    ${e.branch}${e.branchCreated ? ' (new branch)' : ''}: ` +
+            `    ${e.branch}${e.branchCreated ? ' (new branch)' : ''}${e.overwrote ? ' (--overwrite)' : ''}: ` +
               `imported ${e.imported.length}, unchanged ${e.unchanged.length}, skipped ${e.skipped.length}` +
               (clearedCount > 0 ? `, cleared ${clearedCount}` : ''),
           );
@@ -671,6 +704,18 @@ export class ConnectCommand {
           // Names only — which branch the folder's LOCAL .env/.capy/branch
           // ended on (Vince: "folder is on branch X").
           console.log(`    folder is on branch ${f.activeBranch}`);
+        }
+      }
+    }
+    if (commitsForOutput && commitsForOutput.length > 0) {
+      console.log('  Commit:');
+      for (const c of commitsForOutput) {
+        if (!c.ok) {
+          console.log(`    ${c.repoDir}: ✗ ${c.code}: ${c.message}`);
+        } else if (c.dryRun) {
+          console.log(`    ${c.repoDir}: would commit ${c.wouldCommitFiles.length} file(s) onto ${c.branch}`);
+        } else {
+          console.log(`    ${c.repoDir}: committed ${c.committedFiles.length} file(s) onto ${c.branch} (${c.sha.slice(0, 8)})`);
         }
       }
     }

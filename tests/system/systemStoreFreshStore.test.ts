@@ -16,6 +16,7 @@ import { mock, describe, it, expect, beforeAll, beforeEach, afterAll } from 'bun
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
+import { Encryptor } from '../../src/crypto/encryptor';
 
 const tempHome = mkdtempSync(join(require('os').tmpdir(), 'capy-system-store-fresh-test-'));
 mock.module('os', () => {
@@ -104,13 +105,43 @@ afterAll(() => {
 
 let openSystemStore: typeof import('../../src/system/systemStore').openSystemStore;
 let wrapAndSaveMasterKey: typeof import('../../src/crypto/keyResolver').wrapAndSaveMasterKey;
+let resolveProjectKey: typeof import('../../src/crypto/keyResolver').resolveProjectKey;
 
 beforeAll(async () => {
   const ss = await import('../../src/system/systemStore');
   openSystemStore = ss.openSystemStore;
   const kr = await import('../../src/crypto/keyResolver');
   wrapAndSaveMasterKey = kr.wrapAndSaveMasterKey;
+  resolveProjectKey = kr.resolveProjectKey;
 });
+
+/**
+ * Same KMS_PREFIX co-decrypt/wrap scheme `fakeFetch` speaks — used to
+ * independently re-derive the project key `openSystemStore`/`set` used
+ * internally, so a pushed value's round trip can be verified from OUTSIDE
+ * the module under test rather than trusting its own internal decrypt path.
+ */
+function fakeKmsOps() {
+  return {
+    coDecrypt: async (_o: string, ct: string) => ct.slice(KMS_PREFIX.length),
+    wrapOuterLayer: async (_o: string, pt: string) => KMS_PREFIX + pt,
+  };
+}
+
+/**
+ * Parses the single `KEY=capy:{resourceId}:{cipher}` line a pushed
+ * `env_blob` contains in these tests (mirrors `systemStore.ts`'s own
+ * private `decryptStoredValue`, kept independent here on purpose — this
+ * test verifies the PROPERTY the module promises, not its internals) and
+ * decrypts `cipher` with `projectKey`.
+ */
+function decryptPushedLine(blobLine: string, projectKey: string): string {
+  const eq = blobLine.indexOf('=');
+  const raw = blobLine.slice(eq + 1);
+  const parts = raw.split(':');
+  const cipher = parts.slice(2).join(':');
+  return Encryptor.decrypt(cipher, projectKey);
+}
 
 /** Seed a real local master key for `orgId`, wrapped through the same KMS_PREFIX scheme `fakeFetch`'s /wrap and /co-decrypt speak. */
 async function seedMasterKey(orgId: string): Promise<void> {
@@ -139,10 +170,25 @@ describe('systemStore — fresh store 404 (CAP-664, NO_SECRETS)', () => {
     const store = await openSystemStore({ orgId, devMode: true });
     expect(store.listNames()).toEqual([]);
 
-    await store.set('_CONNECTOR_DOKPLOY_API_KEY', 'v1');
+    // A long, high-entropy sentinel — not the 2-character `'v1'` this test
+    // used to write, which random AES-GCM ciphertext can coincidentally
+    // contain (reproduced once: a real push landed a base64 cipher
+    // containing "v1" as a substring, failing `not.toContain('v1')` with no
+    // actual leak). At this length a coincidental substring match is
+    // astronomically unlikely, but the REAL proof below is the decrypt
+    // round trip, not this absence check.
+    const plaintext = `sentinel-${randomBytes(24).toString('hex')}`;
+    await store.set('_CONNECTOR_DOKPLOY_API_KEY', plaintext);
     expect(pushedBlobs).toHaveLength(1);
     expect(pushedBlobs[0]).toContain('capy:');
-    expect(pushedBlobs[0]).not.toContain('v1');
+    expect(pushedBlobs[0]).not.toContain(plaintext);
+
+    // The property this test exists to prove: the pushed blob is not just
+    // "doesn't look like the plaintext" but ACTUALLY decrypts, with this
+    // org's own project key, back to the exact plaintext that was set.
+    const projectId = current.projectId;
+    const projectKey = await resolveProjectKey(orgId, projectId, USER_ID, fakeKmsOps());
+    expect(decryptPushedLine(pushedBlobs[0], projectKey)).toBe(plaintext);
   });
 
   it('a fresh store\'s 404 WITHOUT code (legacy server, text-only) opens empty, and set() still works', async () => {
@@ -156,9 +202,14 @@ describe('systemStore — fresh store 404 (CAP-664, NO_SECRETS)', () => {
     const store = await openSystemStore({ orgId, devMode: true });
     expect(store.listNames()).toEqual([]);
 
-    await store.set('_CONNECTOR_DOKPLOY_API_KEY', 'v1');
+    const plaintext = `sentinel-${randomBytes(24).toString('hex')}`;
+    await store.set('_CONNECTOR_DOKPLOY_API_KEY', plaintext);
     expect(pushedBlobs).toHaveLength(1);
     expect(pushedBlobs[0]).toContain('capy:');
-    expect(pushedBlobs[0]).not.toContain('v1');
+    expect(pushedBlobs[0]).not.toContain(plaintext);
+
+    const projectId = current.projectId;
+    const projectKey = await resolveProjectKey(orgId, projectId, USER_ID, fakeKmsOps());
+    expect(decryptPushedLine(pushedBlobs[0], projectKey)).toBe(plaintext);
   });
 });

@@ -127,6 +127,21 @@ export interface ConnectOpts {
    * lists without writing anything.
    */
   overwrite?: boolean;
+  /**
+   * Dokploy DISCOVERY mode only: restrict the plan to these Dokploy
+   * ENVIRONMENT names — comma-separated (e.g. `--environment staging,preview`),
+   * same single-value-comma-list convention as `--var` (repeated
+   * `--environment` flags are not merged). Case-sensitive exact match,
+   * applied after grouping and nested-folder joining but BEFORE collision
+   * resolution, so a collision is only raised about environments the
+   * filter kept. A folder left with no matching environment drops out of
+   * the plan entirely. An unknown name (matching nothing anywhere) refuses
+   * `DOKPLOY_ENVIRONMENT_NOT_FOUND`, listing the names that DO exist.
+   * Combined with `--application`/`--compose` WITHOUT `--discover` (the
+   * single-service path, where there is no "plan" to filter) refuses
+   * `DOKPLOY_ENVIRONMENT_NOT_APPLICABLE`, checked before any request.
+   */
+  environment?: string;
 }
 
 export interface RotateOpts {

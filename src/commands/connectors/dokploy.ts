@@ -58,6 +58,7 @@ import { SyncEngine } from '../../sync/syncEngine';
 import { assertProjectNameAllowed } from '../../system/reservedProjectName';
 import { findDirtyBranchIssue } from '../checkoutCommand';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
+import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
 import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext } from './shared';
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
 import {
@@ -66,13 +67,15 @@ import {
   DiscoveryContext,
   DiscoveryFolderResult,
   DiscoveryOutcome,
+  DiscoveryPlan,
   DiscoveryPlanEnv,
   DiscoveryPlanFolder,
+  DiscoveryRepoCommitResult,
   DiscoverySequenceDeps,
   applyCollisionResolutions,
   buildDiscoveryPlan,
   defaultDiscoveryProjectName,
-  findCandidateRepos,
+  findCandidateReposResult,
   orderEnvironments,
   resolveCollisions,
   runDiscoverySequences,
@@ -425,6 +428,15 @@ export interface DokployConnectorDeps {
    */
   askDiscoveryProjectName?: (defaultName: string) => Promise<string>;
   /**
+   * Discovery mode only, a real (non-dry-run) run: the git branch to commit
+   * discovery's own keep.lock/.gitignore writes onto, per repo (default:
+   * `capy/dokploy-import-<YYYYMMDD-HHMM>` — see `defaultDiscoveryCommitBranchName`).
+   * Injectable for tests. Real `inquirer` input otherwise. Asked ONCE per
+   * run, never per repo. Never asked under `--yes` or `--dry-run` — the
+   * default is used outright either way.
+   */
+  askDiscoveryCommitBranchName?: (defaultName: string) => Promise<string>;
+  /**
    * Reads the org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry — see
    * `dokployApi.ts#ResolveDokployApiKeyDeps`. Defaults to a no-op (never
    * touches the network): every test constructs this connector directly with
@@ -561,6 +573,27 @@ async function defaultAskDiscoveryProjectName(defaultName: string): Promise<stri
   const inquirer = (await import('inquirer')).default;
   const { name } = await inquirer.prompt([
     { type: 'input', name: 'name', message: 'New Capy project name:', default: defaultName, filter: (v: string) => v.trim() },
+  ]);
+  return name;
+}
+
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+async function defaultAskDiscoveryCommitBranchName(defaultName: string): Promise<string> {
+  const inquirer = (await import('inquirer')).default;
+  const { name } = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'name',
+      message: 'Commit the import to which git branch:',
+      default: defaultName,
+      filter: (v: string) => v.trim(),
+      // Re-asks automatically (inquirer's own validate loop) rather than
+      // ever reaching `commitDiscoveryChanges` with a name it would refuse
+      // `DOKPLOY_COMMIT_BRANCH_INVALID` for — that refusal is still the
+      // authoritative, zero-mutation-guaranteed check for every OTHER
+      // path into this function (non-interactive, an injected test dep).
+      validate: (v: string) => (isValidDiscoveryCommitBranchName(v.trim()) ? true : 'Not a valid git branch name.'),
+    },
   ]);
   return name;
 }
@@ -744,6 +777,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
   const pickCollisionWinner = deps.pickCollisionWinner ?? defaultPickCollisionWinner;
   const askExistingOrNewProject = deps.askExistingOrNewProject ?? defaultAskExistingOrNewProject;
   const askDiscoveryProjectName = deps.askDiscoveryProjectName ?? defaultAskDiscoveryProjectName;
+  const askDiscoveryCommitBranchName = deps.askDiscoveryCommitBranchName ?? defaultAskDiscoveryCommitBranchName;
 
   // A `const` holding the object (rather than a bare `return {...}`) so
   // `discover()`, below, can call `connector.import!(...)` directly — the
@@ -775,6 +809,18 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // equivalent stance on the deploy side). `--web` flows through
       // unchanged, exactly as the shared `connect` code path already handles
       // it for every connector.
+      // `--environment` is a DISCOVERY-mode concept (there is no "plan" to
+      // filter for a single-service import) — refused outright, zero
+      // requests, before anything else. Never true for discovery's OWN
+      // internal per-step calls into this function, which never set it.
+      if (opts.environment && !opts.discover) {
+        return {
+          ok: false,
+          code: 'DOKPLOY_ENVIRONMENT_NOT_APPLICABLE',
+          message: '--environment only applies under --discover.',
+        };
+      }
+
       const interactive = isInteractive(opts.nonTty);
       // Vince's rule: a dry run changes nothing. Threaded through every
       // decision below that would otherwise write, push, or prompt.
@@ -956,14 +1002,35 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       }
 
       const client = createDokployClient(resolvedBaseUrl, resolved.value, deps.fetch);
-      const repos: readonly CandidateRepo[] = findCandidateRepos(cwd());
-      const plan = await buildDiscoveryPlan(client, repos, {
-        peekLocalKeep: peekLocalKeepForFolder,
-        listServerBranches: (projectId) => ctx.serviceClient.listBranches(projectId),
-      });
+      const scan = findCandidateReposResult(cwd());
+      const environmentFilter = parseVarRestriction(opts.environment) ?? undefined;
+      const planCore = await buildDiscoveryPlan(
+        client,
+        scan.repos,
+        {
+          peekLocalKeep: peekLocalKeepForFolder,
+          listServerBranches: (projectId) => ctx.serviceClient.listBranches(projectId),
+        },
+        environmentFilter,
+      );
+      const plan: DiscoveryPlan = { ...planCore, unreadableRepos: scan.unreadable };
+
+      if (environmentFilter) {
+        const unknown = environmentFilter.filter((name) => !plan.allEnvironmentNames.includes(name));
+        if (unknown.length > 0) {
+          return {
+            ok: false,
+            code: 'DOKPLOY_ENVIRONMENT_NOT_FOUND',
+            message: `No such environment(s): ${unknown.join(', ')}. Environments found: ${plan.allEnvironmentNames.join(', ') || '(none)'}.`,
+          };
+        }
+      }
 
       if (dryRun) {
-        return { ok: true, dryRun: true, plan };
+        // Vince's rule: a dry run changes nothing — never asks for a
+        // branch name either; the DEFAULT is what it previews.
+        const commits = commitPreviewForFolders(plan.folders, defaultDiscoveryCommitBranchName());
+        return { ok: true, dryRun: true, plan, ...(commits.length > 0 ? { commits } : {}) };
       }
 
       // `--json` must never have a prompt interleaved with it, same reason
@@ -977,7 +1044,13 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // above) — whichever one is set names the service that should win any
       // collision it is a candidate of.
       const preferredServiceId = opts.application ?? opts.compose;
-      const resolution = await resolveCollisions(plan.collisions, {
+      // Asked in STEP order (staging, then others, then production) — the
+      // same order the sequence itself runs in — never in whatever order
+      // `detectCollisions` happened to build its cells. `orderEnvironments`
+      // already sorts by `environmentName` this way, and `DiscoveryCollision`
+      // carries that same field.
+      const orderedCollisions = orderEnvironments(plan.collisions);
+      const resolution = await resolveCollisions(orderedCollisions, {
         preferredServiceId,
         interactive: promptable,
         askWinner: pickCollisionWinner,
@@ -1007,7 +1080,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       // service's real by-name clear/replace/import lists — this gate is
       // only the plan-level "proceed at all?" ask.
       if (promptable && !opts.yes) {
-        const proceed = await confirm(discoveryConfirmMessage(resolvedFolders, !!opts.overwrite), false);
+        const proceed = await confirm(discoveryConfirmMessage(resolvedFolders, !!opts.overwrite, environmentFilter), false);
         if (!proceed) {
           return { ok: true, dryRun: false, plan, applied: [], cancelled: true };
         }
@@ -1018,6 +1091,24 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
           message: 'Pass --yes to apply non-interactively, or run this interactively.',
         };
       }
+
+      // Asked ONCE per run, never per repo — every repo discovery touches
+      // gets a branch of this SAME name, independently. `--yes` uses the
+      // default outright, same "proceed without asking" contract as every
+      // other discovery confirmation. Asked only AFTER the plan-level
+      // confirm passes — a decline above must never reach this ask.
+      const commitBranchName =
+        promptable && !opts.yes ? await askDiscoveryCommitBranchName(defaultDiscoveryCommitBranchName()) : defaultDiscoveryCommitBranchName();
+
+      // Snapshotted BEFORE any write, per repo — so the commit step below
+      // can tell "discovery itself made this change" apart from "this path
+      // was already dirty before the run started" (DOKPLOY_COMMIT_WOULD_MIX).
+      const beforeStatusByRepo = new Map(
+        [...new Set(resolvedFolders.map((f) => f.repoDir))].map((repoDir) => {
+          const paths = resolvedFolders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
+          return [repoDir, snapshotPathStatus(repoDir, paths)] as const;
+        }),
+      );
 
       const sequenceDeps = buildRealDiscoverySequenceDeps(ctx, connector.import!, {
         noPush: !!opts.noPush,
@@ -1030,7 +1121,17 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         askProjectName: askDiscoveryProjectName,
       });
       const applied = await runDiscoverySequences(resolvedFolders, { overwrite: !!opts.overwrite }, sequenceDeps);
-      return { ok: true, dryRun: false, plan, applied };
+
+      // Commit ONLY the successful folders' keep.lock/.gitignore, per repo —
+      // a failed folder's files are left uncommitted and unstaged, and the
+      // caller (executeDiscovery) reports which folders were left out by
+      // cross-referencing `applied`'s own ok:false entries. Runs the same
+      // whether or not `--no-push` was passed — keep.lock/.env are written
+      // locally either way (see `writeImportOutcome`), so there is always
+      // something local for this step to pin.
+      const commits = commitForAppliedRepos(applied, beforeStatusByRepo, commitBranchName);
+
+      return { ok: true, dryRun: false, plan, applied, ...(commits.length > 0 ? { commits } : {}) };
     },
   };
   return connector;
@@ -1050,22 +1151,68 @@ function peekLocalKeepForFolder(repoDir: string, folder: string): KeepFile | nul
  * re-checks for itself regardless of what this line guessed.
  */
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwrite: boolean): string {
+function discoveryConfirmMessage(folders: readonly DiscoveryPlanFolder[], overwrite: boolean, environmentFilter?: readonly string[]): string {
   const totalSteps = folders.reduce((n, f) => n + f.environments.length, 0);
-  const header = `Run ${totalSteps} step(s) across ${folders.length} folder(s) from Dokploy${overwrite ? ' (--overwrite)' : ''}?`;
+  const filterNote = environmentFilter && environmentFilter.length > 0 ? ` (--environment ${environmentFilter.join(',')})` : '';
+  const header = `Run ${totalSteps} step(s) across ${folders.length} folder(s) from Dokploy${overwrite ? ' (--overwrite)' : ''}${filterNote}?`;
   const rows = folders.flatMap((f) => [
     `  ${f.folder || '.'} (${f.projectName}/${f.serviceName})${f.initialized ? '' : ' — capy (init)'}`,
+    ...(f.mergedServices ?? []).map((m) => `    + ${m.serviceName} → ${f.folder || '.'} (branch ${m.environmentNames.join(', ')})`),
     ...orderEnvironments(f.environments).map((e) => {
       const checkoutCmd = e.branchExists === true ? `capy checkout ${e.environmentName}` : `capy checkout -b ${e.environmentName}`;
       const sourceFlag = e.serviceKind === 'application' ? `--application ${e.serviceId}` : `--compose ${e.serviceId}`;
-      const importCmd = `capy connect dokploy ${sourceFlag}${overwrite ? ' --overwrite' : ''}`;
-      return `    ${checkoutCmd} && ${importCmd}  (${e.variableCount} var(s), ${e.skippedCount} skipped)`;
+      const stepOverwrite = overwrite || e.willAutoOverwrite;
+      const importCmd = `capy connect dokploy ${sourceFlag}${stepOverwrite ? ' --overwrite' : ''}`;
+      return `    ${checkoutCmd} && ${importCmd}  (${e.variableCount} var(s), ${e.skippedCount} skipped)${e.willAutoOverwrite && !overwrite ? ' [auto-overwrite]' : ''}`;
     }),
   ]);
   return [header, ...rows].join('\n');
 }
 
 const folderPath = (repoDir: string, folder: string): string => (folder ? join(repoDir, folder) : repoDir);
+
+/** keep.lock and .gitignore, relative to `repoDir` — the ONLY paths discovery's own commit step ever touches. */
+function discoveryCommitPathsFor(folder: string): readonly string[] {
+  const prefix = folder ? `${folder}/` : '';
+  return [`${prefix}keep.lock`, `${prefix}.gitignore`];
+}
+
+/** Every REPO the plan touches, and the branch/files a real run WOULD commit for it — dry-run preview only, never runs a git-mutating command (see `commitDiscoveryChanges`'s own `dryRun` handling). */
+function commitPreviewForFolders(folders: readonly DiscoveryPlanFolder[], branchName: string): readonly DiscoveryRepoCommitResult[] {
+  const repoDirs = [...new Set(folders.map((f) => f.repoDir))];
+  return repoDirs.map((repoDir) => {
+    const paths = folders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
+    const outcome = commitDiscoveryChanges(repoDir, paths, new Set(), { branchName, dryRun: true, summaryLines: [] });
+    return { repoDir, ...outcome };
+  });
+}
+
+/**
+ * The commit step's real run: per repo touched by `applied`, commits ONLY
+ * the SUCCESSFULLY-applied folders' keep.lock/.gitignore (see
+ * `commitDiscoveryChanges`'s own doc for the refusal codes) — a repo with
+ * zero successful folders is skipped entirely (nothing to commit, no
+ * refusal either).
+ */
+function commitForAppliedRepos(
+  applied: readonly DiscoveryFolderResult[],
+  beforeStatusByRepo: ReadonlyMap<string, ReadonlySet<string>>,
+  branchName: string,
+): readonly DiscoveryRepoCommitResult[] {
+  const repoDirs = [...new Set(applied.map((f) => f.repoDir))];
+  return repoDirs.flatMap((repoDir) => {
+    const okFolders = applied.filter((f) => f.repoDir === repoDir && f.ok);
+    if (okFolders.length === 0) return [];
+    const paths = okFolders.flatMap((f) => discoveryCommitPathsFor(f.folder));
+    const summaryLines = okFolders.map((f) => `- ${f.folder || '.'}: ${(f as Extract<DiscoveryFolderResult, { ok: true }>).activeBranch}`);
+    const outcome = commitDiscoveryChanges(repoDir, paths, beforeStatusByRepo.get(repoDir) ?? new Set(), {
+      branchName,
+      dryRun: false,
+      summaryLines,
+    });
+    return [{ repoDir, ...outcome }];
+  });
+}
 
 /**
  * No keep.lock at (repoDir, folder) → interactive: reuses `capy`'s own

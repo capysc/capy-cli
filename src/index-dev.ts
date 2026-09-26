@@ -880,6 +880,10 @@ program
     '--overwrite',
     'dokploy import: set the branch\'s vars to EXACTLY Dokploy\'s set — clear names not in Dokploy, replace differing values, import new ones',
   )
+  .option(
+    '--environment <names>',
+    'dokploy discover: restrict the plan to these Dokploy environment names, comma-separated (e.g. staging,preview)',
+  )
   .action(async (provider, options, command) => {
     const { ConnectCommand } = await import('./commands/connectCommand');
     const cmd = new ConnectCommand(true); // devMode: hard-blocks live
@@ -912,6 +916,7 @@ program
       discover: options.discover === true,
       yes: options.yes === true,
       overwrite: options.overwrite === true,
+      environment: options.environment,
     });
   });
 
