@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, mock } from 'bun:test';
 import {
   apiBase,
   createDokployAdapter,
@@ -7,11 +7,13 @@ import {
   envProblems,
   envWarnings,
   mergeManagedBlock,
+  optionsProblem,
   splitManagedBlock,
   stripManagedBlock,
   baseUrlProblem,
   tokenEnvProblem,
   DokployDeployment,
+  DokploySystemStoreCallOptions,
   FetchLike,
   MANAGED_BEGIN,
   MANAGED_END,
@@ -874,5 +876,146 @@ describe('dokploy — remove', () => {
     });
     expect(s.done()).toBe(true);
     expect(r?.code).toBe('no_token');
+  });
+});
+
+// ── System store token resolution (CAP-664) ─────────────────────────────────
+//
+// The org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry is a SECOND
+// source in front of the env var this file's other tests exercise
+// throughout — see `dokployApi.ts#resolveDokployApiKey`. Every test above
+// still passes unmodified: an adapter built with `createDokployAdapter` and
+// no `getConnectorSecret` dep, called with no `ctx.resolvedApiKey`, resolves
+// env-only exactly as before. These tests cover the two NEW paths: a caller
+// (`deployCommand.ts`) pre-resolving once and threading it through
+// `ctx.resolvedApiKey`, and the adapter's own fallback reaching an injected
+// store.
+
+describe('dokploy — system store token resolution', () => {
+  const noNetwork = scripted([]);
+  const expectedEnv = mergedEnv('NODE_ENV=production\n# a comment\nPORT=3000', PAIR);
+  const saveWith = (env: string): Step => ({
+    expect: post('application.saveEnvironment', (body) =>
+      expect(body).toEqual({
+        applicationId: APP_ID,
+        env,
+        buildArgs: 'NPM_TOKEN=build-only',
+        buildSecrets: 'SENTRY_AUTH=build-secret',
+        createEnvFile: false,
+      }),
+    ),
+    json: true,
+  });
+  const neverAskedHere = async (): Promise<boolean> => {
+    throw new Error('confirm must not be called');
+  };
+
+  test('preflight: a pre-resolved ctx.resolvedApiKey wins outright, even with no env and no tokenEnv', async () => {
+    const s = scripted([readApp()]);
+    // env is EMPTY and the target has no tokenEnv at all — only the
+    // pre-resolved value could possibly satisfy this call.
+    const t = target({ options: { baseUrl: BASE, applicationId: APP_ID } });
+    const r = await adapterWith(s.fetch, {}).preflight(t, {
+      cwd: '/tmp',
+      resolvedApiKey: { ok: true, value: TOKEN, source: 'system' },
+    });
+    expect(r.ok).toBe(true);
+    expect(s.done()).toBe(true);
+  });
+
+  test('deploy: the SAME pre-resolved ctx.resolvedApiKey is reused, no store or env involved', async () => {
+    const s = scripted([readApp(), saveWith(expectedEnv), readApp(app({ env: expectedEnv }))]);
+    const t = target({ options: { baseUrl: BASE, applicationId: APP_ID } });
+    const r = await adapterWith(s.fetch, {}).deploy(
+      t,
+      ctx({ secretsOnly: true, resolvedApiKey: { ok: true, value: TOKEN, source: 'system' } }),
+    );
+    expect(r.ok).toBe(true);
+    expect(s.done()).toBe(true);
+  });
+
+  test('onRemove: a pre-resolved ctx.resolvedApiKey is honored too', async () => {
+    // No Capy block in this env — a real read happens (proving the token
+    // WAS usable) and onRemove reports there's nothing to strip.
+    const s = scripted([readApp(app({ env: 'NODE_ENV=production' }))]);
+    const t = target({ options: { baseUrl: BASE, applicationId: APP_ID } });
+    const r = await adapterWith(s.fetch, {}).onRemove?.(t, {
+      cwd: '/tmp',
+      interactive: true,
+      confirm: neverAskedHere,
+      resolvedApiKey: { ok: true, value: TOKEN, source: 'system' },
+    });
+    expect(s.done()).toBe(true);
+    expect(r).toEqual({ ok: true, code: 'nothing_to_remove', detail: expect.any(String) });
+  });
+
+  test('preflight: no ctx.resolvedApiKey and no explicit-env match falls through to an injected store, called exactly once', async () => {
+    const getConnectorSecret = mock(async (name: string, opts: DokploySystemStoreCallOptions) => {
+      expect(name).toBe('_CONNECTOR_DOKPLOY_API_KEY');
+      expect(opts.interactive).toBe(false);
+      return TOKEN;
+    });
+    const s = scripted([readApp()]);
+    // target() defaults tokenEnv to DOKPLOY_API_KEY, but env is empty here —
+    // the explicit-env step fails, so resolution must fall to the store.
+    const a = createDokployAdapter({ fetch: s.fetch, env: {}, getConnectorSecret });
+    const r = await a.preflight(target(), { cwd: '/tmp' });
+    expect(r.ok).toBe(true);
+    expect(s.done()).toBe(true);
+    expect(getConnectorSecret).toHaveBeenCalledTimes(1);
+  });
+
+  test('a target with NO tokenEnv at all resolves through the store', async () => {
+    const getConnectorSecret = mock(async () => TOKEN);
+    const s = scripted([readApp()]);
+    const t = target({ options: { baseUrl: BASE, applicationId: APP_ID } });
+    const a = createDokployAdapter({ fetch: s.fetch, env: {}, getConnectorSecret });
+    const r = await a.preflight(t, { cwd: '/tmp' });
+    expect(r.ok).toBe(true);
+    expect(getConnectorSecret).toHaveBeenCalledTimes(1);
+  });
+
+  test('preflight: a non-admin store refusal with no env fallback names SYSTEM_STORE_ADMIN_ONLY, zero requests', async () => {
+    const getConnectorSecret = mock(async () => {
+      throw { code: 'SYSTEM_STORE_ADMIN_ONLY' };
+    });
+    const a = createDokployAdapter({ fetch: noNetwork.fetch, env: {}, getConnectorSecret });
+    const r = await a.preflight(target(), { cwd: '/tmp' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('admin');
+    expect(noNetwork.done()).toBe(true);
+  });
+
+  test('deploy: the same non-admin refusal fails before any request', async () => {
+    const getConnectorSecret = mock(async () => {
+      throw { code: 'SYSTEM_STORE_ADMIN_ONLY' };
+    });
+    const a = createDokployAdapter({ fetch: noNetwork.fetch, env: {}, getConnectorSecret });
+    const r = await a.deploy(target(), ctx());
+    expect(r.ok).toBe(false);
+    expect(r.steps[r.steps.length - 1].detail).toContain('admin');
+    expect(noNetwork.done()).toBe(true);
+  });
+
+  test('a non-admin refusal still falls back to the default env var when it is set', async () => {
+    const getConnectorSecret = mock(async () => {
+      throw { code: 'SYSTEM_STORE_ADMIN_ONLY' };
+    });
+    const s = scripted([readApp()]);
+    const t = target({ options: { baseUrl: BASE, applicationId: APP_ID } });
+    const a = createDokployAdapter({ fetch: s.fetch, env: { DOKPLOY_API_KEY: TOKEN }, getConnectorSecret });
+    const r = await a.preflight(t, { cwd: '/tmp' });
+    expect(r.ok).toBe(true);
+    expect(s.done()).toBe(true);
+  });
+
+  test('a target with no tokenEnv passes config-shape validation (tokenEnv is optional)', () => {
+    const t = target({ options: { baseUrl: BASE, applicationId: APP_ID } });
+    expect(optionsProblem(t)).toBeNull();
+  });
+
+  test('an invalid tokenEnv FORMAT is still rejected when one is present', () => {
+    const t = target({ options: { baseUrl: BASE, applicationId: APP_ID, tokenEnv: '1BAD' } });
+    expect(optionsProblem(t)?.reason).toContain('tokenEnv');
   });
 });

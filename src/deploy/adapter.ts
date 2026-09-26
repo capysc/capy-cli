@@ -11,8 +11,31 @@
  */
 
 import type { Classification } from './classify';
+import type { ResolveDokployApiKeyResult } from './dokployApi';
 
 export type DeployMode = 'direct' | 'ci';
+
+/**
+ * Fields a caller (`deployCommand.ts`) can pre-resolve ONCE per command and
+ * thread into every adapter call that needs them — currently only the
+ * Dokploy adapter reads any of these. `resolvedApiKey` lets the caller
+ * resolve the org system store's Dokploy key a single time and reuse it
+ * across `preflight()`, `deploy()` and `onRemove()`, so the store is asked
+ * (and an admin prompted) at most once per command — see
+ * `dokployApi.ts#resolveDokployApiKey`. Every field is optional: an adapter
+ * that doesn't need one, or a caller that didn't pre-resolve, leaves it out
+ * and the adapter falls back to resolving for itself.
+ */
+export interface AdapterCallContext {
+  /** Org id for this run, when known (e.g. from keep.lock). */
+  orgId?: string;
+  /** Run against the dev service. */
+  devMode?: boolean;
+  /** Whether this run can prompt a human. */
+  interactive?: boolean;
+  /** A Dokploy API key pre-resolved by the caller — see `AdapterCallContext`'s own doc. */
+  resolvedApiKey?: ResolveDokployApiKeyResult;
+}
 
 export interface TargetConfig {
   /** Stable identifier the user references with `capy deploy <name>`. */
@@ -101,7 +124,7 @@ export interface DeployResult {
   warnings?: readonly DeployWarning[];
 }
 
-export interface DeployContext {
+export interface DeployContext extends AdapterCallContext {
   /** Decrypted env for the chosen branch. Adapter may filter to config.vars. */
   env: Record<string, string>;
   /**
@@ -143,7 +166,7 @@ export interface RemoveOfferResult {
 }
 
 /** What `onRemove` needs from the caller to ask its yes/no question. */
-export interface RemoveOfferContext {
+export interface RemoveOfferContext extends AdapterCallContext {
   cwd: string;
   /** False outside a TTY — `confirm` never prompts when this is false. */
   interactive: boolean;
@@ -215,7 +238,7 @@ export interface DeployAdapter {
   /** Sniff the user's cwd for config files; pre-fill picker defaults. */
   detect(cwd: string): Promise<DetectedDefaults>;
   /** Validate config + binaries + auth without performing the deploy. */
-  preflight(config: TargetConfig, ctx: { cwd: string }): Promise<PreflightResult>;
+  preflight(config: TargetConfig, ctx: { cwd: string } & AdapterCallContext): Promise<PreflightResult>;
   /** Push secrets + deploy code. Adapter prints its own progress. */
   deploy(config: TargetConfig, ctx: DeployContext): Promise<DeployResult>;
   /**

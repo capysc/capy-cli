@@ -25,6 +25,7 @@
  * DOKPLOY_API_KEY), read at deploy time.
  */
 import {
+  AdapterCallContext,
   DeployAdapter,
   DeployContext,
   DeployResult,
@@ -41,21 +42,26 @@ import {
   DokployApiError,
   DokployClient,
   DokployDeployment,
+  DokploySystemStoreCallOptions,
   EnvWarning,
   FetchLike,
   MANAGED_BEGIN,
   MANAGED_END,
   OLD_RUNTIME_PAIR,
+  ResolveDokployApiKeyResult,
   RUNTIME_PAIR,
   apiBase,
   createDokployClient,
+  describeDokployTokenProblem,
   describeEnvProblem,
   describeEnvWarning,
+  dokploySecretsMayPrompt,
   envKeys,
   envProblems,
   envWarnings,
   mergeManagedBlock,
   outsideLines,
+  resolveDokployApiKey,
   resolveDokployToken,
   sortedCopy,
   splitManagedBlock,
@@ -74,13 +80,17 @@ export {
   RUNTIME_PAIR,
   apiBase,
   createDokployClient,
+  describeDokployTokenProblem,
   describeEnvProblem,
   describeEnvWarning,
+  dokploySecretsMayPrompt,
   envKeys,
   envProblems,
   envWarnings,
   mergeManagedBlock,
   outsideLines,
+  resolveDokployApiKey,
+  resolveDokployToken,
   splitManagedBlock,
   stripManagedBlock,
 };
@@ -90,6 +100,7 @@ export type {
   DokployDeployment,
   DokployDeploymentStatus,
   DokployErrorCode,
+  DokploySystemStoreCallOptions,
   DotenvEntry,
   EnvMergeProblem,
   EnvMergeProblemCode,
@@ -99,6 +110,7 @@ export type {
   FetchLike,
   ImportableEnvEntry,
   ImportSkipReason,
+  ResolveDokployApiKeyResult,
 } from '../dokployApi';
 
 export interface DokployOptions {
@@ -106,8 +118,14 @@ export interface DokployOptions {
   baseUrl: string;
   /** Application id from the Dokploy dashboard URL / API. */
   applicationId: string;
-  /** Name of the environment variable holding the Dokploy API token. */
-  tokenEnv: string;
+  /**
+   * Name of the environment variable holding the Dokploy API token —
+   * OPTIONAL (CAP-664). When set, an explicit env var still wins outright;
+   * when absent, the org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry
+   * (falling back to `$DOKPLOY_API_KEY`) is the source. See
+   * `dokployApi.ts#resolveDokployApiKey`.
+   */
+  tokenEnv?: string;
   /** How long to wait for the deployment to finish. Defaults to 600. */
   timeoutSeconds?: number;
 }
@@ -192,14 +210,31 @@ export function baseUrlProblem(raw: string | undefined): string | null {
   return null;
 }
 
-/** Why a token variable name is unusable, or null. Shared with the setup prompts. */
+/**
+ * Why a token variable name is unusable, or null. Shared with the setup
+ * prompts, where an EMPTY answer is still a mistake — required there. The
+ * FIELD itself is optional (CAP-664): see `optionsProblem`, which only calls
+ * this when `tokenEnv` is actually present.
+ */
 export function tokenEnvProblem(raw: string | undefined): string | null {
   if (!raw || !raw.trim()) return 'required';
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(raw.trim()) ? null : 'not a valid environment variable name';
 }
 
-/** Config-shape problems, checked before any network call. */
-export function optionsProblem(config: TargetConfig): PreflightResult | null {
+/**
+ * Whether this target's config is broken badly enough that even TALKING to
+ * Dokploy (or asking for a token first) would be pointless: an unusable
+ * `baseUrl`, a missing `applicationId`, or a malformed `tokenEnv`.
+ *
+ * Deliberately narrower than `optionsProblem`: `vars`/`timeoutSeconds` are
+ * DEPLOY-time concerns that say nothing about whether the target is even
+ * reachable. `resolveDokployApiKeyOnce` (`deployCommand.ts`) uses THIS check
+ * — not `optionsProblem` — to decide whether to resolve (and possibly
+ * prompt for) a token at all, because `onRemove` has no vars to ship and
+ * must still be able to reach a target `optionsProblem` would otherwise
+ * reject on that basis alone.
+ */
+export function dokployConnectionProblem(config: TargetConfig): PreflightResult | null {
   const opts = config.options as Partial<DokployOptions>;
   const hint = 'Run `capy deploy --edit ' + config.name + '` to fix.';
   const urlProblem = baseUrlProblem(opts.baseUrl);
@@ -207,8 +242,23 @@ export function optionsProblem(config: TargetConfig): PreflightResult | null {
   if (!opts.applicationId || !opts.applicationId.trim()) {
     return { ok: false, reason: 'dokploy applicationId: required', hint };
   }
-  const envProblem = tokenEnvProblem(opts.tokenEnv);
-  if (envProblem) return { ok: false, reason: `dokploy tokenEnv: ${envProblem}`, hint };
+  // tokenEnv is OPTIONAL (CAP-664) — the org system store is the default
+  // source now (see `resolveDokployApiKey`). When one IS set (an explicit
+  // `--token-env`, or a target saved before the system store existed), its
+  // FORMAT still has to be a valid variable name.
+  if (opts.tokenEnv && opts.tokenEnv.trim()) {
+    const envProblem = tokenEnvProblem(opts.tokenEnv);
+    if (envProblem) return { ok: false, reason: `dokploy tokenEnv: ${envProblem}`, hint };
+  }
+  return null;
+}
+
+/** Config-shape problems, checked before any network call. */
+export function optionsProblem(config: TargetConfig): PreflightResult | null {
+  const connectionProblem = dokployConnectionProblem(config);
+  if (connectionProblem) return connectionProblem;
+  const opts = config.options as Partial<DokployOptions>;
+  const hint = 'Run `capy deploy --edit ' + config.name + '` to fix.';
   if (
     opts.timeoutSeconds !== undefined &&
     !(Number.isInteger(opts.timeoutSeconds) && opts.timeoutSeconds > 0)
@@ -261,6 +311,17 @@ export interface DokployAdapterDeps {
   now?: () => number;
   env?: Record<string, string | undefined>;
   log?: (line: string) => void;
+  /**
+   * Reads the org system store's Dokploy key — see
+   * `dokployApi.ts#ResolveDokployApiKeyDeps`. Defaults to a no-op (never
+   * touches the network), so a caller that constructs this adapter WITHOUT
+   * this dep — every existing test, and any future direct call that doesn't
+   * pre-resolve via `ctx.resolvedApiKey` — keeps the exact pre-CAP-664
+   * env-only behavior. The real store is wired explicitly on the exported
+   * `dokployAdapter` singleton below, and by `deployCommand.ts`'s own
+   * pre-resolution (which is what production actually calls through).
+   */
+  getConnectorSecret?: (name: string, opts: DokploySystemStoreCallOptions) => Promise<string | null>;
 }
 
 function lastLogLines(logs: string, n = 30): string {
@@ -303,12 +364,28 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => Date.now());
   const log = deps.log ?? ((line: string) => console.log(line));
-  const tokenFor = (opts: DokployOptions): string | null =>
-    resolveDokployToken(opts.tokenEnv, deps.env ?? process.env);
-  const clientFor = (opts: DokployOptions): DokployClient | null => {
-    const token = tokenFor(opts);
-    return token ? createDokployClient(opts.baseUrl, token, deps.fetch) : null;
-  };
+
+  /**
+   * The Dokploy API key for one adapter call. `ctx.resolvedApiKey` — set by a
+   * caller that already resolved it once (`deployCommand.ts`) — always wins,
+   * so preflight/deploy/onRemove never ask the store twice in the same
+   * command. Absent that, resolves for itself (env-only unless this
+   * adapter's own `deps.getConnectorSecret` was given).
+   */
+  const resolveApiKeyFor = (
+    opts: DokployOptions,
+    ctx: AdapterCallContext,
+  ): Promise<ResolveDokployApiKeyResult> =>
+    ctx.resolvedApiKey
+      ? Promise.resolve(ctx.resolvedApiKey)
+      : resolveDokployApiKey({
+          tokenEnv: opts.tokenEnv,
+          env: deps.env ?? process.env,
+          interactive: ctx.interactive ?? false,
+          orgId: ctx.orgId,
+          devMode: ctx.devMode,
+          deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
+        });
 
   return {
     id: 'dokploy',
@@ -320,21 +397,21 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
     requires: { binaries: [] },
 
     async detect(): Promise<DetectedDefaults> {
-      return { options: { tokenEnv: DEFAULT_TOKEN_ENV } };
+      // No default tokenEnv (CAP-664): a new target relies on the org system
+      // store unless the user explicitly configures a `tokenEnv` override.
+      return {};
     },
 
-    async preflight(config: TargetConfig): Promise<PreflightResult> {
+    async preflight(config: TargetConfig, ctx: AdapterCallContext): Promise<PreflightResult> {
       const shape = optionsProblem(config);
       if (shape) return shape;
       const opts = config.options as unknown as DokployOptions;
-      const client = clientFor(opts);
-      if (!client) {
-        return {
-          ok: false,
-          reason: `$${opts.tokenEnv} is not set`,
-          hint: `Export your Dokploy API token first:\n  export ${opts.tokenEnv}=…`,
-        };
+      const resolved = await resolveApiKeyFor(opts, ctx);
+      if (!resolved.ok) {
+        const { reason, hint } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV);
+        return { ok: false, reason, hint };
       }
+      const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
       const app = await settle(client.getApplication(opts.applicationId));
       if (!app.ok) return { ok: false, ...explainApiError(app.error, 'application.one', opts) };
       const problem = envProblems(app.value.env);
@@ -371,10 +448,12 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       if (!ctx.deployToken) {
         return fail([], { label: 'runtime pair', status: 'fail', detail: 'no deploy token was minted' });
       }
-      const client = clientFor(opts);
-      if (!client) {
-        return fail([], { label: 'dokploy auth', status: 'fail', detail: `$${opts.tokenEnv} is not set` });
+      const resolved = await resolveApiKeyFor(opts, ctx);
+      if (!resolved.ok) {
+        const { reason } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV);
+        return fail([], { label: 'dokploy auth', status: 'fail', detail: reason });
       }
+      const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
 
       // 1. Fresh read — what preflight saw may be stale by now.
       const read = await settle(client.getApplication(opts.applicationId));
@@ -564,16 +643,17 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
 
     async onRemove(config: TargetConfig, ctx: RemoveOfferContext): Promise<RemoveOfferResult | null> {
       const opts = config.options as unknown as DokployOptions;
-      const token = tokenFor(opts);
-      if (!token) {
+      const resolved = await resolveApiKeyFor(opts, ctx);
+      if (!resolved.ok) {
+        const { reason } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV);
         return {
           ok: false,
           code: 'no_token',
-          detail: `Dokploy environment left untouched — $${opts.tokenEnv} is not set, so Capy could not check for its block.`,
+          detail: `Dokploy environment left untouched — ${reason}, so Capy could not check for its block.`,
           manualHint: manualStripHint(opts),
         };
       }
-      const client = createDokployClient(opts.baseUrl, token, deps.fetch);
+      const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
       const read = await settle(client.getApplication(opts.applicationId));
       if (!read.ok) {
         return {
@@ -665,4 +745,19 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
   };
 }
 
-export const dokployAdapter: DeployAdapter = createDokployAdapter();
+/**
+ * The registry's production instance — the only construction of this
+ * adapter that wires the org system store for real (every other
+ * construction, including every test, gets the safe env-only default — see
+ * `DokployAdapterDeps`). In the normal `capy deploy` / `capy deploy remove`
+ * flow, `deployCommand.ts` already pre-resolves the key once and passes it
+ * via `ctx.resolvedApiKey`, so this wiring is exercised only by a caller
+ * that invokes `preflight`/`deploy`/`onRemove` directly without going
+ * through that pre-resolution.
+ */
+export const dokployAdapter: DeployAdapter = createDokployAdapter({
+  getConnectorSecret: async (name, opts) => {
+    const { getConnectorSecret } = await import('../../system/systemStore');
+    return getConnectorSecret(name, opts);
+  },
+});

@@ -4,8 +4,12 @@
  *
  * Kept separate from the adapter so a second consumer never has to import
  * deploy-flow types (`DeployAdapter`, `DeployContext`, …) just to talk to
- * Dokploy or read its env blob.
+ * Dokploy or read its env blob. `ERROR_CODES` (below) is the one exception —
+ * a plain string-constant map, not a deploy-flow type — so a resolution
+ * refusal can be compared by its stable code rather than a hand-typed
+ * literal.
  */
+import { ERROR_CODES } from '../types/index';
 
 /**
  * Sort a copy, never the input. `Array.prototype.toSorted` would do this in
@@ -208,12 +212,191 @@ export const DEFAULT_TOKEN_ENV = 'DOKPLOY_API_KEY';
  * The Dokploy API token, read from the variable NAME the target configured
  * (never from the target itself — the token is never persisted to
  * `.capy/deploy.json`).
+ *
+ * Superseded by `resolveDokployApiKey` (CAP-664/CAP-657), which layers the
+ * org system store in front of this exact lookup. Kept and still exported —
+ * `resolveDokployApiKey`'s own env-only fallback steps call it — so nothing
+ * that imported it for a plain env-var check has to change.
  */
 export function resolveDokployToken(
   tokenEnv: string,
   env: Record<string, string | undefined> = process.env,
 ): string | null {
   return env[tokenEnv] || null;
+}
+
+/**
+ * Name of the org system store entry (CAP-664, `docs/org-system-store.md`)
+ * that holds the Dokploy API key: `_CONNECTOR_<PROVIDER>_<NAME>`.
+ */
+export const DOKPLOY_CONNECTOR_SECRET_NAME = '_CONNECTOR_DOKPLOY_API_KEY';
+
+/** Where a resolved Dokploy API key came from — never logged with the value, only alongside it in memory. */
+export type DokployApiKeySource = 'system' | 'env';
+
+export type ResolveDokployApiKeyResult =
+  | { ok: true; value: string; source: DokployApiKeySource }
+  | { ok: false; code: string };
+
+/** What the system store's `getConnectorSecret` needs — same shape as `system/systemStore.ts#GetConnectorSecretOptions`. */
+export interface DokploySystemStoreCallOptions {
+  orgId?: string;
+  interactive: boolean;
+  devMode?: boolean;
+  apiUrl?: string;
+}
+
+export interface ResolveDokployApiKeyDeps {
+  /**
+   * Reads (and, when missing + interactive + admin, prompts for and saves)
+   * the org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry.
+   *
+   * Defaults to a function that never touches the network or a terminal —
+   * every REAL caller (the deploy adapter's and the import connector's
+   * exported singletons, and `deployCommand.ts`) wires the real
+   * `system/systemStore.ts#getConnectorSecret` explicitly. Everyone else
+   * (tests, and the adapter/connector's own internal env-only fallback when
+   * a caller didn't pre-resolve) gets this safe no-op, so a missing token
+   * resolves with zero network calls unless something opted in.
+   */
+  getConnectorSecret?: (name: string, opts: DokploySystemStoreCallOptions) => Promise<string | null>;
+}
+
+async function neverReachesTheStore(): Promise<null> {
+  return null;
+}
+
+/** A typed store error (`CapyError`-shaped: `{code: string}`) as its code — never its `.message`. */
+function storeErrorCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : 'DOKPLOY_STORE_ERROR';
+}
+
+type StoreOutcome =
+  | { kind: 'value'; value: string }
+  | { kind: 'empty' }
+  | { kind: 'error'; code: string };
+
+async function readFromSystemStore(
+  getConnectorSecret: NonNullable<ResolveDokployApiKeyDeps['getConnectorSecret']>,
+  callOpts: DokploySystemStoreCallOptions,
+): Promise<StoreOutcome> {
+  try {
+    const value = await getConnectorSecret(DOKPLOY_CONNECTOR_SECRET_NAME, callOpts);
+    return value ? { kind: 'value', value } : { kind: 'empty' };
+  } catch (err) {
+    return { kind: 'error', code: storeErrorCode(err) };
+  }
+}
+
+export interface ResolveDokployApiKeyOptions {
+  /** `--token-env`, or a saved target's own `tokenEnv`. Wins outright when that variable is actually set. */
+  tokenEnv?: string;
+  env: Record<string, string | undefined>;
+  /** Whether this run can prompt a human — passed straight through to the system store. */
+  interactive: boolean;
+  orgId?: string;
+  devMode?: boolean;
+  apiUrl?: string;
+  deps?: ResolveDokployApiKeyDeps;
+}
+
+/**
+ * The Dokploy API key for one command, in order:
+ *
+ *   1. An explicit `tokenEnv` (the `--token-env` flag, or a saved target's
+ *      own `tokenEnv`) — when that variable is actually set, it wins outright.
+ *   2. The org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry. Missing +
+ *      interactive + admin: the store itself asks for it (hidden input) and
+ *      saves it (`system/systemStore.ts#getConnectorSecret`).
+ *   3. The default env var (`DOKPLOY_API_KEY`) — back-compat with every
+ *      target saved before the system store existed.
+ *   4. Refused: `DOKPLOY_TOKEN_MISSING` when nothing anywhere had a value.
+ *      When the store itself refused (a non-admin caller, or any other
+ *      store error) AND step 3 was also empty, the refusal carries the
+ *      STORE's own code (e.g. `SYSTEM_STORE_ADMIN_ONLY`) instead of the
+ *      generic "missing" code, so the caller learns WHY, never by parsing a
+ *      message string.
+ *
+ * Callers resolve this ONCE per command and reuse the result — see
+ * `deployCommand.ts`'s single call, fed into both `preflight()` and
+ * `deploy()`, so the store is asked (and an admin prompted) at most once.
+ */
+export async function resolveDokployApiKey(
+  opts: ResolveDokployApiKeyOptions,
+): Promise<ResolveDokployApiKeyResult> {
+  const explicit = opts.tokenEnv?.trim();
+  if (explicit) {
+    const value = opts.env[explicit] || null;
+    if (value) return { ok: true, value, source: 'env' };
+  }
+
+  const getConnectorSecret = opts.deps?.getConnectorSecret ?? neverReachesTheStore;
+  const storeOutcome = await readFromSystemStore(getConnectorSecret, {
+    orgId: opts.orgId,
+    interactive: opts.interactive,
+    devMode: opts.devMode,
+    apiUrl: opts.apiUrl,
+  });
+  if (storeOutcome.kind === 'value') return { ok: true, value: storeOutcome.value, source: 'system' };
+
+  const fallback = resolveDokployToken(DEFAULT_TOKEN_ENV, opts.env);
+  if (fallback) return { ok: true, value: fallback, source: 'env' };
+
+  return storeOutcome.kind === 'error'
+    ? { ok: false, code: storeOutcome.code }
+    : { ok: false, code: 'DOKPLOY_TOKEN_MISSING' };
+}
+
+/**
+ * Whether a run may let the org system store prompt a human for a missing
+ * Dokploy key. `baseInteractive` is the caller's ordinary TTY check;
+ * `suppressed` covers every reason that overrides a real TTY back to "never
+ * ask" — shared by `deployCommand.ts` (`--web`, `--yes`, `--dry-run`) and
+ * the import connector (`--web`, `--json`):
+ *
+ *   - `--web`: the store's own prompt is a raw terminal `inquirer` prompt,
+ *     not a browser screen — asking there could hang a browser-driven run.
+ *   - `--json` (connector only): machine output must never have a prompt
+ *     interleaved with it.
+ *   - `--yes` (deploy only): never ask, resolve from what's already there
+ *     or fail fast — the same contract every other picker/confirm honors.
+ *   - `--dry-run` (deploy only): a preview must never have the side effect
+ *     of saving a new key into the org store.
+ */
+export function dokploySecretsMayPrompt(baseInteractive: boolean, suppressed: boolean): boolean {
+  return baseInteractive && !suppressed;
+}
+
+/**
+ * A resolution refusal as a printable reason + hint — names only, never a
+ * value. `DOKPLOY_TOKEN_MISSING`'s reason is deliberately identical to the
+ * pre-system-store message (`$<tokenEnv> is not set`) — additive, not a
+ * reword of what every caller already prints.
+ */
+export function describeDokployTokenProblem(
+  code: string,
+  tokenEnv: string,
+): { reason: string; hint: string } {
+  if (code === ERROR_CODES.SYSTEM_STORE_ADMIN_ONLY) {
+    return {
+      // COPY-FLAG: minimal neutral wording.
+      reason: `only an org owner or admin can set ${DOKPLOY_CONNECTOR_SECRET_NAME} in the system store, and $${tokenEnv} is not set`,
+      hint: `Ask an org owner/admin to run \`capy system set ${DOKPLOY_CONNECTOR_SECRET_NAME}\`, or export ${tokenEnv} yourself.`,
+    };
+  }
+  if (code === 'DOKPLOY_TOKEN_MISSING') {
+    return {
+      reason: `$${tokenEnv} is not set`,
+      // COPY-FLAG: minimal neutral wording.
+      hint: `Run \`capy system set ${DOKPLOY_CONNECTOR_SECRET_NAME}\`, or export ${tokenEnv}=… first.`,
+    };
+  }
+  return {
+    // COPY-FLAG: minimal neutral wording.
+    reason: `could not resolve the Dokploy API key (${code})`,
+    hint: `Run \`capy system set ${DOKPLOY_CONNECTOR_SECRET_NAME}\`, or export ${tokenEnv}=… first.`,
+  };
 }
 
 // ── Env block: parse / find / replace / strip ─────────────────────────────

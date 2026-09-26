@@ -48,10 +48,12 @@ import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
 import {
-  DEFAULT_TOKEN_ENV,
   baseUrlProblem,
-  tokenEnvProblem,
+  dokploySecretsMayPrompt,
+  dokployConnectionProblem,
+  resolveDokployApiKey,
 } from '../deploy/adapters/dokploy';
+import type { ResolveDokployApiKeyResult } from '../deploy/adapters/dokploy';
 import { classify, isBuildTime } from '../deploy/classify';
 import type { WebDeployAdapterContext } from '../ui/deployScreens';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
@@ -141,6 +143,43 @@ interface WebContext {
 
 /** Open the user's browser by default; CAPY_WEB_NO_OPEN lets CI / headless in. */
 const openBrowser = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
+
+/**
+ * Dokploy only: resolves the org system store's API key ONCE for this whole
+ * command, wiring the REAL `system/systemStore.ts#getConnectorSecret` — this
+ * is the production entry point for CAP-664. The result is threaded into
+ * every `preflight`/`deploy`/`onRemove` call via `ctx.resolvedApiKey`, so the
+ * store is asked (and an admin prompted) at most once per command no matter
+ * how many of those run. `undefined` for every other adapter — they never
+ * read that field.
+ *
+ * Never resolves (never prompts, never touches the store) when the target
+ * can't even be reached — `dokployConnectionProblem` (an unusable `baseUrl`,
+ * a missing `applicationId`, or a malformed `tokenEnv`): `preflight()` fails
+ * on that regardless of any token, so asking for (or prompting to save) a
+ * key first would be wasted at best and a needless prompt at worst.
+ * Deliberately NOT the full `optionsProblem` — `onRemove` has no vars to
+ * ship and must still reach a target that check would otherwise reject.
+ */
+async function resolveDokployApiKeyOnce(
+  adapter: DeployAdapter,
+  target: TargetConfig,
+  orgId: string | undefined,
+  devMode: boolean | undefined,
+  interactive: boolean,
+): Promise<ResolveDokployApiKeyResult | undefined> {
+  if (adapter.id !== 'dokploy') return undefined;
+  if (dokployConnectionProblem(target)) return undefined;
+  const { getConnectorSecret } = await import('../system/systemStore');
+  return resolveDokployApiKey({
+    tokenEnv: (target.options as { tokenEnv?: string }).tokenEnv,
+    env: process.env,
+    interactive,
+    orgId,
+    devMode,
+    deps: { getConnectorSecret },
+  });
+}
 
 // ── Project-level keep.lock parsing ────────────────────────────────────────
 
@@ -444,10 +483,13 @@ function settingsDefaults(
         naming: existingOpts.naming ?? detectedOpts.naming ?? 'verbatim',
       };
     case 'dokploy':
+      // tokenEnv is no longer asked by default (CAP-664: the org system
+      // store is the default source) — only an EXISTING target's own value
+      // is shown here, never defaulted to the fallback env var name.
       return {
         baseUrl: existingOpts.baseUrl ?? '',
         applicationId: existingOpts.applicationId ?? '',
-        tokenEnv: existingOpts.tokenEnv ?? detectedOpts.tokenEnv ?? DEFAULT_TOKEN_ENV,
+        ...(existingOpts.tokenEnv ? { tokenEnv: existingOpts.tokenEnv } : {}),
       };
     default:
       return {};
@@ -605,8 +647,19 @@ async function resolveAdapterChoice(
   return ans.kind;
 }
 
-/** Adapter-specific options, asked once the adapter and branch are known. */
-async function resolveAdapterOptions(
+/**
+ * Adapter-specific options, asked once the adapter and branch are known.
+ *
+ * Exported (additive) so `tests/commands/deployDokployPickerTokenEnv.test.ts`
+ * can prove the Dokploy branch's `tokenEnv` behavior directly — no tokenEnv
+ * question for a NEW target, but an EXISTING target's saved value survives
+ * — without driving the whole multi-prompt `runPicker` flow, whose result
+ * this function's return value becomes verbatim (`options` in `runPicker`)
+ * and then gets written to `.capy/deploy.json` verbatim (`upsertTarget`):
+ * proving this function never puts `tokenEnv` in its result for a new
+ * target is the same fact as `.capy/deploy.json` never getting one written.
+ */
+export async function resolveAdapterOptions(
   adapter: DeployAdapter,
   cwd: string,
   branchVars: string[],
@@ -746,9 +799,13 @@ async function resolveAdapterOptions(
     ]);
   }
   if (adapter.id === 'dokploy') {
-    // The API token itself is never asked for or saved — only the name of the
-    // environment variable that holds it at deploy time.
-    return await inquirer.prompt([
+    // The API token itself is never asked for or saved here. CAP-664: the
+    // org system store's _CONNECTOR_DOKPLOY_API_KEY entry is the default
+    // source now — no tokenEnv question for a NEW target. An EXISTING
+    // target's own tokenEnv (saved before the system store existed, or set
+    // via `--token-env`) is carried through untouched: re-entering this
+    // picker must never silently drop it.
+    const ans = await inquirer.prompt([
       {
         type: 'input',
         name: 'baseUrl',
@@ -765,15 +822,8 @@ async function resolveAdapterOptions(
         validate: (v: string) => (v.trim() ? true : 'required'),
         filter: (v: string) => v.trim(),
       },
-      {
-        type: 'input',
-        name: 'tokenEnv',
-        message: 'Environment variable that holds your Dokploy API token:',
-        default: existingOpts.tokenEnv ?? detectedOpts.tokenEnv ?? DEFAULT_TOKEN_ENV,
-        validate: (v: string) => tokenEnvProblem(v) ?? true,
-        filter: (v: string) => v.trim(),
-      },
     ]);
+    return existingOpts.tokenEnv ? { ...ans, tokenEnv: existingOpts.tokenEnv } : ans;
   }
   return {};
 }
@@ -1206,7 +1256,7 @@ export async function deployList(
 export async function deployRemove(
   name: string,
   cwd: string = process.cwd(),
-  opts: { web?: boolean } = {},
+  opts: { web?: boolean; devMode?: boolean } = {},
 ): Promise<number> {
   if (opts.web) {
     // The terminal removes on a bare argument with no question at all. The
@@ -1256,7 +1306,28 @@ export async function deployRemove(
       ]);
       return !!ans.yes;
     };
-    const offer = await adapter.onRemove(target, { cwd, interactive, confirm });
+    // Dokploy only: resolve the system store's key ONCE for this command —
+    // see `resolveDokployApiKeyOnce`'s doc. `undefined` for every other
+    // adapter's target. `orgId` is a HINT, not a requirement: when this cwd
+    // has no keep.lock (or none was found), `openSystemStore` (inside
+    // `system/systemStore.ts#getConnectorSecret`) still resolves the org
+    // itself via `resolveOrgContext` — passing `undefined` here still
+    // reaches the store, it just skips the keep.lock-org shortcut.
+    const orgId = readKeep(cwd)?.orgId;
+    // A SEPARATE interactive flag from the removal `confirm` above: `--web`
+    // suppresses the store's own terminal prompt (it isn't a browser
+    // screen) even though the removal confirm itself already went through
+    // the browser earlier in this function.
+    const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.web);
+    const resolvedApiKey = await resolveDokployApiKeyOnce(adapter, target, orgId, opts.devMode, secretsInteractive);
+    const offer = await adapter.onRemove(target, {
+      cwd,
+      interactive,
+      confirm,
+      orgId,
+      devMode: opts.devMode,
+      resolvedApiKey,
+    });
     if (offer) {
       console.log(`  ${offer.ok ? GREEN('✓') : DIM('·')} ${offer.detail}`);
       if (offer.manualHint) console.log(`  ${DIM(offer.manualHint)}`);
@@ -2180,8 +2251,25 @@ export async function deployCommand(
   // ad-hoc target carries a stale 'direct' mode — capy never runs their CLI.
   const mode: DeployMode = adapter.ciOnly ? 'ci' : (target.mode ?? 'direct');
 
+  // Dokploy only: resolve the org system store's API key ONCE for this whole
+  // command and reuse it across preflight, the edit-loop's re-preflight, and
+  // deploy — so the store is asked (and an admin prompted) at most once, no
+  // matter how many of those run. `undefined` for every other adapter; they
+  // never read `ctx.resolvedApiKey`. Never prompts under `--web` (a browser
+  // run — the store's own prompt renders on a terminal, not a screen),
+  // `--yes`, or `--dry-run` (a preview must never save a new key) — see
+  // `dokploySecretsMayPrompt`'s own doc. Never resolves at all when the
+  // target's shape is already broken — `resolveDokployApiKeyOnce` skips it,
+  // and `preflight()`'s own shape check fails first regardless of any token.
+  const secretsInteractive = dokploySecretsMayPrompt(
+    process.stdin.isTTY === true,
+    !!web.web || !!options.yes || !!options.dryRun,
+  );
+  const dokployApiKey = await resolveDokployApiKeyOnce(adapter, target, keep.orgId, options.devMode, secretsInteractive);
+  const adapterCallCtx = { orgId: keep.orgId, devMode: options.devMode, interactive: secretsInteractive, resolvedApiKey: dokployApiKey };
+
   // Preflight (fail BEFORE decryption).
-  const preflight = await adapter.preflight(target, { cwd });
+  const preflight = await adapter.preflight(target, { cwd, ...adapterCallCtx });
   if (!preflight.ok) {
     console.error(`${RED('✗')} preflight: ${preflight.reason}`);
     if (preflight.hint) console.error('\n' + preflight.hint);
@@ -2237,7 +2325,10 @@ export async function deployCommand(
         console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
         renderPlan(target, adapter);
         // Re-run preflight after edit — paths/options may have changed.
-        const recheck = await adapter.preflight(target, { cwd });
+        // Reuses the SAME resolvedApiKey from above: it was resolved once
+        // for this command, and an edit here changes vars/branch/mode, never
+        // the Dokploy token source.
+        const recheck = await adapter.preflight(target, { cwd, ...adapterCallCtx });
         if (!recheck.ok) {
           console.error(`${RED('✗')} preflight: ${recheck.reason}`);
           if (recheck.hint) console.error('\n' + recheck.hint);
@@ -2287,6 +2378,7 @@ export async function deployCommand(
     dryRun: !!options.dryRun,
     secretsOnly: mode === 'ci',
     cwd,
+    ...adapterCallCtx,
   });
   renderResult(result);
   if (!result.ok) {

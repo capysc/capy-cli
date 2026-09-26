@@ -389,7 +389,9 @@ deploy
   .description('Remove a configured connector target')
   .action(async (name: string, _options, command) => {
     const { deployRemove } = await import('./commands/deployCommand');
-    process.exit(await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true }));
+    process.exit(
+      await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true, devMode: true }),
+    );
   });
 
 program

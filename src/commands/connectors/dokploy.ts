@@ -9,9 +9,13 @@
  * to the same kind of Application.
  *
  * Import is READ-ONLY on the Dokploy side: the only call this file ever makes
- * is `GET application.one`. It never writes to Dokploy, and the API token is
- * never stored — only the NAME of the env var holding it (default
- * `DOKPLOY_API_KEY`, `dokployApi.DEFAULT_TOKEN_ENV`), read at import time.
+ * is `GET application.one`. It never writes to Dokploy. The API token itself
+ * is never stored by THIS file — it comes from `resolveDokployApiKey`
+ * (CAP-664): the org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry by
+ * default (which the store itself may prompt for and save, once, on an
+ * admin's first use), or the NAME of an env var holding it (`--token-env`,
+ * default `DOKPLOY_API_KEY` / `dokployApi.DEFAULT_TOKEN_ENV`) when that's
+ * explicitly set. Resolved before any Dokploy request.
  *
  * `kind: 'import'` (see `registry.ts`) routes `capy connect dokploy` to
  * `import()` below instead of the single-variable `connect()`/`rotate()`
@@ -26,10 +30,13 @@ import {
   DEFAULT_TOKEN_ENV,
   DokployApiError,
   DokployClient,
+  DokploySystemStoreCallOptions,
   FetchLike,
   createDokployClient,
+  describeDokployTokenProblem,
+  dokploySecretsMayPrompt,
   listImportableEntries,
-  resolveDokployToken,
+  resolveDokployApiKey,
 } from '../../deploy/dokployApi';
 import { ConnectorMetadata } from '../../types/index';
 import { isInteractive } from '../../ui/interactive';
@@ -218,6 +225,16 @@ export interface DokployConnectorDeps {
   pickTarget?: (names: readonly string[]) => Promise<string>;
   /** Injectable for tests. Real `inquirer` input x2 otherwise. */
   askSettings?: () => Promise<{ baseUrl: string; applicationId: string }>;
+  /**
+   * Reads the org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry — see
+   * `dokployApi.ts#ResolveDokployApiKeyDeps`. Defaults to a no-op (never
+   * touches the network): every test constructs this connector directly with
+   * its own `env`/`fetch` and none of them exercise the store, so this dep
+   * stays opt-in here. The exported `dokployConnector` singleton below wires
+   * the real `system/systemStore.ts#getConnectorSecret` explicitly — that is
+   * the one instance `capy connect dokploy` actually runs.
+   */
+  getConnectorSecret?: (name: string, opts: DokploySystemStoreCallOptions) => Promise<string | null>;
 }
 
 async function defaultConfirm(message: string, defaultValue: boolean): Promise<boolean> {
@@ -321,10 +338,26 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       if (!settings.ok) return { ok: false, code: settings.code, message: settings.message };
       const { baseUrl, applicationId, tokenEnv } = settings;
 
-      const token = resolveDokployToken(tokenEnv, deps.env ?? process.env);
-      if (!token) {
-        return { ok: false, code: 'DOKPLOY_TOKEN_MISSING', message: `$${tokenEnv} is not set.` };
+      // Resolved BEFORE any Dokploy request — a missing/refused token still
+      // means zero requests (see the class doc's "READ-ONLY" note). A
+      // SEPARATE interactive flag from the one above: `--web` (the store's
+      // prompt is a raw terminal prompt, not a browser screen) and `--json`
+      // (machine output must never have a prompt interleaved with it) both
+      // suppress ONLY this prompt, not the settings prompts above.
+      const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.web || !!opts.json);
+      const resolved = await resolveDokployApiKey({
+        tokenEnv,
+        env: deps.env ?? process.env,
+        interactive: secretsInteractive,
+        orgId: ctx.orgId,
+        devMode: opts.devMode,
+        deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
+      });
+      if (!resolved.ok) {
+        const { reason } = describeDokployTokenProblem(resolved.code, tokenEnv);
+        return { ok: false, code: resolved.code, message: `${reason}.` };
       }
+      const token = resolved.value;
 
       const client = createDokployClient(baseUrl, token, deps.fetch);
       const envResult = await fetchApplicationEnv(client, applicationId);
@@ -422,4 +455,14 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
   };
 }
 
-export const dokployConnector: ConnectorModule = createDokployConnector();
+/**
+ * The `capy connect dokploy` production instance — the only place this file
+ * wires the org system store for real (every other construction, including
+ * every test, gets the safe env-only default — see `DokployConnectorDeps`).
+ */
+export const dokployConnector: ConnectorModule = createDokployConnector({
+  getConnectorSecret: async (name, opts) => {
+    const { getConnectorSecret } = await import('../../system/systemStore');
+    return getConnectorSecret(name, opts);
+  },
+});

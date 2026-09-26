@@ -12,7 +12,7 @@
  * `DokployConnectorDeps` rather than mocking a module — this file needs no
  * `mock.module()` and does not have to run in `run-tests.sh`'s isolated list.
  */
-import { describe, test, expect, spyOn, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, spyOn, mock, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +26,7 @@ import type { ResolvedContext } from '../../src/commands/connectors/shared';
 import { writeImportedAndSync } from '../../src/commands/connectors/shared';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import { DokployApiError } from '../../src/deploy/dokployApi';
-import type { FetchLike } from '../../src/deploy/dokployApi';
+import type { DokploySystemStoreCallOptions, FetchLike } from '../../src/deploy/dokployApi';
 import { TargetConfig } from '../../src/deploy/adapter';
 import { listTargets, upsertTarget } from '../../src/deploy/config';
 import type { ConnectOpts, ConnectorModule, ImportOutcome } from '../../src/commands/connectors/registry';
@@ -954,4 +954,191 @@ describe("capy rotate's link-first picker excludes import connectors", () => {
     expect(out).toContain('import-only');
     expect(fetchSpy).not.toHaveBeenCalled();
   }, 30_000);
+});
+
+// ── System store token resolution (CAP-664) ─────────────────────────────────
+//
+// `resolveDokployApiKey` sits in front of the plain env-var lookup every
+// test above exercises. `DokployConnectorDeps.getConnectorSecret` defaults
+// to a no-op (see the connector module's own doc), so every test above is
+// unaffected — these tests cover the store path via explicit injection.
+
+describe('dokploy import — system store token resolution', () => {
+  test('a system-store entry is used when no tokenEnv resolves from env, before any Dokploy request', async () => {
+    // A bun spy, not a variable of our own: `fetchMock.mock.calls` is bun's
+    // own accumulator, read afterward rather than pushed into by us.
+    const fetchMock = mock(async (_url: string, _init: { headers: Record<string, string> }) => ({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({ applicationId: 'app_1', env: null, buildArgs: null, buildSecrets: null, createEnvFile: true }),
+    }));
+
+    const getConnectorSecret = mock(async (name: string, opts: DokploySystemStoreCallOptions) => {
+      expect(name).toBe('_CONNECTOR_DOKPLOY_API_KEY');
+      expect(opts.orgId).toBe('org_test');
+      return 'store-token';
+    });
+    const connector = createDokployConnector({ fetch: fetchMock as unknown as FetchLike, env: {}, getConnectorSecret });
+    const outcome = await connector.import!(ctxWith({ orgId: 'org_test' }), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d.example.com',
+      application: 'app_1',
+      // No tokenEnv flag at all — the store is the only source.
+    });
+    expect(outcome.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].headers['x-api-key']).toBe('store-token');
+    expect(getConnectorSecret).toHaveBeenCalledTimes(1);
+  });
+
+  test('an explicit --token-env that IS set wins outright — the store is never called', async () => {
+    const getConnectorSecret = mock(async () => 'store-token');
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: null, calls: [] }),
+      env: { TOK: 'env-token' },
+      getConnectorSecret,
+    });
+    const outcome = await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d.example.com',
+      application: 'app_1',
+      tokenEnv: 'TOK',
+    });
+    expect(outcome.ok).toBe(true);
+    expect(getConnectorSecret).not.toHaveBeenCalled();
+  });
+
+  test('missing everywhere: zero Dokploy requests, coded refusal from the store', async () => {
+    const getConnectorSecret = mock(async () => null);
+    const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
+    const outcome = await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d.example.com',
+      application: 'app_1',
+    });
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { code: string }).code).toBe('DOKPLOY_TOKEN_MISSING');
+  });
+
+  test('a non-admin store refusal with no env fallback: coded refusal, zero requests', async () => {
+    const getConnectorSecret = mock(async () => {
+      throw { code: 'SYSTEM_STORE_ADMIN_ONLY' };
+    });
+    const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
+    const outcome = await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d.example.com',
+      application: 'app_1',
+    });
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { code: string }).code).toBe('SYSTEM_STORE_ADMIN_ONLY');
+  });
+
+  test('a non-admin store refusal still falls back to the default env var when it is set', async () => {
+    const getConnectorSecret = mock(async () => {
+      throw { code: 'SYSTEM_STORE_ADMIN_ONLY' };
+    });
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: null, calls: [] }),
+      env: { DOKPLOY_API_KEY: 'legacy-value' },
+      getConnectorSecret,
+    });
+    const outcome = await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d.example.com',
+      application: 'app_1',
+    });
+    expect(outcome.ok).toBe(true);
+  });
+
+  test('a sentinel store value never appears in the --json outcome', async () => {
+    const SENTINEL = 'sk_never_leak_this_9f3';
+    const getConnectorSecret = mock(async () => SENTINEL);
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'A=1', calls: [] }),
+      env: {},
+      getConnectorSecret,
+    });
+    const outcome = await connector.import!(ctxWith(), {
+      ...BASE_OPTS,
+      baseUrl: 'https://d.example.com',
+      application: 'app_1',
+      json: true,
+    });
+    expect(JSON.stringify(outcome)).not.toContain(SENTINEL);
+  });
+
+  /**
+   * Mirrors the REAL `getConnectorSecret`'s interactive-gated contract
+   * (`system/systemStore.ts`): an existing entry returns with no prompt; a
+   * missing one prompts (and saves) ONLY when `opts.interactive` is true.
+   * `promptFn` is a bun spy — "zero prompt calls" is read off IT, never a
+   * counter this file owns.
+   */
+  function fakeSystemStore(entry: string | null) {
+    const promptFn = mock(async () => 'prompted-value');
+    const getConnectorSecret = mock(async (_name: string, opts: { interactive: boolean }) => {
+      if (entry !== null) return entry;
+      if (!opts.interactive) return null;
+      return promptFn();
+    });
+    return { getConnectorSecret, promptFn };
+  }
+
+  test('--web: a real TTY does not let the store prompt — refused, zero prompt calls', async () => {
+    const { getConnectorSecret, promptFn } = fakeSystemStore(null);
+    const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith(), {
+        ...BASE_OPTS,
+        nonTty: false,
+        web: true,
+        baseUrl: 'https://d.example.com',
+        application: 'app_1',
+      }),
+    );
+    expect(outcome.ok).toBe(false);
+    expect(promptFn).not.toHaveBeenCalled();
+  });
+
+  test('--json: a real TTY does not let the store prompt — refused, zero prompt calls', async () => {
+    const { getConnectorSecret, promptFn } = fakeSystemStore(null);
+    const connector = createDokployConnector({ fetch: unreachableFetch, env: {}, getConnectorSecret });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith(), {
+        ...BASE_OPTS,
+        nonTty: false,
+        json: true,
+        baseUrl: 'https://d.example.com',
+        application: 'app_1',
+      }),
+    );
+    expect(outcome.ok).toBe(false);
+    expect(promptFn).not.toHaveBeenCalled();
+  });
+
+  test('neither --web nor --json: a real TTY DOES let the store prompt (sanity check for the two tests above)', async () => {
+    const { getConnectorSecret, promptFn } = fakeSystemStore(null);
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'A=1', calls: [] }),
+      env: {},
+      getConnectorSecret,
+      // Avoid REAL inquirer prompts (var selection, deploy-target offer)
+      // under the faked TTY — irrelevant to what this test proves (the
+      // SECRET prompt).
+      selectVars: async (c: readonly string[]) => c,
+      confirm: async () => false,
+    });
+    const outcome = await withTTY(() =>
+      connector.import!(ctxWith(), {
+        ...BASE_OPTS,
+        nonTty: false,
+        baseUrl: 'https://d.example.com',
+        application: 'app_1',
+      }),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(promptFn).toHaveBeenCalledTimes(1);
+  });
 });
