@@ -33,7 +33,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { wrapAndSaveMasterKey, resolveProjectKey } from '../../src/crypto/keyResolver';
 import { FileManager } from '../../src/files/fileManager';
 import { hashValue } from '../../src/commands/statusCommand';
@@ -208,21 +208,76 @@ describe('deepestCommonDir + serviceFolder — the backend-stack example', () =>
   });
 });
 
-// ── defaultDiscoveryProjectName ──────────────────────────────────────────────
+// ── defaultDiscoveryProjectName (Vince, 2026-09-26, decisions #1-#2) ───────
+//
+// Default = `<repoName>/<folder path from git root>`, joined with `/`, each
+// segment normalized INDEPENDENTLY so the dashing never eats a `/`
+// separator. `repoName` comes from (a) the parsed `origin` remote's repo,
+// when passed; (b) otherwise the MAIN repo root's basename (handles a
+// linked worktree); (c) otherwise `basename(process.cwd())` as a last
+// resort — see `resolveDiscoveryRepoName`'s own doc.
 
 describe('defaultDiscoveryProjectName', () => {
-  test('<repo>/<folder> normalized, lowercase, non-alnum collapsed to a dash', () => {
-    expect(defaultDiscoveryProjectName('/repos/Backend_Stack', 'backend/Deployment')).toBe(
-      'backend-stack-backend-deployment',
+  test('origin present: <repoName>/<folder segments>, e.g. slidespeak-monorepo/backend/deployment', () => {
+    const remote = { host: 'github.com', owner: 'slidespeak', repo: 'slidespeak-monorepo' };
+    expect(defaultDiscoveryProjectName('/repos/whatever-this-was-cloned-into', 'backend/deployment', remote)).toBe(
+      'slidespeak-monorepo/backend/deployment',
     );
   });
 
-  test('repo root: just <repo>, normalized', () => {
-    expect(defaultDiscoveryProjectName('/repos/Widgets', '')).toBe('widgets');
+  test('repo root (no folder): just the repo name, normalized', () => {
+    const remote = { host: 'github.com', owner: 'acme', repo: 'widgets' };
+    expect(defaultDiscoveryProjectName('/repos/widgets', '', remote)).toBe('widgets');
+  });
+
+  test('segment normalization: spaces/underscores inside a segment become dashes, the / separator survives', () => {
+    const remote = { host: 'github.com', owner: 'acme', repo: 'Some Repo' };
+    expect(defaultDiscoveryProjectName('/repos/x', 'My Folder/sub_dir', remote)).toBe('some-repo/my-folder/sub-dir');
   });
 
   test('a raw name of the reserved word falls back to my-project', () => {
-    expect(defaultDiscoveryProjectName('/repos/_system', '')).toBe('my-project');
+    const remote = { host: 'github.com', owner: 'acme', repo: '_system' };
+    expect(defaultDiscoveryProjectName('/repos/_system', '', remote)).toBe('my-project');
+  });
+
+  test('a folder renamed on disk but the SAME origin still yields the origin repo name, never the disk folder name', () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-renamed-')));
+    try {
+      initRepo(ROOT, 'git@github.com:slidespeak/backend-stack.git');
+      const [repo] = findCandidateRepos(ROOT);
+      expect(defaultDiscoveryProjectName(ROOT, 'backend/deployment', repo.remote)).toBe(
+        'backend-stack/backend/deployment',
+      );
+      // Proof the disk folder name was never consulted: ROOT's own basename
+      // is a random tmpdir name, nothing like "backend-stack".
+      expect(basename(ROOT)).not.toContain('backend-stack');
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  test('no origin: falls back to the MAIN repo root basename', () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-noorigin-')));
+    try {
+      initRepo(ROOT); // no origin remote
+      expect(defaultDiscoveryProjectName(ROOT, '')).toBe(basename(ROOT).toLowerCase());
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  test('a linked worktree with no origin resolves to the MAIN root, never the worktree folder name', () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-worktree-')));
+    try {
+      const mainRepo = join(ROOT, 'main-repo');
+      const worktreeDir = join(ROOT, 'a-totally-different-worktree-name');
+      initRepo(mainRepo); // no origin remote
+      git(mainRepo, ['worktree', 'add', worktreeDir, '-b', 'wt-branch']);
+      expect(defaultDiscoveryProjectName(worktreeDir, '')).toBe(basename(mainRepo).toLowerCase());
+      expect(defaultDiscoveryProjectName(worktreeDir, '')).not.toBe(basename(worktreeDir).toLowerCase());
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1573,6 +1628,95 @@ describe('connector.discover — ensureProjectSafe defect fixes', () => {
     }
   });
 
+  // Vince, 2026-09-26, decision #4: a default project name over 255 chars is
+  // refused (never truncated), before any write. Built with an oversized
+  // FOLDER segment (rather than an oversized repo/origin name) so the
+  // service still matches normally against `acme/widgets` — only the
+  // resulting default's length is what's under test.
+  test('a default project name over 255 chars refuses DOKPLOY_PROJECT_NAME_TOO_LONG under --yes, before any write', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-name-toolong-')));
+    try {
+      initRepo(ROOT, 'git@github.com:acme/widgets.git');
+      const longFolder = 'a'.repeat(300);
+      const calls: Array<{ method: string; url: string }> = [];
+      const initNames: string[] = [];
+      const fetchFn: FetchLike = (async (url: string, init: { method: string }) => {
+        if (init.method !== 'GET') throw new Error(`unexpected non-GET ${init.method} ${url}`);
+        calls.push({ method: init.method, url });
+        if (url.includes('project.all')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () =>
+              JSON.stringify([
+                {
+                  projectId: 'proj_1',
+                  name: 'acme',
+                  environments: [
+                    { environmentId: 'env_1', name: 'production', compose: [{ composeId: 'compose_1', name: 'widgets' }] },
+                  ],
+                },
+              ]),
+          };
+        }
+        return {
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              composeId: 'compose_1',
+              env: 'A=1',
+              createEnvFile: true,
+              owner: 'acme',
+              repository: 'widgets',
+              sourceType: 'github',
+              composePath: `${longFolder}/docker-compose.yml`,
+            }),
+        };
+      }) as FetchLike;
+      const connector = createDokployConnector({
+        fetch: fetchFn,
+        env: { T: 'x' },
+        cwd: ROOT,
+        askExistingOrNewProject: async () => DISCOVERY_NEW_PROJECT,
+        askDiscoveryProjectName: async () => {
+          throw new Error('must not be asked — --yes uses the default outright');
+        },
+      });
+      const ctx: DiscoveryContext = {
+        orgId: 'o',
+        userId: 'u',
+        serviceClient: {
+          listProjects: async () => [],
+          initializeProject: async (name: string) => {
+            initNames.push(name);
+            throw new Error('must never be called — an over-long name must refuse first');
+          },
+        },
+      } as unknown as DiscoveryContext;
+      const savedTTY = process.stdin.isTTY;
+      Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+      const outcome = await (async () => {
+        try {
+          return await connector.discover!(ctx, { nonTty: false, baseUrl: 'https://d', tokenEnv: 'T', yes: true } as ConnectOpts);
+        } finally {
+          Object.defineProperty(process.stdin, 'isTTY', { value: savedTTY, configurable: true });
+        }
+      })();
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      const folderResult = outcome.applied![0];
+      expect(folderResult.ok).toBe(false);
+      if (folderResult.ok) return;
+      expect(folderResult.code).toBe('DOKPLOY_PROJECT_NAME_TOO_LONG');
+      expect(folderResult.message).toContain(longFolder); // the folder is named in the refusal
+      expect(initNames.length).toBe(0);
+      expect(existsSync(join(ROOT, longFolder, 'keep.lock'))).toBe(false);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
   test('a new project asks for its name (default = the computed default), and initializes with the CHOSEN name', async () => {
     const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-name-ask-')));
     try {
@@ -1621,7 +1765,9 @@ describe('connector.discover — ensureProjectSafe defect fixes', () => {
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(nameAskCalls.length).toBe(1);
-      expect(nameAskCalls[0]).toBe(defaultDiscoveryProjectName(ROOT, ''));
+      expect(nameAskCalls[0]).toBe(
+        defaultDiscoveryProjectName(ROOT, '', { host: 'github.com', owner: 'acme', repo: 'widgets' }),
+      );
       expect(initNames).toEqual(['human-chosen-name']);
     } finally {
       rmSync(ROOT, { recursive: true, force: true });
@@ -1665,7 +1811,9 @@ describe('connector.discover — ensureProjectSafe defect fixes', () => {
       })();
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
-      expect(initNames).toEqual([defaultDiscoveryProjectName(ROOT, '')]);
+      expect(initNames).toEqual([
+        defaultDiscoveryProjectName(ROOT, '', { host: 'github.com', owner: 'acme', repo: 'widgets' }),
+      ]);
     } finally {
       rmSync(ROOT, { recursive: true, force: true });
     }

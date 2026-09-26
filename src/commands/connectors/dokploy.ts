@@ -55,7 +55,7 @@ import { ProjectManager } from '../../core/projectManager';
 import { FileManager } from '../../files/fileManager';
 import { resolveProjectKey } from '../../crypto/keyResolver';
 import { SyncEngine } from '../../sync/syncEngine';
-import { assertProjectNameAllowed } from '../../system/reservedProjectName';
+import { assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../../system/reservedProjectName';
 import { findDirtyBranchIssue } from '../checkoutCommand';
 import { listOrgProjectsOrUnavailable } from '../capyCommand';
 import { commitDiscoveryChanges, defaultDiscoveryCommitBranchName, isValidDiscoveryCommitBranchName, snapshotPathStatus } from '../../git/discoveryCommit';
@@ -63,6 +63,7 @@ import { fingerprint, writeImportedAndSync, writeImportOutcome, ResolvedContext 
 import { ConnectOpts, ConnectorModule, ConnectResult, ImportOutcome, ImportWarning, RotateResult } from './registry';
 import {
   CandidateRepo,
+  DISCOVERY_PROJECT_NAME_MAX_LENGTH,
   DiscoveryCollision,
   DiscoveryContext,
   DiscoveryFolderResult,
@@ -72,6 +73,7 @@ import {
   DiscoveryPlanFolder,
   DiscoveryRepoCommitResult,
   DiscoverySequenceDeps,
+  GitRemoteRef,
   applyCollisionResolutions,
   buildDiscoveryPlan,
   defaultDiscoveryProjectName,
@@ -569,10 +571,36 @@ async function defaultAskExistingOrNewProject(
 }
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
+/**
+ * Validates a discovery project-name answer: non-empty, at most
+ * `DISCOVERY_PROJECT_NAME_MAX_LENGTH` chars, not the reserved `_system` name
+ * (Vince, 2026-09-26, decision #4). Deliberately no charset restriction —
+ * `/` (and anything else `defaultDiscoveryProjectName` might produce) must
+ * stay allowed here; that's a separate concern from this ticket's scope.
+ */
+function discoveryProjectNameProblem(trimmed: string): string | null {
+  if (!trimmed) return 'A project name is required.';
+  if (trimmed.length > DISCOVERY_PROJECT_NAME_MAX_LENGTH) {
+    return `Project name must be ${DISCOVERY_PROJECT_NAME_MAX_LENGTH} characters or fewer.`;
+  }
+  if (isReservedProjectName(trimmed)) return PROJECT_NAME_RESERVED_MESSAGE;
+  return null;
+}
+
 async function defaultAskDiscoveryProjectName(defaultName: string): Promise<string> {
   const inquirer = (await import('inquirer')).default;
   const { name } = await inquirer.prompt([
-    { type: 'input', name: 'name', message: 'New Capy project name:', default: defaultName, filter: (v: string) => v.trim() },
+    {
+      type: 'input',
+      name: 'name',
+      message: 'New Capy project name:',
+      default: defaultName,
+      filter: (v: string) => v.trim(),
+      // Re-asks automatically (inquirer's own validate loop) rather than
+      // ever reaching `ensureProjectSafe` with a name it would refuse
+      // `DOKPLOY_PROJECT_NAME_TOO_LONG`/`PROJECT_NAME_RESERVED` for.
+      validate: (v: string) => discoveryProjectNameProblem(v.trim()) ?? true,
+    },
   ]);
   return name;
 }
@@ -1237,6 +1265,8 @@ async function ensureProjectSafe(
   ctx: DiscoveryContext,
   repoDir: string,
   folder: string,
+  /** This folder's repo's own parsed `origin`, when known — see `defaultDiscoveryProjectName`'s decision #2 doc; passed through rather than re-read here. */
+  remote: GitRemoteRef | undefined,
   opts: {
     interactive: boolean;
     /** Discovery's OWN `--yes` — skips the new-project NAME prompt (defaulting to `defaultName`) the same way it skips every other confirmation, never the existing-vs-new picker itself (that one isn't a confirmation, it's a genuine choice with no safe default). */
@@ -1259,7 +1289,7 @@ async function ensureProjectSafe(
     };
   }
 
-  const defaultName = defaultDiscoveryProjectName(repoDir, folder);
+  const defaultName = defaultDiscoveryProjectName(repoDir, folder, remote);
   // A lookup failure is NOT "this org has no projects" — offering only
   // "create new" on a transient network/auth error risks a duplicate
   // project the human never asked for. Abort THIS folder instead (CAP-657
@@ -1289,6 +1319,19 @@ async function ensureProjectSafe(
     // `--yes` skips the ask — same "proceed without asking" contract as
     // every other discovery confirmation — and uses the default outright.
     const chosenName = opts.yes ? defaultName : await opts.askProjectName(defaultName);
+    // Vince, 2026-09-26, decision #4: refuse before any write when the name
+    // (default or human-typed) is over 255 chars — never truncated. The real
+    // `defaultAskDiscoveryProjectName` prompt validates this itself and
+    // re-asks (so an interactive human self-corrects before ever returning
+    // here); this is the zero-write guarantee for `--yes` and for any
+    // injected `askProjectName` test double that skips that validation.
+    if (chosenName.length > DISCOVERY_PROJECT_NAME_MAX_LENGTH) {
+      return {
+        ok: false,
+        code: 'DOKPLOY_PROJECT_NAME_TOO_LONG',
+        message: `${folder || '.'}: project name is longer than ${DISCOVERY_PROJECT_NAME_MAX_LENGTH} characters.`,
+      };
+    }
     assertProjectNameAllowed(chosenName);
     const initResult = await ctx.serviceClient.initializeProject(chosenName, ctx.orgId);
     const keep: KeepFile = {
@@ -1637,8 +1680,8 @@ function buildRealDiscoverySequenceDeps(
   },
 ): DiscoverySequenceDeps {
   return {
-    ensureProject: (repoDir, folder) =>
-      ensureProjectSafe(ctx, repoDir, folder, {
+    ensureProject: (repoDir, folder, remote) =>
+      ensureProjectSafe(ctx, repoDir, folder, remote, {
         interactive: runOpts.interactive,
         yes: runOpts.yes,
         askExistingOrNewProject: runOpts.askExistingOrNewProject,

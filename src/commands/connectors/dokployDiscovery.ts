@@ -112,7 +112,7 @@
  */
 import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { basename, join, posix } from 'node:path';
+import { basename, dirname, join, posix } from 'node:path';
 import { DokployClient, DokployProjectSummary, listImportableEntries, sortedCopy } from '../../deploy/dokployApi';
 import { isReservedProjectName } from '../../system/reservedProjectName';
 import { KeepFile } from '../../types/index';
@@ -344,25 +344,70 @@ function isProperSubfolder(inner: string, outer: string): boolean {
   return inner.startsWith(`${outer}/`);
 }
 
-// ── Default project naming (mirrors `ProjectManager.getDefaultProjectName`) ─
+// ── Default project naming (Vince, 2026-09-26, decisions #1-#2) ────────────
 
 /**
- * `<repo>/<folder>`, or just `<repo>` at repo root — normalized exactly like
- * `ProjectManager.getDefaultProjectName()` (lowercase, non-alnum → `-`,
- * collapsed, trimmed), and refusing the same reserved name.
+ * The repo name half of `defaultDiscoveryProjectName`'s default, in this
+ * order:
+ *   (a) the parsed `origin` remote's repo (`remote.repo` — already
+ *       lowercased by `parseGitRemoteUrl`), when known. Callers pass the
+ *       `CandidateRepo.remote` they already have rather than this function
+ *       re-reading git itself.
+ *   (b) with no parseable origin: the basename of the MAIN repo root — the
+ *       parent of `git rev-parse --path-format=absolute --git-common-dir`
+ *       run at `repoDir`. This resolves a LINKED WORKTREE to the repo it was
+ *       created from (its common `.git` dir lives in the main root), never
+ *       the worktree's own folder name.
+ *   (c) otherwise (that git command itself fails — `repoDir` unreadable):
+ *       `basename(process.cwd())`, a last resort that production code should
+ *       never actually reach (discovery only ever calls this on a `repoDir`
+ *       it already confirmed is a readable repo).
  */
-export function defaultDiscoveryProjectName(repoDir: string, folder: string): string {
-  const raw = folder ? `${basename(repoDir)}/${folder}` : basename(repoDir);
-  if (isReservedProjectName(raw)) return 'my-project';
-  const normalized = raw
+function resolveDiscoveryRepoName(repoDir: string, remote?: GitRemoteRef | null): string {
+  if (remote?.repo) return remote.repo;
+  const commonDir = runGitReadOnly(['rev-parse', '--path-format=absolute', '--git-common-dir'], repoDir);
+  if (commonDir.code === 0 && commonDir.stdout.trim()) {
+    return basename(dirname(commonDir.stdout.trim()));
+  }
+  return basename(process.cwd());
+}
+
+/**
+ * Lowercase, non-`[a-z0-9-]` → `-`, collapsed, trimmed — the SAME per-segment
+ * rule `ProjectManager.getDefaultProjectName()` applies to its single joined
+ * string, applied here to ONE path segment at a time so the `/` separator
+ * between segments is never itself eaten by the dashing.
+ */
+function normalizeProjectNameSegment(raw: string): string {
+  return raw
     .toLowerCase()
     .replace(/[^a-z0-9-]+/gi, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * `<repoName>/<folder path from git root>`, joined with `/` — or just
+ * `<repoName>` at repo root (Vince, 2026-09-26, decision #1). `repoName`
+ * comes from `resolveDiscoveryRepoName` (above); `folder`'s own `/`-joined
+ * segments are each normalized independently (lowercase, non-alnum → `-`,
+ * collapsed, trimmed) so the dashing can never eat a `/` separator. The
+ * `_system` reserved check runs on BOTH the raw (pre-normalization) and the
+ * normalized form, exactly as before (decision #3).
+ */
+export function defaultDiscoveryProjectName(repoDir: string, folder: string, remote?: GitRemoteRef | null): string {
+  const repoName = resolveDiscoveryRepoName(repoDir, remote);
+  const segments = [repoName, ...(folder ? folder.split('/').filter(Boolean) : [])];
+  const raw = segments.join('/');
+  if (isReservedProjectName(raw)) return 'my-project';
+  const normalized = segments.map(normalizeProjectNameSegment).join('/');
   if (!normalized) return 'my-project';
   if (isReservedProjectName(normalized)) return 'my-project';
   return normalized;
 }
+
+/** Discovery project names longer than this are refused, never truncated (Vince, 2026-09-26, decision #4). */
+export const DISCOVERY_PROJECT_NAME_MAX_LENGTH = 255;
 
 // ── Matching Dokploy services to repos ──────────────────────────────────────
 
@@ -395,6 +440,8 @@ export interface DiscoveryUnmatched {
 
 interface MatchedService extends ServiceDetail {
   repoDir: string;
+  /** The matching `CandidateRepo`'s own parsed `origin` — carried through so downstream naming (see `defaultDiscoveryProjectName`) never re-reads git itself. */
+  remote: GitRemoteRef;
 }
 
 /** `listProjects`/`getApplication`/`getCompose` only — the read-only surface discovery needs from a `DokployClient`. */
@@ -495,7 +542,7 @@ function matchDetail(
     (r) => r.remote.owner === detail.owner!.toLowerCase() && r.remote.repo === detail.repository!.toLowerCase(),
   );
   if (!hit) return { kind: 'unmatched', value: { ...base, reason: 'no_remote_match' } };
-  return { kind: 'matched', value: { ...detail, repoDir: hit.repoDir } };
+  return { kind: 'matched', value: { ...detail, repoDir: hit.repoDir, remote: hit.remote } };
 }
 
 // ── Grouping into Capy-project folders ──────────────────────────────────────
@@ -554,6 +601,14 @@ export interface DiscoveryPlanFolder {
   initialized: boolean;
   /** Present only when one or more OTHER services' folders nested inside this one and joined it as extra branches — see this file's "Nested folders" doc. */
   mergedServices?: readonly DiscoveryMergedService[];
+  /**
+   * This folder's repo's own parsed `origin` (Vince, 2026-09-26, decision
+   * #2) — carried through additively from the matched `CandidateRepo` so
+   * `ensureProject` (and `defaultDiscoveryProjectName`) never re-read git
+   * for it. Optional only so older literal `DiscoveryPlanFolder` test
+   * fixtures that predate this field keep compiling; every real plan sets it.
+   */
+  remote?: GitRemoteRef;
 }
 
 function groupKey(m: MatchedService): string {
@@ -569,6 +624,8 @@ export type ListServerBranches = (projectId: string) => Promise<ReadonlyArray<{ 
 /** One matched (project,service) group's own natural folder + environments — pre-merge, pre-nesting-resolution. */
 interface FolderGroup {
   repoDir: string;
+  /** This group's repo's own parsed `origin` — every member shares the same one (they all matched the same `CandidateRepo`). */
+  remote: GitRemoteRef;
   projectName: string;
   serviceName: string;
   /** This group's OWN folder — the deepest dir its own compose files share. Never relabeled; nesting resolution reads this directly. */
@@ -618,6 +675,7 @@ async function groupMatchedServices(
   }
   const groups: readonly FolderGroup[] = [...byGroup.values()].map((members) => ({
     repoDir: members[0].repoDir,
+    remote: members[0].remote,
     projectName: members[0].projectName,
     serviceName: members[0].serviceName,
     folder: deepestCommonDir(members.map((m) => serviceFolder(m))),
@@ -690,6 +748,7 @@ async function groupMatchedServices(
         serviceName: root.serviceName,
         environments,
         initialized,
+        remote: root.remote,
         ...(nested.length > 0
           ? {
               mergedServices: nested.map((p) => ({
@@ -933,6 +992,8 @@ export interface DiscoverySequenceDeps {
   ensureProject: (
     repoDir: string,
     folder: string,
+    /** This folder's repo's own parsed `origin`, when known — passed through from `DiscoveryPlanFolder.remote` (decision #2) rather than making an implementation re-read git. */
+    remote?: GitRemoteRef,
   ) => Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string }>;
   /**
    * The SAME dirty-working-tree guard `capy checkout` enforces before
@@ -1026,7 +1087,7 @@ export async function runDiscoverySequence(
   opts: { overwrite: boolean },
   deps: DiscoverySequenceDeps,
 ): Promise<DiscoveryFolderResult> {
-  const project = await deps.ensureProject(folder.repoDir, folder.folder);
+  const project = await deps.ensureProject(folder.repoDir, folder.folder, folder.remote);
   if (!project.ok) {
     return { repoDir: folder.repoDir, folder: folder.folder, ok: false, code: project.code, message: project.message, environments: [] };
   }
