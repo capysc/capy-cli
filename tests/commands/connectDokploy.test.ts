@@ -1528,6 +1528,76 @@ describe('dokploy import — compose source, end to end', () => {
   });
 });
 
+// ── dotenv.parse-accurate import values (CAP-657 live bug, 2026-09-27) ──────
+
+describe('dokploy import — a quoted Dokploy value lands as dotenv.parse would read it', () => {
+  test('decrypt-verified: a double-quoted line stores WITHOUT its quotes, and a $-bearing value is flagged by name only, never by value', async () => {
+    const ROOT = mkdtempSync(join(tmpdir(), 'capy-dokploy-dotenv-e2e-'));
+    const fileManager = new FileManager(ROOT);
+    try {
+      const keep: KeepFile = { version: '3.0', org_id: 'o', project_id: 'p', project_name: 'demo', variables: {} };
+      const PROJECT_KEY = 'e2e-project-key-dotenv-0123456';
+      const rawEnv = ['DATABASE_URL="postgres://u:p@h:5432/db?sslmode=require"', 'H="$$2b$$12$$abc"'].join('\n');
+      const ctx = {
+        pm: { readSyncState: () => null },
+        fileManager,
+        serviceClient: {
+          pushSecrets: () => {
+            throw new Error('must not push — this test passes noPush: true');
+          },
+        },
+        orgId: 'o',
+        projectId: 'p',
+        branch: 'development',
+        userId: 'u',
+        projectKey: PROJECT_KEY,
+        keep,
+        localPlaintext: {},
+      } as unknown as ResolvedContext;
+
+      const connector = createDokployConnector({ fetch: fakeComposeFetch({ env: rawEnv, calls: [] }), env: { T: 'x' } });
+
+      const chunks: string[] = [];
+      const record = (...a: unknown[]) => void chunks.push(a.map(String).join(' '));
+      const logSpy = spyOn(console, 'log').mockImplementation(record as never);
+      const errSpy = spyOn(console, 'error').mockImplementation(record as never);
+
+      const command = new ConnectCommand(false);
+      try {
+        await (command as unknown as { executeImport: Function }).executeImport(connector, 'dokploy', ctx, {
+          nonTty: true,
+          baseUrl: 'https://d',
+          compose: 'compose_1',
+          tokenEnv: 'T',
+          json: true,
+          noPush: true,
+        } as ConnectOpts);
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+
+      const printed = chunks.join('\n');
+      // Names only, never the value, on ANY output surface.
+      expect(printed).not.toContain('2b$12');
+      expect(printed).not.toContain('postgres://u:p@h');
+      const parsedOut = JSON.parse(printed.trim());
+      expect(parsedOut.imported).toEqual(expect.arrayContaining(['DATABASE_URL', 'H']));
+      expect(parsedOut.warnings).toEqual(expect.arrayContaining([{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: ['H'] }]));
+
+      // "lands as dotenv.parse would read it": the decrypted on-disk value
+      // for the quoted line has NO surrounding quotes — this is the CAP-657
+      // live bug (6 of 148 SlideSpeak staging values stored WITH their
+      // quotes) — and the dollar-bearing value round-trips unescaped too.
+      const decrypted = fileManager.readEncryptedEnvFile(PROJECT_KEY);
+      expect(decrypted.DATABASE_URL).toBe('postgres://u:p@h:5432/db?sslmode=require');
+      expect(decrypted.H).toBe('$$2b$$12$$abc');
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+});
+
 // ── Dry run (`--dry-run`): Vince's rule — a dry run changes nothing ─────────
 
 describe('dokploy import — dry run', () => {

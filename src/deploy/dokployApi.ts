@@ -9,6 +9,7 @@
  * refusal can be compared by its stable code rather than a hand-typed
  * literal.
  */
+import { parse as parseDotenv } from 'dotenv';
 import { ERROR_CODES } from '../types/index';
 
 /**
@@ -739,6 +740,18 @@ export function outsideLines(split: EnvSplit): readonly string[] {
 }
 
 /**
+ * `before`/`after` concatenated, byte for byte — the raw text a real dotenv
+ * parser (CRLF, quoting, comments, multi-line quoted values) should read,
+ * as opposed to `outsideLines`' pre-split/pre-joined view used by the
+ * naive name-only regex (`parseDotenvEntries`/`envKeys`). Never used for
+ * reconstruction — that stays `splitManagedBlock`'s `before`/`after` fields
+ * directly (see `mergeManagedBlock`/`stripManagedBlock`).
+ */
+function outsideText(split: EnvSplit): string {
+  return split.before + split.after;
+}
+
+/**
  * Everything that must stop a deploy before anything is minted or written: an
  * edited/duplicated block, or a runtime pair (old or new name) that Capy did
  * not write sitting outside the block — an unknown pair would be silently
@@ -840,12 +853,28 @@ export function describeEnvWarning(w: EnvWarning): string {
 // ── Importable entries (for a future `capy connect dokploy`) ─────────────
 
 export type ImportSkipReason = 'DOKPLOY_REFERENCE_VALUE';
+export type ImportWarningReason = 'DOKPLOY_VALUE_HAS_DOLLAR';
 
 export interface ImportableEnvEntry {
   name: string;
   value: string;
   /** Present when this entry should not be offered for import, and why. */
   skip?: ImportSkipReason;
+  /** Present when this entry IS offered, but its value deserves a second look — see `classifyImportValue`'s doc. */
+  warning?: ImportWarningReason;
+}
+
+/**
+ * One raw name/value's own classification: a reference value is never
+ * imported as a literal string (there is no resolved value to put in
+ * `.env`); a `$` anywhere else in the PARSED value (bcrypt hashes written
+ * `$$escaped$$`, an unresolved `${VAR}` Compose interpolation, …) is still
+ * imported — Dokploy/Compose is the thing that treats `$` specially, not
+ * Capy — but flagged so the person reviews it themselves.
+ */
+function classifyImportValue(name: string, value: string): ImportableEnvEntry {
+  if (value.includes('${{')) return { name, value, skip: 'DOKPLOY_REFERENCE_VALUE' };
+  return value.includes('$') ? { name, value, warning: 'DOKPLOY_VALUE_HAS_DOLLAR' } : { name, value };
 }
 
 /**
@@ -853,14 +882,30 @@ export interface ImportableEnvEntry {
  * the Capy block, minus the runtime pairs (Capy's own machinery, never a
  * project secret), with a reference value like `${{project.SOME_VAR}}`
  * flagged rather than silently imported as a literal string.
+ *
+ * The value for each name is exactly what Dokploy's OWN first parsing step
+ * produces — Dokploy parses a service's env text with the `dotenv` npm
+ * package before it ever reaches disk (see `docs/dokploy-deploy-adapter.md`
+ * for the upstream source reference) — never a byte-for-byte copy of the
+ * raw line. Concretely, for a name like `DATABASE_URL="postgres://…"`:
+ * CRLF is normalized to LF, a leading `export ` is dropped, one matching
+ * pair of `'`/`"`/`` ` `` around the (trimmed) value is stripped, `\n`/`\r`
+ * are decoded ONLY inside a double-quoted value, an unquoted value is cut
+ * at the first `#`, and a duplicate name's LAST line wins — all of it
+ * `dotenv.parse`'s own behavior, not reimplemented here. This is a
+ * DIFFERENT parse than `parseDotenvEntries`/`envKeys` (used for name-only
+ * collision checks and the byte-exact managed-block machinery above) — that
+ * one is intentionally naive about values; only import ever hands a value
+ * to the person, so only import needs to get the value right.
  */
 export function listImportableEntries(env: string | null): readonly ImportableEnvEntry[] {
   const split = splitManagedBlock(env);
   if ('code' in split) return [];
   const reserved = new Set<string>([...RUNTIME_PAIR, ...OLD_RUNTIME_PAIR]);
-  return parseDotenvEntries(outsideLines(split))
-    .filter((e) => !reserved.has(e.name))
-    .map((e) => (e.value.includes('${{') ? { ...e, skip: 'DOKPLOY_REFERENCE_VALUE' as const } : e));
+  const parsed = parseDotenv(outsideText(split));
+  return Object.entries(parsed)
+    .filter(([name]) => !reserved.has(name))
+    .map(([name, value]) => classifyImportValue(name, value));
 }
 
 // ── Import conflict classification (shared by the single-service import and

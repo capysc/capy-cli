@@ -416,6 +416,37 @@ describe('buildDiscoveryPlan', () => {
     expect(client.calls.map((c) => c.kind).sort()).toEqual(['compose.one', 'compose.one', 'project.all'].sort());
   });
 
+  // CAP-657 live bug, 2026-09-27: a duplicate name in the raw env text (last
+  // value wins, per dotenv) must be counted ONCE, not once per LINE — the
+  // live service had 149 lines but 148 unique names.
+  test('variableCount counts unique parsed names, not raw lines — a duplicate name counts once', async () => {
+    const client = fakeDokployClient({
+      projects: [
+        {
+          projectId: 'proj_1',
+          name: 'slidespeak',
+          environments: [{ environmentId: 'env_prod', name: 'production', composes: [{ id: 'compose_prod', name: 'backend-stack' }] }],
+        },
+      ],
+      applicationDetails: {},
+      composeDetails: {
+        compose_prod: {
+          owner: 'slidespeak',
+          repository: 'backend-stack',
+          sourceType: 'github',
+          branch: 'main',
+          composePath: 'backend/deployment/production/docker-compose.yml',
+          // 3 lines, 2 unique names (DUP's last value wins) — variableCount must read 2.
+          env: 'A=1\nDUP=first\nDUP=second',
+        },
+      },
+    });
+    const plan = await buildDiscoveryPlan(client, [REPO], notInitializedPeek);
+    const prod = plan.folders[0].environments.find((e) => e.environmentName === 'production')!;
+    expect(prod.variableCount).toBe(2);
+    expect(prod.skippedCount).toBe(0);
+  });
+
   test('an already-initialized folder previews branchExists per environment from listServerBranches', async () => {
     const client = fakeDokployClient({
       projects: [

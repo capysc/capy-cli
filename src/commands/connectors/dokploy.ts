@@ -691,12 +691,15 @@ export function computeOverwritePlan(
 }
 
 // COPY-FLAG: new user-facing string, minimal/neutral wording.
-function overwriteConfirmMessage(plan: OverwritePlan): string {
+function overwriteConfirmMessage(plan: OverwritePlan, dollarWarnedNames: readonly string[]): string {
   const lines = [
     'Overwrite local vars to match Dokploy exactly?',
     plan.toImport.length > 0 ? `  Import (${plan.toImport.length}): ${plan.toImport.map((e) => e.name).join(', ')}` : null,
     plan.toReplace.length > 0 ? `  Replace (${plan.toReplace.length}): ${plan.toReplace.map((e) => e.name).join(', ')}` : null,
     plan.toClear.length > 0 ? `  Clear (${plan.toClear.length}): ${plan.toClear.join(', ')}` : null,
+    dollarWarnedNames.length > 0
+      ? `  review these: Dokploy/Compose may treat \`$\` specially: ${dollarWarnedNames.join(', ')}`
+      : null,
   ].filter((l): l is string => l !== null);
   return lines.join('\n');
 }
@@ -726,6 +729,8 @@ async function runOverwriteImport(args: {
   // (see `computeOverwritePlan`'s doc for why a restricted clear would be unsafe).
   const fullImportable = listImportableEntries(sourceEnv);
   const referenceNames = fullImportable.filter((e) => e.skip === 'DOKPLOY_REFERENCE_VALUE').map((e) => e.name);
+  // Names only — never a value. Still imported; just worth a second look.
+  const dollarWarnedNames = fullImportable.filter((e) => e.warning === 'DOKPLOY_VALUE_HAS_DOLLAR').map((e) => e.name);
   const fullCandidates = fullImportable.filter((e) => !e.skip).map((e) => ({ name: e.name, value: e.value }));
   const plan = computeOverwritePlan(fullCandidates, referenceNames, ctx.localPlaintext);
 
@@ -734,7 +739,7 @@ async function runOverwriteImport(args: {
 
   if (!dryRun && hasWrite) {
     if (promptable && !opts.yes) {
-      const proceed = await confirm(overwriteConfirmMessage(plan), false);
+      const proceed = await confirm(overwriteConfirmMessage(plan, dollarWarnedNames), false);
       if (!proceed) {
         return {
           ok: true,
@@ -745,7 +750,10 @@ async function runOverwriteImport(args: {
           replacedNames: [],
           unchanged: plan.unchanged,
           skipped: [],
-          warnings: referenceNames.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceNames }] : [],
+          warnings: [
+            ...(referenceNames.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceNames }] : []),
+            ...(dollarWarnedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: dollarWarnedNames }] : []),
+          ],
           deployTargetSaved: false,
         };
       }
@@ -786,6 +794,7 @@ async function runOverwriteImport(args: {
     skipped: [],
     warnings: [
       ...(referenceNames.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceNames }] : []),
+      ...(dollarWarnedNames.length > 0 ? [{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: dollarWarnedNames }] : []),
       ...(written.length > 0 && !dryRun ? [{ code: 'DOKPLOY_PLAINTEXT_REMAINS', names: written.map((w) => w.varName) }] : []),
     ],
     deployTargetSaved: false,
@@ -901,6 +910,9 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       const restrict = parseVarRestriction(opts.var);
       const importable = listImportableEntries(sourceEnv).filter((e) => !restrict || restrict.includes(e.name));
       const referenceSkipped = importable.filter((e) => e.skip === 'DOKPLOY_REFERENCE_VALUE').map((e) => e.name);
+      // Names only — never a value. Still imported; just worth a second look
+      // (bcrypt hashes written `$$escaped$$`, an unresolved `${VAR}`, …).
+      const dollarWarned = importable.filter((e) => e.warning === 'DOKPLOY_VALUE_HAS_DOLLAR').map((e) => e.name);
       const candidates = importable.filter((e) => !e.skip);
 
       if (opts.overwrite) {
@@ -941,6 +953,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
 
       const warnings: ImportWarning[] = [
         ...(referenceSkipped.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceSkipped }] : []),
+        ...(dollarWarned.length > 0 ? [{ code: 'DOKPLOY_VALUE_HAS_DOLLAR', names: dollarWarned }] : []),
         // Reminder, names only: the plaintext stays in Dokploy — reversible by
         // design (see docs/dokploy-deploy-adapter.md) — and is ignored at
         // boot once `capy deploy` writes the runtime pair. Not under a dry

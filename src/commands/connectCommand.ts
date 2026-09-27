@@ -595,6 +595,7 @@ export class ConnectCommand {
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
               unchanged: e.outcome.unchanged,
               skipped: e.outcome.skipped,
+              warnings: e.outcome.warnings,
             })),
           }
         : {
@@ -612,6 +613,7 @@ export class ConnectCommand {
               ...(e.outcome.cleared ? { cleared: e.outcome.cleared } : {}),
               unchanged: e.outcome.unchanged,
               skipped: e.outcome.skipped,
+              warnings: e.outcome.warnings,
             })),
           },
     );
@@ -697,6 +699,9 @@ export class ConnectCommand {
               `imported ${e.imported.length}, unchanged ${e.unchanged.length}, skipped ${e.skipped.length}` +
               (clearedCount > 0 ? `, cleared ${clearedCount}` : ''),
           );
+          for (const w of e.warnings) {
+            console.log(`      ⚠ ${w.code}: ${w.names.join(', ')}`);
+          }
         }
         if (!f.ok) {
           console.log(`    ✗ ${f.code}: ${f.message}`);
