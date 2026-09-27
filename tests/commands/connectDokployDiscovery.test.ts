@@ -1287,6 +1287,43 @@ describe('connector.discover — collisions', () => {
       rmSync(ROOT, { recursive: true, force: true });
     }
   });
+
+  // Cosmetic defect fix: `plan.folders` legitimately has TWO entries for
+  // this ONE (repoDir, folder) — the two colliding candidates, still shown
+  // separately since a dry run never asks for a winner. The commit preview
+  // must still report the UNIQUE paths a real apply would actually write
+  // (keep.lock + .gitignore, 2 — never 4, one pair per candidate).
+  test('dry run with a collision: the commit preview counts UNIQUE paths per repo, never one count per colliding candidate', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-collision-dryrun-')));
+    try {
+      initRepo(ROOT, 'git@github.com:slidespeak/backend-stack.git');
+      const calls: Array<{ method: string; url: string }> = [];
+      const connector = createDokployConnector({ fetch: collidingFetch(calls), env: { T: 'x' }, cwd: ROOT });
+      const outcome = await connector.discover!(ctxWith(), {
+        nonTty: true,
+        dryRun: true,
+        baseUrl: 'https://d',
+        tokenEnv: 'T',
+      } as ConnectOpts);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      // The bug's precondition: two plan.folders entries sharing ONE
+      // (repoDir, folder) — the two colliding candidates.
+      expect(outcome.plan.folders.length).toBe(2);
+      expect(outcome.plan.folders[0].repoDir).toBe(outcome.plan.folders[1].repoDir);
+      expect(outcome.plan.folders[0].folder).toBe(outcome.plan.folders[1].folder);
+      const folder = outcome.plan.folders[0].folder;
+
+      expect(outcome.commits?.length).toBe(1);
+      const commit = outcome.commits![0];
+      expect(commit.ok).toBe(true);
+      if (!commit.ok || !commit.dryRun) return;
+      expect(commit.wouldCommitFiles.length).toBe(2);
+      expect(commit.wouldCommitFiles).toEqual([`${folder}/keep.lock`, `${folder}/.gitignore`]);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Confirmation gate for a real (non-dry-run) apply ────────────────────────
@@ -1375,7 +1412,13 @@ describe('connector.discover — confirmation required for a real apply', () => 
     }
   });
 
-  test('non-interactive with --yes: proceeds past the plan-level gate, but a folder with no keep.lock STILL refuses DOKPLOY_FOLDER_NOT_INITIALIZED (never auto-creates non-interactively)', async () => {
+  // Vince, 2026-09-26 decision: under `--yes`, a folder with no keep.lock
+  // now auto-creates a NEW project when the org has ZERO existing projects
+  // (`ctxThatThrowsOnApply`'s `listProjects` returns `[]`) — the sentinel
+  // inside `initializeProject` firing (surfaced as `DOKPLOY_INIT_FAILED`)
+  // proves the run really reached project creation, not merely that the
+  // plan-level confirmation gate was passed.
+  test('non-interactive with --yes and ZERO existing projects: auto-creates (reaches initializeProject) rather than refusing', async () => {
     const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-confirm-yes-')));
     try {
       initRepo(ROOT, 'git@github.com:acme/widgets.git');
@@ -1393,14 +1436,55 @@ describe('connector.discover — confirmation required for a real apply', () => 
       const folderResult = outcome.applied![0];
       expect(folderResult.ok).toBe(false);
       if (folderResult.ok) return;
-      expect(folderResult.code).toBe('DOKPLOY_FOLDER_NOT_INITIALIZED');
-      // The sentinel never fired — `initializeProject` was never called,
-      // because a non-interactive run refuses BEFORE ever reaching it.
+      // The sentinel surfaced INSIDE the coded failure — proving
+      // `initializeProject` really was reached under `--yes` with an empty
+      // org, never refused blind.
+      expect(folderResult.code).toBe('DOKPLOY_INIT_FAILED');
+      expect(folderResult.message).toContain(SENTINEL_APPLY_ATTEMPTED);
       expect(existsSync(join(ROOT, 'keep.lock'))).toBe(false);
     } finally {
       rmSync(ROOT, { recursive: true, force: true });
     }
   });
+
+  test('non-interactive with --yes and an EXISTING project: still refuses DOKPLOY_FOLDER_NOT_INITIALIZED, zero writes (new-vs-existing stays a genuine choice)', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-confirm-yes-existing-')));
+    try {
+      initRepo(ROOT, 'git@github.com:acme/widgets.git');
+      const calls: Array<{ method: string; url: string }> = [];
+      const initializeProjectCalls: true[] = [];
+      const connector = createDokployConnector({ fetch: singleServiceFetch(calls), env: { T: 'x' }, cwd: ROOT });
+      const ctx: DiscoveryContext = {
+        orgId: 'o',
+        userId: 'u',
+        serviceClient: {
+          listProjects: async () => [{ id: 'proj_existing', name: 'existing-one', organization_id: 'o' }],
+          initializeProject: async () => {
+            initializeProjectCalls.push(true);
+            throw new Error('must not be called — an org with any existing project still refuses under --yes');
+          },
+        },
+      } as unknown as DiscoveryContext;
+      const outcome = await connector.discover!(ctx, {
+        nonTty: true,
+        baseUrl: 'https://d',
+        tokenEnv: 'T',
+        yes: true,
+      } as ConnectOpts);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.applied?.length).toBe(1);
+      const folderResult = outcome.applied![0];
+      expect(folderResult.ok).toBe(false);
+      if (folderResult.ok) return;
+      expect(folderResult.code).toBe('DOKPLOY_FOLDER_NOT_INITIALIZED');
+      expect(initializeProjectCalls.length).toBe(0);
+      expect(existsSync(join(ROOT, 'keep.lock'))).toBe(false);
+    } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
 
   test('--json with a real TTY: the confirmation gate is still non-interactive (never a raw prompt interleaved with JSON)', async () => {
     const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-confirm-json-')));
@@ -1815,6 +1899,155 @@ describe('connector.discover — ensureProjectSafe defect fixes', () => {
         defaultDiscoveryProjectName(ROOT, '', { host: 'github.com', owner: 'acme', repo: 'widgets' }),
       ]);
     } finally {
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Non-interactive `--yes` auto-create (Vince, 2026-09-26 decision) ───────
+//
+// Under `--yes`, a folder with no keep.lock now auto-creates a NEW project
+// with the default name IFF the org has zero existing projects — the
+// snapshot answering "does this org have any" is taken ONCE, right before
+// `runDiscoverySequences` starts, and reused unchanged for every folder in
+// THIS run, so a project one folder creates never counts as "existing" for
+// a later folder's own answer (see `ensureProjectSafe` + `discover()`'s own
+// doc on `existingProjectsSnapshot`). This describe block seeds a REAL
+// master key the same way the `--no-push` describe block above does, so
+// both folders' full sequence (init → checkout → import, `--no-push`) can
+// run for real.
+
+describe('connector.discover — non-interactive --yes auto-create on an empty org', () => {
+  test('two folders, one --yes run, ZERO existing projects: BOTH get created — the org lookup happens exactly ONCE, not once per folder', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-autocreate-snapshot-')));
+    const globalDirName = `.capy-test-autocreate-${process.pid}-${Date.now()}`;
+    const savedDirName = process.env.CAPY_GLOBAL_DIR_NAME;
+    process.env.CAPY_GLOBAL_DIR_NAME = globalDirName;
+    try {
+      const repoA = join(ROOT, 'widgets');
+      const repoB = join(ROOT, 'gadgets');
+      initRepo(repoA, 'git@github.com:acme/widgets.git');
+      initRepo(repoB, 'git@github.com:acme/gadgets.git');
+      expect(existsSync(join(repoA, 'keep.lock'))).toBe(false);
+      expect(existsSync(join(repoB, 'keep.lock'))).toBe(false);
+
+      const orgId = 'org_autocreate_test';
+      const userId = 'user_autocreate_test';
+      const masterKey = randomBytes(32);
+      await wrapAndSaveMasterKey(masterKey, orgId, userId, {
+        coDecrypt: async (_oid: string, ct: string) => ct,
+        wrapOuterLayer: async (_oid: string, pt: string) => pt,
+      });
+
+      const listProjectsCallLog: true[] = [];
+      const initializeProjectNames: string[] = [];
+      const ctx: DiscoveryContext = {
+        orgId,
+        userId,
+        authService: {} as unknown as DiscoveryContext['authService'],
+        serviceClient: {
+          // Empty every time it's asked — the assertion below is on HOW
+          // MANY TIMES this was called (must be 1), not on what it returns
+          // the second time, since a correct implementation never asks a
+          // second time in the first place.
+          listProjects: async () => {
+            listProjectsCallLog.push(true);
+            return [];
+          },
+          initializeProject: async (name: string) => {
+            initializeProjectNames.push(name);
+            return { org_id: orgId, project_id: `proj_new_${initializeProjectNames.length}`, project_name: name };
+          },
+          coDecrypt: async (_oid: string, ct: string) => ({ plaintext: ct }),
+          wrapOuterLayer: async (_oid: string, pt: string) => ({ ciphertext: pt }),
+          listBranches: async () => [],
+          createBranch: async (projectId: string) => ({ id: 'b1', name: 'production', project_id: projectId, is_protected: false }),
+          getDecryptData: async () => ({ env_content: '', keep_file: '', decrypt_key: '', expires_at: new Date().toISOString() }),
+        } as unknown as DiscoveryContext['serviceClient'],
+      };
+
+      const calls: Array<{ method: string; url: string }> = [];
+      const fetchImpl: FetchLike = (async (url: string, init: { method: string }) => {
+        if (init.method !== 'GET') throw new Error(`unexpected non-GET ${init.method} ${url}`);
+        calls.push({ method: init.method, url });
+        if (url.includes('project.all')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () =>
+              JSON.stringify([
+                {
+                  projectId: 'proj_1',
+                  name: 'acme',
+                  environments: [
+                    {
+                      environmentId: 'env_1',
+                      name: 'production',
+                      compose: [
+                        { composeId: 'compose_widgets', name: 'widgets' },
+                        { composeId: 'compose_gadgets', name: 'gadgets' },
+                      ],
+                    },
+                  ],
+                },
+              ]),
+          };
+        }
+        const isWidgets = url.includes('compose_widgets');
+        return {
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              composeId: isWidgets ? 'compose_widgets' : 'compose_gadgets',
+              env: 'A=1',
+              createEnvFile: true,
+              owner: 'acme',
+              repository: isWidgets ? 'widgets' : 'gadgets',
+              sourceType: 'github',
+              composePath: 'docker-compose.yml',
+            }),
+        };
+      }) as FetchLike;
+
+      const connector = createDokployConnector({ fetch: fetchImpl, env: { T: 'x' }, cwd: ROOT });
+      const outcome = await connector.discover!(ctx, {
+        nonTty: true,
+        baseUrl: 'https://d',
+        tokenEnv: 'T',
+        yes: true,
+        noPush: true,
+      } as ConnectOpts);
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.applied?.length).toBe(2);
+
+      // The snapshot really was taken ONCE for the whole run, not re-fetched
+      // per folder — proving folder B's "org has none" answer came from the
+      // SAME pre-run snapshot as folder A's, unaffected by A's own create.
+      expect(listProjectsCallLog.length).toBe(1);
+
+      // BOTH folders created — neither one saw the other's brand-new
+      // project and refused.
+      expect(initializeProjectNames.length).toBe(2);
+      for (const folderResult of outcome.applied!) {
+        expect(folderResult.ok).toBe(true);
+        if (!folderResult.ok) continue;
+        expect(folderResult.projectCreated).toBe(true);
+      }
+      expect(initializeProjectNames).toEqual(
+        expect.arrayContaining([
+          defaultDiscoveryProjectName(repoA, '', { host: 'github.com', owner: 'acme', repo: 'widgets' }),
+          defaultDiscoveryProjectName(repoB, '', { host: 'github.com', owner: 'acme', repo: 'gadgets' }),
+        ]),
+      );
+      expect(existsSync(join(repoA, 'keep.lock'))).toBe(true);
+      expect(existsSync(join(repoB, 'keep.lock'))).toBe(true);
+    } finally {
+      if (savedDirName === undefined) delete process.env.CAPY_GLOBAL_DIR_NAME;
+      else process.env.CAPY_GLOBAL_DIR_NAME = savedDirName;
+      rmSync(join(homedir(), globalDirName), { recursive: true, force: true });
       rmSync(ROOT, { recursive: true, force: true });
     }
   });

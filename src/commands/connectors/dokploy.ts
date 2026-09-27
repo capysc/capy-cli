@@ -1138,6 +1138,19 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         }),
       );
 
+      // Vince, 2026-09-26 decision: the non-interactive `--yes` auto-create
+      // rule (see `ensureProjectSafe`'s doc) needs to know "does this org
+      // have ANY existing project" — taken as ONE snapshot right here,
+      // before `runDiscoverySequences` runs a single folder, so a project
+      // folder A's own `ensureProject` creates this run is never counted as
+      // "existing" when folder B (later in the SAME run) asks the same
+      // question. Only fetched in the mode that can ever consult it —
+      // interactive runs make their own fresh per-folder call instead (see
+      // `ensureProjectSafe`), and non-interactive without `--yes` refuses
+      // before ever needing a project list.
+      const existingProjectsSnapshot: ExistingProjectsSnapshot | undefined =
+        !promptable && !!opts.yes ? await listOrgProjectsOrUnavailable(ctx.serviceClient) : undefined;
+
       const sequenceDeps = buildRealDiscoverySequenceDeps(ctx, connector.import!, {
         noPush: !!opts.noPush,
         interactive: promptable,
@@ -1147,6 +1160,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         tokenEnv,
         askExistingOrNewProject,
         askProjectName: askDiscoveryProjectName,
+        existingProjectsSnapshot,
       });
       const applied = await runDiscoverySequences(resolvedFolders, { overwrite: !!opts.overwrite }, sequenceDeps);
 
@@ -1205,11 +1219,23 @@ function discoveryCommitPathsFor(folder: string): readonly string[] {
   return [`${prefix}keep.lock`, `${prefix}.gitignore`];
 }
 
-/** Every REPO the plan touches, and the branch/files a real run WOULD commit for it — dry-run preview only, never runs a git-mutating command (see `commitDiscoveryChanges`'s own `dryRun` handling). */
+/**
+ * Every REPO the plan touches, and the branch/files a real run WOULD commit
+ * for it — dry-run preview only, never runs a git-mutating command (see
+ * `commitDiscoveryChanges`'s own `dryRun` handling).
+ *
+ * `paths` is de-duplicated per repo (cosmetic defect fix): two DISTINCT
+ * `DiscoveryPlanFolder` entries can share the same (repoDir, folder) — e.g.
+ * two colliding services that both resolve to the same folder, still shown
+ * as separate candidates in the pre-resolution `plan.folders` a dry run
+ * previews (a dry run never asks for a collision winner) — and
+ * `discoveryCommitPathsFor` would otherwise be counted once per entry,
+ * reporting `keep.lock`/`.gitignore` twice for what is really one write.
+ */
 function commitPreviewForFolders(folders: readonly DiscoveryPlanFolder[], branchName: string): readonly DiscoveryRepoCommitResult[] {
   const repoDirs = [...new Set(folders.map((f) => f.repoDir))];
   return repoDirs.map((repoDir) => {
-    const paths = folders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder));
+    const paths = [...new Set(folders.filter((f) => f.repoDir === repoDir).flatMap((f) => discoveryCommitPathsFor(f.folder)))];
     const outcome = commitDiscoveryChanges(repoDir, paths, new Set(), { branchName, dryRun: true, summaryLines: [] });
     return { repoDir, ...outcome };
   });
@@ -1242,13 +1268,36 @@ function commitForAppliedRepos(
   });
 }
 
+/** What `listOrgProjectsOrUnavailable` returns — named here so the non-interactive `--yes` snapshot (see `ensureProjectSafe`'s doc) and the interactive per-folder lookup share one type. */
+type ExistingProjectsSnapshot = {
+  existingProjects: ReadonlyArray<{ id: string; name: string; organization_id: string }>;
+  projectsUnavailable: boolean;
+};
+
 /**
  * No keep.lock at (repoDir, folder) → interactive: reuses `capy`'s own
  * existing-project-picking (list the org's projects, ask new-vs-existing —
  * see `defaultAskExistingOrNewProject`), never invents its own project flow.
- * Non-interactive refuses `DOKPLOY_FOLDER_NOT_INITIALIZED` naming the
- * folder and NEVER auto-creates. A keep.lock already there is just read for
- * its project id — no network call.
+ * A keep.lock already there is just read for its project id — no network
+ * call.
+ *
+ * Non-interactive WITHOUT `--yes` refuses `DOKPLOY_FOLDER_NOT_INITIALIZED`
+ * naming the folder and never auto-creates — unchanged.
+ *
+ * Non-interactive WITH `--yes` (Vince, 2026-09-26 decision): "new vs
+ * existing project" is still a genuine choice with no safe default when the
+ * org already has projects, so that case keeps refusing
+ * `DOKPLOY_FOLDER_NOT_INITIALIZED` too. But when the org has NO existing
+ * projects at all, there is no choice to make blind — the only option a
+ * human would see is "New project" — so `--yes` takes it, creating a project
+ * named `defaultName` exactly the way the interactive "New project" choice
+ * does (same `createNewProjectSafe` helper, below). `opts.existingProjectsSnapshot`
+ * is this run's OWN snapshot (see `buildRealDiscoverySequenceDeps`'s doc):
+ * taken ONCE, before any folder in this run starts, so a project an EARLIER
+ * folder in this same run created is never counted as "existing" when
+ * deciding a LATER folder's own "org has none" answer. A snapshot that
+ * failed to load is `DOKPLOY_PROJECT_LOOKUP_FAILED`, same as the interactive
+ * branch below.
  *
  * Deliberately NOT a call into `CapyCommand` itself: that class calls
  * `process.exit()` on several failure paths and always builds its own
@@ -1269,10 +1318,12 @@ async function ensureProjectSafe(
   remote: GitRemoteRef | undefined,
   opts: {
     interactive: boolean;
-    /** Discovery's OWN `--yes` — skips the new-project NAME prompt (defaulting to `defaultName`) the same way it skips every other confirmation, never the existing-vs-new picker itself (that one isn't a confirmation, it's a genuine choice with no safe default). */
+    /** Discovery's OWN `--yes` — skips the new-project NAME prompt (defaulting to `defaultName`) the same way it skips every other confirmation, never the existing-vs-new picker itself (that one isn't a confirmation, it's a genuine choice with no safe default) — EXCEPT non-interactively, where an org with zero existing projects has no choice left to make (see this function's own doc). */
     yes: boolean;
     askExistingOrNewProject: (existing: ReadonlyArray<{ id: string; name: string }>, defaultName: string) => Promise<string>;
     askProjectName: (defaultName: string) => Promise<string>;
+    /** This run's ONE pre-apply snapshot of the org's existing projects — only consulted on the non-interactive `--yes` auto-create path; `undefined` there means the snapshot itself failed to load. */
+    existingProjectsSnapshot?: ExistingProjectsSnapshot;
   },
 ): Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string }> {
   const path = folderPath(repoDir, folder);
@@ -1281,15 +1332,35 @@ async function ensureProjectSafe(
   if (existing) {
     return { ok: true, projectId: existing.project_id, created: false };
   }
+  const defaultName = defaultDiscoveryProjectName(repoDir, folder, remote);
+
   if (!opts.interactive) {
-    return {
-      ok: false,
-      code: 'DOKPLOY_FOLDER_NOT_INITIALIZED',
-      message: `${folder || '.'} has no keep.lock. Run \`capy\` there to initialize it, then re-run discovery.`,
-    };
+    if (!opts.yes) {
+      return {
+        ok: false,
+        code: 'DOKPLOY_FOLDER_NOT_INITIALIZED',
+        message: `${folder || '.'} has no keep.lock. Run \`capy\` there to initialize it, then re-run discovery.`,
+      };
+    }
+    const snapshot = opts.existingProjectsSnapshot;
+    if (!snapshot || snapshot.projectsUnavailable) {
+      return {
+        ok: false,
+        code: 'DOKPLOY_PROJECT_LOOKUP_FAILED',
+        message: `${folder || '.'}: could not list this org's existing projects — refusing to offer "create new" blind.`,
+      };
+    }
+    if (snapshot.existingProjects.length > 0) {
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+      return {
+        ok: false,
+        code: 'DOKPLOY_FOLDER_NOT_INITIALIZED',
+        message: `${folder || '.'} has no keep.lock, and this org already has existing project(s) — run this interactively to choose one, or run \`capy\` in ${folder || '.'}.`,
+      };
+    }
+    return createNewProjectSafe(ctx, path, folder, defaultName);
   }
 
-  const defaultName = defaultDiscoveryProjectName(repoDir, folder, remote);
   // A lookup failure is NOT "this org has no projects" — offering only
   // "create new" on a transient network/auth error risks a duplicate
   // project the human never asked for. Abort THIS folder instead (CAP-657
@@ -1305,33 +1376,53 @@ async function ensureProjectSafe(
   }
   const picked = await opts.askExistingOrNewProject(existingProjects.map((p) => ({ id: p.id, name: p.name })), defaultName);
 
-  try {
-    if (picked !== DISCOVERY_NEW_PROJECT) {
-      const project = existingProjects.find((p) => p.id === picked);
-      if (!project) {
-        return { ok: false, code: 'DOKPLOY_PROJECT_NOT_FOUND', message: `No project ${picked} in this org.` };
-      }
+  if (picked !== DISCOVERY_NEW_PROJECT) {
+    const project = existingProjects.find((p) => p.id === picked);
+    if (!project) {
+      return { ok: false, code: 'DOKPLOY_PROJECT_NOT_FOUND', message: `No project ${picked} in this org.` };
+    }
+    try {
       await bootstrapExistingProjectSafe(ctx, pm, new FileManager(path), project);
       return { ok: true, projectId: project.id, created: false };
+    } catch (err) {
+      return { ok: false, code: 'DOKPLOY_INIT_FAILED', message: err instanceof Error ? err.message : String(err) };
     }
-    // Mirrors `capyCommand.ts#resolveProjectName`: ask for the new
-    // project's name (default = `defaultName`), reserved-name check kept.
-    // `--yes` skips the ask — same "proceed without asking" contract as
-    // every other discovery confirmation — and uses the default outright.
-    const chosenName = opts.yes ? defaultName : await opts.askProjectName(defaultName);
-    // Vince, 2026-09-26, decision #4: refuse before any write when the name
-    // (default or human-typed) is over 255 chars — never truncated. The real
-    // `defaultAskDiscoveryProjectName` prompt validates this itself and
-    // re-asks (so an interactive human self-corrects before ever returning
-    // here); this is the zero-write guarantee for `--yes` and for any
-    // injected `askProjectName` test double that skips that validation.
-    if (chosenName.length > DISCOVERY_PROJECT_NAME_MAX_LENGTH) {
-      return {
-        ok: false,
-        code: 'DOKPLOY_PROJECT_NAME_TOO_LONG',
-        message: `${folder || '.'}: project name is longer than ${DISCOVERY_PROJECT_NAME_MAX_LENGTH} characters.`,
-      };
-    }
+  }
+  // Mirrors `capyCommand.ts#resolveProjectName`: ask for the new project's
+  // name (default = `defaultName`). `--yes` skips the ask — same "proceed
+  // without asking" contract as every other discovery confirmation — and
+  // uses the default outright.
+  const chosenName = opts.yes ? defaultName : await opts.askProjectName(defaultName);
+  return createNewProjectSafe(ctx, path, folder, chosenName);
+}
+
+/**
+ * Creates a brand-new project named `chosenName` and initializes (repoDir,
+ * folder) onto it — the exact write sequence the interactive "New project"
+ * choice runs (`ensureProjectSafe`'s own interactive branch), reused
+ * verbatim by the non-interactive `--yes` auto-create path (Vince,
+ * 2026-09-26 decision) so the two can never drift apart.
+ */
+async function createNewProjectSafe(
+  ctx: DiscoveryContext,
+  path: string,
+  folder: string,
+  chosenName: string,
+): Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string }> {
+  // Vince, 2026-09-26, decision #4: refuse before any write when the name
+  // (default or human-typed) is over 255 chars — never truncated. The real
+  // `defaultAskDiscoveryProjectName` prompt validates this itself and
+  // re-asks (so an interactive human self-corrects before ever returning
+  // here); this is the zero-write guarantee for `--yes` and for any
+  // injected `askProjectName` test double that skips that validation.
+  if (chosenName.length > DISCOVERY_PROJECT_NAME_MAX_LENGTH) {
+    return {
+      ok: false,
+      code: 'DOKPLOY_PROJECT_NAME_TOO_LONG',
+      message: `${folder || '.'}: project name is longer than ${DISCOVERY_PROJECT_NAME_MAX_LENGTH} characters.`,
+    };
+  }
+  try {
     assertProjectNameAllowed(chosenName);
     const initResult = await ctx.serviceClient.initializeProject(chosenName, ctx.orgId);
     const keep: KeepFile = {
@@ -1677,6 +1768,16 @@ function buildRealDiscoverySequenceDeps(
     tokenEnv: string;
     askExistingOrNewProject: (existing: ReadonlyArray<{ id: string; name: string }>, defaultName: string) => Promise<string>;
     askProjectName: (defaultName: string) => Promise<string>;
+    /**
+     * The non-interactive `--yes` auto-create snapshot (see
+     * `ensureProjectSafe`'s doc) — taken ONCE by `discover()` itself, before
+     * `runDiscoverySequences` starts, and handed to EVERY folder's own
+     * `ensureProject` call unchanged, so a project one folder creates this
+     * run never alters a later folder's "org has none" answer. `undefined`
+     * when this run's mode never needs it (interactive, or non-interactive
+     * without `--yes`).
+     */
+    existingProjectsSnapshot?: ExistingProjectsSnapshot;
   },
 ): DiscoverySequenceDeps {
   return {
@@ -1686,6 +1787,7 @@ function buildRealDiscoverySequenceDeps(
         yes: runOpts.yes,
         askExistingOrNewProject: runOpts.askExistingOrNewProject,
         askProjectName: runOpts.askProjectName,
+        existingProjectsSnapshot: runOpts.existingProjectsSnapshot,
       }),
     checkFolderDirty: (repoDir, folder, projectId) => checkFolderDirtySafe(ctx, repoDir, folder, projectId),
     checkoutBranch: (repoDir, folder, projectId, branchName) => checkoutBranchSafe(ctx, repoDir, folder, projectId, branchName),
