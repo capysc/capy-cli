@@ -32,7 +32,7 @@ import { flowAgentPlanHash, flowAgentSocketPath, type FlowAgentState } from '../
 import { runResumedFlowInteraction } from '../../src/ui/flowInteraction';
 import { mintConnectionKeypair } from '../../src/service/brokerEnvelope';
 import { openFlowRecoveryCheckpoint, saveFlowRecoveryBootstrap, sealFlowRecoveryCheckpoint, type FlowRecoveryBinding } from '../../src/ui/flowRecoveryStore';
-import { mintPageKeypairPageSide } from '../helpers/sealEnvelope';
+import { mintPageKeypairPageSide, openRequestEnvelopePageSide, sealEnvelopePageSide } from '../helpers/sealEnvelope';
 
 type Json = Readonly<Record<string, unknown>>;
 const plan = (() => {
@@ -84,20 +84,26 @@ const checkpointJournal = (calls: readonly Json[], binding: FlowRecoveryBinding,
   return checkpointJournal(calls.slice(1), binding, journal);
 };
 type CheckpointStep = Readonly<{ readonly expected: string; readonly next: string }>;
-type PersistedMessage = Readonly<{ readonly v: 1; readonly id: string; readonly correlation_id: string; readonly direction: 'cli_to_browser'; readonly type: 'output'; readonly envelope: string; readonly sequence: number }>;
-const service = (binding: FlowRecoveryBinding, checkpoint: string, pagePubkey: string, checkpointSteps: readonly CheckpointStep[] = [], messages: readonly PersistedMessage[] = []): Readonly<{ readonly fetch: typeof globalThis.fetch; readonly observed: () => Promise<readonly Json[]> }> => {
+type PersistedMessage = Readonly<{ readonly v: 1; readonly id: string; readonly correlation_id: string; readonly direction: 'cli_to_browser' | 'browser_to_cli'; readonly type: 'output' | 'answer'; readonly envelope: string; readonly sequence: number }>;
+const service = (binding: FlowRecoveryBinding, checkpoint: string, page: Awaited<ReturnType<typeof mintPageKeypairPageSide>>, checkpointSteps: readonly CheckpointStep[] = [], messages: readonly PersistedMessage[] = [], answers: readonly boolean[] = []): Readonly<{ readonly fetch: typeof globalThis.fetch; readonly observed: () => Promise<readonly Json[]> }> => {
   const callStream = new PassThrough({ objectMode: true });
   const callIterator = callStream[Symbol.asyncIterator]() as AsyncIterator<Json>;
   const checkpointIterator = Readable.from(checkpointSteps)[Symbol.asyncIterator]();
+  const answerIterator = Readable.from(answers)[Symbol.asyncIterator]();
+  const browserMessages = new PassThrough({ objectMode: true });
+  const browserIterator = browserMessages[Symbol.asyncIterator]() as AsyncIterator<PersistedMessage>;
   const record = (body: Json): Json => ({ ...body, headers: {} });
-  const history = (after = 0): Json => ({ flow_id: FLOW_ID, owner: USER_ID, runtime_id: RUNTIME, repo_fingerprint: REPO, client_pubkey: binding.client_pubkey, page_pubkey: pagePubkey, state: 'active', cursor: messages.length, messages: after === 0 ? messages : [], cli_attached: true });
+  const history = (after = 0, extra: readonly PersistedMessage[] = []): Json => ({ flow_id: FLOW_ID, owner: USER_ID, runtime_id: RUNTIME, repo_fingerprint: REPO, client_pubkey: binding.client_pubkey, page_pubkey: page.pagePubkeyB64, state: 'active', cursor: messages.length + extra.length, messages: after === 0 ? [...messages, ...extra] : extra, cli_attached: true });
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(String(input));
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) as Json : {};
     if (method === 'POST' && url.pathname === `/flows/${FLOW_ID}/resume`) return response({ ...history(), lease_id: 'lease-resumed', expires_at: '2030-01-01T00:00:00.000Z' });
     if (method === 'GET' && url.pathname === `/flows/${FLOW_ID}/messages`) {
-      if (header(init, 'x-capy-cli-lease-id') && url.searchParams.get('wait_ms') !== '0') return aborted(init?.signal ?? null);
+      if (header(init, 'x-capy-cli-lease-id') && url.searchParams.get('wait_ms') !== '0') {
+        const next = await Promise.race([browserIterator.next(), aborted(init?.signal ?? null)]);
+        return response(next.done ? history() : history(Number(url.searchParams.get('after') ?? '0'), [next.value]));
+      }
       if (header(init, 'x-capy-cli-lease-id')) callStream.write({ ...record(body), route: 'read', lease_id: header(init, 'x-capy-cli-lease-id') });
       return response(history(Number(url.searchParams.get('after') ?? '0')));
     }
@@ -113,7 +119,19 @@ const service = (binding: FlowRecoveryBinding, checkpoint: string, pagePubkey: s
       return response({ flow_id: FLOW_ID, runtime_id: RUNTIME, repo_fingerprint: REPO, client_pubkey: binding.client_pubkey, revision: step.value.next });
     }
     if (method === 'POST' && url.pathname === `/flows/${FLOW_ID}/messages`) {
-      callStream.write({ ...record(body), route: 'append' });
+      const opened = await openRequestEnvelopePageSide({ ciphertextB64: body.envelope as string, connectionId: `${FLOW_ID}:${body.id}`, clientPubkeyB64: binding.client_pubkey, pagePrivateKey: page.privateKey });
+      const parsed = JSON.parse(opened) as Json;
+      callStream.write({ ...record(body), route: 'append', payload: parsed });
+      if (body.type === 'prompt') {
+        const next = await answerIterator.next();
+        if (!next.done) {
+          const id = `answer-${body.id}`;
+          const payload = { v: 1, flow_id: FLOW_ID, id, correlation_id: body.correlation_id, type: 'answer', data: { value: next.value } };
+          const envelope = await sealEnvelopePageSide({ plaintext: JSON.stringify(payload), connectionId: `${FLOW_ID}:${id}`, clientPubkeyB64: binding.client_pubkey });
+          browserMessages.write({ v: 1, id, correlation_id: body.correlation_id, direction: 'browser_to_cli', type: 'answer', envelope, sequence: 99 } satisfies PersistedMessage);
+        }
+        expect(parsed.type).toBe('prompt');
+      }
       return response({ ok: true });
     }
     return response({ code: 'UNEXPECTED' });
@@ -128,7 +146,7 @@ describe('resumed Flow adapter integration', () => {
     saveFlowRecoveryBootstrap(ROOT, binding, keys);
     const checkpoint = sealFlowRecoveryCheckpoint(ROOT, binding, { v: 1, phase: 'agent', agent_state: recoveredState, journal: [] });
     const page = await mintPageKeypairPageSide();
-    const fixture = service(binding, checkpoint, page.pagePubkeyB64);
+    const fixture = service(binding, checkpoint, page);
     const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fixture.fetch);
     const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
     try {
@@ -159,7 +177,7 @@ describe('resumed Flow adapter integration', () => {
     const approved: FlowAgentState = { ...recoveredState, application_id: null };
     const checkpoint = sealFlowRecoveryCheckpoint(ROOT, binding, { v: 1, phase: 'agent', agent_state: approved, journal });
     const page = await mintPageKeypairPageSide();
-    const fixture = service(binding, checkpoint, page.pagePubkeyB64, [
+    const fixture = service(binding, checkpoint, page, [
       { expected: 'r1', next: 'r2' }, { expected: 'r2', next: 'r3' }, { expected: 'r3', next: 'r4' },
       { expected: 'r4', next: 'r5' }, { expected: 'r5', next: 'r6' }, { expected: 'r6', next: 'r7' },
     ], [{ v: 1, id: 'prior-output', correlation_id: 'prior-output', direction: 'cli_to_browser', type: 'output', envelope: 'opaque-history-record', sequence: 1 }]);
@@ -181,6 +199,78 @@ describe('resumed Flow adapter integration', () => {
       expect(calls.filter(call => call.route === 'checkpoint-write').every(call => call.lease_id === 'lease-resumed')).toBe(true);
       expect(checkpointJournal(calls, binding)).toBe(true);
       expect(calls.find(call => call.route === 'append' && call.type === 'goal')?.outcome).toBe('succeeded');
+    } finally { stdout.mockRestore(); fetchSpy.mockRestore(); }
+  });
+
+  test('reissues a pending plan approval and closes it as cancelled when declined', async () => {
+    const keys = mintConnectionKeypair();
+    const binding: FlowRecoveryBinding = { flow_id: FLOW_ID, runtime_id: RUNTIME, origin: ORIGIN, owner_id: USER_ID, organization_id: ORG_ID, repo_fingerprint: REPO, client_pubkey: keys.publicKeyB64 };
+    saveFlowRecoveryBootstrap(ROOT, binding, keys);
+    const pending: FlowAgentState = { ...recoveredState, approved: false, application_id: null };
+    const checkpoint = sealFlowRecoveryCheckpoint(ROOT, binding, { v: 1, phase: 'agent', agent_state: pending, journal: [] });
+    const page = await mintPageKeypairPageSide();
+    const fixture = service(binding, checkpoint, page, [], [], [false]);
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fixture.fetch);
+    const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
+    try {
+      await runResumedFlowInteraction(FLOW_ID, false);
+      const calls = await fixture.observed();
+      expect(calls.find(call => call.route === 'append' && call.type === 'goal')).toMatchObject({ outcome: 'cancelled' });
+      expect(calls.filter(call => call.route === 'append' && call.type === 'progress' && call.kind === 'apply_started')).toHaveLength(0);
+    } finally { stdout.mockRestore(); fetchSpy.mockRestore(); }
+  });
+
+  test('reissues a pending plan approval, restores approved state, and completes through the socket', async () => {
+    const keys = mintConnectionKeypair();
+    const binding: FlowRecoveryBinding = { flow_id: FLOW_ID, runtime_id: RUNTIME, origin: ORIGIN, owner_id: USER_ID, organization_id: ORG_ID, repo_fingerprint: REPO, client_pubkey: keys.publicKeyB64 };
+    saveFlowRecoveryBootstrap(ROOT, binding, keys);
+    const pending: FlowAgentState = { ...recoveredState, approved: false, application_id: null };
+    const checkpoint = sealFlowRecoveryCheckpoint(ROOT, binding, { v: 1, phase: 'agent', agent_state: pending, journal: [] });
+    const page = await mintPageKeypairPageSide();
+    const fixture = service(binding, checkpoint, page, [], [], [true]);
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fixture.fetch);
+    const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
+    try {
+      const running = runResumedFlowInteraction(FLOW_ID, false);
+      await waitForSocket();
+      expect(await invoke({ v: 1, id: 'pending-approved-status', action: 'status' })).toMatchObject({ ok: true, state: 'approved', approved_plan: { plan_id: plan.plan_id, plan_hash: plan.plan_hash } });
+      expect(await invoke({ v: 1, id: 'pending-approved-complete', action: 'complete', plan_id: plan.plan_id, plan_hash: plan.plan_hash, application_id: 'missing', result: { summary: 'No grant', checks: [] } })).toMatchObject({ ok: false, code: 'APPLICATION_NOT_AUTHORIZED' });
+      const grant = await invoke({ v: 1, id: 'pending-approved-grant', action: 'begin_apply', plan_id: plan.plan_id, plan_hash: plan.plan_hash });
+      expect(grant).toMatchObject({ ok: true, authorization: 'granted' });
+      expect(await invoke({ v: 1, id: 'pending-approved-complete-real', action: 'complete', plan_id: plan.plan_id, plan_hash: plan.plan_hash, application_id: grant.application_id, result: { summary: 'Completed after approval', checks: ['bun test'] } })).toMatchObject({ ok: true, outcome: 'succeeded' });
+      await running;
+    } finally { stdout.mockRestore(); fetchSpy.mockRestore(); }
+  });
+
+  test('declining a resumed continuation closes Secrets Setup and never marks Project Setup successful', async () => {
+    const keys = mintConnectionKeypair();
+    const binding: FlowRecoveryBinding = { flow_id: FLOW_ID, runtime_id: RUNTIME, origin: ORIGIN, owner_id: USER_ID, organization_id: ORG_ID, repo_fingerprint: REPO, client_pubkey: keys.publicKeyB64 };
+    saveFlowRecoveryBootstrap(ROOT, binding, keys);
+    const checkpoint = sealFlowRecoveryCheckpoint(ROOT, binding, { v: 1, phase: 'continuation_offer', completed_goal: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' }, offer: { goal_id: 'project_setup', goal_name: 'Project Setup', prompt: 'Continue?' }, agent_state: null, journal: [] });
+    const page = await mintPageKeypairPageSide();
+    const fixture = service(binding, checkpoint, page, [], [], [false]);
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fixture.fetch);
+    const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
+    try {
+      await runResumedFlowInteraction(FLOW_ID, false);
+      const calls = await fixture.observed();
+      expect(calls.find(call => call.route === 'append' && call.type === 'goal')).toMatchObject({ outcome: 'succeeded', payload: { data: { outcome: { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' } } } });
+    } finally { stdout.mockRestore(); fetchSpy.mockRestore(); }
+  });
+
+  test('treats a legacy continuation checkpoint without its completed goal as skipped', async () => {
+    const keys = mintConnectionKeypair();
+    const binding: FlowRecoveryBinding = { flow_id: FLOW_ID, runtime_id: RUNTIME, origin: ORIGIN, owner_id: USER_ID, organization_id: ORG_ID, repo_fingerprint: REPO, client_pubkey: keys.publicKeyB64 };
+    saveFlowRecoveryBootstrap(ROOT, binding, keys);
+    const checkpoint = sealFlowRecoveryCheckpoint(ROOT, binding, { v: 1, phase: 'continuation_offer', offer: { goal_id: 'project_setup', goal_name: 'Project Setup', prompt: 'Continue?' }, agent_state: null, journal: [] });
+    const page = await mintPageKeypairPageSide();
+    const fixture = service(binding, checkpoint, page, [], [], [false]);
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fixture.fetch);
+    const stdout = spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
+    try {
+      await runResumedFlowInteraction(FLOW_ID, false);
+      const calls = await fixture.observed();
+      expect(calls.find(call => call.route === 'append' && call.type === 'goal')).toMatchObject({ outcome: 'skipped' });
     } finally { stdout.mockRestore(); fetchSpy.mockRestore(); }
   });
 });

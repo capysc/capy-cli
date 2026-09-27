@@ -409,7 +409,7 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
       const completedGoal: FlowGoal = { goal_id: 'secrets_setup', goal_name: 'Secrets Setup' };
       const firstOffer: FlowNextOffer = { goal_id: 'project_setup', goal_name: 'Project Setup', prompt: 'Would you like your agent to analyze and configure this project?' };
       await emit('goal_completed', { ...completedGoal, status: 'succeeded', result: initial.result ?? {} });
-      await saveCheckpoint({ phase: 'continuation_offer', offer: firstOffer, agent_state: null });
+      await saveCheckpoint({ phase: 'continuation_offer', offer: firstOffer, completed_goal: completedGoal, agent_state: null });
       const accepted = await askConfirmation('Continue with project setup', firstOffer.prompt, {}, true);
       if (!accepted) {
         await emit('goal', { flow: 'init-wizard', goal: 'repository_onboarded', ...completedGoal, status: 'succeeded', result: { continuation_declined: true } });
@@ -497,13 +497,16 @@ export async function runWithFlowInteraction(operation: () => Promise<void>, dev
   }
 }
 
-type RecoveryCheckpoint = Readonly<{ readonly phase: 'continuation_offer' | 'agent'; readonly offer?: FlowNextOffer; readonly agent_state: FlowAgentState | null; readonly journal: readonly JournalEntry[] }>;
+type RecoveryCheckpoint = Readonly<{ readonly phase: 'continuation_offer' | 'agent'; readonly offer?: FlowNextOffer; readonly completed_goal?: FlowGoal; readonly agent_state: FlowAgentState | null; readonly journal: readonly JournalEntry[] }>;
 type JournalEntry = Readonly<{ readonly id: string; readonly type: MessageType; readonly data: Data; readonly envelope: string }>;
 const recoveryCheckpoint = (value: Data): RecoveryCheckpoint | null => {
   const phase = value.phase;
   const agentState = value.agent_state;
   const journal = value.journal;
   const parsedOffer = value.offer !== null && typeof value.offer === 'object' ? value.offer as FlowNextOffer : undefined;
+  const completedGoal = value.completed_goal !== null && typeof value.completed_goal === 'object'
+    && typeof (value.completed_goal as Data).goal_id === 'string' && typeof (value.completed_goal as Data).goal_name === 'string'
+    ? value.completed_goal as FlowGoal : undefined;
   const validJournal = Array.isArray(journal) && journal.every(entry => entry !== null && typeof entry === 'object'
     && typeof (entry as Data).id === 'string' && typeof (entry as Data).type === 'string'
     && typeof (entry as Data).envelope === 'string' && (entry as Data).data !== null && typeof (entry as Data).data === 'object');
@@ -511,7 +514,7 @@ const recoveryCheckpoint = (value: Data): RecoveryCheckpoint | null => {
     && typeof (agentState as Data).goal === 'object' && typeof (agentState as Data).approved === 'boolean'
     && typeof (agentState as Data).terminal === 'boolean');
   return (phase === 'continuation_offer' || phase === 'agent') && validJournal && validState
-    ? { phase, ...(parsedOffer ? { offer: parsedOffer } : {}), agent_state: agentState as FlowAgentState | null, journal: journal as readonly JournalEntry[] }
+    ? { phase, ...(parsedOffer ? { offer: parsedOffer } : {}), ...(completedGoal ? { completed_goal: completedGoal } : {}), agent_state: agentState as FlowAgentState | null, journal: journal as readonly JournalEntry[] }
     : null;
 };
 
@@ -625,7 +628,7 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
   type SavedState = Readonly<{ readonly phase?: Data; readonly journal: ReadonlyMap<string, JournalEntry>; readonly resolve: () => void; readonly reject: (error: unknown) => void }>;
   const saves = new PassThrough({ objectMode: true });
   const saveIterator = saves[Symbol.asyncIterator]();
-  const rawRecoveredPhase: Data = { v: 1, phase: recovered.phase, ...(recovered.offer === undefined ? {} : { offer: recovered.offer }), agent_state: recovered.agent_state as unknown as Data };
+  const rawRecoveredPhase: Data = { v: 1, phase: recovered.phase, ...(recovered.offer === undefined ? {} : { offer: recovered.offer }), ...(recovered.completed_goal ? { completed_goal: recovered.completed_goal } : {}), agent_state: recovered.agent_state as unknown as Data };
   const writeSave = async (revision: string | null, phase: Data): Promise<void> => {
     const next = await saveIterator.next();
     if (next.done) return;
@@ -698,11 +701,11 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
       if (!recovered.offer) throw new Error('FLOW_RECOVERY_CHECKPOINT_INVALID');
       const accepted = await askContinuation(recovered.offer);
       if (!accepted) {
-        await emit('goal', { ...recovered.offer, status: 'succeeded', result: { continuation_declined: true } });
+        await emit('goal', { ...(recovered.completed_goal ?? {}), status: recovered.completed_goal ? 'succeeded' : 'skipped', result: { continuation_declined: true } });
         return null;
       }
       await emit('progress', { kind: 'goal_start', ...recovered.offer });
-      const state = initialFlowAgentState();
+      const state = { ...initialFlowAgentState(), goal: recovered.offer };
       await saveState(state);
       return state;
     }
@@ -755,7 +758,7 @@ export const runResumedFlowInteraction = async (flowId: string, devMode: boolean
     emitProgress: async data => emit('progress', data),
     emitCompleted: async (goal, result) => emit('goal_completed', { ...goal, status: 'succeeded', ...(result === undefined ? {} : { result }) }),
     askPlanApproval: askApproval,
-    askContinuation: async () => false,
+    askContinuation,
     emitTerminal: async data => emit('goal', data),
     signChallenge: nonce => sign('sha256', Buffer.from(`capy.flow.agent.v1\n${flowId}\n${nonce}`), keys.privateKey).toString('base64'),
   });
