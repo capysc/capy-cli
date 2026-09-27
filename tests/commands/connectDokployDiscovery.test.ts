@@ -1412,43 +1412,89 @@ describe('connector.discover — confirmation required for a real apply', () => 
     }
   });
 
-  // Vince, 2026-09-26 decision: under `--yes`, a folder with no keep.lock
-  // now auto-creates a NEW project when the org has ZERO existing projects
-  // (`ctxThatThrowsOnApply`'s `listProjects` returns `[]`) — the sentinel
-  // inside `initializeProject` firing (surfaced as `DOKPLOY_INIT_FAILED`)
-  // proves the run really reached project creation, not merely that the
-  // plan-level confirmation gate was passed.
-  test('non-interactive with --yes and ZERO existing projects: auto-creates (reaches initializeProject) rather than refusing', async () => {
-    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-confirm-yes-')));
+  // Vince, 2026-09-26 decision (REPLACES the old "org has ANY existing
+  // project still refuses" rule): under `--yes`, an existing project whose
+  // name does NOT match this folder's own default is now IRRELEVANT — the
+  // real-world bug this fixes was a stray, unrelated, empty project named
+  // `root` blocking every `--yes` auto-create. This seeds a REAL master key
+  // (like the `--no-push` describe block below) so the full sequence — init,
+  // checkout, import — runs for real, proving "creates, then checkout and
+  // import run" end to end, not merely that `initializeProject` was reached.
+  test('non-interactive --yes, org holds only an UNRELATED project ("root"): creates <repo>/<folder>, then checkout and import run', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-unrelated-root-')));
+    const globalDirName = `.capy-test-unrelated-root-${process.pid}-${Date.now()}`;
+    const savedDirName = process.env.CAPY_GLOBAL_DIR_NAME;
+    process.env.CAPY_GLOBAL_DIR_NAME = globalDirName;
     try {
       initRepo(ROOT, 'git@github.com:acme/widgets.git');
+
+      const orgId = 'org_unrelated_root_test';
+      const userId = 'user_unrelated_root_test';
+      const masterKey = randomBytes(32);
+      await wrapAndSaveMasterKey(masterKey, orgId, userId, {
+        coDecrypt: async (_oid: string, ct: string) => ct,
+        wrapOuterLayer: async (_oid: string, pt: string) => pt,
+      });
+
+      const initializeProjectNames: string[] = [];
       const calls: Array<{ method: string; url: string }> = [];
+      const ctx: DiscoveryContext = {
+        orgId,
+        userId,
+        authService: {} as unknown as DiscoveryContext['authService'],
+        serviceClient: {
+          // The stray, unrelated, EMPTY project ("root") that used to block
+          // every `--yes` auto-create — its name never matches this
+          // folder's own default ("widgets"), so it must no longer refuse.
+          listProjects: async () => [{ id: 'proj_root', name: 'root', organization_id: orgId }],
+          initializeProject: async (name: string) => {
+            initializeProjectNames.push(name);
+            return { org_id: orgId, project_id: 'proj_new_widgets', project_name: name };
+          },
+          coDecrypt: async (_oid: string, ct: string) => ({ plaintext: ct }),
+          wrapOuterLayer: async (_oid: string, pt: string) => ({ ciphertext: pt }),
+          listBranches: async () => [],
+          createBranch: async (projectId: string) => ({ id: 'b1', name: 'production', project_id: projectId, is_protected: false }),
+          getDecryptData: async () => ({ env_content: '', keep_file: '', decrypt_key: '', expires_at: new Date().toISOString() }),
+        } as unknown as DiscoveryContext['serviceClient'],
+      };
+
       const connector = createDokployConnector({ fetch: singleServiceFetch(calls), env: { T: 'x' }, cwd: ROOT });
-      const outcome = await connector.discover!(ctxThatThrowsOnApply(), {
+      const outcome = await connector.discover!(ctx, {
         nonTty: true,
         baseUrl: 'https://d',
         tokenEnv: 'T',
         yes: true,
+        noPush: true,
       } as ConnectOpts);
+
       expect(outcome.ok).toBe(true);
       if (!outcome.ok) return;
       expect(outcome.applied?.length).toBe(1);
       const folderResult = outcome.applied![0];
-      expect(folderResult.ok).toBe(false);
-      if (folderResult.ok) return;
-      // The sentinel surfaced INSIDE the coded failure — proving
-      // `initializeProject` really was reached under `--yes` with an empty
-      // org, never refused blind.
-      expect(folderResult.code).toBe('DOKPLOY_INIT_FAILED');
-      expect(folderResult.message).toContain(SENTINEL_APPLY_ATTEMPTED);
-      expect(existsSync(join(ROOT, 'keep.lock'))).toBe(false);
+      expect(folderResult.ok).toBe(true);
+      if (!folderResult.ok) return;
+      expect(folderResult.projectCreated).toBe(true);
+      // Checkout + import really ran, not merely "reached initializeProject".
+      expect(folderResult.environments.length).toBeGreaterThan(0);
+      expect(initializeProjectNames).toEqual([
+        defaultDiscoveryProjectName(ROOT, '', { host: 'github.com', owner: 'acme', repo: 'widgets' }),
+      ]);
+      expect(existsSync(join(ROOT, 'keep.lock'))).toBe(true);
     } finally {
+      if (savedDirName === undefined) delete process.env.CAPY_GLOBAL_DIR_NAME;
+      else process.env.CAPY_GLOBAL_DIR_NAME = savedDirName;
+      rmSync(join(homedir(), globalDirName), { recursive: true, force: true });
       rmSync(ROOT, { recursive: true, force: true });
     }
   });
 
-  test('non-interactive with --yes and an EXISTING project: still refuses DOKPLOY_FOLDER_NOT_INITIALIZED, zero writes (new-vs-existing stays a genuine choice)', async () => {
-    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-confirm-yes-existing-')));
+  // Vince, 2026-09-26 decision: the ONLY existing-project case that still
+  // refuses under `--yes` is a name that matches this folder's own default —
+  // compared trimmed and case-insensitively (`normalizeProjectName`), so
+  // `"  Widgets "` refuses exactly like an exact-string `"widgets"` would.
+  test('non-interactive --yes, an EXISTING project with the SAME default name (case/whitespace-insensitive): refuses DOKPLOY_PROJECT_NAME_EXISTS, zero writes', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-name-exists-')));
     try {
       initRepo(ROOT, 'git@github.com:acme/widgets.git');
       const calls: Array<{ method: string; url: string }> = [];
@@ -1458,10 +1504,10 @@ describe('connector.discover — confirmation required for a real apply', () => 
         orgId: 'o',
         userId: 'u',
         serviceClient: {
-          listProjects: async () => [{ id: 'proj_existing', name: 'existing-one', organization_id: 'o' }],
+          listProjects: async () => [{ id: 'proj_existing', name: '  Widgets ', organization_id: 'o' }],
           initializeProject: async () => {
             initializeProjectCalls.push(true);
-            throw new Error('must not be called — an org with any existing project still refuses under --yes');
+            throw new Error('must not be called — a same-name project refuses under --yes');
           },
         },
       } as unknown as DiscoveryContext;
@@ -1477,7 +1523,8 @@ describe('connector.discover — confirmation required for a real apply', () => 
       const folderResult = outcome.applied![0];
       expect(folderResult.ok).toBe(false);
       if (folderResult.ok) return;
-      expect(folderResult.code).toBe('DOKPLOY_FOLDER_NOT_INITIALIZED');
+      expect(folderResult.code).toBe('DOKPLOY_PROJECT_NAME_EXISTS');
+      expect(folderResult.message).toContain('widgets');
       expect(initializeProjectCalls.length).toBe(0);
       expect(existsSync(join(ROOT, 'keep.lock'))).toBe(false);
     } finally {
@@ -1907,17 +1954,56 @@ describe('connector.discover — ensureProjectSafe defect fixes', () => {
 // ── Non-interactive `--yes` auto-create (Vince, 2026-09-26 decision) ───────
 //
 // Under `--yes`, a folder with no keep.lock now auto-creates a NEW project
-// with the default name IFF the org has zero existing projects — the
-// snapshot answering "does this org have any" is taken ONCE, right before
-// `runDiscoverySequences` starts, and reused unchanged for every folder in
-// THIS run, so a project one folder creates never counts as "existing" for
-// a later folder's own answer (see `ensureProjectSafe` + `discover()`'s own
-// doc on `existingProjectsSnapshot`). This describe block seeds a REAL
-// master key the same way the `--no-push` describe block above does, so
-// both folders' full sequence (init → checkout → import, `--no-push`) can
-// run for real.
+// with the default name UNLESS a project with that EXACT name (trimmed,
+// case-insensitive) already exists — either in the org (this run's ONE
+// `existingProjectsSnapshot`, taken right before `runDiscoverySequences`
+// starts and reused unchanged for every folder in THIS run) or among the
+// OTHER folders THIS SAME run would also create (`sameRunNameCollisions`,
+// a pure precomputation over every folder's own default name — see
+// `computeSameRunNameCollisions`). An UNRELATED existing project blocks
+// nothing any more (see the previous describe block's own tests). This
+// describe block seeds a REAL master key the same way the `--no-push`
+// describe block below does, so a full sequence (init → checkout → import,
+// `--no-push`) can run for real.
 
-describe('connector.discover — non-interactive --yes auto-create on an empty org', () => {
+describe('connector.discover — non-interactive --yes auto-create (Vince, 2026-09-26 decision)', () => {
+  function singleServiceFetch(calls: Array<{ method: string; url: string }>): FetchLike {
+    return (async (url: string, init: { method: string }) => {
+      if (init.method !== 'GET') throw new Error(`unexpected non-GET ${init.method} ${url}`);
+      calls.push({ method: init.method, url });
+      if (url.includes('project.all')) {
+        return {
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify([
+              {
+                projectId: 'proj_1',
+                name: 'acme',
+                environments: [
+                  { environmentId: 'env_1', name: 'production', compose: [{ composeId: 'compose_1', name: 'widgets' }] },
+                ],
+              },
+            ]),
+        };
+      }
+      return {
+        status: 200,
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            composeId: 'compose_1',
+            env: 'A=1',
+            createEnvFile: true,
+            owner: 'acme',
+            repository: 'widgets',
+            sourceType: 'github',
+            composePath: 'docker-compose.yml',
+          }),
+      };
+    }) as FetchLike;
+  }
+
   test('two folders, one --yes run, ZERO existing projects: BOTH get created — the org lookup happens exactly ONCE, not once per folder', async () => {
     const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-autocreate-snapshot-')));
     const globalDirName = `.capy-test-autocreate-${process.pid}-${Date.now()}`;
@@ -2048,6 +2134,168 @@ describe('connector.discover — non-interactive --yes auto-create on an empty o
       if (savedDirName === undefined) delete process.env.CAPY_GLOBAL_DIR_NAME;
       else process.env.CAPY_GLOBAL_DIR_NAME = savedDirName;
       rmSync(join(homedir(), globalDirName), { recursive: true, force: true });
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  // Two DIFFERENT repos whose remote repo name happens to be identical
+  // (`defaultDiscoveryProjectName` reads only `remote.repo`, never the
+  // owner — Vince, 2026-09-26, decision #1) default to the SAME project
+  // name. Neither is "existing" in the org's own snapshot (it's empty), so
+  // only `sameRunNameCollisions` can catch this — the first folder in run
+  // order gets created, the second is refused.
+  test('two folders defaulting to the SAME project name in one run: the first is created, the second refused DOKPLOY_PROJECT_NAME_EXISTS', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-samerun-collision-')));
+    const globalDirName = `.capy-test-samerun-collision-${process.pid}-${Date.now()}`;
+    const savedDirName = process.env.CAPY_GLOBAL_DIR_NAME;
+    process.env.CAPY_GLOBAL_DIR_NAME = globalDirName;
+    try {
+      const repoA = join(ROOT, 'repo-a');
+      const repoB = join(ROOT, 'repo-b');
+      initRepo(repoA, 'git@github.com:acme/widgets.git');
+      initRepo(repoB, 'git@github.com:other-org/widgets.git');
+      expect(defaultDiscoveryProjectName(repoA, '', { host: 'github.com', owner: 'acme', repo: 'widgets' })).toBe(
+        defaultDiscoveryProjectName(repoB, '', { host: 'github.com', owner: 'other-org', repo: 'widgets' }),
+      );
+
+      const orgId = 'org_samerun_collision_test';
+      const userId = 'user_samerun_collision_test';
+      const masterKey = randomBytes(32);
+      await wrapAndSaveMasterKey(masterKey, orgId, userId, {
+        coDecrypt: async (_oid: string, ct: string) => ct,
+        wrapOuterLayer: async (_oid: string, pt: string) => pt,
+      });
+
+      const initializeProjectNames: string[] = [];
+      const ctx: DiscoveryContext = {
+        orgId,
+        userId,
+        authService: {} as unknown as DiscoveryContext['authService'],
+        serviceClient: {
+          listProjects: async () => [],
+          initializeProject: async (name: string) => {
+            initializeProjectNames.push(name);
+            return { org_id: orgId, project_id: `proj_new_${initializeProjectNames.length}`, project_name: name };
+          },
+          coDecrypt: async (_oid: string, ct: string) => ({ plaintext: ct }),
+          wrapOuterLayer: async (_oid: string, pt: string) => ({ ciphertext: pt }),
+          listBranches: async () => [],
+          createBranch: async (projectId: string) => ({ id: 'b1', name: 'production', project_id: projectId, is_protected: false }),
+          getDecryptData: async () => ({ env_content: '', keep_file: '', decrypt_key: '', expires_at: new Date().toISOString() }),
+        } as unknown as DiscoveryContext['serviceClient'],
+      };
+
+      const fetchImpl: FetchLike = (async (url: string, init: { method: string }) => {
+        if (init.method !== 'GET') throw new Error(`unexpected non-GET ${init.method} ${url}`);
+        if (url.includes('project.all')) {
+          return {
+            status: 200,
+            ok: true,
+            text: async () =>
+              JSON.stringify([
+                {
+                  projectId: 'proj_1',
+                  name: 'acme',
+                  environments: [
+                    {
+                      environmentId: 'env_1',
+                      name: 'production',
+                      compose: [
+                        { composeId: 'compose_a', name: 'widgets-a' },
+                        { composeId: 'compose_b', name: 'widgets-b' },
+                      ],
+                    },
+                  ],
+                },
+              ]),
+          };
+        }
+        const isA = url.includes('compose_a');
+        return {
+          status: 200,
+          ok: true,
+          text: async () =>
+            JSON.stringify({
+              composeId: isA ? 'compose_a' : 'compose_b',
+              env: 'A=1',
+              createEnvFile: true,
+              owner: isA ? 'acme' : 'other-org',
+              repository: 'widgets',
+              sourceType: 'github',
+              composePath: 'docker-compose.yml',
+            }),
+        };
+      }) as FetchLike;
+
+      const connector = createDokployConnector({ fetch: fetchImpl, env: { T: 'x' }, cwd: ROOT });
+      const outcome = await connector.discover!(ctx, {
+        nonTty: true,
+        baseUrl: 'https://d',
+        tokenEnv: 'T',
+        yes: true,
+        noPush: true,
+      } as ConnectOpts);
+
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.applied?.length).toBe(2);
+
+      const [first, second] = outcome.applied!;
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(false);
+      if (second.ok) return;
+      expect(second.code).toBe('DOKPLOY_PROJECT_NAME_EXISTS');
+
+      // Only the FIRST folder's create actually ran — the second was
+      // refused before ever reaching `initializeProject`.
+      expect(initializeProjectNames.length).toBe(1);
+      expect(initializeProjectNames[0]).toBe('widgets');
+    } finally {
+      if (savedDirName === undefined) delete process.env.CAPY_GLOBAL_DIR_NAME;
+      else process.env.CAPY_GLOBAL_DIR_NAME = savedDirName;
+      rmSync(join(homedir(), globalDirName), { recursive: true, force: true });
+      rmSync(ROOT, { recursive: true, force: true });
+    }
+  });
+
+  // Lookup failure refuses `DOKPLOY_PROJECT_LOOKUP_FAILED` exactly as
+  // before this decision — a failed snapshot must never be treated as "org
+  // has no matching project" and offer "create new" blind.
+  test('non-interactive --yes, org lookup fails: refuses DOKPLOY_PROJECT_LOOKUP_FAILED, zero writes (unchanged)', async () => {
+    const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'capy-discover-yes-lookup-failed-')));
+    try {
+      initRepo(ROOT, 'git@github.com:acme/widgets.git');
+      const calls: Array<{ method: string; url: string }> = [];
+      const initializeProjectCalls: true[] = [];
+      const connector = createDokployConnector({ fetch: singleServiceFetch(calls), env: { T: 'x' }, cwd: ROOT });
+      const ctx: DiscoveryContext = {
+        orgId: 'o',
+        userId: 'u',
+        serviceClient: {
+          listProjects: async () => {
+            throw new Error('network down');
+          },
+          initializeProject: async () => {
+            initializeProjectCalls.push(true);
+            throw new Error('must not be called — the lookup failed first');
+          },
+        },
+      } as unknown as DiscoveryContext;
+      const outcome = await connector.discover!(ctx, {
+        nonTty: true,
+        baseUrl: 'https://d',
+        tokenEnv: 'T',
+        yes: true,
+      } as ConnectOpts);
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      const folderResult = outcome.applied![0];
+      expect(folderResult.ok).toBe(false);
+      if (folderResult.ok) return;
+      expect(folderResult.code).toBe('DOKPLOY_PROJECT_LOOKUP_FAILED');
+      expect(initializeProjectCalls.length).toBe(0);
+      expect(existsSync(join(ROOT, 'keep.lock'))).toBe(false);
+    } finally {
       rmSync(ROOT, { recursive: true, force: true });
     }
   });

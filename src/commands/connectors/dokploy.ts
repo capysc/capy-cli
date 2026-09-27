@@ -1151,6 +1151,16 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       const existingProjectsSnapshot: ExistingProjectsSnapshot | undefined =
         !promptable && !!opts.yes ? await listOrgProjectsOrUnavailable(ctx.serviceClient) : undefined;
 
+      // Vince, 2026-09-26 decision: "two folders in the SAME run would
+      // create a project with the same default name" is knowable BEFORE any
+      // folder runs — every candidate folder's own default name is a pure
+      // function of (repoDir, folder, remote), all already sitting in
+      // `resolvedFolders` — so this is computed ONCE, up front, exactly like
+      // `existingProjectsSnapshot` above, rather than tracked as mutable
+      // state threaded through the sequential per-folder run below.
+      const sameRunNameCollisions: ReadonlySet<string> =
+        !promptable && !!opts.yes ? computeSameRunNameCollisions(resolvedFolders) : new Set();
+
       const sequenceDeps = buildRealDiscoverySequenceDeps(ctx, connector.import!, {
         noPush: !!opts.noPush,
         interactive: promptable,
@@ -1161,6 +1171,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         askExistingOrNewProject,
         askProjectName: askDiscoveryProjectName,
         existingProjectsSnapshot,
+        sameRunNameCollisions,
       });
       const applied = await runDiscoverySequences(resolvedFolders, { overwrite: !!opts.overwrite }, sequenceDeps);
 
@@ -1274,6 +1285,55 @@ type ExistingProjectsSnapshot = {
   projectsUnavailable: boolean;
 };
 
+/** A project name, normalized for EQUALITY comparison only (never for storage/display) — trimmed, then lower-cased, so `" Widgets "` and `widgets` compare equal (Vince, 2026-09-26 decision). */
+function normalizeProjectName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/** `DOKPLOY_PROJECT_NAME_EXISTS`'s message — shared by the org-snapshot collision and the same-run collision below, since a human reads the same instruction either way. */
+// COPY-FLAG: new user-facing string, minimal/neutral wording.
+function dokployProjectNameExistsMessage(folder: string, name: string): string {
+  return `${folder || '.'}: a project named "${name}" already exists — reuse or duplicate is a human choice; run interactively or \`capy\` in ${folder || '.'}.`;
+}
+
+/** Stable per-(repoDir, folder) key — mirrors `dokployDiscovery.ts`'s own `groupKey` shape (`\u0000`-joined, so neither part can collide with the separator). */
+function sameRunFolderKey(repoDir: string, folder: string): string {
+  return `${repoDir}\u0000${folder}`;
+}
+
+/**
+ * Pure, run-once precomputation of "two folders in this SAME run would try
+ * to create a project under the SAME default name" (Vince, 2026-09-26
+ * decision) — computed from `resolvedFolders` alone, entirely before any
+ * folder's own `ensureProject` call runs, so no mutable "names created so
+ * far" state needs to be threaded through the sequential per-folder loop
+ * (`runDiscoverySequences`'s `ensureProject` dependency has no such
+ * accumulator parameter, and this file's own immutability rule forbids
+ * inventing one via a mutated `Set`/`Map`).
+ *
+ * Only folders WITHOUT a local keep.lock are candidates (`!f.initialized`) —
+ * an already-initialized folder never creates anything, so it can never
+ * collide with, or be collided into by, another folder's create. Folded over
+ * `folders` in their OWN array order — the exact order `runDiscoverySequences`
+ * processes them in — so "the first one wins" here means the same thing it
+ * means at run time. Returns the set of `sameRunFolderKey`s for every folder
+ * that is NOT the first candidate to claim its (normalized) default name;
+ * the very first claimant of a name is never in the returned set.
+ */
+function computeSameRunNameCollisions(folders: readonly DiscoveryPlanFolder[]): ReadonlySet<string> {
+  const candidates = folders
+    .filter((f) => !f.initialized)
+    .map((f) => ({ key: sameRunFolderKey(f.repoDir, f.folder), normalizedName: normalizeProjectName(defaultDiscoveryProjectName(f.repoDir, f.folder, f.remote)) }));
+
+  return candidates.reduce(
+    (acc, c) =>
+      acc.seenNames.has(c.normalizedName)
+        ? { seenNames: acc.seenNames, collisionKeys: new Set([...acc.collisionKeys, c.key]) }
+        : { seenNames: new Set([...acc.seenNames, c.normalizedName]), collisionKeys: acc.collisionKeys },
+    { seenNames: new Set<string>(), collisionKeys: new Set<string>() },
+  ).collisionKeys;
+}
+
 /**
  * No keep.lock at (repoDir, folder) → interactive: reuses `capy`'s own
  * existing-project-picking (list the org's projects, ask new-vs-existing —
@@ -1284,20 +1344,30 @@ type ExistingProjectsSnapshot = {
  * Non-interactive WITHOUT `--yes` refuses `DOKPLOY_FOLDER_NOT_INITIALIZED`
  * naming the folder and never auto-creates — unchanged.
  *
- * Non-interactive WITH `--yes` (Vince, 2026-09-26 decision): "new vs
- * existing project" is still a genuine choice with no safe default when the
- * org already has projects, so that case keeps refusing
- * `DOKPLOY_FOLDER_NOT_INITIALIZED` too. But when the org has NO existing
- * projects at all, there is no choice to make blind — the only option a
- * human would see is "New project" — so `--yes` takes it, creating a project
- * named `defaultName` exactly the way the interactive "New project" choice
- * does (same `createNewProjectSafe` helper, below). `opts.existingProjectsSnapshot`
- * is this run's OWN snapshot (see `buildRealDiscoverySequenceDeps`'s doc):
- * taken ONCE, before any folder in this run starts, so a project an EARLIER
- * folder in this same run created is never counted as "existing" when
- * deciding a LATER folder's own "org has none" answer. A snapshot that
- * failed to load is `DOKPLOY_PROJECT_LOOKUP_FAILED`, same as the interactive
- * branch below.
+ * Non-interactive WITH `--yes` (Vince, 2026-09-26 decision, SUPERSEDING the
+ * original "org has none" rule): creates a new project named `defaultName`
+ * UNLESS a project with that EXACT name (trimmed, compared case-insensitively
+ * — see `normalizeProjectName`) already exists — an UNRELATED existing
+ * project in the org (e.g. a stray empty `root`) no longer blocks anything.
+ * A same-name collision refuses `DOKPLOY_PROJECT_NAME_EXISTS`, naming both
+ * the project and the folder — reusing or duplicating an existing project is
+ * a genuine human choice with no safe default, same reasoning the old rule
+ * used for "org has ANY project", now narrowed to "org has THIS name".
+ * `opts.existingProjectsSnapshot` is this run's OWN snapshot (see
+ * `buildRealDiscoverySequenceDeps`'s doc): taken ONCE, before any folder in
+ * this run starts, so a project an EARLIER folder in this same run created
+ * is never counted as "existing" when deciding a LATER folder's own
+ * name-collision answer. A snapshot that failed to load is
+ * `DOKPLOY_PROJECT_LOOKUP_FAILED`, same as the interactive branch below and
+ * same as before this decision.
+ *
+ * The snapshot alone cannot catch two DIFFERENT folders in this SAME run
+ * both defaulting to the same name (neither one is "existing" yet when the
+ * snapshot was taken) — `opts.sameRunNameCollision` is `ensureProjectSafe`'s
+ * OWN pure precomputed answer to exactly that (see
+ * `computeSameRunNameCollisions`), and refuses the SAME
+ * `DOKPLOY_PROJECT_NAME_EXISTS` code for whichever folder is the SECOND (or
+ * later) occurrence in run order; the first occurrence proceeds normally.
  *
  * Deliberately NOT a call into `CapyCommand` itself: that class calls
  * `process.exit()` on several failure paths and always builds its own
@@ -1318,12 +1388,14 @@ async function ensureProjectSafe(
   remote: GitRemoteRef | undefined,
   opts: {
     interactive: boolean;
-    /** Discovery's OWN `--yes` — skips the new-project NAME prompt (defaulting to `defaultName`) the same way it skips every other confirmation, never the existing-vs-new picker itself (that one isn't a confirmation, it's a genuine choice with no safe default) — EXCEPT non-interactively, where an org with zero existing projects has no choice left to make (see this function's own doc). */
+    /** Discovery's OWN `--yes` — skips the new-project NAME prompt (defaulting to `defaultName`) the same way it skips every other confirmation, never the existing-vs-new picker itself (that one isn't a confirmation, it's a genuine choice with no safe default) — EXCEPT non-interactively, where a same-name collision has no choice left to make (see this function's own doc). */
     yes: boolean;
     askExistingOrNewProject: (existing: ReadonlyArray<{ id: string; name: string }>, defaultName: string) => Promise<string>;
     askProjectName: (defaultName: string) => Promise<string>;
     /** This run's ONE pre-apply snapshot of the org's existing projects — only consulted on the non-interactive `--yes` auto-create path; `undefined` there means the snapshot itself failed to load. */
     existingProjectsSnapshot?: ExistingProjectsSnapshot;
+    /** This folder's own precomputed answer to "does an EARLIER folder in this SAME run already claim this default name" (see `computeSameRunNameCollisions`) — only consulted on the non-interactive `--yes` auto-create path. */
+    sameRunNameCollision: boolean;
   },
 ): Promise<{ ok: true; projectId: string; created: boolean } | { ok: false; code: string; message: string }> {
   const path = folderPath(repoDir, folder);
@@ -1350,12 +1422,12 @@ async function ensureProjectSafe(
         message: `${folder || '.'}: could not list this org's existing projects — refusing to offer "create new" blind.`,
       };
     }
-    if (snapshot.existingProjects.length > 0) {
-      // COPY-FLAG: new user-facing string, minimal/neutral wording.
+    const sameNameProject = snapshot.existingProjects.find((p) => normalizeProjectName(p.name) === normalizeProjectName(defaultName));
+    if (sameNameProject || opts.sameRunNameCollision) {
       return {
         ok: false,
-        code: 'DOKPLOY_FOLDER_NOT_INITIALIZED',
-        message: `${folder || '.'} has no keep.lock, and this org already has existing project(s) — run this interactively to choose one, or run \`capy\` in ${folder || '.'}.`,
+        code: 'DOKPLOY_PROJECT_NAME_EXISTS',
+        message: dokployProjectNameExistsMessage(folder, defaultName),
       };
     }
     return createNewProjectSafe(ctx, path, folder, defaultName);
@@ -1778,6 +1850,14 @@ function buildRealDiscoverySequenceDeps(
      * without `--yes`).
      */
     existingProjectsSnapshot?: ExistingProjectsSnapshot;
+    /**
+     * This run's OWN pure precomputation (see `computeSameRunNameCollisions`)
+     * of "which candidate folders' default project name collides with an
+     * EARLIER folder in this same run" — keyed by `sameRunFolderKey`. Passed
+     * through unchanged to every folder's own `ensureProject` call, same
+     * shape as `existingProjectsSnapshot` above.
+     */
+    sameRunNameCollisions: ReadonlySet<string>;
   },
 ): DiscoverySequenceDeps {
   return {
@@ -1788,6 +1868,7 @@ function buildRealDiscoverySequenceDeps(
         askExistingOrNewProject: runOpts.askExistingOrNewProject,
         askProjectName: runOpts.askProjectName,
         existingProjectsSnapshot: runOpts.existingProjectsSnapshot,
+        sameRunNameCollision: runOpts.sameRunNameCollisions.has(sameRunFolderKey(repoDir, folder)),
       }),
     checkFolderDirty: (repoDir, folder, projectId) => checkFolderDirtySafe(ctx, repoDir, folder, projectId),
     checkoutBranch: (repoDir, folder, projectId, branchName) => checkoutBranchSafe(ctx, repoDir, folder, projectId, branchName),
