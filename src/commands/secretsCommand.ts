@@ -190,10 +190,19 @@ export class SecretsCommand {
     return loc.protected ? `${plain} ${DIM}(protected)${RESET}` : plain;
   }
 
-  /** The Dokploy service name, falling back to `dokploy:<compose_id>` when Dokploy never set a name; `—` when this location has no service at all. */
+  /**
+   * The Dokploy service, prefixed with its Dokploy project when known —
+   * real Dokploy service names are often generic (many SlideSpeak services
+   * are literally named `main`), so `<dokploy_project> / <name>` disambiguates.
+   * Falls back to bare `<name>` with no project, then `dokploy:<compose_id>`
+   * when Dokploy never set a name, then `—` when this location has no
+   * service at all.
+   */
   private formatService(service: SecretIndexService | null): string {
     if (!service) return '—';
-    if (service.name) return truncatePlain(service.name);
+    if (service.name) {
+      return truncatePlain(service.dokploy_project ? `${service.dokploy_project} / ${service.name}` : service.name);
+    }
     if (service.compose_id) return truncatePlain(`dokploy:${service.compose_id}`);
     return '—';
   }

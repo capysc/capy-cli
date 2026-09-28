@@ -198,6 +198,44 @@ describe('SecretsCommand', () => {
     expect(stripAnsi(stdout)).toContain('—');
   });
 
+  it('SERVICE column: dokploy_project + name renders "<project> / <name>"', async () => {
+    getSecretIndexImpl.mockImplementation(async () => ({
+      org_id: 'org_1',
+      rows: [row({ locations: [loc({ service: { provider: 'dokploy', name: 'main', dokploy_project: 'slidespeak' } })] })],
+      skipped: [],
+    }));
+
+    const { stdout } = await capture(() => new SecretsCommand().execute({}));
+    const plain = stripAnsi(stdout);
+    expect(plain).toContain('slidespeak / main');
+  });
+
+  it('SERVICE column: name with no dokploy_project renders bare "<name>"', async () => {
+    getSecretIndexImpl.mockImplementation(async () => ({
+      org_id: 'org_1',
+      rows: [row({ locations: [loc({ service: { provider: 'dokploy', name: 'web-prod' } })] })],
+      skipped: [],
+    }));
+
+    const { stdout } = await capture(() => new SecretsCommand().execute({}));
+    const plain = stripAnsi(stdout);
+    expect(plain).toContain('web-prod');
+    expect(plain).not.toContain('undefined / web-prod');
+  });
+
+  it('SERVICE column: no name (even with dokploy_project) falls back to "dokploy:<compose_id>"', async () => {
+    getSecretIndexImpl.mockImplementation(async () => ({
+      org_id: 'org_1',
+      rows: [row({ locations: [loc({ service: { provider: 'dokploy', dokploy_project: 'slidespeak', compose_id: 'compose_9' } })] })],
+      skipped: [],
+    }));
+
+    const { stdout } = await capture(() => new SecretsCommand().execute({}));
+    const plain = stripAnsi(stdout);
+    expect(plain).toContain('dokploy:compose_9');
+    expect(plain).not.toContain('slidespeak');
+  });
+
   it('two rows sharing a NAME with a different value are both shown, disambiguated by hash', async () => {
     getSecretIndexImpl.mockImplementation(async () => ({
       org_id: 'org_1',
