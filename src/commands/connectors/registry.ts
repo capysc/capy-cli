@@ -142,6 +142,26 @@ export interface ConnectOpts {
    * `DOKPLOY_ENVIRONMENT_NOT_APPLICABLE`, checked before any request.
    */
   environment?: string;
+  /**
+   * Dokploy DISCOVERY mode only, set INTERNALLY by `discover()`'s own
+   * per-environment sequence — never a CLI flag, never read from
+   * `process.argv`. Discovery's plan already resolved this service's
+   * Dokploy PROJECT name from `project.all` while building the plan
+   * (CAP-657 follow-up); threading it straight into this `import()` call
+   * lets the connector entry's `dokploy_project` field (CAP-673) get set
+   * without a second `project.all` read. A plain `--application`/
+   * `--compose` import (no `--discover`) never sets this — see
+   * `ConnectorMetadata.dokploy_project`'s own doc for why that path doesn't
+   * fetch `project.all` at all.
+   */
+  dokployProjectName?: string;
+  /**
+   * Dokploy DISCOVERY mode only, set internally alongside
+   * `dokployProjectName` above: the Dokploy ENVIRONMENT name (not the git
+   * branch) discovery's plan already resolved for this service, feeding
+   * the connector entry's `environment` field (CAP-673).
+   */
+  dokployEnvironmentName?: string;
 }
 
 export interface RotateOpts {
@@ -250,6 +270,20 @@ export type ImportOutcome =
        * `--overwrite` wasn't passed.
        */
       replacedNames?: readonly string[];
+      /**
+       * CAP-673: the SAME-value names in `unchanged` above, each paired with
+       * its (unchanged) value and a FRESH connector entry — so a re-import
+       * still backfills `service_name`/`dokploy_project`/`environment` (or
+       * any other connector field this provider ever adds) onto an entry
+       * that was written before that field existed, without touching the
+       * value, the value_hash, or `unchanged` itself (still names only).
+       * `writeImportOutcome` merges these into the same write as `imported`
+       * — same push, same keep.lock write — so "nothing new to import" can
+       * still mean "keep.lock's connector metadata moved". Dokploy import
+       * only; absent (never populated) under a dry run, and absent on the
+       * `--overwrite` decline branch, where nothing is touched at all.
+       */
+      unchangedEntries?: readonly ImportedVarEntry[];
     }
   | {
       ok: false;

@@ -65,6 +65,31 @@ export interface ConnectorMetadata {
    * `docs/dokploy-deploy-adapter.md`'s "Discovery" section).
    */
   git_branch?: string;
+  /**
+   * Dokploy import only (CAP-673): the compose/application's own name in
+   * Dokploy — `compose.one`/`application.one`'s `name`, falling back to
+   * `appName` when Dokploy only set that. Always available from the same
+   * response the import already reads (no extra request); absent only when
+   * Dokploy returned neither field.
+   */
+  service_name?: string;
+  /**
+   * Dokploy import only (CAP-673): the Dokploy PROJECT name the service
+   * lives in. Only set when the import already had `project.all` data in
+   * hand to resolve it from — a `--discover` import always does (its own
+   * plan reads `project.all` up front); a plain `--application`/`--compose`
+   * import never fetches `project.all` (every "only ever GETs
+   * application.one/compose.one" test pins that path at exactly one
+   * request), so its entries carry `service_name` only.
+   */
+  dokploy_project?: string;
+  /**
+   * Dokploy import only (CAP-673): the Dokploy ENVIRONMENT name the service
+   * runs in — distinct from `git_branch` above, which is the git branch the
+   * service BUILDS from, not the Dokploy environment it runs as. Same
+   * availability rule as `dokploy_project`.
+   */
+  environment?: string;
 }
 
 /** v3 keep.lock variable entry — per-branch value hashes */
