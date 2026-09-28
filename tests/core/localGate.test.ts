@@ -13,6 +13,7 @@ describe('local-only command gating', () => {
       'invite',
       'kick',
       'users',
+      'projects',
       'grant-branch',
       'revoke-branch',
       'org',

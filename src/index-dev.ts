@@ -667,6 +667,16 @@ program
   });
 
 program
+  .command('projects')
+  .description('List projects in the active organization and their branches')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .action(async (options) => {
+    const { ProjectsCommand } = await import('./commands/projectsCommand');
+    const cmd = new ProjectsCommand(process.env.CAPY_API_URL, true);
+    await cmd.execute({ json: options.json });
+  });
+
+program
   .command('grant-branch <email> <project> <branch>')
   .description('Grant a member wildcard access to a protected branch')
   .action(async (email: string, project: string, branch: string) => {
