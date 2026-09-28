@@ -340,7 +340,15 @@ export async function writeImportOutcome(
 ): Promise<{ wrote: boolean }> {
   if (opts.dryRun) return { wrote: false };
   const cleared = outcome.cleared ?? [];
-  const hasWrite = outcome.imported.length > 0 || cleared.length > 0;
+  // CAP-673: a dokploy import's same-value names still carry a FRESH
+  // connector entry (see `ImportOutcome.unchangedEntries`'s doc) — merged
+  // into the very same write as `imported` so keep.lock's connector
+  // metadata (service_name/dokploy_project/environment) gets backfilled
+  // even on a run that changes no value at all. Absent for every other
+  // caller (link-kind connectors don't set it; hand-built outcomes in
+  // existing tests don't either), so this is a strict no-op there.
+  const unchangedEntries = outcome.unchangedEntries ?? [];
+  const hasWrite = outcome.imported.length > 0 || cleared.length > 0 || unchangedEntries.length > 0;
   if (!hasWrite) return { wrote: false };
 
   const prunedCtx: ResolvedContext =
@@ -348,11 +356,11 @@ export async function writeImportOutcome(
       ? { ...ctx, localPlaintext: Object.fromEntries(Object.entries(ctx.localPlaintext).filter(([k]) => !cleared.includes(k))) }
       : ctx;
 
-  await writeImportedAndSync(prunedCtx, outcome.imported, {
+  await writeImportedAndSync(prunedCtx, [...outcome.imported, ...unchangedEntries], {
     push: opts.push,
     quiet: opts.quiet,
     skipAutoCommit: opts.skipAutoCommit,
-    forceWrite: cleared.length > 0,
+    forceWrite: cleared.length > 0 || unchangedEntries.length > 0,
   });
   return { wrote: true };
 }

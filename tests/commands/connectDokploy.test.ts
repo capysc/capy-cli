@@ -16,6 +16,7 @@ import { describe, test, expect, spyOn, mock, beforeEach, afterEach } from 'bun:
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   createDokployConnector,
   mapImportApiError,
@@ -26,7 +27,7 @@ import {
   type DokploySourceDeps,
 } from '../../src/commands/connectors/dokploy';
 import type { ResolvedContext } from '../../src/commands/connectors/shared';
-import { writeImportedAndSync } from '../../src/commands/connectors/shared';
+import { writeImportedAndSync, writeImportOutcome } from '../../src/commands/connectors/shared';
 import { FileManager } from '../../src/files/fileManager';
 import { ConnectCommand } from '../../src/commands/connectCommand';
 import { DokployApiError } from '../../src/deploy/dokployApi';
@@ -471,6 +472,100 @@ describe('dokploy import — keep.lock metadata + warnings', () => {
     expect(warning?.names).toEqual(['SECRET']);
     expect(JSON.stringify(outcome.warnings)).not.toContain('abc123');
   });
+
+  // ── CAP-673: service_name / dokploy_project / environment ──────────────────
+
+  test('an application import carries service_name from application.one\'s own `name`, and stays at exactly one request', async () => {
+    const calls: FakeCall[] = [];
+    const connector = createDokployConnector({ fetch: fakeFetch({ env: 'A=1', calls }), env: { T: 'x' } });
+    const outcome = await connector.import!(ctxWith(), { nonTty: true, baseUrl: 'https://d', application: 'app_xyz', tokenEnv: 'T' });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const entry = outcome.imported[0].entry as ConnectorMetadata;
+    // fakeFetch's application.one response sets `name: 'demo-app'`.
+    expect(entry.service_name).toBe('demo-app');
+    // A plain --application import never fetches project.all — dokploy_project
+    // and environment stay absent, and the request count never grows past 1.
+    expect(entry.dokploy_project).toBeUndefined();
+    expect(entry.environment).toBeUndefined();
+    expect(calls.length).toBe(1);
+  });
+
+  test('a compose import carries service_name from compose.one\'s own `name`, still exactly one request', async () => {
+    const calls: FakeCall[] = [];
+    const connector = createDokployConnector({ fetch: fakeComposeFetch({ env: 'A=1', calls }), env: { T: 'x' } });
+    const outcome = await connector.import!(ctxWith(), { nonTty: true, baseUrl: 'https://d', compose: 'compose_1', tokenEnv: 'T' });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const entry = outcome.imported[0].entry as ConnectorMetadata;
+    // fakeComposeFetch's compose.one response sets `name: 'demo-compose'`.
+    expect(entry.service_name).toBe('demo-compose');
+    expect(entry.dokploy_project).toBeUndefined();
+    expect(entry.environment).toBeUndefined();
+    expect(calls.length).toBe(1);
+  });
+
+  test('discovery-supplied dokployProjectName/dokployEnvironmentName land on the connector entry, with zero extra requests', async () => {
+    const calls: FakeCall[] = [];
+    const connector = createDokployConnector({ fetch: fakeComposeFetch({ env: 'A=1', calls }), env: { T: 'x' } });
+    // These two fields are never a CLI flag — only discovery's own
+    // per-environment sequence sets them (see `importIntoBranchSafe`). A
+    // direct call here stands in for that plumbing without driving the
+    // whole discovery machinery.
+    const outcome = await connector.import!(ctxWith(), {
+      nonTty: true,
+      baseUrl: 'https://d',
+      compose: 'compose_1',
+      tokenEnv: 'T',
+      dokployProjectName: 'slidespeak',
+      dokployEnvironmentName: 'production',
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const entry = outcome.imported[0].entry as ConnectorMetadata;
+    expect(entry.service_name).toBe('demo-compose');
+    expect(entry.dokploy_project).toBe('slidespeak');
+    expect(entry.environment).toBe('production');
+    expect(calls.length).toBe(1);
+  });
+
+  test('a re-import of an UNCHANGED value still backfills a fresh connector entry (unchangedEntries), same value throughout', async () => {
+    const env = 'PORT=3000';
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env, calls: [] }),
+      env: { T: 'x' },
+      now: () => new Date('2026-09-27T00:00:00.000Z'),
+    });
+    const outcome = await connector.import!(
+      ctxWith({ localPlaintext: { PORT: '3000' } }),
+      { nonTty: true, baseUrl: 'https://d', application: 'app_xyz', tokenEnv: 'T' },
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    // Still reported as unchanged, by name — CAP-673 doesn't touch that.
+    expect(outcome.unchanged).toEqual(['PORT']);
+    expect(outcome.imported).toEqual([]);
+    // But the backfill entry is there, with the SAME value (never a new one).
+    expect(outcome.unchangedEntries).toHaveLength(1);
+    const backfilled = outcome.unchangedEntries![0];
+    expect(backfilled.varName).toBe('PORT');
+    expect(backfilled.value).toBe('3000');
+    expect((backfilled.entry as ConnectorMetadata).service_name).toBe('demo-app');
+    expect((backfilled.entry as ConnectorMetadata).provider).toBe('dokploy');
+  });
+
+  test('a dry run never populates unchangedEntries — a preview writes nothing', async () => {
+    const connector = createDokployConnector({ fetch: fakeFetch({ env: 'PORT=3000', calls: [] }), env: { T: 'x' } });
+    const outcome = await withTTY(() =>
+      connector.import!(
+        ctxWith({ localPlaintext: { PORT: '3000' } }),
+        { nonTty: false, dryRun: true, baseUrl: 'https://d', application: 'app_xyz', tokenEnv: 'T' },
+      ),
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.unchangedEntries).toEqual([]);
+  });
 });
 
 describe('dokploy import — deploy-target offer', () => {
@@ -612,6 +707,132 @@ describe('writeImportedAndSync', () => {
   test('an empty entry list is a no-op', async () => {
     const ctx = { fileManager: { writeKeepFile: () => { throw new Error('should not be called'); } } } as unknown as ResolvedContext;
     await writeImportedAndSync(ctx, [], { push: false });
+  });
+});
+
+// ── writeImportOutcome — CAP-673 unchanged-value backfill actually syncs ────
+
+describe('writeImportOutcome — unchanged-value connector backfill', () => {
+  test('an outcome with ONLY unchangedEntries still pushes, still writes keep.lock, and the value/value_hash never move', async () => {
+    // Isolates `writeKeepCache`'s (best-effort) disk write from this
+    // developer's real ~/.capy — same pattern connectImportJsonPurity.test.ts
+    // uses for the identical push:true path.
+    const savedDirName = process.env.CAPY_GLOBAL_DIR_NAME;
+    process.env.CAPY_GLOBAL_DIR_NAME = `.capy-test-${process.pid}-${Date.now()}`;
+    try {
+    const pushCalls: Array<{ projectId: string; keepFile: string; envBlob: string; branch: string }> = [];
+    const keepWrites: KeepFile[] = [];
+    const envWrites: Array<Record<string, string>> = [];
+    const keep: KeepFile = {
+      version: '3.0',
+      org_id: 'o',
+      project_id: 'p',
+      project_name: 'demo',
+      variables: {
+        PORT: [{ resource_id: 'r1', branch: 'development', value_hash: 'stale-hash-placeholder' }],
+      },
+    };
+    const ctx = {
+      pm: { readSyncState: () => null },
+      fileManager: {
+        writeKeepFile: (k: KeepFile) => keepWrites.push(k),
+        writeEncryptedEnvFile: (env: Record<string, string>) => envWrites.push(env),
+        writeSyncState: () => {},
+      },
+      serviceClient: {
+        pushSecrets: async (projectId: string, keepFile: string, envBlob: string, branch: string) => {
+          pushCalls.push({ projectId, keepFile, envBlob, branch });
+          return { keep_hash: 'h'.repeat(16) };
+        },
+      },
+      orgId: 'o',
+      projectId: 'p',
+      branch: 'development',
+      userId: 'u',
+      projectKey: 'k',
+      keep,
+      localPlaintext: { PORT: '3000' },
+    } as unknown as ResolvedContext;
+
+    const backfillEntry: ConnectorMetadata = {
+      provider: 'dokploy',
+      source: 'import',
+      created_at: 2,
+      fingerprint: '300…000',
+      application_id: 'app_1',
+      imported_at: '2026-09-27T00:00:00.000Z',
+      service_name: 'demo-app',
+    };
+    const outcome: Extract<ImportOutcome, { ok: true }> = {
+      ok: true,
+      imported: [],
+      unchanged: ['PORT'],
+      unchangedEntries: [{ varName: 'PORT', value: '3000', entry: backfillEntry }],
+      skipped: [],
+      warnings: [],
+      deployTargetSaved: false,
+    };
+
+    const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false, skipAutoCommit: true });
+
+    // A backfill-only run still counts as "wrote" — it synced keep.lock.
+    expect(wrote).toBe(true);
+    expect(pushCalls.length).toBe(1);
+    // The value itself never left `.env`/the pushed blob unchanged.
+    expect(envWrites[envWrites.length - 1]).toEqual({ PORT: '3000' });
+    // The keep.lock entry now carries the CAP-673 fields...
+    const finalKeep = keepWrites[keepWrites.length - 1];
+    const portEntry = finalKeep.variables.PORT?.find((e) => e.branch === 'development');
+    expect(portEntry?.connector?.service_name).toBe('demo-app');
+    // ...and the value_hash is exactly sha256('3000').slice(0,16) — the SAME
+    // hash any push of this unchanged value has always produced, never a
+    // different one just because the connector metadata moved.
+    expect(portEntry?.value_hash).toBe(createHash('sha256').update('3000').digest('hex').slice(0, 16));
+    } finally {
+      if (savedDirName === undefined) delete process.env.CAPY_GLOBAL_DIR_NAME;
+      else process.env.CAPY_GLOBAL_DIR_NAME = savedDirName;
+    }
+  });
+
+  test('an outcome with nothing imported, cleared, or unchanged is a true no-op — never pushes', async () => {
+    const ctx = {
+      serviceClient: {
+        pushSecrets: async () => {
+          throw new Error('must not push — nothing changed');
+        },
+      },
+    } as unknown as ResolvedContext;
+    const outcome: Extract<ImportOutcome, { ok: true }> = {
+      ok: true,
+      imported: [],
+      unchanged: [],
+      skipped: [],
+      warnings: [],
+      deployTargetSaved: false,
+    };
+    const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: false });
+    expect(wrote).toBe(false);
+  });
+
+  test('a dry run never writes, even when unchangedEntries is populated', async () => {
+    const ctx = {
+      serviceClient: {
+        pushSecrets: async () => {
+          throw new Error('must not push — dry run changes nothing');
+        },
+      },
+    } as unknown as ResolvedContext;
+    const outcome: Extract<ImportOutcome, { ok: true }> = {
+      ok: true,
+      imported: [],
+      unchanged: ['PORT'],
+      unchangedEntries: [{ varName: 'PORT', value: '3000', entry: { provider: 'dokploy', source: 'import', created_at: 1, fingerprint: 'x' } }],
+      skipped: [],
+      warnings: [],
+      deployTargetSaved: false,
+    };
+    const { wrote } = await writeImportOutcome(ctx, outcome, { push: true, dryRun: true });
+    expect(wrote).toBe(false);
   });
 });
 
@@ -1864,6 +2085,25 @@ describe('dokploy import — --overwrite', () => {
     expect(outcome.replacedNames).toEqual(['CHANGED']);
     expect(outcome.cleared).toEqual(['GONE']);
     expect(outcome.unchanged).toEqual(['SAME']);
+  });
+
+  test('CAP-673: --overwrite backfills a fresh connector entry for the SAME-value name too', async () => {
+    const connector = createDokployConnector({
+      fetch: fakeFetch({ env: 'SAME=1\nNEW=v', calls: [] }),
+      env: { T: 'x' },
+    });
+    const outcome = await connector.import!(
+      ctxWith({ localPlaintext: { SAME: '1' } }),
+      { ...BASE_OPTS, baseUrl: 'https://d', application: 'app_1', tokenEnv: 'T', overwrite: true, yes: true },
+    );
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.unchanged).toEqual(['SAME']);
+    expect(outcome.unchangedEntries).toHaveLength(1);
+    const backfilled = outcome.unchangedEntries![0];
+    expect(backfilled.varName).toBe('SAME');
+    expect(backfilled.value).toBe('1');
+    expect((backfilled.entry as ConnectorMetadata).service_name).toBe('demo-app');
   });
 
   test('a reference value (${{...}}) is never cleared — skipped and reported, not removed', async () => {

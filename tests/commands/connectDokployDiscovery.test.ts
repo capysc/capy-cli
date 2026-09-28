@@ -809,6 +809,23 @@ describe('runDiscoverySequence', () => {
     expect(result.environments.map((e) => e.environmentName)).toEqual(['staging', 'alpha', 'zeta', 'production']);
   });
 
+  test('CAP-673: importIntoBranch is called with this folder\'s Dokploy project name', async () => {
+    const seen: Array<{ projectName: string; environmentName: string }> = [];
+    const deps: DiscoverySequenceDeps = {
+      ensureProject: async () => ({ ok: true, projectId: 'proj_1', created: false }),
+      checkFolderDirty: async () => ({ ok: true }),
+      checkoutBranch: async () => ({ ok: true, created: false }),
+      importIntoBranch: async (_r, _f, env, _overwrite, projectName) => {
+        seen.push({ projectName, environmentName: env.environmentName });
+        return okImport(['A']);
+      },
+    };
+    const folder = samplePlanFolder({ projectName: 'slidespeak' });
+    const result = await runDiscoverySequence(folder, { overwrite: false }, deps);
+    expect(result.ok).toBe(true);
+    expect(seen).toEqual([{ projectName: 'slidespeak', environmentName: 'production' }]);
+  });
+
   test('ensureProject refusing aborts the folder before any checkout/import runs', async () => {
     const calls: string[] = [];
     const deps: DiscoverySequenceDeps = {

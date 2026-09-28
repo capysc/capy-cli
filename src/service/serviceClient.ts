@@ -109,6 +109,57 @@ export interface MemberDetail {
   projects: MemberProject[];
 }
 
+// ── `capy secrets` (CAP-673): GET /orgs/:orgId/secret-index ─────────────────
+//
+// Read-only, org-wide secret NAME index — never a value. One row per
+// (name, value_hash) pair; `capy secrets` (secretsCommand.ts) renders this
+// as a table and is the only consumer.
+
+/** A location's Dokploy connector info, when the value there was imported from Dokploy (CAP-673's `service_name`/`dokploy_project`/`environment`/`compose_id`). `null` when this location's value has no connector, or a non-dokploy one. */
+export interface SecretIndexService {
+  provider: string;
+  name?: string;
+  dokploy_project?: string;
+  environment?: string;
+  compose_id?: string;
+}
+
+/** One (project, branch) this (name, value_hash) pair lives on. */
+export interface SecretIndexLocation {
+  project_id: string;
+  project_name: string;
+  branch: string;
+  protected: boolean;
+  changed_at?: string;
+  service: SecretIndexService | null;
+}
+
+export interface SecretIndexUser {
+  user_id: string;
+  email: string;
+}
+
+/** One row: a (name, value_hash) pair, every location that holds it, and every user who can read it. Two rows can share a `name` with a DIFFERENT `value_hash` — that's a real divergence, not a bug. */
+export interface SecretIndexRow {
+  name: string;
+  value_hash: string;
+  locations: SecretIndexLocation[];
+  users: SecretIndexUser[];
+}
+
+/** A project the index could not read (e.g. a permission gap) — named and coded, never silently dropped. */
+export interface SecretIndexSkipped {
+  project_id: string;
+  project_name: string;
+  code: string;
+}
+
+export interface SecretIndexResponse {
+  org_id: string;
+  rows: SecretIndexRow[];
+  skipped: SecretIndexSkipped[];
+}
+
 /**
  * Async callback that returns the current valid token, refreshing it if
  * needed. ServiceClient calls this before every request — no local token
@@ -651,5 +702,14 @@ export class ServiceClient {
    */
   async getOrCreateSystemStore(orgId: string): Promise<{ project_id: string; branch: string }> {
     return this.request('POST', `/orgs/${orgId}/system-store`, {});
+  }
+
+  /**
+   * `capy secrets` (CAP-673): every secret NAME across the org, grouped by
+   * (name, value_hash), with every location and every user who can read it.
+   * Read-only, never returns a value — see `SecretIndexResponse`'s own doc.
+   */
+  async getSecretIndex(orgId: string): Promise<SecretIndexResponse> {
+    return this.request('GET', `/orgs/${orgId}/secret-index`);
   }
 }

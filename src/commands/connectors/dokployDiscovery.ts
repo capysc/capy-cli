@@ -1026,8 +1026,15 @@ export interface DiscoverySequenceDeps {
    * EFFECTIVE per-step value — the human's own `--overwrite` flag OR'd with
    * auto-overwrite (see this file's own doc) — computed by
    * `runDiscoverySequence` itself, never decided by this dep.
+   *
+   * `projectName` (CAP-673, added last so every existing mock of this dep
+   * keeps compiling unchanged): the Dokploy PROJECT name this environment's
+   * `DiscoveryPlanFolder` already carries — threaded straight through to
+   * the connector entry's `dokploy_project` field (see
+   * `ConnectOpts.dokployProjectName`'s doc) rather than re-resolved from a
+   * second `project.all` read.
    */
-  importIntoBranch: (repoDir: string, folder: string, env: DiscoveryPlanEnv, overwrite: boolean) => Promise<ImportOutcome>;
+  importIntoBranch: (repoDir: string, folder: string, env: DiscoveryPlanEnv, overwrite: boolean, projectName: string) => Promise<ImportOutcome>;
 }
 
 export interface DiscoverySequenceEnvResult {
@@ -1115,7 +1122,7 @@ export async function runDiscoverySequence(
     const autoOverwrite = checkout.created && !(project.created && isFirstStep);
     const effectiveOverwrite = opts.overwrite || autoOverwrite;
 
-    const outcome = await deps.importIntoBranch(folder.repoDir, folder.folder, env, effectiveOverwrite);
+    const outcome = await deps.importIntoBranch(folder.repoDir, folder.folder, env, effectiveOverwrite, folder.projectName);
     if (!outcome.ok) {
       return { ...acc, failure: { code: outcome.code, message: outcome.message } };
     }

@@ -696,6 +696,25 @@ program
   });
 
 program
+  .command('secrets')
+  .description('List every secret name across the active organization, grouped by value (read-only, never shows a value)')
+  .option('--json', 'emit machine-readable JSON instead of the human UI')
+  .option('--project <name>', 'only rows with a location in this project')
+  .option('--branch <name>', 'only rows with a location on this branch')
+  .option('--no-interactive', 'print the static table even on a TTY')
+  .action(async (options) => {
+    assertNotLocalOnly('secrets');
+    const { SecretsCommand } = await import('./commands/secretsCommand');
+    const cmd = new SecretsCommand();
+    await cmd.execute({
+      json: options.json,
+      project: options.project,
+      branch: options.branch,
+      noInteractive: options.interactive === false,
+    });
+  });
+
+program
   .command('grant-branch <email> <project> <branch>')
   .description('Grant a member wildcard access to a protected branch')
   .action(async (email: string, project: string, branch: string) => {

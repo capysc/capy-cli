@@ -314,13 +314,25 @@ export function mapImportComposeApiError(err: unknown, composeId: string): { cod
   return { code: 'DOKPLOY_API_ERROR', message: err instanceof Error ? err.message : String(err) };
 }
 
-type FetchSourceEnvResult = { ok: true; env: string | null } | ({ ok: false } & { code: string; message: string });
+type FetchSourceEnvResult =
+  | {
+      ok: true;
+      env: string | null;
+      /**
+       * CAP-673: the service's own name in Dokploy (`name`, falling back to
+       * `appName`), off the SAME `application.one`/`compose.one` response
+       * this function already reads — zero extra requests. Undefined when
+       * Dokploy set neither field.
+       */
+      serviceName?: string;
+    }
+  | ({ ok: false } & { code: string; message: string });
 
 /** `GET application.one`, mapped to a stable code + message on failure — never a thrown value. */
 async function fetchApplicationEnv(client: DokployClient, applicationId: string): Promise<FetchSourceEnvResult> {
   try {
-    const { env } = await client.getApplication(applicationId);
-    return { ok: true, env };
+    const app = await client.getApplication(applicationId);
+    return { ok: true, env: app.env, serviceName: app.name ?? app.appName };
   } catch (err) {
     return { ok: false, ...mapImportApiError(err, applicationId) };
   }
@@ -329,8 +341,8 @@ async function fetchApplicationEnv(client: DokployClient, applicationId: string)
 /** `GET compose.one`, mapped to a stable code + message on failure — never a thrown value. Mirrors `fetchApplicationEnv`. */
 async function fetchComposeEnv(client: DokployClient, composeId: string): Promise<FetchSourceEnvResult> {
   try {
-    const { env } = await client.getCompose(composeId);
-    return { ok: true, env };
+    const compose = await client.getCompose(composeId);
+    return { ok: true, env: compose.env, serviceName: compose.name ?? compose.appName };
   } catch (err) {
     return { ok: false, ...mapImportComposeApiError(err, composeId) };
   }
@@ -705,6 +717,36 @@ function overwriteConfirmMessage(plan: OverwritePlan, dollarWarnedNames: readonl
 }
 
 /**
+ * A CAP-673 connector entry for one dokploy-imported value: the provider
+ * fields every dokploy import has always set, plus (when known)
+ * `service_name` from the compose/application response and
+ * `dokploy_project`/`environment` when the caller already resolved them
+ * from `project.all` (discovery only — see `ConnectOpts.dokployProjectName`'s
+ * doc). Shared by the plain import path, its unchanged-value backfill, and
+ * `--overwrite`'s own build step — ONE shape, not three copies that could
+ * drift.
+ */
+function buildDokployConnectorEntry(
+  source: DokployImportSource,
+  value: string,
+  serviceMeta: { serviceName?: string; dokployProject?: string; environment?: string },
+  createdAtSec: number,
+  importedAt: string,
+): ConnectorMetadata {
+  return {
+    provider: 'dokploy',
+    source: 'import',
+    created_at: createdAtSec,
+    fingerprint: fingerprint(value),
+    ...(source.kind === 'application' ? { application_id: source.id } : { compose_id: source.id }),
+    imported_at: importedAt,
+    ...(serviceMeta.serviceName ? { service_name: serviceMeta.serviceName } : {}),
+    ...(serviceMeta.dokployProject ? { dokploy_project: serviceMeta.dokployProject } : {}),
+    ...(serviceMeta.environment ? { environment: serviceMeta.environment } : {}),
+  };
+}
+
+/**
  * `--overwrite`'s own run: compute the plan from Dokploy's FULL importable
  * set (never `--var`-restricted — see `computeOverwritePlan`'s doc), confirm
  * (default no; `--yes` skips it; non-interactive without `--yes` refuses;
@@ -718,12 +760,13 @@ async function runOverwriteImport(args: {
   opts: ConnectOpts;
   source: DokployImportSource;
   sourceEnv: string | null;
+  serviceMeta: { serviceName?: string; dokployProject?: string; environment?: string };
   interactive: boolean;
   dryRun: boolean;
   confirm: (message: string, defaultValue: boolean) => Promise<boolean>;
   now: () => Date;
 }): Promise<ImportOutcome> {
-  const { ctx, opts, source, sourceEnv, interactive, dryRun, confirm, now } = args;
+  const { ctx, opts, source, sourceEnv, serviceMeta, interactive, dryRun, confirm, now } = args;
 
   // Dokploy's FULL importable set — `--var` is ignored under `--overwrite`
   // (see `computeOverwritePlan`'s doc for why a restricted clear would be unsafe).
@@ -768,20 +811,22 @@ async function runOverwriteImport(args: {
 
   const importedAt = now().toISOString();
   const createdAtSec = Math.floor(now().getTime() / 1000);
-  const buildEntry = (name: string, value: string): ConnectorMetadata => ({
-    provider: 'dokploy',
-    source: 'import',
-    created_at: createdAtSec,
-    fingerprint: fingerprint(value),
-    ...(source.kind === 'application' ? { application_id: source.id } : { compose_id: source.id }),
-    imported_at: importedAt,
-  });
+  const buildEntry = (value: string): ConnectorMetadata =>
+    buildDokployConnectorEntry(source, value, serviceMeta, createdAtSec, importedAt);
   const written = [...plan.toImport, ...plan.toReplace].map(({ name, value }) => ({
     varName: name,
     value,
-    entry: buildEntry(name, value),
+    entry: buildEntry(value),
   }));
   const replacedNames = plan.toReplace.map((e) => e.name);
+  // CAP-673: a re-run of `--overwrite` over a name whose value already
+  // matches must still refresh its connector metadata (service_name/
+  // dokploy_project/environment) — see `ImportOutcome.unchangedEntries`'s
+  // doc. Same value, same fingerprint; only the provider fields move.
+  const unchangedEntries = plan.unchanged.map((name) => {
+    const value = fullCandidates.find((c) => c.name === name)!.value;
+    return { varName: name, value, entry: buildEntry(value) };
+  });
 
   return {
     ok: true,
@@ -791,6 +836,7 @@ async function runOverwriteImport(args: {
     cleared: plan.toClear,
     replacedNames,
     unchanged: plan.unchanged,
+    unchangedEntries,
     skipped: [],
     warnings: [
       ...(referenceNames.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceNames }] : []),
@@ -906,6 +952,17 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
           : await fetchApplicationEnv(client, source.id);
       if (!envResult.ok) return { ok: false, code: envResult.code, message: envResult.message };
       const sourceEnv = envResult.env;
+      // CAP-673: `service_name` is free (same response as `env`, above);
+      // `dokploy_project`/`environment` are only known when the caller
+      // already resolved them from `project.all` — discovery's own
+      // per-environment call always does (see `ConnectOpts.dokployProjectName`'s
+      // doc); a plain `--application`/`--compose` import never fetches
+      // `project.all` for it, so those two stay absent there.
+      const serviceMeta = {
+        serviceName: envResult.serviceName,
+        dokployProject: opts.dokployProjectName,
+        environment: opts.dokployEnvironmentName,
+      };
 
       const restrict = parseVarRestriction(opts.var);
       const importable = listImportableEntries(sourceEnv).filter((e) => !restrict || restrict.includes(e.name));
@@ -916,7 +973,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       const candidates = importable.filter((e) => !e.skip);
 
       if (opts.overwrite) {
-        return await runOverwriteImport({ ctx, opts, source, sourceEnv, interactive, dryRun, confirm, now });
+        return await runOverwriteImport({ ctx, opts, source, sourceEnv, serviceMeta, interactive, dryRun, confirm, now });
       }
 
       // A dry run previews the WHOLE plan rather than a hand-picked subset —
@@ -941,15 +998,18 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
       const imported = toImport.map(({ name, value }) => ({
         varName: name,
         value,
-        entry: {
-          provider: 'dokploy',
-          source: 'import',
-          created_at: createdAtSec,
-          fingerprint: fingerprint(value),
-          ...(source.kind === 'application' ? { application_id: source.id } : { compose_id: source.id }),
-          imported_at: importedAt,
-        } as ConnectorMetadata,
+        entry: buildDokployConnectorEntry(source, value, serviceMeta, createdAtSec, importedAt),
       }));
+      // CAP-673: a re-import over a name whose value already matches must
+      // still refresh its connector metadata — see
+      // `ImportOutcome.unchangedEntries`'s doc. Never populated under a dry
+      // run (nothing should look written in a preview).
+      const unchangedEntries = dryRun
+        ? []
+        : unchanged.map((name) => {
+            const value = selected.find((e) => e.name === name)!.value;
+            return { varName: name, value, entry: buildDokployConnectorEntry(source, value, serviceMeta, createdAtSec, importedAt) };
+          });
 
       const warnings: ImportWarning[] = [
         ...(referenceSkipped.length > 0 ? [{ code: 'DOKPLOY_REFERENCE_VALUE', names: referenceSkipped }] : []),
@@ -988,6 +1048,7 @@ export function createDokployConnector(deps: DokployConnectorDeps = {}): Connect
         source,
         imported,
         unchanged,
+        unchangedEntries,
         skipped,
         warnings,
         deployTargetSaved,
@@ -1753,6 +1814,8 @@ async function importIntoBranchSafe(
   env: DiscoveryPlanEnv,
   overwrite: boolean,
   runOpts: { noPush: boolean; interactive: boolean; json: boolean; yes: boolean; baseUrl: string; tokenEnv: string },
+  /** CAP-673: this environment's Dokploy PROJECT name — already known from the plan's own `project.all` read, threaded through so `import()` never re-fetches it (see `ConnectOpts.dokployProjectName`'s doc). */
+  projectName: string,
 ): Promise<ImportOutcome> {
   const path = folderPath(repoDir, folder);
   const pm = new ProjectManager(path);
@@ -1819,6 +1882,9 @@ async function importIntoBranchSafe(
     yes: runOpts.yes,
     baseUrl: runOpts.baseUrl,
     tokenEnv: runOpts.tokenEnv,
+    // CAP-673: already known from the plan — see `dokployProjectName`'s doc.
+    dokployProjectName: projectName,
+    dokployEnvironmentName: env.environmentName,
   };
 
   const outcome = await importFn(resolvedCtx, importOpts);
@@ -1885,7 +1951,8 @@ function buildRealDiscoverySequenceDeps(
       }),
     checkFolderDirty: (repoDir, folder, projectId) => checkFolderDirtySafe(ctx, repoDir, folder, projectId),
     checkoutBranch: (repoDir, folder, projectId, branchName) => checkoutBranchSafe(ctx, repoDir, folder, projectId, branchName),
-    importIntoBranch: (repoDir, folder, env, overwrite) => importIntoBranchSafe(ctx, importFn, repoDir, folder, env, overwrite, runOpts),
+    importIntoBranch: (repoDir, folder, env, overwrite, projectName) =>
+      importIntoBranchSafe(ctx, importFn, repoDir, folder, env, overwrite, runOpts, projectName),
   };
 }
 
