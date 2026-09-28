@@ -7,10 +7,13 @@ import {
   resolveSecretValue,
   render,
   filteredRows,
+  filteredRowsWithReasons,
   formatUsersCell,
   formatBranchCell,
   formatProjectCell,
-  formatServiceCell,
+  formatConnectorCell,
+  formatTargetCell,
+  formatIntegrationsCell,
   formatUpdatedCell,
   mostRecentChangedAt,
   maskSecretValue,
@@ -61,6 +64,17 @@ const KEY_DOWN = `${ESC}[B`;
 const KEY_TAB = '\t';
 const KEY_SHIFT_TAB = `${ESC}[Z`;
 const ENTER = '\r';
+
+// Same teal the rest of the CLI's "← current" markers use (src/ui/colors.ts's
+// `ACCENT`) — duplicated here rather than imported so this test file can
+// assert on the exact byte sequence independently of the module under test.
+const ACCENT = `${ESC}[38;5;43m`;
+const ANSI_RESET = `${ESC}[0m`;
+
+/** Strips ANSI escapes the same way `secretsScreen.ts`'s own (private) `stripAnsi` does, so width/column assertions measure visible columns, not escape bytes. */
+function stripAnsiForTest(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
 
 /** Folds `handleKey` over a sequence of keypresses, keeping only the final state — a `reduce`-based stand-in for "press these keys in order" that never needs a reassigned binding. */
 function pressKeys(state: SecretsScreenState, ...keys: readonly string[]): SecretsScreenState {
@@ -168,22 +182,26 @@ describe('multi-key chunks reach the reducer in order (paste / fast-typing bug)'
   });
 });
 
-describe('handleKey — column cycling', () => {
-  test('SERVICE is the default (first-shown) column', () => {
+describe('handleKey — column cycling (CAP-679: CONNECTOR/TARGET/INTEGRATIONS replace SERVICE)', () => {
+  test('CONNECTOR is the default (first-shown) column', () => {
     const s0 = initialSecretsScreenState([row()]);
-    expect(s0.column).toBe('service');
+    expect(s0.column).toBe('connector');
   });
 
-  test('Tab cycles SERVICE -> USERS -> BRANCH -> PROJECT -> SERVICE (wrapping)', () => {
+  test('Tab cycles CONNECTOR -> TARGET -> INTEGRATIONS -> USERS -> BRANCH -> PROJECT -> CONNECTOR (wrapping)', () => {
     const s0 = initialSecretsScreenState([row()]);
     const s1 = handleKey(s0, KEY_TAB).state;
-    expect(s1.column).toBe('users');
+    expect(s1.column).toBe('target');
     const s2 = handleKey(s1, KEY_TAB).state;
-    expect(s2.column).toBe('branch');
+    expect(s2.column).toBe('integrations');
     const s3 = handleKey(s2, KEY_TAB).state;
-    expect(s3.column).toBe('project');
+    expect(s3.column).toBe('users');
     const s4 = handleKey(s3, KEY_TAB).state;
-    expect(s4.column).toBe('service');
+    expect(s4.column).toBe('branch');
+    const s5 = handleKey(s4, KEY_TAB).state;
+    expect(s5.column).toBe('project');
+    const s6 = handleKey(s5, KEY_TAB).state;
+    expect(s6.column).toBe('connector');
   });
 
   test('Shift-Tab cycles backwards, wrapping the other way', () => {
@@ -195,7 +213,11 @@ describe('handleKey — column cycling', () => {
     const s3 = handleKey(s2, KEY_SHIFT_TAB).state;
     expect(s3.column).toBe('users');
     const s4 = handleKey(s3, KEY_SHIFT_TAB).state;
-    expect(s4.column).toBe('service');
+    expect(s4.column).toBe('integrations');
+    const s5 = handleKey(s4, KEY_SHIFT_TAB).state;
+    expect(s5.column).toBe('target');
+    const s6 = handleKey(s5, KEY_SHIFT_TAB).state;
+    expect(s6.column).toBe('connector');
   });
 });
 
@@ -252,32 +274,97 @@ describe('column cell formatting', () => {
     ).toBe('web');
   });
 
-  test('service cell reuses the dokploy_project/name fallback chain, +N when distinct', () => {
+});
+
+describe('CONNECTOR / TARGET / INTEGRATIONS cell formatting (CAP-679 — replaces the old SERVICE column)', () => {
+  test('connector cell: "[provider] name", falling back to service.provider when the new `connector` field is absent (old-server payload)', () => {
     expect(
-      formatServiceCell(row({ locations: [loc({ service: { provider: 'dokploy', name: 'main', dokploy_project: 'slidespeak' } })] })),
-    ).toBe('slidespeak / main');
-    expect(formatServiceCell(row({ locations: [loc({ service: null })] }))).toBe('—');
+      formatConnectorCell(row({ locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'main' } })] })),
+    ).toBe('[dokploy] main');
+    // No `connector` field at all (CAP-676 predates this server) — falls back to service.provider.
+    expect(formatConnectorCell(row({ locations: [loc({ service: { provider: 'dokploy', name: 'main' } })] }))).toBe('[dokploy] main');
+  });
+
+  test('connector cell: bare "[provider]" when there is a provider but no name', () => {
+    expect(formatConnectorCell(row({ locations: [loc({ connector: { provider: 'aws' }, service: null })] }))).toBe('[aws]');
+  });
+
+  test('connector cell: "—" when there is no connector at all', () => {
+    expect(formatConnectorCell(row({ locations: [loc({ service: null })] }))).toBe('—');
+  });
+
+  test('connector cell: +N for DISTINCT connector labels across locations (identical labels do not inflate it)', () => {
     expect(
-      formatServiceCell(
+      formatConnectorCell(
         row({
           locations: [
-            loc({ service: { provider: 'dokploy', name: 'main', dokploy_project: 'slidespeak' } }),
-            loc({ service: { provider: 'dokploy', name: 'worker', dokploy_project: 'slidespeak' } }),
+            loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'main' } }),
+            loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'worker' } }),
           ],
         }),
       ),
-    ).toBe('slidespeak / main +1');
-    // Same service repeated across locations does not inflate the count.
+    ).toBe('[dokploy] main +1');
     expect(
-      formatServiceCell(
+      formatConnectorCell(
         row({
           locations: [
-            loc({ service: { provider: 'dokploy', name: 'main', dokploy_project: 'slidespeak' } }),
-            loc({ service: { provider: 'dokploy', name: 'main', dokploy_project: 'slidespeak' } }),
+            loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'main' } }),
+            loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'main' } }),
           ],
         }),
       ),
-    ).toBe('slidespeak / main'); // identical service label at both locations — no +N
+    ).toBe('[dokploy] main'); // identical label at both locations — no +N
+  });
+
+  test('target cell: "[provider] target", with a trailing "*" when stale', () => {
+    expect(formatTargetCell(row({ locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod', stale: false }] })] }))).toBe(
+      '[aws-ecs] prod',
+    );
+    expect(formatTargetCell(row({ locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod', stale: true }] })] }))).toBe(
+      '[aws-ecs] prod*',
+    );
+  });
+
+  test('target cell: "—" when there are no targets anywhere — whether `targets` is absent (old-server payload) or explicitly `[]`', () => {
+    expect(formatTargetCell(row({ locations: [loc()] }))).toBe('—'); // `targets` field entirely absent
+    expect(formatTargetCell(row({ locations: [loc({ targets: [] })] }))).toBe('—');
+  });
+
+  test('target cell: +N for DISTINCT target labels, counted across every location (one location can itself carry more than one target)', () => {
+    expect(
+      formatTargetCell(
+        row({
+          locations: [
+            loc({
+              targets: [
+                { provider: 'aws-ecs', target: 'prod', stale: false },
+                { provider: 'aws-ecs', target: 'staging', stale: false },
+              ],
+            }),
+          ],
+        }),
+      ),
+    ).toBe('[aws-ecs] prod +1');
+  });
+
+  test('integrations cell: "in:<provider>" then "out:<provider>", distinct, space-separated, names left out', () => {
+    expect(
+      formatIntegrationsCell(
+        row({
+          locations: [
+            loc({
+              connector: { provider: 'dokploy' },
+              service: { provider: 'dokploy', name: 'main' },
+              targets: [{ provider: 'aws-ecs', target: 'prod', stale: false }],
+            }),
+          ],
+        }),
+      ),
+    ).toBe('in:dokploy out:aws-ecs');
+  });
+
+  test('integrations cell: "—" when there is neither a connector nor any targets', () => {
+    expect(formatIntegrationsCell(row({ locations: [loc({ service: null })] }))).toBe('—');
   });
 });
 
@@ -350,6 +437,287 @@ describe('search bar — always-on, fzf-style (no "/" mode)', () => {
     const s1 = type(s0, 'DB'); // only 1 row matches now — cursor must come back into range
     expect(filteredRows(s1)).toHaveLength(1);
     expect(s1.cursorIndex).toBe(0);
+  });
+});
+
+describe('search bar — project/branch/value matching (CAP-678)', () => {
+  const webRow = row({
+    name: 'STRIPE_KEY',
+    value_hash: 'unrelated-hash',
+    locations: [loc({ project_name: 'web-storefront', branch: 'production' })],
+  });
+  const apiRow = row({
+    name: 'REDIS_URL',
+    value_hash: 'also-unrelated',
+    locations: [loc({ project_name: 'api-gateway', branch: 'staging-preview' })],
+  });
+  const rows = [webRow, apiRow];
+
+  test('matches on a location\'s project_name, case-insensitively', () => {
+    const s = type(initialSecretsScreenState(rows), 'STOREFRONT');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['STRIPE_KEY']);
+  });
+
+  test('"prod" matches a production branch', () => {
+    const s = type(initialSecretsScreenState(rows), 'prod');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['STRIPE_KEY']);
+  });
+
+  test('name matching still works alongside the new signals', () => {
+    const s = type(initialSecretsScreenState(rows), 'REDIS');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['REDIS_URL']);
+  });
+
+  test('an exact value match finds the row whose value_hash equals hashValue(query)', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    const s = type(initialSecretsScreenState([...rows, target]), FAKE_LONG_VALUE);
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['DB_PASSWORD']);
+  });
+
+  test('a value pasted with surrounding whitespace still matches via the trimmed hash', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    // Typed one character at a time, including leading/trailing spaces —
+    // the same way a paste of "  value  " would arrive at the reducer.
+    const s = type(initialSecretsScreenState([...rows, target]), `  ${FAKE_LONG_VALUE}  `);
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['DB_PASSWORD']);
+  });
+
+  test('a partial value never matches — value matching is exact only', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    const s = type(initialSecretsScreenState([...rows, target]), FAKE_LONG_VALUE.slice(0, -1));
+    expect(filteredRows(s).map((r) => r.name)).not.toContain('DB_PASSWORD');
+  });
+
+  test('match reasons are reported in priority order value > name > project > branch', () => {
+    // A query that is simultaneously this row's exact value AND a substring
+    // of its own name — value must still win as the reported reason.
+    const trickyValue = 'API_KEY_LOOKALIKE';
+    const target = row({ name: 'API_KEY_LOOKALIKE_SUFFIX', value_hash: hashOf(trickyValue), locations: [loc()] });
+    const s = type(initialSecretsScreenState([target]), trickyValue);
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons[0]).toBe('value');
+    expect(match.reasons).toContain('name');
+  });
+
+  test('no reasons are reported when the query is empty', () => {
+    const matches = filteredRowsWithReasons(initialSecretsScreenState(rows));
+    expect(matches.every((m) => m.reasons.length === 0)).toBe(true);
+  });
+
+  test('the match count in filteredRowsWithReasons matches filteredRows', () => {
+    const s = type(initialSecretsScreenState(rows), 'a');
+    expect(filteredRowsWithReasons(s).length).toBe(filteredRows(s).length);
+  });
+
+  test('render shows a match tag for the strongest reason, including a value match', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    const s = type(initialSecretsScreenState([target]), FAKE_LONG_VALUE);
+    const frame = render(s, 100, 20);
+    expect(frame).toContain('[value]');
+  });
+
+  test('render shows no match tags when the query is empty', () => {
+    const frame = render(initialSecretsScreenState(rows), 100, 20);
+    expect(frame).not.toContain('[name]');
+    expect(frame).not.toContain('[project]');
+    expect(frame).not.toContain('[branch]');
+    expect(frame).not.toContain('[value]');
+  });
+
+  test('updated placeholder mentions name, project, branch, connector, target, and exact value', () => {
+    const frame = render(initialSecretsScreenState(rows), 100, 20);
+    expect(frame).toContain('name, project, branch, connector, target, or exact value');
+  });
+
+  test('the query lives only in state.search.query — nothing else in state echoes it', () => {
+    const query = 'super-secret-query-text';
+    const s = type(initialSecretsScreenState(rows), query);
+    const { search, ...rest } = s;
+    expect(JSON.stringify(rest)).not.toContain(query);
+    expect(search.query).toBe(query);
+  });
+
+  test("matches on a location's inbound connector name (service.name), case-insensitively", () => {
+    const target = row({
+      name: 'BACKEND_SECRET',
+      locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([...rows, target]), 'backend-preview');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['BACKEND_SECRET']);
+  });
+
+  test('a partial connector-name substring still matches (e.g. "preview" inside "backend-preview")', () => {
+    const target = row({
+      name: 'BACKEND_SECRET',
+      locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([...rows, target]), 'preview');
+    // `apiRow` (from the outer `rows`) also matches via its
+    // "staging-preview" branch — the point here is just that the CONNECTOR
+    // partial match fires too, not exclusivity.
+    expect(filteredRows(s).map((r) => r.name)).toContain('BACKEND_SECRET');
+  });
+
+  test('matches on the connector provider even when it is not part of the connector name', () => {
+    const target = row({
+      name: 'BACKEND_SECRET',
+      locations: [loc({ connector: { provider: 'aws-secrets' }, service: { provider: 'aws-secrets', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([...rows, target]), 'aws-secrets');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['BACKEND_SECRET']);
+  });
+
+  test('matches via the connector provider even on an old-server payload with no `connector` field (falls back to service.provider)', () => {
+    const target = row({
+      name: 'BACKEND_SECRET',
+      locations: [loc({ service: { provider: 'aws-secrets', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([...rows, target]), 'aws-secrets');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['BACKEND_SECRET']);
+  });
+
+  test('a location with no connector at all (null service, no connector field) is never matched via the connector signal', () => {
+    const target = row({ name: 'NO_CONNECTOR_ROW', locations: [loc({ service: null })] });
+    const s = type(initialSecretsScreenState([...rows, target]), 'backend-preview');
+    expect(filteredRows(s).map((r) => r.name)).not.toContain('NO_CONNECTOR_ROW');
+  });
+
+  test("matches on a location's outbound target (provider or target name)", () => {
+    const target = row({
+      name: 'DEPLOYED_SECRET',
+      locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
+    });
+    const s1 = type(initialSecretsScreenState([...rows, target]), 'prod-cluster');
+    expect(filteredRows(s1).map((r) => r.name)).toEqual(['DEPLOYED_SECRET']);
+    const s2 = type(initialSecretsScreenState([...rows, target]), 'aws-ecs');
+    expect(filteredRows(s2).map((r) => r.name)).toEqual(['DEPLOYED_SECRET']);
+  });
+
+  test('a location with no targets at all (absent `targets` field, an old-server payload) is never matched via the target signal', () => {
+    const target = row({ name: 'NO_TARGET_ROW', locations: [loc()] });
+    const s = type(initialSecretsScreenState([...rows, target]), 'prod-cluster');
+    expect(filteredRows(s).map((r) => r.name)).not.toContain('NO_TARGET_ROW');
+  });
+
+  test('match reasons prioritize value > name > project > branch > connector > target', () => {
+    // A query that is simultaneously this row's connector name AND a
+    // substring of its branch — connector must lose to branch here.
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ branch: 'staging-preview', connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'staging-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'staging-preview');
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons[0]).toBe('branch');
+    expect(match.reasons).toContain('connector');
+  });
+
+  test('connector beats target when a query matches both', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [
+        loc({
+          connector: { provider: 'dokploy' },
+          service: { provider: 'dokploy', name: 'shared-name' },
+          targets: [{ provider: 'aws-ecs', target: 'shared-name', stale: false }],
+        }),
+      ],
+    });
+    const s = type(initialSecretsScreenState([target]), 'shared-name');
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons[0]).toBe('connector');
+    expect(match.reasons).toContain('target');
+  });
+
+  test('a query that ONLY matches via the connector reports connector as the (only, strongest) reason', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'backend-preview');
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons).toEqual(['connector']);
+  });
+
+  test('a query that ONLY matches via a target reports target as the (only) reason', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'prod-cluster');
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons).toEqual(['target']);
+  });
+
+  test('render shows a [connector] match tag', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'backend-preview');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain('[connector]');
+  });
+
+  test('render shows a [target] match tag', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'prod-cluster');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain('[target]');
+  });
+});
+
+describe('search styling — right-justified match tag, accent-colored query/tag (CAP-678 follow-up)', () => {
+  /** Finds the rendered (ANSI-stripped) body line that carries a `[reason]` match tag. */
+  function matchTagLine(frame: string): string {
+    const stripped = stripAnsiForTest(frame);
+    const line = stripped.split('\n').find((l) => /\[(value|name|project|branch)\]/.test(l));
+    if (line === undefined) throw new Error('no line with a match tag found in frame');
+    return line;
+  }
+
+  test("the tag's closing ']' sits exactly 2 visible columns before the next column starts", () => {
+    const s = type(initialSecretsScreenState([row({ name: 'SHORT_NAME' })]), 'SHORT');
+    const frame = render(s, 100, 20);
+    const line = matchTagLine(frame);
+    const closeIdx = line.indexOf(']');
+    expect(line.slice(closeIdx + 1, closeIdx + 3)).toBe('  ');
+    expect(line.charAt(closeIdx + 3)).not.toBe(' ');
+  });
+
+  test('a long name is truncated to make room, but the match tag is never cut off', () => {
+    const longName = `PREFIX_${'X'.repeat(200)}`;
+    const s = type(initialSecretsScreenState([row({ name: longName })]), 'PREFIX');
+    const frame = render(s, 100, 20);
+    const line = matchTagLine(frame);
+    expect(line).toContain('…'); // the long name got truncated
+    expect(line).toContain('[name]'); // the tag itself is intact, not truncated
+  });
+
+  test('typed query text is wrapped in the shared ACCENT color (teal, 38;5;43 — not a generic ANSI blue)', () => {
+    const rows = [row({ name: 'API_KEY' })];
+    const s = type(initialSecretsScreenState(rows), 'api');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain(`${ACCENT}api${ANSI_RESET}`);
+    expect(frame).not.toContain('\x1b[34m'); // not the old plain-blue constant
+    expect(frame).not.toContain('\x1b[36m'); // not cyan either
+  });
+
+  test('the placeholder is NOT accent-colored — only real typed text is', () => {
+    const rows = [row({ name: 'API_KEY' })];
+    const frame = render(initialSecretsScreenState(rows), 100, 20);
+    expect(frame).toContain('type to filter');
+    expect(frame).not.toContain(ACCENT);
+  });
+
+  test('the match tag is wrapped in the shared ACCENT color', () => {
+    const rows = [row({ name: 'API_KEY' })];
+    const s = type(initialSecretsScreenState(rows), 'API');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain(`${ACCENT}[name]${ANSI_RESET}`);
   });
 });
 
@@ -541,5 +909,120 @@ describe('render — search bar', () => {
     const frame = render(s, 100, 20);
     expect(frame).toContain('api');
     expect(frame).toContain('1/2');
+  });
+});
+
+describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, popup connector/target', () => {
+  test('a long CONNECTOR label truncates but keeps its "+N" suffix intact, never cut', () => {
+    const longName = 'X'.repeat(60);
+    const target = row({
+      name: 'ROW',
+      locations: [
+        loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: longName } }),
+        loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'other' } }),
+      ],
+    });
+    const frame = render(initialSecretsScreenState([target]), 100, 20);
+    const stripped = stripAnsiForTest(frame);
+    const line = stripped.split('\n').find((l) => l.includes('ROW'));
+    expect(line).toBeDefined();
+    expect(line).toContain('…'); // the label got truncated
+    expect(line).toContain('… +1'); // and the "+1" survived, right after the ellipsis
+    expect(line).not.toMatch(/\+\d[^\s]/); // "+1" is never itself sliced (e.g. into a bare "+")
+  });
+
+  test('a long TARGET label truncates but keeps its "+N" suffix intact', () => {
+    const longTarget = 'Y'.repeat(60);
+    const target = row({
+      name: 'ROW',
+      locations: [
+        loc({
+          targets: [
+            { provider: 'aws-ecs', target: longTarget, stale: false },
+            { provider: 'aws-ecs', target: 'other', stale: false },
+          ],
+        }),
+      ],
+    });
+    const s = pressKeys(initialSecretsScreenState([target]), KEY_TAB); // connector -> target
+    const frame = render(s, 100, 20);
+    const stripped = stripAnsiForTest(frame);
+    const line = stripped.split('\n').find((l) => l.includes('ROW'));
+    expect(line).toBeDefined();
+    expect(line).toContain('… +1');
+  });
+
+  test('INTEGRATIONS overflow packs whole provider tags and reports how many were hidden, never slicing one in half', () => {
+    const manyProvidersRow = row({
+      name: 'ROW',
+      locations: [
+        loc({ connector: { provider: 'dokploy' } }),
+        loc({ connector: { provider: 'aws-secrets' } }),
+        loc({ connector: { provider: 'gcp-secrets' } }),
+        loc({
+          connector: { provider: 'azure-kv' },
+          targets: [
+            { provider: 'aws-ecs', target: 't1', stale: false },
+            { provider: 'gcp-run', target: 't2', stale: false },
+            { provider: 'lambda-fn', target: 't3', stale: false },
+          ],
+        }),
+      ],
+    });
+    const s = pressKeys(initialSecretsScreenState([manyProvidersRow]), KEY_TAB, KEY_TAB); // connector -> target -> integrations
+    const frame = render(s, 100, 20);
+    const stripped = stripAnsiForTest(frame);
+    const line = stripped.split('\n').find((l) => l.includes('ROW'));
+    expect(line).toBeDefined();
+    expect(line).toMatch(/ \+\d+(\s|$)/); // some "+N" is present, as its own trailing token
+    expect(line).toContain('in:dokploy'); // the first (whole) tags are still shown
+    expect(line).not.toContain('lambda-fn'); // and the tail got dropped, not sliced mid-word
+  });
+
+  test('INTEGRATIONS shows "—" when a row has neither a connector nor a target', () => {
+    const target = row({ name: 'ROW', locations: [loc({ service: null })] });
+    const s = pressKeys(initialSecretsScreenState([target]), KEY_TAB, KEY_TAB);
+    const frame = render(s, 100, 20);
+    const stripped = stripAnsiForTest(frame);
+    const line = stripped.split('\n').find((l) => l.includes('ROW'));
+    expect(line).toContain('—');
+  });
+
+  test('the details popup shows the per-location connector as "[provider] name" (renamed from "service")', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ connector: { provider: 'dokploy' }, service: { provider: 'dokploy', name: 'backend-preview' } })],
+    });
+    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const frame = render(s1, 100, 30);
+    expect(frame).toContain('[dokploy] backend-preview');
+  });
+
+  test('the details popup spells out a stale target with "(stale)"', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: true }] })],
+    });
+    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const frame = render(s1, 100, 30);
+    expect(frame).toContain('targets: [aws-ecs] prod-cluster (stale)');
+  });
+
+  test('the details popup lists a non-stale target with no "(stale)" marker', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ targets: [{ provider: 'aws-ecs', target: 'prod-cluster', stale: false }] })],
+    });
+    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const frame = render(s1, 100, 30);
+    expect(frame).toContain('targets: [aws-ecs] prod-cluster');
+    expect(frame).not.toContain('(stale)');
+  });
+
+  test('the details popup shows nothing target-related for a location with no targets', () => {
+    const target = row({ name: 'ROW', locations: [loc()] });
+    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const frame = render(s1, 100, 30);
+    expect(frame).not.toContain('targets:');
   });
 });

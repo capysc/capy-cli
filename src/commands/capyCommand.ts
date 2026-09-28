@@ -43,6 +43,7 @@ import { resolveLocalProjectKey } from '../core/localUnlock';
 import { isMembershipRevokedError } from '../errors/membershipRevoked';
 import { cleanupOrgData } from '../cleanup/orgCleanup';
 import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
+import { ACCENT } from '../ui/colors';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -455,7 +456,7 @@ export class CapyCommand {
       message: 'Select organization for project:',
       choices: [
         ...orgs.map(o => ({
-          name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+          name: o.id === currentOrgId ? `${o.name}  ${ACCENT}← current\x1b[0m` : o.name,
           value: o.id,
         })),
         { name: 'Create new organization +', value: createNewOrgValue },

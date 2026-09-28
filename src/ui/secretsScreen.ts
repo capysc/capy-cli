@@ -15,10 +15,11 @@
 // location to trust and never sees or returns anything but that one row's
 // plaintext (or a coded reason it couldn't get one).
 
-import type { SecretIndexLocation, SecretIndexRow, SecretIndexService } from '../service/serviceClient';
+import type { SecretIndexLocation, SecretIndexRow, SecretIndexTarget } from '../service/serviceClient';
 import { formatRelativeTime } from './relativeTime';
 import { renderInlineValue } from './editScreen';
 import { hashValue } from '../commands/statusCommand';
+import { ACCENT } from './colors';
 
 // ── ANSI (mirrors EditScreen's palette/look-and-feel) ───────────────────────
 
@@ -149,9 +150,9 @@ function tokenizeFrom(chunk: string, index: number): readonly string[] {
 
 // ── Column cycling ───────────────────────────────────────────────────────────
 
-export type ColumnMode = 'service' | 'users' | 'branch' | 'project';
-/** Tab cycles forward through this order (wrapping); Shift-Tab backward. SERVICE is the default/first-shown column. */
-export const COLUMN_ORDER: readonly ColumnMode[] = ['service', 'users', 'branch', 'project'];
+export type ColumnMode = 'connector' | 'target' | 'integrations' | 'users' | 'branch' | 'project';
+/** Tab cycles forward through this order (wrapping); Shift-Tab backward. CONNECTOR is the default/first-shown column (CAP-679 — "service" was a misnomer for what's really an inbound connector, and is gone as a column). */
+export const COLUMN_ORDER: readonly ColumnMode[] = ['connector', 'target', 'integrations', 'users', 'branch', 'project'];
 
 function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
   const idx = COLUMN_ORDER.indexOf(column);
@@ -191,7 +192,7 @@ export interface SecretsScreenState {
 export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): SecretsScreenState {
   return {
     rows,
-    column: 'service',
+    column: 'connector',
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
@@ -199,11 +200,105 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): Secr
   };
 }
 
-/** Rows currently visible, after the live NAME filter (case-insensitive substring). */
+// ── Search matching (CAP-678/CAP-679) ────────────────────────────────────────
+//
+// The always-on search bar matches a row on any of six signals: its NAME,
+// any location's PROJECT, BRANCH, CONNECTOR (inbound), or TARGET (outbound)
+// (case-insensitive substring, query trimmed of surrounding whitespace), or
+// an exact VALUE match — the query's own sha256-slice hash (via the same
+// `hashValue` `resolveSecretValue` uses) compared against `row.value_hash`.
+// Nothing about the query or a candidate value ever leaves this process;
+// this is a pure, local, in-memory comparison against a hash the server
+// already sent.
+//
+// `computeFilteredRows` is the single pass that does both the filtering and
+// the "why did this row match" bookkeeping the UI tags rows with — it hashes
+// the query at most twice (once for the raw query, once more only if
+// trimming changed it) regardless of how many rows there are, never once per
+// row.
+
+export type MatchReason = 'value' | 'name' | 'project' | 'branch' | 'connector' | 'target';
+
+export interface MatchedRow {
+  readonly row: SecretIndexRow;
+  /** Every reason `row` matched, in priority order (value > name > project > branch > connector > target); empty when the query is blank. */
+  readonly reasons: readonly MatchReason[];
+}
+
+/**
+ * Whether `location`'s inbound connector (if it has one) matches `qLower`:
+ * a substring of its provider (`connector.provider`, falling back to
+ * `service.provider` on a server that predates CAP-676 — see
+ * `SecretIndexConnector`'s doc) or of its name (`service.name` — the
+ * connector shape itself carries no name field). No provider at all (no
+ * connector AND no service) never matches anything.
+ */
+function locationConnectorMatches(location: SecretIndexLocation, qLower: string): boolean {
+  const provider = location.connector?.provider ?? location.service?.provider;
+  const name = location.service?.name;
+  const candidates = [provider, name].filter((s): s is string => Boolean(s));
+  return candidates.some((s) => s.toLowerCase().includes(qLower));
+}
+
+/** Whether ANY of `location`'s outbound deploy targets (absent/`[]` on a server that predates CAP-676) matches `qLower` — a substring of that target's provider or of its target name. */
+function locationTargetMatches(location: SecretIndexLocation, qLower: string): boolean {
+  return (location.targets ?? []).some(
+    (t) => t.provider.toLowerCase().includes(qLower) || t.target.toLowerCase().includes(qLower),
+  );
+}
+
+/** `qLower` is the trimmed, lowercased query; `rawHash`/`trimmedHash` are the query's hash(es) — computed once by the caller, never here. */
+function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, trimmedHash: string | null): readonly MatchReason[] {
+  const isValueMatch = row.value_hash === rawHash || (trimmedHash !== null && row.value_hash === trimmedHash);
+  const isNameMatch = row.name.toLowerCase().includes(qLower);
+  const isProjectMatch = row.locations.some((l) => l.project_name.toLowerCase().includes(qLower));
+  const isBranchMatch = row.locations.some((l) => l.branch.toLowerCase().includes(qLower));
+  const isConnectorMatch = row.locations.some((l) => locationConnectorMatches(l, qLower));
+  const isTargetMatch = row.locations.some((l) => locationTargetMatches(l, qLower));
+  return (
+    [
+      [isValueMatch, 'value'] as const,
+      [isNameMatch, 'name'] as const,
+      [isProjectMatch, 'project'] as const,
+      [isBranchMatch, 'branch'] as const,
+      [isConnectorMatch, 'connector'] as const,
+      [isTargetMatch, 'target'] as const,
+    ] satisfies readonly (readonly [boolean, MatchReason])[]
+  )
+    .filter(([matched]) => matched)
+    .map(([, reason]) => reason);
+}
+
+/**
+ * Filters `rows` against `query` and, for each survivor, records which
+ * signal(s) it matched on — in one pass, so the query's hash(es) are
+ * computed exactly once no matter how many rows are scanned. An
+ * empty/whitespace-only query short-circuits to "everything matches, no
+ * reasons" before any hashing happens (mirrors the old NAME-only filter's
+ * behavior when the bar is empty).
+ */
+function computeFilteredRows(rows: readonly SecretIndexRow[], query: string): readonly MatchedRow[] {
+  const trimmed = query.trim();
+  const qLower = trimmed.toLowerCase();
+  if (!qLower) return rows.map((row) => ({ row, reasons: [] as const }));
+
+  // Computed ONCE per filter pass — never inside the per-row map below.
+  const rawHash = hashValue(query);
+  const trimmedHash = trimmed !== query ? hashValue(trimmed) : null;
+
+  return rows
+    .map((row) => ({ row, reasons: rowMatchReasons(row, qLower, rawHash, trimmedHash) }))
+    .filter((m) => m.reasons.length > 0);
+}
+
+/** Rows currently visible, plus why each one matched — see the module note above `computeFilteredRows`. */
+export function filteredRowsWithReasons(state: SecretsScreenState): readonly MatchedRow[] {
+  return computeFilteredRows(state.rows, state.search.query);
+}
+
+/** Rows currently visible, after the live filter (name, project, branch, connector, target, or exact value — see `computeFilteredRows`). */
 export function filteredRows(state: SecretsScreenState): readonly SecretIndexRow[] {
-  const q = state.search.query.trim().toLowerCase();
-  if (!q) return state.rows;
-  return state.rows.filter((r) => r.name.toLowerCase().includes(q));
+  return computeFilteredRows(state.rows, state.search.query).map((m) => m.row);
 }
 
 function clampIndex(index: number, length: number): number {
@@ -233,9 +328,7 @@ export function handleKey(state: SecretsScreenState, key: string): ReduceResult 
 }
 
 function filteredRowsFor(rows: readonly SecretIndexRow[], query: string): readonly SecretIndexRow[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return rows;
-  return rows.filter((r) => r.name.toLowerCase().includes(q));
+  return computeFilteredRows(rows, query).map((m) => m.row);
 }
 
 /** Sets the search query and reclamps the cursor into the (possibly now-shorter) filtered set — never resets it to the top just because the query changed. */
@@ -402,7 +495,7 @@ export function formatUsersCell(row: SecretIndexRow): string {
   return `${n} user${n === 1 ? '' : 's'}`;
 }
 
-/** Just the branch name(s) now — PROJECT is its own column, so no `project · ` prefix here. `+N` counts DISTINCT branch names across the row's locations, same convention as SERVICE/PROJECT (not raw location count — two locations on the same branch name don't inflate it). */
+/** Just the branch name(s) now — PROJECT is its own column, so no `project · ` prefix here. `+N` counts DISTINCT branch names across the row's locations, same convention as CONNECTOR/TARGET/PROJECT (not raw location count — two locations on the same branch name don't inflate it). */
 export function formatBranchCell(row: SecretIndexRow): string {
   const first = row.locations[0];
   if (!first) return '—';
@@ -418,25 +511,116 @@ export function formatProjectCell(row: SecretIndexRow): string {
   return distinct.size > 1 ? `${first.project_name} +${distinct.size - 1}` : first.project_name;
 }
 
-/** Same fallback chain as `SecretsCommand.formatService` — kept as a free function here so the TUI's static and interactive renderings can never quietly diverge in wording. */
-export function formatServiceLabel(service: SecretIndexService | null): string {
-  if (!service) return '—';
-  if (service.name) {
-    return service.dokploy_project ? `${service.dokploy_project} / ${service.name}` : service.name;
-  }
-  if (service.compose_id) return `dokploy:${service.compose_id}`;
-  return '—';
+// ── CONNECTOR / TARGET / INTEGRATIONS (CAP-679) ─────────────────────────────
+//
+// CAP-679 renamed the old "service" column: a Dokploy service is really one
+// kind of INBOUND CONNECTOR (a value's source), and it was never the only
+// half of the picture — a value can also be pushed OUT to one or more
+// deploy TARGETS. INTEGRATIONS is the compact, names-free summary of both
+// directions at once. None of these three read `SecretsCommand`'s static
+// table (see CAP-679's note there on why that table keeps saying SERVICE).
+
+/**
+ * One location's inbound-connector label: `[provider] name`, or bare
+ * `[provider]` when there's a provider but no name, or `—` when there's no
+ * connector at all. Provider prefers the new `connector.provider` (CAP-676)
+ * and falls back to the older `service.provider` — a server that predates
+ * CAP-676 never sends `connector`, so this is the compatibility seam. Name
+ * comes only from `service.name` — the new `connector` shape carries no
+ * name field of its own.
+ */
+function formatLocationConnectorLabel(location: SecretIndexLocation): string {
+  const provider = location.connector?.provider ?? location.service?.provider;
+  if (!provider) return '—';
+  const name = location.service?.name;
+  return name ? `[${provider}] ${name}` : `[${provider}]`;
 }
 
-export function formatServiceCell(row: SecretIndexRow): string {
-  const first = row.locations[0] ?? null;
-  const label = formatServiceLabel(first ? first.service : null);
-  const distinct = new Set(row.locations.map((l) => formatServiceLabel(l.service)));
+/** First location's connector label; `+N` for more DISTINCT connector labels across the row's locations (same "first + distinct count" convention as BRANCH/PROJECT — a location with no connector still counts as its own distinct `—` label, exactly as the old service cell treated a null service). */
+export function formatConnectorCell(row: SecretIndexRow): string {
+  const first = row.locations[0];
+  const label = first ? formatLocationConnectorLabel(first) : '—';
+  const distinct = new Set(row.locations.map((l) => formatLocationConnectorLabel(l)));
   return distinct.size > 1 ? `${label} +${distinct.size - 1}` : label;
 }
 
-export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode): string {
-  if (column === 'service') return formatServiceCell(row);
+/** One target's label: `[provider] target`, with a trailing `*` when `stale` (chosen over a spelled-out "(stale)" so it stays compact in this already-narrow column; the details popup spells it out instead — see `buildPopupLines`). */
+function formatTargetLabel(target: SecretIndexTarget): string {
+  const base = `[${target.provider}] ${target.target}`;
+  return target.stale ? `${base}*` : base;
+}
+
+/** Every target across every one of `row`'s locations, flattened — a location's `targets` is additive/optional (absent on a server that predates CAP-676), so `?? []` is the compatibility seam here too. */
+function allTargetsOf(row: SecretIndexRow): readonly SecretIndexTarget[] {
+  return row.locations.flatMap((l) => l.targets ?? []);
+}
+
+/** First target's label (across ALL locations, not just the first one — a single location can itself carry more than one target); `+N` for more DISTINCT target labels. No targets anywhere on the row → `—`. */
+export function formatTargetCell(row: SecretIndexRow): string {
+  const targets = allTargetsOf(row);
+  if (targets.length === 0) return '—';
+  const label = formatTargetLabel(targets[0]);
+  const distinct = new Set(targets.map((t) => formatTargetLabel(t)));
+  return distinct.size > 1 ? `${label} +${distinct.size - 1}` : label;
+}
+
+/** `in:<provider>` for every distinct inbound-connector provider, then `out:<provider>` for every distinct outbound-target provider — names deliberately left out (that's what CONNECTOR/TARGET are for). `[]` → `—`. */
+function integrationsLabels(row: SecretIndexRow): readonly string[] {
+  const inProviders = Array.from(
+    new Set(row.locations.map((l) => l.connector?.provider ?? l.service?.provider).filter((p): p is string => Boolean(p))),
+  );
+  const outProviders = Array.from(new Set(allTargetsOf(row).map((t) => t.provider)));
+  return [...inProviders.map((p) => `in:${p}`), ...outProviders.map((p) => `out:${p}`)];
+}
+
+/** The unfitted INTEGRATIONS label (no column width to pack against) — see `formatIntegrationsCellFitted` for the width-aware version `render()` actually uses. */
+export function formatIntegrationsCell(row: SecretIndexRow): string {
+  const labels = integrationsLabels(row);
+  return labels.length > 0 ? labels.join(' ') : '—';
+}
+
+/**
+ * Packs as many whole `labels` (space-separated) as fit within `maxWidth`,
+ * reserving room for a trailing ` +N` reporting how many didn't — never
+ * slicing a label in half the way a generic character-truncation would.
+ * Stops at the first label that would overflow (a strict prefix, not a
+ * best-effort scan for a later, shorter one) so what's shown is always a
+ * stable, predictable prefix of the full list. If even the very first
+ * label doesn't fit, falls back to the ordinary ellipsis `truncate` — there
+ * is nothing better to show in that little room.
+ */
+function fitLabelsWithOverflowCount(labels: readonly string[], maxWidth: number): string {
+  const full = labels.join(' ');
+  if (visLen(full) <= maxWidth) return full;
+
+  const packed = labels.reduce<{ readonly shown: readonly string[]; readonly stopped: boolean }>(
+    (acc, label) => {
+      if (acc.stopped) return acc;
+      const candidateShown = [...acc.shown, label];
+      const hiddenAfter = labels.length - candidateShown.length;
+      const suffix = hiddenAfter > 0 ? ` +${hiddenAfter}` : '';
+      const fits = visLen(candidateShown.join(' ') + suffix) <= maxWidth;
+      return fits ? { shown: candidateShown, stopped: false } : { shown: acc.shown, stopped: true };
+    },
+    { shown: [], stopped: false },
+  );
+
+  if (packed.shown.length === 0) return truncate(full, maxWidth);
+  const hidden = labels.length - packed.shown.length;
+  return hidden > 0 ? `${packed.shown.join(' ')} +${hidden}` : packed.shown.join(' ');
+}
+
+function formatIntegrationsCellFitted(row: SecretIndexRow, width: number): string {
+  const labels = integrationsLabels(row);
+  if (labels.length === 0) return '—';
+  return fitLabelsWithOverflowCount(labels, width);
+}
+
+/** `width` is the middle column's rendered width — only INTEGRATIONS actually needs it (see `formatIntegrationsCellFitted`); every other column ignores it. */
+export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode, width: number): string {
+  if (column === 'connector') return formatConnectorCell(row);
+  if (column === 'target') return formatTargetCell(row);
+  if (column === 'integrations') return formatIntegrationsCellFitted(row, width);
   if (column === 'users') return formatUsersCell(row);
   if (column === 'branch') return formatBranchCell(row);
   return formatProjectCell(row);
@@ -495,15 +679,59 @@ function truncate(s: string, maxLen: number): string {
   return stripped.slice(0, Math.max(0, maxLen - 1)) + '…';
 }
 
+/** Matches a string ending in a ` +<N>` suffix — the convention every "+N" cell (BRANCH, PROJECT, CONNECTOR, TARGET, and the packed INTEGRATIONS list) uses to report additional distinct values it isn't showing. */
+const PLUS_N_SUFFIX = /^(.*)( \+\d+)$/;
+
+/**
+ * Same contract as `truncate`, except when `s` (ANSI-stripped) ends in a
+ * ` +N` suffix: that suffix is NEVER what gets cut. Only the label before
+ * it shrinks — with the usual ellipsis — so a long label can never
+ * silently swallow the count standing in for the rest (CAP-679).
+ * `slidespeak-monorepo/backend/deploy +2` truncates to
+ * `slidespeak-monorepo/backend/d… +2`, not `slidespeak-monorepo/backend…`.
+ * Falls back to plain `truncate` when there's no such suffix to protect.
+ */
+function truncatePreservingPlusN(s: string, maxLen: number): string {
+  if (visLen(s) <= maxLen) return s;
+  const stripped = stripAnsi(s);
+  const match = stripped.match(PLUS_N_SUFFIX);
+  if (!match) return truncate(s, maxLen);
+  const [, label, suffix] = match;
+  const available = Math.max(0, maxLen - suffix.length);
+  const truncatedLabel = label.length <= available ? label : label.slice(0, Math.max(0, available - 1)) + '…';
+  return `${truncatedLabel}${suffix}`;
+}
+
 function pad(s: string, width: number): string {
   const v = visLen(s);
-  if (v >= width) return truncate(s, width);
+  if (v >= width) return truncatePreservingPlusN(s, width);
   return s + ' '.repeat(width - v);
 }
 
 function padVis(s: string, width: number): string {
   const v = visLen(s);
   return v >= width ? s : s + ' '.repeat(width - v);
+}
+
+/**
+ * Builds the NAME column's cell for one row: `left` (pointer + name)
+ * left-aligned, `tag` (a match-reason tag, already ANSI-wrapped, or `''`
+ * for no tag) right-justified against the column's own right edge — so the
+ * column's fixed 2-space `gap` to the next column is the ONLY space after
+ * the tag's closing `]`, never more. Widths are measured with ANSI
+ * stripped (`visLen`), so styling never throws off alignment.
+ *
+ * When `left` + a minimum 1-space separator + `tag` would overflow
+ * `width`, `left` — never `tag` — is truncated (via the existing
+ * `truncate` ellipsis style) just enough to make room.
+ */
+function buildNameCell(left: string, tag: string, width: number): string {
+  if (tag === '') return pad(left, width);
+  const tagVis = visLen(tag);
+  const maxLeftVis = Math.max(0, width - tagVis - 1);
+  const fittedLeft = visLen(left) > maxLeftVis ? truncate(left, maxLeftVis) : left;
+  const separatorWidth = Math.max(1, width - visLen(fittedLeft) - tagVis);
+  return fittedLeft + ' '.repeat(separatorWidth) + tag;
 }
 
 function columnHeaderLabel(column: ColumnMode): string {
@@ -519,7 +747,9 @@ function columnHeaderLabel(column: ColumnMode): string {
 function searchBarLine(state: SecretsScreenState, matchedCount: number): string {
   const focused = state.popup === null;
   const caret = focused ? '▏' : '';
-  const queryDisplay = state.search.query !== '' ? state.search.query : focused ? `${DIM}type to filter${RESET}` : '';
+  const placeholder = `${DIM}type to filter — name, project, branch, connector, target, or exact value${RESET}`;
+  const typedQuery = `${ACCENT}${state.search.query}${RESET}`;
+  const queryDisplay = state.search.query !== '' ? typedQuery : focused ? placeholder : '';
   const countLabel = `${matchedCount}/${state.rows.length}`;
   return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
 }
@@ -528,13 +758,16 @@ function searchBarLine(state: SecretsScreenState, matchedCount: number): string 
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
-  const rows = filteredRows(state);
+  const matched = filteredRowsWithReasons(state);
+  const rows = matched.map((mr) => mr.row);
+  const matchActive = state.search.query.trim() !== '';
   const cursorIndex = clampIndex(state.cursorIndex, rows.length);
 
-  const lines: string[] = [];
-  lines.push(`${m}${BOLD}capy secrets${RESET} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`);
-  lines.push(m + searchBarLine(state, rows.length));
-  lines.push('');
+  const headerLines: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
+    m + searchBarLine(state, rows.length),
+    '',
+  ];
 
   const nameW = Math.max(16, Math.floor(available * 0.4));
   const updatedW = 14;
@@ -542,36 +775,43 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
 
   const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column), middleW) + gap + pad('UPDATED', updatedW);
-  lines.push(m + DIM + headerLine + RESET);
+  // Everything pushed before the body, in one array — `preBodyLines.length`
+  // below stands in for what used to be `lines.length` read mid-mutation.
+  const preBodyLines: readonly string[] = [...headerLines, m + DIM + headerLine + RESET];
 
-  const bodyLines: string[] = rows.map((row, i) => {
+  const bodyLines: readonly string[] = matched.map(({ row, reasons }, i) => {
     const isSelected = i === cursorIndex;
     const pointer = isSelected ? '▶ ' : '  ';
-    const nameCell = pad(pointer + row.name, nameW);
-    const middleCell = pad(formatMiddleCell(row, state.column), middleW);
+    // Strongest reason only (reasons is already priority-ordered) — a
+    // compact blue tag, right-justified against the NAME column's own edge
+    // (see `buildNameCell`), and only while a query is actually active (an
+    // empty query carries no reasons anyway, but this also guards
+    // `matchActive` for callers that ever hand in a non-empty `reasons`
+    // alongside a cleared query).
+    const tag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
+    const nameCell = buildNameCell(pointer + row.name, tag, nameW);
+    const middleCell = pad(formatMiddleCell(row, state.column, middleW), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
     return isSelected ? INVERSE + padVis(line, available) + RESET : line;
   });
 
-  const withPopup: string[] =
+  const withPopup: readonly string[] =
     state.popup && rows[cursorIndex]
       ? spliceIn(bodyLines, cursorIndex, buildPopupLines(rows[cursorIndex], state.popup, available))
       : bodyLines;
 
-  const reserved = lines.length + 1 /* table header already pushed above */ + 2 /* footer */;
+  const reserved = preBodyLines.length + 1 /* table header already pushed above */ + 2 /* footer */;
   const bodyHeight = Math.max(6, termHeight - reserved);
   const scrollOffset = computeScrollOffset(withPopup, cursorIndex, bodyHeight, state.popup !== null);
   const slice = withPopup.slice(scrollOffset, scrollOffset + bodyHeight);
 
-  if (rows.length === 0) {
-    lines.push(`${m}${DIM}No secrets match.${RESET}`);
-  } else {
-    for (const line of slice) lines.push(m + line);
-  }
+  const bodyOutputLines: readonly string[] =
+    rows.length === 0 ? [`${m}${DIM}No secrets match.${RESET}`] : slice.map((line) => m + line);
 
-  lines.push('');
-  lines.push(m + footerLine(state));
+  const footerLines: readonly string[] = ['', m + footerLine(state)];
+
+  const lines: readonly string[] = [...preBodyLines, ...bodyOutputLines, ...footerLines];
 
   return lines.map((l) => l + CLEAR_EOL).join('\n');
 }
@@ -592,7 +832,7 @@ function computeScrollOffset(lines: readonly string[], cursorIndex: number, body
   return Math.min(target, Math.max(0, lines.length - bodyHeight));
 }
 
-function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number): string[] {
+function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number): readonly string[] {
   const indent = '  ';
   const inner = '   ';
   const ruleWidth = Math.max(10, width - indent.length);
@@ -603,30 +843,42 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
 
   const field = (label: string, value: string) => `${indent}${inner}${DIM}${pad(label, labelW)}${RESET}${value}`;
 
-  const lines: string[] = [rule, '', `${indent}${inner}${BOLD}${truncate(row.name, contentWidth)}${RESET}`, ''];
-  lines.push(field('value', renderPopupValueLine(popup, valueWidth)));
-  lines.push(field('updated', formatUpdatedCell(row)));
-  lines.push('');
+  const topLines: readonly string[] = [
+    rule,
+    '',
+    `${indent}${inner}${BOLD}${truncate(row.name, contentWidth)}${RESET}`,
+    '',
+    field('value', renderPopupValueLine(popup, valueWidth)),
+    field('updated', formatUpdatedCell(row)),
+    '',
+    `${indent}${inner}${BOLD}locations${RESET}`,
+  ];
 
-  lines.push(`${indent}${inner}${BOLD}locations${RESET}`);
-  for (const loc of row.locations) {
+  // Per-location: project · branch (protected marker), the CONNECTOR that
+  // brought the value IN (renamed from "service" — CAP-679), when it
+  // changed, and — only when this location has any — every TARGET it was
+  // pushed OUT to, each spelled out with its full "(stale)" wording (the
+  // table's own TARGET column uses a compact `*` instead; there's no room
+  // pressure here to justify that shorthand).
+  const locationLines: readonly string[] = row.locations.map((loc) => {
     const protMarker = loc.protected ? ` ${DIM}(protected)${RESET}` : '';
-    const svc = formatServiceLabel(loc.service);
+    const connectorLabel = formatLocationConnectorLabel(loc);
     const updated = loc.changed_at ? formatRelativeTime(loc.changed_at) : '—';
-    lines.push(`${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${svc} · ${updated}${RESET}`);
-  }
-  lines.push('');
+    const targets = loc.targets ?? [];
+    const targetsLabel =
+      targets.length > 0
+        ? ` · targets: ${targets.map((t) => `[${t.provider}] ${t.target}${t.stale ? ' (stale)' : ''}`).join(', ')}`
+        : '';
+    return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;
+  });
 
-  lines.push(`${indent}${inner}${BOLD}users${RESET}`);
-  if (row.users.length === 0) {
-    lines.push(`${indent}${inner}${DIM}(none)${RESET}`);
-  } else {
-    for (const u of row.users) lines.push(`${indent}${inner}${truncate(u.email, contentWidth)}`);
-  }
+  const usersHeaderLines: readonly string[] = ['', `${indent}${inner}${BOLD}users${RESET}`];
+  const userLines: readonly string[] =
+    row.users.length === 0
+      ? [`${indent}${inner}${DIM}(none)${RESET}`]
+      : row.users.map((u) => `${indent}${inner}${truncate(u.email, contentWidth)}`);
 
-  lines.push('');
-  lines.push(rule);
-  return lines;
+  return [...topLines, ...locationLines, ...usersHeaderLines, ...userLines, '', rule];
 }
 
 function renderPopupValueLine(popup: PopupState, width: number): string {

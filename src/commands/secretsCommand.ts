@@ -47,7 +47,7 @@ const HEADERS = ['NAME', 'USERS', 'BRANCH', 'SERVICE'] as const;
 /**
  * `capy secrets` — read-only listing of every secret NAME across the
  * caller's active organization, grouped by (name, value_hash). Values are
- * NEVER shown, NEVER requested: the server's `/orgs/:orgId/secret-index`
+ * NEVER shown, NEVER requested: the server's `/orgs/:orgId/secrets`
  * contract (see `ServiceClient.getSecretIndex`) carries only names, hashes,
  * locations, and readers — nothing this command touches can leak a value.
  *
