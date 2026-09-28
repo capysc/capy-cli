@@ -11,6 +11,7 @@ import { CapyCommand } from './commands/capyCommand';
 import { CliOptions } from './types/index';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
+import { ACCENT } from './ui/colors';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -224,7 +225,7 @@ program
       const name = b.name;
       const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === activeBranch;
-      const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
+      const current = isCurrent ? `  ${ACCENT}← current\x1b[0m` : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
     });
     console.log('');

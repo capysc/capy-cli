@@ -19,6 +19,7 @@ import type { SecretIndexLocation, SecretIndexRow, SecretIndexService } from '..
 import { formatRelativeTime } from './relativeTime';
 import { renderInlineValue } from './editScreen';
 import { hashValue } from '../commands/statusCommand';
+import { ACCENT } from './colors';
 
 // ── ANSI (mirrors EditScreen's palette/look-and-feel) ───────────────────────
 
@@ -571,6 +572,27 @@ function padVis(s: string, width: number): string {
   return v >= width ? s : s + ' '.repeat(width - v);
 }
 
+/**
+ * Builds the NAME column's cell for one row: `left` (pointer + name)
+ * left-aligned, `tag` (a match-reason tag, already ANSI-wrapped, or `''`
+ * for no tag) right-justified against the column's own right edge — so the
+ * column's fixed 2-space `gap` to the next column is the ONLY space after
+ * the tag's closing `]`, never more. Widths are measured with ANSI
+ * stripped (`visLen`), so styling never throws off alignment.
+ *
+ * When `left` + a minimum 1-space separator + `tag` would overflow
+ * `width`, `left` — never `tag` — is truncated (via the existing
+ * `truncate` ellipsis style) just enough to make room.
+ */
+function buildNameCell(left: string, tag: string, width: number): string {
+  if (tag === '') return pad(left, width);
+  const tagVis = visLen(tag);
+  const maxLeftVis = Math.max(0, width - tagVis - 1);
+  const fittedLeft = visLen(left) > maxLeftVis ? truncate(left, maxLeftVis) : left;
+  const separatorWidth = Math.max(1, width - visLen(fittedLeft) - tagVis);
+  return fittedLeft + ' '.repeat(separatorWidth) + tag;
+}
+
 function columnHeaderLabel(column: ColumnMode): string {
   return `${column.toUpperCase()} ⇥`;
 }
@@ -585,7 +607,8 @@ function searchBarLine(state: SecretsScreenState, matchedCount: number): string 
   const focused = state.popup === null;
   const caret = focused ? '▏' : '';
   const placeholder = `${DIM}type to filter — name, project, branch, or exact value${RESET}`;
-  const queryDisplay = state.search.query !== '' ? state.search.query : focused ? placeholder : '';
+  const typedQuery = `${ACCENT}${state.search.query}${RESET}`;
+  const queryDisplay = state.search.query !== '' ? typedQuery : focused ? placeholder : '';
   const countLabel = `${matchedCount}/${state.rows.length}`;
   return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
 }
@@ -619,12 +642,13 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
     const isSelected = i === cursorIndex;
     const pointer = isSelected ? '▶ ' : '  ';
     // Strongest reason only (reasons is already priority-ordered) — a
-    // compact dim tag, and only while a query is actually active (an empty
-    // query carries no reasons anyway, but this also guards `matchActive`
-    // for callers that ever hand in a non-empty `reasons` alongside a
-    // cleared query).
-    const tag = matchActive && reasons.length > 0 ? ` ${DIM}[${reasons[0]}]${RESET}` : '';
-    const nameCell = pad(pointer + row.name + tag, nameW);
+    // compact blue tag, right-justified against the NAME column's own edge
+    // (see `buildNameCell`), and only while a query is actually active (an
+    // empty query carries no reasons anyway, but this also guards
+    // `matchActive` for callers that ever hand in a non-empty `reasons`
+    // alongside a cleared query).
+    const tag = matchActive && reasons.length > 0 ? `${ACCENT}[${reasons[0]}]${RESET}` : '';
+    const nameCell = buildNameCell(pointer + row.name, tag, nameW);
     const middleCell = pad(formatMiddleCell(row, state.column), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;

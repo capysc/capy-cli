@@ -63,6 +63,17 @@ const KEY_TAB = '\t';
 const KEY_SHIFT_TAB = `${ESC}[Z`;
 const ENTER = '\r';
 
+// Same teal the rest of the CLI's "← current" markers use (src/ui/colors.ts's
+// `ACCENT`) — duplicated here rather than imported so this test file can
+// assert on the exact byte sequence independently of the module under test.
+const ACCENT = `${ESC}[38;5;43m`;
+const ANSI_RESET = `${ESC}[0m`;
+
+/** Strips ANSI escapes the same way `secretsScreen.ts`'s own (private) `stripAnsi` does, so width/column assertions measure visible columns, not escape bytes. */
+function stripAnsiForTest(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
 /** Folds `handleKey` over a sequence of keypresses, keeping only the final state — a `reduce`-based stand-in for "press these keys in order" that never needs a reassigned binding. */
 function pressKeys(state: SecretsScreenState, ...keys: readonly string[]): SecretsScreenState {
   return keys.reduce((acc: SecretsScreenState, k) => handleKey(acc, k).state, state);
@@ -449,6 +460,57 @@ describe('search bar — project/branch/value matching (CAP-678)', () => {
     const { search, ...rest } = s;
     expect(JSON.stringify(rest)).not.toContain(query);
     expect(search.query).toBe(query);
+  });
+});
+
+describe('search styling — right-justified match tag, accent-colored query/tag (CAP-678 follow-up)', () => {
+  /** Finds the rendered (ANSI-stripped) body line that carries a `[reason]` match tag. */
+  function matchTagLine(frame: string): string {
+    const stripped = stripAnsiForTest(frame);
+    const line = stripped.split('\n').find((l) => /\[(value|name|project|branch)\]/.test(l));
+    if (line === undefined) throw new Error('no line with a match tag found in frame');
+    return line;
+  }
+
+  test("the tag's closing ']' sits exactly 2 visible columns before the next column starts", () => {
+    const s = type(initialSecretsScreenState([row({ name: 'SHORT_NAME' })]), 'SHORT');
+    const frame = render(s, 100, 20);
+    const line = matchTagLine(frame);
+    const closeIdx = line.indexOf(']');
+    expect(line.slice(closeIdx + 1, closeIdx + 3)).toBe('  ');
+    expect(line.charAt(closeIdx + 3)).not.toBe(' ');
+  });
+
+  test('a long name is truncated to make room, but the match tag is never cut off', () => {
+    const longName = `PREFIX_${'X'.repeat(200)}`;
+    const s = type(initialSecretsScreenState([row({ name: longName })]), 'PREFIX');
+    const frame = render(s, 100, 20);
+    const line = matchTagLine(frame);
+    expect(line).toContain('…'); // the long name got truncated
+    expect(line).toContain('[name]'); // the tag itself is intact, not truncated
+  });
+
+  test('typed query text is wrapped in the shared ACCENT color (teal, 38;5;43 — not a generic ANSI blue)', () => {
+    const rows = [row({ name: 'API_KEY' })];
+    const s = type(initialSecretsScreenState(rows), 'api');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain(`${ACCENT}api${ANSI_RESET}`);
+    expect(frame).not.toContain('\x1b[34m'); // not the old plain-blue constant
+    expect(frame).not.toContain('\x1b[36m'); // not cyan either
+  });
+
+  test('the placeholder is NOT accent-colored — only real typed text is', () => {
+    const rows = [row({ name: 'API_KEY' })];
+    const frame = render(initialSecretsScreenState(rows), 100, 20);
+    expect(frame).toContain('type to filter');
+    expect(frame).not.toContain(ACCENT);
+  });
+
+  test('the match tag is wrapped in the shared ACCENT color', () => {
+    const rows = [row({ name: 'API_KEY' })];
+    const s = type(initialSecretsScreenState(rows), 'API');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain(`${ACCENT}[name]${ANSI_RESET}`);
   });
 });
 
