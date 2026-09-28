@@ -124,6 +124,30 @@ export interface SecretIndexService {
   compose_id?: string;
 }
 
+/**
+ * CAP-676: the connector that brought this location's value IN. Distinct
+ * from (and additive alongside) the older `service` shape — `service` is
+ * Dokploy-specific and carries a name/project/compose_id; `connector` is
+ * provider-only and provider-agnostic. Optional because it may be absent on
+ * a server that predates CAP-676 — callers fall back to `service?.provider`.
+ */
+export interface SecretIndexConnector {
+  provider: string;
+}
+
+/**
+ * CAP-676: one deploy target this location's value was pushed OUT to.
+ * `stale` marks a target whose last push (`deployed_at`) predates the
+ * value's current `changed_at` — i.e. what's deployed there may not be
+ * what's set now. Optional/absent on a server that predates CAP-676.
+ */
+export interface SecretIndexTarget {
+  provider: string;
+  target: string;
+  deployed_at?: string;
+  stale: boolean;
+}
+
 /** One (project, branch) this (name, value_hash) pair lives on. */
 export interface SecretIndexLocation {
   project_id: string;
@@ -132,6 +156,10 @@ export interface SecretIndexLocation {
   protected: boolean;
   changed_at?: string;
   service: SecretIndexService | null;
+  /** CAP-676, additive: the inbound connector, when the server sends one (see `SecretIndexConnector`'s doc for the `service` fallback). */
+  connector?: SecretIndexConnector;
+  /** CAP-676, additive: every outbound deploy target for this location's value, or absent/`[]` on a server or location with none. */
+  targets?: SecretIndexTarget[];
 }
 
 export interface SecretIndexUser {
