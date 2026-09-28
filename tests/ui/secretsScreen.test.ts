@@ -449,9 +449,9 @@ describe('search bar — project/branch/value matching (CAP-678)', () => {
     expect(frame).not.toContain('[value]');
   });
 
-  test('updated placeholder mentions name, project, branch and exact value', () => {
+  test('updated placeholder mentions name, project, branch, service, and exact value', () => {
     const frame = render(initialSecretsScreenState(rows), 100, 20);
-    expect(frame).toContain('name, project, branch, or exact value');
+    expect(frame).toContain('name, project, branch, service, or exact value');
   });
 
   test('the query lives only in state.search.query — nothing else in state echoes it', () => {
@@ -460,6 +460,75 @@ describe('search bar — project/branch/value matching (CAP-678)', () => {
     const { search, ...rest } = s;
     expect(JSON.stringify(rest)).not.toContain(query);
     expect(search.query).toBe(query);
+  });
+
+  test("matches on a location's Dokploy service.name, case-insensitively", () => {
+    const target = row({
+      name: 'BACKEND_SECRET',
+      locations: [loc({ service: { provider: 'dokploy', name: 'backend-preview', dokploy_project: 'acme' } })],
+    });
+    const s = type(initialSecretsScreenState([...rows, target]), 'backend-preview');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['BACKEND_SECRET']);
+  });
+
+  test('a partial service.name substring still matches (e.g. "preview" inside "backend-preview")', () => {
+    const target = row({
+      name: 'BACKEND_SECRET',
+      locations: [loc({ service: { provider: 'dokploy', name: 'backend-preview', dokploy_project: 'acme' } })],
+    });
+    const s = type(initialSecretsScreenState([...rows, target]), 'preview');
+    // `apiRow` (from the outer `rows`) also matches via its
+    // "staging-preview" branch — the point here is just that the SERVICE
+    // partial match fires too, not exclusivity.
+    expect(filteredRows(s).map((r) => r.name)).toContain('BACKEND_SECRET');
+  });
+
+  test('matches on service.dokploy_project even when it is not part of service.name', () => {
+    const target = row({
+      name: 'BACKEND_SECRET',
+      locations: [loc({ service: { provider: 'dokploy', name: 'backend-preview', dokploy_project: 'acme-corp' } })],
+    });
+    const s = type(initialSecretsScreenState([...rows, target]), 'acme-corp');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['BACKEND_SECRET']);
+  });
+
+  test('a location with a null service is never matched via the service signal', () => {
+    const target = row({ name: 'NO_SERVICE_ROW', locations: [loc({ service: null })] });
+    const s = type(initialSecretsScreenState([...rows, target]), 'backend-preview');
+    expect(filteredRows(s).map((r) => r.name)).not.toContain('NO_SERVICE_ROW');
+  });
+
+  test('match reasons prioritize value > name > project > branch > service', () => {
+    // A query that is simultaneously this row's service.name AND a
+    // substring of its branch — service must lose to branch here.
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ branch: 'staging-preview', service: { provider: 'dokploy', name: 'staging-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'staging-preview');
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons[0]).toBe('branch');
+    expect(match.reasons).toContain('service');
+  });
+
+  test('a query that ONLY matches via service reports service as the (only, strongest) reason', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ service: { provider: 'dokploy', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'backend-preview');
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons).toEqual(['service']);
+  });
+
+  test('render shows a [service] match tag', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ service: { provider: 'dokploy', name: 'backend-preview' } })],
+    });
+    const s = type(initialSecretsScreenState([target]), 'backend-preview');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain('[service]');
   });
 });
 

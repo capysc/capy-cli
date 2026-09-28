@@ -202,13 +202,13 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): Secr
 
 // ── Search matching (CAP-678) ────────────────────────────────────────────────
 //
-// The always-on search bar matches a row on any of four signals: its NAME,
-// any location's PROJECT or BRANCH (case-insensitive substring, query
-// trimmed of surrounding whitespace), or an exact VALUE match — the query's
-// own sha256-slice hash (via the same `hashValue` `resolveSecretValue` uses)
-// compared against `row.value_hash`. Nothing about the query or a candidate
-// value ever leaves this process; this is a pure, local, in-memory
-// comparison against a hash the server already sent.
+// The always-on search bar matches a row on any of five signals: its NAME,
+// any location's PROJECT, BRANCH, or SERVICE (case-insensitive substring,
+// query trimmed of surrounding whitespace), or an exact VALUE match — the
+// query's own sha256-slice hash (via the same `hashValue`
+// `resolveSecretValue` uses) compared against `row.value_hash`. Nothing
+// about the query or a candidate value ever leaves this process; this is a
+// pure, local, in-memory comparison against a hash the server already sent.
 //
 // `computeFilteredRows` is the single pass that does both the filtering and
 // the "why did this row match" bookkeeping the UI tags rows with — it hashes
@@ -216,12 +216,28 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): Secr
 // trimming changed it) regardless of how many rows there are, never once per
 // row.
 
-export type MatchReason = 'value' | 'name' | 'project' | 'branch';
+export type MatchReason = 'value' | 'name' | 'project' | 'branch' | 'service';
 
 export interface MatchedRow {
   readonly row: SecretIndexRow;
-  /** Every reason `row` matched, in priority order (value > name > project > branch); empty when the query is blank. */
+  /** Every reason `row` matched, in priority order (value > name > project > branch > service); empty when the query is blank. */
   readonly reasons: readonly MatchReason[];
+}
+
+/**
+ * Whether `location`'s Dokploy service (if it has one) matches `qLower`:
+ * a substring of `service.name`, of `service.dokploy_project`, or of the
+ * `"dokploy_project / name"` label those two form together (so a query
+ * spanning the " / " separator still matches) — never `compose_id`, which
+ * this spec doesn't call for. A `null` service (no Dokploy connector at
+ * this location) never matches anything.
+ */
+function locationServiceMatches(location: SecretIndexLocation, qLower: string): boolean {
+  const service = location.service;
+  if (service === null) return false;
+  const combinedLabel = service.name && service.dokploy_project ? `${service.dokploy_project} / ${service.name}` : undefined;
+  const candidates = [service.name, service.dokploy_project, combinedLabel].filter((s): s is string => Boolean(s));
+  return candidates.some((s) => s.toLowerCase().includes(qLower));
 }
 
 /** `qLower` is the trimmed, lowercased query; `rawHash`/`trimmedHash` are the query's hash(es) — computed once by the caller, never here. */
@@ -230,12 +246,14 @@ function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, t
   const isNameMatch = row.name.toLowerCase().includes(qLower);
   const isProjectMatch = row.locations.some((l) => l.project_name.toLowerCase().includes(qLower));
   const isBranchMatch = row.locations.some((l) => l.branch.toLowerCase().includes(qLower));
+  const isServiceMatch = row.locations.some((l) => locationServiceMatches(l, qLower));
   return (
     [
       [isValueMatch, 'value'] as const,
       [isNameMatch, 'name'] as const,
       [isProjectMatch, 'project'] as const,
       [isBranchMatch, 'branch'] as const,
+      [isServiceMatch, 'service'] as const,
     ] satisfies readonly (readonly [boolean, MatchReason])[]
   )
     .filter(([matched]) => matched)
@@ -269,7 +287,7 @@ export function filteredRowsWithReasons(state: SecretsScreenState): readonly Mat
   return computeFilteredRows(state.rows, state.search.query);
 }
 
-/** Rows currently visible, after the live filter (name, project, branch, or exact value — see `computeFilteredRows`). */
+/** Rows currently visible, after the live filter (name, project, branch, service, or exact value — see `computeFilteredRows`). */
 export function filteredRows(state: SecretsScreenState): readonly SecretIndexRow[] {
   return computeFilteredRows(state.rows, state.search.query).map((m) => m.row);
 }
@@ -606,7 +624,7 @@ function columnHeaderLabel(column: ColumnMode): string {
 function searchBarLine(state: SecretsScreenState, matchedCount: number): string {
   const focused = state.popup === null;
   const caret = focused ? '▏' : '';
-  const placeholder = `${DIM}type to filter — name, project, branch, or exact value${RESET}`;
+  const placeholder = `${DIM}type to filter — name, project, branch, service, or exact value${RESET}`;
   const typedQuery = `${ACCENT}${state.search.query}${RESET}`;
   const queryDisplay = state.search.query !== '' ? typedQuery : focused ? placeholder : '';
   const countLabel = `${matchedCount}/${state.rows.length}`;
