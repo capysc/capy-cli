@@ -26,6 +26,7 @@ import {
   applyValueResult,
   resolveSecretValue,
   render,
+  tokenizeKeys,
   LocationDecryptor,
   ValueState,
 } from './secretsScreen';
@@ -86,7 +87,14 @@ async function loop(
  */
 export async function runSecretsScreen(rows: readonly SecretIndexRow[], decryptAt: LocationDecryptor): Promise<void> {
   const bus = new EventEmitter();
-  const onData = (data: Buffer): boolean => bus.emit('action', { kind: 'key', key: data.toString() });
+  // A single `data` chunk can carry more than one keypress (a paste, fast
+  // typing, or piped/scripted input) — `tokenizeKeys` splits it into
+  // individual tokens first, and each becomes its own action, so all of
+  // them reach the reducer in order instead of the chunk being handled (or
+  // silently dropped) as if it were one key.
+  const onData = (data: Buffer): void => {
+    for (const key of tokenizeKeys(data.toString())) bus.emit('action', { kind: 'key', key });
+  };
   const onResize = (): boolean => bus.emit('action', { kind: 'resize' });
   const onSignal = (): boolean => bus.emit('action', { kind: 'quit' });
   const actions = on(bus, 'action') as AsyncIterator<[DriverAction]>;

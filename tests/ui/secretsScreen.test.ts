@@ -13,6 +13,7 @@ import {
   formatUpdatedCell,
   mostRecentChangedAt,
   maskSecretValue,
+  tokenizeKeys,
   SecretsScreenState,
   LocationDecryptResult,
 } from '../../src/ui/secretsScreen';
@@ -69,6 +70,102 @@ function pressKeys(state: SecretsScreenState, ...keys: readonly string[]): Secre
 function type(state: SecretsScreenState, text: string): SecretsScreenState {
   return pressKeys(state, ...text.split(''));
 }
+
+/** Feeds a raw stdin chunk through the same tokenize-then-fold path the driver uses. */
+function pressChunk(state: SecretsScreenState, chunk: string): SecretsScreenState {
+  return pressKeys(state, ...tokenizeKeys(chunk));
+}
+
+describe('tokenizeKeys — splitting a raw stdin chunk into key tokens', () => {
+  test('a multi-character chunk (paste / fast typing) becomes one token per character', () => {
+    expect(tokenizeKeys('APIFY')).toEqual(['A', 'P', 'I', 'F', 'Y']);
+  });
+
+  test('a trailing \\r is its own token, in order', () => {
+    expect(tokenizeKeys('STRIPE\r')).toEqual(['S', 'T', 'R', 'I', 'P', 'E', '\r']);
+  });
+
+  test('a CSI arrow sequence mixed with letters splits into one token for the arrow and one per letter', () => {
+    expect(tokenizeKeys(`${ESC}[Bxy`)).toEqual([KEY_DOWN, 'x', 'y']);
+  });
+
+  test('a CSI sequence with numeric parameters (e.g. PgUp) is one token', () => {
+    expect(tokenizeKeys(`${ESC}[5~`)).toEqual([`${ESC}[5~`]);
+  });
+
+  test('an SS3 sequence (ESC O <byte>) is one token', () => {
+    expect(tokenizeKeys(`${ESC}OA`)).toEqual([`${ESC}OA`]);
+  });
+
+  test('a lone ESC at the end of a chunk is its own token', () => {
+    expect(tokenizeKeys(ESC)).toEqual([ESC]);
+  });
+
+  test('a lone ESC followed by an ordinary character splits into two tokens', () => {
+    expect(tokenizeKeys(`${ESC}q`)).toEqual([ESC, 'q']);
+  });
+
+  test('two consecutive ESC bytes (one physical Escape, double-emitted by some terminals) collapse to one token', () => {
+    expect(tokenizeKeys(`${ESC}${ESC}`)).toEqual([`${ESC}${ESC}`]);
+  });
+
+  test('an incomplete CSI sequence at the chunk boundary is returned whole, not chopped into stray characters', () => {
+    expect(tokenizeKeys(`${ESC}[`)).toEqual([`${ESC}[`]);
+    expect(tokenizeKeys(`${ESC}[1`)).toEqual([`${ESC}[1`]);
+  });
+
+  test('a surrogate-pair character (emoji) is one token, not two broken halves', () => {
+    const emoji = '🔒';
+    expect(tokenizeKeys(emoji)).toEqual([emoji]);
+    expect(tokenizeKeys(`ab${emoji}cd`)).toEqual(['a', 'b', emoji, 'c', 'd']);
+  });
+
+  test('an empty chunk tokenizes to nothing', () => {
+    expect(tokenizeKeys('')).toEqual([]);
+  });
+});
+
+describe('multi-key chunks reach the reducer in order (paste / fast-typing bug)', () => {
+  const rows = [row({ name: 'STRIPE_SECRET_KEY' }), row({ name: 'DATABASE_URL' })];
+
+  test('a whole word arriving in one chunk filters the list, not just its first character', () => {
+    const s = pressChunk(initialSecretsScreenState(rows), 'STRIPE');
+    expect(s.search.query).toBe('STRIPE');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['STRIPE_SECRET_KEY']);
+  });
+
+  test('a chunk with a trailing \\r types the filter AND opens the (now sole) matching row', () => {
+    const s0 = initialSecretsScreenState(rows);
+    const tokens = tokenizeKeys('STRIPE\r');
+    const beforeEnter = pressKeys(s0, ...tokens.slice(0, -1));
+    expect(filteredRows(beforeEnter).map((r) => r.name)).toEqual(['STRIPE_SECRET_KEY']);
+    const { state: afterEnter, effect } = handleKey(beforeEnter, tokens[tokens.length - 1]);
+    expect(afterEnter.popup?.rowName).toBe('STRIPE_SECRET_KEY');
+    expect(effect).toEqual({ type: 'fetchValue', row: beforeEnter.rows.find((r) => r.name === 'STRIPE_SECRET_KEY') });
+  });
+
+  test('a chunk mixing an arrow escape with letters navigates AND types, in order', () => {
+    const s = pressChunk(initialSecretsScreenState(rows), `${KEY_DOWN}url`);
+    // Down moved the cursor to row 1 before "url" was typed into the query.
+    expect(s.cursorIndex).toBe(0); // reclamped: "url" only matches DATABASE_URL, a single row
+    expect(s.search.query).toBe('url');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['DATABASE_URL']);
+  });
+
+  test('a lone ESC arriving mid-chunk still clears an already-typed query', () => {
+    const s = pressChunk(initialSecretsScreenState(rows), `db${ESC}`);
+    expect(s.search.query).toBe('');
+    expect(s.quit).toBe(false);
+  });
+
+  test('pasted multi-line text (raw \\n line breaks, no bracketed-paste markers) never opens a popup', () => {
+    const s = pressChunk(initialSecretsScreenState(rows), 'foo\nbar\nbaz');
+    expect(s.popup).toBeNull();
+    // The `\n`s themselves are inert (not Enter, not typed) — only the
+    // letters land in the query.
+    expect(s.search.query).toBe('foobarbaz');
+  });
+});
 
 describe('handleKey — column cycling', () => {
   test('Tab cycles USERS -> BRANCH -> SERVICE -> USERS', () => {
