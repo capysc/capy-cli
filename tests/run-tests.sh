@@ -58,6 +58,7 @@ ISOLATED_FILES=(
   tests/system/systemStoreFreshStore.test.ts
   tests/commands/systemCommand.test.ts
   tests/commands/projectsCommand.test.ts
+  tests/commands/secretsCommand.test.ts
   tests/commands/runCommandSystemStore.test.ts
   tests/commands/connectDiscoveryRouting.test.ts
 )

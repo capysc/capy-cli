@@ -15,6 +15,7 @@ export const LOCAL_ONLY_DISABLED_COMMANDS = [
   'kick',
   'users',
   'projects',
+  'secrets',
   'grant-branch',
   'revoke-branch',
   'org',
