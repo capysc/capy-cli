@@ -42,8 +42,10 @@ import {
   worktreeRemove,
   deleteLocalBranch,
 } from '../deploy/git';
-import { buildDeployKeep, touchDeployKeep, reconcileVars } from '../deploy/keepGate';
-import { KeepFile } from '../types/index';
+import { buildDeployKeep, touchDeployKeep, reconcileVars, hashValue } from '../deploy/keepGate';
+import { recordTargetDeliveries, stripTargetsForProviderTarget, TargetDeliveryDescriptor } from '../deploy/targetsGate';
+import { KeepFile, ERROR_CODES, AuthResult } from '../types/index';
+import type { AuthService } from '../auth/authService';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
@@ -132,6 +134,12 @@ export interface DeployCliOptions {
   platformAnswer?: string;
   /** The mode answer, when that question was really asked. */
   modeAnswer?: string;
+  /**
+   * Write and verify the target's configuration, but skip the platform
+   * deploy/redeploy (CAP-679). The user, or the platform's own auto-deploy,
+   * ships it later. `targets` are still recorded — the write happened.
+   */
+  noDeploy?: boolean;
 }
 
 /** Whether a question is asked in a browser, and what the rail already holds. */
@@ -179,6 +187,22 @@ async function resolveDokployApiKeyOnce(
     devMode,
     deps: { getConnectorSecret },
   });
+}
+
+/**
+ * `authenticateSilent`'s common "org-scoped, then unscoped" probe as one
+ * value rather than a reassigned local — the org-scoped attempt wins
+ * outright; the unscoped one only runs (and is only returned) when it
+ * failed. Shared by every CAP-679 write path below that needs to
+ * authenticate without ever prompting (they are all best-effort follow-ups
+ * to an operation that already succeeded).
+ */
+async function authenticateSilentWithFallback(
+  authService: AuthService,
+  orgId: string,
+): Promise<AuthResult> {
+  const scoped = await authService.authenticateSilent(orgId);
+  return scoped.success ? scoped : await authService.authenticateSilent();
 }
 
 // ── Project-level keep.lock parsing ────────────────────────────────────────
@@ -278,7 +302,7 @@ async function mintForDeploy(
   cwd: string,
   vars: readonly string[],
   devMode: boolean = false,
-): Promise<{ secretsBlob: string; projectKey: string; deployId: string }> {
+): Promise<{ secretsBlob: string; projectKey: string; deployId: string; valueHashes: Record<string, string> }> {
   const keep = readKeep(cwd);
   if (!keep) throw new Error('no keep.lock — run `capy` to sync first.');
 
@@ -305,6 +329,7 @@ async function mintForDeploy(
     secretsBlob: minted.secretsBlob,
     projectKey: minted.projectKey,
     deployId: minted.deployId,
+    valueHashes: minted.valueHashes,
   };
 }
 
@@ -312,6 +337,13 @@ async function mintForDeploy(
 interface DeploySecrets {
   env: Record<string, string>;
   deployToken?: { secretsBlob: string; projectKey: string; deployId: string };
+  /**
+   * sha256(value).slice(0,16) per variable actually delivered (CAP-679) —
+   * from the minted bundle's own plaintext for a token adapter, or hashed
+   * from `env` directly otherwise. Used only to RECORD `targets`, never to
+   * decide anything about the deploy itself.
+   */
+  valueHashes: Record<string, string>;
 }
 
 /**
@@ -326,22 +358,164 @@ async function loadDeploySecrets(
 ): Promise<DeploySecrets | null> {
   if (options.dryRun) {
     console.log(YELLOW('  --dry-run: no secrets will be decrypted or pushed.'));
-    return { env: {} };
+    return { env: {}, valueHashes: {} };
   }
   if (adapter.needsDeployToken) {
     try {
-      return { env: {}, deployToken: await mintForDeploy(cwd, target.vars, options.devMode) };
+      const minted = await mintForDeploy(cwd, target.vars, options.devMode);
+      return { env: {}, deployToken: minted, valueHashes: minted.valueHashes };
     } catch (err: any) {
       console.error(`${RED('✗')} mint deploy token: ${err.message}`);
       return null;
     }
   }
   try {
-    return { env: await decryptCurrentBranch(cwd, options.devMode) };
+    const env = await decryptCurrentBranch(cwd, options.devMode);
+    const valueHashes = Object.fromEntries(
+      target.vars.filter((v) => env[v] !== undefined).map((v) => [v, hashValue(env[v])]),
+    );
+    return { env, valueHashes };
   } catch (err: any) {
     console.error(`${RED('✗')} decrypt: ${err.message}`);
     return null;
   }
+}
+
+// ── Targets recording (CAP-679) ─────────────────────────────────────────────
+
+/**
+ * Adapter-specific handle for what a target actually points at, when one is
+ * knowable from `target.options` alone. Only Dokploy defines this today
+ * (`composeId` / `applicationId`); every other adapter gets `undefined` —
+ * there is no spec'd `ref` shape for them yet.
+ */
+function targetRefFor(target: TargetConfig): Record<string, string> | undefined {
+  const opts = target.options as Record<string, unknown>;
+  if (typeof opts.composeId === 'string') return { composeId: opts.composeId };
+  if (typeof opts.applicationId === 'string') return { applicationId: opts.applicationId };
+  return undefined;
+}
+
+/**
+ * Read → transform → push → auto-commit keep.lock through the existing sync
+ * path, for a pure `KeepFile → KeepFile` change that isn't a value edit
+ * (targets recording/stripping). Mirrors `capy connect`'s import write
+ * (`connectors/shared.ts#writeImportedAndSync`) — same push, same
+ * auto-commit — but generalized over the transform instead of "add these
+ * new vars".
+ *
+ * `transform` returning the SAME object (`===`) is treated as "nothing to
+ * do" and skips the network entirely. Best-effort: errors are logged, never
+ * thrown — the caller's own operation (a deploy, a remove, a revoke) already
+ * succeeded or is already committed to happening by the time this runs.
+ */
+async function pushKeepTransform(
+  cwd: string,
+  branch: string,
+  transform: (keep: KeepFile) => KeepFile,
+  devMode: boolean | undefined,
+  label: string,
+): Promise<void> {
+  try {
+    const { ProjectManager } = await import('../core/projectManager');
+    const pm = new ProjectManager(cwd);
+    const projectState = await pm.detectProjectState();
+    if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) return;
+    const keep = pm.readKeepFile();
+    if (!keep) return;
+    const nextKeep = transform(keep);
+    if (nextKeep === keep) return;
+
+    const { AuthService, silentAuthFailureMessage } = await import('../auth/authService');
+    const { ServiceClient } = await import('../service/serviceClient');
+    const { resolveProjectKey } = await import('../crypto/keyResolver');
+    const { Encryptor } = await import('../crypto/encryptor');
+    const { deriveResourceId } = await import('../crypto/resourceId');
+
+    const authService = new AuthService(undefined, devMode, projectState.userId);
+    const serviceClient = new ServiceClient(undefined, devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+    const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+    if (!authResult.success || !authResult.user_id) {
+      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${silentAuthFailureMessage(authResult)}`);
+      return;
+    }
+    const projectKey = await resolveProjectKey(projectState.organizationId, projectState.projectId, authResult.user_id, {
+      coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
+      wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
+    });
+
+    const fm = new FileManager(cwd);
+    const rawLocal = fm.readEnvFile();
+    const localPlaintext = Object.fromEntries(
+      Object.entries(rawLocal).map(([k, v]) => [k, v.startsWith('capy:') ? fm.decryptValue(v, projectKey) : v]),
+    );
+    const envBlob = Object.entries(localPlaintext)
+      .map(([k, v]) => `${k}=capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`)
+      .join('\n');
+
+    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
+    const { SyncEngine } = await import('../sync/syncEngine');
+    fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
+
+    const { autoCommitKeep } = await import('../git/autoCommitKeep');
+    autoCommitKeep(branch, cwd, { quiet: true });
+  } catch (err: any) {
+    console.error(`  ${YELLOW('!')} could not ${label} in keep.lock: ${err?.message ?? err}`);
+  }
+}
+
+/**
+ * Direct-mode-only: after a verified successful deploy, record this target's
+ * delivery into every (var, branch) entry it actually shipped.
+ *
+ * Best-effort: the platform write already succeeded by the time this runs,
+ * so a failure here is reported but does not flip the command's exit code —
+ * the deploy itself did not fail.
+ */
+async function recordDeployTargets(
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  valueHashes: Record<string, string>,
+  deployId: string | undefined,
+  devMode: boolean | undefined,
+): Promise<void> {
+  const deliveredAt = new Date().toISOString();
+  const delivery: TargetDeliveryDescriptor = {
+    provider: adapter.id,
+    target: target.name,
+    ref: targetRefFor(target),
+    deployId,
+  };
+  const values = target.vars
+    .filter((v) => valueHashes[v] !== undefined)
+    .map((v) => ({ name: v, valueHash: valueHashes[v] }));
+  if (values.length === 0) return;
+  await pushKeepTransform(
+    cwd,
+    target.branch,
+    (keep) => recordTargetDeliveries(keep, target.branch, delivery, deliveredAt, values),
+    devMode,
+    'record deploy targets',
+  );
+}
+
+/**
+ * Every distinct `deploy_id` a (provider, target) pair has ever delivered
+ * with, read straight off keep.lock — used by `deployRemove` to know which
+ * deploy tokens to revoke before stripping the record of them.
+ */
+function deployIdsForTarget(keep: KeepFile, provider: string, target: string): readonly string[] {
+  const ids = new Set<string>();
+  for (const entries of Object.values(keep.variables)) {
+    for (const entry of entries) {
+      for (const t of (entry as { targets?: ReadonlyArray<{ provider: string; target: string; deploy_id?: string }> }).targets ?? []) {
+        if (t.provider === provider && t.target === target && t.deploy_id) ids.add(t.deploy_id);
+      }
+    }
+  }
+  return Array.from(ids);
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -1256,7 +1430,7 @@ export async function deployList(
 export async function deployRemove(
   name: string,
   cwd: string = process.cwd(),
-  opts: { web?: boolean; devMode?: boolean } = {},
+  opts: { web?: boolean; devMode?: boolean; noDeploy?: boolean } = {},
 ): Promise<number> {
   if (opts.web) {
     // The terminal removes on a bare argument with no question at all. The
@@ -1327,10 +1501,49 @@ export async function deployRemove(
       orgId,
       devMode: opts.devMode,
       resolvedApiKey,
+      noDeploy: opts.noDeploy,
     });
     if (offer) {
       console.log(`  ${offer.ok ? GREEN('✓') : DIM('·')} ${offer.detail}`);
       if (offer.manualHint) console.log(`  ${DIM(offer.manualHint)}`);
+    }
+  }
+
+  // CAP-679: strip this target's `targets` elements from keep.lock, and
+  // revoke every deploy token it ever delivered with — today `remove` left
+  // the token live. Best-effort and independent of the onRemove offer above
+  // (whether or not the adapter could clean up its own side, the LOCAL
+  // record of "this target received these vars" should not survive removal).
+  if (target) {
+    const pm = new (await import('../core/projectManager')).ProjectManager(cwd);
+    const keep = pm.readKeepFile();
+    if (keep) {
+      const deployIds = deployIdsForTarget(keep, target.kind, target.name);
+      if (deployIds.length > 0) {
+        try {
+          const { AuthService } = await import('../auth/authService');
+          const { ServiceClient } = await import('../service/serviceClient');
+          const projectState = await pm.detectProjectState();
+          if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
+          const authService = new AuthService(undefined, opts.devMode, projectState.userId);
+          const serviceClient = new ServiceClient(undefined, opts.devMode);
+          serviceClient.setTokenProvider(() => authService.getValidToken());
+          const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+          if (authResult.success) {
+            await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
+            console.log(`  ${GREEN('✓')} revoked ${deployIds.length} deploy token(s) for "${name}".`);
+          }
+        } catch (err: any) {
+          console.error(`  ${YELLOW('!')} could not revoke deploy token(s) for "${name}": ${err?.message ?? err}`);
+        }
+      }
+      await pushKeepTransform(
+        cwd,
+        target.branch,
+        (k) => stripTargetsForProviderTarget(k, target.kind, target.name),
+        opts.devMode,
+        'strip deploy targets',
+      );
     }
   }
 
@@ -1793,6 +2006,7 @@ async function computeCiChangeGate(
   options: DeployCliOptions,
   web: WebContext,
   preflight: PreflightResult,
+  deployId?: string,
 ): Promise<CiChangeGate> {
   const fetched = fetchRemoteBranch(cwd, baseBranch);
   if (!fetched.ok) {
@@ -1807,7 +2021,10 @@ async function computeCiChangeGate(
     ? JSON.parse(baseRaw)
     : { ...JSON.parse(readFileSync(join(cwd, 'keep.lock'), 'utf-8')), variables: {} };
 
-  const built = buildDeployKeep(baseKeep, env, target.vars, target.branch);
+  // CAP-679: fold this target's delivery in alongside the value_hash bump —
+  // the PR's keep.lock IS what gets committed if the deploy below succeeds.
+  const delivery: TargetDeliveryDescriptor = { provider: adapter.id, target: target.name, ref: targetRefFor(target), deployId };
+  const built = buildDeployKeep(baseKeep, env, target.vars, target.branch, delivery);
   if (built.changed) {
     return { ok: true, keepLockChanged: true, deployKeepContent: built.content };
   }
@@ -2156,6 +2373,29 @@ export async function deployCommand(
     return 1;
   }
 
+  // ── Branch check (CAP-679) ────────────────────────────────────────────────
+  // Deploy reads values from `.env` but files the result under
+  // `target.branch` — refuse when the two disagree, rather than shipping
+  // branch A's secrets under branch B's name. Only refuses when the active
+  // branch is actually KNOWN (`ProjectManager.deriveActiveBranch`, e.g. the
+  // `.env` header) — a project with no such signal (a plaintext `.env` with
+  // several keep.lock branches, common in tests and some early setups) stays
+  // silent here exactly as it did before this check existed.
+  {
+    const { ProjectManager } = await import('../core/projectManager');
+    const activeBranch = new ProjectManager(cwd).deriveActiveBranch();
+    if (activeBranch && activeBranch !== target.branch) {
+      console.error(
+        `${RED('✗')} [${ERROR_CODES.DEPLOY_BRANCH_MISMATCH}] the active branch (${activeBranch}) does not ` +
+          `match target "${target.name}"'s branch (${target.branch}).`,
+      );
+      console.error(
+        `\nRun \`capy checkout ${target.branch}\` first, or edit the target with \`capy deploy --edit\`.`,
+      );
+      return 1;
+    }
+  }
+
   // Heal Vercel Preview targets saved before options.gitBranch existed. The
   // old fallback scoped the Preview env to the CAPY branch name, which fails
   // at `vercel env add` with "Branch not found in the connected Git
@@ -2347,7 +2587,7 @@ export async function deployCommand(
   //    drive the change-gate, so it measures exactly what ships.
   const secrets = await loadDeploySecrets(cwd, adapter, target, options);
   if (!secrets) return 1;
-  const { env, deployToken } = secrets;
+  const { env, deployToken, valueHashes } = secrets;
 
   // ── CI change-gate ────────────────────────────────────────────
   // "Does this deploy change what's recorded on the target branch?" — keyed off
@@ -2356,7 +2596,7 @@ export async function deployCommand(
   // we commit for the PR, so the gate and the committed artifact can't disagree.
   const changeGate: CiChangeGate =
     gitOk && mode === 'ci' && !options.dryRun
-      ? await computeCiChangeGate(cwd, baseBranch, env, target, adapter, mode, options, web, preflight)
+      ? await computeCiChangeGate(cwd, baseBranch, env, target, adapter, mode, options, web, preflight, deployToken?.deployId)
       : { ok: true, keepLockChanged: false, deployKeepContent: '' };
   if (!changeGate.ok) return 1;
   const { keepLockChanged, deployKeepContent } = changeGate;
@@ -2377,6 +2617,7 @@ export async function deployCommand(
     deployToken,
     dryRun: !!options.dryRun,
     secretsOnly: mode === 'ci',
+    noDeploy: !!options.noDeploy,
     cwd,
     ...adapterCallCtx,
   });
@@ -2393,6 +2634,15 @@ export async function deployCommand(
     return 1;
   }
   if (mode === 'direct') await unwindGitState(cwd, null, directStashed);
+
+  // ── Record targets (CAP-679) ─────────────────────────────────────────────
+  // Direct mode only: CI mode already folded this delivery into the PR's
+  // keep.lock above (`computeCiChangeGate`'s `delivery` param) — recording it
+  // AGAIN here, against the user's own branch, would be wrong: CI mode never
+  // touches the user's tree.
+  if (mode === 'direct' && !options.dryRun) {
+    await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode);
+  }
 
   // The pull request this run opened, for the result page. Held rather than
   // printed-and-forgotten: `✓ PR (open)` with no URL row is the terminal

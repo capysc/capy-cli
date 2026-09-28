@@ -67,6 +67,13 @@ export interface DokployCompose {
   composePath?: string;
   /** Which Dokploy environment this Compose service belongs to, within its project. */
   environmentId?: string;
+  /**
+   * 'docker-compose' | 'stack' (Docker Swarm). CAP-679: `stack` on a Dokploy
+   * version below v0.30.3 ships `env_file` values to containers with literal
+   * quotes (upstream fix d1830182) — the deploy adapter warns, never refuses,
+   * on that combination.
+   */
+  composeType?: string;
 }
 
 // ── Discovery (CAP-657 follow-up): `project.all` ────────────────────────────
@@ -178,6 +185,32 @@ export interface DokployClient {
    * needs `getApplication`/`getCompose`'s detail fields per candidate).
    */
   listProjects(): Promise<readonly DokployProjectSummary[]>;
+  /**
+   * `POST compose.saveEnvironment` (CAP-679) — the Compose write counterpart
+   * to `saveEnvironment`. Needs the `envVars:write` permission, unlike
+   * `compose.update` (`service:create`). `createEnvFile` rides through
+   * exactly as read — this call never flips it.
+   */
+  saveComposeEnvironment(compose: { composeId: string; env: string; createEnvFile: boolean }): Promise<void>;
+  /**
+   * `POST compose.redeploy` (CAP-679) — reuses the code already on disk.
+   * Deliberately NOT `compose.deploy`, which re-clones the branch head and
+   * would ship unreviewed commits, and NEVER sends `freshVolumes`.
+   */
+  redeployCompose(composeId: string, title: string): Promise<void>;
+  /**
+   * `GET deployment.allByCompose` (CAP-679) — the Compose counterpart to
+   * `listDeployments`, used for both the pre-redeploy baseline and polling.
+   */
+  listComposeDeployments(composeId: string): Promise<readonly DokployDeployment[]>;
+  /**
+   * `GET settings.getDokployVersion` (CAP-679) — used only to decide whether
+   * to WARN (never refuse) on a `composeType: 'stack'` target: below
+   * v0.30.3, `env_file` values reach containers with literal quotes.
+   * `null` when the response couldn't be read as a version string — callers
+   * treat that as "unknown", never as "old".
+   */
+  getDokployVersion(): Promise<string | null>;
 }
 
 // ── `project.all` parsing (defensive: unknown-shaped JSON in, typed tree out) ─
@@ -237,6 +270,36 @@ function parseProjectSummary(raw: unknown): DokployProjectSummary | null {
     name: typeof r.name === 'string' ? r.name : r.projectId,
     environments,
   };
+}
+
+/**
+ * Whether `version` is at least `min`, both `x.y.z`. Missing/non-numeric
+ * segments compare as `0`, so `'0.30'` reads as `0.30.0`. Returns `false`
+ * (never "unknown") for a string that doesn't parse as dotted numbers at
+ * all — callers that need to tell "known old" apart from "unknown" do that
+ * by checking `version` for `null` first, not by trusting this function's
+ * `false`.
+ */
+export function dokployVersionAtLeast(version: string, min: string): boolean {
+  const parse = (v: string): readonly number[] =>
+    v
+      .trim()
+      .replace(/^v/i, '')
+      .split('.')
+      .map((part) => {
+        const n = Number.parseInt(part, 10);
+        return Number.isFinite(n) ? n : 0;
+      });
+  const a = parse(version);
+  const b = parse(min);
+  const len = Math.max(a.length, b.length);
+  const compareAt = (i: number): boolean | null => {
+    if (i >= len) return null;
+    const av = a[i] ?? 0;
+    const bv = b[i] ?? 0;
+    return av !== bv ? av > bv : compareAt(i + 1);
+  };
+  return compareAt(0) ?? true;
 }
 
 /** `https://host/` and `https://host/api` both mean the same dashboard. */
@@ -373,7 +436,42 @@ export function createDokployClient(
         branch: typeof body.branch === 'string' ? body.branch : undefined,
         composePath: typeof body.composePath === 'string' ? body.composePath : undefined,
         environmentId: typeof body.environmentId === 'string' ? body.environmentId : undefined,
+        composeType: typeof body.composeType === 'string' ? body.composeType : undefined,
       };
+    },
+    async saveComposeEnvironment(compose) {
+      await call('POST', 'compose.saveEnvironment', {
+        composeId: compose.composeId,
+        env: compose.env,
+        createEnvFile: compose.createEnvFile,
+      });
+    },
+    async redeployCompose(composeId, title) {
+      await call('POST', 'compose.redeploy', { composeId, title });
+    },
+    async listComposeDeployments(composeId) {
+      const body = json(
+        'deployment.allByCompose',
+        await call('GET', 'deployment.allByCompose', { composeId }),
+      );
+      if (!Array.isArray(body)) {
+        throw new DokployApiError('bad_response', null, 'deployment.allByCompose did not return a list');
+      }
+      return body.filter(
+        (d): d is DokployDeployment =>
+          !!d && typeof d === 'object' && typeof d.deploymentId === 'string',
+      );
+    },
+    async getDokployVersion() {
+      const body = json(
+        'settings.getDokployVersion',
+        await call('GET', 'settings.getDokployVersion', {}),
+      );
+      if (typeof body === 'string') return body;
+      if (body && typeof body === 'object' && typeof (body as { version?: unknown }).version === 'string') {
+        return (body as { version: string }).version;
+      }
+      return null;
     },
     async readLogs(deploymentId) {
       const text = await call('GET', 'deployment.readLogs', { deploymentId });
@@ -821,6 +919,21 @@ export function mergeManagedBlock(
 export function stripManagedBlock(split: EnvSplit): string {
   if (!split.hadBlock) return split.before + split.after;
   return split.before.replace(/\r?\n$/, '') + split.after;
+}
+
+/**
+ * CAP-679: a Compose service with `createEnvFile: false` never gets an
+ * `.env` file on disk, so a service that reads its config via `env_file:
+ * .env` would never see Capy's block no matter what `env` holds. Refused
+ * before any read/merge — there is no way to make this deploy work without
+ * the Dokploy setting changing first.
+ */
+export function describeComposeEnvFileDisabled(): { reason: string; hint: string } {
+  return {
+    // COPY-FLAG: minimal neutral wording.
+    reason: 'this Compose service has "Create Env File" disabled in Dokploy, so its containers never read an env file',
+    hint: 'Enable "Create Env File" for this service in the Dokploy Environment tab, then re-run `capy deploy`.',
+  };
 }
 
 export function describeEnvProblem(p: EnvMergeProblem): { reason: string; hint: string } {

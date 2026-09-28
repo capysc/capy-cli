@@ -5,10 +5,13 @@ import type { AuthFailureReason as ScreenAuthFailureReason } from '../ui/screens
  * flow. Lives on the per-branch variable entry so different branches can
  * point at different provider accounts/modes (dev → sandbox, main → live).
  *
- * Connectors are distinct from deploy integrations (cf-workers, vercel,
- * etc.): connectors INGEST a credential into one env var, deploy integrations
- * EGRESS the whole .env to a platform. Don't conflate them — deploy
- * integrations live in `.capy/config`, not here.
+ * "Integration" (CAP-679) is the umbrella term for both directions below —
+ * connectors and targets are its two halves, never conflated:
+ *   - Connector (this type): brings a value IN (Dokploy import, Stripe,
+ *     WorkOS). Lives on the entry as `connector` (singular).
+ *   - Target (`KeepVariableEntry.targets`, below): pushes values OUT
+ *     (`capy deploy` platforms). Intent lives in `.capy/deploy.json`; the
+ *     FACTS of what was actually delivered live here, in keep.lock.
  */
 export interface ConnectorMetadata {
   /** Provider name registered in connectors/registry.ts (e.g. 'stripe'). */
@@ -92,6 +95,32 @@ export interface ConnectorMetadata {
   environment?: string;
 }
 
+/**
+ * One `capy deploy` target's own record of delivering this variable (CAP-679).
+ * Facts, not intent — the intent (which vars a target ships, its branch, its
+ * adapter options) lives in `.capy/deploy.json`; this is what actually landed.
+ *
+ * `deployed_value_hash !== value_hash` on the entry it sits on means STALE:
+ * the value changed since this target last received it.
+ *
+ * At most one element per (provider, target) on a given entry — a new deploy
+ * to the same target REPLACES its element, never appends a duplicate.
+ */
+export interface TargetDelivery {
+  /** Adapter id — e.g. 'dokploy'. Same vocabulary as `TargetConfig.kind`. */
+  provider: string;
+  /** `.capy/deploy.json` target name — same vocabulary as `TargetConfig.name`. */
+  target: string;
+  /** Adapter-specific handle for what was written, e.g. `{ composeId }` or `{ applicationId }`. */
+  ref?: Record<string, string>;
+  /** sha256(value).slice(0,16) — same algorithm as `value_hash`, computed at delivery time. */
+  deployed_value_hash: string;
+  /** ISO8601 UTC — when this was delivered to the target's configuration (not "running"). */
+  deployed_at: string;
+  /** Token deploys only (Dokploy): the deploy id `capy deploy revoke` takes. */
+  deploy_id?: string;
+}
+
 /** v3 keep.lock variable entry — per-branch value hashes */
 export interface KeepVariableEntry {
   resource_id: string;
@@ -107,6 +136,13 @@ export interface KeepVariableEntry {
   changed_at?: string;
   /** Set when this variable was provisioned by `capy connect <provider>`. */
   connector?: ConnectorMetadata;
+  /**
+   * Every `capy deploy` target this variable has been delivered to (CAP-679).
+   * Optional and additive — absent on every entry written before this field
+   * existed. See `TargetDelivery`'s own doc for the one-per-(provider,target)
+   * rule and what "stale" means.
+   */
+  targets?: ReadonlyArray<TargetDelivery>;
 }
 
 export interface KeepFile {
@@ -421,6 +457,18 @@ export const ERROR_CODES = {
    * `dokploy`) — there is nothing to rotate through a one-time import.
    */
   ROTATE_NOT_SUPPORTED_IMPORTED: 'ROTATE_NOT_SUPPORTED_IMPORTED',
+  // --- Deploy targets (CAP-679) ---
+  /**
+   * A Dokploy Compose service has `createEnvFile: false` — writing Capy's
+   * block into `env` would never reach a container reading `env_file: .env`.
+   */
+  DOKPLOY_ENV_FILE_DISABLED: 'DOKPLOY_ENV_FILE_DISABLED',
+  /**
+   * `capy deploy <target>` refused: the active `.env` branch (what deploy is
+   * about to read) differs from the saved target's own branch (what the
+   * result would be filed under).
+   */
+  DEPLOY_BRANCH_MISMATCH: 'DEPLOY_BRANCH_MISMATCH',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

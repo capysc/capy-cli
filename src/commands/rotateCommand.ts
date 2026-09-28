@@ -12,6 +12,7 @@ import { cap, rotationPlan, type RotationPlanInput } from './connectors/plans';
 import { ProjectManager } from '../core/projectManager';
 import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/index';
 import { TargetConfig } from '../deploy/adapter';
+import { staleTargets } from '../deploy/targetsGate';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
 import type {
@@ -985,6 +986,15 @@ export class RotateCommand {
       return;
     }
 
+    // ── Stale targets (CAP-679) ───────────────────────────────────────────
+    // The rotate above already pushed — re-read to see which `targets`
+    // elements now disagree with the fresh value_hash, and report them.
+    // Kept deliberately separate from `deployTarget`'s own auto-redeploy
+    // above/below: THIS is "does any configured target still hold the OLD
+    // value", regardless of whether a single unambiguous target happened to
+    // be resolved for the redeploy-after-rotate flow.
+    await this.reportStaleTargets(branch, report.succeeded, opts, isTTY && !web);
+
     let deployed: { name: string; ok: boolean } | null = null;
     if (deployTarget) {
       const { deployCommand } = await import('./deployCommand');
@@ -1013,6 +1023,66 @@ export class RotateCommand {
     if (web) {
       await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
       if (report.stopped) process.exitCode = 1;
+    }
+  }
+
+  /**
+   * CAP-679: after a successful rotate + push, list every configured target
+   * whose keep.lock record now disagrees with the fresh value — i.e. a
+   * platform that still holds the OLD value. Report-only outside a plain
+   * terminal (`offerRedeploy=false`): under `--web`, or with `--skip-prompts`
+   * /`--yes`, this never prompts — it reuses the same rotate→deploy plumbing
+   * (`deployCommand`) as the single-target auto-redeploy above, one call per
+   * stale target, only when a human at a real TTY says yes.
+   */
+  private async reportStaleTargets(
+    branch: string,
+    rotatedVars: readonly string[],
+    opts: RotateOpts & { skipPrompts?: boolean },
+    offerRedeploy: boolean,
+  ): Promise<void> {
+    if (rotatedVars.length === 0) return;
+    const pm = new ProjectManager();
+    const keep = pm.readKeepFile();
+    if (!keep) return;
+
+    type StaleGroup = { provider: string; target: string; vars: readonly string[] };
+    const staleHits = rotatedVars.flatMap((varName) => {
+      const entry = (keep.variables[varName] ?? []).find((e) => (e.branch ?? '') === branch);
+      return entry ? staleTargets(entry).map((t) => ({ varName, provider: t.provider, target: t.target })) : [];
+    });
+    const staleByTarget = staleHits.reduce((acc, hit) => {
+      const key = `${hit.provider}\u0000${hit.target}`;
+      const existing = acc.get(key);
+      const group: StaleGroup = existing
+        ? { ...existing, vars: [...existing.vars, hit.varName] }
+        : { provider: hit.provider, target: hit.target, vars: [hit.varName] };
+      return new Map([...acc, [key, group]]);
+    }, new Map<string, StaleGroup>());
+    if (staleByTarget.size === 0) return;
+
+    console.log(`\n  \x1b[33m!\x1b[0m Stale on ${staleByTarget.size} target(s) — the value(s) changed since last delivered:`);
+    for (const { provider, target, vars } of staleByTarget.values()) {
+      console.log(`    - ${target} (${provider}): ${vars.join(', ')}`);
+    }
+
+    if (!offerRedeploy || opts.skipPrompts) {
+      console.log('    Run `capy deploy <target>` to redeploy the ones you need.');
+      return;
+    }
+
+    const { listTargets } = await import('../deploy/config');
+    const configured = listTargets(process.cwd());
+    const inquirer = (await import('inquirer')).default;
+    for (const { target: targetName } of staleByTarget.values()) {
+      const target = configured.find((t) => t.name === targetName);
+      if (!target) continue;
+      const { proceed } = await inquirer.prompt([
+        { type: 'confirm', name: 'proceed', message: `Redeploy stale target "${targetName}" now?`, default: true },
+      ]);
+      if (!proceed) continue;
+      const { deployCommand } = await import('./deployCommand');
+      await deployCommand(target.name, { yes: true, devMode: this.devMode });
     }
   }
 

@@ -345,6 +345,7 @@ const deploy = program
   .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
+  .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (connector mode)')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     assertNotLocalOnly('deploy');
     // Top-level program also defines --dry-run; merge globals so either
@@ -365,6 +366,8 @@ const deploy = program
         // Deploy-level flag only — the global `-f/--force` means "re-encrypt",
         // a different thing, so it must NOT be merged in here.
         force: options.force,
+        // commander negates `--no-deploy` onto the positive `deploy` property.
+        noDeploy: options.deploy === false,
       });
       process.exit(code);
     }
@@ -415,10 +418,17 @@ deploy
 deploy
   .command('targets-remove <name>')
   .description('Remove a configured connector target')
-  .action(async (name: string, _options, command) => {
+  .option('--no-deploy', 'strip the config but skip the redeploy that would apply the revert')
+  .action(async (name: string, options: any, command) => {
     assertNotLocalOnly('deploy targets-remove');
     const { deployRemove } = await import('./commands/deployCommand');
-    process.exit(await deployRemove(name, process.cwd(), { web: command.optsWithGlobals().web === true }));
+    process.exit(
+      await deployRemove(name, process.cwd(), {
+        web: command.optsWithGlobals().web === true,
+        // commander negates `--no-deploy` onto the positive `deploy` property.
+        noDeploy: options.deploy === false,
+      }),
+    );
   });
 
 program

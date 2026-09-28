@@ -17,6 +17,62 @@ import ora from '../ui/spinner';
 import inquirer from 'inquirer';
 import { generateDeployHtml } from '../ui/deployPage/html';
 import { formatRelativeTime } from '../ui/relativeTime';
+import { hashValue } from '../deploy/keepGate';
+import { stripTargetsForDeployId } from '../deploy/targetsGate';
+import type { ProjectState } from '../types/index';
+
+/**
+ * `deploy revoke <id>` (CAP-679): strip every `targets` element carrying
+ * this `deploy_id` from keep.lock, push through the existing sync path, and
+ * auto-commit — the same "read → transform → push → commit" shape as
+ * `deployCommand.ts#pushKeepTransform`, kept local here rather than
+ * cross-importing `deployCommand.ts` (which itself dynamically imports THIS
+ * module for minting), to avoid a module cycle.
+ *
+ * Best-effort and silent on failure beyond a one-line warning: the token is
+ * already revoked by the time this runs, so a keep.lock hiccup here must
+ * never look like the revoke itself failed.
+ */
+async function stripRevokedTargets(
+  pm: ProjectManager,
+  serviceClient: ServiceClient,
+  projectState: ProjectState,
+  userId: string,
+  deployId: string,
+): Promise<void> {
+  try {
+    if (!projectState.projectId || !projectState.organizationId) return;
+    const branch = projectState.activeBranch;
+    if (!branch) return;
+    const keep = pm.readKeepFile();
+    if (!keep) return;
+    const nextKeep = stripTargetsForDeployId(keep, deployId);
+    if (nextKeep === keep) return;
+
+    const { resolveProjectKey: resolveKey } = await import('../crypto/keyResolver');
+    const { Encryptor } = await import('../crypto/encryptor');
+    const { deriveResourceId } = await import('../crypto/resourceId');
+    const projectKey = await resolveKey(projectState.organizationId, projectState.projectId, userId, {
+      coDecrypt: (o, c) => serviceClient.coDecrypt(o, c).then((r) => r.plaintext),
+      wrapOuterLayer: (o, p) => serviceClient.wrapOuterLayer(o, p).then((r) => r.ciphertext),
+    });
+    const fm = new FileManager();
+    const rawLocal = fm.readEnvFile();
+    const localPlaintext = Object.fromEntries(
+      Object.entries(rawLocal).map(([k, v]) => [k, v.startsWith('capy:') ? fm.decryptValue(v, projectKey) : v]),
+    );
+    const envBlob = Object.entries(localPlaintext)
+      .map(([k, v]) => `${k}=capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`)
+      .join('\n');
+    const pushed = await serviceClient.pushSecrets(projectState.projectId, JSON.stringify(nextKeep), envBlob, branch);
+    const { SyncEngine } = await import('../sync/syncEngine');
+    fm.writeKeepFile(SyncEngine.adoptServerKeep(pushed.keep_file, nextKeep, branch));
+    const { autoCommitKeep } = await import('../git/autoCommitKeep');
+    autoCommitKeep(branch, process.cwd(), { quiet: true });
+  } catch (err: any) {
+    console.error(`  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock: ${err?.message ?? err}`);
+  }
+}
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
@@ -84,7 +140,12 @@ function decorateChoices(
     if (PLATFORM_TO_CONNECTOR[p.value]) {
       return {
         ...p,
-        name: `${p.name}  \x1b[90m(connector available)\x1b[0m`,
+        // CAP-679: "connector" was the umbrella word this picker uses for
+        // "the platform has a real deploy adapter, not just docs" — but
+        // connectors are now the INBOUND half of "integrations" (targets are
+        // outbound). Approved copy change: only this label moves; internal
+        // identifiers like `PLATFORM_TO_CONNECTOR` are untouched for now.
+        name: `${p.name}  \x1b[90m(integration available)\x1b[0m`,
       };
     }
     return { ...p };
@@ -144,6 +205,13 @@ export interface MintedDeployToken {
   deployId: string;
   secretCount: number;
   blobBytes: number;
+  /**
+   * sha256(value).slice(0,16) per minted variable — same algorithm as
+   * keep.lock's `value_hash` (CAP-679). Never the plaintext itself: a caller
+   * that needs to RECORD a `capy deploy` target's delivery (see
+   * `deployCommand.ts`/`targetsGate.ts`) uses this instead of re-decrypting.
+   */
+  valueHashes: Record<string, string>;
 }
 
 export interface MintDeployTokenDeps {
@@ -239,6 +307,9 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
   const encryptedVars = encryptEnvBlob(plaintextEnv, pk, innerBlob, projectId, deployId);
   const secretsBlob = buildSecretsBlob(deployId, outerBlob, encryptedVars);
   const blobBytes = Buffer.from(secretsBlob, 'base64').length;
+  const valueHashes = Object.fromEntries(
+    Object.entries(plaintextEnv).map(([name, value]) => [name, hashValue(value)]),
+  );
 
   return {
     secretsBlob,
@@ -246,6 +317,7 @@ export async function mintDeployToken(deps: MintDeployTokenDeps): Promise<Minted
     deployId: deployId.toString('hex'),
     secretCount: Object.keys(plaintextEnv).length,
     blobBytes,
+    valueHashes,
   };
 }
 
@@ -690,9 +762,14 @@ export class DeployRevokeCommand {
       const authService = new AuthService(this.apiUrl, this.devMode, projectState.userId);
       const serviceClient = new ServiceClient(this.apiUrl, this.devMode);
       serviceClient.setTokenProvider(() => authService.getValidToken());
-      let authResult = await authService.authenticateSilent(orgId);
-      if (!authResult.success) authResult = await authService.authenticateSilent();
-      if (!authResult.success) authResult = await authService.authenticate(orgId);
+      // org-scoped silent → unscoped silent → interactive, as one value
+      // rather than a reassigned local.
+      const authResult = await (async () => {
+        const scoped = await authService.authenticateSilent(orgId);
+        if (scoped.success) return scoped;
+        const unscoped = await authService.authenticateSilent();
+        return unscoped.success ? unscoped : await authService.authenticate(orgId);
+      })();
       if (!authResult.success) {
         console.error('Authentication failed');
         process.exit(1);
@@ -738,12 +815,23 @@ export class DeployRevokeCommand {
         }
         await serviceClient.revokeDeployToken(picked.deployId);
         console.log(`  Deploy token ${picked.deployId.slice(0, 12)}... revoked.`);
+        if (authResult.user_id) {
+          await stripRevokedTargets(pm, serviceClient, projectState, authResult.user_id, picked.deployId);
+        }
         return;
       }
 
       await serviceClient.revokeDeployToken(deployIdPrefix);
 
       console.log(`  Deploy token ${deployIdPrefix.slice(0, 12)}... revoked.`);
+      // CAP-679: strip keep.lock's record of this deploy — best-effort, and
+      // resolved to the FULL id (via listDeployTokens) since a prefix can't
+      // be matched exactly against `targets[].deploy_id`.
+      if (projectState.projectId && authResult.user_id) {
+        const { tokens } = await serviceClient.listDeployTokens(orgId, projectState.projectId).catch(() => ({ tokens: [] }));
+        const full = tokens.find((t) => t.deploy_id.startsWith(deployIdPrefix))?.deploy_id ?? deployIdPrefix;
+        await stripRevokedTargets(pm, serviceClient, projectState, authResult.user_id, full);
+      }
     } catch (error) {
       const { displayErrorAndExit } = await import('../ui/errorScreen');
       await displayErrorAndExit(error);
