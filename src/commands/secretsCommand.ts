@@ -83,9 +83,9 @@ export class SecretsCommand {
 
     // Same CAP-273 contract as `usersCommand`/`projectsCommand`: under
     // --json, no progress output at all, so stdout stays pure JSON even on
-    // a TTY. The interactive screen owns the whole terminal itself, so it
-    // gets no spinner either — it draws its own first frame instead.
-    const spinner = json || interactive ? null : new Spinner('Loading secrets...');
+    // a TTY. The interactive screen shows the same loading line while the
+    // index loads, then clears it before taking over the terminal.
+    const spinner = json ? null : new Spinner('Loading secrets...');
     spinner?.start();
 
     try {
@@ -96,6 +96,7 @@ export class SecretsCommand {
       if (interactive) {
         const { createLocationDecryptor } = await import('./secretsValueDecryptor');
         const { runSecretsScreen } = await import('../ui/secretsScreenDriver');
+        spinner?.stop();
         await runSecretsScreen(rows, createLocationDecryptor(orgId, userId, serviceClient));
         return;
       }
