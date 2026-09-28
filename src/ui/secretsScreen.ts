@@ -96,7 +96,6 @@ export interface PopupState {
 }
 
 export interface SearchState {
-  readonly typing: boolean;
   readonly query: string;
 }
 
@@ -114,7 +113,7 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): Secr
     rows,
     column: 'users',
     cursorIndex: 0,
-    search: { typing: false, query: '' },
+    search: { query: '' },
     popup: null,
     quit: false,
   };
@@ -148,31 +147,9 @@ const noEffect = (state: SecretsScreenState): ReduceResult => ({ state, effect: 
 export function handleKey(state: SecretsScreenState, key: string): ReduceResult {
   if (key === KEY_CTRL_C) return noEffect({ ...state, quit: true });
 
-  if (state.search.typing) return noEffect(handleSearchKey(state, key));
-
   if (state.popup) return noEffect(handlePopupKey(state, key));
 
-  return handleNavKey(state, key);
-}
-
-function handleSearchKey(state: SecretsScreenState, key: string): SecretsScreenState {
-  if (key === KEY_ESC || key === KEY_ESC_ESC) {
-    return { ...state, search: { typing: false, query: '' }, cursorIndex: 0 };
-  }
-  if (key === '\r' || key === '\n') {
-    return { ...state, search: { ...state.search, typing: false } };
-  }
-  if (key === KEY_BACKSPACE || key === KEY_BACKSPACE2) {
-    const query = state.search.query.slice(0, -1);
-    const rows = filteredRowsFor(state.rows, query);
-    return { ...state, search: { typing: true, query }, cursorIndex: clampIndex(0, rows.length) };
-  }
-  if (key.length === 1 && key.charCodeAt(0) >= 0x20 && key.charCodeAt(0) !== 0x7f) {
-    const query = state.search.query + key;
-    const rows = filteredRowsFor(state.rows, query);
-    return { ...state, search: { typing: true, query }, cursorIndex: clampIndex(0, rows.length) };
-  }
-  return state;
+  return handleListKey(state, key);
 }
 
 function filteredRowsFor(rows: readonly SecretIndexRow[], query: string): readonly SecretIndexRow[] {
@@ -181,11 +158,20 @@ function filteredRowsFor(rows: readonly SecretIndexRow[], query: string): readon
   return rows.filter((r) => r.name.toLowerCase().includes(q));
 }
 
+/** Sets the search query and reclamps the cursor into the (possibly now-shorter) filtered set — never resets it to the top just because the query changed. */
+function applyQuery(state: SecretsScreenState, query: string): SecretsScreenState {
+  const rows = filteredRowsFor(state.rows, query);
+  return { ...state, search: { query }, cursorIndex: clampIndex(state.cursorIndex, rows.length) };
+}
+
 function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenState {
   const popup = state.popup;
   if (!popup) return state;
 
-  if (key === KEY_ESC || key === KEY_ESC_ESC) {
+  // `q` closes the popup here (same as Esc) — with the search bar always
+  // live in the list view, `q` is no longer a global "quit" key at all;
+  // only Ctrl-C, and Esc pressed with an already-empty query, quit the app.
+  if (key === KEY_ESC || key === KEY_ESC_ESC || key === 'q' || key === 'Q') {
     return { ...state, popup: null };
   }
   if (key === 'r' || key === 'R') {
@@ -206,17 +192,21 @@ function handlePopupKey(state: SecretsScreenState, key: string): SecretsScreenSt
   return state;
 }
 
-function handleNavKey(state: SecretsScreenState, key: string): ReduceResult {
+/**
+ * The list view: a search bar that's ALWAYS live (fzf-style, no separate
+ * "search mode" to enter or leave) plus navigation. Every printable
+ * character types into the query; `q`/`j`/`k`/`/` carry no special meaning
+ * here anymore — they're just query text like any other letter. Esc clears
+ * a non-empty query; pressed again (query already empty) it quits, so one
+ * key reliably backs all the way out. Ctrl-C (handled one level up) always
+ * quits regardless of query state.
+ */
+function handleListKey(state: SecretsScreenState, key: string): ReduceResult {
   const rows = filteredRows(state);
 
-  if (key === 'q' || key === 'Q') return noEffect({ ...state, quit: true });
-
-  if (key === '/') {
-    return noEffect({ ...state, search: { typing: true, query: state.search.query } });
-  }
-
-  if ((state.search.query !== '' || state.search.typing) && (key === KEY_ESC || key === KEY_ESC_ESC)) {
-    return noEffect({ ...state, search: { typing: false, query: '' }, cursorIndex: 0 });
+  if (key === KEY_ESC || key === KEY_ESC_ESC) {
+    if (state.search.query !== '') return noEffect(applyQuery(state, ''));
+    return noEffect({ ...state, quit: true });
   }
 
   if (key === KEY_TAB) {
@@ -226,10 +216,10 @@ function handleNavKey(state: SecretsScreenState, key: string): ReduceResult {
     return noEffect({ ...state, column: nextColumn(state.column, -1) });
   }
 
-  if (key === KEY_UP || key === 'k') {
+  if (key === KEY_UP) {
     return noEffect({ ...state, cursorIndex: clampIndex(state.cursorIndex - 1, rows.length) });
   }
-  if (key === KEY_DOWN || key === 'j') {
+  if (key === KEY_DOWN) {
     return noEffect({ ...state, cursorIndex: clampIndex(state.cursorIndex + 1, rows.length) });
   }
   if (key === KEY_PGUP) {
@@ -239,7 +229,7 @@ function handleNavKey(state: SecretsScreenState, key: string): ReduceResult {
     return noEffect({ ...state, cursorIndex: clampIndex(state.cursorIndex + PAGE_SIZE, rows.length) });
   }
 
-  if (key === '\r' || key === '\n' || key === ' ') {
+  if (key === '\r' || key === '\n') {
     const row = rows[clampIndex(state.cursorIndex, rows.length)];
     if (!row) return noEffect(state);
     const popup: PopupState = {
@@ -250,6 +240,16 @@ function handleNavKey(state: SecretsScreenState, key: string): ReduceResult {
       panOffset: 0,
     };
     return { state: { ...state, popup }, effect: { type: 'fetchValue', row } };
+  }
+
+  if (key === KEY_BACKSPACE || key === KEY_BACKSPACE2) {
+    return noEffect(applyQuery(state, state.search.query.slice(0, -1)));
+  }
+
+  // Any other single printable character (including 'q', 'j', 'k', '/')
+  // types into the search bar.
+  if (key.length === 1 && key.charCodeAt(0) >= 0x20 && key.charCodeAt(0) !== 0x7f) {
+    return noEffect(applyQuery(state, state.search.query + key));
   }
 
   return noEffect(state);
@@ -414,6 +414,20 @@ function columnHeaderLabel(column: ColumnMode): string {
   return `${column.toUpperCase()} ⇥`;
 }
 
+/**
+ * Always-visible search bar (fzf-style — there's no separate "search mode"
+ * to enter). Shows a dim placeholder when empty and a `<matched>/<total>`
+ * count; the insertion caret only appears when the list view actually owns
+ * keystrokes (i.e. no popup is open).
+ */
+function searchBarLine(state: SecretsScreenState, matchedCount: number): string {
+  const focused = state.popup === null;
+  const caret = focused ? '▏' : '';
+  const queryDisplay = state.search.query !== '' ? state.search.query : focused ? `${DIM}type to filter${RESET}` : '';
+  const countLabel = `${matchedCount}/${state.rows.length}`;
+  return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
+}
+
 /** Pure render — a total function of state + terminal size. Never mutates `state`; any "clamping" of a display-only quantity (e.g. panning past the end of a value) is a local `const`, never written back. */
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   const m = ' '.repeat(MARGIN);
@@ -423,13 +437,7 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
 
   const lines: string[] = [];
   lines.push(`${m}${BOLD}capy secrets${RESET} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`);
-
-  if (state.search.typing || state.search.query !== '') {
-    const cursor = state.search.typing ? '_' : '';
-    lines.push(`${m}${DIM}search:${RESET} ${state.search.query}${cursor} ${DIM}(${rows.length} match${rows.length === 1 ? '' : 'es'})${RESET}`);
-  } else {
-    lines.push('');
-  }
+  lines.push(m + searchBarLine(state, rows.length));
   lines.push('');
 
   const nameW = Math.max(16, Math.floor(available * 0.4));
@@ -545,13 +553,10 @@ function renderPopupValueLine(popup: PopupState, width: number): string {
 }
 
 function footerLine(state: SecretsScreenState): string {
-  if (state.search.typing) {
-    return `${DIM}Type to filter · ${RESET}${BOLD}Enter${RESET}${DIM} keep filter · ${RESET}${BOLD}Esc${RESET}${DIM} clear${RESET}`;
-  }
   if (state.popup) {
     const revealLabel = state.popup.revealed ? 'hide' : 'reveal';
     const panHint = state.popup.revealed ? `${DIM} · ${RESET}${BOLD}←/→${RESET}${DIM} pan${RESET}` : '';
-    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM} close${RESET}`;
+    return `${BOLD}r${RESET}${DIM} ${revealLabel}${RESET}${panHint}${DIM} · ${RESET}${BOLD}esc${RESET}${DIM}/${RESET}${BOLD}q${RESET}${DIM} close${RESET}`;
   }
-  return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} cycle column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}/${RESET}${DIM} search · ${RESET}${BOLD}q${RESET}${DIM} quit${RESET}`;
+  return `${DIM}↑↓ navigate · ${RESET}${BOLD}tab${RESET}${DIM} column · ${RESET}${BOLD}enter${RESET}${DIM} inspect · ${RESET}${BOLD}esc${RESET}${DIM} clear/quit${RESET}`;
 }

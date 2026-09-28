@@ -13,6 +13,7 @@ import {
   formatUpdatedCell,
   mostRecentChangedAt,
   maskSecretValue,
+  SecretsScreenState,
   LocationDecryptResult,
 } from '../../src/ui/secretsScreen';
 import type { SecretIndexLocation, SecretIndexRow } from '../../src/service/serviceClient';
@@ -58,6 +59,16 @@ const KEY_DOWN = `${ESC}[B`;
 const KEY_TAB = '\t';
 const KEY_SHIFT_TAB = `${ESC}[Z`;
 const ENTER = '\r';
+
+/** Folds `handleKey` over a sequence of keypresses, keeping only the final state — a `reduce`-based stand-in for "press these keys in order" that never needs a reassigned binding. */
+function pressKeys(state: SecretsScreenState, ...keys: readonly string[]): SecretsScreenState {
+  return keys.reduce((acc: SecretsScreenState, k) => handleKey(acc, k).state, state);
+}
+
+/** Same as `pressKeys`, but for a string typed one character at a time (the way real keystrokes arrive). */
+function type(state: SecretsScreenState, text: string): SecretsScreenState {
+  return pressKeys(state, ...text.split(''));
+}
 
 describe('handleKey — column cycling', () => {
   test('Tab cycles USERS -> BRANCH -> SERVICE -> USERS', () => {
@@ -157,59 +168,53 @@ describe('UPDATED computation', () => {
   });
 });
 
-describe('search filtering / clear', () => {
+describe('search bar — always-on, fzf-style (no "/" mode)', () => {
   const rows = [row({ name: 'API_KEY' }), row({ name: 'DB_PASSWORD' }), row({ name: 'api_secondary' })];
 
-  test('typed chars filter by NAME, case-insensitively, live', () => {
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, '/').state;
-    expect(s.search.typing).toBe(true);
-    s = handleKey(s, 'a').state;
-    s = handleKey(s, 'p').state;
-    s = handleKey(s, 'i').state;
+  test('typed characters filter by NAME, case-insensitively, live — no "/" needed to start', () => {
+    const s = type(initialSecretsScreenState(rows), 'api');
+    expect(s.search.query).toBe('api');
     expect(filteredRows(s).map((r) => r.name)).toEqual(['API_KEY', 'api_secondary']);
   });
 
   test('backspace edits the query', () => {
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, '/').state;
-    s = handleKey(s, 'x').state;
-    s = handleKey(s, 'x').state;
-    s = handleKey(s, '\x7f').state;
+    const s = pressKeys(type(initialSecretsScreenState(rows), 'xx'), '\x7f');
     expect(s.search.query).toBe('x');
   });
 
-  test('Enter commits the filter and returns to navigation', () => {
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, '/').state;
-    s = handleKey(s, 'D').state;
-    s = handleKey(s, 'B').state;
-    s = handleKey(s, ENTER).state;
-    expect(s.search.typing).toBe(false);
-    expect(s.search.query).toBe('DB');
-    expect(filteredRows(s).map((r) => r.name)).toEqual(['DB_PASSWORD']);
+  test('"q" and "j" are just query text in the list view, not quit/navigate', () => {
+    const s = type(initialSecretsScreenState(rows), 'qj');
+    expect(s.search.query).toBe('qj');
+    expect(s.quit).toBe(false);
+    expect(s.cursorIndex).toBe(0); // 'j' did not move the cursor
   });
 
-  test('Esc while typing clears the filter entirely', () => {
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, '/').state;
-    s = handleKey(s, 'D').state;
-    s = handleKey(s, 'B').state;
-    s = handleKey(s, ESC).state;
-    expect(s.search.typing).toBe(false);
+  test('Esc clears a non-empty query without quitting', () => {
+    const s = pressKeys(type(initialSecretsScreenState(rows), 'db'), ESC);
     expect(s.search.query).toBe('');
+    expect(s.quit).toBe(false);
     expect(filteredRows(s)).toEqual(rows);
   });
 
-  test('a new query resets the cursor into bounds of the filtered set', () => {
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, KEY_DOWN).state;
-    s = handleKey(s, KEY_DOWN).state; // cursor at index 2 (api_secondary) pre-filter
-    expect(s.cursorIndex).toBe(2);
-    s = handleKey(s, '/').state;
-    s = handleKey(s, 'D').state;
-    s = handleKey(s, 'B').state; // filters down to just DB_PASSWORD (1 row)
-    expect(s.cursorIndex).toBe(0);
+  test('Esc with an already-empty query quits', () => {
+    const s = handleKey(initialSecretsScreenState(rows), ESC).state;
+    expect(s.search.query).toBe('');
+    expect(s.quit).toBe(true);
+  });
+
+  test('pressing Esc twice clears then quits', () => {
+    const afterFirstEsc = pressKeys(type(initialSecretsScreenState(rows), 'db'), ESC);
+    expect(afterFirstEsc.quit).toBe(false);
+    const afterSecondEsc = handleKey(afterFirstEsc, ESC).state;
+    expect(afterSecondEsc.quit).toBe(true);
+  });
+
+  test('cursor reclamps when the filter shrinks the list, but is left alone otherwise', () => {
+    const s0 = pressKeys(initialSecretsScreenState(rows), KEY_DOWN, KEY_DOWN); // cursor at index 2 (api_secondary)
+    expect(s0.cursorIndex).toBe(2);
+    const s1 = type(s0, 'DB'); // only 1 row matches now — cursor must come back into range
+    expect(filteredRows(s1)).toHaveLength(1);
+    expect(s1.cursorIndex).toBe(0);
   });
 });
 
@@ -217,27 +222,14 @@ describe('navigation bounds', () => {
   const rows = [row({ name: 'A' }), row({ name: 'B' }), row({ name: 'C' })];
 
   test('up/down clamp at the ends, never go negative or past the last row', () => {
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, KEY_UP).state;
-    expect(s.cursorIndex).toBe(0);
-    s = handleKey(s, KEY_DOWN).state;
-    s = handleKey(s, KEY_DOWN).state;
-    s = handleKey(s, KEY_DOWN).state;
-    s = handleKey(s, KEY_DOWN).state;
-    expect(s.cursorIndex).toBe(2);
-  });
-
-  test('j/k are aliases for down/up', () => {
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, 'j').state;
-    expect(s.cursorIndex).toBe(1);
-    s = handleKey(s, 'k').state;
-    expect(s.cursorIndex).toBe(0);
+    const afterUpAtTop = handleKey(initialSecretsScreenState(rows), KEY_UP).state;
+    expect(afterUpAtTop.cursorIndex).toBe(0);
+    const afterFourDowns = pressKeys(initialSecretsScreenState(rows), KEY_DOWN, KEY_DOWN, KEY_DOWN, KEY_DOWN);
+    expect(afterFourDowns.cursorIndex).toBe(2);
   });
 
   test('an empty row set never lets the cursor go out of range', () => {
-    let s = initialSecretsScreenState([]);
-    s = handleKey(s, KEY_DOWN).state;
+    const s = handleKey(initialSecretsScreenState([]), KEY_DOWN).state;
     expect(s.cursorIndex).toBe(0);
   });
 });
@@ -245,13 +237,13 @@ describe('navigation bounds', () => {
 describe('render scroll viewport', () => {
   test('a short terminal only shows a window of rows, following the cursor', () => {
     const rows = Array.from({ length: 30 }, (_, i) => row({ name: `VAR_${i}` }));
-    let s = initialSecretsScreenState(rows);
-    const out0 = render(s, 100, 15);
+    const s0 = initialSecretsScreenState(rows);
+    const out0 = render(s0, 100, 15);
     expect(out0).toContain('VAR_0');
     expect(out0).not.toContain('VAR_29');
 
-    for (let i = 0; i < 25; i++) s = handleKey(s, KEY_DOWN).state;
-    const out1 = render(s, 100, 15);
+    const s1 = pressKeys(s0, ...Array.from({ length: 25 }, () => KEY_DOWN));
+    const out1 = render(s1, 100, 15);
     expect(out1).toContain('VAR_25');
     expect(out1).not.toContain('VAR_0');
   });
@@ -269,36 +261,38 @@ describe('details popup open/close', () => {
 
   test('Esc closes the popup', () => {
     const s0 = initialSecretsScreenState([row()]);
-    const s1 = handleKey(s0, ENTER).state;
-    const s2 = handleKey(s1, ESC).state;
-    expect(s2.popup).toBeNull();
+    const s1 = pressKeys(s0, ENTER, ESC);
+    expect(s1.popup).toBeNull();
+  });
+
+  test('"q" also closes the popup (unlike the list view, where it is just text)', () => {
+    const s0 = initialSecretsScreenState([row()]);
+    const s1 = pressKeys(s0, ENTER, 'q');
+    expect(s1.popup).toBeNull();
+    expect(s1.quit).toBe(false); // closes the popup, does not quit the app
   });
 
   test('reveal toggle clears (along with the plaintext) on close', () => {
     const s0 = initialSecretsScreenState([row()]);
-    let s1 = handleKey(s0, ENTER).state;
-    s1 = applyValueResult(s1, s0.rows[0], { status: 'ok', value: FAKE_LONG_VALUE });
-    s1 = handleKey(s1, 'r').state;
-    expect(s1.popup?.revealed).toBe(true);
-    expect(s1.popup?.value).toEqual({ status: 'ok', value: FAKE_LONG_VALUE });
+    const afterOpen = handleKey(s0, ENTER).state;
+    const afterValue = applyValueResult(afterOpen, s0.rows[0], { status: 'ok', value: FAKE_LONG_VALUE });
+    const afterReveal = handleKey(afterValue, 'r').state;
+    expect(afterReveal.popup?.revealed).toBe(true);
+    expect(afterReveal.popup?.value).toEqual({ status: 'ok', value: FAKE_LONG_VALUE });
 
-    const s2 = handleKey(s1, ESC).state;
-    expect(s2.popup).toBeNull(); // revealed flag AND plaintext are gone with it
+    const afterClose = handleKey(afterReveal, ESC).state;
+    expect(afterClose.popup).toBeNull(); // revealed flag AND plaintext are gone with it
 
     // Reopening starts fresh: not revealed, value re-requested from scratch.
-    const { state: s3, effect } = handleKey(s2, ENTER);
-    expect(s3.popup?.revealed).toBe(false);
-    expect(s3.popup?.value).toEqual({ status: 'loading' });
+    const { state: reopened, effect } = handleKey(afterClose, ENTER);
+    expect(reopened.popup?.revealed).toBe(false);
+    expect(reopened.popup?.value).toEqual({ status: 'loading' });
     expect(effect).not.toBeNull();
   });
 
   test('applyValueResult drops a stale result for a row the popup has moved past', () => {
     const rows = [row({ name: 'FIRST', value_hash: 'h1' }), row({ name: 'SECOND', value_hash: 'h2' })];
-    let s = initialSecretsScreenState(rows);
-    s = handleKey(s, ENTER).state; // open FIRST's popup
-    s = handleKey(s, ESC).state; // close it
-    s = handleKey(s, KEY_DOWN).state;
-    s = handleKey(s, ENTER).state; // open SECOND's popup
+    const s = pressKeys(initialSecretsScreenState(rows), ENTER, ESC, KEY_DOWN, ENTER); // open FIRST, close, move down, open SECOND
 
     // A late result for FIRST must not land in SECOND's popup.
     const afterStale = applyValueResult(s, rows[0], { status: 'ok', value: FAKE_LONG_VALUE });
@@ -372,28 +366,45 @@ describe('resolveSecretValue — location fallback and hash verification', () =>
 
 describe('render never leaks plaintext', () => {
   test('a revealed=false popup never contains the real value anywhere in the frame', () => {
-    let s = initialSecretsScreenState([row({ name: 'API_KEY' })]);
-    s = handleKey(s, ENTER).state;
-    s = applyValueResult(s, { name: 'API_KEY', value_hash: 'hash1' }, { status: 'ok', value: FAKE_LONG_VALUE });
-    const frame = render(s, 100, 30);
+    const s0 = initialSecretsScreenState([row({ name: 'API_KEY' })]);
+    const s1 = handleKey(s0, ENTER).state;
+    const s2 = applyValueResult(s1, { name: 'API_KEY', value_hash: 'hash1' }, { status: 'ok', value: FAKE_LONG_VALUE });
+    const frame = render(s2, 100, 30);
     expect(frame).not.toContain(FAKE_LONG_VALUE);
   });
 
   test('a revealed=true popup does show the (collapsed) value', () => {
-    let s = initialSecretsScreenState([row({ name: 'API_KEY' })]);
-    s = handleKey(s, ENTER).state;
-    s = applyValueResult(s, { name: 'API_KEY', value_hash: 'hash1' }, { status: 'ok', value: FAKE_LONG_VALUE });
-    s = handleKey(s, 'r').state;
-    const frame = render(s, 100, 30);
+    const s0 = initialSecretsScreenState([row({ name: 'API_KEY' })]);
+    const s1 = handleKey(s0, ENTER).state;
+    const s2 = applyValueResult(s1, { name: 'API_KEY', value_hash: 'hash1' }, { status: 'ok', value: FAKE_LONG_VALUE });
+    const s3 = handleKey(s2, 'r').state;
+    const frame = render(s3, 100, 30);
     expect(frame).toContain(FAKE_LONG_VALUE);
   });
 
   test('an unavailable value never renders a placeholder that looks like real data', () => {
-    let s = initialSecretsScreenState([row({ name: 'API_KEY' })]);
-    s = handleKey(s, ENTER).state;
-    s = applyValueResult(s, { name: 'API_KEY', value_hash: 'hash1' }, { status: 'unavailable', code: 'PERMISSION_DENIED' });
-    const frame = render(s, 100, 30);
+    const s0 = initialSecretsScreenState([row({ name: 'API_KEY' })]);
+    const s1 = handleKey(s0, ENTER).state;
+    const s2 = applyValueResult(s1, { name: 'API_KEY', value_hash: 'hash1' }, { status: 'unavailable', code: 'PERMISSION_DENIED' });
+    const frame = render(s2, 100, 30);
     expect(frame).toContain('unavailable');
     expect(frame).toContain('PERMISSION_DENIED');
+  });
+});
+
+describe('render — search bar', () => {
+  test('shows a placeholder and the full match count when the query is empty', () => {
+    const rows = [row({ name: 'A' }), row({ name: 'B' })];
+    const frame = render(initialSecretsScreenState(rows), 100, 20);
+    expect(frame).toContain('type to filter');
+    expect(frame).toContain('2/2');
+  });
+
+  test('shows the typed query and a narrowed match count', () => {
+    const rows = [row({ name: 'API_KEY' }), row({ name: 'DB_PASSWORD' })];
+    const s = type(initialSecretsScreenState(rows), 'api');
+    const frame = render(s, 100, 20);
+    expect(frame).toContain('api');
+    expect(frame).toContain('1/2');
   });
 });
