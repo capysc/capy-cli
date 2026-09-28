@@ -109,7 +109,7 @@ export interface MemberDetail {
   projects: MemberProject[];
 }
 
-// ── `capy secrets` (CAP-673): GET /orgs/:orgId/secret-index ─────────────────
+// ── `capy secrets` (CAP-673): GET /orgs/:orgId/secrets ──────────────────────
 //
 // Read-only, org-wide secret NAME index — never a value. One row per
 // (name, value_hash) pair; `capy secrets` (secretsCommand.ts) renders this
@@ -738,6 +738,6 @@ export class ServiceClient {
    * Read-only, never returns a value — see `SecretIndexResponse`'s own doc.
    */
   async getSecretIndex(orgId: string): Promise<SecretIndexResponse> {
-    return this.request('GET', `/orgs/${orgId}/secret-index`);
+    return this.request('GET', `/orgs/${orgId}/secrets`);
   }
 }
