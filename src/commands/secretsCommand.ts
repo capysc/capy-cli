@@ -30,6 +30,8 @@ export interface SecretsOpts {
   project?: string;
   /** Keep only rows with at least one location on this branch — exact, case-sensitive match. */
   branch?: string;
+  /** Force the static table even on a TTY (the interactive screen's escape hatch). */
+  noInteractive?: boolean;
 }
 
 /** One row, pre-rendered into its own column lines — `lines.length` is the same for every column within a row (padded with `''`), and is the number of terminal lines this row occupies. */
@@ -58,6 +60,12 @@ const HEADERS = ['NAME', 'USERS', 'BRANCH', 'SERVICE'] as const;
  * real divergence (the same-named var holds different values in different
  * places), not a defect. The human table marks it (see `formatName`) so it
  * reads as deliberate rather than as a rendering bug.
+ *
+ * On a real terminal (both stdout and stdin are TTYs) with neither `--json`
+ * nor `--no-interactive`, this hands off to the interactive screen
+ * (`ui/secretsScreenDriver.ts`) instead of printing the static table — same
+ * index, same org-scoped read, just a navigable view with an on-demand,
+ * one-location-at-a-time value reveal (see CAP-675 / `ui/secretsScreen.ts`).
  */
 export class SecretsCommand {
   constructor(
@@ -67,16 +75,30 @@ export class SecretsCommand {
 
   async execute(opts: SecretsOpts = {}): Promise<void> {
     const json = opts.json === true;
+    const interactive =
+      !json &&
+      opts.noInteractive !== true &&
+      process.stdout.isTTY === true &&
+      process.stdin.isTTY === true;
+
     // Same CAP-273 contract as `usersCommand`/`projectsCommand`: under
     // --json, no progress output at all, so stdout stays pure JSON even on
-    // a TTY.
-    const spinner = json ? null : new Spinner('Loading secrets...');
+    // a TTY. The interactive screen owns the whole terminal itself, so it
+    // gets no spinner either — it draws its own first frame instead.
+    const spinner = json || interactive ? null : new Spinner('Loading secrets...');
     spinner?.start();
 
     try {
-      const { orgId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
+      const { orgId, userId, serviceClient } = await resolveOrgContext(this.apiUrl, this.devMode);
       const index = await serviceClient.getSecretIndex(orgId);
       const rows = this.filterRows(index.rows, opts);
+
+      if (interactive) {
+        const { createLocationDecryptor } = await import('./secretsValueDecryptor');
+        const { runSecretsScreen } = await import('../ui/secretsScreenDriver');
+        await runSecretsScreen(rows, createLocationDecryptor(orgId, userId, serviceClient));
+        return;
+      }
 
       spinner?.succeed(`${rows.length} secret${rows.length !== 1 ? 's' : ''}`);
       this.render(rows, index.skipped, index.org_id, json);
