@@ -199,11 +199,78 @@ export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): Secr
   };
 }
 
-/** Rows currently visible, after the live NAME filter (case-insensitive substring). */
+// ── Search matching (CAP-678) ────────────────────────────────────────────────
+//
+// The always-on search bar matches a row on any of four signals: its NAME,
+// any location's PROJECT or BRANCH (case-insensitive substring, query
+// trimmed of surrounding whitespace), or an exact VALUE match — the query's
+// own sha256-slice hash (via the same `hashValue` `resolveSecretValue` uses)
+// compared against `row.value_hash`. Nothing about the query or a candidate
+// value ever leaves this process; this is a pure, local, in-memory
+// comparison against a hash the server already sent.
+//
+// `computeFilteredRows` is the single pass that does both the filtering and
+// the "why did this row match" bookkeeping the UI tags rows with — it hashes
+// the query at most twice (once for the raw query, once more only if
+// trimming changed it) regardless of how many rows there are, never once per
+// row.
+
+export type MatchReason = 'value' | 'name' | 'project' | 'branch';
+
+export interface MatchedRow {
+  readonly row: SecretIndexRow;
+  /** Every reason `row` matched, in priority order (value > name > project > branch); empty when the query is blank. */
+  readonly reasons: readonly MatchReason[];
+}
+
+/** `qLower` is the trimmed, lowercased query; `rawHash`/`trimmedHash` are the query's hash(es) — computed once by the caller, never here. */
+function rowMatchReasons(row: SecretIndexRow, qLower: string, rawHash: string, trimmedHash: string | null): readonly MatchReason[] {
+  const isValueMatch = row.value_hash === rawHash || (trimmedHash !== null && row.value_hash === trimmedHash);
+  const isNameMatch = row.name.toLowerCase().includes(qLower);
+  const isProjectMatch = row.locations.some((l) => l.project_name.toLowerCase().includes(qLower));
+  const isBranchMatch = row.locations.some((l) => l.branch.toLowerCase().includes(qLower));
+  return (
+    [
+      [isValueMatch, 'value'] as const,
+      [isNameMatch, 'name'] as const,
+      [isProjectMatch, 'project'] as const,
+      [isBranchMatch, 'branch'] as const,
+    ] satisfies readonly (readonly [boolean, MatchReason])[]
+  )
+    .filter(([matched]) => matched)
+    .map(([, reason]) => reason);
+}
+
+/**
+ * Filters `rows` against `query` and, for each survivor, records which
+ * signal(s) it matched on — in one pass, so the query's hash(es) are
+ * computed exactly once no matter how many rows are scanned. An
+ * empty/whitespace-only query short-circuits to "everything matches, no
+ * reasons" before any hashing happens (mirrors the old NAME-only filter's
+ * behavior when the bar is empty).
+ */
+function computeFilteredRows(rows: readonly SecretIndexRow[], query: string): readonly MatchedRow[] {
+  const trimmed = query.trim();
+  const qLower = trimmed.toLowerCase();
+  if (!qLower) return rows.map((row) => ({ row, reasons: [] as const }));
+
+  // Computed ONCE per filter pass — never inside the per-row map below.
+  const rawHash = hashValue(query);
+  const trimmedHash = trimmed !== query ? hashValue(trimmed) : null;
+
+  return rows
+    .map((row) => ({ row, reasons: rowMatchReasons(row, qLower, rawHash, trimmedHash) }))
+    .filter((m) => m.reasons.length > 0);
+}
+
+/** Rows currently visible, plus why each one matched — see the module note above `computeFilteredRows`. */
+export function filteredRowsWithReasons(state: SecretsScreenState): readonly MatchedRow[] {
+  return computeFilteredRows(state.rows, state.search.query);
+}
+
+/** Rows currently visible, after the live filter (name, project, branch, or exact value — see `computeFilteredRows`). */
 export function filteredRows(state: SecretsScreenState): readonly SecretIndexRow[] {
-  const q = state.search.query.trim().toLowerCase();
-  if (!q) return state.rows;
-  return state.rows.filter((r) => r.name.toLowerCase().includes(q));
+  return computeFilteredRows(state.rows, state.search.query).map((m) => m.row);
 }
 
 function clampIndex(index: number, length: number): number {
@@ -233,9 +300,7 @@ export function handleKey(state: SecretsScreenState, key: string): ReduceResult 
 }
 
 function filteredRowsFor(rows: readonly SecretIndexRow[], query: string): readonly SecretIndexRow[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return rows;
-  return rows.filter((r) => r.name.toLowerCase().includes(q));
+  return computeFilteredRows(rows, query).map((m) => m.row);
 }
 
 /** Sets the search query and reclamps the cursor into the (possibly now-shorter) filtered set — never resets it to the top just because the query changed. */
@@ -519,7 +584,8 @@ function columnHeaderLabel(column: ColumnMode): string {
 function searchBarLine(state: SecretsScreenState, matchedCount: number): string {
   const focused = state.popup === null;
   const caret = focused ? '▏' : '';
-  const queryDisplay = state.search.query !== '' ? state.search.query : focused ? `${DIM}type to filter${RESET}` : '';
+  const placeholder = `${DIM}type to filter — name, project, branch, or exact value${RESET}`;
+  const queryDisplay = state.search.query !== '' ? state.search.query : focused ? placeholder : '';
   const countLabel = `${matchedCount}/${state.rows.length}`;
   return `${DIM}search:${RESET} ${queryDisplay}${caret} ${DIM}${countLabel}${RESET}`;
 }
@@ -528,13 +594,16 @@ function searchBarLine(state: SecretsScreenState, matchedCount: number): string 
 export function render(state: SecretsScreenState, termWidth: number, termHeight: number): string {
   const m = ' '.repeat(MARGIN);
   const available = Math.max(40, termWidth - MARGIN * 2);
-  const rows = filteredRows(state);
+  const matched = filteredRowsWithReasons(state);
+  const rows = matched.map((mr) => mr.row);
+  const matchActive = state.search.query.trim() !== '';
   const cursorIndex = clampIndex(state.cursorIndex, rows.length);
 
-  const lines: string[] = [];
-  lines.push(`${m}${BOLD}capy secrets${RESET} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`);
-  lines.push(m + searchBarLine(state, rows.length));
-  lines.push('');
+  const headerLines: readonly string[] = [
+    `${m}${BOLD}capy secrets${RESET} ${DIM}(${state.rows.length} secret${state.rows.length === 1 ? '' : 's'})${RESET}`,
+    m + searchBarLine(state, rows.length),
+    '',
+  ];
 
   const nameW = Math.max(16, Math.floor(available * 0.4));
   const updatedW = 14;
@@ -542,36 +611,42 @@ export function render(state: SecretsScreenState, termWidth: number, termHeight:
   const middleW = Math.max(10, available - nameW - updatedW - gap.length * 2);
 
   const headerLine = pad('NAME', nameW) + gap + pad(columnHeaderLabel(state.column), middleW) + gap + pad('UPDATED', updatedW);
-  lines.push(m + DIM + headerLine + RESET);
+  // Everything pushed before the body, in one array — `preBodyLines.length`
+  // below stands in for what used to be `lines.length` read mid-mutation.
+  const preBodyLines: readonly string[] = [...headerLines, m + DIM + headerLine + RESET];
 
-  const bodyLines: string[] = rows.map((row, i) => {
+  const bodyLines: readonly string[] = matched.map(({ row, reasons }, i) => {
     const isSelected = i === cursorIndex;
     const pointer = isSelected ? '▶ ' : '  ';
-    const nameCell = pad(pointer + row.name, nameW);
+    // Strongest reason only (reasons is already priority-ordered) — a
+    // compact dim tag, and only while a query is actually active (an empty
+    // query carries no reasons anyway, but this also guards `matchActive`
+    // for callers that ever hand in a non-empty `reasons` alongside a
+    // cleared query).
+    const tag = matchActive && reasons.length > 0 ? ` ${DIM}[${reasons[0]}]${RESET}` : '';
+    const nameCell = pad(pointer + row.name + tag, nameW);
     const middleCell = pad(formatMiddleCell(row, state.column), middleW);
     const updatedCell = pad(formatUpdatedCell(row), updatedW);
     const line = nameCell + gap + middleCell + gap + updatedCell;
     return isSelected ? INVERSE + padVis(line, available) + RESET : line;
   });
 
-  const withPopup: string[] =
+  const withPopup: readonly string[] =
     state.popup && rows[cursorIndex]
       ? spliceIn(bodyLines, cursorIndex, buildPopupLines(rows[cursorIndex], state.popup, available))
       : bodyLines;
 
-  const reserved = lines.length + 1 /* table header already pushed above */ + 2 /* footer */;
+  const reserved = preBodyLines.length + 1 /* table header already pushed above */ + 2 /* footer */;
   const bodyHeight = Math.max(6, termHeight - reserved);
   const scrollOffset = computeScrollOffset(withPopup, cursorIndex, bodyHeight, state.popup !== null);
   const slice = withPopup.slice(scrollOffset, scrollOffset + bodyHeight);
 
-  if (rows.length === 0) {
-    lines.push(`${m}${DIM}No secrets match.${RESET}`);
-  } else {
-    for (const line of slice) lines.push(m + line);
-  }
+  const bodyOutputLines: readonly string[] =
+    rows.length === 0 ? [`${m}${DIM}No secrets match.${RESET}`] : slice.map((line) => m + line);
 
-  lines.push('');
-  lines.push(m + footerLine(state));
+  const footerLines: readonly string[] = ['', m + footerLine(state)];
+
+  const lines: readonly string[] = [...preBodyLines, ...bodyOutputLines, ...footerLines];
 
   return lines.map((l) => l + CLEAR_EOL).join('\n');
 }

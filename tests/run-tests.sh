@@ -53,6 +53,7 @@ ISOLATED_FILES=(
   tests/commands/profileCommand.test.ts
   tests/commands/localOnlyFlow.test.ts
   tests/ui/deployDeadline.test.ts
+  tests/ui/secretsScreenSearchHashing.test.ts
   tests/commands/rotatePromotesThenRotates.test.ts
   tests/system/systemStore.test.ts
   tests/system/systemStoreFreshStore.test.ts

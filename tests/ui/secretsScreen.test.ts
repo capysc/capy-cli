@@ -7,6 +7,7 @@ import {
   resolveSecretValue,
   render,
   filteredRows,
+  filteredRowsWithReasons,
   formatUsersCell,
   formatBranchCell,
   formatProjectCell,
@@ -350,6 +351,104 @@ describe('search bar — always-on, fzf-style (no "/" mode)', () => {
     const s1 = type(s0, 'DB'); // only 1 row matches now — cursor must come back into range
     expect(filteredRows(s1)).toHaveLength(1);
     expect(s1.cursorIndex).toBe(0);
+  });
+});
+
+describe('search bar — project/branch/value matching (CAP-678)', () => {
+  const webRow = row({
+    name: 'STRIPE_KEY',
+    value_hash: 'unrelated-hash',
+    locations: [loc({ project_name: 'web-storefront', branch: 'production' })],
+  });
+  const apiRow = row({
+    name: 'REDIS_URL',
+    value_hash: 'also-unrelated',
+    locations: [loc({ project_name: 'api-gateway', branch: 'staging-preview' })],
+  });
+  const rows = [webRow, apiRow];
+
+  test('matches on a location\'s project_name, case-insensitively', () => {
+    const s = type(initialSecretsScreenState(rows), 'STOREFRONT');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['STRIPE_KEY']);
+  });
+
+  test('"prod" matches a production branch', () => {
+    const s = type(initialSecretsScreenState(rows), 'prod');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['STRIPE_KEY']);
+  });
+
+  test('name matching still works alongside the new signals', () => {
+    const s = type(initialSecretsScreenState(rows), 'REDIS');
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['REDIS_URL']);
+  });
+
+  test('an exact value match finds the row whose value_hash equals hashValue(query)', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    const s = type(initialSecretsScreenState([...rows, target]), FAKE_LONG_VALUE);
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['DB_PASSWORD']);
+  });
+
+  test('a value pasted with surrounding whitespace still matches via the trimmed hash', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    // Typed one character at a time, including leading/trailing spaces —
+    // the same way a paste of "  value  " would arrive at the reducer.
+    const s = type(initialSecretsScreenState([...rows, target]), `  ${FAKE_LONG_VALUE}  `);
+    expect(filteredRows(s).map((r) => r.name)).toEqual(['DB_PASSWORD']);
+  });
+
+  test('a partial value never matches — value matching is exact only', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    const s = type(initialSecretsScreenState([...rows, target]), FAKE_LONG_VALUE.slice(0, -1));
+    expect(filteredRows(s).map((r) => r.name)).not.toContain('DB_PASSWORD');
+  });
+
+  test('match reasons are reported in priority order value > name > project > branch', () => {
+    // A query that is simultaneously this row's exact value AND a substring
+    // of its own name — value must still win as the reported reason.
+    const trickyValue = 'API_KEY_LOOKALIKE';
+    const target = row({ name: 'API_KEY_LOOKALIKE_SUFFIX', value_hash: hashOf(trickyValue), locations: [loc()] });
+    const s = type(initialSecretsScreenState([target]), trickyValue);
+    const [match] = filteredRowsWithReasons(s);
+    expect(match.reasons[0]).toBe('value');
+    expect(match.reasons).toContain('name');
+  });
+
+  test('no reasons are reported when the query is empty', () => {
+    const matches = filteredRowsWithReasons(initialSecretsScreenState(rows));
+    expect(matches.every((m) => m.reasons.length === 0)).toBe(true);
+  });
+
+  test('the match count in filteredRowsWithReasons matches filteredRows', () => {
+    const s = type(initialSecretsScreenState(rows), 'a');
+    expect(filteredRowsWithReasons(s).length).toBe(filteredRows(s).length);
+  });
+
+  test('render shows a match tag for the strongest reason, including a value match', () => {
+    const target = row({ name: 'DB_PASSWORD', value_hash: hashOf(FAKE_LONG_VALUE), locations: [loc()] });
+    const s = type(initialSecretsScreenState([target]), FAKE_LONG_VALUE);
+    const frame = render(s, 100, 20);
+    expect(frame).toContain('[value]');
+  });
+
+  test('render shows no match tags when the query is empty', () => {
+    const frame = render(initialSecretsScreenState(rows), 100, 20);
+    expect(frame).not.toContain('[name]');
+    expect(frame).not.toContain('[project]');
+    expect(frame).not.toContain('[branch]');
+    expect(frame).not.toContain('[value]');
+  });
+
+  test('updated placeholder mentions name, project, branch and exact value', () => {
+    const frame = render(initialSecretsScreenState(rows), 100, 20);
+    expect(frame).toContain('name, project, branch, or exact value');
+  });
+
+  test('the query lives only in state.search.query — nothing else in state echoes it', () => {
+    const query = 'super-secret-query-text';
+    const s = type(initialSecretsScreenState(rows), query);
+    const { search, ...rest } = s;
+    expect(JSON.stringify(rest)).not.toContain(query);
+    expect(search.query).toBe(query);
   });
 });
 
