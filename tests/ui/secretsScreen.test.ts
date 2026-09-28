@@ -9,6 +9,7 @@ import {
   filteredRows,
   formatUsersCell,
   formatBranchCell,
+  formatProjectCell,
   formatServiceCell,
   formatUpdatedCell,
   mostRecentChangedAt,
@@ -168,23 +169,33 @@ describe('multi-key chunks reach the reducer in order (paste / fast-typing bug)'
 });
 
 describe('handleKey — column cycling', () => {
-  test('Tab cycles USERS -> BRANCH -> SERVICE -> USERS', () => {
+  test('SERVICE is the default (first-shown) column', () => {
     const s0 = initialSecretsScreenState([row()]);
-    expect(s0.column).toBe('users');
-    const s1 = handleKey(s0, KEY_TAB).state;
-    expect(s1.column).toBe('branch');
-    const s2 = handleKey(s1, KEY_TAB).state;
-    expect(s2.column).toBe('service');
-    const s3 = handleKey(s2, KEY_TAB).state;
-    expect(s3.column).toBe('users');
+    expect(s0.column).toBe('service');
   });
 
-  test('Shift-Tab cycles backwards', () => {
+  test('Tab cycles SERVICE -> USERS -> BRANCH -> PROJECT -> SERVICE (wrapping)', () => {
+    const s0 = initialSecretsScreenState([row()]);
+    const s1 = handleKey(s0, KEY_TAB).state;
+    expect(s1.column).toBe('users');
+    const s2 = handleKey(s1, KEY_TAB).state;
+    expect(s2.column).toBe('branch');
+    const s3 = handleKey(s2, KEY_TAB).state;
+    expect(s3.column).toBe('project');
+    const s4 = handleKey(s3, KEY_TAB).state;
+    expect(s4.column).toBe('service');
+  });
+
+  test('Shift-Tab cycles backwards, wrapping the other way', () => {
     const s0 = initialSecretsScreenState([row()]);
     const s1 = handleKey(s0, KEY_SHIFT_TAB).state;
-    expect(s1.column).toBe('service');
+    expect(s1.column).toBe('project');
     const s2 = handleKey(s1, KEY_SHIFT_TAB).state;
     expect(s2.column).toBe('branch');
+    const s3 = handleKey(s2, KEY_SHIFT_TAB).state;
+    expect(s3.column).toBe('users');
+    const s4 = handleKey(s3, KEY_SHIFT_TAB).state;
+    expect(s4.column).toBe('service');
   });
 });
 
@@ -203,15 +214,42 @@ describe('column cell formatting', () => {
     ).toBe('2 users');
   });
 
-  test('branch cell shows project · branch, +N when more locations', () => {
-    expect(formatBranchCell(row({ locations: [loc({ project_name: 'web', branch: 'main' })] }))).toBe('web · main');
+  test('branch cell shows just the branch name (no project prefix — PROJECT is its own column), +N for distinct branch names', () => {
+    expect(formatBranchCell(row({ locations: [loc({ project_name: 'web', branch: 'main' })] }))).toBe('main');
     expect(
       formatBranchCell(
         row({
           locations: [loc({ project_name: 'web', branch: 'main' }), loc({ project_name: 'api', branch: 'staging' })],
         }),
       ),
-    ).toBe('web · main +1');
+    ).toBe('main +1');
+    // Same branch name at two different projects does not inflate the count.
+    expect(
+      formatBranchCell(
+        row({
+          locations: [loc({ project_name: 'web', branch: 'main' }), loc({ project_name: 'api', branch: 'main' })],
+        }),
+      ),
+    ).toBe('main');
+  });
+
+  test('project cell shows the first location\'s project, +N for distinct projects', () => {
+    expect(formatProjectCell(row({ locations: [loc({ project_name: 'web' })] }))).toBe('web');
+    expect(
+      formatProjectCell(
+        row({
+          locations: [loc({ project_name: 'web' }), loc({ project_name: 'api' })],
+        }),
+      ),
+    ).toBe('web +1');
+    // Same project at two different branches does not inflate the count.
+    expect(
+      formatProjectCell(
+        row({
+          locations: [loc({ project_name: 'web', branch: 'main' }), loc({ project_name: 'web', branch: 'staging' })],
+        }),
+      ),
+    ).toBe('web');
   });
 
   test('service cell reuses the dokploy_project/name fallback chain, +N when distinct', () => {

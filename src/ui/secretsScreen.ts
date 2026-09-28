@@ -149,8 +149,9 @@ function tokenizeFrom(chunk: string, index: number): readonly string[] {
 
 // ── Column cycling ───────────────────────────────────────────────────────────
 
-export type ColumnMode = 'users' | 'branch' | 'service';
-export const COLUMN_ORDER: readonly ColumnMode[] = ['users', 'branch', 'service'];
+export type ColumnMode = 'service' | 'users' | 'branch' | 'project';
+/** Tab cycles forward through this order (wrapping); Shift-Tab backward. SERVICE is the default/first-shown column. */
+export const COLUMN_ORDER: readonly ColumnMode[] = ['service', 'users', 'branch', 'project'];
 
 function nextColumn(column: ColumnMode, dir: 1 | -1): ColumnMode {
   const idx = COLUMN_ORDER.indexOf(column);
@@ -190,7 +191,7 @@ export interface SecretsScreenState {
 export function initialSecretsScreenState(rows: readonly SecretIndexRow[]): SecretsScreenState {
   return {
     rows,
-    column: 'users',
+    column: 'service',
     cursorIndex: 0,
     search: { query: '' },
     popup: null,
@@ -401,12 +402,20 @@ export function formatUsersCell(row: SecretIndexRow): string {
   return `${n} user${n === 1 ? '' : 's'}`;
 }
 
+/** Just the branch name(s) now — PROJECT is its own column, so no `project · ` prefix here. `+N` counts DISTINCT branch names across the row's locations, same convention as SERVICE/PROJECT (not raw location count — two locations on the same branch name don't inflate it). */
 export function formatBranchCell(row: SecretIndexRow): string {
   const first = row.locations[0];
   if (!first) return '—';
-  const base = `${first.project_name} · ${first.branch}`;
-  const extra = row.locations.length - 1;
-  return extra > 0 ? `${base} +${extra}` : base;
+  const distinct = new Set(row.locations.map((l) => l.branch));
+  return distinct.size > 1 ? `${first.branch} +${distinct.size - 1}` : first.branch;
+}
+
+/** Project name of the first location; `+N` for more DISTINCT projects across the row's locations. */
+export function formatProjectCell(row: SecretIndexRow): string {
+  const first = row.locations[0];
+  if (!first) return '—';
+  const distinct = new Set(row.locations.map((l) => l.project_name));
+  return distinct.size > 1 ? `${first.project_name} +${distinct.size - 1}` : first.project_name;
 }
 
 /** Same fallback chain as `SecretsCommand.formatService` — kept as a free function here so the TUI's static and interactive renderings can never quietly diverge in wording. */
@@ -427,9 +436,10 @@ export function formatServiceCell(row: SecretIndexRow): string {
 }
 
 export function formatMiddleCell(row: SecretIndexRow, column: ColumnMode): string {
+  if (column === 'service') return formatServiceCell(row);
   if (column === 'users') return formatUsersCell(row);
   if (column === 'branch') return formatBranchCell(row);
-  return formatServiceCell(row);
+  return formatProjectCell(row);
 }
 
 /** Most recent `changed_at` across a row's locations, or undefined if none carry one. */
