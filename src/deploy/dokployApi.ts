@@ -178,7 +178,21 @@ function codeForStatus(status: number): DokployErrorCode {
 
 export type FetchLike = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string },
+  init: {
+    method: string;
+    headers: Record<string, string>;
+    body?: string;
+    /**
+     * Validator finding (key exposure, CAP-657 URL input follow-up):
+     * `call()` below always passes `'error'` — a redirect response makes
+     * `fetch` itself reject rather than silently re-sending the `x-api-key`
+     * header (which carries the resolved Dokploy token) to whatever host a
+     * 30x's `Location` names, which could be cross-origin. Optional so every
+     * existing scripted `FetchLike` fake in tests, which ignores unknown
+     * init fields, keeps working unchanged.
+     */
+    redirect?: 'error' | 'manual' | 'follow';
+  },
 ) => Promise<{ status: number; ok: boolean; text(): Promise<string> }>;
 
 export interface DokployClient {
@@ -394,6 +408,12 @@ export function createDokployClient(
     const res = await fetchImpl(url, {
       method,
       headers,
+      // Refuse to follow a redirect rather than risk forwarding the
+      // `x-api-key` header cross-origin — see `FetchLike`'s own doc. A
+      // redirect response makes `fetch` reject, which the `.catch` below
+      // turns into the same `'unreachable'` `DokployApiError` any other
+      // network failure produces.
+      redirect: 'error',
       ...(method === 'POST' ? { body: JSON.stringify(params) } : {}),
     }).catch((err: unknown) => {
       throw new DokployApiError(
