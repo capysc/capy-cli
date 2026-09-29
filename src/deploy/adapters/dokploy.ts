@@ -37,10 +37,12 @@ import {
   RemoveOfferResult,
   TargetConfig,
 } from '../adapter';
+import { ERROR_CODES } from '../../types/index';
 import {
   DEFAULT_TOKEN_ENV,
   DokployApiError,
   DokployClient,
+  DokployCompose,
   DokployDeployment,
   DokploySystemStoreCallOptions,
   EnvWarning,
@@ -52,10 +54,12 @@ import {
   RUNTIME_PAIR,
   apiBase,
   createDokployClient,
+  describeComposeEnvFileDisabled,
   describeDokployTokenProblem,
   describeEnvProblem,
   describeEnvWarning,
   dokploySecretsMayPrompt,
+  dokployVersionAtLeast,
   envKeys,
   envProblems,
   envWarnings,
@@ -67,6 +71,9 @@ import {
   splitManagedBlock,
   stripManagedBlock,
 } from '../dokployApi';
+
+/** Below this, a `composeType: 'stack'` target gets a WARNING, never a refusal — see `describeStackVersionWarning`. */
+const STACK_ENV_FILE_FIX_VERSION = 'v0.30.3';
 
 // Re-exported for back-compat: callers (tests, deployCommand.ts) import the
 // client + env-merge primitives from this module today. New code should
@@ -80,10 +87,12 @@ export {
   RUNTIME_PAIR,
   apiBase,
   createDokployClient,
+  describeComposeEnvFileDisabled,
   describeDokployTokenProblem,
   describeEnvProblem,
   describeEnvWarning,
   dokploySecretsMayPrompt,
+  dokployVersionAtLeast,
   envKeys,
   envProblems,
   envWarnings,
@@ -97,6 +106,7 @@ export {
 export type {
   DokployApplication,
   DokployClient,
+  DokployCompose,
   DokployDeployment,
   DokployDeploymentStatus,
   DokployErrorCode,
@@ -116,8 +126,17 @@ export type {
 export interface DokployOptions {
   /** Dokploy dashboard URL, e.g. https://dokploy.example.com. `/api` is appended. */
   baseUrl: string;
-  /** Application id from the Dokploy dashboard URL / API. */
-  applicationId: string;
+  /**
+   * Application id from the Dokploy dashboard URL / API. Mutually exclusive
+   * with `composeId` (CAP-679) — a target configures exactly one of the two,
+   * matching whichever kind of Dokploy service it points at.
+   */
+  applicationId?: string;
+  /**
+   * Compose service id from the Dokploy dashboard URL / API (CAP-679).
+   * Mutually exclusive with `applicationId`.
+   */
+  composeId?: string;
   /**
    * Name of the environment variable holding the Dokploy API token —
    * OPTIONAL (CAP-664). When set, an explicit env var still wins outright;
@@ -149,20 +168,23 @@ export interface PollDeps {
 /**
  * Wait for the deployment our trigger created. Dokploy's deploy call returns
  * no id, so "ours" is the newest deployment whose id was not in the list
- * taken just before the trigger.
+ * taken just before the trigger. `list` is a thunk rather than a
+ * `(client, id)` pair so ONE poll loop serves both Applications
+ * (`client.listDeployments`) and Compose services (CAP-679,
+ * `client.listComposeDeployments`) — see `pollApplicationDeployment` /
+ * `pollComposeDeployment` below.
  */
 export async function pollDeployment(
-  client: DokployClient,
-  applicationId: string,
+  list: () => Promise<readonly DokployDeployment[]>,
   before: ReadonlySet<string>,
   deadline: number,
   deps: PollDeps,
   seenRunning: boolean = false,
 ): Promise<DeploymentOutcome> {
-  const list = await client.listDeployments(applicationId);
+  const rows = await list();
   const ours =
     sortedCopy(
-      list.filter((d) => !before.has(d.deploymentId)),
+      rows.filter((d) => !before.has(d.deploymentId)),
       (a, b) => b.createdAt.localeCompare(a.createdAt),
     )[0] ?? null;
   if (ours?.status === 'done') return { kind: 'succeeded', deployment: ours };
@@ -172,7 +194,29 @@ export async function pollDeployment(
   if (ours && !seenRunning) deps.onRunning?.(ours);
   if (deps.now() >= deadline) return { kind: 'timed_out', deployment: ours };
   await deps.sleep(POLL_INTERVAL_MS);
-  return pollDeployment(client, applicationId, before, deadline, deps, seenRunning || !!ours);
+  return pollDeployment(list, before, deadline, deps, seenRunning || !!ours);
+}
+
+/** `pollDeployment`, bound to an Application's deployments. */
+export function pollApplicationDeployment(
+  client: DokployClient,
+  applicationId: string,
+  before: ReadonlySet<string>,
+  deadline: number,
+  deps: PollDeps,
+): Promise<DeploymentOutcome> {
+  return pollDeployment(() => client.listDeployments(applicationId), before, deadline, deps);
+}
+
+/** `pollDeployment`, bound to a Compose service's deployments (CAP-679). */
+export function pollComposeDeployment(
+  client: DokployClient,
+  composeId: string,
+  before: ReadonlySet<string>,
+  deadline: number,
+  deps: PollDeps,
+): Promise<DeploymentOutcome> {
+  return pollDeployment(() => client.listComposeDeployments(composeId), before, deadline, deps);
 }
 
 // ── Adapter ────────────────────────────────────────────────────────────────
@@ -239,8 +283,19 @@ export function dokployConnectionProblem(config: TargetConfig): PreflightResult 
   const hint = 'Run `capy deploy --edit ' + config.name + '` to fix.';
   const urlProblem = baseUrlProblem(opts.baseUrl);
   if (urlProblem) return { ok: false, reason: `dokploy baseUrl: ${urlProblem}`, hint };
-  if (!opts.applicationId || !opts.applicationId.trim()) {
-    return { ok: false, reason: 'dokploy applicationId: required', hint };
+  const hasAppId = !!opts.applicationId && !!opts.applicationId.trim();
+  const hasComposeId = !!opts.composeId && !!opts.composeId.trim();
+  if (hasAppId && hasComposeId) {
+    return {
+      ok: false,
+      reason: 'dokploy target has both applicationId and composeId — exactly one is allowed',
+      hint,
+    };
+  }
+  if (!hasAppId && !hasComposeId) {
+    // Preserves the pre-CAP-679 substring ("applicationId: required") that
+    // existing callers match on, while covering the new alternative.
+    return { ok: false, reason: 'dokploy applicationId: required (or composeId)', hint };
   }
   // tokenEnv is OPTIONAL (CAP-664) — the org system store is the default
   // source now (see `resolveDokployApiKey`). When one IS set (an explicit
@@ -291,10 +346,15 @@ export function explainApiError(
         hint: `Create an API token in the Dokploy dashboard and export it as ${opts.tokenEnv}.`,
       };
     case 'not_found':
-      return {
-        reason: `${what}: no Dokploy application ${opts.applicationId} at ${opts.baseUrl}`,
-        hint: 'Check the application id — it is part of the application URL in the Dokploy dashboard.',
-      };
+      return opts.composeId
+        ? {
+            reason: `${what}: no Dokploy compose service ${opts.composeId} at ${opts.baseUrl}`,
+            hint: 'Check the compose id — it is part of the service URL in the Dokploy dashboard.',
+          }
+        : {
+            reason: `${what}: no Dokploy application ${opts.applicationId} at ${opts.baseUrl}`,
+            hint: 'Check the application id — it is part of the application URL in the Dokploy dashboard.',
+          };
     default:
       return { reason: `${what}: ${err.message}` };
   }
@@ -303,6 +363,32 @@ export function explainApiError(
 /** `envWarnings` as the generic, printable `DeployWarning` shape. */
 function toDeployWarning(w: EnvWarning): DeployWarning {
   return { code: w.code, names: w.names, message: describeEnvWarning(w) };
+}
+
+/**
+ * CAP-679: `composeType: 'stack'` on a Dokploy below v0.30.3 ships `env_file`
+ * values — every one in the file, not only Capy's — to containers with
+ * literal quotes (upstream fix d1830182). WARN, never refuse: Capy cannot fix
+ * this, and the same problem already affects every other var in the file.
+ * `null` (never treated as "old") when the compose isn't a stack, or the
+ * version can't be read/parsed at all.
+ */
+async function composeStackVersionWarning(
+  client: DokployClient,
+  compose: DokployCompose,
+): Promise<DeployWarning | null> {
+  if (compose.composeType !== 'stack') return null;
+  const version = await settle(client.getDokployVersion());
+  if (!version.ok || version.value === null) return null;
+  if (dokployVersionAtLeast(version.value, STACK_ENV_FILE_FIX_VERSION)) return null;
+  return {
+    code: 'DOKPLOY_STACK_ENV_FILE_QUOTING',
+    names: [],
+    // COPY-FLAG: minimal neutral wording.
+    message:
+      `this is a Dokploy "stack" (Swarm) service on ${version.value}, below ${STACK_ENV_FILE_FIX_VERSION} — ` +
+      `env_file values, including Capy's, may reach containers with literal quotes until Dokploy is upgraded.`,
+  };
 }
 
 export interface DokployAdapterDeps {
@@ -353,11 +439,296 @@ export function runtimeEpilogue(deployId: string | undefined): string {
 
 /** One line, printed either way, for `onRemove`'s manual fallback. */
 function manualStripHint(opts: DokployOptions): string {
-  return (
-    `In the Dokploy dashboard, open Application → Environment for ` +
-    `${opts.applicationId}, delete the block between "${MANAGED_BEGIN}" and ` +
-    `"${MANAGED_END}" (inclusive), and save.`
+  return opts.composeId
+    ? `In the Dokploy dashboard, open Compose → Environment for ${opts.composeId}, ` +
+        `delete the block between "${MANAGED_BEGIN}" and "${MANAGED_END}" (inclusive), and save.`
+    : `In the Dokploy dashboard, open Application → Environment for ` +
+        `${opts.applicationId}, delete the block between "${MANAGED_BEGIN}" and ` +
+        `"${MANAGED_END}" (inclusive), and save.`;
+}
+
+/**
+ * The Compose sequence (CAP-679): read → refuse on `createEnvFile: false` →
+ * baseline `deployment.allByCompose` → merge ONLY the Capy block, byte-exact
+ * elsewhere → `compose.saveEnvironment` → re-read and verify → redeploy
+ * (unless `ctx.secretsOnly` / `ctx.noDeploy`) → poll `deployment.allByCompose`
+ * to a real outcome, fetching logs on `error`.
+ *
+ * Kept as its own function (rather than threaded through the Application
+ * `deploy()` body above) so the two never share control flow — the
+ * Application path is untouched by this feature.
+ */
+async function deployComposeFlow(
+  client: DokployClient,
+  config: TargetConfig,
+  ctx: DeployContext,
+  opts: DokployOptions,
+  composeId: string,
+  runtime: { sleep: (ms: number) => Promise<void>; now: () => number; log: (line: string) => void },
+): Promise<DeployResult> {
+  const { sleep, now, log } = runtime;
+  const fail = (
+    steps: readonly DeployStep[],
+    step: DeployStep,
+    epilogue?: string,
+  ): DeployResult => ({ ok: false, steps: [...steps, step], ...(epilogue ? { epilogue } : {}) });
+
+  if (!ctx.deployToken) {
+    return fail([], { label: 'runtime pair', status: 'fail', detail: 'no deploy token was minted' });
+  }
+
+  // 1. Fresh read.
+  const read = await settle(client.getCompose(composeId));
+  if (!read.ok) {
+    return fail([], { label: 'compose.one', status: 'fail', detail: explainApiError(read.error, 'read', opts).reason });
+  }
+  const current = read.value;
+  const s1: readonly DeployStep[] = [
+    { label: 'dokploy compose', status: 'ok', detail: current.name ?? current.composeId },
+  ];
+  if (current.createEnvFile === false) {
+    return fail(s1, {
+      label: 'env merge',
+      status: 'fail',
+      detail: describeComposeEnvFileDisabled().reason,
+      code: ERROR_CODES.DOKPLOY_ENV_FILE_DISABLED,
+    });
+  }
+  const split = splitManagedBlock(current.env);
+  const problem = 'code' in split ? split : envProblems(current.env);
+  if (problem || 'code' in split) {
+    return fail(s1, {
+      label: 'env merge',
+      status: 'fail',
+      detail: problem ? describeEnvProblem(problem).reason : 'unreadable environment',
+    });
+  }
+  const envWarning = envWarnings(current.env, config.vars);
+  const stackWarning = await composeStackVersionWarning(client, current);
+  const warnings: readonly DeployWarning[] = [
+    envWarning ? toDeployWarning(envWarning) : null,
+    stackWarning,
+  ].filter((w): w is DeployWarning => !!w);
+  const withWarnings = (r: DeployResult): DeployResult => (warnings.length ? { ...r, warnings } : r);
+  const nextEnv = mergeManagedBlock(split, ctx.deployToken);
+
+  // 2. Baseline — remembered BEFORE the write, same reason as the Application
+  //    path: Dokploy's redeploy call returns no id.
+  const baseline = await settle(client.listComposeDeployments(composeId));
+  if (!baseline.ok) {
+    return withWarnings(
+      fail(s1, { label: 'deployment.allByCompose', status: 'fail', detail: explainApiError(baseline.error, 'list', opts).reason }),
+    );
+  }
+
+  // 3. Write.
+  const saved = await settle(
+    client.saveComposeEnvironment({ composeId: current.composeId, env: nextEnv, createEnvFile: current.createEnvFile }),
   );
+  if (!saved.ok) {
+    return withWarnings(
+      fail(s1, { label: 'compose.saveEnvironment', status: 'fail', detail: explainApiError(saved.error, 'write', opts).reason }),
+    );
+  }
+
+  // 4. Verify.
+  const reread = await settle(client.getCompose(composeId));
+  const intact = reread.ok && reread.value.env === nextEnv && reread.value.createEnvFile === current.createEnvFile;
+  if (!intact) {
+    return withWarnings(
+      fail(s1, {
+        label: 'compose.saveEnvironment',
+        status: 'fail',
+        detail:
+          'the stored environment is not what Capy wrote — another edit may have landed at the ' +
+          'same moment. Check the Environment tab in Dokploy, then re-run.',
+      }),
+    );
+  }
+  const s2: readonly DeployStep[] = [
+    ...s1,
+    {
+      label: 'compose.saveEnvironment',
+      status: 'ok',
+      detail:
+        `${RUNTIME_PAIR[0]} + ${RUNTIME_PAIR[1]} ${split.hadBlock ? 'replaced' : 'added'}; ` +
+        `${envKeys(outsideLines(split)).length} other var(s) kept`,
+    },
+  ];
+
+  if (ctx.secretsOnly) {
+    return withWarnings({
+      ok: true,
+      steps: [...s2, { label: 'compose.redeploy', status: 'skip', detail: 'CI mode — deploy runs on PR merge' }],
+      epilogue: runtimeEpilogue(ctx.deployToken.deployId),
+    });
+  }
+  if (ctx.noDeploy) {
+    return withWarnings({
+      ok: true,
+      steps: [...s2, { label: 'compose.redeploy', status: 'skip', detail: '--no-deploy' }],
+      epilogue: runtimeEpilogue(ctx.deployToken.deployId),
+    });
+  }
+
+  // 5. Redeploy — never `compose.deploy` (re-clones the branch head), never `freshVolumes`.
+  const triggered = await settle(client.redeployCompose(composeId, `capy deploy ${config.name}`));
+  if (!triggered.ok) {
+    return withWarnings(
+      fail(s2, { label: 'compose.redeploy', status: 'fail', detail: explainApiError(triggered.error, 'trigger', opts).reason }),
+    );
+  }
+  const s3: readonly DeployStep[] = [...s2, { label: 'compose.redeploy', status: 'ok', detail: 'accepted' }];
+  log('  · deployment accepted — waiting for Dokploy…');
+
+  // 6. Poll to a real outcome.
+  const timeoutMs = (opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000;
+  const polled = await settle(
+    pollComposeDeployment(
+      client,
+      composeId,
+      new Set(baseline.value.map((d) => d.deploymentId)),
+      now() + timeoutMs,
+      { sleep, now, onRunning: () => log('  · deployment running…') },
+    ),
+  );
+  if (!polled.ok) {
+    return withWarnings(fail(s3, { label: 'deployment', status: 'fail', detail: explainApiError(polled.error, 'status', opts).reason }));
+  }
+  const outcome = polled.value;
+  switch (outcome.kind) {
+    case 'succeeded':
+      return withWarnings({
+        ok: true,
+        steps: [...s3, { label: 'deployment', status: 'ok', detail: `succeeded (${outcome.deployment.deploymentId})` }],
+        epilogue: runtimeEpilogue(ctx.deployToken.deployId),
+      });
+    case 'failed': {
+      const logs = await settle(client.readLogs(outcome.deployment.deploymentId));
+      const logText = logs.ok ? logs.value.trim() : '';
+      return withWarnings(
+        fail(
+          s3,
+          {
+            label: 'deployment',
+            status: 'fail',
+            detail:
+              `${outcome.deployment.status} (${outcome.deployment.deploymentId})` +
+              (outcome.deployment.errorMessage ? ` — ${outcome.deployment.errorMessage}` : ''),
+          },
+          logText
+            ? `  Last lines of the Dokploy deployment log:\n\n${lastLogLines(logText)}`
+            : '  Dokploy returned no deployment log — open the deployment in the Dokploy dashboard.',
+        ),
+      );
+    }
+    case 'timed_out':
+      return withWarnings(
+        fail(s3, {
+          label: 'deployment',
+          status: 'fail',
+          detail: outcome.deployment
+            ? `still running after ${timeoutMs / 1000}s (${outcome.deployment.deploymentId}) — check the Dokploy dashboard`
+            : `Dokploy recorded no new deployment within ${timeoutMs / 1000}s — check the Dokploy dashboard`,
+        }),
+      );
+  }
+}
+
+/**
+ * `deploy remove`'s Compose undo (CAP-679): strip the Capy block via
+ * `compose.saveEnvironment`, verify, then redeploy so the reverted config is
+ * actually running — unless `ctx.noDeploy`. Mirrors the Application
+ * `onRemove` above; kept separate so that path stays untouched.
+ */
+async function onRemoveCompose(
+  client: DokployClient,
+  config: TargetConfig,
+  ctx: RemoveOfferContext,
+  opts: DokployOptions,
+  composeId: string,
+): Promise<RemoveOfferResult> {
+  const read = await settle(client.getCompose(composeId));
+  if (!read.ok) {
+    return {
+      ok: false,
+      code: 'api_error',
+      detail: `Dokploy environment left untouched — ${explainApiError(read.error, 'read', opts).reason}`,
+      manualHint: manualStripHint(opts),
+    };
+  }
+  const compose = read.value;
+  const split = splitManagedBlock(compose.env);
+  if ('code' in split) {
+    return {
+      ok: false,
+      code: 'malformed_block',
+      detail:
+        'Dokploy environment left untouched — the Capy block looks edited or duplicated; ' +
+        'Capy will not guess which lines are its own.',
+      manualHint: manualStripHint(opts),
+    };
+  }
+  if (!split.hadBlock) {
+    return { ok: true, code: 'nothing_to_remove', detail: 'No Capy block found in the Dokploy environment — nothing to remove.' };
+  }
+  if (!ctx.interactive) {
+    return {
+      ok: false,
+      code: 'non_interactive',
+      detail: 'Dokploy environment left untouched — not asking to strip the Capy block outside a terminal.',
+      manualHint: manualStripHint(opts),
+    };
+  }
+  const confirmed = await ctx.confirm(`Also strip the Capy block from the Dokploy Compose env for "${config.name}"?`);
+  if (!confirmed) {
+    return { ok: false, code: 'declined', detail: 'Dokploy environment left untouched.', manualHint: manualStripHint(opts) };
+  }
+  const strippedEnv = stripManagedBlock(split);
+  const saved = await settle(
+    client.saveComposeEnvironment({ composeId: compose.composeId, env: strippedEnv, createEnvFile: compose.createEnvFile }),
+  );
+  if (!saved.ok) {
+    return {
+      ok: false,
+      code: 'api_error',
+      detail: `Could not write the Dokploy environment — ${explainApiError(saved.error, 'write', opts).reason}`,
+      manualHint: manualStripHint(opts),
+    };
+  }
+  const reread = await settle(client.getCompose(composeId));
+  const intact = reread.ok && reread.value.env === strippedEnv && reread.value.createEnvFile === compose.createEnvFile;
+  if (!intact) {
+    return {
+      ok: false,
+      code: 'verify_mismatch',
+      detail: 'The stored environment after removal did not match what Capy wrote — check the Environment tab in Dokploy.',
+      manualHint: manualStripHint(opts),
+    };
+  }
+  if (ctx.noDeploy) {
+    return {
+      ok: true,
+      code: 'stripped',
+      detail: 'Removed the Capy block from the Dokploy environment; everything else was left untouched. --no-deploy: not redeployed.',
+    };
+  }
+  const redeployed = await settle(client.redeployCompose(composeId, `capy deploy remove ${config.name}`));
+  if (!redeployed.ok) {
+    return {
+      ok: false,
+      code: 'api_error',
+      detail:
+        `Removed the Capy block, but could not redeploy — ${explainApiError(redeployed.error, 'trigger', opts).reason}. ` +
+        'The reverted config is saved but not yet running.',
+      manualHint: manualStripHint(opts),
+    };
+  }
+  return {
+    ok: true,
+    code: 'stripped',
+    detail: 'Removed the Capy block from the Dokploy environment and redeployed; everything else was left untouched.',
+  };
 }
 
 export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapter {
@@ -412,7 +783,23 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         return { ok: false, reason, hint };
       }
       const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
-      const app = await settle(client.getApplication(opts.applicationId));
+      if (opts.composeId) {
+        const compose = await settle(client.getCompose(opts.composeId));
+        if (!compose.ok) return { ok: false, ...explainApiError(compose.error, 'compose.one', opts) };
+        if (compose.value.createEnvFile === false) {
+          return { ok: false, ...describeComposeEnvFileDisabled(), code: ERROR_CODES.DOKPLOY_ENV_FILE_DISABLED };
+        }
+        const problem = envProblems(compose.value.env);
+        if (problem) return { ok: false, ...describeEnvProblem(problem) };
+        const envWarning = envWarnings(compose.value.env, config.vars);
+        const stackWarning = await composeStackVersionWarning(client, compose.value);
+        const warnings: readonly DeployWarning[] = [
+          envWarning ? toDeployWarning(envWarning) : null,
+          stackWarning,
+        ].filter((w): w is DeployWarning => !!w);
+        return { ok: true, ...(warnings.length ? { warnings } : {}) };
+      }
+      const app = await settle(client.getApplication(opts.applicationId!));
       if (!app.ok) return { ok: false, ...explainApiError(app.error, 'application.one', opts) };
       const problem = envProblems(app.value.env);
       if (problem) return { ok: false, ...describeEnvProblem(problem) };
@@ -431,8 +818,8 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
               status: 'ok',
               detail: `${config.vars.length} var(s) would ship inside ${RUNTIME_PAIR[0]} + ${RUNTIME_PAIR[1]}`,
             },
-            { label: 'application.saveEnvironment', status: 'skip', detail: 'dry-run' },
-            { label: 'application.deploy', status: 'skip', detail: 'dry-run' },
+            { label: opts.composeId ? 'compose.saveEnvironment' : 'application.saveEnvironment', status: 'skip', detail: 'dry-run' },
+            { label: opts.composeId ? 'compose.redeploy' : 'application.deploy', status: 'skip', detail: 'dry-run' },
           ],
         };
       }
@@ -455,8 +842,19 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       }
       const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
 
+      // CAP-679: Compose services take a completely separate sequence (see
+      // `deployComposeFlow`'s own doc) — the Application path below is kept
+      // exactly as it was.
+      if (opts.composeId) {
+        return deployComposeFlow(client, config, ctx, opts, opts.composeId, { sleep, now, log });
+      }
+      const applicationId = opts.applicationId;
+      if (!applicationId) {
+        return fail([], { label: 'dokploy target', status: 'fail', detail: 'no applicationId or composeId configured' });
+      }
+
       // 1. Fresh read — what preflight saw may be stale by now.
-      const read = await settle(client.getApplication(opts.applicationId));
+      const read = await settle(client.getApplication(applicationId));
       if (!read.ok) {
         return fail([], {
           label: 'application.one',
@@ -509,7 +907,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
 
       // 3. Dokploy has no conditional write, so a concurrent dashboard edit can
       //    only be detected, not prevented: re-read and compare.
-      const reread = await settle(client.getApplication(opts.applicationId));
+      const reread = await settle(client.getApplication(applicationId));
       const intact =
         reread.ok &&
         reread.value.env === nextEnv &&
@@ -548,10 +946,17 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           epilogue: runtimeEpilogue(ctx.deployToken.deployId),
         });
       }
+      if (ctx.noDeploy) {
+        return withWarnings({
+          ok: true,
+          steps: [...s2, { label: 'application.deploy', status: 'skip', detail: '--no-deploy' }],
+          epilogue: runtimeEpilogue(ctx.deployToken.deployId),
+        });
+      }
 
       // 4. Trigger, remembering which deployments already existed — Dokploy's
       //    deploy call does not say which deployment it created.
-      const before = await settle(client.listDeployments(opts.applicationId));
+      const before = await settle(client.listDeployments(applicationId));
       if (!before.ok) {
         return withWarnings(
           fail(s2, {
@@ -561,7 +966,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           }),
         );
       }
-      const triggered = await settle(client.deploy(opts.applicationId, `capy deploy ${config.name}`));
+      const triggered = await settle(client.deploy(applicationId, `capy deploy ${config.name}`));
       if (!triggered.ok) {
         return withWarnings(
           fail(s2, {
@@ -580,9 +985,9 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       // 5. Poll to a real outcome; the trigger response alone proves nothing.
       const timeoutMs = (opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS) * 1000;
       const polled = await settle(
-        pollDeployment(
+        pollApplicationDeployment(
           client,
-          opts.applicationId,
+          applicationId,
           new Set(before.value.map((d) => d.deploymentId)),
           now() + timeoutMs,
           { sleep, now, onRunning: () => log('  · deployment running…') },
@@ -654,7 +1059,10 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         };
       }
       const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
-      const read = await settle(client.getApplication(opts.applicationId));
+      if (opts.composeId) {
+        return onRemoveCompose(client, config, ctx, opts, opts.composeId);
+      }
+      const read = await settle(client.getApplication(opts.applicationId!));
       if (!read.ok) {
         return {
           ok: false,
@@ -719,7 +1127,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           manualHint: manualStripHint(opts),
         };
       }
-      const reread = await settle(client.getApplication(opts.applicationId));
+      const reread = await settle(client.getApplication(opts.applicationId!));
       const intact =
         reread.ok &&
         reread.value.env === strippedEnv &&

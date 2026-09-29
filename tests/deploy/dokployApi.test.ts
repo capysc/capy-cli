@@ -8,9 +8,11 @@ import {
   mergeManagedBlock,
   resolveDokployToken,
   splitManagedBlock,
+  stripManagedBlock,
 } from '../../src/deploy/dokployApi';
 
 const PAIR = { secretsBlob: 'QkxPQg==', projectKey: 'ab'.repeat(32) };
+const PAIR2 = { secretsBlob: 'TkVXQkxPQg==', projectKey: 'cd'.repeat(32) };
 
 /** `splitManagedBlock` + `mergeManagedBlock` in one step — the production flow. */
 function mergedEnv(env: string | null, pair: { secretsBlob: string; projectKey: string }): string {
@@ -18,6 +20,102 @@ function mergedEnv(env: string | null, pair: { secretsBlob: string; projectKey: 
   if ('code' in split) throw new Error('unexpected problem');
   return mergeManagedBlock(split, pair);
 }
+
+function splitOk(env: string | null) {
+  const split = splitManagedBlock(env);
+  if ('code' in split) throw new Error('unexpected problem: ' + split.code);
+  return split;
+}
+
+/** The 4 lines of a Capy block, joined with `eol`, no trailing terminator — matches mergeManagedBlock's own construction. */
+function blockText(pair: { secretsBlob: string; projectKey: string }, eol: '\n' | '\r\n' = '\n'): string {
+  return [MANAGED_BEGIN, `${RUNTIME_PAIR[0]}=${pair.secretsBlob}`, `${RUNTIME_PAIR[1]}=${pair.projectKey}`, MANAGED_END].join(eol);
+}
+
+// ── Byte-exactness: split/merge/strip must round-trip every byte outside the
+// block, in every position (start/middle/end) and every line-ending style. ──
+describe('dokployApi — managed block byte-exactness', () => {
+  const withContentAfter = `A=1\n${blockText(PAIR)}\nB=2\n# tail\n`;
+  const withContentAfterCRLF = `A=1\r\n${blockText(PAIR, '\r\n')}\r\nB=2\r\n# tail\r\n`;
+
+  test('replace: content AFTER the block (LF) survives byte-for-byte', () => {
+    const merged = mergedEnv(withContentAfter, PAIR2);
+    expect(merged).toBe(`A=1\n${blockText(PAIR2)}\nB=2\n# tail\n`);
+    // The literal bug this guards: END and the next line must never fuse.
+    expect(merged).not.toContain('endB=2');
+    expect(merged).toContain(`${MANAGED_END}\nB=2`);
+  });
+
+  test('replace: content AFTER the block (CRLF) survives byte-for-byte', () => {
+    const merged = mergedEnv(withContentAfterCRLF, PAIR2);
+    expect(merged).toBe(`A=1\r\n${blockText(PAIR2, '\r\n')}\r\nB=2\r\n# tail\r\n`);
+    expect(merged).toContain(`${MANAGED_END}\r\nB=2`);
+  });
+
+  test('replace keeps `before`/`after` byte-identical — only the block’s own 4 lines move', () => {
+    const split = splitOk(withContentAfter);
+    expect(split.before).toBe('A=1\n');
+    expect(split.after).toBe('\nB=2\n# tail\n');
+    const merged = mergeManagedBlock(split, PAIR2);
+    const resplit = splitOk(merged);
+    expect(resplit.before).toBe(split.before);
+    expect(resplit.after).toBe(split.after);
+  });
+
+  test('block at the very START (nothing before it)', () => {
+    const env = `${blockText(PAIR)}\nB=2\n`;
+    const merged = mergedEnv(env, PAIR2);
+    expect(merged).toBe(`${blockText(PAIR2)}\nB=2\n`);
+  });
+
+  test('block at the very END, WITH a trailing newline', () => {
+    const env = `A=1\n${blockText(PAIR)}\n`;
+    const merged = mergedEnv(env, PAIR2);
+    expect(merged).toBe(`A=1\n${blockText(PAIR2)}\n`);
+  });
+
+  test('block at the very END, with NO trailing newline', () => {
+    const env = `A=1\n${blockText(PAIR)}`;
+    const merged = mergedEnv(env, PAIR2);
+    expect(merged).toBe(`A=1\n${blockText(PAIR2)}`);
+  });
+
+  test('strip undoes a real (first-time) merge exactly, for every block position — strip(merge(x)) === x', () => {
+    const cases: Array<{ name: string; before: string }> = [
+      { name: 'no prior block, content in the middle', before: 'A=1\nB=2\n# tail\n' },
+      { name: 'no prior block, empty file', before: '' },
+      { name: 'no prior block, single line no trailing newline', before: 'A=1' },
+      { name: 'no prior block, CRLF', before: 'A=1\r\nB=2\r\n' },
+    ];
+    for (const { before } of cases) {
+      const split = splitOk(before);
+      const merged = mergeManagedBlock(split, PAIR);
+      const roundTripped = stripManagedBlock(splitOk(merged));
+      expect(roundTripped).toBe(before);
+    }
+  });
+
+  test('strip a block that already has real content after it (e.g. a dashboard edit made after Capy wrote) leaves exactly one separator', () => {
+    // Block sits between "A=1" and "B=2", exactly as if the 4 Capy lines were
+    // deleted outright — never two newlines, never zero.
+    const stripped = stripManagedBlock(splitOk(withContentAfter));
+    expect(stripped).toBe('A=1\nB=2\n# tail\n');
+  });
+
+  test('strip a block at the end, with real content after it, CRLF', () => {
+    const stripped = stripManagedBlock(splitOk(withContentAfterCRLF));
+    expect(stripped).toBe('A=1\r\nB=2\r\n# tail\r\n');
+  });
+
+  test('multiple replaces in a row never drift the surrounding bytes', () => {
+    const once = mergedEnv(withContentAfter, PAIR);
+    const twice = mergedEnv(once, PAIR2);
+    const split = splitOk(twice);
+    expect(split.before).toBe('A=1\n');
+    expect(split.after).toBe('\nB=2\n# tail\n');
+    expect(stripManagedBlock(splitOk(twice))).toBe('A=1\nB=2\n# tail\n');
+  });
+});
 
 describe('dokployApi — token resolution', () => {
   test('reads the token from the configured variable name', () => {

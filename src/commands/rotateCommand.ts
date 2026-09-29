@@ -12,6 +12,7 @@ import { cap, rotationPlan, type RotationPlanInput } from './connectors/plans';
 import { ProjectManager } from '../core/projectManager';
 import { CapyError, ConnectorMetadata, ERROR_CODES, KeepFile } from '../types/index';
 import { TargetConfig } from '../deploy/adapter';
+import { staleTargets } from '../deploy/targetsGate';
 import { isInteractive, refuseNonInteractive } from '../ui/interactive';
 import { confirmLiveActionInBrowser } from '../ui/connectScreens';
 import type {
@@ -133,6 +134,19 @@ async function refuse(
   await displayErrorAndExit(error, context);
 }
 
+/**
+ * capy-dev may open a CI/PR deploy, but must never run a direct vendor ship.
+ * Drops a resolved direct-mode target in dev, printing why; returns `target`
+ * unchanged otherwise.
+ */
+function devDirectModeGuard(devMode: boolean, target: TargetConfig | null): TargetConfig | null {
+  if (!devMode || !target || (target.mode ?? 'direct') === 'ci') return target;
+  console.log(
+    `\n  \x1b[33m⚠ capy-dev skips the direct-mode deploy for ${target.name} (CI/PR only in dev).\x1b[0m`,
+  );
+  return null;
+}
+
 /** One-line description of how a configured target ships, for the Deploy stop. */
 function describeDeploy(t: TargetConfig): string {
   const mode = t.mode ?? 'direct';
@@ -201,16 +215,16 @@ export class RotateCommand {
       return;
     }
 
-    // Resolve which (varName, connector|unmanaged) we're operating on.
-    let target: { varName: string; connector: ConnectorMetadata } | { varName: string; unmanaged: true };
-
-    if (varName) {
-      const connector = findManagedConnector(keep, varName, branch);
-      if (connector) {
-        target = { varName, connector };
-      } else if (allVars.includes(varName)) {
-        target = { varName, unmanaged: true };
-      } else {
+    // Resolve which (varName, connector|unmanaged) we're operating on, as one
+    // value rather than a reassigned local — `resolution.stop` is set on
+    // every path that already printed its own refusal/cancellation and needs
+    // this method to return without doing anything else.
+    type Target = { varName: string; connector: ConnectorMetadata } | { varName: string; unmanaged: true };
+    const resolution: { target: Target } | { stop: true } = await (async (): Promise<{ target: Target } | { stop: true }> => {
+      if (varName) {
+        const connector = findManagedConnector(keep, varName, branch);
+        if (connector) return { target: { varName, connector } };
+        if (allVars.includes(varName)) return { target: { varName, unmanaged: true } };
         await refuse(
           new CapyError(
             `${varName} is not in your environment on branch ${branch}.`,
@@ -222,37 +236,37 @@ export class RotateCommand {
           ),
           { projectName: keep.project_name, projectId: keep.project_id, branch },
         );
-        return;
+        return { stop: true };
       }
-    } else {
+
       if (allVars.length === 0) {
         await refuse(
           new CapyError('No variables on this branch yet.', ERROR_CODES.NO_VARIABLES, { branch }),
           { projectName: keep.project_name, projectId: keep.project_id, branch },
         );
-        return;
+        return { stop: true };
       }
-      let picked: string;
-      if (opts.web) {
-        const candidates = buildRotateCandidates(allVars, keep, branch);
-        const { askRotateVariableInBrowser } = await import('../ui/rotateScreens');
-        const answer = await askRotateVariableInBrowser({
-          step: 'variable',
-          projectName: keep.project_name,
-          branch,
-          devMode: this.devMode,
-          all: false,
-          noPush: opts.noPush === true,
-          stops: await this.planStops(keep, branch, opts, { standing: 'variable' }),
-          candidates,
-          open: shouldOpen(),
-        });
-        if (answer.cancelled) {
-          console.log('\n  Cancelled.\n');
-          return;
+      const picked: string | null = await (async (): Promise<string | null> => {
+        if (opts.web) {
+          const candidates = buildRotateCandidates(allVars, keep, branch);
+          const { askRotateVariableInBrowser } = await import('../ui/rotateScreens');
+          const answer = await askRotateVariableInBrowser({
+            step: 'variable',
+            projectName: keep.project_name,
+            branch,
+            devMode: this.devMode,
+            all: false,
+            noPush: opts.noPush === true,
+            stops: await this.planStops(keep, branch, opts, { standing: 'variable' }),
+            candidates,
+            open: shouldOpen(),
+          });
+          if (answer.cancelled) {
+            console.log('\n  Cancelled.\n');
+            return null;
+          }
+          return answer.variable;
         }
-        picked = answer.variable;
-      } else {
         if (!isInteractive(opts.nonTty)) {
           refuseNonInteractive(
             'no variable specified and the picker needs a prompt',
@@ -270,11 +284,15 @@ export class RotateCommand {
             ),
           },
         ]);
-        picked = answer.picked;
-      }
+        return answer.picked;
+      })();
+      if (picked === null) return { stop: true };
       const connector = findManagedConnector(keep, picked, branch);
-      target = connector ? { varName: picked, connector } : { varName: picked, unmanaged: true };
-    }
+      return { target: connector ? { varName: picked, connector } : { varName: picked, unmanaged: true } };
+    })();
+
+    if ('stop' in resolution) return;
+    const { target } = resolution;
 
     if ('unmanaged' in target) {
       await this.promoteAndConnect(target.varName, branch, opts);
@@ -856,56 +874,57 @@ export class RotateCommand {
     // invokes a vendor CLI/API directly.
     const { listTargets } = await import('../deploy/config');
     const configuredTargets = listTargets(process.cwd());
-    let deployTarget: TargetConfig | null = null;
-    if (opts.noPush) {
-      // `--no-push` ships nothing, so there is no target to resolve. The plan
-      // is still drawn for that run — the destructive half is unchanged — with
-      // the stops it will not travel struck through.
-      deployTarget = null;
-    } else if (web || isTTY) {
-      // Ensure a target exists, setting one up inline if needed.
-      //
-      // `--web` HAS TO REACH THIS CALL, and for two reasons that are easy to
-      // miss because everything downstream is already built and already
-      // tested. `ensureDeployTarget` takes a `WebContext` and branches on it
-      // twice — `pickTargetInBrowser` when several targets are saved, and
-      // `runPicker(…, web)` when none is, which serves the adapter/branch/
-      // settings/variables/delivery/name route through
-      // `setUpDeployTargetInBrowser`. Called with no second argument the
-      // context defaults to `{}`, every one of those branches is skipped, and
-      // a run whose whole point is that nobody is watching the terminal stops
-      // on `Where are you deploying?` at an inquirer prompt. The screens are
-      // not missing; this call site was not asking for them.
-      //
-      // And the gate cannot stay `isTTY` alone. `--web` exists because the
-      // caller is an agent, which is precisely the case with no TTY — so the
-      // old condition sent exactly the intended caller down the branch that
-      // silently resolves nothing.
-      const { ensureDeployTarget } = await import('./deployCommand');
-      deployTarget = await ensureDeployTarget(process.cwd(), web ? { web: true } : {});
-      if (!deployTarget) {
-        // A declined picker wrote nothing and that was the point, so this is a
-        // 0 either way. Under `--web` the wizard has already closed on the
-        // user's own cancel, so the line below is a terminal echo of a
-        // decision they watched themselves make — not the only report of it.
-        console.log('\n  Cancelled.\n');
-        return;
+    // Resolved as one value rather than a reassigned local — `stop` marks the
+    // one path (a declined picker) that already printed its own
+    // cancellation and needs this method to return without doing anything else.
+    const targetResolution: { target: TargetConfig | null; stop?: true } = await (async () => {
+      if (opts.noPush) {
+        // `--no-push` ships nothing, so there is no target to resolve. The plan
+        // is still drawn for that run — the destructive half is unchanged — with
+        // the stops it will not travel struck through.
+        return { target: null };
       }
-    } else if (configuredTargets.length === 1) {
+      if (web || isTTY) {
+        // Ensure a target exists, setting one up inline if needed.
+        //
+        // `--web` HAS TO REACH THIS CALL, and for two reasons that are easy to
+        // miss because everything downstream is already built and already
+        // tested. `ensureDeployTarget` takes a `WebContext` and branches on it
+        // twice — `pickTargetInBrowser` when several targets are saved, and
+        // `runPicker(…, web)` when none is, which serves the adapter/branch/
+        // settings/variables/delivery/name route through
+        // `setUpDeployTargetInBrowser`. Called with no second argument the
+        // context defaults to `{}`, every one of those branches is skipped, and
+        // a run whose whole point is that nobody is watching the terminal stops
+        // on `Where are you deploying?` at an inquirer prompt. The screens are
+        // not missing; this call site was not asking for them.
+        //
+        // And the gate cannot stay `isTTY` alone. `--web` exists because the
+        // caller is an agent, which is precisely the case with no TTY — so the
+        // old condition sent exactly the intended caller down the branch that
+        // silently resolves nothing.
+        const { ensureDeployTarget } = await import('./deployCommand');
+        const resolved = await ensureDeployTarget(process.cwd(), web ? { web: true } : {});
+        if (!resolved) {
+          // A declined picker wrote nothing and that was the point, so this is a
+          // 0 either way. Under `--web` the wizard has already closed on the
+          // user's own cancel, so the line below is a terminal echo of a
+          // decision they watched themselves make — not the only report of it.
+          console.log('\n  Cancelled.\n');
+          return { target: null, stop: true as const };
+        }
+        return { target: resolved };
+      }
       // Non-interactive: auto-resolve the unambiguous single target. With zero
       // or several we don't refuse — rotate + push still runs and the user is
-      // kicked into the deploy flow afterward (deployTarget stays null).
-      deployTarget = configuredTargets[0];
-    }
+      // kicked into the deploy flow afterward (target stays null).
+      return { target: configuredTargets.length === 1 ? configuredTargets[0] : null };
+    })();
+    if (targetResolution.stop) return;
 
     // Dev isolation: capy-dev may open a CI/PR deploy, but must never run a
     // direct vendor ship. Drop a resolved direct-mode target in dev.
-    if (this.devMode && deployTarget && (deployTarget.mode ?? 'direct') !== 'ci') {
-      console.log(
-        `\n  \x1b[33m⚠ capy-dev skips the direct-mode deploy for ${deployTarget.name} (CI/PR only in dev).\x1b[0m`,
-      );
-      deployTarget = null;
-    }
+    const deployTarget = devDirectModeGuard(this.devMode, targetResolution.target);
 
     // ── Build the (now fully resolved) train-stop ───────────────────────────
     const pm = new ProjectManager();
@@ -985,11 +1004,28 @@ export class RotateCommand {
       return;
     }
 
-    let deployed: { name: string; ok: boolean } | null = null;
-    if (deployTarget) {
+    // ── Stale targets (CAP-679) ───────────────────────────────────────────
+    // The rotate above already pushed — re-read to see which `targets`
+    // elements now disagree with the fresh value_hash, and report them.
+    // Kept deliberately separate from `deployTarget`'s own auto-redeploy
+    // above/below: THIS is "does any configured target still hold the OLD
+    // value", regardless of whether a single unambiguous target happened to
+    // be resolved for the redeploy-after-rotate flow.
+    await this.reportStaleTargets(branch, report.succeeded, opts, isTTY && !web);
+
+    const deployOutcome: { deployed: { name: string; ok: boolean } | null; stop?: true } = await (async () => {
+      if (!deployTarget) {
+        if (!opts.noPush) {
+          // No target resolved (none configured, several to disambiguate, or
+          // a dev direct-mode target we skipped). The key is already rotated
+          // + pushed; kick the user into the deploy flow to open the rollout PR.
+          this.deployHint(configuredTargets.length);
+        }
+        return { deployed: null };
+      }
       const { deployCommand } = await import('./deployCommand');
       const code = await deployCommand(deployTarget.name, { yes: true, devMode: this.devMode });
-      deployed = { name: deployTarget.name, ok: code === 0 };
+      const deployed = { name: deployTarget.name, ok: code === 0 };
       if (code !== 0) {
         // The keys are already live in Capy and every running system still
         // holds the old ones. Under `--web` that state gets its own page
@@ -999,20 +1035,78 @@ export class RotateCommand {
         if (web) {
           await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
           process.exitCode = code;
-          return;
+          return { deployed, stop: true as const };
         }
         process.exit(code);
       }
-    } else if (!opts.noPush) {
-      // No target resolved (none configured, several to disambiguate, or a
-      // dev direct-mode target we skipped). The key is already rotated +
-      // pushed; kick the user into the deploy flow to open the rollout PR.
-      this.deployHint(configuredTargets.length);
-    }
+      return { deployed };
+    })();
+    if (deployOutcome.stop) return;
+    const { deployed } = deployOutcome;
 
     if (web) {
       await this.reportRun(keep?.project_name ?? 'project', branch, opts, report, stops, deployed, configuredTargets.length);
       if (report.stopped) process.exitCode = 1;
+    }
+  }
+
+  /**
+   * CAP-679: after a successful rotate + push, list every configured target
+   * whose keep.lock record now disagrees with the fresh value — i.e. a
+   * platform that still holds the OLD value. Report-only outside a plain
+   * terminal (`offerRedeploy=false`): under `--web`, or with `--skip-prompts`
+   * /`--yes`, this never prompts — it reuses the same rotate→deploy plumbing
+   * (`deployCommand`) as the single-target auto-redeploy above, one call per
+   * stale target, only when a human at a real TTY says yes.
+   */
+  private async reportStaleTargets(
+    branch: string,
+    rotatedVars: readonly string[],
+    opts: RotateOpts & { skipPrompts?: boolean },
+    offerRedeploy: boolean,
+  ): Promise<void> {
+    if (rotatedVars.length === 0) return;
+    const pm = new ProjectManager();
+    const keep = pm.readKeepFile();
+    if (!keep) return;
+
+    type StaleGroup = { provider: string; target: string; vars: readonly string[] };
+    const staleHits = rotatedVars.flatMap((varName) => {
+      const entry = (keep.variables[varName] ?? []).find((e) => (e.branch ?? '') === branch);
+      return entry ? staleTargets(entry).map((t) => ({ varName, provider: t.provider, target: t.target })) : [];
+    });
+    const staleByTarget = staleHits.reduce((acc, hit) => {
+      const key = `${hit.provider}\u0000${hit.target}`;
+      const existing = acc.get(key);
+      const group: StaleGroup = existing
+        ? { ...existing, vars: [...existing.vars, hit.varName] }
+        : { provider: hit.provider, target: hit.target, vars: [hit.varName] };
+      return new Map([...acc, [key, group]]);
+    }, new Map<string, StaleGroup>());
+    if (staleByTarget.size === 0) return;
+
+    console.log(`\n  \x1b[33m!\x1b[0m Stale on ${staleByTarget.size} target(s) — the value(s) changed since last delivered:`);
+    for (const { provider, target, vars } of staleByTarget.values()) {
+      console.log(`    - ${target} (${provider}): ${vars.join(', ')}`);
+    }
+
+    if (!offerRedeploy || opts.skipPrompts) {
+      console.log('    Run `capy deploy <target>` to redeploy the ones you need.');
+      return;
+    }
+
+    const { listTargets } = await import('../deploy/config');
+    const configured = listTargets(process.cwd());
+    const inquirer = (await import('inquirer')).default;
+    for (const { target: targetName } of staleByTarget.values()) {
+      const target = configured.find((t) => t.name === targetName);
+      if (!target) continue;
+      const { proceed } = await inquirer.prompt([
+        { type: 'confirm', name: 'proceed', message: `Redeploy stale target "${targetName}" now?`, default: true },
+      ]);
+      if (!proceed) continue;
+      const { deployCommand } = await import('./deployCommand');
+      await deployCommand(target.name, { yes: true, devMode: this.devMode });
     }
   }
 

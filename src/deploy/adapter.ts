@@ -12,6 +12,7 @@
 
 import type { Classification } from './classify';
 import type { ResolveDokployApiKeyResult } from './dokployApi';
+import type { ErrorCode } from '../types/index';
 
 export type DeployMode = 'direct' | 'ci';
 
@@ -100,6 +101,13 @@ export interface PreflightResult {
   reason?: string;
   /** Optional fix-it hint shown alongside reason. */
   hint?: string;
+  /**
+   * Machine-readable companion to `reason` (Rule 5: never parse `reason`'s
+   * prose to decide anything). Optional and additive — most refusals here
+   * predate this field and still carry `reason` alone; new refusals should
+   * set both.
+   */
+  code?: ErrorCode;
   /** Non-blocking heads-up(s), shown whether or not ok is true. */
   warnings?: readonly DeployWarning[];
 }
@@ -110,6 +118,8 @@ export interface DeployStep {
   detail?: string;
   /** URL surfaced to the user (deployed worker URL, pages URL). */
   url?: string;
+  /** Machine-readable companion to `detail` on a `'fail'` step — see `PreflightResult.code`'s own doc. */
+  code?: ErrorCode;
 }
 
 export interface DeployResult {
@@ -142,6 +152,16 @@ export interface DeployContext extends AdapterCallContext {
    * the CI pipeline runs the actual deploy after the PR merges.
    */
   secretsOnly?: boolean;
+  /**
+   * `--no-deploy` (CAP-679): write and verify the target's configuration,
+   * but skip the trigger + poll step — the user, or the platform's own
+   * auto-deploy, ships it later. Distinct from `secretsOnly`: that one is
+   * CI mode's own "a pipeline deploys this on merge" story with its own
+   * epilogue copy; this is a direct-mode caller explicitly asking to write
+   * without shipping right now. An adapter that doesn't support write-only
+   * delivery ignores this field and behaves as if it were unset.
+   */
+  noDeploy?: boolean;
   /** cwd of the user's invocation. */
   cwd: string;
 }
@@ -172,6 +192,12 @@ export interface RemoveOfferContext extends AdapterCallContext {
   interactive: boolean;
   /** Asks a yes/no question; resolves `false` without prompting when !interactive. */
   confirm(message: string): Promise<boolean>;
+  /**
+   * `--no-deploy` (CAP-679): after stripping whatever this adapter left
+   * outside `.capy/deploy.json`, skip the redeploy/restart that would
+   * otherwise apply the reverted config right away.
+   */
+  noDeploy?: boolean;
 }
 
 export interface DeployAdapter {

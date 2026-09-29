@@ -102,6 +102,139 @@ describe('keepGate.buildDeployKeep', () => {
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// CAP-679: buildDeployKeep's optional `delivery` param folds `targets` for CI
+// mode, keyed to the SAME hash it just computed for value_hash.
+// ────────────────────────────────────────────────────────────────────────────
+describe('keepGate.buildDeployKeep — CAP-679 delivery folding', () => {
+  const base = keepWith({ WORKOS_API_KEY: 'sk_old', WORKOS_CLIENT_ID: 'client_x' }, 'staging');
+
+  test('folds a targets element for every delivered var, keyed to its own hash', () => {
+    const env = { WORKOS_API_KEY: 'sk_NEW', WORKOS_CLIENT_ID: 'client_x' };
+    const r = buildDeployKeep(
+      base,
+      env,
+      ['WORKOS_API_KEY', 'WORKOS_CLIENT_ID'],
+      'staging',
+      { provider: 'vercel', target: 'web-prod', ref: { projectId: 'prj_1' } },
+      '2026-06-23T00:00:00.000Z',
+    );
+    const keep = JSON.parse(r.content);
+    expect(keep.variables.WORKOS_API_KEY[0].targets).toEqual([
+      {
+        provider: 'vercel',
+        target: 'web-prod',
+        ref: { projectId: 'prj_1' },
+        deployed_value_hash: hashValue('sk_NEW'),
+        deployed_at: '2026-06-23T00:00:00.000Z',
+      },
+    ]);
+    expect(keep.variables.WORKOS_CLIENT_ID[0].targets[0].deployed_value_hash).toBe(hashValue('client_x'));
+  });
+
+  test('replaces the same (provider, target) element rather than appending', () => {
+    const withPrior: any = JSON.parse(JSON.stringify(base));
+    withPrior.variables.WORKOS_API_KEY[0].targets = [
+      { provider: 'vercel', target: 'web-prod', deployed_value_hash: 'stale', deployed_at: 't0' },
+    ];
+    const r = buildDeployKeep(withPrior, { WORKOS_API_KEY: 'sk_NEW' }, ['WORKOS_API_KEY'], 'staging', {
+      provider: 'vercel',
+      target: 'web-prod',
+    });
+    const keep = JSON.parse(r.content);
+    expect(keep.variables.WORKOS_API_KEY[0].targets).toHaveLength(1);
+    expect(keep.variables.WORKOS_API_KEY[0].targets[0].deployed_value_hash).toBe(hashValue('sk_NEW'));
+  });
+
+  test('no delivery argument — behaves exactly as before, no targets field added', () => {
+    const r = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_NEW' }, ['WORKOS_API_KEY'], 'staging');
+    const keep = JSON.parse(r.content);
+    expect(keep.variables.WORKOS_API_KEY[0]).not.toHaveProperty('targets');
+  });
+
+  test('a stray non-object 5th argument (the old call shape) is ignored, not corrupted', () => {
+    // Regression guard: two tests above in this file call
+    // buildDeployKeep(base, env, vars, branch, NOW) with a bare ISO string in
+    // this exact slot. That call shape must keep working unchanged.
+    const r = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_NEW' }, ['WORKOS_API_KEY'], 'staging', '2026-06-23T00:00:00.000Z' as any);
+    const keep = JSON.parse(r.content);
+    expect(keep.variables.WORKOS_API_KEY[0].value_hash).toBe(hashValue('sk_NEW'));
+    expect(keep.variables.WORKOS_API_KEY[0]).not.toHaveProperty('targets');
+  });
+
+  test('a brand-new entry (var not yet on base) also gets its targets element', () => {
+    const env = { WORKOS_API_KEY: 'sk_old', STRIPE_KEY: 'sk_live_1' };
+    const r = buildDeployKeep(base, env, ['WORKOS_API_KEY', 'STRIPE_KEY'], 'staging', {
+      provider: 'dokploy',
+      target: 'backend-preview',
+    });
+    const keep = JSON.parse(r.content);
+    expect(keep.variables.STRIPE_KEY[0].targets[0]).toMatchObject({
+      provider: 'dokploy',
+      target: 'backend-preview',
+      deployed_value_hash: hashValue('sk_live_1'),
+    });
+  });
+
+  test('is pure: never mutates baseKeep', () => {
+    const before = JSON.stringify(base);
+    buildDeployKeep(base, { WORKOS_API_KEY: 'sk_NEW' }, ['WORKOS_API_KEY'], 'staging', {
+      provider: 'dokploy',
+      target: 't',
+    });
+    expect(JSON.stringify(base)).toBe(before);
+  });
+
+  // ── The bug the validator caught: a redeploy of the SAME value must not
+  // manufacture a diff by stamping a fresh deployed_at on a fact that
+  // didn't change — otherwise the CI change-gate opens a PR on every run. ──
+  test('identical value, already-recorded target → changed is false, no element churn', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview' };
+    const first = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', delivery, 't0');
+    const firstKeep = JSON.parse(first.content);
+    expect(firstKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t0');
+
+    // Redeploy: SAME value, SAME delivery, but a NEW timestamp/deploy_id —
+    // as a real second `capy deploy` run would pass.
+    const second = buildDeployKeep(
+      firstKeep,
+      { WORKOS_API_KEY: 'sk_old' },
+      ['WORKOS_API_KEY'],
+      'staging',
+      { ...delivery, deployId: 'dep_new' },
+      't1',
+    );
+    expect(second.changed).toBe(false);
+    const secondKeep = JSON.parse(second.content);
+    // The element is UNTOUCHED — same deployed_at, no deploy_id added — not
+    // bumped to 't1'/'dep_new'.
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets).toEqual(firstKeep.variables.WORKOS_API_KEY[0].targets);
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t0');
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0]).not.toHaveProperty('deploy_id');
+  });
+
+  test('identical value, no PRIOR target recorded yet → still changed (a first delivery IS a real change)', () => {
+    // Distinguishes "value unchanged" from "target bookkeeping unchanged" —
+    // recording a delivery for the first time is a genuine new fact.
+    const r = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', {
+      provider: 'dokploy',
+      target: 'backend-preview',
+    });
+    expect(r.changed).toBe(true);
+  });
+
+  test('a genuine value change still replaces the target element (and reports changed)', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview' };
+    const first = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', delivery, 't0');
+    const firstKeep = JSON.parse(first.content);
+    const second = buildDeployKeep(firstKeep, { WORKOS_API_KEY: 'sk_NEW' }, ['WORKOS_API_KEY'], 'staging', delivery, 't1');
+    expect(second.changed).toBe(true);
+    const secondKeep = JSON.parse(second.content);
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_value_hash).toBe(hashValue('sk_NEW'));
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t1');
+  });
+});
+
 describe('keepGate.reconcileVars', () => {
   test('no drift when selection still matches what the project knew', () => {
     const r = reconcileVars(['A', 'B'], ['A', 'B', 'C'], ['A', 'B', 'C']);
