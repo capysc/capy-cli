@@ -466,9 +466,19 @@ export const ERROR_CODES = {
   /**
    * `capy deploy <target>` refused: the active `.env` branch (what deploy is
    * about to read) differs from the saved target's own branch (what the
-   * result would be filed under).
+   * result would be filed under). Also the code any keep.lock-writing
+   * follow-up (`recordDeployTargets`, `deploy targets-remove`) refuses on —
+   * see `DEPLOY_BRANCH_UNKNOWN` for its sibling: this code always means the
+   * active branch IS known, just wrong.
    */
   DEPLOY_BRANCH_MISMATCH: 'DEPLOY_BRANCH_MISMATCH',
+  /**
+   * Same refusal family as `DEPLOY_BRANCH_MISMATCH`, for when the active
+   * branch cannot be determined at all (no `.env` header, no `.capy/branch`,
+   * no unambiguous fallback) — never guessed, never silently skipped when a
+   * write is about to key off it.
+   */
+  DEPLOY_BRANCH_UNKNOWN: 'DEPLOY_BRANCH_UNKNOWN',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

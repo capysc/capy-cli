@@ -140,6 +140,37 @@ describe('recordTargetDeliveries', () => {
   test('no values delivered → returns the same KeepFile (identity)', () => {
     expect(recordTargetDeliveries(base, 'preview', { provider: 'dokploy', target: 't' }, 'at', [])).toBe(base);
   });
+
+  // ── Direct-mode counterpart of buildDeployKeep's "no churn" fix: a
+  // redeploy of the SAME value must return the identical KeepFile BY
+  // REFERENCE, so `pushKeepTransform` skips the network push entirely. ──
+  test('identical value, already-recorded target → returns the SAME KeepFile by reference (no churn, no push)', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview' };
+    const first = recordTargetDeliveries(base, 'preview', delivery, 't0', [{ name: 'DATABASE_URL', valueHash: 'h1' }]);
+    expect(first).not.toBe(base); // first delivery IS a real change
+
+    const second = recordTargetDeliveries(
+      first,
+      'preview',
+      { ...delivery, deployId: 'dep_new' },
+      't1',
+      [{ name: 'DATABASE_URL', valueHash: 'h1' }], // SAME hash as before
+    );
+    expect(second).toBe(first); // no-op, by reference
+    const targets = (second.variables.DATABASE_URL[0] as any).targets;
+    expect(targets[0].deployed_at).toBe('t0'); // untouched
+    expect(targets[0]).not.toHaveProperty('deploy_id');
+  });
+
+  test('a genuine value change still replaces the element and returns a new KeepFile', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview' };
+    const first = recordTargetDeliveries(base, 'preview', delivery, 't0', [{ name: 'DATABASE_URL', valueHash: 'h1' }]);
+    const second = recordTargetDeliveries(first, 'preview', delivery, 't1', [{ name: 'DATABASE_URL', valueHash: 'h1new' }]);
+    expect(second).not.toBe(first);
+    const targets = (second.variables.DATABASE_URL[0] as any).targets;
+    expect(targets[0].deployed_value_hash).toBe('h1new');
+    expect(targets[0].deployed_at).toBe('t1');
+  });
 });
 
 describe('stripTargetsForProviderTarget', () => {

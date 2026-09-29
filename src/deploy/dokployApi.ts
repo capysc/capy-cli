@@ -818,7 +818,16 @@ export function splitManagedBlock(env: string | null): EnvSplit | EnvMergeProble
   const offsetOf = (idx: number): number =>
     rawLines.slice(0, idx).reduce((acc, l) => acc + l.content.length + l.eol.length, 0);
   const beginStart = offsetOf(begins[0]);
-  const endEnd = offsetOf(ends[0]) + rawLines[ends[0]].content.length + rawLines[ends[0]].eol.length;
+  // Deliberately EXCLUDES the END line's own eol: that terminator belongs to
+  // `after`, not to the consumed block span. `mergeManagedBlock` rebuilds the
+  // block's 4 lines via `.join(eol)`, which never carries a trailing
+  // terminator after the last line (END) — so if `after` didn't keep its own
+  // leading eol, `before + newBlock + after` would lose exactly one line
+  // ending every time a block gets replaced with real content following it
+  // (see the fixtures in dokployApi.test.ts for the byte-exact round trip
+  // this buys: strip(merge(x)) === x, and a replace keeps `before`/`after`
+  // byte-identical).
+  const endEnd = offsetOf(ends[0]) + rawLines[ends[0]].content.length;
   return {
     before: text.slice(0, beginStart),
     after: text.slice(endEnd),

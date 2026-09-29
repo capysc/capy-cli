@@ -19,6 +19,7 @@ import { generateDeployHtml } from '../ui/deployPage/html';
 import { formatRelativeTime } from '../ui/relativeTime';
 import { hashValue } from '../deploy/keepGate';
 import { stripTargetsForDeployId } from '../deploy/targetsGate';
+import { ERROR_CODES } from '../types/index';
 import type { ProjectState } from '../types/index';
 
 /**
@@ -42,12 +43,23 @@ async function stripRevokedTargets(
 ): Promise<void> {
   try {
     if (!projectState.projectId || !projectState.organizationId) return;
-    const branch = projectState.activeBranch;
-    if (!branch) return;
     const keep = pm.readKeepFile();
     if (!keep) return;
     const nextKeep = stripTargetsForDeployId(keep, deployId);
     if (nextKeep === keep) return;
+
+    // Never push an env blob for a branch other than the one `.env` is
+    // actually on. Revoke has no separate "target.branch" to compare
+    // against — it always pushes under the ACTIVE branch — so the only
+    // possible refusal here is "unknown", never "mismatch".
+    const branch = projectState.activeBranch;
+    if (!branch) {
+      console.error(
+        `  \x1b[33m!\x1b[0m could not strip revoked deploy targets in keep.lock — ` +
+          `[${ERROR_CODES.DEPLOY_BRANCH_UNKNOWN}] the active branch could not be determined.`,
+      );
+      return;
+    }
 
     const { resolveProjectKey: resolveKey } = await import('../crypto/keyResolver');
     const { Encryptor } = await import('../crypto/encryptor');

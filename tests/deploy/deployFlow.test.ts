@@ -184,6 +184,55 @@ describe('keepGate.buildDeployKeep — CAP-679 delivery folding', () => {
     });
     expect(JSON.stringify(base)).toBe(before);
   });
+
+  // ── The bug the validator caught: a redeploy of the SAME value must not
+  // manufacture a diff by stamping a fresh deployed_at on a fact that
+  // didn't change — otherwise the CI change-gate opens a PR on every run. ──
+  test('identical value, already-recorded target → changed is false, no element churn', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview' };
+    const first = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', delivery, 't0');
+    const firstKeep = JSON.parse(first.content);
+    expect(firstKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t0');
+
+    // Redeploy: SAME value, SAME delivery, but a NEW timestamp/deploy_id —
+    // as a real second `capy deploy` run would pass.
+    const second = buildDeployKeep(
+      firstKeep,
+      { WORKOS_API_KEY: 'sk_old' },
+      ['WORKOS_API_KEY'],
+      'staging',
+      { ...delivery, deployId: 'dep_new' },
+      't1',
+    );
+    expect(second.changed).toBe(false);
+    const secondKeep = JSON.parse(second.content);
+    // The element is UNTOUCHED — same deployed_at, no deploy_id added — not
+    // bumped to 't1'/'dep_new'.
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets).toEqual(firstKeep.variables.WORKOS_API_KEY[0].targets);
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t0');
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0]).not.toHaveProperty('deploy_id');
+  });
+
+  test('identical value, no PRIOR target recorded yet → still changed (a first delivery IS a real change)', () => {
+    // Distinguishes "value unchanged" from "target bookkeeping unchanged" —
+    // recording a delivery for the first time is a genuine new fact.
+    const r = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', {
+      provider: 'dokploy',
+      target: 'backend-preview',
+    });
+    expect(r.changed).toBe(true);
+  });
+
+  test('a genuine value change still replaces the target element (and reports changed)', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview' };
+    const first = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', delivery, 't0');
+    const firstKeep = JSON.parse(first.content);
+    const second = buildDeployKeep(firstKeep, { WORKOS_API_KEY: 'sk_NEW' }, ['WORKOS_API_KEY'], 'staging', delivery, 't1');
+    expect(second.changed).toBe(true);
+    const secondKeep = JSON.parse(second.content);
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_value_hash).toBe(hashValue('sk_NEW'));
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t1');
+  });
 });
 
 describe('keepGate.reconcileVars', () => {

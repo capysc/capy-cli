@@ -11,7 +11,38 @@
  * never mutating its input. Callers (`deployCommand.ts`, `keepGate.ts`,
  * `rotateCommand.ts`) own reading the file, pushing it, and writing it back.
  */
-import { KeepFile, KeepVariableEntry, TargetDelivery } from '../types/index';
+import { ERROR_CODES, KeepFile, KeepVariableEntry, TargetDelivery } from '../types/index';
+
+/**
+ * Whether it is safe to push a keep.lock write for `targetBranch` given the
+ * ACTUAL active branch `.env` is on. Pure — no filesystem/network — so every
+ * caller that needs this guard (`pushKeepTransform`'s deploy-target writes,
+ * `deploy revoke`'s keep.lock strip) shares one rule instead of each
+ * re-deriving it.
+ *
+ * `null` means safe to proceed. A non-null result is always a refusal: a
+ * write keyed to the wrong branch's `.env` would push that branch's secrets
+ * mislabeled as `targetBranch`'s — see CAP-679's branch-check note.
+ */
+export interface BranchProblem {
+  code: typeof ERROR_CODES.DEPLOY_BRANCH_MISMATCH | typeof ERROR_CODES.DEPLOY_BRANCH_UNKNOWN;
+  activeBranch: string | null;
+  targetBranch: string;
+}
+
+export function branchPushProblem(activeBranch: string | null, targetBranch: string): BranchProblem | null {
+  if (!activeBranch) return { code: ERROR_CODES.DEPLOY_BRANCH_UNKNOWN, activeBranch: null, targetBranch };
+  if (activeBranch !== targetBranch) {
+    return { code: ERROR_CODES.DEPLOY_BRANCH_MISMATCH, activeBranch, targetBranch };
+  }
+  return null;
+}
+
+export function describeBranchProblem(p: BranchProblem): string {
+  return p.code === ERROR_CODES.DEPLOY_BRANCH_UNKNOWN
+    ? `[${p.code}] the active branch could not be determined; refusing to push keep.lock for "${p.targetBranch}" against an unknown .env branch.`
+    : `[${p.code}] the active branch (${p.activeBranch}) does not match "${p.targetBranch}"; refusing to push .env's values under the wrong branch.`;
+}
 
 /** What one delivery looked like, before it's turned into a `TargetDelivery` per var. */
 export interface TargetDeliveryDescriptor {
@@ -41,6 +72,16 @@ type EntryWithTargets = KeepVariableEntry & { targets?: ReadonlyArray<TargetDeli
  * Replace-not-append: drop any existing element for this (provider, target),
  * then add the fresh one. At most one element per (provider, target) — never
  * a second entry for the same pair.
+ *
+ * NO-OP when the existing element for this (provider, target) already
+ * carries the SAME `deployed_value_hash` — returns `existing` UNCHANGED (same
+ * array reference when nothing else needed updating), rather than replacing
+ * it with a fresh `deployed_at`/`deploy_id`. This is what makes an unchanged
+ * value produce an unchanged keep.lock: `buildDeployKeep`'s CI change-gate
+ * (and `recordTargetDeliveries`'s direct-mode write) both key their own
+ * "did anything change" off comparing serialized keep.lock text, and a
+ * redeploy of the exact same value must not manufacture a diff by stamping a
+ * new timestamp on a fact that didn't change.
  */
 export function upsertTargetElement(
   existing: ReadonlyArray<TargetDelivery> | undefined,
@@ -48,9 +89,12 @@ export function upsertTargetElement(
   deployedValueHash: string,
   deployedAt: string,
 ): ReadonlyArray<TargetDelivery> {
-  const filtered = (existing ?? []).filter(
-    (t) => !(t.provider === delivery.provider && t.target === delivery.target),
-  );
+  const list = existing ?? [];
+  const match = list.find((t) => t.provider === delivery.provider && t.target === delivery.target);
+  if (match && match.deployed_value_hash === deployedValueHash) {
+    return list;
+  }
+  const filtered = list.filter((t) => !(t.provider === delivery.provider && t.target === delivery.target));
   const element: TargetDelivery = {
     provider: delivery.provider,
     target: delivery.target,
@@ -82,26 +126,34 @@ export function recordTargetDeliveries(
 ): KeepFile {
   const byName = new Map(values.map((v) => [v.name, v.valueHash]));
   if (byName.size === 0) return keep;
-  return {
-    ...keep,
-    variables: Object.fromEntries(
-      Object.entries(keep.variables).map(([name, entries]) => {
-        const valueHash = byName.get(name);
-        if (valueHash === undefined) return [name, entries];
-        return [
-          name,
-          entries.map((e) => {
-            if ((e.branch ?? '') !== branch) return e;
-            const withTargets = e as EntryWithTargets;
-            return {
-              ...e,
-              targets: upsertTargetElement(withTargets.targets, delivery, valueHash, deliveredAt),
-            };
-          }),
-        ];
-      }),
-    ),
-  };
+
+  // Built alongside a `changed` flag rather than always spreading a new
+  // object: a redeploy of values that are all UNCHANGED (every
+  // `upsertTargetElement` call below is itself a no-op — see its own doc)
+  // must return `keep` BY REFERENCE, so callers that skip the push on
+  // `nextKeep === keep` (`pushKeepTransform`) don't push a no-op.
+  const built = Object.entries(keep.variables).reduce(
+    (acc, [name, entries]) => {
+      const valueHash = byName.get(name);
+      if (valueHash === undefined) {
+        return { variables: { ...acc.variables, [name]: entries }, changed: acc.changed };
+      }
+      const nextEntries = entries.map((e) => {
+        if ((e.branch ?? '') !== branch) return e;
+        const withTargets = e as EntryWithTargets;
+        const nextTargets = upsertTargetElement(withTargets.targets, delivery, valueHash, deliveredAt);
+        return nextTargets === withTargets.targets ? e : { ...e, targets: nextTargets };
+      });
+      const entryChanged = nextEntries.some((e, i) => e !== entries[i]);
+      return {
+        variables: { ...acc.variables, [name]: nextEntries },
+        changed: acc.changed || entryChanged,
+      };
+    },
+    { variables: {} as KeepFile['variables'], changed: false },
+  );
+
+  return built.changed ? { ...keep, variables: built.variables } : keep;
 }
 
 /** Drop every `targets` element matching `predicate`, on every entry, on every branch. */

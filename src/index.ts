@@ -346,6 +346,7 @@ const deploy = program
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
   .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (connector mode)')
+  .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     assertNotLocalOnly('deploy');
     // Top-level program also defines --dry-run; merge globals so either
@@ -368,6 +369,7 @@ const deploy = program
         force: options.force,
         // commander negates `--no-deploy` onto the positive `deploy` property.
         noDeploy: options.deploy === false,
+        json: !!options.json,
       });
       process.exit(code);
     }

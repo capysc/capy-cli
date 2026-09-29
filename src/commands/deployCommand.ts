@@ -43,9 +43,16 @@ import {
   deleteLocalBranch,
 } from '../deploy/git';
 import { buildDeployKeep, touchDeployKeep, reconcileVars, hashValue } from '../deploy/keepGate';
-import { recordTargetDeliveries, stripTargetsForProviderTarget, TargetDeliveryDescriptor } from '../deploy/targetsGate';
-import { KeepFile, ERROR_CODES, AuthResult } from '../types/index';
+import {
+  branchPushProblem,
+  describeBranchProblem,
+  recordTargetDeliveries,
+  stripTargetsForProviderTarget,
+  TargetDeliveryDescriptor,
+} from '../deploy/targetsGate';
+import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
 import type { AuthService } from '../auth/authService';
+import { ProjectManager } from '../core/projectManager';
 import { tmpdir } from 'os';
 import { ALL_ADAPTERS, getAdapter, listPlanned } from '../deploy/registry';
 import { detectAwsRegion, leafFor } from '../deploy/adapters/awsSsm';
@@ -417,8 +424,16 @@ async function pushKeepTransform(
   label: string,
 ): Promise<void> {
   try {
-    const { ProjectManager } = await import('../core/projectManager');
     const pm = new ProjectManager(cwd);
+    // Never push an env blob for a branch other than the one `.env` is
+    // actually on — `.env`'s plaintext below is encrypted and pushed as
+    // `branch`'s secrets; if `.env` is on a different branch (or none is
+    // knowable), that would mislabel one branch's values as another's.
+    const branchProblem = branchPushProblem(pm.deriveActiveBranch(), branch);
+    if (branchProblem) {
+      console.error(`  ${YELLOW('!')} could not ${label} in keep.lock — ${describeBranchProblem(branchProblem)}`);
+      return;
+    }
     const projectState = await pm.detectProjectState();
     if (!projectState.initialized || !projectState.organizationId || !projectState.projectId) return;
     const keep = pm.readKeepFile();
@@ -1471,70 +1486,94 @@ export async function deployRemove(
   // local removal below — it is an offer, not a precondition.
   const target = getTarget(cwd, name);
   const adapter = target ? getAdapter(target.kind) : null;
-  if (target && adapter?.onRemove) {
-    const interactive = process.stdin.isTTY === true;
-    const confirm = async (message: string): Promise<boolean> => {
-      if (!interactive) return false;
-      const ans = await inquirer.prompt([
-        { type: 'confirm', name: 'yes', message, default: false },
-      ]);
-      return !!ans.yes;
-    };
-    // Dokploy only: resolve the system store's key ONCE for this command —
-    // see `resolveDokployApiKeyOnce`'s doc. `undefined` for every other
-    // adapter's target. `orgId` is a HINT, not a requirement: when this cwd
-    // has no keep.lock (or none was found), `openSystemStore` (inside
-    // `system/systemStore.ts#getConnectorSecret`) still resolves the org
-    // itself via `resolveOrgContext` — passing `undefined` here still
-    // reaches the store, it just skips the keep.lock-org shortcut.
-    const orgId = readKeep(cwd)?.orgId;
-    // A SEPARATE interactive flag from the removal `confirm` above: `--web`
-    // suppresses the store's own terminal prompt (it isn't a browser
-    // screen) even though the removal confirm itself already went through
-    // the browser earlier in this function.
-    const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.web);
-    const resolvedApiKey = await resolveDokployApiKeyOnce(adapter, target, orgId, opts.devMode, secretsInteractive);
-    const offer = await adapter.onRemove(target, {
-      cwd,
-      interactive,
-      confirm,
-      orgId,
-      devMode: opts.devMode,
-      resolvedApiKey,
-      noDeploy: opts.noDeploy,
-    });
-    if (offer) {
-      console.log(`  ${offer.ok ? GREEN('✓') : DIM('·')} ${offer.detail}`);
-      if (offer.manualHint) console.log(`  ${DIM(offer.manualHint)}`);
-    }
+  const onRemove = adapter?.onRemove;
+  const offer =
+    target && onRemove
+      ? await (async () => {
+          const interactive = process.stdin.isTTY === true;
+          const confirm = async (message: string): Promise<boolean> => {
+            if (!interactive) return false;
+            const ans = await inquirer.prompt([
+              { type: 'confirm', name: 'yes', message, default: false },
+            ]);
+            return !!ans.yes;
+          };
+          // Dokploy only: resolve the system store's key ONCE for this command —
+          // see `resolveDokployApiKeyOnce`'s doc. `undefined` for every other
+          // adapter's target. `orgId` is a HINT, not a requirement: when this cwd
+          // has no keep.lock (or none was found), `openSystemStore` (inside
+          // `system/systemStore.ts#getConnectorSecret`) still resolves the org
+          // itself via `resolveOrgContext` — passing `undefined` here still
+          // reaches the store, it just skips the keep.lock-org shortcut.
+          const orgId = readKeep(cwd)?.orgId;
+          // A SEPARATE interactive flag from the removal `confirm` above: `--web`
+          // suppresses the store's own terminal prompt (it isn't a browser
+          // screen) even though the removal confirm itself already went through
+          // the browser earlier in this function.
+          const secretsInteractive = dokploySecretsMayPrompt(interactive, !!opts.web);
+          const resolvedApiKey = await resolveDokployApiKeyOnce(adapter!, target, orgId, opts.devMode, secretsInteractive);
+          return onRemove(target, {
+            cwd,
+            interactive,
+            confirm,
+            orgId,
+            devMode: opts.devMode,
+            resolvedApiKey,
+            noDeploy: opts.noDeploy,
+          });
+        })()
+      : null;
+  if (offer) {
+    console.log(`  ${offer.ok ? GREEN('✓') : DIM('·')} ${offer.detail}`);
+    if (offer.manualHint) console.log(`  ${DIM(offer.manualHint)}`);
   }
 
   // CAP-679: strip this target's `targets` elements from keep.lock, and
   // revoke every deploy token it ever delivered with — today `remove` left
-  // the token live. Best-effort and independent of the onRemove offer above
-  // (whether or not the adapter could clean up its own side, the LOCAL
-  // record of "this target received these vars" should not survive removal).
+  // the token live.
+  //
+  // Revocation is GATED on the onRemove offer above: only when the platform
+  // side was actually cleaned up (`offer.ok`, which is also true for
+  // `nothing_to_remove`) or there was nothing to offer at all (no
+  // `onRemove` hook — vacuously fine) does the token get revoked. When the
+  // platform-side strip failed or was declined, the token stays live and
+  // the deploy it minted keeps working — revoking it would leave secrets
+  // sitting in a Dokploy env with no way to rotate them out.
+  //
+  // The keep.lock strip below is UNCONDITIONAL on the offer's outcome —
+  // whether or not the adapter could clean up its own side, the LOCAL
+  // record of "this target received these vars" should not survive removal
+  // — but it has its own independent guard (the branch check inside
+  // `pushKeepTransform`).
   if (target) {
-    const pm = new (await import('../core/projectManager')).ProjectManager(cwd);
+    const stripSucceededOrNothingToDo = !offer || offer.ok;
+    const pm = new ProjectManager(cwd);
     const keep = pm.readKeepFile();
     if (keep) {
       const deployIds = deployIdsForTarget(keep, target.kind, target.name);
       if (deployIds.length > 0) {
-        try {
-          const { AuthService } = await import('../auth/authService');
-          const { ServiceClient } = await import('../service/serviceClient');
-          const projectState = await pm.detectProjectState();
-          if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
-          const authService = new AuthService(undefined, opts.devMode, projectState.userId);
-          const serviceClient = new ServiceClient(undefined, opts.devMode);
-          serviceClient.setTokenProvider(() => authService.getValidToken());
-          const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
-          if (authResult.success) {
-            await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
-            console.log(`  ${GREEN('✓')} revoked ${deployIds.length} deploy token(s) for "${name}".`);
+        if (!stripSucceededOrNothingToDo) {
+          console.log(
+            `  ${YELLOW('!')} keeping ${deployIds.length} deploy token(s) for "${name}" live — the platform-side ` +
+              `cleanup above did not succeed, so revoking now would strand secrets it already delivered.`,
+          );
+        } else {
+          try {
+            const { AuthService } = await import('../auth/authService');
+            const { ServiceClient } = await import('../service/serviceClient');
+            const projectState = await pm.detectProjectState();
+            if (!projectState.organizationId) throw new Error('no organization id in keep.lock');
+            const authService = new AuthService(undefined, opts.devMode, projectState.userId);
+            const serviceClient = new ServiceClient(undefined, opts.devMode);
+            serviceClient.setTokenProvider(() => authService.getValidToken());
+            const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+            if (authResult.success) {
+              await Promise.all(deployIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
+              console.log(`  ${GREEN('✓')} revoked ${deployIds.length} deploy token(s) for "${name}".`);
+            }
+          } catch (err: any) {
+            console.error(`  ${YELLOW('!')} could not revoke deploy token(s) for "${name}": ${err?.message ?? err}`);
           }
-        } catch (err: any) {
-          console.error(`  ${YELLOW('!')} could not revoke deploy token(s) for "${name}": ${err?.message ?? err}`);
         }
       }
       await pushKeepTransform(
@@ -1891,8 +1930,16 @@ export function describeDeployRoute(
   nameArg: string | undefined,
   options: DeployCliOptions,
   cwd: string,
-): { stops: DeployPlanConfirmStop[]; unanswered: string[] } {
+): { stops: DeployPlanConfirmStop[]; unanswered: string[]; problem?: { code: ErrorCode; activeBranch: string; targetBranch: string } } {
   const saved = nameArg ? getTarget(cwd, nameArg) : null;
+  // CAP-679: `--json` never travels the route (see this function's own
+  // doc — no network, no decryption), so a real run's branch check never
+  // gets a chance to run under `--json` either. This is the ONE place that
+  // refusal can be surfaced as parseable JSON rather than only stderr prose
+  // from a run `--json` will never actually make. Cheap and local — same
+  // "only refuse when the active branch is KNOWN" rule as the real check.
+  const activeBranch = new ProjectManager(cwd).deriveActiveBranch();
+  const branchProblem = saved && activeBranch ? branchPushProblem(activeBranch, saved.branch) : null;
   const savedAdapter = saved ? getAdapter(saved.kind) : null;
   // `--target <id>` builds an ad-hoc target that is never written to disk,
   // so the naming question does not happen rather than going unanswered.
@@ -1932,6 +1979,9 @@ export function describeDeployRoute(
   return {
     stops,
     unanswered: unansweredDeployStops(stops),
+    ...(branchProblem
+      ? { problem: { code: branchProblem.code, activeBranch: branchProblem.activeBranch!, targetBranch: saved!.branch } }
+      : {}),
   };
 }
 
@@ -2382,13 +2432,15 @@ export async function deployCommand(
   // several keep.lock branches, common in tests and some early setups) stays
   // silent here exactly as it did before this check existed.
   {
-    const { ProjectManager } = await import('../core/projectManager');
     const activeBranch = new ProjectManager(cwd).deriveActiveBranch();
-    if (activeBranch && activeBranch !== target.branch) {
-      console.error(
-        `${RED('✗')} [${ERROR_CODES.DEPLOY_BRANCH_MISMATCH}] the active branch (${activeBranch}) does not ` +
-          `match target "${target.name}"'s branch (${target.branch}).`,
-      );
+    // Unknown is deliberately NOT refused here (unlike `pushKeepTransform`'s
+    // stricter guard at the actual write point) — a project with no branch
+    // signal at all (plaintext `.env`, several keep.lock branches; common in
+    // tests and some early setups) stays silent exactly as it did before
+    // this check existed. A KNOWN mismatch is always refused.
+    const branchProblem = activeBranch ? branchPushProblem(activeBranch, target.branch) : null;
+    if (branchProblem) {
+      console.error(`${RED('✗')} ${describeBranchProblem(branchProblem)}`);
       console.error(
         `\nRun \`capy checkout ${target.branch}\` first, or edit the target with \`capy deploy --edit\`.`,
       );

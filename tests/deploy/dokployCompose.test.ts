@@ -45,9 +45,14 @@ const COMPOSE_ID = 'compose_abc';
 const PAIR = { secretsBlob: 'Q09NUE9TRQ==', projectKey: 'cd'.repeat(32), deployId: 'ef'.repeat(32) };
 const RAW_ENV = 'NODE_ENV=production\n# a comment\nAPI_URL=${{project.API_URL}}\nPORT=3000';
 
-function scripted(steps: readonly Step[]): { fetch: FetchLike; done: () => boolean; log: string[] } {
+/**
+ * A request the script does not expect (wrong path, or one call too many)
+ * throws immediately — so e.g. a stray `compose.deploy` call in place of the
+ * scripted `compose.redeploy` step fails LOUDLY here, at the mismatched
+ * `expect()`, rather than needing a separate call-log to notice.
+ */
+function scripted(steps: readonly Step[]): { fetch: FetchLike; done: () => boolean } {
   const it = steps[Symbol.iterator]();
-  const log: string[] = [];
   const fetchImpl: FetchLike = async (url, init) => {
     const next = it.next();
     if (next.done) throw new Error(`unscripted request: ${init.method} ${url}`);
@@ -59,13 +64,12 @@ function scripted(steps: readonly Step[]): { fetch: FetchLike; done: () => boole
       headers: init.headers,
       body: init.body ? JSON.parse(init.body) : null,
     };
-    log.push(JSON.stringify(req));
     next.value.expect(req);
     const status = next.value.status ?? 200;
     const text = JSON.stringify(next.value.json ?? null);
     return { status, ok: status >= 200 && status < 300, text: async () => text };
   };
-  return { fetch: fetchImpl, done: () => it.next().done === true, log };
+  return { fetch: fetchImpl, done: () => it.next().done === true };
 }
 
 const compose = (overrides: Record<string, unknown> = {}) => ({
@@ -185,6 +189,9 @@ describe('dokploy compose — preflight', () => {
     expect(r.ok).toBe(false);
     expect(r.reason).toContain('Create Env File');
     expect(r.hint).toBeTruthy();
+    // CAP-679 fix-first review: the refusal must be branchable on a stable
+    // code, never on `reason`'s prose (Rule 5).
+    expect(r.code).toBe('DOKPLOY_ENV_FILE_DISABLED');
   });
 
   test('an edited/duplicated block is refused, same rule as Applications', async () => {
@@ -286,9 +293,13 @@ describe('dokploy compose — deploy', () => {
       redeployTrigger,
       listComposeDeployments([deployment('dep_new', 'done', '2026-09-22T00:00:00.000Z')]),
     ]);
-    await adapterWith(s.fetch).deploy(composeTarget(), ctx());
-    expect(s.log.some((l) => l.includes('compose.deploy'))).toBe(false);
-    expect(s.log.some((l) => l.includes('freshVolumes'))).toBe(false);
+    const r = await adapterWith(s.fetch).deploy(composeTarget(), ctx());
+    expect(r.ok).toBe(true);
+    // `s.done()` proves every request matched a SCRIPTED step in order — a
+    // `compose.deploy` call, or `freshVolumes` in the redeploy body, would
+    // have failed `redeployTrigger`'s own strict `toEqual` above (an exact
+    // match on `{ composeId, title }`, so a stray extra field fails it too).
+    expect(s.done()).toBe(true);
   });
 
   test('byte-exact preservation: comments and ${{project.X}} refs, and only Capy names change', async () => {
@@ -312,6 +323,7 @@ describe('dokploy compose — deploy', () => {
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(false);
     expect(r.steps[r.steps.length - 1].detail).toContain('Create Env File');
+    expect(r.steps[r.steps.length - 1].code).toBe('DOKPLOY_ENV_FILE_DISABLED');
   });
 
   test('--no-deploy writes and verifies, but never calls compose.redeploy', async () => {
@@ -389,12 +401,12 @@ describe('dokploy compose — deploy', () => {
       ]),
       { expect: get('deployment.readLogs', { deploymentId: 'dep_new' }), json: 'log line' },
     ]);
-    const lines: string[] = [];
-    await adapterWith(s.fetch, { DOKPLOY_API_KEY: TOKEN }, (l) => lines.push(l)).deploy(composeTarget(), ctx());
-    for (const l of lines) {
+    // Asserted AS each line is emitted (no accumulator array needed) — a
+    // violation fails the exact call that produced it.
+    await adapterWith(s.fetch, { DOKPLOY_API_KEY: TOKEN }, (l) => {
       expect(l).not.toContain(PAIR.secretsBlob);
       expect(l).not.toContain(RAW_ENV);
-    }
+    }).deploy(composeTarget(), ctx());
   });
 });
 

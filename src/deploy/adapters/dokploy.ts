@@ -487,7 +487,12 @@ async function deployComposeFlow(
     { label: 'dokploy compose', status: 'ok', detail: current.name ?? current.composeId },
   ];
   if (current.createEnvFile === false) {
-    return fail(s1, { label: 'env merge', status: 'fail', detail: describeComposeEnvFileDisabled().reason });
+    return fail(s1, {
+      label: 'env merge',
+      status: 'fail',
+      detail: describeComposeEnvFileDisabled().reason,
+      code: ERROR_CODES.DOKPLOY_ENV_FILE_DISABLED,
+    });
   }
   const split = splitManagedBlock(current.env);
   const problem = 'code' in split ? split : envProblems(current.env);
@@ -782,7 +787,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         const compose = await settle(client.getCompose(opts.composeId));
         if (!compose.ok) return { ok: false, ...explainApiError(compose.error, 'compose.one', opts) };
         if (compose.value.createEnvFile === false) {
-          return { ok: false, ...describeComposeEnvFileDisabled() };
+          return { ok: false, ...describeComposeEnvFileDisabled(), code: ERROR_CODES.DOKPLOY_ENV_FILE_DISABLED };
         }
         const problem = envProblems(compose.value.env);
         if (problem) return { ok: false, ...describeEnvProblem(problem) };
