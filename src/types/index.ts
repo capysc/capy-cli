@@ -546,6 +546,21 @@ export const ERROR_CODES = {
   RUN_SECRETS_BLOB_INVALID: 'RUN_SECRETS_BLOB_INVALID',
   /** `_PROJECT_KEY` (the new runtime pair) is not 64 hex characters after stripping one layer of surrounding quotes. */
   RUN_PROJECT_KEY_INVALID: 'RUN_PROJECT_KEY_INVALID',
+  // --- Dokploy plaintext delivery (CAP-682) ---
+  /**
+   * A value Capy needs to deliver plaintext to Dokploy cannot be rendered as
+   * a dotenv value that reads back byte-exact (e.g. it contains every quote
+   * character dotenv understands, or a quoting ambiguity none of them can
+   * resolve). Refused before any write — naming the VARIABLE only, never
+   * the value.
+   */
+  DOKPLOY_VALUE_UNREPRESENTABLE: 'DOKPLOY_VALUE_UNREPRESENTABLE',
+  /** CI-mode preflight: the Dokploy Application/Compose service has auto-deploy turned off, so merging the keep.lock PR would never trigger a deploy. */
+  DOKPLOY_AUTODEPLOY_OFF: 'DOKPLOY_AUTODEPLOY_OFF',
+  /** CI-mode preflight: the git branch Dokploy is tracking doesn't match the deploy PR's base branch — merging it would never reach Dokploy's auto-deploy. */
+  DOKPLOY_BRANCH_MISMATCH: 'DOKPLOY_BRANCH_MISMATCH',
+  /** CI-mode preflight: Dokploy's configured watch paths for this service don't cover keep.lock, so merging the PR would never trigger a deploy. */
+  DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP: 'DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
