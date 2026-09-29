@@ -20,9 +20,6 @@ mock.module('../../src/sync/syncEngine', () => {
   (MockSyncEngine as any).adoptServerKeep = mock((_json: any, fallback: any) => fallback);
   return { SyncEngine: MockSyncEngine };
 });
-mock.module('../../src/git/autoCommitKeep', () => ({
-  autoCommitKeep: mock(() => ({ committed: false, reason: 'disabled' })),
-}));
 mock.module('../../src/ui/promptEngine', () => ({
   PromptEngine: mock(() => ({})),
 }));

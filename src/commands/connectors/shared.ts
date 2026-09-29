@@ -205,10 +205,6 @@ export async function writeAndSync(
     user_id: userId,
     keep_hash: setSyncKeepHash(existingSyncState, branch, SyncEngine.computeKeepHash(finalKeep, branch)),
   });
-
-  // The new pin reaches teammates only through git.
-  const { autoCommitKeep } = await import('../../git/autoCommitKeep');
-  autoCommitKeep(branch);
 }
 
 /**

@@ -245,10 +245,6 @@ export class PushCommand {
         : `Pushed ${Object.keys(rawLocal).length} secret(s) to Keep`
     );
 
-    // The push is only visible to teammates' pins once keep.lock is in git.
-    const { autoCommitKeep } = await import('../git/autoCommitKeep');
-    autoCommitKeep(branch);
-
     const { printExpiryWarnings } = await import('./connectors/shared');
     printExpiryWarnings();
   }

@@ -878,11 +878,6 @@ export class CapyCommand {
 
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
 
-          // The freshly created pin only reaches teammates once committed —
-          // this is how "main was never committed" incidents start.
-          const { autoCommitKeep } = await import('../git/autoCommitKeep');
-          autoCommitKeep(initBranch);
-
           // Install git hooks
           this.installGitHooks();
 
@@ -1884,11 +1879,6 @@ export class CapyCommand {
 
     const changeCount = Object.keys(pushedVars).length;
     console.log(`\n> keep.lock updated (${diffs.length} changes)`);
-
-    // Every action above rewrites pins (retrieve updates them, commit pushes
-    // them) — commit the new pin so the team's keep.lock travels with git.
-    const { autoCommitKeep } = await import('../git/autoCommitKeep');
-    autoCommitKeep(branch);
 
     if (action === 'commit_local') {
       console.log(
