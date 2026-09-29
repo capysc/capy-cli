@@ -580,6 +580,23 @@ export const ERROR_CODES = {
   DOKPLOY_BRANCH_MISMATCH: 'DOKPLOY_BRANCH_MISMATCH',
   /** CI-mode preflight: Dokploy's configured watch paths for this service don't cover keep.lock, so merging the PR would never trigger a deploy. */
   DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP: 'DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP',
+  // --- Deploy setup UX follow-up (CAP-657 URL input) ---
+  /**
+   * The `capy deploy` Dokploy setup picker was given a string that looks like
+   * a URL (has a `scheme://`) but doesn't match any known Dokploy dashboard
+   * service route (`.../services/compose/<id>` or `.../services/application/<id>`,
+   * with or without an `environment/<id>` segment) — see
+   * `dokploy.ts#parseDokployServiceUrl`. Refused and re-asked at a TTY, never
+   * guessed at.
+   */
+  DOKPLOY_URL_INVALID: 'DOKPLOY_URL_INVALID',
+  /**
+   * The `capy deploy` Dokploy setup picker parsed a dashboard URL, resolved a
+   * Dokploy API key, and called `compose.one`/`application.one` to confirm
+   * the service exists before saving — and Dokploy returned 404. Refused and
+   * re-asked at a TTY rather than saved unverified.
+   */
+  DOKPLOY_SERVICE_NOT_FOUND: 'DOKPLOY_SERVICE_NOT_FOUND',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
