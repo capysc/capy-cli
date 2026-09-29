@@ -350,8 +350,9 @@ export class CapyCommand {
 
     // One additional TTY-only prompt at the very end of a successful init —
     // skipped under --web (that flow is browser-driven, not terminal
-    // prompts) and a no-op if AGENTS.md/CLAUDE.md already has the section.
-    if (!this.options.web) await offerAgentsSetupAfterInit();
+    // prompts), skipped under --dry-run (a dry run must never prompt or
+    // write), and a no-op if AGENTS.md/CLAUDE.md already has the section.
+    if (!this.options.web && !this.options.dryRun) await offerAgentsSetupAfterInit();
   }
 
   /**
@@ -377,8 +378,9 @@ export class CapyCommand {
     try {
       await this.runInitialization(wizard);
       await wizard?.finish();
-      // Same one-time, TTY-only offer as the local-only init path above.
-      if (!this.options.web) await offerAgentsSetupAfterInit();
+      // Same one-time, TTY-only offer as the local-only init path above —
+      // same --web and --dry-run gating.
+      if (!this.options.web && !this.options.dryRun) await offerAgentsSetupAfterInit();
     } catch (err) {
       // The browser is holding a submit at this point, and it must not be told
       // that submit worked. `abort` replaces the question with what stopped

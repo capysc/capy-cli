@@ -665,6 +665,7 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DEPLOY_BRANCH_UNKNOWN`
 - `AGENTS_SETUP_NEEDS_TTY`
 - `AGENTS_BLOCK_MALFORMED`
+- `AGENTS_FILE_OUTSIDE_REPO`
 
 ## Conventions
 

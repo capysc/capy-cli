@@ -9,8 +9,8 @@
  * deliberately NOT in LOCAL_ONLY_DISABLED_COMMANDS (see src/core/localGate.ts)
  * and works the same whether or not the active profile has an organization.
  */
-import { existsSync, readFileSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'fs';
+import { join, sep } from 'path';
 import { spawnSync } from 'child_process';
 import inquirer from 'inquirer';
 import { isInteractive, EXIT_NEEDS_INPUT } from '../ui/interactive';
@@ -42,14 +42,37 @@ export function resolveRepoRoot(cwd: string): string {
   return top.length > 0 ? top : cwd;
 }
 
+/**
+ * True when `path` doesn't exist yet (nothing to escape through — creating a
+ * brand new regular file is always safe) or exists and resolves (through any
+ * symlinks) to somewhere inside `root`'s own resolved path.
+ */
+function isInsideRoot(root: string, path: string): boolean {
+  if (!existsSync(path)) return true;
+  const realRoot = realpathSync(root);
+  const realPath = realpathSync(path);
+  return realPath === realRoot || realPath.startsWith(realRoot + sep);
+}
+
+/** Refuses (coded `AGENTS_FILE_OUTSIDE_REPO`) before any read/write through a file that escapes `root` via a symlink. */
+function assertInsideRoot(root: string, path: string, name: string): void {
+  if (isInsideRoot(root, path)) return;
+  throw new CapyError(
+    `${name} resolves outside this repo (through a symlink) — refusing to read or write through it.`, // COPY-FLAG
+    ERROR_CODES.AGENTS_FILE_OUTSIDE_REPO,
+  );
+}
+
 function readIfExists(path: string): string | null {
   return existsSync(path) ? readFileSync(path, 'utf-8') : null;
 }
 
-/** True when AGENTS.md or CLAUDE.md at `root` already carries the current block — used to skip the first-run prompt. */
+/** True when AGENTS.md or CLAUDE.md at `root` already carries the current block — used to skip the first-run prompt. Silently skips (never throws) a file that resolves outside `root`. */
 export function agentsBlockAlreadyPresent(root: string): boolean {
   return AGENTS_FILE_NAMES.some((name) => {
-    const content = readIfExists(join(root, name));
+    const path = join(root, name);
+    if (!isInsideRoot(root, path)) return false;
+    const content = readIfExists(path);
     return content !== null && hasCurrentBlock(content);
   });
 }
@@ -64,24 +87,28 @@ function writeTargetFileNames(root: string): string[] {
   return existing.length > 0 ? existing : ['AGENTS.md'];
 }
 
+function malformedError(name: string): CapyError {
+  return new CapyError(
+    `${name} has a malformed capy:agents marker pair — one marker without its match, or duplicates. Fix or remove them by hand, then re-run.`, // COPY-FLAG
+    ERROR_CODES.AGENTS_BLOCK_MALFORMED,
+  );
+}
+
 /**
  * Writes/updates the block into every write-target file at `root`. Throws a
- * `CapyError` (code `AGENTS_BLOCK_MALFORMED`) on the first malformed file
- * without writing anything for it; files already handled remain written
+ * coded `CapyError` — `AGENTS_BLOCK_MALFORMED` for a hand-edited marker pair,
+ * `AGENTS_FILE_OUTSIDE_REPO` if the target resolves (via a symlink) outside
+ * `root` — before touching that file; files already handled remain written
  * (each file's write is independent and idempotent, so a partial run is
  * always safe to re-run).
  */
 export function writeAgentsBlock(root: string): AgentsFileResult[] {
   return writeTargetFileNames(root).map((name) => {
     const path = join(root, name);
+    assertInsideRoot(root, path, name);
     const existing = readIfExists(path);
     const result = upsertAgentsBlock(existing);
-    if (!result.ok) {
-      throw new CapyError(
-        `${name} has a malformed capy:agents marker pair — one marker without its match, or duplicates. Fix or remove them by hand, then re-run.`, // COPY-FLAG
-        result.code,
-      );
-    }
+    if (!result.ok) throw malformedError(name);
     if (result.action !== 'unchanged') {
       writeFileSync(path, result.content, 'utf-8');
     }
@@ -89,20 +116,25 @@ export function writeAgentsBlock(root: string): AgentsFileResult[] {
   });
 }
 
-/** Removes the block from every AGENTS.md/CLAUDE.md that currently exists at `root`. */
+/**
+ * Removes the block from every AGENTS.md/CLAUDE.md that currently exists at
+ * `root`. A file whose content is empty or whitespace-only once the block is
+ * gone — i.e. the file held nothing but the block Capy itself put there — is
+ * deleted rather than left behind as clutter.
+ */
 export function removeAgentsBlockFromFiles(root: string): AgentsFileResult[] {
   return existingAgentsFileNames(root).map((name) => {
     const path = join(root, name);
+    assertInsideRoot(root, path, name);
     const existing = readFileSync(path, 'utf-8');
     const result = removeAgentsBlock(existing);
-    if (!result.ok) {
-      throw new CapyError(
-        `${name} has a malformed capy:agents marker pair — one marker without its match, or duplicates. Fix or remove them by hand, then re-run.`, // COPY-FLAG
-        result.code,
-      );
-    }
+    if (!result.ok) throw malformedError(name);
     if (result.action === 'removed') {
-      writeFileSync(path, result.content, 'utf-8');
+      if (result.content.trim().length === 0) {
+        unlinkSync(path);
+      } else {
+        writeFileSync(path, result.content, 'utf-8');
+      }
     }
     return { path: name, action: result.action };
   });
@@ -122,7 +154,8 @@ function refuseNeedsTty(json: boolean): never {
   process.exit(EXIT_NEEDS_INPUT);
 }
 
-function refuseMalformed(err: CapyError, json: boolean): never {
+/** Refuses on any coded `CapyError` thrown while touching a file — malformed markers, a symlink outside the repo, or the like. */
+function refuseCapyError(err: CapyError, json: boolean): never {
   if (json) {
     printJson({ ok: false, code: err.code, error: err.message });
   } else {
@@ -149,8 +182,12 @@ function reportHuman(files: AgentsFileResult[], removedVerb: string): void {
   }
 }
 
-/** `capy agents --print`: the block, verbatim, to stdout. No writes, works without a TTY. */
-function printBlock(): void {
+/** `capy agents --print`: the block to stdout. No writes, works without a TTY. `--json` wraps it as `{ok:true, block}` so stdout stays parseable JSON instead of raw markdown. */
+function printBlock(json: boolean): void {
+  if (json) {
+    printJson({ ok: true, block: AGENTS_BLOCK });
+    return;
+  }
   console.log(AGENTS_BLOCK);
 }
 
@@ -212,7 +249,7 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
   const json = opts.json === true;
 
   if (opts.print) {
-    printBlock();
+    printBlock(json);
     return;
   }
 
@@ -234,7 +271,7 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
       }
       reportHuman(files, 'Removed the Capy section from');
     } catch (err) {
-      if (err instanceof CapyError) refuseMalformed(err, json);
+      if (err instanceof CapyError) refuseCapyError(err, json);
       throw err;
     }
     return;
@@ -256,7 +293,7 @@ export async function agentsCommand(opts: AgentsCommandOpts): Promise<void> {
     }
     reportHuman(files, 'Removed');
   } catch (err) {
-    if (err instanceof CapyError) refuseMalformed(err, json);
+    if (err instanceof CapyError) refuseCapyError(err, json);
     throw err;
   }
 }

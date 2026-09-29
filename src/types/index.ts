@@ -489,6 +489,12 @@ export const ERROR_CODES = {
    * guessed at, so no byte outside the markers is ever put at risk.
    */
   AGENTS_BLOCK_MALFORMED: 'AGENTS_BLOCK_MALFORMED',
+  /**
+   * AGENTS.md or CLAUDE.md resolves (via a symlink) to a path outside the
+   * repo root — refused before any read or write through it, so `capy
+   * agents` can never be tricked into touching a file elsewhere on disk.
+   */
+  AGENTS_FILE_OUTSIDE_REPO: 'AGENTS_FILE_OUTSIDE_REPO',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
