@@ -17,6 +17,12 @@ import {
   upsertAgentsBlock,
 } from '../../src/core/agentsBlockPlan';
 
+/** Unwraps an `{ok: true, ...}` result, failing the test with a readable message if it's a refusal. */
+function unwrapOk<T extends { ok: boolean }>(result: T): Exclude<T, { ok: false }> {
+  if (!result.ok) throw new Error(`expected ok:true, got refusal: ${JSON.stringify(result)}`);
+  return result as Exclude<T, { ok: false }>;
+}
+
 describe('AGENTS_BLOCK', () => {
   test('is the exact verbatim block from the spec', () => {
     expect(AGENTS_BLOCK).toBe(
@@ -33,12 +39,22 @@ describe('AGENTS_BLOCK', () => {
   });
 });
 
-describe('detectNewline', () => {
+describe('detectNewline (majority vote, ties default to LF)', () => {
   test('LF-only content is LF', () => {
     expect(detectNewline('a\nb\n')).toBe('\n');
   });
-  test('any CRLF makes the whole file CRLF', () => {
-    expect(detectNewline('a\r\nb\n')).toBe('\r\n');
+  test('CRLF-only content is CRLF', () => {
+    expect(detectNewline('a\r\nb\r\n')).toBe('\r\n');
+  });
+  test('a single stray CRLF pasted into an otherwise-LF file does NOT flip the whole file to CRLF', () => {
+    // 4 lone-LF newlines vs 1 CRLF: LF wins the majority.
+    expect(detectNewline('a\nb\nc\nd\ne\r\n')).toBe('\n');
+  });
+  test('more CRLF lines than lone-LF lines: CRLF wins', () => {
+    expect(detectNewline('a\r\nb\r\nc\r\nd\n')).toBe('\r\n');
+  });
+  test('a tie defaults to LF', () => {
+    expect(detectNewline('a\r\nb\n')).toBe('\n');
   });
   test('empty content defaults to LF', () => {
     expect(detectNewline('')).toBe('\n');
@@ -51,8 +67,7 @@ describe('classifyMarkers', () => {
   });
   test('present: exactly one begin and one end, in order', () => {
     const content = `before\n${AGENTS_BLOCK}\nafter\n`;
-    const state = classifyMarkers(content);
-    expect(state.kind).toBe('present');
+    expect(classifyMarkers(content).kind).toBe('present');
   });
   test('malformed: begin without end', () => {
     expect(classifyMarkers(`x\n${AGENTS_BLOCK_BEGIN}\ny\n`).kind).toBe('malformed');
@@ -72,13 +87,60 @@ describe('classifyMarkers', () => {
     const content = `${AGENTS_BLOCK_END}\nstuff\n${AGENTS_BLOCK_BEGIN}\n`;
     expect(classifyMarkers(content).kind).toBe('malformed');
   });
+
+  describe('markers inside a fenced code block are inert (documentation examples)', () => {
+    test('a marker pair shown only inside a ``` fence is treated as absent', () => {
+      const content = [
+        '# README',
+        'Here is what the block looks like:',
+        '```',
+        AGENTS_BLOCK_BEGIN,
+        '## Secrets (Capy)',
+        AGENTS_BLOCK_END,
+        '```',
+        '',
+      ].join('\n');
+      expect(classifyMarkers(content)).toEqual({ kind: 'absent' });
+      expect(hasCurrentBlock(content)).toBe(false);
+    });
+
+    test('a real marker pair outside the fence is still detected even when the fence also shows example markers', () => {
+      const content = [
+        '# README',
+        'Example:',
+        '```',
+        AGENTS_BLOCK_BEGIN,
+        AGENTS_BLOCK_END,
+        '```',
+        '',
+        AGENTS_BLOCK,
+        '',
+      ].join('\n');
+      const state = classifyMarkers(content);
+      expect(state.kind).toBe('present');
+      expect(hasCurrentBlock(content)).toBe(true);
+    });
+
+    test('upsertAgentsBlock inserts a real block rather than "updating" an example inside a fence', () => {
+      const existing = ['# README', '```', AGENTS_BLOCK_BEGIN, AGENTS_BLOCK_END, '```', ''].join('\n');
+      const result = unwrapOk(upsertAgentsBlock(existing));
+      expect(result.action).toBe('updated'); // absent (fenced doesn't count) -> block appended
+      expect(result.content.startsWith(existing)).toBe(true);
+      expect(result.content).toContain(AGENTS_BLOCK);
+      // The original fenced example text is untouched.
+      expect(result.content).toContain('```\n<!-- capy:agents:begin -->\n<!-- capy:agents:end -->\n```');
+    });
+
+    test('an unterminated fence runs to EOF, so a marker after an opening ``` with no closing fence is also inert', () => {
+      const content = ['# README', '```', AGENTS_BLOCK].join('\n');
+      expect(classifyMarkers(content)).toEqual({ kind: 'absent' });
+    });
+  });
 });
 
 describe('upsertAgentsBlock', () => {
   test('null (file does not exist) creates it', () => {
-    const result = upsertAgentsBlock(null);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unreachable');
+    const result = unwrapOk(upsertAgentsBlock(null));
     expect(result.action).toBe('created');
     expect(result.content.startsWith(AGENTS_BLOCK_BEGIN)).toBe(true);
     expect(result.content.endsWith('\n')).toBe(true);
@@ -86,21 +148,15 @@ describe('upsertAgentsBlock', () => {
 
   test('existing file with no markers appends the block, preserving all prior bytes', () => {
     const existing = '# My repo\n\nSome docs here.\n';
-    const result = upsertAgentsBlock(existing);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unreachable');
+    const result = unwrapOk(upsertAgentsBlock(existing));
     expect(result.action).toBe('updated');
     expect(result.content.startsWith(existing)).toBe(true);
     expect(result.content).toContain(AGENTS_BLOCK);
   });
 
   test('is idempotent: running twice on an up-to-date file reports unchanged and produces byte-identical content', () => {
-    const first = upsertAgentsBlock('# repo\n');
-    expect(first.ok).toBe(true);
-    if (!first.ok) throw new Error('unreachable');
-    const second = upsertAgentsBlock(first.content);
-    expect(second.ok).toBe(true);
-    if (!second.ok) throw new Error('unreachable');
+    const first = unwrapOk(upsertAgentsBlock('# repo\n'));
+    const second = unwrapOk(upsertAgentsBlock(first.content));
     expect(second.action).toBe('unchanged');
     expect(second.content).toBe(first.content);
   });
@@ -109,9 +165,7 @@ describe('upsertAgentsBlock', () => {
     const before = '# repo\n\n';
     const after = '\n## Other section\nkept as-is\n';
     const stale = `${before}${AGENTS_BLOCK_BEGIN}\nold stale content\n${AGENTS_BLOCK_END}${after}`;
-    const result = upsertAgentsBlock(stale);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unreachable');
+    const result = unwrapOk(upsertAgentsBlock(stale));
     expect(result.action).toBe('updated');
     expect(result.content).toBe(`${before}${AGENTS_BLOCK}${after}`);
   });
@@ -123,52 +177,72 @@ describe('upsertAgentsBlock', () => {
     if (result.ok) throw new Error('unreachable');
     expect(result.code).toBe(ERROR_CODES.AGENTS_BLOCK_MALFORMED);
   });
+});
 
-  test('CRLF file with no trailing newline: the inserted block uses CRLF and the original bytes are preserved verbatim before it', () => {
-    const existing = '# repo\r\nsome line with no trailing newline';
-    const result = upsertAgentsBlock(existing);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unreachable');
-    expect(result.content.startsWith(existing)).toBe(true);
-    // Everything appended after the original bytes uses CRLF, matching the file.
-    const appended = result.content.slice(existing.length);
-    expect(appended).toBe('\r\n\r\n' + blockForNewline('\r\n') + '\r\n');
-    expect(appended.includes('\r\n')).toBe(true);
+describe('append <-> remove is an exact round trip', () => {
+  // The whole point of the fixed (existing-independent) separator: these
+  // pairs must restore the ORIGINAL byte-for-byte, for every combination of
+  // newline style and trailing-newline state.
+  const cases: Array<[string, string]> = [
+    ['LF, no trailing newline', '# Title\n\nSome text'],
+    ['LF, with a trailing newline', '# Title\n\nSome text\n'],
+    ['LF, empty file', ''],
+    ['LF, single line, no newline', 'just one line'],
+    ['CRLF, no trailing newline', '# Title\r\n\r\nSome text'],
+    ['CRLF, with a trailing newline', '# Title\r\n\r\nSome text\r\n'],
+    ['LF, already has trailing blank lines', 'abc\n\n\n'],
+  ];
+
+  for (const [label, existing] of cases) {
+    test(`${label}: upsert then remove restores the original exactly`, () => {
+      const inserted = unwrapOk(upsertAgentsBlock(existing));
+      const removed = unwrapOk(removeAgentsBlock(inserted.content));
+      // The block was always present after upsert, so remove always reports
+      // "removed" (it did remove something) — even when that leaves the file
+      // empty, which is what "original was empty" looks like here.
+      expect(removed.action).toBe('removed');
+      expect(removed.content).toBe(existing);
+    });
+  }
+
+  test('validator repro: "# Title\\n\\nSome text" round-trips exactly (no stray trailing newlines)', () => {
+    const existing = '# Title\n\nSome text';
+    const inserted = unwrapOk(upsertAgentsBlock(existing));
+    const removed = unwrapOk(removeAgentsBlock(inserted.content));
+    expect(removed.content).toBe(existing);
+    expect(removed.content).not.toMatch(/\n\n\n$/);
   });
 
-  test('replacing a block inside a CRLF file with no trailing newline at EOF preserves the CRLF tail byte-for-byte', () => {
-    const crlfBlock = blockForNewline('\r\n');
-    const before = '# repo\r\n\r\n';
-    const after = '\r\nfinal line, no trailing newline';
-    const existing = `${before}${crlfBlock}${after}`;
-    const result = upsertAgentsBlock(existing);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unreachable');
-    // Already current (block content matches) -> unchanged, byte-identical.
-    expect(result.action).toBe('unchanged');
-    expect(result.content).toBe(existing);
+  test('the CRLF equivalent of the validator repro round-trips exactly', () => {
+    const existing = '# Title\r\n\r\nSome text';
+    const inserted = unwrapOk(upsertAgentsBlock(existing));
+    const removed = unwrapOk(removeAgentsBlock(inserted.content));
+    expect(removed.content).toBe(existing);
+  });
+
+  test('a file that is ONLY the block (created, never had other content) restores to empty', () => {
+    const created = unwrapOk(upsertAgentsBlock(null));
+    const removed = unwrapOk(removeAgentsBlock(created.content));
+    expect(removed.action).toBe('removed');
+    expect(removed.content).toBe('');
   });
 });
 
 describe('removeAgentsBlock', () => {
   test('absent: nothing to remove', () => {
     const existing = '# repo\nno block here\n';
-    const result = removeAgentsBlock(existing);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unreachable');
+    const result = unwrapOk(removeAgentsBlock(existing));
     expect(result.action).toBe('absent');
     expect(result.content).toBe(existing);
   });
 
-  test('removes exactly the marker span, restoring surrounding content byte-for-byte', () => {
-    const before = '# repo\r\n\r\n';
-    const after = '\r\nfinal line, no trailing newline';
-    const existing = `${before}${AGENTS_BLOCK}${after}`;
-    const result = removeAgentsBlock(existing);
-    expect(result.ok).toBe(true);
-    if (!result.ok) throw new Error('unreachable');
+  test('strips up to the fixed separator budget (2 before, 1 after), capped at what is actually present', () => {
+    // Only 1 newline before the block (less than the 2-newline budget) and
+    // nothing after — remove takes only what's there, never goes negative.
+    const content = `# repo\n${AGENTS_BLOCK}`;
+    const result = unwrapOk(removeAgentsBlock(content));
     expect(result.action).toBe('removed');
-    expect(result.content).toBe(before + after);
+    expect(result.content).toBe('# repo');
   });
 
   test('refuses on malformed markers', () => {
