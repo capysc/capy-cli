@@ -57,12 +57,18 @@ function allIndicesOf(haystack: string, needle: string, from = 0): number[] {
 
 // ---------------------------------------------------------------------------
 // Fenced code blocks: a marker string shown as a *documentation example*
-// inside a ``` fence (e.g. someone's README explaining what this block looks
-// like) must never be mistaken for a real, live marker pair. This is a
-// line-based fence scanner (any line whose trimmed text starts with ```
-// toggles fenced/unfenced), not a full CommonMark parser — good enough to
-// keep example text inert without trying to parse arbitrary Markdown.
+// inside a ``` or ~~~ fence (both are valid CommonMark fence markers; e.g.
+// someone's README explaining what this block looks like) must never be
+// mistaken for a real, live marker pair. This is a line-based fence scanner
+// (any line whose trimmed text starts with ``` or ~~~ toggles
+// fenced/unfenced), not a full CommonMark parser — good enough to keep
+// example text inert without trying to parse arbitrary Markdown.
 // ---------------------------------------------------------------------------
+
+function isFenceLine(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed.startsWith('```') || trimmed.startsWith('~~~');
+}
 
 /** Start offset (into `content`) of every line, given `content.split('\n')`. */
 function lineStartOffsets(lines: readonly string[]): number[] {
@@ -94,7 +100,7 @@ function fencedCodeBlockRanges(content: string): Array<readonly [number, number]
   const lines = content.split('\n');
   const starts = lineStartOffsets(lines);
   const fenceLineIndices = lines
-    .map((line, i) => (line.trim().startsWith('```') ? i : -1))
+    .map((line, i) => (isFenceLine(line) ? i : -1))
     .filter((i) => i !== -1);
   const pairs = pairFenceLines(fenceLineIndices, lines.length - 1);
 
@@ -217,13 +223,23 @@ export type RemoveResult =
   | { ok: false; code: string };
 
 /**
- * Deletes the marker span AND the fixed separator/terminator whitespace
- * `appendBlock` adds around it (up to 2 newlines before, 1 after — capped at
- * what's actually present, so a file with less surrounding whitespace than
- * that simply has less to strip). This is the exact inverse of
- * `appendBlock`: `removeAgentsBlock(appendBlock(x)) === x`. Everything else
- * — content further from the block, or content added via the in-place
- * "updated" path above, which never touches separators — is untouched.
+ * Deletes the marker span, plus whatever surrounding whitespace it's safe to
+ * reclaim — which depends on whether anything follows the block:
+ *
+ * - Nothing follows it (the block is the last thing in the file, once its own
+ *   mandatory one-newline terminator is accounted for): this is exactly the
+ *   shape `appendBlock` produces, so this is its exact inverse —
+ *   `removeAgentsBlock(appendBlock(x)) === x` — reclaiming up to the full
+ *   fixed budget (2 newlines before, 1 after), capped at what's present.
+ * - Something follows it (an interior block — hand-placed, produced by the
+ *   in-place "updated" path, or simply appended-to by hand afterward):
+ *   `before` is left COMPLETELY untouched — there is no reliable way to tell
+ *   a deliberate blank line (or a fenced code block's own closing newline)
+ *   from separator whitespace, so touching it at all risks corrupting real
+ *   content (joining two lines together, or eating a fence's terminator).
+ *   Only the ONE newline that is never "content" — the mandatory terminator
+ *   ending the block's own last line, which has to exist for `after` to
+ *   start its own line — is stripped, capped at 1.
  */
 export function removeAgentsBlock(existing: string): RemoveResult {
   const state = classifyMarkers(existing);
@@ -236,8 +252,11 @@ export function removeAgentsBlock(existing: string): RemoveResult {
   const newline = detectNewline(existing);
   const rawBefore = existing.slice(0, state.beginIndex);
   const rawAfter = existing.slice(state.endIndex + AGENTS_BLOCK_END.length);
-  const before = stripTrailingNewlines(rawBefore, newline, LEADING_SEPARATOR_NEWLINES);
+
   const after = stripLeadingNewlines(rawAfter, newline, TRAILING_TERMINATOR_NEWLINES);
+  const isAtFileEnd = after.length === 0;
+  const before = isAtFileEnd ? stripTrailingNewlines(rawBefore, newline, LEADING_SEPARATOR_NEWLINES) : rawBefore;
+
   return { ok: true, action: 'removed', content: before + after };
 }
 

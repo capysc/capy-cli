@@ -118,9 +118,13 @@ export function writeAgentsBlock(root: string): AgentsFileResult[] {
 
 /**
  * Removes the block from every AGENTS.md/CLAUDE.md that currently exists at
- * `root`. A file whose content is empty or whitespace-only once the block is
- * gone — i.e. the file held nothing but the block Capy itself put there — is
- * deleted rather than left behind as clutter.
+ * `root`. A file left EXACTLY empty by the removal — i.e. it held nothing
+ * but the block Capy itself put there, byte for byte — is deleted rather
+ * than left behind as a clutter file. Anything merely whitespace-only (a
+ * blank line or two survives, but the file isn't literally empty) is kept:
+ * that whitespace came from the file's own surrounding content, not from
+ * Capy, and deleting a file on a fuzzy "looks blank" guess is not this
+ * command's call to make.
  */
 export function removeAgentsBlockFromFiles(root: string): AgentsFileResult[] {
   return existingAgentsFileNames(root).map((name) => {
@@ -130,7 +134,7 @@ export function removeAgentsBlockFromFiles(root: string): AgentsFileResult[] {
     const result = removeAgentsBlock(existing);
     if (!result.ok) throw malformedError(name);
     if (result.action === 'removed') {
-      if (result.content.trim().length === 0) {
+      if (result.content.length === 0) {
         unlinkSync(path);
       } else {
         writeFileSync(path, result.content, 'utf-8');

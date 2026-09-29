@@ -215,11 +215,13 @@ describe('agentsCommand', () => {
   });
 
   describe('removeAgentsBlockFromFiles', () => {
-    it('removes the block plus its fixed whitespace budget (2 newlines before, 1 after), preserving everything beyond it', async () => {
+    it('an interior block (content follows it): `before` is untouched, only the block\'s own 1-newline terminator is stripped from `after`', async () => {
       await withTempRoot((root) => {
-        // 3 CRLF before the block: 2 are the separator budget (stripped), 1
-        // is the file's own content and must survive. 2 CRLF after: 1 is the
-        // terminator budget (stripped), 1 plus "kept tail" must survive.
+        // Content follows the block ("kept tail"), so this is NOT the
+        // "appended at EOF" shape — before must survive byte-for-byte
+        // (3 CRLF and all), and only the ONE newline that is never
+        // "content" (the block's own mandatory line terminator) comes off
+        // the front of `after`.
         const before = '# Repo\r\n\r\n\r\n';
         const after = '\r\n\r\nkept tail\r\n';
         // The block itself must be CRLF too, matching the file — a file this
@@ -228,7 +230,7 @@ describe('agentsCommand', () => {
         writeFileSync(join(root, 'AGENTS.md'), `${before}${blockForNewline('\r\n')}${after}`);
         const files = removeAgentsBlockFromFiles(root);
         expect(files).toEqual([{ path: 'AGENTS.md', action: 'removed' }]);
-        expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe('# Repo\r\n\r\nkept tail\r\n');
+        expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe(before + '\r\nkept tail\r\n');
       });
     });
 
@@ -258,14 +260,19 @@ describe('agentsCommand', () => {
       });
     });
 
-    it('a file that becomes whitespace-only after remove is deleted too', async () => {
+    it('a file that becomes whitespace-only (but NOT exactly empty) after remove is kept, not deleted', async () => {
       await withTempRoot((root) => {
-        // Only whitespace around the block — after stripping the fixed
-        // separator budget there is nothing left but blank lines.
+        // Blank lines on both sides of the block, but content follows it
+        // (another blank line), so this isn't the "appended at EOF" shape —
+        // `before` is left untouched and only the block's own one-newline
+        // terminator is stripped from `after`, leaving whitespace behind.
+        // Only an EXACTLY empty result is treated as "nothing but the
+        // block" and deleted; merely whitespace-only is not.
         writeFileSync(join(root, 'AGENTS.md'), `\n\n${AGENTS_BLOCK}\n\n`);
         const files = removeAgentsBlockFromFiles(root);
         expect(files).toEqual([{ path: 'AGENTS.md', action: 'removed' }]);
-        expect(existsSync(join(root, 'AGENTS.md'))).toBe(false);
+        expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
+        expect(readFileSync(join(root, 'AGENTS.md'), 'utf-8')).toBe('\n\n\n');
       });
     });
 

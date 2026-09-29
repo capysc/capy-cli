@@ -135,6 +135,27 @@ describe('classifyMarkers', () => {
       const content = ['# README', '```', AGENTS_BLOCK].join('\n');
       expect(classifyMarkers(content)).toEqual({ kind: 'absent' });
     });
+
+    test('~~~ fences are recognized too (both are valid CommonMark fence markers)', () => {
+      const content = [
+        '# README',
+        'Here is what the block looks like:',
+        '~~~',
+        AGENTS_BLOCK_BEGIN,
+        '## Secrets (Capy)',
+        AGENTS_BLOCK_END,
+        '~~~',
+        '',
+      ].join('\n');
+      expect(classifyMarkers(content)).toEqual({ kind: 'absent' });
+      expect(hasCurrentBlock(content)).toBe(false);
+    });
+
+    test('a real marker pair outside a ~~~ fence is still detected', () => {
+      const content = ['# README', '~~~', AGENTS_BLOCK_BEGIN, AGENTS_BLOCK_END, '~~~', '', AGENTS_BLOCK, ''].join('\n');
+      expect(classifyMarkers(content).kind).toBe('present');
+      expect(hasCurrentBlock(content)).toBe(true);
+    });
   });
 });
 
@@ -236,9 +257,10 @@ describe('removeAgentsBlock', () => {
     expect(result.content).toBe(existing);
   });
 
-  test('strips up to the fixed separator budget (2 before, 1 after), capped at what is actually present', () => {
+  test('strips up to the fixed separator budget (2 before, 1 after), capped at what is actually present — block truly at EOF', () => {
     // Only 1 newline before the block (less than the 2-newline budget) and
-    // nothing after — remove takes only what's there, never goes negative.
+    // nothing after at all — this IS the "appended at EOF" shape, so the
+    // full inverse applies. Remove takes only what's there, never negative.
     const content = `# repo\n${AGENTS_BLOCK}`;
     const result = unwrapOk(removeAgentsBlock(content));
     expect(result.action).toBe('removed');
@@ -251,6 +273,63 @@ describe('removeAgentsBlock', () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.code).toBe(ERROR_CODES.AGENTS_BLOCK_MALFORMED);
+  });
+
+  describe('an interior block (something follows it): never join the surrounding lines', () => {
+    // Coordinator repro (FIX-FIRST round 3): unconditional stripping of up to
+    // 2 newlines before / 1 after joined "text" and "More" into "textMore".
+    // Fix: when `after` is non-empty, `before` is left completely untouched;
+    // only the ONE newline that is never "content" — the mandatory
+    // terminator ending the block's own last line — comes off `after`.
+
+    test('LF: exactly one newline before, one after — before untouched, after loses only its own terminator', () => {
+      const existing = `text\n${AGENTS_BLOCK}\nMore\n`;
+      const result = unwrapOk(removeAgentsBlock(existing));
+      expect(result.content).toBe('text\nMore\n');
+    });
+
+    test('LF: two newlines before (a real blank line) — before is STILL untouched, not eaten', () => {
+      const existing = `text\n\n${AGENTS_BLOCK}\nMore\n`;
+      const result = unwrapOk(removeAgentsBlock(existing));
+      expect(result.content).toBe('text\n\nMore\n');
+    });
+
+    test('CRLF: the same shape, CRLF throughout', () => {
+      const block = blockForNewline('\r\n');
+      const existing = `text\r\n${block}\r\nMore\r\n`;
+      const result = unwrapOk(removeAgentsBlock(existing));
+      expect(result.content).toBe('text\r\nMore\r\n');
+    });
+
+    test('CRLF: two CRLF before (a real blank line) — before is still untouched', () => {
+      const block = blockForNewline('\r\n');
+      const existing = `text\r\n\r\n${block}\r\nMore\r\n`;
+      const result = unwrapOk(removeAgentsBlock(existing));
+      expect(result.content).toBe('text\r\n\r\nMore\r\n');
+    });
+
+    test('block at the very start of the file: nothing before to touch, only the terminator comes off after', () => {
+      const existing = `${AGENTS_BLOCK}\nMore\n`;
+      const result = unwrapOk(removeAgentsBlock(existing));
+      expect(result.content).toBe('More\n');
+    });
+
+    test('block in the middle, right after a fenced code example: the fence\'s own closing newline survives', () => {
+      const existing = ['# Docs', '```', 'some code', '```', '', AGENTS_BLOCK, 'More docs', ''].join('\n');
+      const result = unwrapOk(removeAgentsBlock(existing));
+      // Nothing before the block is touched — the fence's "```\n" (and the
+      // blank line after it) survive exactly as they were.
+      expect(result.content).toBe(['# Docs', '```', 'some code', '```', '', 'More docs', ''].join('\n'));
+    });
+
+    test('block appended at the very end (nothing follows): this is the OTHER case — the fixed budget applies, unlike the interior cases above', () => {
+      // Via the real appendBlock path (upsertAgentsBlock on a file with no
+      // markers yet) rather than a hand-crafted string, so this test can't
+      // drift from what append actually produces.
+      const inserted = unwrapOk(upsertAgentsBlock('text\n'));
+      const result = unwrapOk(removeAgentsBlock(inserted.content));
+      expect(result.content).toBe('text\n');
+    });
   });
 });
 
