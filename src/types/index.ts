@@ -555,6 +555,15 @@ export const ERROR_CODES = {
    * the value.
    */
   DOKPLOY_VALUE_UNREPRESENTABLE: 'DOKPLOY_VALUE_UNREPRESENTABLE',
+  /**
+   * A value Capy needs to deliver plaintext to Dokploy contains a literal
+   * `${{` — Dokploy resolves `${{project.X}}`/`${{environment.X}}`
+   * template references inside `env` at deploy time itself (or refuses the
+   * deploy if one doesn't resolve), so the container would never receive
+   * this value byte-for-byte. Refused before any write, naming the
+   * VARIABLE only, never the value.
+   */
+  DOKPLOY_VALUE_HAS_REFERENCE: 'DOKPLOY_VALUE_HAS_REFERENCE',
   /** CI-mode preflight: the Dokploy Application/Compose service has auto-deploy turned off, so merging the keep.lock PR would never trigger a deploy. */
   DOKPLOY_AUTODEPLOY_OFF: 'DOKPLOY_AUTODEPLOY_OFF',
   /** CI-mode preflight: the git branch Dokploy is tracking doesn't match the deploy PR's base branch — merging it would never reach Dokploy's auto-deploy. */

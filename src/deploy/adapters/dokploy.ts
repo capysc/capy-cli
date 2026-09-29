@@ -78,6 +78,7 @@ import {
   envKeys,
   envProblems,
   envWarnings,
+  hasCommentedLines,
   mergeManagedBlock,
   mergeManagedValuesBlock,
   mismatchedDeliveredValues,
@@ -119,6 +120,7 @@ export {
   envKeys,
   envProblems,
   envWarnings,
+  hasCommentedLines,
   mergeManagedBlock,
   mergeManagedValuesBlock,
   mismatchedDeliveredValues,
@@ -801,18 +803,28 @@ async function onRemoveCompose(
       manualHint: manualStripHint(opts),
     };
   }
-  if (!split.hadBlock) {
+  // CAP-682: a block being gone does not by itself mean nothing to do — a
+  // hand-deleted block can leave `# capy:off ` lines stranded behind (they
+  // are ordinary comments to Dokploy, so nothing else ever cleans them up).
+  const strayMarkers = !split.hadBlock && hasCommentedLines(compose.env);
+  if (!split.hadBlock && !strayMarkers) {
     return { ok: true, code: 'nothing_to_remove', detail: 'No Capy block found in the Dokploy environment — nothing to remove.' };
   }
   if (!ctx.interactive) {
     return {
       ok: false,
       code: 'non_interactive',
-      detail: 'Dokploy environment left untouched — not asking to strip the Capy block outside a terminal.',
+      detail: strayMarkers
+        ? 'Dokploy environment left untouched — not asking to un-comment Capy-marked lines outside a terminal.'
+        : 'Dokploy environment left untouched — not asking to strip the Capy block outside a terminal.',
       manualHint: manualStripHint(opts),
     };
   }
-  const confirmed = await ctx.confirm(`Also strip the Capy block from the Dokploy Compose env for "${config.name}"?`);
+  const confirmed = await ctx.confirm(
+    strayMarkers
+      ? `Also un-comment the lines Capy previously disabled in the Dokploy Compose env for "${config.name}"?`
+      : `Also strip the Capy block from the Dokploy Compose env for "${config.name}"?`,
+  );
   if (!confirmed) {
     return { ok: false, code: 'declined', detail: 'Dokploy environment left untouched.', manualHint: manualStripHint(opts) };
   }
@@ -851,11 +863,12 @@ async function onRemoveCompose(
       manualHint: manualStripHint(opts),
     };
   }
+  const removedWhat = strayMarkers ? 'Un-commented the lines Capy had disabled' : 'Removed the Capy block';
   if (ctx.noDeploy) {
     return {
       ok: true,
       code: 'stripped',
-      detail: 'Removed the Capy block from the Dokploy environment; everything else was left untouched. --no-deploy: not redeployed.',
+      detail: `${removedWhat} in the Dokploy environment; everything else was left untouched. --no-deploy: not redeployed.`,
     };
   }
   const redeployed = await settle(client.redeployCompose(composeId, `capy deploy remove ${config.name}`));
@@ -864,7 +877,7 @@ async function onRemoveCompose(
       ok: false,
       code: 'api_error',
       detail:
-        `Removed the Capy block, but could not redeploy — ${explainApiError(redeployed.error, 'trigger', opts).reason}. ` +
+        `${removedWhat}, but could not redeploy — ${explainApiError(redeployed.error, 'trigger', opts).reason}. ` +
         'The reverted config is saved but not yet running.',
       manualHint: manualStripHint(opts),
     };
@@ -872,7 +885,7 @@ async function onRemoveCompose(
   return {
     ok: true,
     code: 'stripped',
-    detail: 'Removed the Capy block from the Dokploy environment and redeployed; everything else was left untouched.',
+    detail: `${removedWhat} in the Dokploy environment and redeployed; everything else was left untouched.`,
   };
 }
 
@@ -1237,7 +1250,11 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           manualHint: manualStripHint(opts),
         };
       }
-      if (!split.hadBlock) {
+      // CAP-682: a block being gone does not by itself mean nothing to do —
+      // a hand-deleted block can leave `# capy:off ` lines stranded behind
+      // (ordinary comments to Dokploy, so nothing else ever cleans them up).
+      const strayMarkers = !split.hadBlock && hasCommentedLines(app.env);
+      if (!split.hadBlock && !strayMarkers) {
         return {
           ok: true,
           code: 'nothing_to_remove',
@@ -1248,12 +1265,16 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         return {
           ok: false,
           code: 'non_interactive',
-          detail: 'Dokploy environment left untouched — not asking to strip the Capy block outside a terminal.',
+          detail: strayMarkers
+            ? 'Dokploy environment left untouched — not asking to un-comment Capy-marked lines outside a terminal.'
+            : 'Dokploy environment left untouched — not asking to strip the Capy block outside a terminal.',
           manualHint: manualStripHint(opts),
         };
       }
       const confirmed = await ctx.confirm(
-        `Also strip the Capy block from the Dokploy Application env for "${config.name}"?`,
+        strayMarkers
+          ? `Also un-comment the lines Capy previously disabled in the Dokploy Application env for "${config.name}"?`
+          : `Also strip the Capy block from the Dokploy Application env for "${config.name}"?`,
       );
       if (!confirmed) {
         return {
@@ -1314,7 +1335,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       return {
         ok: true,
         code: 'stripped',
-        detail: 'Removed the Capy block from the Dokploy environment; everything else was left untouched.',
+        detail: `${strayMarkers ? 'Un-commented the lines Capy had disabled' : 'Removed the Capy block'} in the Dokploy environment; everything else was left untouched.`,
       };
     },
   };

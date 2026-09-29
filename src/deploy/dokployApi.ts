@@ -1076,13 +1076,13 @@ export function stripManagedBlock(split: EnvSplit): string {
 // COPY-FLAG: new on-disk marker text (not user-facing prose, but visible in the Dokploy dashboard).
 export const CAPY_OFF_MARKER = '# capy:off ';
 
-export type DotenvValueProblem = 'DOKPLOY_VALUE_UNREPRESENTABLE';
+export type DotenvValueProblem = 'DOKPLOY_VALUE_UNREPRESENTABLE' | 'DOKPLOY_VALUE_HAS_REFERENCE';
 
 /**
  * Render one arbitrary string as a `dotenv`-safe VALUE (the part after `=`,
  * quotes included) such that `dotenv.parse` on the rendered line reads back
- * exactly `value` — see `tests/deploy/dokployApi.formatDotenvValue.test.ts`
- * for the adversarial property test this is built to satisfy.
+ * exactly `value` — see `tests/deploy/dokployPlainDelivery.test.ts` for the
+ * adversarial property test (and seeded fuzz test) this is built to satisfy.
  *
  * ALWAYS quotes (never emits an unquoted value): dotenv trims an unquoted
  * value's surrounding whitespace and cuts it at the first `#`, and — subtler
@@ -1106,25 +1106,41 @@ export type DotenvValueProblem = 'DOKPLOY_VALUE_UNREPRESENTABLE';
  *      a `'` but no `` ` ``.
  *   3. double quotes — for a value with both `'` and `` ` `` but no `"`.
  *      UNLIKE the other two, `dotenv.parse` decodes a double-quoted value's
- *      literal `\n` (backslash + letter n) into a real newline character —
- *      so this wrapper is only safe when the value contains no literal
- *      `\n` two-character sequence (a REAL embedded newline byte is fine
- *      either way; it is not what that decode step matches — and `\r` was
- *      already refused above, so there is no `\r`-decode case left to guard
- *      here).
+ *      literal `\n` AND literal `\r` (backslash + the letter n or r — two
+ *      ordinary characters, NOT the real control bytes the earlier `\r`
+ *      check above is about) into real newline/CR control characters — so
+ *      this wrapper is only safe when the value contains NEITHER two-
+ *      character sequence. A REAL embedded newline byte is fine either way
+ *      (it is not what that decode step matches); a real embedded `\r`
+ *      byte was already refused above, but the literal two-character
+ *      `\`+`r` sequence is a completely different, still-live risk this
+ *      branch must guard on its own.
  *   4. refuse — a value containing all three quote characters (or `'`+`` ` ``
- *      plus a `"` or a literal `\n` sequence) cannot be represented
+ *      plus a `"` or a literal `\n`/`\r` sequence) cannot be represented
  *      losslessly by any of `dotenv`'s three quote forms: whichever one
  *      would be chosen to survive matching still needs to escape ITS OWN
  *      quote character inside the value, and `dotenv.parse` never
  *      un-escapes that back — the escaping backslash would land in the
  *      read-back value, corrupting it. Refused rather than written lossy.
+ *
+ * SEPARATELY, before any of the above: a value containing a literal `${{`
+ * is refused outright (`DOKPLOY_VALUE_HAS_REFERENCE`), regardless of
+ * quoting. Dokploy itself resolves `${{project.X}}`/`${{environment.X}}`
+ * template references inside `env` at deploy time (or throws if one
+ * doesn't resolve) — so a delivered value that merely CONTAINS that
+ * substring would either get silently rewritten by Dokploy's own resolver
+ * or break the deploy outright, never reaching the container as the exact
+ * value Capy wrote.
  */
 export function formatDotenvValue(value: string): { ok: true; rendered: string } | { ok: false; code: DotenvValueProblem } {
+  if (value.includes('${{')) return { ok: false, code: 'DOKPLOY_VALUE_HAS_REFERENCE' };
   if (value.includes('\r')) return { ok: false, code: 'DOKPLOY_VALUE_UNREPRESENTABLE' };
   if (!value.includes("'")) return { ok: true, rendered: `'${value}'` };
   if (!value.includes('`')) return { ok: true, rendered: `\`${value}\`` };
-  const hasEscapeSequence = value.includes('\\n');
+  // Both literal two-character sequences `dotenv.parse` decodes inside a
+  // double-quoted value — NOT the real control bytes (`\r` is refused
+  // above; a real embedded `\n` is fine and not what this matches).
+  const hasEscapeSequence = value.includes('\\n') || value.includes('\\r');
   if (!value.includes('"') && !hasEscapeSequence) return { ok: true, rendered: `"${value}"` };
   return { ok: false, code: 'DOKPLOY_VALUE_UNREPRESENTABLE' };
 }
@@ -1226,6 +1242,20 @@ function unmarkLine(content: string): string {
   return content.startsWith(CAPY_OFF_MARKER) ? content.slice(CAPY_OFF_MARKER.length) : content;
 }
 
+/**
+ * Whether `env` has ANY line carrying Capy's `CAPY_OFF_MARKER` prefix —
+ * regardless of whether a managed block is present. Exists for `onRemove`:
+ * a managed block being GONE (`splitManagedBlock`'s `hadBlock: false` —
+ * e.g. someone deleted just the block by hand in the Dokploy dashboard,
+ * leaving the commented lines behind, since a `# capy:off ` line is an
+ * ordinary comment to Dokploy and never gets cleaned up on its own) must
+ * not be reported as "nothing to remove" when stray marked lines are still
+ * sitting there — those still need un-commenting to restore the env.
+ */
+export function hasCommentedLines(env: string | null): boolean {
+  return (env ?? '').split(/\r?\n/).some((line) => line.startsWith(CAPY_OFF_MARKER));
+}
+
 /** `a..b` inclusive, as a plain array — small env files only, no need for anything cleverer. */
 function inclusiveRange(a: number, b: number): readonly number[] {
   return Array.from({ length: b - a + 1 }, (_, k) => a + k);
@@ -1273,7 +1303,11 @@ export function syncCommentedLines(text: string, deliveredNames: ReadonlySet<str
 
 export type DokployPlainMergeProblem =
   | { code: 'malformed_block' }
-  | { code: DotenvValueProblem; problems: readonly DotenvValueNameProblem[] };
+  // Deliberately NOT keyed by a single `DotenvValueProblem` — `problems` can
+  // freely mix `DOKPLOY_VALUE_UNREPRESENTABLE` and `DOKPLOY_VALUE_HAS_REFERENCE`
+  // across different variables in the same delivery (see
+  // `describeDokployPlainMergeProblem`, which groups them back out).
+  | { code: 'value_problem'; problems: readonly DotenvValueNameProblem[] };
 
 /**
  * Whole-env write for CAP-682's plaintext delivery: comments out every
@@ -1296,7 +1330,7 @@ export function mergeManagedValuesBlock(
   if ('code' in split) return { ok: false, problem: { code: 'malformed_block' } };
   const rendered = renderManagedValueLines(values);
   if (!rendered.ok) {
-    return { ok: false, problem: { code: 'DOKPLOY_VALUE_UNREPRESENTABLE', problems: rendered.problems } };
+    return { ok: false, problem: { code: 'value_problem', problems: rendered.problems } };
   }
   const deliveredNames = new Set(values.map((v) => v.name));
   const nextBefore = syncCommentedLines(split.before, deliveredNames);
@@ -1390,11 +1424,15 @@ export function describeEnvWarning(w: EnvWarning): string {
 
 /**
  * `mergeManagedValuesBlock`'s refusal, as a printable reason + hint.
- * `code` is a stable `ErrorCode` (Rule 5) ONLY for the value-shape refusal —
- * `malformed_block` mirrors `describeEnvProblem`'s OWN pre-existing refusal,
- * which has never carried a machine code (an edited/duplicated block is
- * reported by `reason` alone, same as before CAP-682). Names only, never a
- * value.
+ * `code` is a stable `ErrorCode` (Rule 5) ONLY when every offending
+ * variable shares the SAME `DotenvValueProblem` — `p.problems` can freely
+ * mix `DOKPLOY_VALUE_UNREPRESENTABLE` and `DOKPLOY_VALUE_HAS_REFERENCE`
+ * across different variables in one delivery, and there is no single
+ * correct code to report for a mixed refusal (`reason`/`hint` still name
+ * every variable and its own specific problem either way). `malformed_block`
+ * mirrors `describeEnvProblem`'s OWN pre-existing refusal, which has never
+ * carried a machine code (an edited/duplicated block is reported by
+ * `reason` alone, same as before CAP-682). Names only, never a value.
  */
 // COPY-FLAG: new user-facing strings, minimal/neutral wording.
 export function describeDokployPlainMergeProblem(
@@ -1403,11 +1441,32 @@ export function describeDokployPlainMergeProblem(
   if (p.code === 'malformed_block') {
     return describeEnvProblem({ code: 'malformed_block', names: [] });
   }
-  const names = p.problems.map((x) => x.name).join(', ');
+  const referenceNames = p.problems.filter((x) => x.code === 'DOKPLOY_VALUE_HAS_REFERENCE').map((x) => x.name);
+  const unrepresentableNames = p.problems.filter((x) => x.code === 'DOKPLOY_VALUE_UNREPRESENTABLE').map((x) => x.name);
+  const reasonParts = [
+    referenceNames.length
+      ? `${referenceNames.join(', ')} contain a literal \${{ — Dokploy resolves that itself at deploy time, so Capy's own value would never reach the container unchanged`
+      : null,
+    unrepresentableNames.length
+      ? `${unrepresentableNames.join(', ')} cannot be written to Dokploy as an exact dotenv value — every quote style dotenv understands is already in use, or it contains a carriage return`
+      : null,
+  ].filter((s): s is string => !!s);
+  const hintParts = [
+    referenceNames.length ? `remove the literal \${{ from ${referenceNames.join(', ')}` : null,
+    unrepresentableNames.length
+      ? `change the value of ${unrepresentableNames.join(', ')} (drop one of ' " \` from it, or the carriage return)`
+      : null,
+  ].filter((s): s is string => !!s);
+  const code =
+    referenceNames.length > 0 && unrepresentableNames.length === 0
+      ? 'DOKPLOY_VALUE_HAS_REFERENCE'
+      : referenceNames.length === 0 && unrepresentableNames.length > 0
+        ? 'DOKPLOY_VALUE_UNREPRESENTABLE'
+        : undefined; // mixed — no single correct code; reason/hint still say everything needed
   return {
-    reason: `${names} cannot be written to Dokploy as an exact dotenv value — it uses every quote style dotenv understands, or contains a carriage return`,
-    hint: `Change the value of ${names} (drop one of ' " \` from it, or the carriage return), then re-run \`capy deploy\`.`,
-    code: 'DOKPLOY_VALUE_UNREPRESENTABLE',
+    reason: reasonParts.join('; '),
+    hint: `${hintParts.join('; ')}, then re-run \`capy deploy\`.`,
+    ...(code ? { code } : {}),
   };
 }
 
