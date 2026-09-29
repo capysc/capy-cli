@@ -2763,13 +2763,35 @@ export async function deployCommand(
   const dokployApiKey = await resolveDokployApiKeyOnce(adapter, target, keep.orgId, options.devMode, secretsInteractive);
   const adapterCallCtx = { orgId: keep.orgId, devMode: options.devMode, interactive: secretsInteractive, resolvedApiKey: dokployApiKey };
 
-  // Preflight (fail BEFORE decryption).
-  const preflight = await adapter.preflight(target, { cwd, ...adapterCallCtx });
-  if (!preflight.ok) {
-    console.error(`${RED('✗')} preflight: ${preflight.reason}`);
-    if (preflight.hint) console.error('\n' + preflight.hint);
-    return 1;
-  }
+  // Preflight (fail BEFORE decryption). At a terminal, a failed preflight is
+  // not a dead end: the user can edit the target (e.g. a wrong composeId) and
+  // preflight runs again. Non-interactive runs (--yes, --dry-run, --json,
+  // --web, no TTY) refuse exactly as before.
+  const canFixInteractively =
+    process.stdin.isTTY === true && !options.yes && !options.dryRun && !options.json && !web.web;
+  const preflightOrEdit = async (
+    t: TargetConfig,
+  ): Promise<{ ok: true; target: TargetConfig; preflight: PreflightResult } | { ok: false }> => {
+    const result = await adapter.preflight(t, { cwd, ...adapterCallCtx });
+    if (result.ok) return { ok: true, target: t, preflight: result };
+    console.error(`${RED('✗')} preflight: ${result.reason}`);
+    if (result.hint) console.error('\n' + result.hint);
+    if (!canFixInteractively) return { ok: false };
+    // COPY-FLAG: minimal neutral wording, pending Vince's approval.
+    const action = await keypressConfirm({ message: 'Preflight failed. Press e to edit this target, c to check again, esc to cancel.' });
+    if (action === 'confirm') return preflightOrEdit(t);
+    if (action !== 'edit') return { ok: false };
+    const edited = await runPicker(cwd, keep, t, undefined, undefined);
+    if (!edited) return { ok: false };
+    upsertTarget(cwd, edited);
+    console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
+    renderPlan(edited, adapter);
+    return preflightOrEdit(edited);
+  };
+  const preflightOutcome = await preflightOrEdit(target);
+  if (!preflightOutcome.ok) return 1;
+  target = preflightOutcome.target;
+  const preflight = preflightOutcome.preflight;
   for (const w of preflight.warnings ?? []) {
     console.log(`  ${YELLOW('!')} ${w.message}`);
   }
