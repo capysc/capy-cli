@@ -5,6 +5,25 @@
  * PROPERTY (which ids `revokeDeployToken` is called with, and how many
  * times), never the shape of some intermediate object.
  *
+ * CAP-682: Dokploy no longer mints a deploy token at all (plain-value
+ * delivery — `needsDeployToken: false`), so it is currently the ONLY real
+ * adapter this file's REAL-`deployCommand()` vehicle can drive, and it can
+ * no longer produce a FRESH `deploy_id` to supersede. What it still proves,
+ * and what the tests below were adapted to show:
+ *   - a Dokploy target whose keep.lock still carries a PRE-MIGRATION
+ *     `deploy_id` (from before this org's Dokploy target used plain-value
+ *     delivery) gets that stale id superseded — and, in direct mode,
+ *     revoked — by the very next deploy, even though that deploy itself
+ *     mints nothing new. This is the generic "no untracked tokens" wiring
+ *     (`targetsGate.ts#upsertTargetElement`) working exactly as it did
+ *     before, driven off a delivery whose OWN `deployId` is simply always
+ *     `undefined` now.
+ *   - `mintDeployToken` itself is never called for a Dokploy deploy.
+ *   - `capy deploy targets-remove` still revokes every id — current or
+ *     superseded — it finds recorded in keep.lock, regardless of whether
+ *     the adapter that recorded them still mints tokens at all (the LAST
+ *     test: two pre-recorded `superseded_deploy_ids` plus the current one).
+ *
  * Every crypto/key-resolution dependency `pushKeepTransform` touches
  * (`resolveProjectKey`, `Encryptor`, `deriveResourceId`) is mocked to a
  * trivial fake — this file is about the REVOKE WIRING, not real crypto,
@@ -55,7 +74,12 @@ mock.module('../../src/crypto/resourceId', () => ({
   deriveResourceId: (branch: string, name: string) => `rid-${branch}-${name}`,
 }));
 
-/** Default fixture — individual tests override the deployId via `mockImplementationOnce` (bun's own reconfiguration API, not a mutable var this file owns). */
+/**
+ * CAP-682: `mintDeployToken` is mocked here purely to prove it is NEVER
+ * called for a Dokploy deploy anymore — see the assertion in the first
+ * test below. No test in this file calls `mintNext`/relies on its return
+ * value; Dokploy's delivery no longer produces a `deployId` at all.
+ */
 const mintDeployTokenMock = mock(async () => ({
   secretsBlob: 'BLOB_VALUE',
   projectKey: 'KEY_VALUE',
@@ -68,34 +92,28 @@ mock.module('../../src/commands/deployTokenCommand', () => ({
   mintDeployToken: mintDeployTokenMock,
 }));
 
-/** Queues one mint result with the given deployId — a thin wrapper over `mockImplementationOnce` so every test reads the same one-liner. */
-function mintNext(deployId: string): void {
-  mintDeployTokenMock.mockImplementationOnce(async () => ({
-    secretsBlob: 'BLOB_VALUE',
-    projectKey: 'KEY_VALUE',
-    deployId,
-    secretCount: 1,
-    blobBytes: 4,
-    valueHashes: { STRIPE_KEY: 'hv' },
-  }));
-}
-
-afterEach(() => mock.restore());
+afterEach(() => {
+  mock.restore();
+  mintDeployTokenMock.mockClear();
+});
 
 import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
-import { splitManagedBlock, mergeManagedBlock } from '../../src/deploy/dokployApi';
+import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
 
 const ROOT = join(tmpdir(), `capy-deploy-revoke-wiring-${process.pid}-${Date.now()}`);
 const APP_ID = 'app_revoke_test';
+/** An active line for STRIPE_KEY already outside the block — gets COMMENTED once Capy delivers it. */
 const RAW_ENV = 'STRIPE_KEY=stale\n';
+/** `.env`'s own plaintext value for STRIPE_KEY (see `setUp`) — a fake, non-secret test value. */
+const DECRYPTED_STRIPE_KEY = 'whatever';
 
-function mergedEnv(env: string | null, pair: { secretsBlob: string; projectKey: string }): string {
-  const split = splitManagedBlock(env);
-  if ('code' in split) throw new Error('unexpected problem');
-  return mergeManagedBlock(split, pair);
+function mergedEnv(env: string | null): string {
+  const merged = mergeManagedValuesBlock(env, [{ name: 'STRIPE_KEY', value: DECRYPTED_STRIPE_KEY }]);
+  if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
+  return merged.env;
 }
 
 /**
@@ -105,7 +123,7 @@ function mergedEnv(env: string | null, pair: { secretsBlob: string; projectKey: 
  * revoke. `priorSuperseded` lets a test seed an ALREADY-superseded id too,
  * to prove `targets-remove` revokes both current and superseded together.
  */
-function setUp(opts: { mode?: 'ci' | 'direct'; priorSuperseded?: string[] } = {}): void {
+function setUp(opts: { mode?: 'ci' | 'direct'; priorSuperseded?: string[]; gitBaseBranch?: string } = {}): void {
   rmSync(ROOT, { recursive: true, force: true });
   mkdirSync(join(ROOT, '.capy'), { recursive: true });
   writeFileSync(
@@ -148,6 +166,9 @@ function setUp(opts: { mode?: 'ci' | 'direct'; priorSuperseded?: string[] } = {}
           branch: 'production',
           vars: ['STRIPE_KEY'],
           mode: opts.mode ?? 'direct',
+          // CAP-682: CI mode now preflights autoDeploy/tracked-branch —
+          // must match `dokployFetchMock`'s `branch: 'main'` fixture.
+          ...(opts.mode === 'ci' ? { gitBaseBranch: opts.gitBaseBranch ?? 'main' } : {}),
           options: {
             baseUrl: 'https://dokploy.example.com',
             applicationId: APP_ID,
@@ -173,11 +194,8 @@ function tearDown(): void {
  * `opts.realDeploy` scripts the trigger+poll steps too; omit it for
  * `--no-deploy` (which the adapter skips BEFORE ever reaching them).
  */
-function dokployFetchMock(
-  newPair: { secretsBlob: string; projectKey: string },
-  opts: { failWrite?: boolean; realDeploy?: boolean } = {},
-) {
-  const expectedMergedEnv = mergedEnv(RAW_ENV, newPair);
+function dokployFetchMock(opts: { failWrite?: boolean; realDeploy?: boolean } = {}) {
+  const expectedMergedEnv = mergedEnv(RAW_ENV);
   const reads = [RAW_ENV, RAW_ENV, expectedMergedEnv][Symbol.iterator]();
   const deploymentReads = [
     [] as const,
@@ -205,6 +223,10 @@ function dokployFetchMock(
             buildArgs: null,
             buildSecrets: null,
             createEnvFile: true,
+            // CAP-682 CI preflight: harmless for direct mode, required for
+            // the CI-mode test below.
+            autoDeploy: true,
+            branch: 'main',
           }),
       };
     }
@@ -253,39 +275,38 @@ async function runScriptedDeploy(
   }
 }
 
-const NEW_PAIR = { secretsBlob: 'BLOB_VALUE', projectKey: 'KEY_VALUE' };
-
 describe('capy deploy — superseded deploy-token revocation wiring (validator fix-first)', () => {
   afterEach(() => tearDown());
 
-  test('a successful REAL direct-mode deploy revokes exactly the superseded id(s)', async () => {
+  test('a successful direct-mode deploy revokes the PRE-MIGRATION deploy_id it superseded, without minting a new one', async () => {
     setUp({ mode: 'direct' });
-    mintNext('dep_new');
     revokeDeployTokenMock.mockClear();
 
     const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
-      runScriptedDeploy(dokployFetchMock(NEW_PAIR, { realDeploy: true })),
+      runScriptedDeploy(dokployFetchMock({ realDeploy: true })),
     );
     expect(code).toBe(0);
 
-    // The property: revoked with EXACTLY the id the fresh deploy superseded
-    // — never zero, never more, never the wrong id.
+    // CAP-682: Dokploy never mints a deploy token at all.
+    expect(mintDeployTokenMock).not.toHaveBeenCalled();
+    // The property: revoked with EXACTLY the pre-migration id this delivery
+    // superseded (its own `deployId` is always `undefined` now) — never
+    // zero, never more, never the wrong id.
     expect(revokeDeployTokenMock).toHaveBeenCalledTimes(1);
     expect(revokeDeployTokenMock.mock.calls.map((c) => c[0])).toEqual(['dep_prior']);
   }, 30_000);
 
   test('--no-deploy: never revokes — the predecessor may still be the one actually running', async () => {
     setUp({ mode: 'direct' });
-    mintNext('dep_pending');
     revokeDeployTokenMock.mockClear();
 
     // --no-deploy still writes the config (that's the point — the target is
-    // verified and the runtime pair lands on the platform) but skips the
+    // verified and the plain values land on the platform) but skips the
     // trigger+poll steps entirely (`ctx.noDeploy` short-circuits BEFORE the
     // `deployment.all` baseline read — see adapters/dokploy.ts). The fetch
     // mock never scripts `deployment.all`/`application.deploy`; it would
     // throw if called, proving the actual redeploy trigger never happens.
-    const fetchMock = dokployFetchMock(NEW_PAIR);
+    const fetchMock = dokployFetchMock();
 
     const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
       runScriptedDeploy(fetchMock, { yes: true, noDeploy: true }),
@@ -296,11 +317,10 @@ describe('capy deploy — superseded deploy-token revocation wiring (validator f
 
   test('a FAILED adapter deploy never revokes', async () => {
     setUp({ mode: 'direct' });
-    mintNext('dep_new');
     revokeDeployTokenMock.mockClear();
 
     const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
-      runScriptedDeploy(dokployFetchMock(NEW_PAIR, { failWrite: true })),
+      runScriptedDeploy(dokployFetchMock({ failWrite: true })),
     );
     expect(code).toBe(1);
     expect(revokeDeployTokenMock).not.toHaveBeenCalled();
@@ -308,7 +328,6 @@ describe('capy deploy — superseded deploy-token revocation wiring (validator f
 
   test('CI mode never revokes — recordDeployTargets/revoke are direct-mode only', async () => {
     setUp({ mode: 'ci' });
-    mintNext('dep_new');
     revokeDeployTokenMock.mockClear();
 
     // CI mode's own gate would decrypt via decryptCurrentBranch — no git
@@ -317,7 +336,7 @@ describe('capy deploy — superseded deploy-token revocation wiring (validator f
     // OTHER `mode: 'ci'` test in deployDokploySystemStoreToken.test.ts,
     // none of which git-init their ROOT either).
     const code = await withEnv({ MY_REVOKE_TEST_TOKEN: 'dk_token' }, () =>
-      runScriptedDeploy(dokployFetchMock(NEW_PAIR)),
+      runScriptedDeploy(dokployFetchMock()),
     );
     expect(code).toBe(0);
     expect(revokeDeployTokenMock).not.toHaveBeenCalled();

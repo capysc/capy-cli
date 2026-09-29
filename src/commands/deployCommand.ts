@@ -269,7 +269,13 @@ async function decryptCurrentBranch(
   cwd: string,
   devMode: boolean = false,
 ): Promise<Record<string, string>> {
-  const fm = new FileManager();
+  // CAP-682 fix: this constructed `FileManager()` with no `cwd`, silently
+  // reading `.env` from `process.cwd()` instead of the `cwd` this function
+  // was actually called with — every OTHER `new FileManager(cwd)` call site
+  // in this file passes it. Dormant for token adapters (their secrets never
+  // reach this function — see `loadDeploySecrets`), but Dokploy's plain-value
+  // delivery (CAP-682) now decrypts for real, which is what surfaced it.
+  const fm = new FileManager(cwd);
   const envFromFile = fm.readEnvFile();
 
   const out: Record<string, string> = {};
@@ -320,6 +326,15 @@ async function decryptCurrentBranch(
  * `capy run` consumes). Same devMode-aware auth as decryptCurrentBranch — so
  * under capy-dev it talks to the dev service, not prod. The bundle carries
  * only `vars` — the target's selection — never the whole `.env`.
+ *
+ * CAP-682: no shipped adapter has `needsDeployToken: true` anymore (Dokploy
+ * — the only one that ever did — moved to plain-value delivery), so this
+ * function's one call site below (inside `loadDeploySecrets`) is currently
+ * unreachable. Deliberately KEPT, not deleted: the original CAP-682 spec is
+ * explicit that "the blob/token machinery stays for other adapters and
+ * `capy run`" — this is the mechanism a future token-based adapter opts
+ * into by setting `needsDeployToken: true`, and removing it now would
+ * silently retract that documented capability rather than leave it dormant.
  */
 async function mintForDeploy(
   cwd: string,
@@ -3001,6 +3016,11 @@ function buildDeployPrBody(target: TargetConfig): string {
         target.vars.map((v) => `- \`${v}\``).join('\n'),
       ].join('\n');
 
+  // Dokploy CI mode (CAP-682): not `needsDeployToken` (plain values now) and
+  // not `ciOnly` (direct mode still exists) — but for THIS section it reads
+  // exactly like a `ciOnly` adapter: Dokploy's OWN auto-deploy is what merging
+  // triggers, capy never calls `compose.redeploy`/`application.deploy` in CI
+  // mode. Checked before the generic `ciOnly` branch so it wins.
   const mergeSection = adapter?.needsDeployToken
     ? [
         `Merging this PR is the deploy signal. ${adapterLabel}'s git CI builds on`,
@@ -3008,19 +3028,28 @@ function buildDeployPrBody(target: TargetConfig): string {
         `time. capy does **not** ship code from the local machine — only the`,
         `keep.lock pin lands here.`,
       ].join('\n')
-    : adapter?.ciOnly
-      ? [
-          `Merging this PR is the deploy signal. ${adapterLabel}'s git integration`,
-          `builds and deploys on merge, reading the env vars pushed above directly`,
-          `from its store — no decrypt step at build. capy does **not** ship code`,
-          `from the local machine — only the keep.lock pin lands here.`,
+    : adapter?.id === 'dokploy'
+      ? // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        [
+          `Merging this PR is the deploy signal. Dokploy's own auto-deploy builds`,
+          `and deploys on merge, reading the env vars written above directly from`,
+          `its store — no decrypt step at build. capy does **not** call`,
+          `\`compose.redeploy\`/\`application.deploy\` in CI mode — only the`,
+          `keep.lock pin lands here.`,
         ].join('\n')
-      : [
-          `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
-          `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
-          `the secrets that were pushed above. capy itself does **not** ship code`,
-          `from the local machine in CI mode — only the keep.lock pin lands here.`,
-        ].join('\n');
+      : adapter?.ciOnly
+        ? [
+            `Merging this PR is the deploy signal. ${adapterLabel}'s git integration`,
+            `builds and deploys on merge, reading the env vars pushed above directly`,
+            `from its store — no decrypt step at build. capy does **not** ship code`,
+            `from the local machine — only the keep.lock pin lands here.`,
+          ].join('\n')
+        : [
+            `Merging this PR is the deploy signal. Your CI pipeline runs the actual`,
+            `code deploy (e.g. \`capy run -- wrangler deploy\` for cf-worker) using`,
+            `the secrets that were pushed above. capy itself does **not** ship code`,
+            `from the local machine in CI mode — only the keep.lock pin lands here.`,
+          ].join('\n');
 
   return [
     `Automated deploy PR opened by \`capy deploy\`.`,

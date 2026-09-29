@@ -3,22 +3,28 @@
  * REAL git repo + bare origin (validator fix-first, CAP-679 follow-up
  * item 1: "no CI churn").
  *
- * The property under test: an UNCHANGED CI-mode redeploy of a token adapter
- * (Dokploy) must mint NOTHING, push NOTHING to the platform, open NO PR, and
- * leave keep.lock byte-identical on the base branch — deciding "did
- * anything change" must happen BEFORE any token is minted (see
- * `deployCommand.ts#resolveCiGateOutcome` and
- * `targetsGate.ts#deliveryWorthGating`). The bug this guards: `upsertTargetElement`
- * now treats a fresh `deploy_id` as a real change (CAP-679's own "no
- * untracked tokens" fix) — if the CI gate ever folded a freshly-minted
- * `deploy_id` into its "changed?" decision (the old `computeCiChangeGate`
- * did, since it minted FIRST), every CI run would open a PR regardless of
- * whether the secret VALUE changed at all.
+ * The property under test: an UNCHANGED CI-mode redeploy must push NOTHING
+ * to the platform, open NO PR, and leave keep.lock byte-identical on the
+ * base branch — deciding "did anything change" must happen BEFORE anything
+ * is written (see `deployCommand.ts#resolveCiGateOutcome` and
+ * `targetsGate.ts#deliveryWorthGating`).
+ *
+ * CAP-682: Dokploy no longer mints a deploy token at all (plain-value
+ * delivery), so the ORIGINAL bug this file guarded against — a freshly
+ * minted `deploy_id` being folded into the "changed?" decision, which
+ * `upsertTargetElement`'s "no untracked tokens" fix (CAP-679) would treat as
+ * a real change on EVERY CI run regardless of the secret VALUE — can no
+ * longer happen via Dokploy specifically (it never mints anything to fold
+ * in). The two tests below were adapted to prove the property that still
+ * applies to Dokploy's own plain-value write:
+ *   - unchanged → the gate stops the run before ANY Dokploy write.
+ *   - a STALE target (secretsScreen's `*` marker) still proceeds to a real
+ *     write, rather than getting stuck "unchanged" forever.
  *
  * `mock.module()` is process-wide: this file runs isolated (tests/run-tests.sh).
  *
- * Only the UNCHANGED case is driven through the full `deployCommand()` here.
- * The CHANGED case (mint proceeds, a PR gets opened) is covered instead by:
+ * Only the UNCHANGED case is driven all the way to a PR attempt here. The
+ * CHANGED case (a PR gets opened) is covered instead by:
  * `targetsGate.test.ts#deliveryWorthGating` (the decision itself, every
  * branch), and `deployFlow.test.ts`'s "bump a var → PR branch..." e2e test
  * (the worktree/push mechanics) — going through the REAL `deployCommand()`
@@ -45,6 +51,7 @@ mock.module('../../src/service/serviceClient', () => ({
   },
 }));
 
+/** CAP-682: mocked purely to prove it is NEVER called — Dokploy mints no deploy token at all. */
 const mintDeployTokenMock = mock(async () => ({
   secretsBlob: 'BLOB_VALUE',
   projectKey: 'KEY_VALUE',
@@ -66,6 +73,7 @@ import { spawnSync } from 'child_process';
 import { deployCommand } from '../../src/commands/deployCommand';
 import { hashValue } from '../../src/deploy/keepGate';
 import { serializeKeep } from '../../src/files/fileManager';
+import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
 
 function git(args: string[], cwd: string) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf-8' });
@@ -118,11 +126,26 @@ function baseKeepLock(valueHash: string, deployedValueHash: string = valueHash):
   } as any);
 }
 
-/** Scripted Dokploy fetch: `application.one` only — preflight's read, no write. Fails the test loudly on any other call. */
-function dokployFetchMock() {
-  return mock(async (url: string, init: { method: string }) => {
+const RAW_APP_ENV = 'NODE_ENV=production';
+
+/**
+ * Scripted Dokploy fetch. `allowWrite: false` (the UNCHANGED case) only ever
+ * scripts `application.one` — preflight's read, no write — and throws
+ * loudly on any other call, proving the gate stopped the run before Dokploy
+ * saw a write. `allowWrite: true` (the STALE case) additionally scripts a
+ * full write cycle: fresh read, `application.saveEnvironment`, and the
+ * post-write verify read.
+ */
+function dokployFetchMock(opts: { allowWrite?: boolean; stripeKeyValue?: string } = {}) {
+  const value = opts.stripeKeyValue ?? 'same-value';
+  const merged = mergeManagedValuesBlock(RAW_APP_ENV, [{ name: 'STRIPE_KEY', value }]);
+  if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
+  const reads = [RAW_APP_ENV, RAW_APP_ENV, merged.env][Symbol.iterator]();
+  return mock(async (url: string, init: { method: string; body?: string }) => {
     const u = new URL(url);
     if (u.pathname.endsWith('application.one')) {
+      const next = opts.allowWrite ? reads.next() : { done: false, value: RAW_APP_ENV };
+      if (next.done) throw new Error('unscripted extra application.one read');
       return {
         status: 200,
         ok: true,
@@ -130,12 +153,19 @@ function dokployFetchMock() {
           JSON.stringify({
             applicationId: APP_ID,
             name: 'demo-app',
-            env: 'NODE_ENV=production',
+            env: next.value,
             buildArgs: null,
             buildSecrets: null,
             createEnvFile: true,
+            // CAP-682 CI preflight: auto-deploy on, tracking `main` — matches
+            // this file's `gitBaseBranch: 'main'` target fixture.
+            autoDeploy: true,
+            branch: 'main',
           }),
       };
+    }
+    if (opts.allowWrite && u.pathname.endsWith('application.saveEnvironment')) {
+      return { status: 200, ok: true, text: async () => 'true' };
     }
     throw new Error(`unscripted Dokploy request in the UNCHANGED case: ${init.method} ${url}`);
   });
@@ -202,10 +232,7 @@ describe('capy deploy — CI mode change gate (validator fix-first: no CI churn)
     tearDownRepo();
   });
 
-  test('CI mode, unchanged values → no mint, no push, no PR, keep.lock byte-identical', async () => {
-    // decryptCurrentBranch's FileManager() defaults to process.cwd() (not the
-    // `cwd` argument deployCommand itself receives) — chdir is the only way
-    // to make it see THIS test's .env.
+  test('CI mode, unchanged values → no write, no push, no PR, keep.lock byte-identical', async () => {
     process.chdir(REPO);
 
     const beforeKeepLock = readFileSync(join(REPO, 'keep.lock'), 'utf-8');
@@ -253,7 +280,7 @@ describe('capy deploy — CI mode change gate (validator fix-first: no CI churn)
   // — the synced value is current, but this target's OWN deployed_value_hash
   // is for an older value it never caught up on) must still gate "proceed",
   // or it stays stale forever. ──
-  test('a stale target (synced value unchanged, deployed_value_hash old) still proceeds — mints, never stuck "unchanged" forever', async () => {
+  test('a stale target (synced value unchanged, deployed_value_hash old) still proceeds — writes plain values, never stuck "unchanged" forever', async () => {
     // Overrides this describe's `beforeEach` fixture: same synced value as
     // always, but the target's OWN deployed_value_hash is for a DIFFERENT,
     // older value — exactly what the secretsScreen `*` marker represents.
@@ -261,7 +288,7 @@ describe('capy deploy — CI mode change gate (validator fix-first: no CI churn)
     process.chdir(REPO);
     mintDeployTokenMock.mockClear();
 
-    const fetchMock = dokployFetchMock();
+    const fetchMock = dokployFetchMock({ allowWrite: true, stripeKeyValue: 'same-value' });
     const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
     const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
     const errSpy = spyOn(console, 'error').mockImplementation((() => {}) as never);
@@ -270,7 +297,8 @@ describe('capy deploy — CI mode change gate (validator fix-first: no CI churn)
       // Not asserting the final exit code: this run may still fail later at
       // a real `gh pr create` against this test's throwaway local origin
       // (see the top-of-file note) — a concern unrelated to the gate
-      // property under test here, which is that minting happens AT ALL.
+      // property under test here, which is that the write is ATTEMPTED at
+      // all rather than the gate reporting "unchanged" forever.
       await deployCommand('dokploy-ci', { yes: true }, REPO);
     } finally {
       fetchSpy.mockRestore();
@@ -278,6 +306,10 @@ describe('capy deploy — CI mode change gate (validator fix-first: no CI churn)
       errSpy.mockRestore();
     }
 
-    expect(mintDeployTokenMock).toHaveBeenCalledTimes(1);
+    // CAP-682: the gate proceeding means a real write was attempted — never
+    // a mint (Dokploy mints nothing at all now).
+    expect(mintDeployTokenMock).not.toHaveBeenCalled();
+    const paths = fetchMock.mock.calls.map((c) => c[0] as string);
+    expect(paths.some((p) => p.includes('application.saveEnvironment'))).toBe(true);
   }, 30_000);
 });

@@ -44,6 +44,17 @@ export interface DokployApplication {
   branch?: string;
   /** Which Dokploy environment this Application belongs to, within its project. */
   environmentId?: string;
+  /**
+   * CAP-682 CI preflight fields. `autoDeploy` must be `true` for a merge to
+   * Dokploy's tracked branch to trigger anything; `customGitBranch` is the
+   * tracked-branch field for a `sourceType: 'git'` (custom) source — see
+   * `trackedGitBranch`'s own doc for why both are read. `watchPaths`, when
+   * non-null and non-empty, is the set of path globs that gate auto-deploy —
+   * see `watchPathsExcludeKeep`.
+   */
+  autoDeploy?: boolean | null;
+  customGitBranch?: string | null;
+  watchPaths?: readonly string[] | null;
 }
 
 /**
@@ -74,6 +85,10 @@ export interface DokployCompose {
    * on that combination.
    */
   composeType?: string;
+  /** CAP-682 CI preflight fields — see `DokployApplication`'s identical fields. */
+  autoDeploy?: boolean | null;
+  customGitBranch?: string | null;
+  watchPaths?: readonly string[] | null;
 }
 
 // ── Discovery (CAP-657 follow-up): `project.all` ────────────────────────────
@@ -302,6 +317,53 @@ export function dokployVersionAtLeast(version: string, min: string): boolean {
   return compareAt(0) ?? true;
 }
 
+// ── CI preflight (CAP-682): auto-deploy, tracked branch, watch paths ───────
+
+/**
+ * The git branch Dokploy is actually tracking for this Application/Compose
+ * service — `branch` (github/gitlab/bitbucket/gitea sources) or
+ * `customGitBranch` (a `sourceType: 'git'` custom source), whichever is set.
+ * `null` when neither is populated (e.g. a `sourceType: 'docker'`/`'drop'`
+ * service with no git branch at all — CI preflight treats that as "can't
+ * confirm a match" the same as any other mismatch, never as a pass).
+ */
+export function trackedGitBranch(entity: { branch?: string | null; customGitBranch?: string | null }): string | null {
+  const branch = entity.branch?.trim();
+  if (branch) return branch;
+  const custom = entity.customGitBranch?.trim();
+  return custom || null;
+}
+
+/**
+ * Whether `path` matches Dokploy's watch-path glob `pattern` — `**` for any
+ * depth (including zero segments), `*` for anything within one path
+ * segment, everything else literal. Deliberately conservative rather than a
+ * full glob engine: Dokploy's own watch-path examples (`src/**`, `*.ts`,
+ * an exact file path) are exactly what this covers, and CI preflight only
+ * ever uses this to decide "definitely excluded" vs "let it through" — see
+ * `watchPathsExcludeKeep`.
+ */
+export function matchesWatchPath(pattern: string, path: string): boolean {
+  const DOUBLESTAR = '\u0000CAPY_DOUBLESTAR\u0000';
+  const withPlaceholder = pattern.trim().split('**').join(DOUBLESTAR);
+  const escaped = withPlaceholder.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const withWildcards = escaped.split('\\*').join('[^/]*').split(DOUBLESTAR).join('.*');
+  return new RegExp(`^${withWildcards}$`).test(path);
+}
+
+/**
+ * True when Dokploy's `watchPaths` is configured (non-null, non-empty) AND
+ * none of its patterns cover `keepPath` — i.e. merging the deploy PR would
+ * never trigger Dokploy's own auto-deploy. `null`/empty `watchPaths` means
+ * Dokploy watches everything, so this is always `false` in that case —
+ * never a refusal.
+ */
+export function watchPathsExcludeKeep(watchPaths: readonly string[] | null | undefined, keepPath: string): boolean {
+  const patterns = (watchPaths ?? []).map((p) => p.trim()).filter((p) => p.length > 0);
+  if (patterns.length === 0) return false;
+  return !patterns.some((p) => matchesWatchPath(p, keepPath));
+}
+
 /** `https://host/` and `https://host/api` both mean the same dashboard. */
 export function apiBase(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, '');
@@ -385,6 +447,11 @@ export function createDokployClient(
         owner: typeof body.owner === 'string' ? body.owner : undefined,
         branch: typeof body.branch === 'string' ? body.branch : undefined,
         environmentId: typeof body.environmentId === 'string' ? body.environmentId : undefined,
+        autoDeploy: typeof body.autoDeploy === 'boolean' ? body.autoDeploy : null,
+        customGitBranch: typeof body.customGitBranch === 'string' ? body.customGitBranch : null,
+        watchPaths: Array.isArray(body.watchPaths)
+          ? body.watchPaths.filter((p): p is string => typeof p === 'string')
+          : null,
       };
     },
     async saveEnvironment(app) {
@@ -437,6 +504,11 @@ export function createDokployClient(
         composePath: typeof body.composePath === 'string' ? body.composePath : undefined,
         environmentId: typeof body.environmentId === 'string' ? body.environmentId : undefined,
         composeType: typeof body.composeType === 'string' ? body.composeType : undefined,
+        autoDeploy: typeof body.autoDeploy === 'boolean' ? body.autoDeploy : null,
+        customGitBranch: typeof body.customGitBranch === 'string' ? body.customGitBranch : null,
+        watchPaths: Array.isArray(body.watchPaths)
+          ? body.watchPaths.filter((p): p is string => typeof p === 'string')
+          : null,
       };
     },
     async saveComposeEnvironment(compose) {
@@ -981,6 +1053,333 @@ export function stripManagedBlock(split: EnvSplit): string {
   return split.before.replace(/\r?\n$/, '') + split.after;
 }
 
+// ── Plaintext delivery (CAP-682) ────────────────────────────────────────────
+//
+// Dokploy targets no longer ship `_SECRETS_BLOB`/`_PROJECT_KEY` — Capy writes
+// each delivered var as a plain `KEY=value` line INSIDE the managed block,
+// and comments out (never deletes) every pre-existing ACTIVE line outside the
+// block that defines the same name, so the platform never reads two
+// definitions of one var. This section is the pure rendering/scanning half
+// of that: `formatDotenvValue` (one value → one dotenv-safe line),
+// `syncCommentedLines` (comment/uncomment the right outside lines),
+// `mergeManagedValuesBlock`/`removeManagedValuesBlock` (compose the two into
+// a whole-env write), and `mismatchedDeliveredValues` (the read-back check).
+// The OLD pair-based `mergeManagedBlock`/`stripManagedBlock`/`RUNTIME_PAIR`
+// above are UNCHANGED and still exported — `capy run` and any other adapter
+// that still ships the blob/token pair keeps using them exactly as before.
+
+/**
+ * Stable prefix `capy deploy` puts on a line it disabled — never deletes.
+ * Chosen short and greppable; the trailing space keeps the original line's
+ * own content readable immediately after it in the Dokploy dashboard.
+ */
+// COPY-FLAG: new on-disk marker text (not user-facing prose, but visible in the Dokploy dashboard).
+export const CAPY_OFF_MARKER = '# capy:off ';
+
+export type DotenvValueProblem = 'DOKPLOY_VALUE_UNREPRESENTABLE' | 'DOKPLOY_VALUE_HAS_REFERENCE';
+
+/**
+ * Render one arbitrary string as a `dotenv`-safe VALUE (the part after `=`,
+ * quotes included) such that `dotenv.parse` on the rendered line reads back
+ * exactly `value` — see `tests/deploy/dokployPlainDelivery.test.ts` for the
+ * adversarial property test (and seeded fuzz test) this is built to satisfy.
+ *
+ * ALWAYS quotes (never emits an unquoted value): dotenv trims an unquoted
+ * value's surrounding whitespace and cuts it at the first `#`, and — subtler
+ * — a value that itself happens to start and end with the same quote
+ * character would be re-stripped by `dotenv.parse`'s own quote-removal step
+ * if left unquoted. Quoting unconditionally sidesteps both.
+ *
+ * FIRST, independent of quoting: `dotenv.parse` normalizes every `\r\n` (and
+ * a lone `\r`) to `\n` on the WHOLE input text before any quote-aware parsing
+ * even starts (`lines.replace(/\r\n?/mg, '\n')` in `dotenv`'s own source) —
+ * so a value containing a real `\r` byte, in ANY quote form, can never read
+ * back exactly: refused outright, not a quoting problem at all.
+ *
+ * Otherwise picks the first wrapper the value doesn't defeat, in order of
+ * "least escaping-shaped risk":
+ *   1. single quotes — safe for anything, PROVIDED the value has no `'`.
+ *      `dotenv` never interprets escapes inside a single-quoted value (not
+ *      even `\n`), so every other byte — real newlines, `"`, `` ` ``,
+ *      `#`, `$`, backslashes — survives verbatim.
+ *   2. backticks — identical safety to single quotes, for a value that has
+ *      a `'` but no `` ` ``.
+ *   3. double quotes — for a value with both `'` and `` ` `` but no `"`.
+ *      UNLIKE the other two, `dotenv.parse` decodes a double-quoted value's
+ *      literal `\n` AND literal `\r` (backslash + the letter n or r — two
+ *      ordinary characters, NOT the real control bytes the earlier `\r`
+ *      check above is about) into real newline/CR control characters — so
+ *      this wrapper is only safe when the value contains NEITHER two-
+ *      character sequence. A REAL embedded newline byte is fine either way
+ *      (it is not what that decode step matches); a real embedded `\r`
+ *      byte was already refused above, but the literal two-character
+ *      `\`+`r` sequence is a completely different, still-live risk this
+ *      branch must guard on its own.
+ *   4. refuse — a value containing all three quote characters (or `'`+`` ` ``
+ *      plus a `"` or a literal `\n`/`\r` sequence) cannot be represented
+ *      losslessly by any of `dotenv`'s three quote forms: whichever one
+ *      would be chosen to survive matching still needs to escape ITS OWN
+ *      quote character inside the value, and `dotenv.parse` never
+ *      un-escapes that back — the escaping backslash would land in the
+ *      read-back value, corrupting it. Refused rather than written lossy.
+ *
+ * SEPARATELY, before any of the above: a value containing a literal `${{`
+ * is refused outright (`DOKPLOY_VALUE_HAS_REFERENCE`), regardless of
+ * quoting. Dokploy itself resolves `${{project.X}}`/`${{environment.X}}`
+ * template references inside `env` at deploy time (or throws if one
+ * doesn't resolve) — so a delivered value that merely CONTAINS that
+ * substring would either get silently rewritten by Dokploy's own resolver
+ * or break the deploy outright, never reaching the container as the exact
+ * value Capy wrote.
+ */
+export function formatDotenvValue(value: string): { ok: true; rendered: string } | { ok: false; code: DotenvValueProblem } {
+  if (value.includes('${{')) return { ok: false, code: 'DOKPLOY_VALUE_HAS_REFERENCE' };
+  if (value.includes('\r')) return { ok: false, code: 'DOKPLOY_VALUE_UNREPRESENTABLE' };
+  if (!value.includes("'")) return { ok: true, rendered: `'${value}'` };
+  if (!value.includes('`')) return { ok: true, rendered: `\`${value}\`` };
+  // Both literal two-character sequences `dotenv.parse` decodes inside a
+  // double-quoted value — NOT the real control bytes (`\r` is refused
+  // above; a real embedded `\n` is fine and not what this matches).
+  const hasEscapeSequence = value.includes('\\n') || value.includes('\\r');
+  if (!value.includes('"') && !hasEscapeSequence) return { ok: true, rendered: `"${value}"` };
+  return { ok: false, code: 'DOKPLOY_VALUE_UNREPRESENTABLE' };
+}
+
+/** One dotenv line's problem, keyed by the variable NAME only — never the value. */
+export interface DotenvValueNameProblem {
+  name: string;
+  code: DotenvValueProblem;
+}
+
+/**
+ * `formatDotenvValue` for a whole delivery — every entry rendered as a
+ * `KEY=value` line, in the SAME order `entries` was given. All-or-nothing:
+ * any unrepresentable value refuses the WHOLE render (never a partial
+ * block), naming every offending variable.
+ */
+export function renderManagedValueLines(
+  entries: ReadonlyArray<{ name: string; value: string }>,
+): { ok: true; lines: readonly string[] } | { ok: false; problems: readonly DotenvValueNameProblem[] } {
+  const rendered = entries.map((e) => ({ name: e.name, result: formatDotenvValue(e.value) }));
+  const problems = rendered.flatMap((r) => (r.result.ok ? [] : [{ name: r.name, code: r.result.code }]));
+  if (problems.length > 0) return { ok: false, problems };
+  return {
+    ok: true,
+    lines: rendered.map((r) => `${r.name}=${(r.result as { ok: true; rendered: string }).rendered}`),
+  };
+}
+
+/**
+ * Mirrors `dotenv` 16.x's own `LINE` regex verbatim (see
+ * `node_modules/dotenv/lib/main.js`) — used ONLY to find each outside
+ * entry's NAME and physical-line SPAN (including a multi-line quoted
+ * value's continuation lines), never to extract/decode its value (reading
+ * a value back for verification stays `dotenv.parse` itself, via
+ * `mismatchedDeliveredValues`). Kept as a local literal copy rather than a
+ * dependency on `dotenv`'s internals (which the package does not export)
+ * — this is the only way to know which physical lines one entry spans.
+ */
+const DOTENV_LINE_SOURCE =
+  "(?:^|^)\\s*(?:export\\s+)?([\\w.-]+)(?:\\s*=\\s*?|:\\s+?)(\\s*'(?:\\\\'|[^'])*'|\\s*\"(?:\\\\\"|[^\"])*\"|\\s*`(?:\\\\`|[^`])*`|[^#\\r\\n]+)?\\s*(?:#.*)?(?:$|$)";
+
+interface OutsideEntrySpan {
+  readonly name: string;
+  /** Index into the physical-line array this span was found in (0-based, inclusive). */
+  readonly lineStart: number;
+  readonly lineEnd: number;
+}
+
+/** Cumulative start offset of each line, as if every `RawLine.content` were joined with a single `\n` — mirrors `dotenv`'s own CRLF→LF normalization for matching purposes only (never for reconstruction). */
+function lineStartOffsets(contents: readonly string[]): readonly number[] {
+  return contents.reduce<{ offsets: readonly number[]; acc: number }>(
+    (state, c) => ({ offsets: [...state.offsets, state.acc], acc: state.acc + c.length + 1 }),
+    { offsets: [], acc: 0 },
+  ).offsets;
+}
+
+/** The largest index `i` with `offsets[i] <= pos` — which physical line a normalized-text offset falls in. */
+function lineIndexForOffset(offsets: readonly number[], pos: number): number {
+  return offsets.reduce((best, start, i) => (start <= pos ? i : best), 0);
+}
+
+/**
+ * Every KEY=value entry findable in `lines`, with the physical-line span it
+ * occupies.
+ *
+ * Uses the regex's `d` (hasIndices) flag to read each CAPTURE GROUP's own
+ * offsets, rather than the whole match's `m.index`/`m[0].length` — the
+ * pattern's leading `\s*` (before the KEY) and trailing `\s*` (after the
+ * value, before an optional comment) are DELIBERATELY lax to mirror
+ * `dotenv`'s own matching, which means the FULL match can extend across a
+ * blank line or trailing whitespace that has nothing to do with this
+ * entry's own content. Anchoring the span to the KEY group's start and the
+ * value group's end (falling back to the KEY group's own end when there is
+ * no value at all, e.g. a bare `KEY=`) keeps a blank/comment line that
+ * merely precedes or follows an entry from being misattributed to it.
+ */
+function findEntrySpans(lines: readonly RawLine[]): readonly OutsideEntrySpan[] {
+  const contents = lines.map((l) => l.content);
+  const normalized = contents.join('\n');
+  const offsets = lineStartOffsets(contents);
+  const re = new RegExp(DOTENV_LINE_SOURCE, 'gmd');
+  return Array.from(normalized.matchAll(re))
+    .filter((m) => m[0].length > 0 && typeof m.index === 'number')
+    .map((m) => {
+      const indices = (m as RegExpMatchArray & { indices?: Array<[number, number] | undefined> }).indices;
+      const keyRange = indices?.[1];
+      const valueRange = indices?.[2];
+      const start = keyRange ? keyRange[0] : (m.index as number);
+      const end = (valueRange ?? keyRange ?? [start, start + m[0].length])[1] - 1;
+      return { name: m[1], lineStart: lineIndexForOffset(offsets, start), lineEnd: lineIndexForOffset(offsets, Math.max(start, end)) };
+    });
+}
+
+function markLine(content: string): string {
+  return content.startsWith(CAPY_OFF_MARKER) ? content : CAPY_OFF_MARKER + content;
+}
+
+function unmarkLine(content: string): string {
+  return content.startsWith(CAPY_OFF_MARKER) ? content.slice(CAPY_OFF_MARKER.length) : content;
+}
+
+/**
+ * Whether `env` has ANY line carrying Capy's `CAPY_OFF_MARKER` prefix —
+ * regardless of whether a managed block is present. Exists for `onRemove`:
+ * a managed block being GONE (`splitManagedBlock`'s `hadBlock: false` —
+ * e.g. someone deleted just the block by hand in the Dokploy dashboard,
+ * leaving the commented lines behind, since a `# capy:off ` line is an
+ * ordinary comment to Dokploy and never gets cleaned up on its own) must
+ * not be reported as "nothing to remove" when stray marked lines are still
+ * sitting there — those still need un-commenting to restore the env.
+ */
+export function hasCommentedLines(env: string | null): boolean {
+  return (env ?? '').split(/\r?\n/).some((line) => line.startsWith(CAPY_OFF_MARKER));
+}
+
+/** `a..b` inclusive, as a plain array — small env files only, no need for anything cleverer. */
+function inclusiveRange(a: number, b: number): readonly number[] {
+  return Array.from({ length: b - a + 1 }, (_, k) => a + k);
+}
+
+/**
+ * Comment out (or un-comment) lines OUTSIDE Capy's managed block so at most
+ * ONE definition of any delivered name is ever active — the byte-exact,
+ * reversible half of CAP-682's plaintext delivery.
+ *
+ * For every KEY=value entry `findEntrySpans` can find in `text` (scanned
+ * against a MARKER-STRIPPED reading of every line, so this is correct
+ * however the line is marked right now):
+ *   - `deliveredNames` has the entry's name → every physical line of its
+ *     span ends up marked (an already-marked line is left alone —
+ *     `markLine` is idempotent, never double-prefixes).
+ *   - it does not → every physical line of its span ends up UNmarked.
+ *
+ * A line that is not part of any detected entry (blank, a real comment, or
+ * one Dokploy's own `${{project.X}}`/`${{environment.X}}` reference syntax
+ * that still parses as a plain KEY=value — those are entries too, just
+ * never in `deliveredNames`, so this leaves them active) is returned
+ * byte-identical, including its own original line ending. Idempotent and
+ * order-independent: calling this again with the SAME `deliveredNames`
+ * changes nothing; calling it with a DIFFERENT set converges directly to
+ * the new state without needing to know what the previous call did.
+ */
+export function syncCommentedLines(text: string, deliveredNames: ReadonlySet<string>): string {
+  const rawLines = splitPreservingEol(text);
+  const demarkedForScanning = rawLines.map((l) => ({ ...l, content: unmarkLine(l.content) }));
+  const spans = findEntrySpans(demarkedForScanning);
+  const lineDecision = spans.reduce<ReadonlyMap<number, 'mark' | 'unmark'>>((acc, span) => {
+    const decision: 'mark' | 'unmark' = deliveredNames.has(span.name) ? 'mark' : 'unmark';
+    const entries = inclusiveRange(span.lineStart, span.lineEnd).map((i) => [i, decision] as const);
+    return new Map([...acc, ...entries]);
+  }, new Map());
+  return rawLines
+    .map((l, i) => {
+      const decision = lineDecision.get(i);
+      const content = decision === 'mark' ? markLine(l.content) : decision === 'unmark' ? unmarkLine(l.content) : l.content;
+      return content + l.eol;
+    })
+    .join('');
+}
+
+export type DokployPlainMergeProblem =
+  | { code: 'malformed_block' }
+  // Deliberately NOT keyed by a single `DotenvValueProblem` — `problems` can
+  // freely mix `DOKPLOY_VALUE_UNREPRESENTABLE` and `DOKPLOY_VALUE_HAS_REFERENCE`
+  // across different variables in the same delivery (see
+  // `describeDokployPlainMergeProblem`, which groups them back out).
+  | { code: 'value_problem'; problems: readonly DotenvValueNameProblem[] };
+
+/**
+ * Whole-env write for CAP-682's plaintext delivery: comments out every
+ * pre-existing active line outside the block for a delivered name (see
+ * `syncCommentedLines`), un-comments a previously-marked line for a name no
+ * longer delivered, and replaces (or first-writes) the managed block with
+ * one `KEY=value` line per delivered var — same in-place-replace / append
+ * placement rule `mergeManagedBlock` uses (reuses its own `blockEol`/
+ * `dominantEol` choice, so a redeploy's block framing never drifts).
+ *
+ * All-or-nothing on an unrepresentable value: nothing is written (not even
+ * the comment/uncomment half) — a partial write would leave the platform's
+ * env in a state no single `capy deploy` run produced.
+ */
+export function mergeManagedValuesBlock(
+  env: string | null,
+  values: ReadonlyArray<{ name: string; value: string }>,
+): { ok: true; env: string } | { ok: false; problem: DokployPlainMergeProblem } {
+  const split = splitManagedBlock(env);
+  if ('code' in split) return { ok: false, problem: { code: 'malformed_block' } };
+  const rendered = renderManagedValueLines(values);
+  if (!rendered.ok) {
+    return { ok: false, problem: { code: 'value_problem', problems: rendered.problems } };
+  }
+  const deliveredNames = new Set(values.map((v) => v.name));
+  const nextBefore = syncCommentedLines(split.before, deliveredNames);
+  const nextAfter = syncCommentedLines(split.after, deliveredNames);
+  const eol = split.hadBlock ? (split.blockEol ?? '\n') : dominantEol(nextBefore);
+  const block = [MANAGED_BEGIN, ...rendered.lines, MANAGED_END].join(eol);
+  const withBlock = split.hadBlock
+    ? nextBefore + block
+    : nextBefore.length > 0
+      ? nextBefore + eol + block
+      : block;
+  return { ok: true, env: withBlock + nextAfter };
+}
+
+/**
+ * The exact revert of `mergeManagedValuesBlock`: removes the managed block
+ * (`stripManagedBlock`'s own byte-exact rule) AND un-comments every line
+ * Capy marked outside it — `deliveredNames` is always empty here, so every
+ * currently-marked entry, for whichever names, comes back active. Byte-exact
+ * restore of the original env, the same guarantee `stripManagedBlock` alone
+ * gives for the block itself.
+ */
+export function removeManagedValuesBlock(env: string | null): { ok: true; env: string } | { ok: false } {
+  const split = splitManagedBlock(env);
+  if ('code' in split) return { ok: false };
+  const uncommentedBefore = syncCommentedLines(split.before, new Set());
+  const uncommentedAfter = syncCommentedLines(split.after, new Set());
+  const text = split.hadBlock
+    ? uncommentedBefore.replace(/\r?\n$/, '') + uncommentedAfter
+    : uncommentedBefore + uncommentedAfter;
+  return { ok: true, env: text };
+}
+
+/**
+ * Read-back verification (CAP-682): every delivered name that
+ * `dotenv.parse(env)` does NOT resolve to Capy's own value — because the
+ * write didn't land, a concurrent edit raced it, or (defensively) the
+ * comment/uncomment logic above has a gap somewhere. Empty means every
+ * delivered value round-trips exactly. Never logs `env` or any value —
+ * callers name ONLY the returned variable names.
+ */
+export function mismatchedDeliveredValues(
+  env: string,
+  values: ReadonlyArray<{ name: string; value: string }>,
+): readonly string[] {
+  const parsed = parseDotenv(env);
+  return values.filter((v) => parsed[v.name] !== v.value).map((v) => v.name);
+}
+
 /**
  * CAP-679: a Compose service with `createEnvFile: false` never gets an
  * `.env` file on disk, so a service that reads its config via `env_file:
@@ -1021,6 +1420,57 @@ export function describeEnvProblem(p: EnvMergeProblem): { reason: string; hint: 
 export function describeEnvWarning(w: EnvWarning): string {
   const verb = w.names.length === 1 ? 'is' : 'are';
   return `${w.names.join(', ')} ${verb} set in Dokploy too; ignored at boot.`;
+}
+
+/**
+ * `mergeManagedValuesBlock`'s refusal, as a printable reason + hint.
+ * `code` is the SPECIFIC `ErrorCode` when every offending variable shares
+ * the SAME `DotenvValueProblem`; when `p.problems` mixes
+ * `DOKPLOY_VALUE_UNREPRESENTABLE` and `DOKPLOY_VALUE_HAS_REFERENCE` across
+ * different variables in one delivery, neither specific code alone would
+ * correctly describe every variable, so the umbrella `DOKPLOY_VALUE_INVALID`
+ * is reported instead (Rule 5: always a real, stable code — never omitted).
+ * `reason`/`hint` name every variable and its own specific problem either
+ * way. `malformed_block` mirrors `describeEnvProblem`'s OWN pre-existing
+ * refusal, which has never carried a machine code (an edited/duplicated
+ * block is reported by `reason` alone, same as before CAP-682). Names
+ * only, never a value.
+ */
+// COPY-FLAG: new user-facing strings, minimal/neutral wording.
+export function describeDokployPlainMergeProblem(
+  p: DokployPlainMergeProblem,
+): { reason: string; hint: string; code?: string } {
+  if (p.code === 'malformed_block') {
+    return describeEnvProblem({ code: 'malformed_block', names: [] });
+  }
+  const referenceNames = p.problems.filter((x) => x.code === 'DOKPLOY_VALUE_HAS_REFERENCE').map((x) => x.name);
+  const unrepresentableNames = p.problems.filter((x) => x.code === 'DOKPLOY_VALUE_UNREPRESENTABLE').map((x) => x.name);
+  const referenceVerb = referenceNames.length === 1 ? 'contains' : 'contain';
+  const reasonParts = [
+    referenceNames.length
+      ? `${referenceNames.join(', ')} ${referenceVerb} a literal \${{ — Dokploy resolves that itself at deploy time, so Capy's own value would never reach the container unchanged`
+      : null,
+    unrepresentableNames.length
+      ? `${unrepresentableNames.join(', ')} cannot be written to Dokploy as an exact dotenv value — every quote style dotenv understands is already in use, or it contains a carriage return`
+      : null,
+  ].filter((s): s is string => !!s);
+  const hintParts = [
+    referenceNames.length ? `remove the literal \${{ from ${referenceNames.join(', ')}` : null,
+    unrepresentableNames.length
+      ? `change the value of ${unrepresentableNames.join(', ')} (drop one of ' " \` from it, or the carriage return)`
+      : null,
+  ].filter((s): s is string => !!s);
+  const code =
+    referenceNames.length > 0 && unrepresentableNames.length === 0
+      ? 'DOKPLOY_VALUE_HAS_REFERENCE'
+      : referenceNames.length === 0 && unrepresentableNames.length > 0
+        ? 'DOKPLOY_VALUE_UNREPRESENTABLE'
+        : 'DOKPLOY_VALUE_INVALID'; // mixed — umbrella code; reason/hint still say everything needed
+  return {
+    reason: reasonParts.join('; '),
+    hint: `${hintParts.join('; ')}, then re-run \`capy deploy\`.`,
+    code,
+  };
 }
 
 // ── Importable entries (for a future `capy connect dokploy`) ─────────────

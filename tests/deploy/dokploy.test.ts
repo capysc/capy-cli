@@ -6,10 +6,8 @@ import {
   envKeys,
   envProblems,
   envWarnings,
-  mergeManagedBlock,
+  mergeManagedValuesBlock,
   optionsProblem,
-  splitManagedBlock,
-  stripManagedBlock,
   baseUrlProblem,
   tokenEnvProblem,
   DokployDeployment,
@@ -19,6 +17,7 @@ import {
   MANAGED_END,
   OLD_RUNTIME_PAIR,
   RUNTIME_PAIR,
+  CAPY_OFF_MARKER,
 } from '../../src/deploy/adapters/dokploy';
 import { DeployContext, RemoveOfferContext, TargetConfig } from '../../src/deploy/adapter';
 import { getAdapter } from '../../src/deploy/registry';
@@ -46,7 +45,8 @@ interface Step {
 const BASE = 'https://dokploy.example.com';
 const TOKEN = 'dk_test_token';
 const APP_ID = 'app_123';
-const PAIR = { secretsBlob: 'QkxPQg==', projectKey: 'ab'.repeat(32), deployId: 'cd'.repeat(32) };
+/** Delivered plain values for the default `target()` (vars: DATABASE_URL, STRIPE_KEY) — fake, non-secret test values only. */
+const VALUES = { DATABASE_URL: 'postgres://example-not-real/db', STRIPE_KEY: 'sk_test_not_real_123' };
 
 function scripted(steps: readonly Step[]): { fetch: FetchLike; done: () => boolean } {
   const it = steps[Symbol.iterator]();
@@ -78,6 +78,10 @@ const app = (overrides: Record<string, unknown> = {}) => ({
   createEnvFile: false,
   ...overrides,
 });
+
+/** A "clean CI preflight" application: auto-deploy on, tracking the PR base, no watch-path filter. */
+const ciReadyApp = (overrides: Record<string, unknown> = {}) =>
+  app({ autoDeploy: true, branch: 'main', ...overrides });
 
 const get = (path: string, query: Record<string, string>) => (r: Req) => {
   expect(r.method).toBe('GET');
@@ -114,8 +118,7 @@ const target = (overrides: Partial<TargetConfig> = {}): TargetConfig => ({
 });
 
 const ctx = (overrides: Partial<DeployContext> = {}): DeployContext => ({
-  env: {},
-  deployToken: PAIR,
+  env: VALUES,
   dryRun: false,
   cwd: '/tmp',
   ...overrides,
@@ -154,12 +157,13 @@ const OLD = deployment('dep_old', 'done', '2026-09-01T00:00:00.000Z');
 // ── Registry ───────────────────────────────────────────────────────────────
 
 describe('dokploy — registry', () => {
-  test('is a registered adapter that ships the capy run pair', () => {
+  test('is a registered adapter that ships plain values, CI mode by default (CAP-682)', () => {
     const a = getAdapter('dokploy');
     expect(a?.label).toBe('Dokploy');
-    expect(a?.needsDeployToken).toBe(true);
+    expect(a?.needsDeployToken).toBe(false);
     expect(a?.varKind).toBe('runtime');
-    expect(a?.defaultMode).toBe('direct');
+    expect(a?.defaultMode).toBe('ci');
+    expect(a?.ciOnly).toBeFalsy();
     expect(a?.requires.binaries).toEqual([]);
   });
 });
@@ -245,74 +249,34 @@ describe('dokploy — client', () => {
       code: 'unreachable',
     });
   });
+
+  test('getApplication reads the CAP-682 CI preflight fields (autoDeploy, customGitBranch, watchPaths)', async () => {
+    const s = scripted([
+      readApp(app({ autoDeploy: true, customGitBranch: 'main', watchPaths: ['keep.lock', 'src/**'] })),
+    ]);
+    const got = await createDokployClient(BASE, TOKEN, s.fetch).getApplication(APP_ID);
+    expect(got.autoDeploy).toBe(true);
+    expect(got.customGitBranch).toBe('main');
+    expect(got.watchPaths).toEqual(['keep.lock', 'src/**']);
+  });
+
+  test('getApplication defaults the CI preflight fields to null when Dokploy omits them', async () => {
+    const s = scripted([readApp(app())]);
+    const got = await createDokployClient(BASE, TOKEN, s.fetch).getApplication(APP_ID);
+    expect(got.autoDeploy).toBeNull();
+    expect(got.customGitBranch).toBeNull();
+    expect(got.watchPaths).toBeNull();
+  });
 });
 
-// ── Env merge ──────────────────────────────────────────────────────────────
+// ── Env merge (reserved-name primitives, unchanged by CAP-682) ─────────────
 
-/** `splitManagedBlock` + `mergeManagedBlock` in one step — the production flow. */
-function mergedEnv(env: string | null, pair: { secretsBlob: string; projectKey: string }): string {
-  const split = splitManagedBlock(env);
-  if ('code' in split) throw new Error('unexpected problem');
-  return mergeManagedBlock(split, pair);
-}
-
-/** `splitManagedBlock` + `stripManagedBlock` in one step — the revert side. */
-function stripEnv(env: string | null): string {
-  const split = splitManagedBlock(env);
-  if ('code' in split) throw new Error('unexpected problem');
-  return stripManagedBlock(split);
-}
-
-const PAIR_B = { secretsBlob: 'TkVX', projectKey: 'ef'.repeat(32) };
-
-describe('dokploy — env merge', () => {
+describe('dokploy — env merge (reserved names)', () => {
   test('envKeys reads KEY= and export KEY= lines, skipping comments and blanks', () => {
     expect(envKeys(['A=1', 'export B=2', '# C=3', '', '  D = 4', 'not a line'])).toEqual(['A', 'B', 'D']);
   });
 
-  test('first write appends the block and keeps every other line verbatim', () => {
-    const split = splitManagedBlock('NODE_ENV=production\n# note\nPORT=3000');
-    expect('code' in split).toBe(false);
-    if ('code' in split) return;
-    expect(split.hadBlock).toBe(false);
-    expect(mergeManagedBlock(split, PAIR)).toBe(
-      [
-        'NODE_ENV=production',
-        '# note',
-        'PORT=3000',
-        MANAGED_BEGIN,
-        `_SECRETS_BLOB=${PAIR.secretsBlob}`,
-        `_PROJECT_KEY=${PAIR.projectKey}`,
-        MANAGED_END,
-      ].join('\n'),
-    );
-  });
-
-  test('an empty Dokploy env gets just the block', () => {
-    expect(mergedEnv(null, PAIR).split('\n')[0]).toBe(MANAGED_BEGIN);
-  });
-
-  test('a later write replaces the block in place, not a second copy', () => {
-    const first = mergedEnv('A=1', PAIR);
-    const withUserEdit = `${first}\nB=2`;
-    const split = splitManagedBlock(withUserEdit);
-    if ('code' in split) throw new Error('unexpected problem');
-    expect(split.hadBlock).toBe(true);
-    const second = mergeManagedBlock(split, PAIR_B);
-    expect(second.split('\n').filter((l) => l === MANAGED_BEGIN)).toHaveLength(1);
-    expect(second).toContain('A=1');
-    expect(second).toContain('B=2');
-    expect(second).toContain('_SECRETS_BLOB=TkVX');
-    expect(second).not.toContain(PAIR.secretsBlob);
-  });
-
-  test('the runtime pair inside Capy\'s block is not a collision', () => {
-    expect(envProblems(mergedEnv('A=1', PAIR))).toBeNull();
-  });
-
-  // Changed: `envProblems` no longer takes a `selectedVars` argument — that
-  // check moved to `envWarnings` (rule 3 is now a warning, not a refusal).
-  test('the new-name runtime pair Capy did not write is refused', () => {
+  test('the new-name runtime pair Capy no longer writes for Dokploy is still refused outside the block', () => {
     expect(envProblems(`${RUNTIME_PAIR[0]}=old\n${RUNTIME_PAIR[1]}=old`)).toEqual({
       code: 'reserved_outside_block',
       names: [...RUNTIME_PAIR],
@@ -320,120 +284,27 @@ describe('dokploy — env merge', () => {
     expect(envProblems(`export ${RUNTIME_PAIR[1]}=old`)?.code).toBe('reserved_outside_block');
   });
 
-  // New: rule 2 must also cover the pair the adapter USED to write, so an
-  // old-name leftover from a prior deploy is never silently adopted as Capy's.
-  test('the old-name runtime pair Capy no longer writes is also refused', () => {
+  test('the old-name runtime pair is also refused', () => {
     expect(envProblems(`${OLD_RUNTIME_PAIR[0]}=old\n${OLD_RUNTIME_PAIR[1]}=old`)).toEqual({
       code: 'reserved_outside_block',
       names: [...OLD_RUNTIME_PAIR],
     });
-    expect(envProblems(`export ${OLD_RUNTIME_PAIR[1]}=old`)?.code).toBe('reserved_outside_block');
-  });
-
-  // Changed: was `envProblems(..., selectedVars)` returning a
-  // `selected_var_override` refusal. Rule 3 now warns instead of refusing —
-  // `capy run`'s new pair lets the decrypted value win, so a stale
-  // dashboard value is shadowed rather than dangerous.
-  test('a selected variable also set in Dokploy is a warning, not a refusal', () => {
-    expect(envProblems('STRIPE_KEY=stale\nDATABASE_URL=stale\nPORT=1')).toBeNull();
-    expect(
-      envWarnings('STRIPE_KEY=stale\nDATABASE_URL=stale\nPORT=1', ['STRIPE_KEY', 'DATABASE_URL', 'X']),
-    ).toEqual({
-      code: 'DOKPLOY_SHADOWED_VAR',
-      names: ['DATABASE_URL', 'STRIPE_KEY'],
-    });
-  });
-
-  test('an unselected variable in Dokploy is left alone', () => {
-    expect(envProblems('PORT=3000')).toBeNull();
-    expect(envWarnings('PORT=3000', ['DATABASE_URL'])).toBeNull();
   });
 
   test('an edited or duplicated block is refused rather than guessed at', () => {
     expect(envProblems(`${MANAGED_BEGIN}\n${RUNTIME_PAIR[0]}=x`)?.code).toBe('malformed_block');
     expect(envProblems(`${MANAGED_END}\n${MANAGED_BEGIN}`)?.code).toBe('malformed_block');
-    const twice = `${mergedEnv(null, PAIR)}\n${mergedEnv(null, PAIR)}`;
-    expect(envProblems(twice)?.code).toBe('malformed_block');
   });
 
-  test('stripManagedBlock is the exact revert of a first write', () => {
-    const outside = 'NODE_ENV=production\n# note\nPORT=3000';
-    expect(stripEnv(mergedEnv(outside, PAIR))).toBe(outside);
-  });
-
-  // ── Reversibility: strip(merge(x)) === x, byte for byte ────────────────
-  //
-  // Capy only ever adds its own block. Everything outside it — every line's
-  // own terminator, the trailing-newline state, however many trailing blank
-  // lines were already there — comes back exactly as it was before Capy's
-  // first write, whether the block was written once or replaced several
-  // times since.
-  describe('reversibility: byte for byte', () => {
-    const CASES: ReadonlyArray<[string, string | null]> = [
-      ['empty string', ''],
-      ['null (Dokploy has no env yet)', null],
-      ['just a newline', '\n'],
-      ['LF, no trailing newline', 'A=1\nB=2'],
-      ['LF, with a trailing newline', 'A=1\nB=2\n'],
-      ['CRLF, no trailing newline', 'A=1\r\nB=2'],
-      ['CRLF, with a trailing newline', 'A=1\r\nB=2\r\n'],
-      ['mixed LF and CRLF', 'A=1\r\nB=2\nC=3\r\n'],
-      ['multiple trailing blank lines', 'A=1\n\n\n'],
-      ['a comment', '# hello\nA=1\n'],
-      ['a shadowed var', 'STRIPE_KEY=stale\nPORT=3000\n'],
-      ['a single line, no newline at all', 'A=1'],
-    ];
-
-    for (const [label, x] of CASES) {
-      test(`${label}: strip(merge(x)) === x`, () => {
-        expect(stripEnv(mergedEnv(x, PAIR))).toBe(x ?? '');
-      });
-
-      test(`${label}: strip(merge(merge(x, pairA), pairB)) === x`, () => {
-        const once = mergedEnv(x, PAIR);
-        const twice = mergedEnv(once, PAIR_B);
-        expect(stripEnv(twice)).toBe(x ?? '');
-      });
-    }
-
-    test('an empty env and a null env produce byte-identical first writes', () => {
-      expect(mergedEnv('', PAIR)).toBe(mergedEnv(null, PAIR));
-    });
-
-    test('a first write uses the dominant line ending, separator only as needed', () => {
-      expect(mergedEnv('A=1\r\nB=2\r\n', PAIR)).toContain(`A=1\r\nB=2\r\n\r\n${MANAGED_BEGIN}`);
-      expect(mergedEnv('A=1\nB=2\n', PAIR)).toContain(`A=1\nB=2\n\n${MANAGED_BEGIN}`);
-      // No existing content at all: no separator, just the block.
-      expect(mergedEnv('', PAIR).startsWith(MANAGED_BEGIN)).toBe(true);
-    });
-
-    test("a replace reuses the block's own line ending, never the outside content's", () => {
-      const firstCrlf = mergedEnv('A=1\r\n', PAIR); // block first written against a CRLF env
-      // Hand-edit outside the block afterwards, in LF — must not change how a
-      // later replace joins the block's own 4 lines.
-      const withLfLineAdded = firstCrlf.replace('A=1\r\n\r\n', 'A=1\r\n\r\nC=3\n');
-      const split = splitManagedBlock(withLfLineAdded);
-      if ('code' in split) throw new Error('unexpected problem');
-      expect(split.blockEol).toBe('\r\n');
-      const replaced = mergeManagedBlock(split, PAIR_B);
-      expect(replaced).toContain(`${MANAGED_BEGIN}\r\n`);
-      expect(replaced).toContain('A=1\r\n\r\nC=3\n');
-    });
-  });
-
-  // ── Collision detection + import candidates: CRLF-safe ─────────────────
-
-  test('collision detection sees a reserved name even on a CRLF-terminated line', () => {
-    expect(envProblems(`${RUNTIME_PAIR[0]}=old\r\n${RUNTIME_PAIR[1]}=old\r\n`)).toEqual({
-      code: 'reserved_outside_block',
-      names: [...RUNTIME_PAIR],
-    });
-  });
-
-  test('a shadowed-var warning is found on a CRLF-terminated line, and the name carries no \\r', () => {
-    const warning = envWarnings('STRIPE_KEY=stale\r\nPORT=1\r\n', ['STRIPE_KEY']);
-    expect(warning).toEqual({ code: 'DOKPLOY_SHADOWED_VAR', names: ['STRIPE_KEY'] });
-    expect(warning?.names.some((n) => n.includes('\r'))).toBe(false);
+  // `envWarnings`/`DOKPLOY_SHADOWED_VAR` is UNCHANGED as a pure function
+  // (kept for back-compat — see dokployApi.ts's own doc) but CAP-682's
+  // adapter no longer CALLS it: a shadow is now resolved by commenting the
+  // outside line out, not warned about. See the "preflight"/"deploy"
+  // describe blocks below for the behavior that replaced it.
+  test('envWarnings itself is untouched — still flags a shadowed selected var', () => {
+    expect(
+      envWarnings('STRIPE_KEY=stale\nDATABASE_URL=stale\nPORT=1', ['STRIPE_KEY', 'DATABASE_URL', 'X']),
+    ).toEqual({ code: 'DOKPLOY_SHADOWED_VAR', names: ['DATABASE_URL', 'STRIPE_KEY'] });
   });
 });
 
@@ -504,30 +375,110 @@ describe('dokploy — preflight', () => {
     expect(s.done()).toBe(true);
   });
 
-  // Changed: rule 3 (a selected var shadowed outside the block) used to fail
-  // preflight. It is now a warning — preflight still passes, and reports it
-  // as structured `warnings` for the terminal/--json to print.
-  test('a selected variable shadowed outside the block passes preflight with a warning', async () => {
+  // CAP-682: a selected var also set as a plain value outside the block is no
+  // longer a preflight WARNING — it is silently resolvable (the deploy will
+  // comment that line out), so preflight just passes clean, direct mode.
+  test('a selected variable shadowed outside the block passes preflight with NO warning (it will be commented, not shadowed)', async () => {
     const s = scripted([readApp(app({ env: 'DATABASE_URL=stale' }))]);
     const r = await adapterWith(s.fetch).preflight(target(), { cwd: '/tmp' });
     expect(r.ok).toBe(true);
-    expect(r.warnings).toEqual([
-      { code: 'DOKPLOY_SHADOWED_VAR', names: ['DATABASE_URL'], message: expect.stringContaining('DATABASE_URL') },
-    ]);
+    expect(r.warnings ?? []).toEqual([]);
     expect(s.done()).toBe(true);
   });
 
-  test('a clean application passes', async () => {
+  test('a clean application passes, direct mode', async () => {
     const s = scripted([readApp()]);
     expect(await adapterWith(s.fetch).preflight(target(), { cwd: '/tmp' })).toEqual({ ok: true });
     expect(s.done()).toBe(true);
+  });
+
+  // ── CI preflight (CAP-682) ────────────────────────────────────────────
+  describe('CI mode', () => {
+    const ciTarget = (overrides: Partial<TargetConfig> = {}) =>
+      target({ mode: 'ci', gitBaseBranch: 'main', ...overrides });
+
+    test('direct-mode targets are never subject to any of these checks, even with autoDeploy off', async () => {
+      const s = scripted([readApp(app({ autoDeploy: false }))]);
+      const r = await adapterWith(s.fetch).preflight(target(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+    });
+
+    test('a clean CI-ready application passes', async () => {
+      const s = scripted([readApp(ciReadyApp())]);
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+      expect(s.done()).toBe(true);
+    });
+
+    test('auto-deploy off refuses with DOKPLOY_AUTODEPLOY_OFF', async () => {
+      const s = scripted([readApp(ciReadyApp({ autoDeploy: false }))]);
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_AUTODEPLOY_OFF');
+    });
+
+    test('autoDeploy null (Dokploy never returned it) refuses the same way as false', async () => {
+      const s = scripted([readApp(app({ branch: 'main' }))]); // no autoDeploy field at all
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_AUTODEPLOY_OFF');
+    });
+
+    test('a tracked branch that differs from the PR base refuses with DOKPLOY_BRANCH_MISMATCH', async () => {
+      const s = scripted([readApp(ciReadyApp({ branch: 'develop' }))]);
+      const r = await adapterWith(s.fetch).preflight(ciTarget({ gitBaseBranch: 'main' }), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_BRANCH_MISMATCH');
+      expect(r.reason).toContain('develop');
+      expect(r.reason).toContain('main');
+    });
+
+    test('customGitBranch is read too, for a custom git source with no `branch` field', async () => {
+      const s = scripted([readApp(app({ autoDeploy: true, branch: undefined, customGitBranch: 'main' }))]);
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+    });
+
+    test('no tracked branch at all (e.g. a docker-image source) refuses with DOKPLOY_BRANCH_MISMATCH, never a false pass', async () => {
+      const s = scripted([readApp(app({ autoDeploy: true }))]); // no branch, no customGitBranch
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_BRANCH_MISMATCH');
+    });
+
+    test('watch paths that exclude keep.lock refuse with DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP', async () => {
+      const s = scripted([readApp(ciReadyApp({ watchPaths: ['src/**', 'package.json'] }))]);
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP');
+      expect(r.reason).toContain('keep.lock');
+    });
+
+    test('watch paths that DO cover keep.lock pass', async () => {
+      const s = scripted([readApp(ciReadyApp({ watchPaths: ['keep.lock', 'src/**'] }))]);
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+    });
+
+    test('an empty/null watch-paths list means "watches everything" — no refusal', async () => {
+      const s = scripted([readApp(ciReadyApp({ watchPaths: [] }))]);
+      const r = await adapterWith(s.fetch).preflight(ciTarget(), { cwd: '/tmp' });
+      expect(r.ok).toBe(true);
+    });
   });
 });
 
 // ── Deploy ─────────────────────────────────────────────────────────────────
 
 describe('dokploy — deploy', () => {
-  const expectedEnv = mergedEnv('NODE_ENV=production\n# a comment\nPORT=3000', PAIR);
+  const expectedEnv = (() => {
+    const merged = mergeManagedValuesBlock('NODE_ENV=production\n# a comment\nPORT=3000', [
+      { name: 'DATABASE_URL', value: VALUES.DATABASE_URL },
+      { name: 'STRIPE_KEY', value: VALUES.STRIPE_KEY },
+    ]);
+    if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
+    return merged.env;
+  })();
 
   const saveWith = (env: string): Step => ({
     expect: post('application.saveEnvironment', (body) =>
@@ -549,7 +500,7 @@ describe('dokploy — deploy', () => {
     json: true,
   };
 
-  test('delivers the pair, keeps build fields, triggers, and reports success from polling', async () => {
+  test('delivers plain values, keeps build fields, triggers, and reports success from polling (direct mode)', async () => {
     const s = scripted([
       readApp(),
       saveWith(expectedEnv),
@@ -569,14 +520,17 @@ describe('dokploy — deploy', () => {
       ['application.deploy', 'ok'],
       ['deployment', 'ok'],
     ]);
-    expect(r.steps[1].detail).toContain('added');
+    expect(r.steps[1].detail).toContain('2 var(s) written plaintext');
     expect(r.steps[2].detail).toBe('accepted');
     expect(r.steps[3].detail).toContain('succeeded (dep_new)');
-    expect(r.epilogue).toContain('capy run -- <your start command>');
-    expect(r.epilogue).toContain(`capy deploy revoke ${PAIR.deployId}`);
+    // No more capy-run/revoke language — no deploy token was minted.
+    expect(r.epilogue).toContain('No `capy run` step needed');
+    expect(r.epilogue).toContain('capy deploy targets-remove dokploy-prod');
+    expect(r.epilogue).not.toContain('capy run --');
+    expect(r.epilogue).not.toContain('revoke');
   });
 
-  test('only the runtime pair reaches Dokploy — never an individual secret', async () => {
+  test('values reach Dokploy in plaintext — that is the whole point of CAP-682, not a leak', async () => {
     const s = scripted([
       readApp(),
       saveWith(expectedEnv),
@@ -585,13 +539,19 @@ describe('dokploy — deploy', () => {
       trigger,
       listDeployments([deployment('dep_new', 'done', '2026-09-21T00:00:00.000Z')]),
     ]);
-    const r = await adapterWith(s.fetch).deploy(
-      target(),
-      ctx({ env: { DATABASE_URL: 'postgres://plaintext' } }),
-    );
+    const r = await adapterWith(s.fetch).deploy(target(), ctx());
     expect(r.ok).toBe(true);
-    expect(expectedEnv).not.toContain('postgres://plaintext');
-    expect(envKeys(expectedEnv.split('\n'))).toEqual(['NODE_ENV', 'PORT', ...RUNTIME_PAIR]);
+    expect(expectedEnv).toContain(VALUES.DATABASE_URL);
+    expect(expectedEnv).toContain(VALUES.STRIPE_KEY);
+    expect(envKeys(expectedEnv.split('\n'))).toEqual(['NODE_ENV', 'PORT', 'DATABASE_URL', 'STRIPE_KEY']);
+  });
+
+  test('a var missing from the decrypted branch fails before any request', async () => {
+    const s = scripted([]);
+    const r = await adapterWith(s.fetch).deploy(target(), ctx({ env: { DATABASE_URL: VALUES.DATABASE_URL } }));
+    expect(r.ok).toBe(false);
+    expect(r.steps[r.steps.length - 1].detail).toContain('missing in branch production: STRIPE_KEY');
+    expect(s.done()).toBe(true);
   });
 
   test('a failed deployment is reported with its log', async () => {
@@ -694,12 +654,16 @@ describe('dokploy — deploy', () => {
     expect(r.steps[r.steps.length - 1]).toMatchObject({ label: 'env merge', status: 'fail' });
   });
 
-  // Changed: this used to be `envProblems`'s `selected_var_override` refusal
-  // (stopped before any write). Rule 3 is now a warning: the deploy proceeds,
-  // the shadowed line outside the block is carried through byte-for-byte
-  // (never touched), and the shadow is reported as structured `warnings`.
-  test('a selected variable shadowed outside the block warns and proceeds, leaving that line untouched', async () => {
-    const shadowedEnv = mergedEnv('STRIPE_KEY=stale', PAIR);
+  // CAP-682: a selected var also active outside the block is now COMMENTED
+  // OUT (not left untouched with a warning) — the platform never sees two
+  // definitions of the same name.
+  test('a selected variable shadowed outside the block is commented out, not warned about', async () => {
+    const merged = mergeManagedValuesBlock('STRIPE_KEY=stale', [
+      { name: 'DATABASE_URL', value: VALUES.DATABASE_URL },
+      { name: 'STRIPE_KEY', value: VALUES.STRIPE_KEY },
+    ]);
+    if (!merged.ok) throw new Error('unexpected');
+    const shadowedEnv = merged.env;
     const s = scripted([
       readApp(app({ env: 'STRIPE_KEY=stale' })),
       saveWith(shadowedEnv),
@@ -711,20 +675,22 @@ describe('dokploy — deploy', () => {
     const r = await adapterWith(s.fetch).deploy(target(), ctx());
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(true);
-    expect(r.warnings).toEqual([
-      { code: 'DOKPLOY_SHADOWED_VAR', names: ['STRIPE_KEY'], message: expect.stringContaining('STRIPE_KEY') },
-    ]);
-    // the shadowed line rode through the write byte-for-byte, untouched
-    expect(shadowedEnv.split('\n')).toContain('STRIPE_KEY=stale');
+    expect(r.warnings ?? []).toEqual([]);
+    // the old outside line is commented, never deleted
+    expect(shadowedEnv.split('\n')).toContain(`${CAPY_OFF_MARKER}STRIPE_KEY=stale`);
+    expect(shadowedEnv).not.toContain('\nSTRIPE_KEY=stale\n');
+    // Capy's own block carries the live value
+    expect(shadowedEnv).toContain(`STRIPE_KEY='${VALUES.STRIPE_KEY}'`);
   });
 
   test('an existing Capy block is replaced, not duplicated', async () => {
-    const previous = mergedEnv('NODE_ENV=production\n# a comment\nPORT=3000', {
-      secretsBlob: 'T0xE',
-      projectKey: '00'.repeat(32),
-    });
+    const previousMerged = mergeManagedValuesBlock('NODE_ENV=production\n# a comment\nPORT=3000', [
+      { name: 'DATABASE_URL', value: 'old-value' },
+      { name: 'STRIPE_KEY', value: 'old-key' },
+    ]);
+    if (!previousMerged.ok) throw new Error('unexpected');
     const s = scripted([
-      readApp(app({ env: previous })),
+      readApp(app({ env: previousMerged.env })),
       saveWith(expectedEnv),
       readApp(app({ env: expectedEnv })),
       listDeployments([]),
@@ -734,20 +700,44 @@ describe('dokploy — deploy', () => {
     const r = await adapterWith(s.fetch).deploy(target(), ctx());
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(true);
-    expect(r.steps[1].detail).toContain('replaced');
+    expect(expectedEnv.split('\n').filter((l) => l === MANAGED_BEGIN)).toHaveLength(1);
   });
 
-  test('CI mode writes the pair and leaves the deploy to the pipeline', async () => {
+  test('CI mode writes plain values and NEVER calls application.deploy — merging the PR is the deploy signal', async () => {
     const s = scripted([readApp(), saveWith(expectedEnv), readApp(app({ env: expectedEnv }))]);
-    const r = await adapterWith(s.fetch).deploy(target(), ctx({ secretsOnly: true }));
+    const r = await adapterWith(s.fetch).deploy(target({ mode: 'ci' }), ctx({ secretsOnly: true }));
     expect(s.done()).toBe(true);
     expect(r.ok).toBe(true);
     expect(r.steps[r.steps.length - 1]).toMatchObject({ label: 'application.deploy', status: 'skip' });
+    expect(r.epilogue).toContain('No `capy run` step needed');
+  });
+
+  test('--no-deploy writes plain values and skips the trigger, same as CI mode structurally', async () => {
+    const s = scripted([readApp(), saveWith(expectedEnv), readApp(app({ env: expectedEnv }))]);
+    const r = await adapterWith(s.fetch).deploy(target(), ctx({ noDeploy: true }));
+    expect(s.done()).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.steps[r.steps.length - 1]).toMatchObject({ label: 'application.deploy', status: 'skip', detail: '--no-deploy' });
+  });
+
+  test('direct mode (no secretsOnly) DOES call application.deploy and polls to a real outcome', async () => {
+    const s = scripted([
+      readApp(),
+      saveWith(expectedEnv),
+      readApp(app({ env: expectedEnv })),
+      listDeployments([]),
+      trigger,
+      listDeployments([deployment('dep_new', 'done', '2026-09-21T00:00:00.000Z')]),
+    ]);
+    const r = await adapterWith(s.fetch).deploy(target({ mode: 'direct' }), ctx());
+    expect(s.done()).toBe(true);
+    expect(r.ok).toBe(true);
+    expect(r.steps.some((st) => st.label === 'application.deploy' && st.status === 'ok')).toBe(true);
   });
 
   test('a dry run makes no request', async () => {
     const s = scripted([]);
-    const r = await adapterWith(s.fetch).deploy(target(), ctx({ dryRun: true, deployToken: undefined }));
+    const r = await adapterWith(s.fetch).deploy(target(), ctx({ dryRun: true }));
     expect(r.ok).toBe(true);
     expect(s.done()).toBe(true);
   });
@@ -760,11 +750,20 @@ describe('dokploy — deploy', () => {
     expect(r.steps[r.steps.length - 1].detail).toContain('rejected the API token');
   });
 
-  test('no minted pair means no request', async () => {
-    const s = scripted([]);
-    const r = await adapterWith(s.fetch).deploy(target(), ctx({ deployToken: undefined }));
-    expect(r.ok).toBe(false);
-    expect(s.done()).toBe(true);
+  test('no deploy token is ever asked for — DeployContext.deployToken is never read', async () => {
+    const s = scripted([
+      readApp(),
+      saveWith(expectedEnv),
+      readApp(app({ env: expectedEnv })),
+      listDeployments([]),
+      trigger,
+      listDeployments([deployment('dep_new', 'done', '2026-09-21T00:00:00.000Z')]),
+    ]);
+    // ctx() never sets `deployToken` at all — a deploy still succeeds,
+    // proving the adapter never requires one (CAP-682: needsDeployToken is
+    // false for Dokploy).
+    const r = await adapterWith(s.fetch).deploy(target(), ctx());
+    expect(r.ok).toBe(true);
   });
 });
 
@@ -772,11 +771,18 @@ describe('dokploy — deploy', () => {
 //
 // `capy deploy remove <target>` always removes the LOCAL target config; for
 // a Dokploy target it also OFFERS (yes/no, default no) to strip the Capy
-// block from the Dokploy Application env. `onRemove` is the hook that does
-// the offering — deployCommand.ts only wires the terminal confirm.
+// block from the Dokploy Application env AND un-comment whatever Capy
+// commented (CAP-682) — a byte-exact restore, not just a block strip.
 
 describe('dokploy — remove', () => {
-  const removedEnv = mergedEnv('NODE_ENV=production\n# a comment\nPORT=3000', PAIR);
+  const removedEnv = (() => {
+    const merged = mergeManagedValuesBlock('NODE_ENV=production\n# a comment\nPORT=3000', [
+      { name: 'DATABASE_URL', value: VALUES.DATABASE_URL },
+      { name: 'STRIPE_KEY', value: VALUES.STRIPE_KEY },
+    ]);
+    if (!merged.ok) throw new Error('unexpected');
+    return merged.env;
+  })();
   const strippedEnv = 'NODE_ENV=production\n# a comment\nPORT=3000';
 
   const neverAsked = async (): Promise<boolean> => {
@@ -811,6 +817,25 @@ describe('dokploy — remove', () => {
     expect(r).toEqual({ ok: true, code: 'stripped', detail: expect.stringContaining('Removed') });
   });
 
+  test('yes: also un-comments a line Capy had commented for a shadowed var', async () => {
+    const beforeRemoval = mergeManagedValuesBlock('STRIPE_KEY=stale', [
+      { name: 'DATABASE_URL', value: VALUES.DATABASE_URL },
+      { name: 'STRIPE_KEY', value: VALUES.STRIPE_KEY },
+    ]);
+    if (!beforeRemoval.ok) throw new Error('unexpected');
+    const s = scripted([
+      readApp(app({ env: beforeRemoval.env })),
+      {
+        expect: post('application.saveEnvironment', (body) => expect(body.env).toBe('STRIPE_KEY=stale')),
+        json: true,
+      },
+      readApp(app({ env: 'STRIPE_KEY=stale' })),
+    ]);
+    const r = await adapterWith(s.fetch).onRemove?.(target(), confirmCtx(true, true));
+    expect(s.done()).toBe(true);
+    expect(r?.ok).toBe(true);
+  });
+
   test('no: declines and leaves the environment untouched', async () => {
     const s = scripted([readApp(app({ env: removedEnv }))]);
     const r = await adapterWith(s.fetch).onRemove?.(target(), confirmCtx(true, false));
@@ -834,6 +859,46 @@ describe('dokploy — remove', () => {
 
   test('no Capy block found: nothing to remove, no prompt needed', async () => {
     const s = scripted([readApp(app({ env: 'NODE_ENV=production' }))]);
+    const r = await adapterWith(s.fetch).onRemove?.(target(), {
+      cwd: '/tmp',
+      interactive: true,
+      confirm: neverAsked,
+    });
+    expect(s.done()).toBe(true);
+    expect(r).toEqual({ ok: true, code: 'nothing_to_remove', detail: expect.any(String) });
+  });
+
+  test('a block deleted BY HAND, leaving stray "# capy:off " lines behind, is still offered for cleanup — never reported as nothing_to_remove', async () => {
+    // Simulates someone deleting just the begin/end markers + block content
+    // in the Dokploy dashboard, by hand, leaving the commented lines Capy
+    // added sitting there — ordinary comments to Dokploy, so nothing else
+    // would ever clean them up. `splitManagedBlock` sees `hadBlock: false`
+    // here (no markers at all), but there IS still work to do.
+    const strayEnv = `${CAPY_OFF_MARKER}STRIPE_KEY=stale\nNODE_ENV=production\n`;
+    const restoredEnv = 'STRIPE_KEY=stale\nNODE_ENV=production\n';
+    const s = scripted([
+      readApp(app({ env: strayEnv })),
+      {
+        expect: post('application.saveEnvironment', (body) =>
+          expect(body).toEqual({
+            applicationId: APP_ID,
+            env: restoredEnv,
+            buildArgs: 'NPM_TOKEN=build-only',
+            buildSecrets: 'SENTRY_AUTH=build-secret',
+            createEnvFile: false,
+          }),
+        ),
+        json: true,
+      },
+      readApp(app({ env: restoredEnv })),
+    ]);
+    const r = await adapterWith(s.fetch).onRemove?.(target(), confirmCtx(true, true));
+    expect(s.done()).toBe(true);
+    expect(r).toEqual({ ok: true, code: 'stripped', detail: expect.stringContaining('Un-commented') });
+  });
+
+  test('a block deleted by hand with NO stray marked lines left behind really is nothing to remove', async () => {
+    const s = scripted([readApp(app({ env: 'NODE_ENV=production\nSTRIPE_KEY=whatever\n' }))]);
     const r = await adapterWith(s.fetch).onRemove?.(target(), {
       cwd: '/tmp',
       interactive: true,
@@ -877,6 +942,29 @@ describe('dokploy — remove', () => {
     expect(s.done()).toBe(true);
     expect(r?.code).toBe('no_token');
   });
+
+  test('migration: an env still holding an OLD blob-style Capy block is replaced cleanly on removal', async () => {
+    // Simulates a leftover block from the pre-CAP-682 design (e.g.
+    // SlideSpeak's backend-preview): the block content is the old pair, but
+    // `splitManagedBlock`/`removeManagedValuesBlock` don't care what is
+    // INSIDE the block — they cut the whole thing out by its markers either
+    // way, so migration needs no special code path.
+    const oldBlobEnv = [
+      'NODE_ENV=production',
+      MANAGED_BEGIN,
+      '_SECRETS_BLOB=old-blob-value',
+      '_PROJECT_KEY=' + 'ab'.repeat(32),
+      MANAGED_END,
+    ].join('\n');
+    const s = scripted([
+      readApp(app({ env: oldBlobEnv })),
+      { expect: post('application.saveEnvironment', (body) => expect(body.env).toBe('NODE_ENV=production')), json: true },
+      readApp(app({ env: 'NODE_ENV=production' })),
+    ]);
+    const r = await adapterWith(s.fetch).onRemove?.(target(), confirmCtx(true, true));
+    expect(s.done()).toBe(true);
+    expect(r?.ok).toBe(true);
+  });
 });
 
 // ── System store token resolution (CAP-664) ─────────────────────────────────
@@ -894,7 +982,14 @@ describe('dokploy — remove', () => {
 
 describe('dokploy — system store token resolution', () => {
   const noNetwork = scripted([]);
-  const expectedEnv = mergedEnv('NODE_ENV=production\n# a comment\nPORT=3000', PAIR);
+  const expectedEnv = (() => {
+    const merged = mergeManagedValuesBlock('NODE_ENV=production\n# a comment\nPORT=3000', [
+      { name: 'DATABASE_URL', value: VALUES.DATABASE_URL },
+      { name: 'STRIPE_KEY', value: VALUES.STRIPE_KEY },
+    ]);
+    if (!merged.ok) throw new Error('unexpected');
+    return merged.env;
+  })();
   const saveWith = (env: string): Step => ({
     expect: post('application.saveEnvironment', (body) =>
       expect(body).toEqual({

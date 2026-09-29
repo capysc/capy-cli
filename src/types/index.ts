@@ -546,6 +546,40 @@ export const ERROR_CODES = {
   RUN_SECRETS_BLOB_INVALID: 'RUN_SECRETS_BLOB_INVALID',
   /** `_PROJECT_KEY` (the new runtime pair) is not 64 hex characters after stripping one layer of surrounding quotes. */
   RUN_PROJECT_KEY_INVALID: 'RUN_PROJECT_KEY_INVALID',
+  // --- Dokploy plaintext delivery (CAP-682) ---
+  /**
+   * A value Capy needs to deliver plaintext to Dokploy cannot be rendered as
+   * a dotenv value that reads back byte-exact (e.g. it contains every quote
+   * character dotenv understands, or a quoting ambiguity none of them can
+   * resolve). Refused before any write — naming the VARIABLE only, never
+   * the value.
+   */
+  DOKPLOY_VALUE_UNREPRESENTABLE: 'DOKPLOY_VALUE_UNREPRESENTABLE',
+  /**
+   * A value Capy needs to deliver plaintext to Dokploy contains a literal
+   * `${{` — Dokploy resolves `${{project.X}}`/`${{environment.X}}`
+   * template references inside `env` at deploy time itself (or refuses the
+   * deploy if one doesn't resolve), so the container would never receive
+   * this value byte-for-byte. Refused before any write, naming the
+   * VARIABLE only, never the value.
+   */
+  DOKPLOY_VALUE_HAS_REFERENCE: 'DOKPLOY_VALUE_HAS_REFERENCE',
+  /**
+   * A single delivery refused MORE THAN ONE distinct reason across its
+   * variables — some values `DOKPLOY_VALUE_UNREPRESENTABLE`, others
+   * `DOKPLOY_VALUE_HAS_REFERENCE`. Neither specific code alone would
+   * correctly describe every variable in the refusal, so this umbrella
+   * code covers the mixed case; a refusal where every variable shares ONE
+   * specific reason still carries that specific code instead (see
+   * `describeDokployPlainMergeProblem`).
+   */
+  DOKPLOY_VALUE_INVALID: 'DOKPLOY_VALUE_INVALID',
+  /** CI-mode preflight: the Dokploy Application/Compose service has auto-deploy turned off, so merging the keep.lock PR would never trigger a deploy. */
+  DOKPLOY_AUTODEPLOY_OFF: 'DOKPLOY_AUTODEPLOY_OFF',
+  /** CI-mode preflight: the git branch Dokploy is tracking doesn't match the deploy PR's base branch — merging it would never reach Dokploy's auto-deploy. */
+  DOKPLOY_BRANCH_MISMATCH: 'DOKPLOY_BRANCH_MISMATCH',
+  /** CI-mode preflight: Dokploy's configured watch paths for this service don't cover keep.lock, so merging the PR would never trigger a deploy. */
+  DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP: 'DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
