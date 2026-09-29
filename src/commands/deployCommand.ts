@@ -14,6 +14,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join, basename } from 'path';
 import inquirer from 'inquirer';
 import { FileManager } from '../files/fileManager';
+import { ProjectManager } from '../core/projectManager';
 import {
   DeployAdapter,
   DeployContext,
@@ -138,37 +139,83 @@ const openBrowser = (): boolean => !process.env.CAPY_WEB_NO_OPEN;
 
 // ── Project-level keep.lock parsing ────────────────────────────────────────
 
-interface KeepInfo {
+export interface KeepInfo {
   orgId: string;
   projectId: string;
   variables: string[];
   branches: string[];
 }
 
-function readKeep(cwd: string): KeepInfo | null {
-  const p = join(cwd, 'keep.lock');
-  if (!existsSync(p)) return null;
+/**
+ * Best-effort JSON read: null on anything short of a parsed object (missing
+ * file, unreadable, malformed JSON) — `readKeep` below only ever needs
+ * org_id/project_id/variables out of this, not a fully validated KeepFile
+ * (that's `ProjectManager.readKeepFile`, which is stricter — it requires
+ * `project_name`/`version` too — and used by every OTHER reader).
+ */
+function tryReadKeepJson(path: string): any | null {
+  if (!existsSync(path)) return null;
   try {
-    const raw = JSON.parse(readFileSync(p, 'utf-8'));
-    if (!raw.org_id || !raw.project_id) return null;
-    const variables = Object.keys(raw.variables ?? {}).sort();
-    const branches = new Set<string>();
-    for (const entries of Object.values(raw.variables ?? {}) as any[]) {
-      if (Array.isArray(entries)) {
-        for (const e of entries) {
-          if (e?.branch) branches.add(e.branch);
-        }
-      }
-    }
-    return {
-      orgId: raw.org_id,
-      projectId: raw.project_id,
-      variables,
-      branches: Array.from(branches).sort(),
-    };
+    return JSON.parse(readFileSync(path, 'utf-8'));
   } catch {
     return null;
   }
+}
+
+/**
+ * Reads the CURRENT keep.lock — capy's untracked working copy at
+ * `.capy/keep.lock` when present, else the tracked file (same preference
+ * `ProjectManager.readKeepFile` applies, CAP-667). This is deploy's LOCAL
+ * picture of what variables/branches exist, used for the target picker and
+ * for decrypting the branch about to ship; it is NOT the CI change-gate's
+ * base read, which deliberately reads `origin/<base>`'s keep.lock via git
+ * and is untouched by this.
+ *
+ * Before this fix, deploy read the tracked file directly — which the rest
+ * of capy no longer updates after project init, so a deploy run any time
+ * after the first `capy push` would see a stale, empty-ish variable/branch
+ * list here.
+ */
+export function readKeep(cwd: string): KeepInfo | null {
+  const pm = new ProjectManager(cwd);
+  const raw = tryReadKeepJson(pm.getWorkingKeepPath()) ?? tryReadKeepJson(pm.getKeepPath());
+  if (!raw || !raw.org_id || !raw.project_id) return null;
+  const variables = Object.keys(raw.variables ?? {}).sort();
+  const branches = Array.from(
+    new Set(
+      Object.values(raw.variables ?? {})
+        .flatMap((entries) => (Array.isArray(entries) ? entries : []))
+        .map((e: any) => e?.branch)
+        .filter((b): b is string => Boolean(b)),
+    ),
+  ).sort();
+  return {
+    orgId: raw.org_id,
+    projectId: raw.project_id,
+    variables,
+    branches,
+  };
+}
+
+/**
+ * Copies capy's untracked working copy (`.capy/keep.lock`) over the tracked
+ * `keep.lock`, when it exists and differs — so direct-mode deploy's
+ * "keep.lock dirty? commit it" check (below) and its commit both see the
+ * CURRENT pins, not whatever was frozen into the tracked file at project
+ * init. A no-op when there's no working copy yet (fresh worktree, or a
+ * project that predates it) — the tracked file is already the best
+ * information available, same as `ProjectManager.readKeepFile`'s fallback.
+ *
+ * Never touches `.capy/keep.lock` itself, so it stays exactly what it was —
+ * only the tracked file is brought in line with it.
+ */
+export function syncTrackedKeepForDirectDeploy(cwd: string): void {
+  const workingPath = new ProjectManager(cwd).getWorkingKeepPath();
+  if (!existsSync(workingPath)) return;
+  const workingContent = readFileSync(workingPath, 'utf-8');
+  const trackedPath = join(cwd, 'keep.lock');
+  if (existsSync(trackedPath) && readFileSync(trackedPath, 'utf-8') === workingContent) return;
+  writeFileSync(trackedPath, workingContent, 'utf-8');
 }
 
 // ── Decryption (uses same path as `capy export` / `capy run`) ──────────────
@@ -1802,6 +1849,18 @@ export async function deployCommand(
   // capy never blocks on uncommitted source changes. It only ever stages and
   // commits keep.lock — your work-in-progress is left exactly as it was.
   const gitOk = !options.dryRun && isGitRepo(cwd);
+  // Direct mode is one of the sanctioned exceptions to "the tracked
+  // keep.lock is written once and never touched again" (FileManager.
+  // writeKeepFile, CAP-667) — it's an explicit action that commits keep.lock
+  // onto the user's OWN current branch. Since sync/push/edit now write pins
+  // only into the untracked working copy (.capy/keep.lock), catch the
+  // tracked file up to it here, BEFORE deciding whether keep.lock is dirty —
+  // otherwise the tracked file (frozen since project init) never looks
+  // dirty, this commit step never fires, and a deploy ships secrets whose
+  // pins were never captured in git.
+  if (gitOk && mode === 'direct') {
+    syncTrackedKeepForDirectDeploy(cwd);
+  }
   const keepLockDirty = gitOk && hasKeepLockChanges(cwd);
 
   // Confirm-or-edit loop. Single-keypress picker (c/e/d/esc) so the user
