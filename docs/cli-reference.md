@@ -322,15 +322,32 @@ JSON support: no
 
 ## `capy transport`
 
-Generate a redeem code to move your account to another machine
+Move your local key to another device via Keep (prints a QR code + link)
 
 ```
-capy transport
+capy transport [options]
 ```
 
-_No options._
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
 
-JSON support: no
+JSON support: yes (`--json`)
+
+## `capy pair`
+
+Pair this device into an org via Keep (device-code login + key pickup)
+
+```
+capy pair [options]
+```
+
+| Option | Description | Default |
+|---|---|---|
+| `--json` | emit machine-readable JSON instead of the human UI |  |
+| `--force` | overwrite a different local key already on this machine |  |
+
+JSON support: yes (`--json`)
 
 ## `capy kick`
 
@@ -682,6 +699,14 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP`
 - `DOKPLOY_URL_INVALID`
 - `DOKPLOY_SERVICE_NOT_FOUND`
+- `TRANSPORT_NO_LOCAL_KEY`
+- `TRANSPORT_NOT_FOUND`
+- `TRANSPORT_WRONG_USER`
+- `PAIRING_NOT_FOUND`
+- `PAIRING_WRONG_USER`
+- `PAIRING_NOT_READY`
+- `PAIR_NO_KEYS`
+- `PAIR_LOCAL_KEY_CONFLICT`
 
 ## Conventions
 

@@ -156,6 +156,22 @@ export function hasOrgKey(orgId: string, userId?: string): boolean {
   return existsSync(getOrgKeyPath(orgId, userId));
 }
 
+/**
+ * Reads `key.enc`'s file content verbatim (the JSON `saveMasterKey` wrote,
+ * unparsed) — for `capy transport`/`capy pair` (CAP-684), which move the
+ * file "as-is" rather than decomposing and re-wrapping it. `readMasterKey`
+ * is for callers that want just the `encrypted_master_key` field; this is
+ * for callers that want the exact bytes.
+ */
+export function readOrgKeyFileRaw(orgId: string, userId?: string): string | null {
+  return readFileOrNull(getOrgKeyPath(orgId, userId));
+}
+
+/** Writes `key.enc`'s content verbatim, mode 0600. Sibling of {@link readOrgKeyFileRaw}. */
+export function writeOrgKeyFileRaw(orgId: string, content: string, userId?: string): void {
+  writeSecureFile(getOrgKeyPath(orgId, userId), content);
+}
+
 export function saveProjectKeyCache(
   orgId: string,
   projectId: string,

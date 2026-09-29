@@ -597,6 +597,23 @@ export const ERROR_CODES = {
    * re-asked at a TTY rather than saved unverified.
    */
   DOKPLOY_SERVICE_NOT_FOUND: 'DOKPLOY_SERVICE_NOT_FOUND',
+  // --- Basic pairing (CAP-684, docs/basic-pair.md) ---
+  /** `capy transport`: no `local.key`/`key.enc` on this machine for the project's org+user — nothing to transport. */
+  TRANSPORT_NO_LOCAL_KEY: 'TRANSPORT_NO_LOCAL_KEY',
+  /** Keep `/transport`'s activate: the transport row is missing, already used, or expired — one code, so nobody can probe which. */
+  TRANSPORT_NOT_FOUND: 'TRANSPORT_NOT_FOUND',
+  /** Keep `/transport`'s activate: the caller is not the row's user. */
+  TRANSPORT_WRONG_USER: 'TRANSPORT_WRONG_USER',
+  /** `capy pair`'s pickup: the `device_pairings` row is missing or already used. */
+  PAIRING_NOT_FOUND: 'PAIRING_NOT_FOUND',
+  /** `capy pair`'s pickup: the token's user doesn't match the row's user. */
+  PAIRING_WRONG_USER: 'PAIRING_WRONG_USER',
+  /** `capy pair`'s pickup: Keep hasn't sealed the row yet (no `PUT /device-pairings/:user_code` yet). */
+  PAIRING_NOT_READY: 'PAIRING_NOT_READY',
+  /** `capy pair`: the pickup decrypted, but held zero entries for the logged-in user — run `capy transport` first. */
+  PAIR_NO_KEYS: 'PAIR_NO_KEYS',
+  /** `capy pair`: an entry's `local.key` already exists on this machine with a DIFFERENT value — refused unless `--force`. */
+  PAIR_LOCAL_KEY_CONFLICT: 'PAIR_LOCAL_KEY_CONFLICT',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
