@@ -8,6 +8,7 @@ import { CliOptions } from './types/index';
 import { assertNotLocalOnly } from './core/localGate';
 import { version as CLI_VERSION } from '../package.json';
 import { setWebMode } from './ui/webMode';
+import { ACCENT } from './ui/colors';
 
 // Prod talks to api.capy.sc and ~/.capy, full stop. Strip the environment's
 // attempts to move it before anything can read them — see config/prodPins.ts
@@ -244,7 +245,7 @@ program
       const name = b.name;
       const prot = b.is_protected ? '  \x1b[90m(protected)\x1b[0m' : '';
       const isCurrent = b.name === activeBranch;
-      const current = isCurrent ? '  \x1b[38;5;43m← current\x1b[0m' : '';
+      const current = isCurrent ? `  ${ACCENT}← current\x1b[0m` : '';
       console.log(`  ${connector} ${name}  ${prot}${current}`);
     });
     console.log('');
@@ -713,7 +714,6 @@ program
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
   .option('--branch <name>', 'only rows with a location on this branch')
-  .option('--no-interactive', 'print the static table even on a TTY')
   .action(async (options) => {
     assertNotLocalOnly('secrets');
     const { SecretsCommand } = await import('./commands/secretsCommand');
@@ -722,7 +722,6 @@ program
       json: options.json,
       project: options.project,
       branch: options.branch,
-      noInteractive: options.interactive === false,
     });
   });
 

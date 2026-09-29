@@ -9,8 +9,25 @@ import { hasOrgKey, resolveProjectKey, KeyServiceOps } from '../crypto/keyResolv
 import { createNewOrganization } from './orgCreation';
 import { excludeSystemProject, assertProjectNameAllowed, isReservedProjectName, PROJECT_NAME_RESERVED_MESSAGE } from '../system/reservedProjectName';
 import { execSync } from 'child_process';
+import { ACCENT } from '../ui/colors';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+
+/**
+ * `_execute()`'s auth fallback chain: try the org-scoped silent session
+ * first, then a plain silent session, then a full interactive
+ * authentication — returning the first successful result, or the last
+ * attempt's failure if none succeed. Pulled out into its own function
+ * (rather than a reassigned `let`) so each attempt is a `return`, not a
+ * mutation the reader has to track across three lines.
+ */
+async function resolveAuthResultWithFallback(authService: AuthService, currentOrgId: string | undefined): Promise<AuthResult> {
+  const scopedSilent = await authService.authenticateSilent(currentOrgId);
+  if (scopedSilent.success) return scopedSilent;
+  const plainSilent = await authService.authenticateSilent();
+  if (plainSilent.success) return plainSilent;
+  return authService.authenticate(currentOrgId);
+}
 
 /**
  * The branch a first project is bootstrapped with.
@@ -77,9 +94,7 @@ export class OrgCommand {
     if (projectState.userId) {
       this.authService.setSessionUserId(projectState.userId);
     }
-    let authResult = await this.authService.authenticateSilent(currentOrgId);
-    if (!authResult.success) authResult = await this.authService.authenticateSilent();
-    if (!authResult.success) authResult = await this.authService.authenticate(currentOrgId);
+    const authResult = await resolveAuthResultWithFallback(this.authService, currentOrgId);
     if (!authResult.success) {
       console.error('Authentication failed. Run `capy` to re-authenticate.');
       process.exit(1);
@@ -104,7 +119,7 @@ export class OrgCommand {
       message: 'Switch organization:',
       choices: [
         ...orgs.map(o => ({
-          name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+          name: o.id === currentOrgId ? `${o.name}  ${ACCENT}← current\x1b[0m` : o.name,
           value: o.id,
         })),
         { name: 'Create new organization +', value: CREATE_NEW_ORG },
@@ -123,18 +138,21 @@ export class OrgCommand {
       process.exit(1);
     }
 
-    let selectedOrg: Organization;
-    if (orgId === CREATE_NEW_ORG) {
-      selectedOrg = await createNewOrganization(
+    // Two ways to land on the org this run switches into — creating a brand
+    // new one, or re-scoping auth onto one already picked from the list —
+    // each its own closure (rather than two `if`/`else` branches assigning
+    // into one `let`) so the value IS the result of whichever path ran,
+    // never a variable patched after the fact.
+    const createSelectedOrg = async (): Promise<Organization> => {
+      const org = await createNewOrganization(
         this.authService,
         this.serviceClient,
         refreshToken,
         authResult.user_id!,
       );
-
       const scopedAuth = await this.authService.refreshWithCredentials(
         refreshToken,
-        selectedOrg.id,
+        org.id,
         authResult.user_id,
       );
       if (!scopedAuth.success) {
@@ -143,16 +161,17 @@ export class OrgCommand {
           ERROR_CODES.AUTH_FAILED,
         );
       }
-    } else {
-      selectedOrg = orgs.find(o => o.id === orgId)!;
+      return org;
+    };
 
+    const switchToSelectedOrg = async (): Promise<Organization> => {
+      const org = orgs.find(o => o.id === orgId)!;
       const orgSpinner = ora('Switching organization...').start();
       const scopedAuth = await this.authService.refreshWithCredentials(
         refreshToken,
-        selectedOrg.id,
+        org.id,
         authResult.user_id,
       );
-
       if (!scopedAuth.success) {
         orgSpinner.fail('Failed to switch organization');
         throw new CapyError(
@@ -160,8 +179,11 @@ export class OrgCommand {
           ERROR_CODES.AUTH_FAILED,
         );
       }
-      orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
-    }
+      orgSpinner.succeed(`Organization: ${org.name}`);
+      return org;
+    };
+
+    const selectedOrg: Organization = orgId === CREATE_NEW_ORG ? await createSelectedOrg() : await switchToSelectedOrg();
 
     // Check for org master key
     if (!hasOrgKey(selectedOrg.id, authResult.user_id!)) {
