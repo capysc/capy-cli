@@ -4,6 +4,7 @@ import {
   MANAGED_END,
   OLD_RUNTIME_PAIR,
   RUNTIME_PAIR,
+  createDokployClient,
   listImportableEntries,
   mergeManagedBlock,
   resolveDokployToken,
@@ -309,5 +310,37 @@ describe('dokployApi — listImportableEntries — dotenv.parse-accurate values'
     // not a quoted value, even though its parsed form also looks wrapped.
     expect(entries[0].skip).toBe('DOKPLOY_REFERENCE_VALUE');
     expect(entries[0].warning).toBeUndefined();
+  });
+});
+
+// ── Validator finding (key exposure, CAP-657 URL input follow-up): a
+// redirect must never carry the `x-api-key` header cross-origin. ──────────
+describe('createDokployClient — redirect guard', () => {
+  test('every request is sent with redirect: "error" (never follows a 30x)', async () => {
+    const seenInits: Array<{ redirect?: string }> = [];
+    const fetchImpl = async (
+      _url: string,
+      init: { method: string; headers: Record<string, string>; body?: string; redirect?: string },
+    ) => {
+      seenInits.push({ redirect: init.redirect });
+      return {
+        status: 200,
+        ok: true,
+        text: async () => JSON.stringify({ applicationId: 'app_1', env: null, createEnvFile: true }),
+      };
+    };
+    const client = createDokployClient('https://dokploy.example.com', 'tok', fetchImpl);
+    await client.getApplication('app_1');
+    expect(seenInits.length).toBe(1);
+    expect(seenInits[0].redirect).toBe('error');
+  });
+
+  test('a redirect (fetch rejecting under redirect: "error") surfaces as an "unreachable" DokployApiError, not an unhandled throw', async () => {
+    const fetchImpl = async () => {
+      // What a real `fetch` does for a 30x under `redirect: 'error'`: reject.
+      throw new TypeError('Failed to fetch: redirect');
+    };
+    const client = createDokployClient('https://dokploy.example.com', 'tok', fetchImpl);
+    await expect(client.getApplication('app_1')).rejects.toMatchObject({ code: 'unreachable' });
   });
 });

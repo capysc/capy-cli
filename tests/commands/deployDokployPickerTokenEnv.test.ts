@@ -158,15 +158,19 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
   });
 
   describe('a full dashboard URL: parsed + (best-effort) verified', () => {
-    test('no Dokploy key available yet → saved as entered, no confirm prompt asked', async () => {
+    test('no Dokploy key available yet → saved as entered, after confirming the host (new target, no existing host to compare)', async () => {
       promptMock.mockImplementationOnce(async () => ({
         serviceUrl:
           'https://dokploy.example.com/dashboard/project/p1/environment/e1/services/compose/compose_verified',
       }));
+      promptMock.mockImplementationOnce(async (qs: ReadonlyArray<{ name: string }>) => {
+        expect(qs[0].name).toBe('proceed');
+        return { proceed: true };
+      });
       const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
       expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_verified' });
-      // Only the URL question — no verification, so no confirm prompt.
-      expect(promptMock.mock.calls.length).toBe(1);
+      // URL question + host-confirm — no verification (no key), so no "confirmed" prompt.
+      expect(promptMock.mock.calls.length).toBe(2);
     });
 
     test('a bad path claiming to be a URL is refused (DOKPLOY_URL_INVALID) and RE-ASKED — never silently treated as an id', async () => {
@@ -174,9 +178,93 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
       promptMock.mockImplementationOnce(async () => ({
         serviceUrl: 'https://dokploy.example.com/dashboard/project/p1/services/application/app_ok',
       }));
+      promptMock.mockImplementationOnce(async () => ({ proceed: true }));
       const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
       expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', applicationId: 'app_ok' });
-      expect(promptMock.mock.calls.length).toBe(2);
+      expect(promptMock.mock.calls.length).toBe(3);
+    });
+
+    describe('host confirmation (validator finding: key exposure)', () => {
+      test('the SAME host as an existing target never asks — proceeds straight to verification', async () => {
+        mock.module('../../src/system/systemStore', () => ({
+          getDirectionalConnectorSecret: mock(async () => null),
+        }));
+        promptMock.mockImplementationOnce(async () => ({
+          serviceUrl: 'https://dokploy.example.com/dashboard/project/p1/services/compose/compose_new',
+        }));
+        const options = await resolveAdapterOptions(
+          adapter,
+          '/tmp',
+          [],
+          {},
+          { baseUrl: 'https://dokploy.example.com', composeId: 'compose_old' },
+        );
+        expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_new' });
+        // URL question only — same host as the existing target, no host-confirm.
+        expect(promptMock.mock.calls.length).toBe(1);
+      });
+
+      test('a DIFFERENT host than an existing target confirms, naming the host, before any key is sent', async () => {
+        mock.module('../../src/system/systemStore', () => ({
+          getDirectionalConnectorSecret: mock(async () => null),
+        }));
+        promptMock.mockImplementationOnce(async () => ({
+          serviceUrl: 'https://other-dokploy.example.com/dashboard/project/p1/services/compose/compose_new',
+        }));
+        promptMock.mockImplementationOnce(async (qs: ReadonlyArray<{ name: string; message: string }>) => {
+          expect(qs[0].name).toBe('proceed');
+          expect(qs[0].message).toContain('other-dokploy.example.com');
+          return { proceed: true };
+        });
+        const options = await resolveAdapterOptions(
+          adapter,
+          '/tmp',
+          [],
+          {},
+          { baseUrl: 'https://dokploy.example.com', composeId: 'compose_old' },
+        );
+        expect(options).toEqual({ baseUrl: 'https://other-dokploy.example.com', composeId: 'compose_new' });
+      });
+
+      test('declining the host-send confirmation loops back to the URL question, never calls the API', async () => {
+        mock.module('../../src/system/systemStore', () => ({
+          getDirectionalConnectorSecret: mock(async () => 'fake-dokploy-key'),
+        }));
+        const fetchMock = mock(async () => {
+          throw new Error('must never be called — the host was declined');
+        });
+        const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
+        try {
+          promptMock.mockImplementationOnce(async () => ({
+            serviceUrl: 'https://dokploy.example.com/dashboard/project/p1/services/compose/compose_new',
+          }));
+          promptMock.mockImplementationOnce(async () => ({ proceed: false }));
+          // Loop back to the URL/id question — a bare id this time (skips verification and the host gate).
+          promptMock.mockImplementationOnce(async () => ({ serviceUrl: 'compose_fallback' }));
+          promptMock.mockImplementationOnce(async () => ({ kind: 'compose', baseUrl: 'https://dokploy.example.com' }));
+          const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
+          expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_fallback' });
+          expect(fetchMock.mock.calls.length).toBe(0);
+        } finally {
+          fetchSpy.mockRestore();
+        }
+      });
+    });
+
+    test('key resolution for the picker is never interactive (no prompt-and-save) — required so `--dry-run` never prompts', async () => {
+      const getConnectorSecretMock = mock(
+        async (_primary: string, _fallback: string, opts: { interactive: boolean }) => {
+          expect(opts.interactive).toBe(false);
+          return null;
+        },
+      );
+      mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecretMock }));
+      promptMock.mockImplementationOnce(async () => ({
+        serviceUrl: 'https://dokploy.example.com/dashboard/project/p1/services/compose/compose_1',
+      }));
+      promptMock.mockImplementationOnce(async () => ({ proceed: true }));
+      await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
+      expect(getConnectorSecretMock.mock.calls.length).toBe(1);
     });
 
     describe('with a resolvable key: verification actually runs', () => {
@@ -217,6 +305,7 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
             serviceUrl:
               'https://dokploy.example.com/dashboard/project/p1/environment/e1/services/compose/compose_verified',
           }));
+          promptMock.mockImplementationOnce(async () => ({ proceed: true }));
           promptMock.mockImplementationOnce(async (qs: ReadonlyArray<{ name: string; message: string }>) => {
             expect(qs[0].name).toBe('confirmed');
             expect(qs[0].message).toContain('billing-worker');
@@ -250,13 +339,14 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
           promptMock.mockImplementationOnce(async () => ({
             serviceUrl: 'https://dokploy.example.com/dashboard/project/p1/services/compose/compose_1',
           }));
+          promptMock.mockImplementationOnce(async () => ({ proceed: true }));
           promptMock.mockImplementationOnce(async () => ({ confirmed: false }));
           // Declined — loop back to the URL/id question; answer with a bare id this time.
           promptMock.mockImplementationOnce(async () => ({ serviceUrl: 'compose_2' }));
           promptMock.mockImplementationOnce(async () => ({ kind: 'compose', baseUrl: 'https://dokploy.example.com' }));
           const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
           expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_2' });
-          expect(promptMock.mock.calls.length).toBe(4);
+          expect(promptMock.mock.calls.length).toBe(5);
         } finally {
           fetchSpy.mockRestore();
         }
@@ -278,12 +368,13 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
           promptMock.mockImplementationOnce(async () => ({
             serviceUrl: 'https://dokploy.example.com/dashboard/project/p1/services/application/ghost_id',
           }));
+          promptMock.mockImplementationOnce(async () => ({ proceed: true }));
           // Re-asked after the 404 — this time a bare id (skips verification).
           promptMock.mockImplementationOnce(async () => ({ serviceUrl: 'app_real' }));
           promptMock.mockImplementationOnce(async () => ({ kind: 'application', baseUrl: 'https://dokploy.example.com' }));
           const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
           expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', applicationId: 'app_real' });
-          expect(promptMock.mock.calls.length).toBe(3);
+          expect(promptMock.mock.calls.length).toBe(4);
         } finally {
           fetchSpy.mockRestore();
         }
@@ -299,15 +390,16 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
           promptMock.mockImplementationOnce(async () => ({
             serviceUrl: 'https://dokploy.example.com/dashboard/project/p1/services/compose/compose_x',
           }));
+          promptMock.mockImplementationOnce(async () => ({ proceed: true }));
           const options = await resolveAdapterOptions(adapter, '/tmp', [], {}, {});
           expect(options).toEqual({ baseUrl: 'https://dokploy.example.com', composeId: 'compose_x' });
-          expect(promptMock.mock.calls.length).toBe(1);
+          expect(promptMock.mock.calls.length).toBe(2);
         } finally {
           fetchSpy.mockRestore();
         }
       });
 
-      test('tokenEnv still survives a Compose re-edit, byte for byte, through the verified path', async () => {
+      test('tokenEnv still survives a Compose re-edit, byte for byte, through the verified path (same host — no host-confirm)', async () => {
         mock.module('../../src/system/systemStore', () => ({
           getDirectionalConnectorSecret: mock(async () => 'fake-dokploy-key'),
         }));
@@ -334,7 +426,7 @@ describe('capy deploy picker — dokploy URL input (CAP-657) + tokenEnv (CAP-664
             '/tmp',
             [],
             {},
-            { composeId: 'compose_old', tokenEnv: 'MY_TOKEN' },
+            { baseUrl: 'https://dokploy.example.com', composeId: 'compose_old', tokenEnv: 'MY_TOKEN' },
           );
           expect(options).toEqual({
             baseUrl: 'https://dokploy.example.com',
