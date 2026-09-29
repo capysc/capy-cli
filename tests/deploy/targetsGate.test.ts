@@ -442,6 +442,37 @@ describe('deliveryWorthGating', () => {
     ).toBe(false);
   });
 
+  // ── Re-validation regression: a value that's already current on the
+  // SOURCE (entry.value_hash matches) but was never delivered to THIS
+  // target (target.deployed_value_hash is stale — the secretsScreen `*`
+  // marker) must still gate true, or a stale target never clears. ──
+  test('the SYNCED value is unchanged, but the TARGET itself is stale (deployed_value_hash is old) → true', () => {
+    const base = keep({
+      DATABASE_URL: [
+        {
+          resource_id: 'r1',
+          branch: 'preview',
+          value_hash: 'h1new', // current synced value
+          targets: [
+            {
+              provider: PROVIDER,
+              target: TARGET,
+              deployed_value_hash: 'h1old', // this target delivered an OLDER value and never caught up
+              deployed_at: 't0',
+              deploy_id: 'dep_old',
+            },
+          ],
+        },
+      ],
+    });
+    // The value being delivered THIS run is the current synced one (h1new)
+    // — deliveryWorthGating must catch that the TARGET's own record still
+    // says h1old, even though entry.value_hash === valueHash already.
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1new' }]),
+    ).toBe(true);
+  });
+
   test('a genuinely changed value → true', () => {
     const base = keep({
       DATABASE_URL: [

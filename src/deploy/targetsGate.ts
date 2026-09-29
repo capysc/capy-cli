@@ -173,6 +173,13 @@ export function deliveryWorthGating(
   values: ReadonlyArray<VarDelivery>,
 ): boolean {
   return values.some(({ name, valueHash }) => {
+    // NOTE (pre-existing behavior, unrelated to the checks below): a var
+    // REMOVED from `target.vars`/`.env` entirely never gates here — `values`
+    // only ever contains vars the CALLER is currently delivering, so a var
+    // that dropped out of the selection (or vanished from `.env`) never
+    // appears in `values` at all and can't trigger a "something changed"
+    // decision through this function. Detecting that kind of drift is
+    // `reconcileVars`'s job, not this gate's.
     const entries = keep.variables[name] ?? [];
     const entry = entries.find((e) => (e.branch ?? '') === branch);
     if (!entry) return true; // not tracked on this branch yet — a real fact to record
@@ -181,6 +188,13 @@ export function deliveryWorthGating(
       (t) => t.provider === provider && t.target === target,
     );
     if (!match) return true; // first-ever delivery to this target
+    // The target itself is STALE — it delivered a DIFFERENT value than
+    // what's live now (the secretsScreen `*` marker), even though the
+    // CURRENT synced value hasn't moved since. Redelivering it is a real
+    // change worth a PR, same as any other value_hash mismatch above —
+    // `deploy_id` still never enters this decision, so a same-value,
+    // already-up-to-date redeploy still gates false (no CI churn).
+    if (match.deployed_value_hash !== valueHash) return true;
     return (match.deployed ?? true) !== (deployed ?? true);
   });
 }

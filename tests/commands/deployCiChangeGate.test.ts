@@ -83,8 +83,15 @@ const REPO = join(TMP, 'repo');
  * have delivered before, with a deploy_id from that prior run, so
  * `deliveryWorthGating` (value-hash + pending only, never deploy_id) has
  * something to compare against and correctly says "nothing changed".
+ *
+ * `deployedValueHash` defaults to `valueHash` (already delivered, current).
+ * Passing a DIFFERENT one models a STALE target — the synced value is
+ * already current (`entry.value_hash === valueHash`) but this target never
+ * caught up (`target.deployed_value_hash` is still the old one) — the
+ * secretsScreen `*` marker, and the re-validation regression this file's
+ * "stale target" test guards.
  */
-function baseKeepLock(valueHash: string): string {
+function baseKeepLock(valueHash: string, deployedValueHash: string = valueHash): string {
   return serializeKeep({
     version: '3.0',
     org_id: 'org_1',
@@ -100,7 +107,7 @@ function baseKeepLock(valueHash: string): string {
             {
               provider: 'dokploy',
               target: 'dokploy-ci',
-              deployed_value_hash: valueHash,
+              deployed_value_hash: deployedValueHash,
               deployed_at: '2026-01-01T00:00:00.000Z',
               deploy_id: 'deploy_prior',
             },
@@ -134,7 +141,8 @@ function dokployFetchMock() {
   });
 }
 
-function setUpRepo(stripeKeyValue: string): void {
+/** `deployedValue` defaults to `stripeKeyValue` (already delivered, current) — pass a different value to model a stale target (see `baseKeepLock`'s doc). */
+function setUpRepo(stripeKeyValue: string, deployedValue: string = stripeKeyValue): void {
   rmSync(TMP, { recursive: true, force: true });
   mkdirSync(TMP, { recursive: true });
   git(['init', '--bare', '-b', 'main', ORIGIN], TMP);
@@ -145,7 +153,7 @@ function setUpRepo(stripeKeyValue: string): void {
   git(['remote', 'add', 'origin', ORIGIN], REPO);
 
   mkdirSync(join(REPO, '.capy'), { recursive: true });
-  writeFileSync(join(REPO, 'keep.lock'), baseKeepLock(hashValue(stripeKeyValue)));
+  writeFileSync(join(REPO, 'keep.lock'), baseKeepLock(hashValue(stripeKeyValue), hashValue(deployedValue)));
   writeFileSync(join(REPO, '.env'), `STRIPE_KEY=${stripeKeyValue}\n`);
   writeFileSync(
     join(REPO, '.capy', 'deploy.json'),
@@ -239,5 +247,37 @@ describe('capy deploy — CI mode change gate (validator fix-first: no CI churn)
     expect(afterKeepLock).toBe(beforeKeepLock);
     const afterOriginContent = git(['show', 'origin/main:keep.lock'], REPO).stdout;
     expect(afterOriginContent).toBe(beforeOriginContent);
+  }, 30_000);
+
+  // ── Re-validation regression: a STALE target (secretsScreen's `*` marker
+  // — the synced value is current, but this target's OWN deployed_value_hash
+  // is for an older value it never caught up on) must still gate "proceed",
+  // or it stays stale forever. ──
+  test('a stale target (synced value unchanged, deployed_value_hash old) still proceeds — mints, never stuck "unchanged" forever', async () => {
+    // Overrides this describe's `beforeEach` fixture: same synced value as
+    // always, but the target's OWN deployed_value_hash is for a DIFFERENT,
+    // older value — exactly what the secretsScreen `*` marker represents.
+    setUpRepo('same-value', 'older-value');
+    process.chdir(REPO);
+    mintDeployTokenMock.mockClear();
+
+    const fetchMock = dokployFetchMock();
+    const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(fetchMock as never);
+    const logSpy = spyOn(console, 'log').mockImplementation((() => {}) as never);
+    const errSpy = spyOn(console, 'error').mockImplementation((() => {}) as never);
+
+    try {
+      // Not asserting the final exit code: this run may still fail later at
+      // a real `gh pr create` against this test's throwaway local origin
+      // (see the top-of-file note) — a concern unrelated to the gate
+      // property under test here, which is that minting happens AT ALL.
+      await deployCommand('dokploy-ci', { yes: true }, REPO);
+    } finally {
+      fetchSpy.mockRestore();
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+
+    expect(mintDeployTokenMock).toHaveBeenCalledTimes(1);
   }, 30_000);
 });
