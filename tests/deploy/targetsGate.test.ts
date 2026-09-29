@@ -11,6 +11,9 @@ import {
   staleTargets,
   upsertTargetElement,
   isDeliveryDescriptor,
+  allDeployIdsForTarget,
+  supersededDeployIdsForTarget,
+  clearSupersededDeployIds,
 } from '../../src/deploy/targetsGate';
 import { KeepFile } from '../../src/types/index';
 
@@ -142,12 +145,38 @@ describe('recordTargetDeliveries', () => {
   });
 
   // ── Direct-mode counterpart of buildDeployKeep's "no churn" fix: a
-  // redeploy of the SAME value must return the identical KeepFile BY
-  // REFERENCE, so `pushKeepTransform` skips the network push entirely. ──
-  test('identical value, already-recorded target → returns the SAME KeepFile by reference (no churn, no push)', () => {
+  // redeploy of the SAME value with NO new token to track must return the
+  // identical KeepFile BY REFERENCE, so `pushKeepTransform` skips the
+  // network push entirely. ──
+  test('identical value, no deploy_id on either side → returns the SAME KeepFile by reference (no churn, no push)', () => {
     const delivery = { provider: 'dokploy', target: 'backend-preview' };
     const first = recordTargetDeliveries(base, 'preview', delivery, 't0', [{ name: 'DATABASE_URL', valueHash: 'h1' }]);
     expect(first).not.toBe(base); // first delivery IS a real change
+
+    const second = recordTargetDeliveries(
+      first,
+      'preview',
+      delivery, // still no deployId — nothing new was minted
+      't1',
+      [{ name: 'DATABASE_URL', valueHash: 'h1' }], // SAME hash as before
+    );
+    expect(second).toBe(first); // no-op, by reference
+    const targets = (second.variables.DATABASE_URL[0] as any).targets;
+    expect(targets[0].deployed_at).toBe('t0'); // untouched
+    expect(targets[0]).not.toHaveProperty('deploy_id');
+  });
+
+  // ── "No untracked tokens" (CAP-679 follow-up): a same-VALUE redeploy still
+  // mints a FRESH live token server-side. The old behavior silently dropped
+  // the new deploy_id (a no-op keyed on value hash alone), leaving that fresh
+  // token installed on the platform but recorded nowhere. Now a changed
+  // deploy_id is never a no-op: the new id becomes current, and the old one
+  // — still possibly in use until a follow-up confirms the new one is live —
+  // moves to `superseded_deploy_ids` rather than vanishing. ──
+  test('identical value, a NEW deploy_id → not a no-op: new id current, old id superseded', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview', deployId: 'dep_old' };
+    const first = recordTargetDeliveries(base, 'preview', delivery, 't0', [{ name: 'DATABASE_URL', valueHash: 'h1' }]);
+    expect((first.variables.DATABASE_URL[0] as any).targets[0].deploy_id).toBe('dep_old');
 
     const second = recordTargetDeliveries(
       first,
@@ -156,10 +185,56 @@ describe('recordTargetDeliveries', () => {
       't1',
       [{ name: 'DATABASE_URL', valueHash: 'h1' }], // SAME hash as before
     );
-    expect(second).toBe(first); // no-op, by reference
+    expect(second).not.toBe(first); // a fresh token IS a real change to record
     const targets = (second.variables.DATABASE_URL[0] as any).targets;
-    expect(targets[0].deployed_at).toBe('t0'); // untouched
-    expect(targets[0]).not.toHaveProperty('deploy_id');
+    expect(targets[0].deploy_id).toBe('dep_new');
+    expect(targets[0].deployed_at).toBe('t1');
+    expect(targets[0].superseded_deploy_ids).toEqual(['dep_old']);
+  });
+
+  test('a second same-value redeploy accumulates onto superseded_deploy_ids, deduped', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview', deployId: 'dep_1' };
+    const first = recordTargetDeliveries(base, 'preview', delivery, 't0', [{ name: 'DATABASE_URL', valueHash: 'h1' }]);
+    const second = recordTargetDeliveries(
+      first,
+      'preview',
+      { ...delivery, deployId: 'dep_2' },
+      't1',
+      [{ name: 'DATABASE_URL', valueHash: 'h1' }],
+    );
+    const third = recordTargetDeliveries(
+      second,
+      'preview',
+      { ...delivery, deployId: 'dep_3' },
+      't2',
+      [{ name: 'DATABASE_URL', valueHash: 'h1' }],
+    );
+    const targets = (third.variables.DATABASE_URL[0] as any).targets;
+    expect(targets[0].deploy_id).toBe('dep_3');
+    // Order-independent: sort a COPY, never the array under test.
+    expect(Array.from(targets[0].superseded_deploy_ids).sort()).toEqual(['dep_1', 'dep_2']);
+  });
+
+  test('--no-deploy: `deployed: false` is recorded, and clears on the next real (non-no-deploy) delivery', () => {
+    const pendingDelivery = { provider: 'dokploy', target: 'backend-preview', deployId: 'dep_pending', deployed: false };
+    const pending = recordTargetDeliveries(base, 'preview', pendingDelivery, 't0', [{ name: 'DATABASE_URL', valueHash: 'h1' }]);
+    const pendingTarget = (pending.variables.DATABASE_URL[0] as any).targets[0];
+    expect(pendingTarget.deployed).toBe(false);
+    expect(pendingTarget.deploy_id).toBe('dep_pending');
+
+    // A REAL deploy (deployed omitted) with a fresh deploy_id clears pending
+    // and supersedes the pending token's id.
+    const real = recordTargetDeliveries(
+      pending,
+      'preview',
+      { provider: 'dokploy', target: 'backend-preview', deployId: 'dep_real' },
+      't1',
+      [{ name: 'DATABASE_URL', valueHash: 'h1' }],
+    );
+    const realTarget = (real.variables.DATABASE_URL[0] as any).targets[0];
+    expect(realTarget.deployed).toBeUndefined();
+    expect(realTarget.deploy_id).toBe('dep_real');
+    expect(realTarget.superseded_deploy_ids).toEqual(['dep_pending']);
   });
 
   test('a genuine value change still replaces the element and returns a new KeepFile', () => {
@@ -251,5 +326,75 @@ describe('staleTargets', () => {
 
   test('no targets → empty, never throws', () => {
     expect(staleTargets({ resource_id: 'r1', branch: 'preview', value_hash: 'h' } as any)).toEqual([]);
+  });
+});
+
+describe('allDeployIdsForTarget / supersededDeployIdsForTarget / clearSupersededDeployIds', () => {
+  const withSuperseded = keep({
+    DATABASE_URL: [
+      {
+        resource_id: 'r1',
+        branch: 'preview',
+        value_hash: 'h1',
+        targets: [
+          {
+            provider: 'dokploy',
+            target: 'backend-preview',
+            deployed_value_hash: 'h1',
+            deployed_at: 't2',
+            deploy_id: 'dep_3',
+            superseded_deploy_ids: ['dep_1', 'dep_2'],
+          },
+          { provider: 'vercel', target: 'web-prod', deployed_value_hash: 'h1', deployed_at: 't0', deploy_id: 'dep_other' },
+        ],
+      },
+    ],
+    STRIPE_KEY: [
+      {
+        resource_id: 'r2',
+        branch: 'preview',
+        value_hash: 'h2',
+        targets: [
+          { provider: 'dokploy', target: 'backend-preview', deployed_value_hash: 'h2', deployed_at: 't2', deploy_id: 'dep_3' },
+        ],
+      },
+    ],
+  });
+
+  test('allDeployIdsForTarget: current + every superseded id, deduped, scoped to (provider, target)', () => {
+    const ids = allDeployIdsForTarget(withSuperseded, 'dokploy', 'backend-preview');
+    expect(new Set(ids)).toEqual(new Set(['dep_1', 'dep_2', 'dep_3']));
+    expect(ids).not.toContain('dep_other'); // a different target's id
+  });
+
+  test('supersededDeployIdsForTarget: superseded only, never the current id', () => {
+    const ids = supersededDeployIdsForTarget(withSuperseded, 'dokploy', 'backend-preview');
+    expect(new Set(ids)).toEqual(new Set(['dep_1', 'dep_2']));
+    expect(ids).not.toContain('dep_3');
+  });
+
+  test('supersededDeployIdsForTarget: empty when nothing is superseded', () => {
+    expect(supersededDeployIdsForTarget(withSuperseded, 'vercel', 'web-prod')).toEqual([]);
+  });
+
+  test('clearSupersededDeployIds: drops the given ids, keeps the current one and unrelated targets untouched', () => {
+    const cleared = clearSupersededDeployIds(withSuperseded, 'dokploy', 'backend-preview', new Set(['dep_1', 'dep_2']));
+    const dbTarget = (cleared.variables.DATABASE_URL[0] as any).targets.find((t: any) => t.provider === 'dokploy');
+    expect(dbTarget).not.toHaveProperty('superseded_deploy_ids');
+    expect(dbTarget.deploy_id).toBe('dep_3'); // current id untouched
+    const otherTarget = (cleared.variables.DATABASE_URL[0] as any).targets.find((t: any) => t.provider === 'vercel');
+    expect(otherTarget.deploy_id).toBe('dep_other'); // unrelated target untouched
+  });
+
+  test('clearSupersededDeployIds: partial clear keeps the remaining ids', () => {
+    const cleared = clearSupersededDeployIds(withSuperseded, 'dokploy', 'backend-preview', new Set(['dep_1']));
+    const dbTarget = (cleared.variables.DATABASE_URL[0] as any).targets.find((t: any) => t.provider === 'dokploy');
+    expect(dbTarget.superseded_deploy_ids).toEqual(['dep_2']);
+  });
+
+  test('clearSupersededDeployIds: is pure and never mutates the input', () => {
+    const before = JSON.stringify(withSuperseded);
+    clearSupersededDeployIds(withSuperseded, 'dokploy', 'backend-preview', new Set(['dep_1', 'dep_2']));
+    expect(JSON.stringify(withSuperseded)).toBe(before);
   });
 });

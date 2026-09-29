@@ -146,6 +146,16 @@ export interface SecretIndexTarget {
   target: string;
   deployed_at?: string;
   stale: boolean;
+  /**
+   * CAP-679 follow-up: this target's config was written by `capy deploy
+   * --no-deploy` and has never actually been shipped — the platform deploy
+   * itself hasn't run yet. Absent (or `false`) means deployed, same
+   * additive-only convention as `TargetDelivery.deployed` in
+   * `types/index.ts`. The server currently drops unknown target fields, so
+   * this is only ever populated once the server passes it through — the CLI
+   * side is ready ahead of that.
+   */
+  pending?: boolean;
 }
 
 /** One (project, branch) this (name, value_hash) pair lives on. */

@@ -325,6 +325,22 @@ describe('CONNECTOR / TARGET / INTEGRATIONS cell formatting (CAP-679 — replace
     );
   });
 
+  test('target cell: " (pending)" suffix when the target config was written by --no-deploy and never shipped', () => {
+    expect(
+      formatTargetCell(row({ locations: [loc({ targets: [{ provider: 'dokploy', target: 'backend-preview', stale: false, pending: true }] })] })),
+    ).toBe('[dokploy] backend-preview (pending)');
+    // Absent `pending` (or `false`) never shows the suffix — additive, old-server-safe.
+    expect(
+      formatTargetCell(row({ locations: [loc({ targets: [{ provider: 'dokploy', target: 'backend-preview', stale: false }] })] })),
+    ).toBe('[dokploy] backend-preview');
+  });
+
+  test('target cell: stale and pending can both apply — "*" then " (pending)"', () => {
+    expect(
+      formatTargetCell(row({ locations: [loc({ targets: [{ provider: 'dokploy', target: 'backend-preview', stale: true, pending: true }] })] })),
+    ).toBe('[dokploy] backend-preview* (pending)');
+  });
+
   test('target cell: "—" when there are no targets anywhere — whether `targets` is absent (old-server payload) or explicitly `[]`', () => {
     expect(formatTargetCell(row({ locations: [loc()] }))).toBe('—'); // `targets` field entirely absent
     expect(formatTargetCell(row({ locations: [loc({ targets: [] })] }))).toBe('—');
@@ -1006,6 +1022,16 @@ describe('CAP-679 rendering: "+N" survives truncation, INTEGRATIONS overflow, po
     const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
     const frame = render(s1, 100, 30);
     expect(frame).toContain('targets: [aws-ecs] prod-cluster (stale)');
+  });
+
+  test('the details popup spells out a pending target with "(pending)"', () => {
+    const target = row({
+      name: 'ROW',
+      locations: [loc({ targets: [{ provider: 'dokploy', target: 'backend-preview', stale: false, pending: true }] })],
+    });
+    const s1 = handleKey(initialSecretsScreenState([target]), ENTER).state;
+    const frame = render(s1, 100, 30);
+    expect(frame).toContain('targets: [dokploy] backend-preview (pending)');
   });
 
   test('the details popup lists a non-stale target with no "(stale)" marker', () => {

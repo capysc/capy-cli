@@ -53,6 +53,13 @@ export interface TargetDeliveryDescriptor {
   ref?: Record<string, string>;
   /** Token deploys only. */
   deployId?: string;
+  /**
+   * `false` for a `capy deploy --no-deploy` write — see `TargetDelivery.deployed`'s
+   * own doc. Omitted (the default) means a real deploy: the element written
+   * OMITS the field, which is what "deployed" means for every element,
+   * including every one written before this existed.
+   */
+  deployed?: boolean;
 }
 
 /** Narrows `unknown` to a well-formed descriptor — guards against a caller (or a stray
@@ -74,14 +81,32 @@ type EntryWithTargets = KeepVariableEntry & { targets?: ReadonlyArray<TargetDeli
  * a second entry for the same pair.
  *
  * NO-OP when the existing element for this (provider, target) already
- * carries the SAME `deployed_value_hash` — returns `existing` UNCHANGED (same
- * array reference when nothing else needed updating), rather than replacing
- * it with a fresh `deployed_at`/`deploy_id`. This is what makes an unchanged
- * value produce an unchanged keep.lock: `buildDeployKeep`'s CI change-gate
- * (and `recordTargetDeliveries`'s direct-mode write) both key their own
- * "did anything change" off comparing serialized keep.lock text, and a
- * redeploy of the exact same value must not manufacture a diff by stamping a
- * new timestamp on a fact that didn't change.
+ * carries the SAME `deployed_value_hash`, the SAME `deploy_id` (including
+ * "neither has one"), and the SAME `deployed` pending-ness — returns
+ * `existing` UNCHANGED (same array reference), rather than replacing it with
+ * a fresh `deployed_at`. This is what makes a truly-nothing-changed redeploy
+ * produce an unchanged keep.lock: `buildDeployKeep`'s CI change-gate (and
+ * `recordTargetDeliveries`'s direct-mode write) both key their own "did
+ * anything change" off comparing serialized keep.lock text.
+ *
+ * NOT a no-op when only `deploy_id` differs, even with an identical value —
+ * "no untracked tokens" (CAP-679 follow-up): a same-value redeploy still
+ * mints a FRESH live token, and silently keeping the old `deploy_id` here
+ * (the original bug this replaced) would leave that fresh token installed on
+ * the platform but recorded nowhere, so `capy deploy targets-remove` could
+ * never revoke it. Instead, the OLD `deploy_id` (when there was one) is
+ * carried forward into `superseded_deploy_ids` — merged with any it already
+ * had, deduped, and never including the id that's current either before or
+ * after this call. Nothing here revokes anything: a superseded id is a
+ * "maybe still needed" fact, not an action. It is safe to sit there
+ * indefinitely — `deploy targets-remove` revokes every id it finds (current
+ * + superseded, see `allDeployIdsForTarget`-style callers), and
+ * `deployCommand.ts`'s own post-deploy step revokes (and then clears) a
+ * target's superseded ids ONLY after a REAL deploy to that same target has
+ * just succeeded — never for a `--no-deploy` write (`delivery.deployed ===
+ * false`, which still supersedes here exactly the same way, just isn't
+ * revoked by that follow-up) and never for a failed deploy (this function is
+ * never even called in that case — see `deployCommand.ts`'s call sites).
  */
 export function upsertTargetElement(
   existing: ReadonlyArray<TargetDelivery> | undefined,
@@ -91,9 +116,19 @@ export function upsertTargetElement(
 ): ReadonlyArray<TargetDelivery> {
   const list = existing ?? [];
   const match = list.find((t) => t.provider === delivery.provider && t.target === delivery.target);
-  if (match && match.deployed_value_hash === deployedValueHash) {
+
+  const deployIdUnchanged = (match?.deploy_id ?? undefined) === (delivery.deployId ?? undefined);
+  const pendingUnchanged = (match?.deployed ?? true) === (delivery.deployed ?? true);
+  if (match && match.deployed_value_hash === deployedValueHash && deployIdUnchanged && pendingUnchanged) {
     return list;
   }
+
+  const priorSuperseded = match?.superseded_deploy_ids ?? [];
+  const newlySuperseded = match?.deploy_id && !deployIdUnchanged ? [match.deploy_id] : [];
+  const supersededIds = Array.from(new Set([...priorSuperseded, ...newlySuperseded])).filter(
+    (id) => id !== delivery.deployId,
+  );
+
   const filtered = list.filter((t) => !(t.provider === delivery.provider && t.target === delivery.target));
   const element: TargetDelivery = {
     provider: delivery.provider,
@@ -102,6 +137,8 @@ export function upsertTargetElement(
     deployed_value_hash: deployedValueHash,
     deployed_at: deployedAt,
     ...(delivery.deployId ? { deploy_id: delivery.deployId } : {}),
+    ...(delivery.deployed === false ? { deployed: false } : {}),
+    ...(supersededIds.length > 0 ? { superseded_deploy_ids: supersededIds } : {}),
   };
   return [...filtered, element];
 }
@@ -194,6 +231,88 @@ export function stripTargetsForProviderTarget(
 /** `deploy revoke <id>`: strip every element whose `deploy_id` matches. */
 export function stripTargetsForDeployId(keep: KeepFile, deployId: string): KeepFile {
   return stripTargetsMatching(keep, (t) => t.deploy_id === deployId);
+}
+
+/**
+ * Every `deploy_id` this (provider, target) pair has EVER delivered with and
+ * might still be live — its CURRENT `deploy_id` on every element, plus every
+ * `superseded_deploy_ids` entry those elements carry, deduped. `deploy
+ * targets-remove` revokes every one of these — the whole point of tracking
+ * superseded ids is that removal is the one place that's safe to revoke
+ * everything at once, since the target itself is going away.
+ */
+export function allDeployIdsForTarget(keep: KeepFile, provider: string, target: string): readonly string[] {
+  const ids = new Set<string>();
+  for (const entries of Object.values(keep.variables)) {
+    for (const entry of entries) {
+      for (const t of (entry as EntryWithTargets).targets ?? []) {
+        if (t.provider !== provider || t.target !== target) continue;
+        if (t.deploy_id) ids.add(t.deploy_id);
+        for (const id of t.superseded_deploy_ids ?? []) ids.add(id);
+      }
+    }
+  }
+  return Array.from(ids);
+}
+
+/**
+ * Only the SUPERSEDED ids for (provider, target) — never the current one.
+ * Used by the post-deploy revoke step (`deployCommand.ts`): a real deploy
+ * just succeeded, so whatever this target's element superseded a moment ago
+ * (see `upsertTargetElement`'s doc) is safe to revoke now — but the CURRENT
+ * `deploy_id` obviously never is.
+ */
+export function supersededDeployIdsForTarget(keep: KeepFile, provider: string, target: string): readonly string[] {
+  const ids = new Set<string>();
+  for (const entries of Object.values(keep.variables)) {
+    for (const entry of entries) {
+      for (const t of (entry as EntryWithTargets).targets ?? []) {
+        if (t.provider !== provider || t.target !== target) continue;
+        for (const id of t.superseded_deploy_ids ?? []) ids.add(id);
+      }
+    }
+  }
+  return Array.from(ids);
+}
+
+/**
+ * Drop `ids` from every `superseded_deploy_ids` list on (provider, target)'s
+ * elements — called once those ids have actually been revoked, so a later
+ * run never tries again. Pure, and a true no-op (same object identity via
+ * `targetsChanged`-style comparison isn't attempted here — callers push
+ * through `pushKeepTransform`, which already skips a same-reference result)
+ * when nothing needed dropping.
+ */
+export function clearSupersededDeployIds(
+  keep: KeepFile,
+  provider: string,
+  target: string,
+  ids: ReadonlySet<string>,
+): KeepFile {
+  return {
+    ...keep,
+    variables: Object.fromEntries(
+      Object.entries(keep.variables).map(([name, entries]) => [
+        name,
+        entries.map((e) => {
+          const withTargets = e as EntryWithTargets;
+          if (!withTargets.targets) return e;
+          const nextTargets = withTargets.targets.map((t) => {
+            if (t.provider !== provider || t.target !== target || !t.superseded_deploy_ids?.length) return t;
+            const kept = t.superseded_deploy_ids.filter((id) => !ids.has(id));
+            if (kept.length === t.superseded_deploy_ids.length) return t;
+            if (kept.length === 0) {
+              const { superseded_deploy_ids: _drop, ...rest } = t;
+              return rest;
+            }
+            return { ...t, superseded_deploy_ids: kept };
+          });
+          const entryChanged = nextTargets.some((t, i) => t !== withTargets.targets![i]);
+          return entryChanged ? { ...e, targets: nextTargets } : e;
+        }),
+      ]),
+    ),
+  };
 }
 
 /** Whether `keep` actually changed vs. `next` — cheap identity check first, deep fallback otherwise. */
