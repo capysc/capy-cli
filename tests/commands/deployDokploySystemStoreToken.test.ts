@@ -8,10 +8,10 @@
  *
  * `mock.module('../../src/system/systemStore', ...)` is set up FRESH inside
  * each test (not once at module scope) so every scenario gets its own
- * `getConnectorSecret` behavior with no shared mutable state of our own —
- * bun's mock registry (and its spy functions' own `.mock.calls`) hold all of
- * it; this file only ever READS those, via `.map`/`.every`/`.some`, never
- * pushes into anything itself.
+ * `getDirectionalConnectorSecret` behavior with no shared mutable state of
+ * our own — bun's mock registry (and its spy functions' own `.mock.calls`)
+ * hold all of it; this file only ever READS those, via
+ * `.map`/`.every`/`.some`, never pushes into anything itself.
  *
  * mock.module is process-wide: this file runs isolated (tests/run-tests.sh).
  */
@@ -102,8 +102,8 @@ function tearDown(): void {
  * NO keep.lock anywhere — proves `deployRemove` doesn't need
  * `readKeep(cwd)?.orgId` to reach the org system store: `orgId` is a hint
  * `resolveDokployApiKeyOnce` passes through when it has one, but
- * `getConnectorSecret` → `openSystemStore` resolves the org itself
- * (`resolveOrgContext`) when it doesn't.
+ * `getDirectionalConnectorSecret` → `openSystemStore` resolves the org
+ * itself (`resolveOrgContext`) when it doesn't.
  */
 function setUpNoKeepLock(targetOptions: Record<string, unknown>): void {
   rmSync(ROOT_NO_KEEP, { recursive: true, force: true });
@@ -173,18 +173,21 @@ async function withTTY<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * A fake system store mirroring the REAL `getConnectorSecret`'s
+ * A fake system store mirroring the REAL `getDirectionalConnectorSecret`'s
  * interactive-gated contract (`system/systemStore.ts`): an existing `entry`
  * is returned with no prompt; a missing one is prompted for (and saved)
  * ONLY when `opts.interactive` is true, exactly like the real store. Built
  * from two bun spies (`promptFn`/`writeFn`) so "zero prompt calls" / "zero
  * store writes" are read off THEM — bun's own accumulator — never a counter
- * this file owns.
+ * this file owns. Signature is `(primaryName, fallbackName, opts)` — the
+ * real function's three-arg shape (CAP-679 follow-up) — but this fake never
+ * needs the fallback name: it never exercises the "borrow from the other
+ * direction" branch, only "present" vs "missing + prompt".
  */
 function fakeSystemStore(entry: string | null) {
   const promptFn = mock(async () => 'prompted-value');
   const writeFn = mock(async (_value: string) => {});
-  const getConnectorSecret = mock(async (_name: string, opts: { interactive: boolean }) => {
+  const getConnectorSecret = mock(async (_name: string, _fallbackName: string, opts: { interactive: boolean }) => {
     if (entry !== null) return entry;
     if (!opts.interactive) return null;
     const value = await promptFn();
@@ -276,7 +279,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
     setUp({});
     const SENTINEL = 'sk_capy_e2e_never_leak_7a1';
     const getConnectorSecret = mock(async () => SENTINEL);
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code, lines, seenApiKeys, requestCount } = await runScriptedDeploy();
@@ -295,7 +301,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
   test('missing everywhere + non-interactive: refused, zero Dokploy requests', async () => {
     setUp({});
     const getConnectorSecret = mock(async () => null);
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code, requestCount } = await withEnv({ DOKPLOY_API_KEY: undefined }, runScriptedDeploy);
@@ -311,7 +320,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
     const getConnectorSecret = mock(async () => {
       throw { code: 'SYSTEM_STORE_ADMIN_ONLY' };
     });
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code, lines, requestCount } = await withEnv({ DOKPLOY_API_KEY: undefined }, runScriptedDeploy);
@@ -328,7 +340,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
     const getConnectorSecret = mock(async () => {
       throw { code: 'SYSTEM_STORE_ADMIN_ONLY' };
     });
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code, seenApiKeys } = await withEnv({ DOKPLOY_API_KEY: 'env-fallback-token' }, runScriptedDeploy);
@@ -342,7 +357,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
   test('an explicit tokenEnv on the target, set in env, wins outright — the store is never called', async () => {
     setUp({ tokenEnv: 'MY_DOKPLOY_TOKEN_STORE_TEST' });
     const getConnectorSecret = mock(async () => 'store-token-should-not-be-used');
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code, seenApiKeys } = await withEnv(
@@ -360,7 +378,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
   test('capy deploy targets-remove reaches the org system store even from a cwd with no keep.lock', async () => {
     setUpNoKeepLock({});
     const { getConnectorSecret } = fakeSystemStore('resolved-without-keep-lock');
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     const fetchMock = mock(async (url: string) => {
       const u = new URL(url);
@@ -401,7 +422,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
   test('--dry-run: an empty store makes zero prompt calls and zero store writes, and reports the coded refusal', async () => {
     setUp({});
     const { getConnectorSecret, promptFn, writeFn } = fakeSystemStore(null);
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       // A real TTY, so the ONLY thing that can be suppressing the prompt is
@@ -423,7 +447,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
     // `resolveDokployApiKeyOnce` ever calls the store.
     setUp({ baseUrl: 'not a url' });
     const { getConnectorSecret, promptFn, writeFn } = fakeSystemStore(null);
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code } = await withTTY(() => withEnv({ DOKPLOY_API_KEY: undefined }, () => runScriptedDeploy()));
@@ -439,7 +466,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
   test('--web: a real TTY does not let the store prompt — refused, coded, zero prompt calls', async () => {
     setUp({});
     const { getConnectorSecret, promptFn } = fakeSystemStore(null);
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code } = await withTTY(() =>
@@ -457,7 +487,10 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
   test('--yes: a real TTY does not let the store prompt — refused, coded, zero prompt calls', async () => {
     setUp({});
     const { getConnectorSecret, promptFn } = fakeSystemStore(null);
-    mock.module('../../src/system/systemStore', () => ({ getConnectorSecret }));
+    // CAP-679 follow-up: deploy resolves through `getDirectionalConnectorSecret`
+    // now, not the bare `getConnectorSecret` — same call shape modulo the
+    // extra fallback-name argument, which every mock here ignores.
+    mock.module('../../src/system/systemStore', () => ({ getDirectionalConnectorSecret: getConnectorSecret }));
 
     try {
       const { code } = await withTTY(() =>

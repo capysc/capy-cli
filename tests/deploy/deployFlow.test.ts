@@ -185,17 +185,44 @@ describe('keepGate.buildDeployKeep — CAP-679 delivery folding', () => {
     expect(JSON.stringify(base)).toBe(before);
   });
 
-  // ── The bug the validator caught: a redeploy of the SAME value must not
-  // manufacture a diff by stamping a fresh deployed_at on a fact that
-  // didn't change — otherwise the CI change-gate opens a PR on every run. ──
-  test('identical value, already-recorded target → changed is false, no element churn', () => {
+  // ── The bug the validator caught: a redeploy of the SAME value with NO new
+  // token to track must not manufacture a diff by stamping a fresh
+  // deployed_at on a fact that didn't change — otherwise the CI change-gate
+  // opens a PR on every run. ──
+  test('identical value, no deploy_id involved → changed is false, no element churn', () => {
     const delivery = { provider: 'dokploy', target: 'backend-preview' };
     const first = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', delivery, 't0');
     const firstKeep = JSON.parse(first.content);
     expect(firstKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t0');
 
-    // Redeploy: SAME value, SAME delivery, but a NEW timestamp/deploy_id —
-    // as a real second `capy deploy` run would pass.
+    // Redeploy: SAME value, SAME delivery, still no deployId — nothing new
+    // was minted, so there is genuinely nothing to record.
+    const second = buildDeployKeep(
+      firstKeep,
+      { WORKOS_API_KEY: 'sk_old' },
+      ['WORKOS_API_KEY'],
+      'staging',
+      delivery,
+      't1',
+    );
+    expect(second.changed).toBe(false);
+    const secondKeep = JSON.parse(second.content);
+    // The element is UNTOUCHED — same deployed_at, no deploy_id added — not
+    // bumped to 't1'.
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets).toEqual(firstKeep.variables.WORKOS_API_KEY[0].targets);
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t0');
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0]).not.toHaveProperty('deploy_id');
+  });
+
+  // ── "No untracked tokens" (CAP-679 follow-up): unlike the case above, a
+  // redeploy that DOES carry a new deploy_id is a real change — the old
+  // token might still be live on the platform, so its id must be recorded
+  // (superseded), never silently dropped. ──
+  test('identical value, a NEW deploy_id → changed is true, old id moves to superseded_deploy_ids', () => {
+    const delivery = { provider: 'dokploy', target: 'backend-preview', deployId: 'dep_old' };
+    const first = buildDeployKeep(base, { WORKOS_API_KEY: 'sk_old' }, ['WORKOS_API_KEY'], 'staging', delivery, 't0');
+    const firstKeep = JSON.parse(first.content);
+
     const second = buildDeployKeep(
       firstKeep,
       { WORKOS_API_KEY: 'sk_old' },
@@ -204,13 +231,11 @@ describe('keepGate.buildDeployKeep — CAP-679 delivery folding', () => {
       { ...delivery, deployId: 'dep_new' },
       't1',
     );
-    expect(second.changed).toBe(false);
+    expect(second.changed).toBe(true);
     const secondKeep = JSON.parse(second.content);
-    // The element is UNTOUCHED — same deployed_at, no deploy_id added — not
-    // bumped to 't1'/'dep_new'.
-    expect(secondKeep.variables.WORKOS_API_KEY[0].targets).toEqual(firstKeep.variables.WORKOS_API_KEY[0].targets);
-    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t0');
-    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0]).not.toHaveProperty('deploy_id');
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deploy_id).toBe('dep_new');
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].deployed_at).toBe('t1');
+    expect(secondKeep.variables.WORKOS_API_KEY[0].targets[0].superseded_deploy_ids).toEqual(['dep_old']);
   });
 
   test('identical value, no PRIOR target recorded yet → still changed (a first delivery IS a real change)', () => {

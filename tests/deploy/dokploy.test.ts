@@ -881,9 +881,10 @@ describe('dokploy — remove', () => {
 
 // ── System store token resolution (CAP-664) ─────────────────────────────────
 //
-// The org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry is a SECOND
-// source in front of the env var this file's other tests exercise
-// throughout — see `dokployApi.ts#resolveDokployApiKey`. Every test above
+// The org system store's `_TARGET_DOKPLOY_API_KEY` entry (CAP-679 follow-up
+// — deploy's OWN direction, separate from import's `_CONNECTOR_DOKPLOY_API_KEY`)
+// is a SECOND source in front of the env var this file's other tests
+// exercise throughout — see `dokployApi.ts#resolveDokployApiKey`. Every test above
 // still passes unmodified: an adapter built with `createDokployAdapter` and
 // no `getConnectorSecret` dep, called with no `ctx.resolvedApiKey`, resolves
 // env-only exactly as before. These tests cover the two NEW paths: a caller
@@ -951,7 +952,9 @@ describe('dokploy — system store token resolution', () => {
 
   test('preflight: no ctx.resolvedApiKey and no explicit-env match falls through to an injected store, called exactly once', async () => {
     const getConnectorSecret = mock(async (name: string, opts: DokploySystemStoreCallOptions) => {
-      expect(name).toBe('_CONNECTOR_DOKPLOY_API_KEY');
+      // CAP-679 follow-up: the adapter (deploy's own direction) asks for
+      // `_TARGET_DOKPLOY_API_KEY`, never the import-side connector key.
+      expect(name).toBe('_TARGET_DOKPLOY_API_KEY');
       expect(opts.interactive).toBe(false);
       return TOKEN;
     });

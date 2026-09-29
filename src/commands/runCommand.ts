@@ -6,6 +6,7 @@ import { debug } from '../ui/debug';
 import { getShellPinnedEnv } from '../config/prodPins';
 import { resolveActiveUrl } from '../config/profileConfig';
 import type { ParsedSecretsBlob } from '../crypto/deployRuntime';
+import { ERROR_CODES } from '../types/index';
 
 /**
  * Writes `.capy/next-env.js`, a CommonJS module mapping each decrypted env var
@@ -176,6 +177,88 @@ async function resolveLocalModeProjectKey(
   }
 }
 
+// ── Quoted runtime-pair values (CAP-679 follow-up) ──────────────────────────
+//
+// A Dokploy "stack" (Swarm) compose below v0.30.3 ships `env_file` values —
+// every one in the file, not only Capy's — to the container with literal
+// quote characters still attached (see `deploy/adapters/dokploy.ts`'s
+// `DOKPLOY_STACK_QUOTES` warning). Stripping ONE layer of surrounding quotes
+// from `_SECRETS_BLOB`/`_PROJECT_KEY` — and ONLY those two, and ONLY one
+// layer — lets `capy run` still parse them correctly once the container's
+// own `capy` is new enough. Every other env var, and the OLD
+// `SECRETS_BLOB`/`PROJECT_KEY` pair, is left byte-for-byte as today: this is
+// new behavior for the new pair only, never a general env-parsing change.
+
+/**
+ * Strips exactly one surrounding pair of matching quotes (`"…"` or `'…'`)
+ * from `raw` — only when the SAME character opens and closes, and only ever
+ * one layer. Anything else (unquoted, mismatched quotes, an empty/1-char
+ * string) is returned unchanged.
+ */
+function stripOuterQuotePair(raw: string): string {
+  if (raw.length < 2) return raw;
+  const first = raw[0];
+  const last = raw[raw.length - 1];
+  if ((first === '"' || first === "'") && first === last) {
+    return raw.slice(1, -1);
+  }
+  return raw;
+}
+
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Strict base64: the right alphabet, `=` padding only at the end, and a length that's actually a multiple of 4. */
+function isValidBase64(s: string): boolean {
+  return s.length > 0 && s.length % 4 === 0 && BASE64_RE.test(s);
+}
+
+const HEX64_RE = /^[0-9a-fA-F]{64}$/;
+
+type QuoteCheckedValue =
+  | { readonly ok: true; readonly value: string }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/** `_SECRETS_BLOB`: strip one quote layer, then validate as base64 — same shape the old pair is trusted to have, just checked explicitly here since stripping could otherwise turn a genuinely-bad value into something that merely LOOKS parseable. */
+function checkedNewSecretsBlob(raw: string): QuoteCheckedValue {
+  const stripped = stripOuterQuotePair(raw);
+  if (!isValidBase64(stripped)) {
+    return {
+      ok: false,
+      code: ERROR_CODES.RUN_SECRETS_BLOB_INVALID,
+      // COPY-FLAG: minimal neutral wording.
+      message: '_SECRETS_BLOB is not valid base64 (checked after removing one layer of surrounding quotes, if present).',
+    };
+  }
+  return { ok: true, value: stripped };
+}
+
+/** `_PROJECT_KEY`: strip one quote layer, then validate as exactly 64 hex characters. */
+function checkedNewProjectKey(raw: string): QuoteCheckedValue {
+  const stripped = stripOuterQuotePair(raw);
+  if (!HEX64_RE.test(stripped)) {
+    return {
+      ok: false,
+      code: ERROR_CODES.RUN_PROJECT_KEY_INVALID,
+      // COPY-FLAG: minimal neutral wording.
+      message: '_PROJECT_KEY is not 64 hex characters (checked after removing one layer of surrounding quotes, if present).',
+    };
+  }
+  return { ok: true, value: stripped };
+}
+
+type NewRuntimePairResult =
+  | { readonly ok: true; readonly secretsBlob: string; readonly projectKey: string }
+  | { readonly ok: false; readonly code: string; readonly message: string };
+
+/** Both new-pair values, stripped and validated together — short-circuits on the blob first, same order they're declared in. */
+function resolveNewRuntimePair(rawBlob: string, rawKey: string): NewRuntimePairResult {
+  const blob = checkedNewSecretsBlob(rawBlob);
+  if (!blob.ok) return blob;
+  const key = checkedNewProjectKey(rawKey);
+  if (!key.ok) return key;
+  return { ok: true, secretsBlob: blob.value, projectKey: key.value };
+}
+
 export async function runCommand(args: string[], devMode: boolean = false): Promise<number> {
   if (args.length === 0) {
     console.error('Usage: capy run -- <command> [args...]');
@@ -222,8 +305,17 @@ export async function runCommand(args: string[], devMode: boolean = false): Prom
 
   // Deployed mode: CI, serverless, Vercel builds, Dokploy applications, etc.
   if (useNewPair || useOldPair) {
-    const secretsBlob = useNewPair ? (newSecretsBlob as string) : (oldSecretsBlob as string);
-    const projectKey = useNewPair ? (newProjectKey as string) : (oldProjectKey as string);
+    // Strip + validate ONLY the new pair (see the "Quoted runtime-pair
+    // values" section above) — the old pair is untouched, exactly as today.
+    const newPairResolved = useNewPair
+      ? resolveNewRuntimePair(newSecretsBlob as string, newProjectKey as string)
+      : null;
+    if (newPairResolved && !newPairResolved.ok) {
+      console.error(`capy run: [${newPairResolved.code}] ${newPairResolved.message}`);
+      return 1;
+    }
+    const secretsBlob = newPairResolved ? newPairResolved.secretsBlob : (oldSecretsBlob as string);
+    const projectKey = newPairResolved ? newPairResolved.projectKey : (oldProjectKey as string);
 
     const { parseSecretsBlob, fetchServiceKey, decryptSecretsBlob } = await import(
       '../crypto/deployRuntime'

@@ -252,4 +252,108 @@ describe('capy run (deployed mode: _SECRETS_BLOB/_PROJECT_KEY vs SECRETS_BLOB/PR
     expect(result.stderr).toContain('_SECRETS_BLOB');
     expect(result.stderr).toContain('_PROJECT_KEY');
   });
+
+  // ── CAP-679 follow-up (5a): one layer of surrounding quotes on the NEW
+  // pair only — some deploy platforms (a Dokploy "stack" compose below
+  // v0.30.3, see DOKPLOY_STACK_QUOTES) hand env_file values to the container
+  // still quoted. `capy run` strips exactly one layer, validates strictly,
+  // and never touches the OLD pair or any other env var. ──
+  describe('quoted _SECRETS_BLOB/_PROJECT_KEY (5a)', () => {
+    test('double-quoted new pair: stripped, decrypts, and the child receives the value UNQUOTED', async () => {
+      const envVars = { QUOTED_ROUND_TRIP: 'plain-decrypted-value' };
+      const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+      fake = await startFakeService(serviceKeyHex);
+
+      const result = await capy(['--', 'node', '-e', 'console.log(process.env.QUOTED_ROUND_TRIP)'], {
+        env: {
+          _SECRETS_BLOB: `"${secretsBlob}"`,
+          _PROJECT_KEY: `"${pk.toString('hex')}"`,
+          CAPY_API_URL: fake.url,
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      // The DECRYPTED value is unquoted — quoting only ever wraps the two
+      // runtime-pair carrier vars, never the values inside the blob.
+      expect(result.stdout.trim()).toBe('plain-decrypted-value');
+    });
+
+    test('single-quoted new pair: also stripped and decrypts', async () => {
+      const envVars = { SQ: 'ok' };
+      const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+      fake = await startFakeService(serviceKeyHex);
+
+      const result = await capy(['--', 'node', '-e', 'console.log(process.env.SQ)'], {
+        env: {
+          _SECRETS_BLOB: `'${secretsBlob}'`,
+          _PROJECT_KEY: `'${pk.toString('hex')}'`,
+          CAPY_API_URL: fake.url,
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('ok');
+    });
+
+    test('unquoted new pair: unchanged behavior (no stripping needed, still works)', async () => {
+      const envVars = { UNQ: 'ok' };
+      const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+      fake = await startFakeService(serviceKeyHex);
+
+      const result = await capy(['--', 'node', '-e', 'console.log(process.env.UNQ)'], {
+        env: { _SECRETS_BLOB: secretsBlob, _PROJECT_KEY: pk.toString('hex'), CAPY_API_URL: fake.url },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe('ok');
+    });
+
+    test('mismatched quotes are refused, coded, and name the var', async () => {
+      const result = await capy(['--', 'echo', 'unreached'], {
+        env: { _SECRETS_BLOB: '"not-matching\'', _PROJECT_KEY: 'a'.repeat(64) },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('RUN_SECRETS_BLOB_INVALID');
+      expect(result.stderr).toContain('_SECRETS_BLOB');
+    });
+
+    test('quoted-but-invalid base64 is refused with a coded, distinct error', async () => {
+      const result = await capy(['--', 'echo', 'unreached'], {
+        env: { _SECRETS_BLOB: '"not valid base64!!"', _PROJECT_KEY: 'a'.repeat(64) },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('RUN_SECRETS_BLOB_INVALID');
+    });
+
+    test('quoted-but-invalid _PROJECT_KEY (not 64 hex chars) is refused with its own coded error', async () => {
+      const { secretsBlob } = buildDeployedFixture({ X: 'y' });
+      const result = await capy(['--', 'echo', 'unreached'], {
+        env: { _SECRETS_BLOB: secretsBlob, _PROJECT_KEY: '"not-hex"' },
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('RUN_PROJECT_KEY_INVALID');
+      expect(result.stderr).toContain('_PROJECT_KEY');
+    });
+
+    test('the OLD pair is never quote-stripped — a quoted old pair fails exactly as it does today', async () => {
+      const envVars = { OLD: 'should-not-decrypt' };
+      const { pk, secretsBlob, serviceKeyHex } = buildDeployedFixture(envVars);
+      fake = await startFakeService(serviceKeyHex);
+
+      const result = await capy(['--', 'echo', 'unreached'], {
+        env: {
+          SECRETS_BLOB: `"${secretsBlob}"`,
+          PROJECT_KEY: `"${pk.toString('hex')}"`,
+          CAPY_API_URL: fake.url,
+        },
+      });
+      // The quotes are part of the value for the OLD pair — base64-decoding
+      // a quote-wrapped blob does not error immediately, so this surfaces
+      // later as a normal decrypt failure, never as a RUN_*_INVALID code
+      // (which is new-pair only).
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).not.toContain('RUN_SECRETS_BLOB_INVALID');
+      expect(result.stderr).not.toContain('RUN_PROJECT_KEY_INVALID');
+    });
+  });
 });

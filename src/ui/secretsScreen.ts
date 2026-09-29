@@ -544,10 +544,21 @@ export function formatConnectorCell(row: SecretIndexRow): string {
   return distinct.size > 1 ? `${label} +${distinct.size - 1}` : label;
 }
 
-/** One target's label: `[provider] target`, with a trailing `*` when `stale` (chosen over a spelled-out "(stale)" so it stays compact in this already-narrow column; the details popup spells it out instead — see `buildPopupLines`). */
+/**
+ * One target's label: `[provider] target`, with a trailing `*` when `stale`
+ * (chosen over a spelled-out "(stale)" so it stays compact in this
+ * already-narrow column; the details popup spells it out instead — see
+ * `buildPopupLines`), and ` (pending)` when the config was written by
+ * `capy deploy --no-deploy` and never actually shipped — minimal/neutral,
+ * spelled out rather than another single-char marker since "pending" isn't
+ * something a `*` reads as on its own. Both can apply at once (a pending
+ * write can also be stale if the value moved again since).
+ */
 function formatTargetLabel(target: SecretIndexTarget): string {
   const base = `[${target.provider}] ${target.target}`;
-  return target.stale ? `${base}*` : base;
+  const staleSuffix = target.stale ? '*' : '';
+  const pendingSuffix = target.pending ? ' (pending)' : '';
+  return `${base}${staleSuffix}${pendingSuffix}`;
 }
 
 /** Every target across every one of `row`'s locations, flattened — a location's `targets` is additive/optional (absent on a server that predates CAP-676), so `?? []` is the compatibility seam here too. */
@@ -867,7 +878,9 @@ function buildPopupLines(row: SecretIndexRow, popup: PopupState, width: number):
     const targets = loc.targets ?? [];
     const targetsLabel =
       targets.length > 0
-        ? ` · targets: ${targets.map((t) => `[${t.provider}] ${t.target}${t.stale ? ' (stale)' : ''}`).join(', ')}`
+        ? ` · targets: ${targets
+            .map((t) => `[${t.provider}] ${t.target}${t.stale ? ' (stale)' : ''}${t.pending ? ' (pending)' : ''}`)
+            .join(', ')}`
         : '';
     return `${indent}${inner}${truncate(`${loc.project_name} · ${loc.branch}`, contentWidth)}${protMarker} ${DIM}· ${connectorLabel} · ${updated}${targetsLabel}${RESET}`;
   });

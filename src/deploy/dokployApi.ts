@@ -522,9 +522,23 @@ export function resolveDokployToken(
 
 /**
  * Name of the org system store entry (CAP-664, `docs/org-system-store.md`)
- * that holds the Dokploy API key: `_CONNECTOR_<PROVIDER>_<NAME>`.
+ * that holds the Dokploy API key for IMPORT (`capy connect dokploy`, inbound):
+ * `_CONNECTOR_<PROVIDER>_<NAME>`.
  */
 export const DOKPLOY_CONNECTOR_SECRET_NAME = '_CONNECTOR_DOKPLOY_API_KEY';
+
+/**
+ * Name of the org system store entry that holds the Dokploy API key for
+ * DEPLOY (`capy deploy`, outbound) — CAP-679 follow-up. Deliberately a
+ * SEPARATE key from `DOKPLOY_CONNECTOR_SECRET_NAME`: import and deploy are
+ * different directions of "integrations" and may legitimately want different
+ * credentials (e.g. a narrower-scoped token for deploy). When this one is
+ * absent but the connector key already exists, the caller (`deployCommand.ts`
+ * wiring `system/systemStore.ts#getDirectionalConnectorSecret`) offers to
+ * reuse it via a one-level REFERENCE rather than silently using it directly
+ * or forcing a duplicate value to be typed in.
+ */
+export const DOKPLOY_TARGET_SECRET_NAME = '_TARGET_DOKPLOY_API_KEY';
 
 /** Where a resolved Dokploy API key came from — never logged with the value, only alongside it in memory. */
 export type DokployApiKeySource = 'system' | 'env';
@@ -575,9 +589,10 @@ type StoreOutcome =
 async function readFromSystemStore(
   getConnectorSecret: NonNullable<ResolveDokployApiKeyDeps['getConnectorSecret']>,
   callOpts: DokploySystemStoreCallOptions,
+  storeName: string,
 ): Promise<StoreOutcome> {
   try {
-    const value = await getConnectorSecret(DOKPLOY_CONNECTOR_SECRET_NAME, callOpts);
+    const value = await getConnectorSecret(storeName, callOpts);
     return value ? { kind: 'value', value } : { kind: 'empty' };
   } catch (err) {
     return { kind: 'error', code: storeErrorCode(err) };
@@ -594,6 +609,15 @@ export interface ResolveDokployApiKeyOptions {
   devMode?: boolean;
   apiUrl?: string;
   deps?: ResolveDokployApiKeyDeps;
+  /**
+   * Which system store entry to ask for (CAP-679 follow-up: deploy and
+   * import now use SEPARATE keys). Defaults to
+   * `DOKPLOY_CONNECTOR_SECRET_NAME` — every caller that predates this option
+   * (and `capy connect dokploy`, which passes it explicitly for clarity)
+   * keeps asking for the connector key; `deployCommand.ts` passes
+   * `DOKPLOY_TARGET_SECRET_NAME` explicitly.
+   */
+  storeName?: string;
 }
 
 /**
@@ -601,17 +625,20 @@ export interface ResolveDokployApiKeyOptions {
  *
  *   1. An explicit `tokenEnv` (the `--token-env` flag, or a saved target's
  *      own `tokenEnv`) — when that variable is actually set, it wins outright.
- *   2. The org system store's `_CONNECTOR_DOKPLOY_API_KEY` entry. Missing +
- *      interactive + admin: the store itself asks for it (hidden input) and
- *      saves it (`system/systemStore.ts#getConnectorSecret`).
+ *   2. The org system store's `opts.storeName` entry (default
+ *      `_CONNECTOR_DOKPLOY_API_KEY` — see that option's own doc for the
+ *      deploy-vs-import split, CAP-679 follow-up). Missing + interactive +
+ *      admin: the store itself asks for it (hidden input, possibly offering
+ *      to reuse the OTHER direction's key instead — see
+ *      `system/systemStore.ts#getDirectionalConnectorSecret`) and saves it.
  *   3. The default env var (`DOKPLOY_API_KEY`) — back-compat with every
  *      target saved before the system store existed.
  *   4. Refused: `DOKPLOY_TOKEN_MISSING` when nothing anywhere had a value.
  *      When the store itself refused (a non-admin caller, or any other
  *      store error) AND step 3 was also empty, the refusal carries the
- *      STORE's own code (e.g. `SYSTEM_STORE_ADMIN_ONLY`) instead of the
- *      generic "missing" code, so the caller learns WHY, never by parsing a
- *      message string.
+ *      STORE's own code (e.g. `SYSTEM_STORE_ADMIN_ONLY`,
+ *      `DOKPLOY_TARGET_KEY_MISSING`) instead of the generic "missing" code,
+ *      so the caller learns WHY, never by parsing a message string.
  *
  * Callers resolve this ONCE per command and reuse the result — see
  * `deployCommand.ts`'s single call, fed into both `preflight()` and
@@ -627,12 +654,16 @@ export async function resolveDokployApiKey(
   }
 
   const getConnectorSecret = opts.deps?.getConnectorSecret ?? neverReachesTheStore;
-  const storeOutcome = await readFromSystemStore(getConnectorSecret, {
-    orgId: opts.orgId,
-    interactive: opts.interactive,
-    devMode: opts.devMode,
-    apiUrl: opts.apiUrl,
-  });
+  const storeOutcome = await readFromSystemStore(
+    getConnectorSecret,
+    {
+      orgId: opts.orgId,
+      interactive: opts.interactive,
+      devMode: opts.devMode,
+      apiUrl: opts.apiUrl,
+    },
+    opts.storeName ?? DOKPLOY_CONNECTOR_SECRET_NAME,
+  );
   if (storeOutcome.kind === 'value') return { ok: true, value: storeOutcome.value, source: 'system' };
 
   const fallback = resolveDokployToken(DEFAULT_TOKEN_ENV, opts.env);
@@ -668,29 +699,49 @@ export function dokploySecretsMayPrompt(baseInteractive: boolean, suppressed: bo
  * value. `DOKPLOY_TOKEN_MISSING`'s reason is deliberately identical to the
  * pre-system-store message (`$<tokenEnv> is not set`) — additive, not a
  * reword of what every caller already prints.
+ *
+ * `storeName` (CAP-679 follow-up) is which system store entry this refusal
+ * is about — defaults to `DOKPLOY_CONNECTOR_SECRET_NAME` for back-compat
+ * with every existing caller; `deployCommand.ts` passes
+ * `DOKPLOY_TARGET_SECRET_NAME` explicitly so its messages name the right key.
  */
 export function describeDokployTokenProblem(
   code: string,
   tokenEnv: string,
+  storeName: string = DOKPLOY_CONNECTOR_SECRET_NAME,
 ): { reason: string; hint: string } {
   if (code === ERROR_CODES.SYSTEM_STORE_ADMIN_ONLY) {
     return {
       // COPY-FLAG: minimal neutral wording.
-      reason: `only an org owner or admin can set ${DOKPLOY_CONNECTOR_SECRET_NAME} in the system store, and $${tokenEnv} is not set`,
-      hint: `Ask an org owner/admin to run \`capy system set ${DOKPLOY_CONNECTOR_SECRET_NAME}\`, or export ${tokenEnv} yourself.`,
+      reason: `only an org owner or admin can set ${storeName} in the system store, and $${tokenEnv} is not set`,
+      hint: `Ask an org owner/admin to run \`capy system set ${storeName}\`, or export ${tokenEnv} yourself.`,
+    };
+  }
+  if (code === ERROR_CODES.DOKPLOY_TARGET_KEY_MISSING) {
+    return {
+      // COPY-FLAG: minimal neutral wording.
+      reason: `${DOKPLOY_TARGET_SECRET_NAME} is not set, but ${DOKPLOY_CONNECTOR_SECRET_NAME} already holds a Dokploy key`,
+      hint: `Run this interactively to choose whether to reuse it, or run \`capy system set ${DOKPLOY_TARGET_SECRET_NAME}\` to set a dedicated one.`,
+    };
+  }
+  if (code === ERROR_CODES.DOKPLOY_CONNECTOR_KEY_MISSING) {
+    return {
+      // COPY-FLAG: minimal neutral wording.
+      reason: `${DOKPLOY_CONNECTOR_SECRET_NAME} is not set, but ${DOKPLOY_TARGET_SECRET_NAME} already holds a Dokploy key`,
+      hint: `Run this interactively to choose whether to reuse it, or run \`capy system set ${DOKPLOY_CONNECTOR_SECRET_NAME}\` to set a dedicated one.`,
     };
   }
   if (code === 'DOKPLOY_TOKEN_MISSING') {
     return {
       reason: `$${tokenEnv} is not set`,
       // COPY-FLAG: minimal neutral wording.
-      hint: `Run \`capy system set ${DOKPLOY_CONNECTOR_SECRET_NAME}\`, or export ${tokenEnv}=… first.`,
+      hint: `Run \`capy system set ${storeName}\`, or export ${tokenEnv}=… first.`,
     };
   }
   return {
     // COPY-FLAG: minimal neutral wording.
     reason: `could not resolve the Dokploy API key (${code})`,
-    hint: `Run \`capy system set ${DOKPLOY_CONNECTOR_SECRET_NAME}\`, or export ${tokenEnv}=… first.`,
+    hint: `Run \`capy system set ${storeName}\`, or export ${tokenEnv}=… first.`,
   };
 }
 
@@ -975,7 +1026,7 @@ export function describeEnvWarning(w: EnvWarning): string {
 // ── Importable entries (for a future `capy connect dokploy`) ─────────────
 
 export type ImportSkipReason = 'DOKPLOY_REFERENCE_VALUE';
-export type ImportWarningReason = 'DOKPLOY_VALUE_HAS_DOLLAR';
+export type ImportWarningReason = 'DOKPLOY_VALUE_HAS_DOLLAR' | 'DOKPLOY_VALUE_QUOTED';
 
 export interface ImportableEnvEntry {
   name: string;
@@ -986,16 +1037,34 @@ export interface ImportableEnvEntry {
   warning?: ImportWarningReason;
 }
 
+/** Whether `value` is wrapped in exactly one matching pair of `"`/`'` — never stripped, only detected. */
+function isSingleQuotePairWrapped(value: string): boolean {
+  if (value.length < 2) return false;
+  const first = value[0];
+  const last = value[value.length - 1];
+  return (first === '"' || first === "'") && first === last;
+}
+
 /**
  * One raw name/value's own classification: a reference value is never
  * imported as a literal string (there is no resolved value to put in
- * `.env`); a `$` anywhere else in the PARSED value (bcrypt hashes written
- * `$$escaped$$`, an unresolved `${VAR}` Compose interpolation, …) is still
- * imported — Dokploy/Compose is the thing that treats `$` specially, not
- * Capy — but flagged so the person reviews it themselves.
+ * `.env`). Dokploy's own `dotenv.parse` (see `listImportableEntries`'s doc)
+ * already strips ONE layer of surrounding quotes before this ever runs, so a
+ * PARSED value that STILL looks quote-wrapped means the raw line was
+ * double-quoted (e.g. `KEY='"real value"'`) — flagged under
+ * `DOKPLOY_VALUE_QUOTED` (CAP-679 follow-up) rather than silently imported
+ * with its outer quote characters as literal content. Never stripped here —
+ * the person reviews and decides; a `$` anywhere else in the PARSED value
+ * (bcrypt hashes written `$$escaped$$`, an unresolved `${VAR}` Compose
+ * interpolation, …) is still imported — Dokploy/Compose is the thing that
+ * treats `$` specially, not Capy — but flagged under
+ * `DOKPLOY_VALUE_HAS_DOLLAR` the same way. A value is flagged for at most
+ * one reason — quoting takes priority since it's about the value's OUTER
+ * shape, `$` about its content.
  */
 function classifyImportValue(name: string, value: string): ImportableEnvEntry {
   if (value.includes('${{')) return { name, value, skip: 'DOKPLOY_REFERENCE_VALUE' };
+  if (isSingleQuotePairWrapped(value)) return { name, value, warning: 'DOKPLOY_VALUE_QUOTED' };
   return value.includes('$') ? { name, value, warning: 'DOKPLOY_VALUE_HAS_DOLLAR' } : { name, value };
 }
 

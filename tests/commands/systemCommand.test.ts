@@ -204,6 +204,21 @@ describe('systemCommand', () => {
       const { stdout } = await capture(() => systemListCommand({}));
       expect(stdout.includes('_CONNECTOR_FOO_KEY')).toBe(true);
     });
+
+    // CAP-679 follow-up: a reference entry shows what it points at — a NAME,
+    // never a value, in both human and --json output.
+    it('a reference entry shows its target NAME in human mode, never a value', async () => {
+      listReturn = [{ name: '_TARGET_DOKPLOY_API_KEY', referencesName: '_CONNECTOR_DOKPLOY_API_KEY' } as any];
+      const { stdout } = await capture(() => systemListCommand({}));
+      expect(stdout).toContain('_TARGET_DOKPLOY_API_KEY');
+      expect(stdout).toContain('_CONNECTOR_DOKPLOY_API_KEY');
+    });
+
+    it('a reference entry carries referencesName through --json too', async () => {
+      listReturn = [{ name: '_TARGET_DOKPLOY_API_KEY', referencesName: '_CONNECTOR_DOKPLOY_API_KEY' } as any];
+      const { stdout } = await capture(() => systemListCommand({ json: true }));
+      expect(JSON.parse(stdout)).toEqual({ ok: true, names: listReturn });
+    });
   });
 
   describe('systemRmCommand', () => {

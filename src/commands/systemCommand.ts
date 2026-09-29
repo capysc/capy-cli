@@ -152,7 +152,12 @@ export async function systemListCommand(opts: SystemCommandOpts): Promise<void> 
     console.log('');
     for (const entry of names) {
       const when = entry.changed_at ? ` (changed ${entry.changed_at})` : ''; // COPY-FLAG
-      console.log(`  ${entry.name}${when}`);
+      // CAP-679 follow-up: a reference entry (e.g. `_TARGET_DOKPLOY_API_KEY`
+      // pointing at `_CONNECTOR_DOKPLOY_API_KEY`) shows what it points at —
+      // a NAME, never a value, so this is safe even though the rest of this
+      // command never prints values at all.
+      const ref = entry.referencesName ? ` → ${entry.referencesName}` : ''; // COPY-FLAG
+      console.log(`  ${entry.name}${when}${ref}`);
     }
     console.log('');
   } catch (err) {

@@ -40,6 +40,8 @@ import {
 import { ERROR_CODES } from '../../types/index';
 import {
   DEFAULT_TOKEN_ENV,
+  DOKPLOY_CONNECTOR_SECRET_NAME,
+  DOKPLOY_TARGET_SECRET_NAME,
   DokployApiError,
   DokployClient,
   DokployCompose,
@@ -366,12 +368,27 @@ function toDeployWarning(w: EnvWarning): DeployWarning {
 }
 
 /**
- * CAP-679: `composeType: 'stack'` on a Dokploy below v0.30.3 ships `env_file`
- * values — every one in the file, not only Capy's — to containers with
- * literal quotes (upstream fix d1830182). WARN, never refuse: Capy cannot fix
- * this, and the same problem already affects every other var in the file.
- * `null` (never treated as "old") when the compose isn't a stack, or the
- * version can't be read/parsed at all.
+ * CAP-679 (follow-up): `composeType: 'stack'` on a Dokploy below v0.30.3
+ * ships `env_file` values — every one in the file, not only Capy's — to
+ * containers with literal quotes (upstream fix d1830182). WARN, never
+ * refuse: Capy cannot fix this on the Dokploy side, and the same problem
+ * already affects every other var in the file.
+ *
+ * `capy run` (5a of the follow-up) now strips ONE layer of surrounding
+ * quotes from `_SECRETS_BLOB`/`_PROJECT_KEY` specifically, so Capy's OWN two
+ * managed values survive this Dokploy bug once the CONTAINER's `capy` is new
+ * enough — but values Capy doesn't manage are unaffected and still arrive
+ * quoted either way, so the warning always fires for an old stack compose,
+ * never just "until Dokploy is upgraded" as if that were the only fix.
+ *
+ * The version check itself can fail two ways, and both are now WARNED about
+ * rather than silently skipped (`null`) as before — guessing "not old" when
+ * the version genuinely couldn't be read would hide a real risk:
+ *   - the version can't be read/parsed at all → `DOKPLOY_VERSION_UNKNOWN`.
+ *   - it CAN be read and is below the fix version → `DOKPLOY_STACK_QUOTES`.
+ * `null` only when the compose isn't a `stack` at all — the version is never
+ * even fetched in that case (see the tests: "docker-compose never checks the
+ * version").
  */
 async function composeStackVersionWarning(
   client: DokployClient,
@@ -379,15 +396,28 @@ async function composeStackVersionWarning(
 ): Promise<DeployWarning | null> {
   if (compose.composeType !== 'stack') return null;
   const version = await settle(client.getDokployVersion());
-  if (!version.ok || version.value === null) return null;
+  if (!version.ok || version.value === null) {
+    return {
+      code: ERROR_CODES.DOKPLOY_VERSION_UNKNOWN,
+      names: [],
+      // COPY-FLAG: minimal neutral wording.
+      message:
+        `could not read this Dokploy instance's version — this is a "stack" (Swarm) service, and env_file ` +
+        `values may reach containers with literal quotes on Dokploy below ${STACK_ENV_FILE_FIX_VERSION}. ` +
+        `The container's \`capy\` must be at least the release that strips a quote layer from ` +
+        `_SECRETS_BLOB/_PROJECT_KEY (\`capy run\`) to be safe either way.`,
+    };
+  }
   if (dokployVersionAtLeast(version.value, STACK_ENV_FILE_FIX_VERSION)) return null;
   return {
-    code: 'DOKPLOY_STACK_ENV_FILE_QUOTING',
+    code: ERROR_CODES.DOKPLOY_STACK_QUOTES,
     names: [],
     // COPY-FLAG: minimal neutral wording.
     message:
       `this is a Dokploy "stack" (Swarm) service on ${version.value}, below ${STACK_ENV_FILE_FIX_VERSION} — ` +
-      `env_file values, including Capy's, may reach containers with literal quotes until Dokploy is upgraded.`,
+      `env_file values arrive at the container wrapped in literal quotes. The container's \`capy\` must be ` +
+      `at least the release that strips one quote layer from _SECRETS_BLOB/_PROJECT_KEY (\`capy run\`) to ` +
+      `read them; values Capy doesn't manage will still arrive wrapped in quotes, as today.`,
   };
 }
 
@@ -755,6 +785,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           interactive: ctx.interactive ?? false,
           orgId: ctx.orgId,
           devMode: ctx.devMode,
+          storeName: DOKPLOY_TARGET_SECRET_NAME,
           deps: deps.getConnectorSecret ? { getConnectorSecret: deps.getConnectorSecret } : undefined,
         });
 
@@ -779,7 +810,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       const opts = config.options as unknown as DokployOptions;
       const resolved = await resolveApiKeyFor(opts, ctx);
       if (!resolved.ok) {
-        const { reason, hint } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV);
+        const { reason, hint } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV, DOKPLOY_TARGET_SECRET_NAME);
         return { ok: false, reason, hint };
       }
       const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
@@ -837,7 +868,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       }
       const resolved = await resolveApiKeyFor(opts, ctx);
       if (!resolved.ok) {
-        const { reason } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV);
+        const { reason } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV, DOKPLOY_TARGET_SECRET_NAME);
         return fail([], { label: 'dokploy auth', status: 'fail', detail: reason });
       }
       const client = createDokployClient(opts.baseUrl, resolved.value, deps.fetch);
@@ -1050,7 +1081,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
       const opts = config.options as unknown as DokployOptions;
       const resolved = await resolveApiKeyFor(opts, ctx);
       if (!resolved.ok) {
-        const { reason } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV);
+        const { reason } = describeDokployTokenProblem(resolved.code, opts.tokenEnv ?? DEFAULT_TOKEN_ENV, DOKPLOY_TARGET_SECRET_NAME);
         return {
           ok: false,
           code: 'no_token',
@@ -1165,7 +1196,14 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
  */
 export const dokployAdapter: DeployAdapter = createDokployAdapter({
   getConnectorSecret: async (name, opts) => {
-    const { getConnectorSecret } = await import('../../system/systemStore');
-    return getConnectorSecret(name, opts);
+    // CAP-679 follow-up: deploy's own direction — see
+    // `system/systemStore.ts#getDirectionalConnectorSecret`'s doc and
+    // `deployCommand.ts`'s identical wiring (the one actually exercised in
+    // production; this is the fallback for a caller that bypasses it).
+    const { getDirectionalConnectorSecret } = await import('../../system/systemStore');
+    return getDirectionalConnectorSecret(name, DOKPLOY_CONNECTOR_SECRET_NAME, {
+      ...opts,
+      missingWithFallbackCode: ERROR_CODES.DOKPLOY_TARGET_KEY_MISSING,
+    });
   },
 });
