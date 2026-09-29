@@ -124,10 +124,9 @@ export class FileManager {
       const content = readFileSync(envPath, 'utf-8');
       const parsed = parseDotenv(content);
 
-      const decrypted: Record<string, string> = {};
-      for (const [key, value] of Object.entries(parsed)) {
+      const decryptOne = (key: string, value: string): string => {
         try {
-          decrypted[key] = this.decryptValue(value, decryptionKey);
+          return this.decryptValue(value, decryptionKey);
         } catch (decryptError) {
           if (value.startsWith('capy:')) {
             throw new CapyError(
@@ -137,10 +136,10 @@ export class FileManager {
             );
           }
           // Non-capy value that failed — keep as-is (likely plaintext)
-          decrypted[key] = value;
+          return value;
         }
-      }
-      return decrypted;
+      };
+      return Object.fromEntries(Object.entries(parsed).map(([key, value]) => [key, decryptOne(key, value)]));
     } catch (error) {
       // Preserve typed errors (e.g. DECRYPT_KEY_MISMATCH) — re-wrapping flattens
       // the code and forces callers back to message-sniffing (cardinal Rule 4).

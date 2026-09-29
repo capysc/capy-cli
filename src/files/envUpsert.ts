@@ -79,6 +79,10 @@ function inlineCommentOf(valuePart: string): string {
     const after = trimmed.slice(close + 1);
     return after.trimStart().startsWith('#') ? after : '';
   }
+  // An empty value (`KEY= # note`) reaches here as just the comment: the
+  // whitespace before `#` was consumed after `=`. It needs a space back, or the
+  // comment would join the new value.
+  if (quote === '#') return ` ${trimmed}`;
   const match = trimmed.match(/\s+#.*$/);
   return match ? match[0] : '';
 }

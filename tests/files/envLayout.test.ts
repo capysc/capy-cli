@@ -48,6 +48,10 @@ describe('upsertEnvText', () => {
       .toBe('export A=n1 # note\n  B=n2 # quoted note\nC=n3\n');
   });
 
+  it('keeps an inline comment after an empty value', () => {
+    expect(upsertEnvText('C= # note\nD=  # another\n', {}, [['C', 'z'], ['D', 'y']])).toBe('C=z # note\nD=y # another\n');
+  });
+
   it('does not treat # inside a quoted value as a comment', () => {
     expect(upsertEnvText('A="a # b"\n', {}, [['A', 'z']])).toBe('A=z\n');
   });
