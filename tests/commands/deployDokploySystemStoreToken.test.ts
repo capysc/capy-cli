@@ -3,8 +3,14 @@
  * org system store wiring (CAP-664) end to end — not just the adapter in
  * isolation (see `tests/deploy/dokploy.test.ts` and
  * `tests/deploy/dokployApiKey.test.ts` for that). Same pattern as
- * `deployDokployWarningOnce.test.ts`: auth + the deploy-token mint are
- * mocked so this never touches the real Capy service.
+ * `deployDokployWarningOnce.test.ts`.
+ *
+ * CAP-682: Dokploy no longer mints a deploy token (`needsDeployToken` is
+ * false) — `mintDeployToken` is mocked here purely to prove it is NEVER
+ * called for a Dokploy deploy (see the `mintDeployToken` assertion in the
+ * first test below); every value the target delivers now comes straight
+ * from the decrypted branch env, as plain `KEY=value` lines inside Capy's
+ * managed block.
  *
  * `mock.module('../../src/system/systemStore', ...)` is set up FRESH inside
  * each test (not once at module scope) so every scenario gets its own
@@ -33,34 +39,41 @@ mock.module('../../src/service/serviceClient', () => ({
     setTokenProvider() {}
   },
 }));
-mock.module('../../src/commands/deployTokenCommand', () => ({
-  mintDeployToken: async () => ({
-    secretsBlob: 'BLOB_VALUE',
-    projectKey: 'KEY_VALUE',
-    deployId: 'deploy_1',
-    secretCount: 1,
-  }),
+const mintDeployTokenMock = mock(async () => ({
+  secretsBlob: 'BLOB_VALUE',
+  projectKey: 'KEY_VALUE',
+  deployId: 'deploy_1',
+  secretCount: 1,
 }));
-afterEach(() => mock.restore());
+mock.module('../../src/commands/deployTokenCommand', () => ({
+  mintDeployToken: mintDeployTokenMock,
+}));
+afterEach(() => {
+  mock.restore();
+  mintDeployTokenMock.mockClear();
+});
 
 import { mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { deployCommand, deployRemove } from '../../src/commands/deployCommand';
-import { splitManagedBlock, mergeManagedBlock } from '../../src/deploy/dokployApi';
+import { mergeManagedValuesBlock } from '../../src/deploy/dokployApi';
 
 const ROOT = join(tmpdir(), `capy-deploy-dokploy-store-token-${process.pid}-${Date.now()}`);
 const ROOT_NO_KEEP = join(tmpdir(), `capy-deploy-dokploy-store-token-no-keep-${process.pid}-${Date.now()}`);
 const APP_ID = 'app_test';
+/** An active line for STRIPE_KEY already outside the block — gets COMMENTED, not deleted, once Capy delivers it. */
 const RAW_ENV = 'STRIPE_KEY=stale\n';
+/** `.env`'s own plaintext value for STRIPE_KEY (see `setUp`) — a fake, non-secret test value. */
+const DECRYPTED_STRIPE_KEY = 'whatever';
 
-function mergedEnv(env: string | null, pair: { secretsBlob: string; projectKey: string }): string {
-  const split = splitManagedBlock(env);
-  if ('code' in split) throw new Error('unexpected problem');
-  return mergeManagedBlock(split, pair);
+function mergedEnv(env: string | null, values: ReadonlyArray<{ name: string; value: string }>): string {
+  const merged = mergeManagedValuesBlock(env, values);
+  if (!merged.ok) throw new Error('unexpected merge problem in test fixture');
+  return merged.env;
 }
 
-const EXPECTED_MERGED_ENV = mergedEnv(RAW_ENV, { secretsBlob: 'BLOB_VALUE', projectKey: 'KEY_VALUE' });
+const EXPECTED_MERGED_ENV = mergedEnv(RAW_ENV, [{ name: 'STRIPE_KEY', value: DECRYPTED_STRIPE_KEY }]);
 
 function setUp(targetOptions: Record<string, unknown>): void {
   rmSync(ROOT, { recursive: true, force: true });
@@ -87,6 +100,9 @@ function setUp(targetOptions: Record<string, unknown>): void {
           branch: 'production',
           vars: ['STRIPE_KEY'],
           mode: 'ci',
+          // CAP-682: CI mode now preflights autoDeploy/tracked-branch/watch-paths
+          // — `gitBaseBranch` here must match `dokployFetchMock`'s `branch: 'main'`.
+          gitBaseBranch: 'main',
           options: { baseUrl: 'https://dokploy.example.com', applicationId: APP_ID, ...targetOptions },
         },
       },
@@ -229,6 +245,10 @@ function dokployFetchMock() {
             buildArgs: null,
             buildSecrets: null,
             createEnvFile: true,
+            // CAP-682 CI preflight: auto-deploy on, tracking the same
+            // branch the target's `gitBaseBranch` (setUp) opens PRs against.
+            autoDeploy: true,
+            branch: 'main',
           }),
       };
     }
@@ -293,6 +313,8 @@ describe('capy deploy dokploy — org system store token resolution (CAP-664)', 
       expect(requestCount).toBeGreaterThan(0);
       expect(seenApiKeys.every((k) => k === SENTINEL)).toBe(true);
       expect(lines.some((l) => l.includes(SENTINEL))).toBe(false);
+      // CAP-682: no deploy token is minted for Dokploy anymore.
+      expect(mintDeployTokenMock).not.toHaveBeenCalled();
     } finally {
       tearDown();
     }
