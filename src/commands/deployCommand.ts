@@ -48,7 +48,12 @@ import {
   describeBranchProblem,
   recordTargetDeliveries,
   stripTargetsForProviderTarget,
+  supersededDeployIdsForTarget,
+  clearSupersededDeployIds,
+  allDeployIdsForTarget,
+  deliveryWorthGating,
   TargetDeliveryDescriptor,
+  VarDelivery,
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
 import type { AuthService } from '../auth/authService';
@@ -63,6 +68,7 @@ import {
   resolveDokployApiKey,
 } from '../deploy/adapters/dokploy';
 import type { ResolveDokployApiKeyResult } from '../deploy/adapters/dokploy';
+import { DOKPLOY_CONNECTOR_SECRET_NAME, DOKPLOY_TARGET_SECRET_NAME, DokploySystemStoreCallOptions } from '../deploy/dokployApi';
 import { classify, isBuildTime } from '../deploy/classify';
 import type { WebDeployAdapterContext } from '../ui/deployScreens';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
@@ -185,13 +191,23 @@ async function resolveDokployApiKeyOnce(
 ): Promise<ResolveDokployApiKeyResult | undefined> {
   if (adapter.id !== 'dokploy') return undefined;
   if (dokployConnectionProblem(target)) return undefined;
-  const { getConnectorSecret } = await import('../system/systemStore');
+  const { getDirectionalConnectorSecret } = await import('../system/systemStore');
+  // CAP-679 follow-up: deploy asks for `_TARGET_DOKPLOY_API_KEY` first, and
+  // — only when that's missing — offers to reuse (or shadow-refuse without a
+  // TTY) `_CONNECTOR_DOKPLOY_API_KEY`, the import-side key. See
+  // `system/systemStore.ts#getDirectionalConnectorSecret`'s own doc.
+  const getConnectorSecret = (name: string, opts: DokploySystemStoreCallOptions) =>
+    getDirectionalConnectorSecret(name, DOKPLOY_CONNECTOR_SECRET_NAME, {
+      ...opts,
+      missingWithFallbackCode: ERROR_CODES.DOKPLOY_TARGET_KEY_MISSING,
+    });
   return resolveDokployApiKey({
     tokenEnv: (target.options as { tokenEnv?: string }).tokenEnv,
     env: process.env,
     interactive,
     orgId,
     devMode,
+    storeName: DOKPLOY_TARGET_SECRET_NAME,
     deps: { getConnectorSecret },
   });
 }
@@ -481,8 +497,15 @@ async function pushKeepTransform(
 }
 
 /**
- * Direct-mode-only: after a verified successful deploy, record this target's
- * delivery into every (var, branch) entry it actually shipped.
+ * Direct-mode-only: after a verified successful deploy (or, when `noDeploy`,
+ * after the config write `--no-deploy` still performs), record this
+ * target's delivery into every (var, branch) entry it actually shipped.
+ *
+ * `noDeploy` marks the fresh element `deployed: false` (CAP-679 follow-up,
+ * "pending") — the config landed but the platform deploy itself never ran.
+ * Absent/false means a real deploy, which OMITS the field (see
+ * `targetsGate.ts#upsertTargetElement`'s doc for why, and how this also
+ * clears a PRIOR pending element once a real deploy follows it).
  *
  * Best-effort: the platform write already succeeded by the time this runs,
  * so a failure here is reported but does not flip the command's exit code —
@@ -495,6 +518,7 @@ async function recordDeployTargets(
   valueHashes: Record<string, string>,
   deployId: string | undefined,
   devMode: boolean | undefined,
+  noDeploy: boolean = false,
 ): Promise<void> {
   const deliveredAt = new Date().toISOString();
   const delivery: TargetDeliveryDescriptor = {
@@ -502,6 +526,7 @@ async function recordDeployTargets(
     target: target.name,
     ref: targetRefFor(target),
     deployId,
+    ...(noDeploy ? { deployed: false } : {}),
   };
   const values = target.vars
     .filter((v) => valueHashes[v] !== undefined)
@@ -517,20 +542,70 @@ async function recordDeployTargets(
 }
 
 /**
- * Every distinct `deploy_id` a (provider, target) pair has ever delivered
- * with, read straight off keep.lock — used by `deployRemove` to know which
- * deploy tokens to revoke before stripping the record of them.
+ * Direct-mode-only, real deploys only (never `--no-deploy`, never a dry
+ * run): after `recordDeployTargets` above has folded this delivery in — which
+ * is what moves a superseded token's id into `superseded_deploy_ids`, see
+ * `targetsGate.ts#upsertTargetElement`'s "no untracked tokens" note — revoke
+ * every id that call just recorded as superseded, then strip them from
+ * keep.lock so a later run never tries again.
+ *
+ * Called ONLY after `result.ok` (the deploy adapter itself considers the
+ * redeploy done and successful — see `dokploy.ts`'s Compose sequence doc:
+ * write → verify → poll deployment to a real outcome) — a failed deploy
+ * never reaches this function at all, so it never revokes anything a failed
+ * run might still need. Best-effort, same as `recordDeployTargets`: the
+ * deploy already succeeded, so a failure here is reported but never flips
+ * the exit code.
+ */
+async function revokeSupersededDeployTokens(
+  cwd: string,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  devMode: boolean | undefined,
+): Promise<void> {
+  try {
+    const pm = new ProjectManager(cwd);
+    const keep = pm.readKeepFile();
+    if (!keep) return;
+    const supersededIds = supersededDeployIdsForTarget(keep, adapter.id, target.name);
+    if (supersededIds.length === 0) return;
+
+    const { AuthService } = await import('../auth/authService');
+    const { ServiceClient } = await import('../service/serviceClient');
+    const projectState = await pm.detectProjectState();
+    if (!projectState.organizationId) return;
+    const authService = new AuthService(undefined, devMode, projectState.userId);
+    const serviceClient = new ServiceClient(undefined, devMode);
+    serviceClient.setTokenProvider(() => authService.getValidToken());
+    const authResult = await authenticateSilentWithFallback(authService, projectState.organizationId);
+    if (!authResult.success) return;
+
+    await Promise.all(supersededIds.map((id) => serviceClient.revokeDeployToken(id).catch(() => {})));
+    console.log(`  ${GREEN('✓')} revoked ${supersededIds.length} superseded deploy token(s) for "${target.name}".`);
+
+    await pushKeepTransform(
+      cwd,
+      target.branch,
+      (k) => clearSupersededDeployIds(k, adapter.id, target.name, new Set(supersededIds)),
+      devMode,
+      'clear superseded deploy tokens',
+    );
+  } catch (err: any) {
+    console.error(`  ${YELLOW('!')} could not revoke superseded deploy token(s) for "${target.name}": ${err?.message ?? err}`);
+  }
+}
+
+/**
+ * Every deploy token id a (provider, target) pair might still need revoking
+ * — its CURRENT `deploy_id` plus every `superseded_deploy_ids` entry it has
+ * accumulated (CAP-679 follow-up: "no untracked tokens" — see
+ * `targetsGate.ts#allDeployIdsForTarget`), read straight off keep.lock.
+ * `deployRemove` revokes ALL of these before stripping the record — removal
+ * is the one place that's safe to revoke everything at once, since the
+ * target itself is going away.
  */
 function deployIdsForTarget(keep: KeepFile, provider: string, target: string): readonly string[] {
-  const ids = new Set<string>();
-  for (const entries of Object.values(keep.variables)) {
-    for (const entry of entries) {
-      for (const t of (entry as { targets?: ReadonlyArray<{ provider: string; target: string; deploy_id?: string }> }).targets ?? []) {
-        if (t.provider === provider && t.target === target && t.deploy_id) ids.add(t.deploy_id);
-      }
-    }
-  }
-  return Array.from(ids);
+  return allDeployIdsForTarget(keep, provider, target);
 }
 
 // ── Picker (interactive setup) ─────────────────────────────────────────────
@@ -632,7 +707,7 @@ function adapterChoices(): DeployAdapterChoice[] {
  * the CLI's fallback. Two lists of defaults would be two answers to "what does
  * this box start as", and the box is what a target gets saved with.
  */
-function settingsDefaults(
+export function settingsDefaults(
   adapterId: string,
   cwd: string,
   existingOpts: Record<string, string>,
@@ -675,9 +750,20 @@ function settingsDefaults(
       // tokenEnv is no longer asked by default (CAP-664: the org system
       // store is the default source) — only an EXISTING target's own value
       // is shown here, never defaulted to the fallback env var name.
+      //
+      // CAP-679 follow-up (item 6, validator fix-first): the terminal picker
+      // now asks Compose vs. Application up front (`resolveAdapterOptions`'s
+      // dokploy branch) and defaults `kind`/`composeId` from an existing
+      // target. This is the web surface's copy of that same default — the
+      // web flow doesn't have its own Dokploy settings screen (it isn't
+      // being built here), but keeping these two defaults in sync means
+      // neither surface silently disagrees about what a re-edit starts from
+      // if/when one is added.
       return {
         baseUrl: existingOpts.baseUrl ?? '',
         applicationId: existingOpts.applicationId ?? '',
+        composeId: existingOpts.composeId ?? '',
+        kind: existingOpts.applicationId && !existingOpts.composeId ? 'application' : 'compose',
         ...(existingOpts.tokenEnv ? { tokenEnv: existingOpts.tokenEnv } : {}),
       };
     default:
@@ -989,11 +1075,28 @@ export async function resolveAdapterOptions(
   }
   if (adapter.id === 'dokploy') {
     // The API token itself is never asked for or saved here. CAP-664: the
-    // org system store's _CONNECTOR_DOKPLOY_API_KEY entry is the default
-    // source now — no tokenEnv question for a NEW target. An EXISTING
-    // target's own tokenEnv (saved before the system store existed, or set
-    // via `--token-env`) is carried through untouched: re-entering this
-    // picker must never silently drop it.
+    // org system store's _TARGET_DOKPLOY_API_KEY entry (CAP-679 follow-up:
+    // deploy's OWN direction — see `dokployApi.ts#DOKPLOY_TARGET_SECRET_NAME`)
+    // is the default source now — no tokenEnv question for a NEW target. An
+    // EXISTING target's own tokenEnv (saved before the system store existed,
+    // or set via `--token-env`) is carried through untouched: re-entering
+    // this picker must never silently drop it.
+    //
+    // CAP-679 follow-up (item 6): a target configures EXACTLY ONE of
+    // `composeId` / `applicationId` (see `DokployOptions`'s own doc) — ask
+    // which kind up front so a Compose target (what Capy's Dokploy customer
+    // actually runs) is reachable from this picker at all, not just via
+    // hand-edited `.capy/deploy.json`. Compose listed first, and also the
+    // default for a brand-new target (no existing options at all); re-editing
+    // an existing target defaults to whichever kind it already has
+    // (`composeId` present → Compose, `applicationId` present → Application).
+    const existingKind: 'compose' | 'application' = existingOpts.applicationId && !existingOpts.composeId
+      ? 'application'
+      : 'compose';
+    // `as any[]`: inquirer's own overload resolution chokes on a mixed
+    // input/list array with a `when` clause (same reason `runPicker`'s own
+    // adapter-choice array above is typed `any[]`) — every question here is
+    // still a plain, correctly-shaped inquirer question.
     const ans = await inquirer.prompt([
       {
         type: 'input',
@@ -1004,15 +1107,43 @@ export async function resolveAdapterOptions(
         filter: (v: string) => v.trim(),
       },
       {
+        type: 'list',
+        name: 'kind',
+        message: 'Dokploy service kind:',
+        theme: LIST_THEME,
+        choices: [
+          { name: 'Compose', value: 'compose' },
+          { name: 'Application', value: 'application' },
+        ],
+        default: existingKind,
+      },
+      {
+        type: 'input',
+        name: 'composeId',
+        message: 'Dokploy compose ID:',
+        when: (a: { kind: string }) => a.kind === 'compose',
+        default: existingOpts.composeId,
+        validate: (v: string) => (v.trim() ? true : 'required'),
+        filter: (v: string) => v.trim(),
+      },
+      {
         type: 'input',
         name: 'applicationId',
         message: 'Dokploy application ID:',
+        when: (a: { kind: string }) => a.kind !== 'compose',
         default: existingOpts.applicationId,
         validate: (v: string) => (v.trim() ? true : 'required'),
         filter: (v: string) => v.trim(),
       },
-    ]);
-    return existingOpts.tokenEnv ? { ...ans, tokenEnv: existingOpts.tokenEnv } : ans;
+    ] as any[]);
+    // Exactly one of composeId/applicationId survives — switching kind on a
+    // re-edit drops whichever one no longer applies, never carrying a stale
+    // `applicationId` alongside a freshly-picked `composeId` or vice versa.
+    const result: Record<string, unknown> =
+      ans.kind === 'compose'
+        ? { baseUrl: ans.baseUrl, composeId: ans.composeId }
+        : { baseUrl: ans.baseUrl, applicationId: ans.applicationId };
+    return existingOpts.tokenEnv ? { ...result, tokenEnv: existingOpts.tokenEnv } : result;
   }
   return {};
 }
@@ -2036,32 +2167,50 @@ async function resolveForceRedeploy(
 type CiChangeGate = { ok: true; keepLockChanged: boolean; deployKeepContent: string } | { ok: false };
 
 /**
- * "Does this deploy change what's recorded on the target branch?" — keyed off
- * the decrypted values being pushed, folded into origin/<base>'s keep.lock,
- * NOT the local keep.lock file (which can lag .env). The folded keep IS what
- * gets committed for the PR, so the gate and the committed artifact can't
- * disagree.
+ * The CI gate's decision, made BEFORE anything is minted or pushed:
+ *   - `error`: a git/decrypt failure — the caller returns 1.
+ *   - `unchanged`: nothing worth a PR — the caller mints NOTHING, pushes
+ *     NOTHING, opens no PR, and returns 0. This is the whole point of
+ *     splitting the gate from `buildFinalCiKeep` below: deciding "did
+ *     anything change" must never itself require a deploy token to exist.
+ *   - `proceed`: a real change (or `--force`) — the caller mints (for a
+ *     token adapter), then calls `buildFinalCiKeep` with the real result.
+ */
+type CiGateOutcome = { kind: 'error' } | { kind: 'unchanged' } | { kind: 'proceed'; baseKeep: KeepFile };
+
+/**
+ * "Does this deploy change what's recorded on the target branch?" — decided
+ * off a plain decrypt (never a minted token — see `deliveryWorthGating`'s
+ * own doc for why `deploy_id` must never be part of this decision), folded
+ * against origin/<base>'s keep.lock, NOT the local keep.lock file (which can
+ * lag `.env`).
+ *
+ * Runs BEFORE `loadDeploySecrets`/minting — a token adapter (Dokploy) that's
+ * unchanged never gets a fresh token minted or written to the platform at
+ * all, which is the fix for CI churn: minting unconditionally (the old
+ * behavior) meant every CI run installed a fresh, effectively untracked
+ * token on the platform (CI mode never runs `recordDeployTargets` — that's
+ * direct-mode only — so a token minted-and-written here with no PR opening
+ * to record it was never tracked anywhere).
  *
  * Only called when `gitOk && mode === 'ci' && !options.dryRun` — direct mode
  * and dry runs never reach this, and the caller's own fallback (unchanged,
  * empty content) covers them without calling in here at all.
  */
-async function computeCiChangeGate(
+async function resolveCiGateOutcome(
   cwd: string,
   baseBranch: string,
-  env: Record<string, string>,
   target: TargetConfig,
   adapter: DeployAdapter,
   mode: DeployMode,
   options: DeployCliOptions,
   web: WebContext,
   preflight: PreflightResult,
-  deployId?: string,
-): Promise<CiChangeGate> {
+): Promise<CiGateOutcome> {
   const fetched = fetchRemoteBranch(cwd, baseBranch);
   if (!fetched.ok) {
     console.error(`${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`);
-    return { ok: false };
+    return { kind: 'error' };
   }
   const relKeep = repoRelPath(cwd, 'keep.lock');
   const baseRaw = readFileAtRef(cwd, `origin/${baseBranch}`, relKeep);
@@ -2071,29 +2220,68 @@ async function computeCiChangeGate(
     ? JSON.parse(baseRaw)
     : { ...JSON.parse(readFileSync(join(cwd, 'keep.lock'), 'utf-8')), variables: {} };
 
-  // CAP-679: fold this target's delivery in alongside the value_hash bump —
-  // the PR's keep.lock IS what gets committed if the deploy below succeeds.
-  const delivery: TargetDeliveryDescriptor = { provider: adapter.id, target: target.name, ref: targetRefFor(target), deployId };
-  const built = buildDeployKeep(baseKeep, env, target.vars, target.branch, delivery);
-  if (built.changed) {
-    return { ok: true, keepLockChanged: true, deployKeepContent: built.content };
+  const gateEnv = await (async (): Promise<{ ok: true; env: Record<string, string> } | { ok: false; message: string }> => {
+    try {
+      return { ok: true, env: await decryptCurrentBranch(cwd, options.devMode) };
+    } catch (err: any) {
+      return { ok: false, message: err.message };
+    }
+  })();
+  if (!gateEnv.ok) {
+    console.error(`${RED('✗')} decrypt: ${gateEnv.message}`);
+    return { kind: 'error' };
   }
+
+  const values: VarDelivery[] = target.vars
+    .filter((v) => gateEnv.env[v] !== undefined)
+    .map((v) => ({ name: v, valueHash: hashValue(gateEnv.env[v]) }));
+  const deployed = options.noDeploy ? false : undefined;
+  const changed = deliveryWorthGating(baseKeep, target.branch, adapter.id, target.name, deployed, values);
+  if (changed) return { kind: 'proceed', baseKeep };
 
   // No secret change vs the target. --force (or a confirm) touches
   // keep.lock's changed_at so there's a real diff to PR + re-trigger CI.
   const force = await resolveForceRedeploy(options, web, cwd, target, adapter, mode, preflight, baseBranch);
-  if (force) {
-    return {
-      ok: true,
-      keepLockChanged: true,
-      deployKeepContent: touchDeployKeep(baseKeep, target.vars, target.branch),
-    };
-  }
+  if (force) return { kind: 'proceed', baseKeep };
 
   console.log(
-    `  ${DIM('·')} no secret changes vs origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to re-trigger CI.')}`,
+    `  ${DIM('·')} no secret changes vs origin/${baseBranch} — nothing to deploy. ${DIM('Use --force to re-trigger CI.')}`,
   );
-  return { ok: true, keepLockChanged: false, deployKeepContent: built.content };
+  return { kind: 'unchanged' };
+}
+
+/**
+ * The PR's keep.lock content — called only once `resolveCiGateOutcome` has
+ * already decided to proceed (a real change, or `--force`), and — for a
+ * token adapter — a fresh token has been minted. Folds the delivery in WITH
+ * its real `deploy_id` this time (the gate decision above never sees one),
+ * so a freshly minted token IS recorded (and, if it superseded one, tracked
+ * via `superseded_deploy_ids`) even when the only reason we're here is
+ * `--force` on an otherwise-unchanged value.
+ */
+function buildFinalCiKeep(
+  baseKeep: KeepFile,
+  env: Record<string, string>,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  deployId: string | undefined,
+  options: DeployCliOptions,
+): CiChangeGate {
+  const delivery: TargetDeliveryDescriptor = {
+    provider: adapter.id,
+    target: target.name,
+    ref: targetRefFor(target),
+    deployId,
+    ...(options.noDeploy ? { deployed: false } : {}),
+  };
+  const built = buildDeployKeep(baseKeep, env, target.vars, target.branch, delivery);
+  // A `--force` on an otherwise-unchanged, non-token adapter (no deployId to
+  // fold in — e.g. cf-worker/vercel) still needs SOME diff to actually
+  // retrigger CI — fall back to the `deploy_revision` bump `touchDeployKeep`
+  // provides, the same as before this split.
+  return built.changed
+    ? { ok: true, keepLockChanged: true, deployKeepContent: built.content }
+    : { ok: true, keepLockChanged: true, deployKeepContent: touchDeployKeep(baseKeep, target.vars, target.branch) };
 }
 
 /** Everything `deployRemove` needs after `showRunResult`'s `pr` field. */
@@ -2635,20 +2823,30 @@ export async function deployCommand(
   const msg = `chore(deploy): ${target.name} → ${target.branch} (${target.kind})`;
   const baseBranch = target.gitBaseBranch ?? 'main';
 
-  // ── Decrypt the secrets we're about to push. In CI mode these same values
-  //    drive the change-gate, so it measures exactly what ships.
+  // ── CI change-gate — BEFORE any mint (see resolveCiGateOutcome's own doc:
+  //    deciding "did anything change" must never itself require a token, or
+  //    every CI run of a token adapter mints and writes one regardless of
+  //    whether anything changed). Direct mode and dry runs are never gated
+  //    — `gateOutcome` stays `null` and the fallback below covers them.
+  const ciGated = gitOk && mode === 'ci' && !options.dryRun;
+  const gateOutcome: CiGateOutcome | null = ciGated
+    ? await resolveCiGateOutcome(cwd, baseBranch, target, adapter, mode, options, web, preflight)
+    : null;
+  if (gateOutcome?.kind === 'error') return 1;
+  if (gateOutcome?.kind === 'unchanged') return 0;
+
+  // ── Decrypt the secrets we're about to push (and, for a token adapter,
+  //    mint) — only reached when direct mode, or CI mode just decided
+  //    something is actually worth shipping.
   const secrets = await loadDeploySecrets(cwd, adapter, target, options);
   if (!secrets) return 1;
   const { env, deployToken, valueHashes } = secrets;
 
-  // ── CI change-gate ────────────────────────────────────────────
-  // "Does this deploy change what's recorded on the target branch?" — keyed off
-  // the decrypted values being pushed, folded into origin/<base>'s keep.lock,
-  // NOT the local keep.lock file (which can lag .env). The folded keep IS what
-  // we commit for the PR, so the gate and the committed artifact can't disagree.
+  // The PR's keep.lock content, now that a real deploy_id (if any) is known
+  // — see `buildFinalCiKeep`'s own doc.
   const changeGate: CiChangeGate =
-    gitOk && mode === 'ci' && !options.dryRun
-      ? await computeCiChangeGate(cwd, baseBranch, env, target, adapter, mode, options, web, preflight, deployToken?.deployId)
+    gateOutcome?.kind === 'proceed'
+      ? buildFinalCiKeep(gateOutcome.baseKeep, env, target, adapter, deployToken?.deployId, options)
       : { ok: true, keepLockChanged: false, deployKeepContent: '' };
   if (!changeGate.ok) return 1;
   const { keepLockChanged, deployKeepContent } = changeGate;
@@ -2689,11 +2887,19 @@ export async function deployCommand(
 
   // ── Record targets (CAP-679) ─────────────────────────────────────────────
   // Direct mode only: CI mode already folded this delivery into the PR's
-  // keep.lock above (`computeCiChangeGate`'s `delivery` param) — recording it
+  // keep.lock above (`buildFinalCiKeep`'s `delivery` param) — recording it
   // AGAIN here, against the user's own branch, would be wrong: CI mode never
   // touches the user's tree.
   if (mode === 'direct' && !options.dryRun) {
-    await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode);
+    await recordDeployTargets(cwd, target, adapter, valueHashes, deployToken?.deployId, options.devMode, !!options.noDeploy);
+    // "No untracked tokens" (CAP-679 follow-up): only once THIS deploy is a
+    // REAL one (never `--no-deploy` — that config is pending, and its
+    // predecessor may still be the one actually running) does it become safe
+    // to revoke whatever `recordDeployTargets` just moved to
+    // `superseded_deploy_ids` — see `revokeSupersededDeployTokens`'s own doc.
+    if (!options.noDeploy) {
+      await revokeSupersededDeployTokens(cwd, target, adapter, options.devMode);
+    }
   }
 
   // The pull request this run opened, for the result page. Held rather than

@@ -90,7 +90,7 @@ JSON support: no
 
 ## `capy deploy`
 
-Set up secret delivery — token + docs (existing) or connector deploy
+Set up secret delivery — token + docs (existing) or target deploy
 
 ```
 capy deploy [target] [options]
@@ -100,15 +100,15 @@ capy deploy [target] [options]
 |---|---|---|
 | `--target <id>` | adapter id; requires --yes (CI mode) |  |
 | `--yes` | skip all prompts (CI) |  |
-| `--dry-run` | preflight + show plan, push nothing (connector mode) |  |
+| `--dry-run` | preflight + show plan, push nothing (target mode) |  |
 | `--force` | redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI |  |
-| `--edit` | re-enter the picker for an existing connector target |  |
-| `--connect` | force connector mode (skip the token+docs path) |  |
+| `--edit` | re-enter the picker for an existing target |  |
+| `--connect` | force target mode (skip the token+docs path) |  |
 | `--platform <id>` | skip platform picker (token+docs flow; e.g. github-actions, vercel) |  |
-| `--mode <mode>` | skip mode picker: "connector" or "token" |  |
+| `--mode <mode>` | skip mode picker: "target" or "token" (also accepts the old "connector" spelling) |  |
 | `--scope <scope>` | gh-actions: "repo" or "env" |  |
 | `--env-name <name>` | gh-actions: env name when --scope env |  |
-| `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (connector mode) |  |
+| `--no-deploy` | write and verify the target, but skip the platform deploy/redeploy (target mode) |  |
 | `--json` | describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it |  |
 
 JSON support: yes (`--json`)
@@ -139,7 +139,7 @@ JSON support: no
 
 ### `capy deploy targets`
 
-List configured connector targets (connector mode)
+List configured targets (target mode)
 
 ```
 capy deploy targets
@@ -151,7 +151,7 @@ JSON support: no
 
 ### `capy deploy targets-remove`
 
-Remove a configured connector target
+Remove a configured target
 
 ```
 capy deploy targets-remove <name> [options]
@@ -666,6 +666,14 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `AGENTS_SETUP_NEEDS_TTY`
 - `AGENTS_BLOCK_MALFORMED`
 - `AGENTS_FILE_OUTSIDE_REPO`
+- `DOKPLOY_TARGET_KEY_MISSING`
+- `DOKPLOY_CONNECTOR_KEY_MISSING`
+- `SYSTEM_STORE_REFERENCE_MISSING`
+- `SYSTEM_STORE_REFERENCE_CHAIN`
+- `DOKPLOY_STACK_QUOTES`
+- `DOKPLOY_VERSION_UNKNOWN`
+- `RUN_SECRETS_BLOB_INVALID`
+- `RUN_PROJECT_KEY_INVALID`
 
 ## Conventions
 

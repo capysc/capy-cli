@@ -485,7 +485,9 @@ export class DeployCommand {
         platform = picked.platform;
         webMode = picked.mode;
         if (picked.mode) {
-          modeAnswer = picked.mode === 'connector' ? 'Connector' : 'Deploy token';
+          // CAP-679 follow-up: display text says "Target" now — 'connector'
+          // stays the internal value (untouched, see the `mode` doc above).
+          modeAnswer = picked.mode === 'connector' ? 'Target' : 'Deploy token';
         }
       } else if (flagPlatform !== undefined) {
         if (badPlatformFlag) {
@@ -540,13 +542,15 @@ export class DeployCommand {
         } else {
           const connectorChoice = isGhActions
             ? 'Push SECRETS_BLOB + PROJECT_KEY to GitHub secrets via gh'
-            : 'Deploy now via connector (push secrets + ship code)';
+            : 'Deploy now via direct target deploy (push secrets + ship code)';
           const r = await inquirer.prompt([{
             type: 'list',
             name: 'mode',
             message: `${PLATFORMS.find(p => p.value === platform)?.name} — what do you want to do?`,
             choices: [
-              { name: connectorChoice, value: 'connector', short: 'connector' },
+              // `value: 'connector'` is the internal identifier, untouched —
+              // only the displayed `name`/`short` moved to "target" wording.
+              { name: connectorChoice, value: 'connector', short: 'target' },
               {
                 name: 'Set up CI deploy token + docs (capy run in your CI)',
                 value: 'token',

@@ -119,6 +119,28 @@ export interface TargetDelivery {
   deployed_at: string;
   /** Token deploys only (Dokploy): the deploy id `capy deploy revoke` takes. */
   deploy_id?: string;
+  /**
+   * `false` when this element was written by `capy deploy --no-deploy` — the
+   * config landed, but the platform deploy itself never ran, so nothing is
+   * actually serving this value yet. Absent (the default for every element
+   * written before this field existed, and for every REAL successful deploy)
+   * means "deployed" — this is deliberately additive-only: a real deploy
+   * OMITS the field rather than writing `true`, so an old keep.lock with no
+   * `deployed` field at all keeps meaning exactly what it always meant. The
+   * next successful real deploy to the same (provider, target) clears this
+   * by omitting the field on the fresh element `upsertTargetElement` writes.
+   */
+  deployed?: boolean;
+  /**
+   * Deploy ids this element's CURRENT `deploy_id` superseded, that a prior
+   * write (a pending `--no-deploy`, or a config that was written but never
+   * confirmed as running) may still depend on — see `targetsGate.ts`'s
+   * "no untracked tokens" note. Revoked only once the REPLACEMENT has been
+   * successfully delivered AND deployed (a real deploy, polled to done), at
+   * which point they are dropped from this list. Never revoked for a pending
+   * write or a failed deploy — those may still need the old token.
+   */
+  superseded_deploy_ids?: readonly string[];
 }
 
 /** v3 keep.lock variable entry — per-branch value hashes */
@@ -495,6 +517,35 @@ export const ERROR_CODES = {
    * agents` can never be tricked into touching a file elsewhere on disk.
    */
   AGENTS_FILE_OUTSIDE_REPO: 'AGENTS_FILE_OUTSIDE_REPO',
+  // --- Deploy follow-ups (CAP-679 continued) ---
+  /**
+   * Deploy needs the Dokploy API key: `_TARGET_DOKPLOY_API_KEY` is absent,
+   * `_CONNECTOR_DOKPLOY_API_KEY` already holds one, and there is no TTY to
+   * ask whether to reuse it or set a dedicated one.
+   */
+  DOKPLOY_TARGET_KEY_MISSING: 'DOKPLOY_TARGET_KEY_MISSING',
+  /**
+   * `capy connect dokploy` needs the Dokploy API key: `_CONNECTOR_DOKPLOY_API_KEY`
+   * is absent, `_TARGET_DOKPLOY_API_KEY` already holds one, and there is no
+   * TTY to ask whether to reuse it or set a dedicated one.
+   */
+  DOKPLOY_CONNECTOR_KEY_MISSING: 'DOKPLOY_CONNECTOR_KEY_MISSING',
+  /** A system-store reference (`capy-ref:1:<name>`) points at a name with no entry. */
+  SYSTEM_STORE_REFERENCE_MISSING: 'SYSTEM_STORE_REFERENCE_MISSING',
+  /** A system-store reference points at another reference — chains are refused, never followed. */
+  SYSTEM_STORE_REFERENCE_CHAIN: 'SYSTEM_STORE_REFERENCE_CHAIN',
+  /**
+   * A `composeType: 'stack'` target is below the Dokploy version that fixed
+   * `env_file` quoting (see `dokploy.ts#STACK_ENV_FILE_FIX_VERSION`) — WARN,
+   * never refuse.
+   */
+  DOKPLOY_STACK_QUOTES: 'DOKPLOY_STACK_QUOTES',
+  /** Couldn't read the Dokploy instance's version to check for the stack quoting issue above — warn rather than guess either way. */
+  DOKPLOY_VERSION_UNKNOWN: 'DOKPLOY_VERSION_UNKNOWN',
+  /** `_SECRETS_BLOB` (the new runtime pair) is not valid base64 after stripping one layer of surrounding quotes. */
+  RUN_SECRETS_BLOB_INVALID: 'RUN_SECRETS_BLOB_INVALID',
+  /** `_PROJECT_KEY` (the new runtime pair) is not 64 hex characters after stripping one layer of surrounding quotes. */
+  RUN_PROJECT_KEY_INVALID: 'RUN_PROJECT_KEY_INVALID',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

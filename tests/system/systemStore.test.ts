@@ -140,6 +140,7 @@ afterAll(() => {
 // Dynamic imports so every module above sees the mocks.
 let openSystemStore: typeof import('../../src/system/systemStore').openSystemStore;
 let getConnectorSecret: typeof import('../../src/system/systemStore').getConnectorSecret;
+let getDirectionalConnectorSecret: typeof import('../../src/system/systemStore').getDirectionalConnectorSecret;
 let assertValidConnectorName: typeof import('../../src/system/systemStore').assertValidConnectorName;
 let wrapAndSaveMasterKey: typeof import('../../src/crypto/keyResolver').wrapAndSaveMasterKey;
 let resolveProjectKey: typeof import('../../src/crypto/keyResolver').resolveProjectKey;
@@ -155,6 +156,7 @@ beforeAll(async () => {
   const ss = await import('../../src/system/systemStore');
   openSystemStore = ss.openSystemStore;
   getConnectorSecret = ss.getConnectorSecret;
+  getDirectionalConnectorSecret = ss.getDirectionalConnectorSecret;
   assertValidConnectorName = ss.assertValidConnectorName;
 
   const kr = await import('../../src/crypto/keyResolver');
@@ -174,6 +176,22 @@ beforeAll(async () => {
   CapyError = types.CapyError;
   ERROR_CODES = types.ERROR_CODES;
 });
+
+/**
+ * Sets one entry through a FRESH `openSystemStore()` call. A store handle's
+ * `set`/`remove` push relative to the snapshot it was OPENED with, not
+ * relative to its own prior writes — see the very first test in this file
+ * ("set → list → get round-trips through a FRESH open"), which re-opens
+ * before reading back for exactly this reason. Calling `.set()` twice on the
+ * SAME handle would have the second call clobber the first (each push is
+ * `{ ...ctx.plaintextEnv, [name]: value }`, and `ctx.plaintextEnv` never
+ * updates after open) — this helper sidesteps that for tests that need to
+ * seed more than one entry.
+ */
+async function setValue(orgId: string, name: string, value: string): Promise<void> {
+  const store = await openSystemStore({ orgId, devMode: true });
+  await store.set(name, value);
+}
 
 /** Seed a REAL master key on disk for (orgId, userId), wrapped through the same KMS_PREFIX scheme the fake ServiceClient speaks. */
 async function seedMasterKey(orgId: string, userId: string): Promise<void> {
@@ -287,6 +305,19 @@ describe('systemStore', () => {
     await expect(store.remove('bad')).rejects.toThrow();
   });
 
+  it('CAP-679 follow-up: accepts _TARGET_<PROVIDER>_<NAME> names too, same store, same validation', async () => {
+    await setValue(ORG_A, '_TARGET_DOKPLOY_API_KEY', 'target-value');
+    const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+    expect(store.get('_TARGET_DOKPLOY_API_KEY')).toBe('target-value');
+    expect(() => assertValidConnectorName('_TARGET_DOKPLOY_API_KEY')).not.toThrow();
+    // Self-clean: later tests in this file re-use ORG_A's local disk cache,
+    // which `beforeEach`'s `servers.clear()` (the FAKE SERVER's in-memory
+    // state) does not touch — leaving this entry behind would leak into
+    // whichever test runs next, the same reason `remove() drops the entry
+    // from a subsequent open` above expects an empty store afterward.
+    await store.remove('_TARGET_DOKPLOY_API_KEY');
+  });
+
   it('a non-admin/non-owner gets a typed SYSTEM_STORE_ADMIN_ONLY on open (read) and on write (Proof 3, 9)', async () => {
     serverFor(ORG_A).role = 'member';
     await expect(openSystemStore({ orgId: ORG_A, devMode: true })).rejects.toMatchObject({
@@ -370,6 +401,193 @@ describe('systemStore', () => {
       const again = await getConnectorSecret('_CONNECTOR_DOKPLOY_API_KEY', { orgId: ORG_A, devMode: true, interactive: false });
       expect(again).toBe('typed-secret');
       expect(promptedWith).toHaveLength(1);
+    });
+  });
+
+  // ── CAP-679 follow-up: `getDirectionalConnectorSecret` — deploy's
+  // `_TARGET_DOKPLOY_API_KEY` borrowing from import's
+  // `_CONNECTOR_DOKPLOY_API_KEY` (or the reverse), and the one-level
+  // reference machinery it saves. ──
+  describe('getDirectionalConnectorSecret', () => {
+    const PRIMARY = '_TARGET_DOKPLOY_API_KEY';
+    const FALLBACK = '_CONNECTOR_DOKPLOY_API_KEY';
+    const missingWithFallbackCode = 'DOKPLOY_TARGET_KEY_MISSING';
+
+    it('primary already present → returns it verbatim, no prompt, fallback never consulted', async () => {
+      await setValue(ORG_A, PRIMARY, 'primary-value');
+      await setValue(ORG_A, FALLBACK, 'fallback-value');
+
+      const value = await getDirectionalConnectorSecret(PRIMARY, FALLBACK, {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: false,
+        missingWithFallbackCode,
+      });
+      expect(value).toBe('primary-value');
+      expect(promptedWith).toEqual([]);
+    });
+
+    it('both missing, non-interactive → null, zero prompts (same as getConnectorSecret)', async () => {
+      const value = await getDirectionalConnectorSecret(PRIMARY, FALLBACK, {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: false,
+        missingWithFallbackCode,
+      });
+      expect(value).toBeNull();
+      expect(promptedWith).toEqual([]);
+    });
+
+    it('both missing, interactive → prompts for a brand-new value and saves it under the PRIMARY name', async () => {
+      promptQueue.push({ value: 'fresh-value' });
+      const value = await getDirectionalConnectorSecret(PRIMARY, FALLBACK, {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: true,
+        missingWithFallbackCode,
+      });
+      expect(value).toBe('fresh-value');
+      expect(promptedWith).toHaveLength(1);
+      expect(promptedWith[0][0].type).toBe('password');
+
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      expect(store.get(PRIMARY)).toBe('fresh-value');
+      expect(store.get(FALLBACK)).toBeNull();
+    });
+
+    it('primary missing, fallback present, non-interactive → refuses with missingWithFallbackCode, never silently borrows', async () => {
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set(FALLBACK, 'fallback-value');
+
+      await expect(
+        getDirectionalConnectorSecret(PRIMARY, FALLBACK, {
+          orgId: ORG_A,
+          devMode: true,
+          interactive: false,
+          missingWithFallbackCode,
+        }),
+      ).rejects.toMatchObject({ code: missingWithFallbackCode });
+      expect(promptedWith).toEqual([]);
+    });
+
+    it('primary missing, fallback present, interactive, "use stored" → saves a REFERENCE and returns the fallback value', async () => {
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set(FALLBACK, 'fallback-value');
+
+      promptQueue.push({ choice: 'use' });
+      const value = await getDirectionalConnectorSecret(PRIMARY, FALLBACK, {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: true,
+        missingWithFallbackCode,
+      });
+      expect(value).toBe('fallback-value');
+      expect(promptedWith).toHaveLength(1);
+      expect(promptedWith[0][0].type).toBe('list');
+
+      // Reference resolves transparently on a later read, non-interactive,
+      // no further prompt — and `capy system list` can see it's a reference
+      // (name only, never the value) via `referencesName`.
+      const reopened = await openSystemStore({ orgId: ORG_A, devMode: true });
+      expect(reopened.get(PRIMARY)).toBe('fallback-value');
+      const entry = reopened.listNames().find((e) => e.name === PRIMARY);
+      expect(entry?.referencesName).toBe(FALLBACK);
+      // The reference marker itself never appears in what's actually pushed
+      // — it's just another (short) encrypted value, opaque server-side.
+      expect(promptedWith).toHaveLength(1);
+    });
+
+    it('primary missing, fallback present, interactive, "add new" → prompts and saves a literal value, no reference', async () => {
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set(FALLBACK, 'fallback-value');
+
+      promptQueue.push({ choice: 'new' }, { value: 'dedicated-value' });
+      const value = await getDirectionalConnectorSecret(PRIMARY, FALLBACK, {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: true,
+        missingWithFallbackCode,
+      });
+      expect(value).toBe('dedicated-value');
+      expect(promptedWith).toHaveLength(2);
+
+      const reopened = await openSystemStore({ orgId: ORG_A, devMode: true });
+      expect(reopened.get(PRIMARY)).toBe('dedicated-value');
+      const entry = reopened.listNames().find((e) => e.name === PRIMARY);
+      expect(entry?.referencesName).toBeUndefined();
+    });
+
+    it('the reverse direction (connect borrowing from deploy) uses the same function symmetrically', async () => {
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set(PRIMARY, 'target-value'); // only the TARGET key exists
+
+      promptQueue.push({ choice: 'use' });
+      const value = await getDirectionalConnectorSecret(FALLBACK, PRIMARY, {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: true,
+        missingWithFallbackCode: 'DOKPLOY_CONNECTOR_KEY_MISSING',
+      });
+      expect(value).toBe('target-value');
+      const reopened = await openSystemStore({ orgId: ORG_A, devMode: true });
+      expect(reopened.listNames().find((e) => e.name === FALLBACK)?.referencesName).toBe(PRIMARY);
+    });
+  });
+
+  // ── One-level references: never chain, never resolve to a missing name. ──
+  describe('references', () => {
+    it('a reference to a name with no entry is a coded SYSTEM_STORE_REFERENCE_MISSING', async () => {
+      const store = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store.set('_TARGET_DOKPLOY_API_KEY', 'fallback-value');
+      promptQueue.push({ choice: 'use' });
+      await getDirectionalConnectorSecret('_CONNECTOR_DOKPLOY_API_KEY', '_TARGET_DOKPLOY_API_KEY', {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: true,
+        missingWithFallbackCode: 'DOKPLOY_CONNECTOR_KEY_MISSING',
+      });
+      // Now remove the referenced entry out from under the reference.
+      const store2 = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await store2.remove('_TARGET_DOKPLOY_API_KEY');
+
+      const store3 = await openSystemStore({ orgId: ORG_A, devMode: true });
+      expect(() => store3.get('_CONNECTOR_DOKPLOY_API_KEY')).toThrow();
+      try {
+        store3.get('_CONNECTOR_DOKPLOY_API_KEY');
+      } catch (err) {
+        expect((err as any).code).toBe(ERROR_CODES.SYSTEM_STORE_REFERENCE_MISSING);
+      }
+    });
+
+    it('a reference whose target is ITSELF a reference is a coded SYSTEM_STORE_REFERENCE_CHAIN, never followed', async () => {
+      // Build the chain by hand: A references B, and B is then made to
+      // reference C — the store's own API never creates this (it always
+      // checks the target isn't itself a reference), so this proves the
+      // READ side refuses a chain regardless of how it got on disk.
+      const storeA = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await storeA.set('_TARGET_DOKPLOY_API_KEY', 'real-value');
+      promptQueue.push({ choice: 'use' });
+      await getDirectionalConnectorSecret('_CONNECTOR_DOKPLOY_API_KEY', '_TARGET_DOKPLOY_API_KEY', {
+        orgId: ORG_A,
+        devMode: true,
+        interactive: true,
+        missingWithFallbackCode: 'DOKPLOY_CONNECTOR_KEY_MISSING',
+      });
+      // `_CONNECTOR_DOKPLOY_API_KEY` now references `_TARGET_DOKPLOY_API_KEY`.
+      // Re-point `_TARGET_DOKPLOY_API_KEY` itself into a reference by hand
+      // (writing the marker format directly via `store.set`, which never
+      // interprets its own value — that's the whole point of the format
+      // being just a plain string convention).
+      const storeB = await openSystemStore({ orgId: ORG_A, devMode: true });
+      await storeB.set('_TARGET_DOKPLOY_API_KEY', 'capy-ref:1:_SOME_OTHER_NAME');
+
+      const storeC = await openSystemStore({ orgId: ORG_A, devMode: true });
+      expect(() => storeC.get('_CONNECTOR_DOKPLOY_API_KEY')).toThrow();
+      try {
+        storeC.get('_CONNECTOR_DOKPLOY_API_KEY');
+      } catch (err) {
+        expect((err as any).code).toBe(ERROR_CODES.SYSTEM_STORE_REFERENCE_CHAIN);
+      }
     });
   });
 });

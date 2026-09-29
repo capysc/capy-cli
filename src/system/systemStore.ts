@@ -54,25 +54,59 @@ export { SYSTEM_PROJECT_NAME } from './reservedProjectName';
 /** Every entry on the system store lives on this fixed branch. */
 export const SYSTEM_STORE_BRANCH = 'system';
 
-/** `_CONNECTOR_<PROVIDER>_<NAME>` — see docs/org-system-store.md "Naming". */
-const CONNECTOR_NAME_RE = /^_CONNECTOR_[A-Z0-9]+_[A-Z0-9_]+$/;
+/**
+ * `_CONNECTOR_<PROVIDER>_<NAME>` (inbound — `capy connect`) or
+ * `_TARGET_<PROVIDER>_<NAME>` (outbound — `capy deploy`, CAP-679 follow-up)
+ * — see docs/org-system-store.md "Naming". Same store, same validation, two
+ * directions: a name is never ambiguous about which one it is.
+ */
+const CONNECTOR_NAME_RE = /^_(?:CONNECTOR|TARGET)_[A-Z0-9]+_[A-Z0-9_]+$/;
 
 /** COPY-FLAG: minimal neutral wording. */
 const BAD_NAME_MESSAGE = (name: string) =>
-  `"${name}" is not a valid connector secret name. Names must match _CONNECTOR_<PROVIDER>_<NAME>.`;
+  `"${name}" is not a valid system store name. Names must match _CONNECTOR_<PROVIDER>_<NAME> or _TARGET_<PROVIDER>_<NAME>.`;
 
 /** COPY-FLAG: minimal neutral wording. */
 const ADMIN_ONLY_MESSAGE = 'This org\'s system store is only available to owners and admins.';
 
 /**
  * Throws `SYSTEM_STORE_BAD_NAME` when `name` doesn't match
- * `^_CONNECTOR_[A-Z0-9]+_[A-Z0-9_]+$`. Callers must call this BEFORE any
- * network call — see docs/org-system-store.md Proof 3.
+ * `^_(CONNECTOR|TARGET)_[A-Z0-9]+_[A-Z0-9_]+$`. Callers must call this
+ * BEFORE any network call — see docs/org-system-store.md Proof 3. Name kept
+ * as `assertValidConnectorName` (not renamed) even though it now also
+ * accepts `_TARGET_` names — every existing call site already imports it
+ * under this name, and the check itself is identical either way: "is this a
+ * well-formed system store name".
  */
 export function assertValidConnectorName(name: string): void {
   if (!CONNECTOR_NAME_RE.test(name)) {
     throw new CapyError(BAD_NAME_MESSAGE(name), ERROR_CODES.SYSTEM_STORE_BAD_NAME, { name });
   }
+}
+
+// ── One-level references (CAP-679 follow-up) ────────────────────────────────
+//
+// A `_TARGET_*` entry can point at a `_CONNECTOR_*` entry (or vice versa)
+// instead of holding its own copy of the secret — "use the key I already
+// have" rather than typing/pasting it twice. Stored as a plain marker STRING
+// in the same encrypted slot every other value uses (so `capy system list`
+// can recognize one without decrypting anything extra), resolved to the
+// referenced name's own value on every read. One level only: a reference
+// whose target is ITSELF a reference is a coded refusal, never followed —
+// see `resolveStoredValue`.
+
+const REFERENCE_PREFIX = 'capy-ref:1:';
+
+function isReferenceValue(raw: string): boolean {
+  return raw.startsWith(REFERENCE_PREFIX);
+}
+
+function referenceTargetName(raw: string): string {
+  return raw.slice(REFERENCE_PREFIX.length);
+}
+
+function makeReferenceValue(targetName: string): string {
+  return `${REFERENCE_PREFIX}${targetName}`;
 }
 
 export interface OpenSystemStoreOptions {
@@ -86,6 +120,12 @@ export interface SystemStoreEntry {
   name: string;
   /** ISO8601 UTC, server-assigned. Absent when this entry has never round-tripped through a push response. */
   changed_at?: string;
+  /**
+   * Present when this entry is a REFERENCE (CAP-679 follow-up) rather than
+   * its own value — the name it points at. Safe to show even in `--json`
+   * output: it's a NAME, never a secret. Absent for an ordinary entry.
+   */
+  referencesName?: string;
 }
 
 export interface SystemStoreHandle {
@@ -313,15 +353,53 @@ function listNamesFrom(ctx: SystemStoreContext): SystemStoreEntry[] {
   const unsorted = Object.entries(ctx.keep.variables)
     .map(([name, entries]) => ({ name, entry: entries.find((e) => e.branch === ctx.branch) }))
     .filter((x): x is { name: string; entry: KeepVariableEntry } => x.entry !== undefined)
-    .map(({ name, entry }) => ({ name, changed_at: entry.changed_at }));
+    .map(({ name, entry }) => {
+      const raw = ctx.plaintextEnv[name];
+      const referencesName = raw !== undefined && isReferenceValue(raw) ? referenceTargetName(raw) : undefined;
+      return { name, changed_at: entry.changed_at, ...(referencesName ? { referencesName } : {}) };
+    });
   // `.toSorted()` needs ES2023, which this package's tsconfig `lib` doesn't
   // include — sort a fresh copy instead of mutating `unsorted` in place.
   return Array.from(unsorted).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * Resolves `name`'s stored value, following ONE reference hop if the raw
+ * value is one (see the "One-level references" section above) — never a
+ * second hop. `null` when `name` itself has no entry at all (a normal "not
+ * set", not an error). Throws a coded `CapyError` when `name` IS a
+ * reference but can't be resolved: `SYSTEM_STORE_REFERENCE_MISSING` when the
+ * referenced name has no entry, `SYSTEM_STORE_REFERENCE_CHAIN` when the
+ * referenced name is ITSELF a reference (chains are refused, never followed).
+ */
+function resolveStoredValue(ctx: SystemStoreContext, name: string): string | null {
+  const raw = ctx.plaintextEnv[name];
+  if (raw === undefined) return null;
+  if (!isReferenceValue(raw)) return raw;
+  const targetName = referenceTargetName(raw);
+  const targetRaw = ctx.plaintextEnv[targetName];
+  if (targetRaw === undefined) {
+    throw new CapyError(
+      // COPY-FLAG: minimal neutral wording.
+      `"${name}" references "${targetName}", which has no entry in this org's system store.`,
+      ERROR_CODES.SYSTEM_STORE_REFERENCE_MISSING,
+      { name, targetName },
+    );
+  }
+  if (isReferenceValue(targetRaw)) {
+    throw new CapyError(
+      // COPY-FLAG: minimal neutral wording.
+      `"${name}" references "${targetName}", which is itself a reference — references cannot chain.`,
+      ERROR_CODES.SYSTEM_STORE_REFERENCE_CHAIN,
+      { name, targetName },
+    );
+  }
+  return targetRaw;
+}
+
 function getFrom(ctx: SystemStoreContext, name: string): string | null {
   assertValidConnectorName(name);
-  return Object.prototype.hasOwnProperty.call(ctx.plaintextEnv, name) ? ctx.plaintextEnv[name] : null;
+  return resolveStoredValue(ctx, name);
 }
 
 /** Resolves org + auth, opens/creates the org's system store, and pulls its current entries. */
@@ -381,5 +459,121 @@ export async function getConnectorSecret(name: string, opts: GetConnectorSecretO
   if (!trimmed) return null;
 
   await pushSystemEnv(ctx, { ...ctx.plaintextEnv, [name]: trimmed });
+  return trimmed;
+}
+
+export interface GetDirectionalSecretOptions {
+  orgId?: string;
+  apiUrl?: string;
+  devMode?: boolean;
+  /** No terminal → never prompts; refuses instead when `fallbackName` has a value to offer (see below). */
+  interactive: boolean;
+  /**
+   * Code to refuse with when `primaryName` is missing, `fallbackName` DOES
+   * have a value, and there is no terminal to ask which one the caller
+   * wants — e.g. `DOKPLOY_TARGET_KEY_MISSING` / `DOKPLOY_CONNECTOR_KEY_MISSING`.
+   */
+  missingWithFallbackCode: string;
+}
+
+/**
+ * Resolves `primaryName`, with one-directional "borrow" support from
+ * `fallbackName` when `primaryName` has no entry of its own yet (CAP-679
+ * follow-up — `_TARGET_DOKPLOY_API_KEY` borrowing from
+ * `_CONNECTOR_DOKPLOY_API_KEY`, or the reverse for `capy connect dokploy`):
+ *
+ *   1. `primaryName` already has an entry (a real value, or a reference this
+ *      resolves transparently) → use it, no prompt.
+ *   2. `primaryName` is missing, `fallbackName` also has no entry → same
+ *      "missing, prompt for a brand-new one if interactive" behavior as
+ *      `getConnectorSecret` — this org has configured NEITHER direction yet.
+ *   3. `primaryName` is missing, `fallbackName` DOES have an entry:
+ *      - interactive: asks "use the stored `fallbackName` / add a new
+ *        `primaryName`". "Use stored" saves a REFERENCE (`primaryName` →
+ *        `fallbackName`, one level, resolved on read) and returns the
+ *        fallback's value; "add new" prompts for and saves a fresh
+ *        `primaryName` value, same as case 2.
+ *      - non-interactive: refuses with `opts.missingWithFallbackCode` — never
+ *        silently falls back to using `fallbackName`'s value un-referenced,
+ *        and never silently mints a new value either, since either would be
+ *        guessing which the caller wanted.
+ *
+ * Backward compatible by construction: an org that has only ever set
+ * `fallbackName` (the pre-CAP-679-follow-up world) lands in case 3 the first
+ * time the OTHER direction is needed — it is asked (interactive) or refused
+ * with a code that names both avenues (non-interactive), never silently
+ * broken.
+ */
+export async function getDirectionalConnectorSecret(
+  primaryName: string,
+  fallbackName: string,
+  opts: GetDirectionalSecretOptions,
+): Promise<string | null> {
+  assertValidConnectorName(primaryName);
+  assertValidConnectorName(fallbackName);
+  const ctx = await openSystemStoreContext(opts);
+
+  const existing = getFrom(ctx, primaryName);
+  if (existing !== null) return existing;
+
+  const fallbackExists = Object.prototype.hasOwnProperty.call(ctx.plaintextEnv, fallbackName);
+
+  if (!opts.interactive) {
+    if (fallbackExists) {
+      throw new CapyError(
+        // COPY-FLAG: minimal neutral wording.
+        `"${primaryName}" is not set, but "${fallbackName}" already holds a key.`,
+        opts.missingWithFallbackCode,
+        { primaryName, fallbackName },
+      );
+    }
+    return null;
+  }
+
+  if (fallbackExists) {
+    const { choice } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'choice',
+        // COPY-FLAG: minimal neutral wording.
+        message: `${primaryName} is not set. ${fallbackName} already holds a key — use it, or add a new one?`,
+        choices: [
+          { name: `Use the stored ${fallbackName}`, value: 'use' },
+          { name: 'Add a new key', value: 'new' },
+        ],
+        default: 'use',
+      },
+    ]);
+    if (choice === 'use') {
+      const fallbackValue = getFrom(ctx, fallbackName);
+      if (fallbackValue === null) {
+        // Vanished between the existence check above and here (e.g. removed
+        // concurrently) — refuse rather than silently falling through to a
+        // fresh-value prompt the person didn't ask for.
+        throw new CapyError(
+          // COPY-FLAG: minimal neutral wording.
+          `"${fallbackName}" has no value to reuse.`,
+          ERROR_CODES.SYSTEM_STORE_REFERENCE_MISSING,
+          { primaryName, fallbackName },
+        );
+      }
+      await pushSystemEnv(ctx, { ...ctx.plaintextEnv, [primaryName]: makeReferenceValue(fallbackName) });
+      return fallbackValue;
+    }
+    // else "add new" — fall through to the same prompt case 2 uses.
+  }
+
+  const { value } = await inquirer.prompt([
+    {
+      type: 'password',
+      name: 'value',
+      message: `Enter a value for ${primaryName}:`, // COPY-FLAG
+      mask: '*',
+    },
+  ]);
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed) return null;
+
+  await pushSystemEnv(ctx, { ...ctx.plaintextEnv, [primaryName]: trimmed });
   return trimmed;
 }

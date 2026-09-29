@@ -334,23 +334,32 @@ program
 
 // `capy deploy` is a single picker that surfaces both:
 //   • existing flow: deploy-token + docs page (works for any platform)
-//   • new connector flow: real deploy via adapter (cf-worker, …)
-// When the user picks a platform with a connector available, an extra prompt
-// asks which mode they want; otherwise the existing token+docs flow runs.
+//   • new target flow: real deploy via adapter (cf-worker, …)
+// When the user picks a platform with a target adapter available, an extra
+// prompt asks which mode they want; otherwise the existing token+docs flow
+// runs.
+//
+// CAP-679 follow-up wording pass: this picker's user-facing text stopped
+// calling the outbound adapter path "connector" (that word is now the
+// INBOUND half of "integrations" — `capy connect`) in favor of "target". The
+// OLD spelling is kept working as a HIDDEN alias so existing scripts never
+// break: `--connect` itself is untouched (its own name was always "connect",
+// never "connector"), and `--mode connector` still resolves exactly like
+// `--mode target` — see the `--mode` normalization below.
 const deploy = program
   .command('deploy [target]')
-  .description('Set up secret delivery — token + docs (existing) or connector deploy')
+  .description('Set up secret delivery — token + docs (existing) or target deploy')
   .option('--target <id>', 'adapter id; requires --yes (CI mode)')
   .option('--yes', 'skip all prompts (CI)')
-  .option('--dry-run', 'preflight + show plan, push nothing (connector mode)')
+  .option('--dry-run', 'preflight + show plan, push nothing (target mode)')
   .option('--force', 'redeploy even when keep.lock is unchanged — bumps keep.lock to trigger CI')
-  .option('--edit', 're-enter the picker for an existing connector target')
-  .option('--connect', 'force connector mode (skip the token+docs path)')
+  .option('--edit', 're-enter the picker for an existing target')
+  .option('--connect', 'force target mode (skip the token+docs path)')
   .option('--platform <id>', 'skip platform picker (token+docs flow; e.g. github-actions, vercel)')
-  .option('--mode <mode>', 'skip mode picker: "connector" or "token"')
+  .option('--mode <mode>', 'skip mode picker: "target" or "token" (also accepts the old "connector" spelling)')
   .option('--scope <scope>', 'gh-actions: "repo" or "env"')
   .option('--env-name <name>', 'gh-actions: env name when --scope env')
-  .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (connector mode)')
+  .option('--no-deploy', 'write and verify the target, but skip the platform deploy/redeploy (target mode)')
   .option('--json', 'describe the route (unanswered stops + any known branch problem) as JSON instead of travelling it')
   .action(async (target: string | undefined, options: any, cmd: any) => {
     assertNotLocalOnly('deploy');
@@ -358,7 +367,7 @@ const deploy = program
     // `capy --dry-run deploy ...` or `capy deploy ... --dry-run` works.
     const merged = cmd.optsWithGlobals ? cmd.optsWithGlobals() : options;
 
-    // CI/explicit connector path — go straight to the adapter flow.
+    // CI/explicit target path — go straight to the adapter flow.
     if (options.target || options.connect || target) {
       const { deployCommand } = await import('./commands/deployCommand');
       const code = await deployCommand(target, {
@@ -380,11 +389,16 @@ const deploy = program
     }
 
     // Default path: existing token+docs picker. It auto-routes to the
-    // connector flow when the user picks a connector-enabled platform.
+    // target flow when the user picks a target-enabled platform.
     const { DeployCommand } = await import('./commands/deployTokenCommand');
     const c = new DeployCommand(undefined, false, {
       platform: options.platform,
-      mode: options.mode,
+      // `--mode target` (new) and `--mode connector` (old, hidden alias) both
+      // resolve to the same internal 'connector' value DeployCommand already
+      // understands — see DeployCommand's own doc for why that internal name
+      // is untouched. Any other value (undefined, 'token', a typo) passes
+      // through unchanged.
+      mode: options.mode === 'target' ? 'connector' : options.mode,
       scope: options.scope,
       envName: options.envName,
       yes: !!options.yes,
@@ -415,7 +429,7 @@ deploy
 
 deploy
   .command('targets')
-  .description('List configured connector targets (connector mode)')
+  .description('List configured targets (target mode)')
   .action(async (_options, command) => {
     assertNotLocalOnly('deploy targets');
     const { deployList } = await import('./commands/deployCommand');
@@ -424,7 +438,7 @@ deploy
 
 deploy
   .command('targets-remove <name>')
-  .description('Remove a configured connector target')
+  .description('Remove a configured target')
   .option('--no-deploy', 'strip the config but skip the redeploy that would apply the revert')
   .action(async (name: string, options: any, command) => {
     assertNotLocalOnly('deploy targets-remove');
