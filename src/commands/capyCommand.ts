@@ -44,6 +44,27 @@ import { compareSecrets, hashValue, formatSnippet } from './statusCommand';
 
 const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
 
+/** Shared by every `capy` init picker: is a wizard (web) session driving this run? */
+type InitWizard = import('../ui/initWizardScreen').InitWizardSession | null;
+
+const CREATE_NEW_ORG = '__create_new__';
+const CREATE_NEW_PROJECT = '__create_new_project__';
+
+/**
+ * Runs `fn`, capturing a thrown error as a value instead of letting a catch
+ * block read mutable progress flags afterward. Used by
+ * `CapyCommand.syncInitialSecrets` to chain a sequence of fallible steps —
+ * each only runs if the previous returned `ok: true` — as an early-return
+ * chain rather than `let pushedToKeep = false; ...; pushedToKeep = true;`.
+ */
+async function tryStep<T>(fn: () => T | Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
 export class CapyCommand {
   private projectManager: ProjectManager;
   private fileManager: FileManager;
@@ -397,88 +418,15 @@ export class CapyCommand {
 
     // Resolve organization
     const orgs = authResult.organizations || [];
-    let selectedOrg: Organization;
-    const CREATE_NEW_ORG = '__create_new__';
     const refreshToken = authResult._refresh_token || this.authService.getToken()?.refresh_token;
-
     const currentOrgId = authResult.organization_id;
-    const currentOrg = orgs.find(o => o.id === currentOrgId);
-
-    if (orgs.length === 0) {
-      console.log('\nNo organization found. Let\'s create one.');
-      selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-      wizard?.record({
-        organization: { kind: 'new', name: selectedOrg.name },
-        recoveryShown: true,
-      });
-
-    } else {
-      let orgId: string;
-      if (wizard) {
-        // No TTY under --web (e.g. driven through the MCP): the picker is the
-        // wizard's `organization` stop, which carries the same list and the
-        // same "create new" row an inquirer prompt would have shown — and, on
-        // the rail beside it, the five stops that come after.
-        const chosen = await wizard.askOrganization(
-          orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId })),
-        );
-        if (chosen === null) {
-          throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        orgId = chosen === 'create' ? CREATE_NEW_ORG : chosen;
-      } else {
-        ({ orgId } = await inquirer.prompt([{
-          type: 'list',
-          name: 'orgId',
-          message: 'Select organization for project:',
-          choices: [
-            ...orgs.map(o => ({
-              name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
-              value: o.id,
-            })),
-            { name: 'Create new organization +', value: CREATE_NEW_ORG },
-          ],
-          default: currentOrgId,
-        }]));
-      }
-
-      if (orgId === CREATE_NEW_ORG) {
-        selectedOrg = await this.createNewOrganization(refreshToken!, authResult.user_id!);
-        // Naming it and being shown the phrase both happened, elsewhere. The
-        // rail settles those two stops rather than leaving them ◌ behind a
-        // fork this run has already taken.
-        wizard?.record({
-          organization: { kind: 'new', name: selectedOrg.name },
-          recoveryShown: true,
-        });
-
-      } else if (currentOrg && orgId === currentOrg.id) {
-        selectedOrg = currentOrg;
-
-      } else {
-        selectedOrg = orgs.find(o => o.id === orgId)!;
-
-        const orgSpinner = ora('Switching organization...').start();
-        let scopedAuth = await this.authService.refreshWithCredentials(
-          refreshToken!,
-          selectedOrg.id,
-          authResult.user_id,
-        );
-        if (!scopedAuth.success) {
-          orgSpinner.text = 'Re-authenticating...';
-          this.authService.clearToken();
-          scopedAuth = await this.authService.authenticate(selectedOrg.id);
-          if (!scopedAuth.success) {
-            orgSpinner.fail('Failed to authenticate with organization');
-            throw new CapyError(
-              scopedAuth.error || 'Organization authentication failed',
-              ERROR_CODES.AUTH_FAILED
-            );
-          }
-        }
-        orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
-      }
-    }
+    const selectedOrg = await this.resolveSelectedOrgForInit(
+      wizard,
+      orgs,
+      currentOrgId,
+      refreshToken,
+      authResult.user_id!,
+    );
 
     // User has access to an existing org but no local key — they were invited
     // and need to redeem their invite code to receive the shared master key.
@@ -516,52 +464,12 @@ export class CapyCommand {
     // Discover existing projects in the org. If any exist, give the user the
     // choice to bootstrap one of them OR create a new project. This is the path
     // a teammate hits when cloning a repo with no committed keep.lock.
-    const CREATE_NEW_PROJECT = '__create_new_project__';
-    let existingProjects: Array<{ id: string; name: string; organization_id: string }> = [];
-    // "The lookup failed" and "this org has none" both end up as an empty list
-    // here, and they are not the same fact: one walks the user into creating a
-    // second project alongside one they already have. The rail says which.
-    let projectsUnavailable = false;
-    try {
-      const listSpinner = ora('Looking for existing projects...').start();
-      existingProjects = await this.serviceClient.listProjects();
-      listSpinner.stop();
-      this.debug('listProjects response', existingProjects);
-    } catch (err) {
-      this.debugError('listProjects failed', err);
-      // Network or auth issue — fall through to new-project flow
-      existingProjects = [];
-      projectsUnavailable = true;
-    }
+    const { projects: existingProjects, unavailable: projectsUnavailable } =
+      await this.listExistingProjectsForInit();
     wizard?.record({ projectCount: existingProjects.length, projectsUnavailable });
 
     if (existingProjects.length > 0) {
-      const choices = [
-        { name: 'New project', value: CREATE_NEW_PROJECT },
-        ...existingProjects.map(p => ({
-          name: p.name,
-          value: p.id,
-        })),
-      ];
-
-      let projectChoice: string;
-      if (wizard) {
-        const chosen = await wizard.askProject(
-          existingProjects.map(p => ({ id: p.id, name: p.name })),
-        );
-        if (chosen === null) {
-          throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        projectChoice = chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
-      } else {
-        ({ projectChoice } = await inquirer.prompt([{
-          type: 'list',
-          name: 'projectChoice',
-          message: 'Which project do you want to use?',
-          choices,
-          default: CREATE_NEW_PROJECT,
-        }]));
-      }
+      const projectChoice = await this.pickProjectChoiceForInit(wizard, existingProjects);
 
       if (projectChoice !== CREATE_NEW_PROJECT) {
         const picked = existingProjects.find(p => p.id === projectChoice)!;
@@ -576,19 +484,7 @@ export class CapyCommand {
 
     // Prompt for project name
     const defaultName = this.projectManager.getDefaultProjectName();
-    let projectName: string;
-    if (wizard) {
-      // Same two refusals the TTY validator makes, in the same words — the
-      // screen holds its button on both, so either arriving here means the
-      // submit did not come from the screen.
-      const entered = await wizard.askProjectName(defaultName);
-      if (entered === null) {
-        throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
-      }
-      projectName = entered;
-    } else {
-      projectName = await this.promptEngine.promptForProjectName(defaultName);
-    }
+    const projectName = await this.promptProjectNameForInit(wizard, defaultName);
 
     // Initialize project on service
     const initSpinner = ora('Creating project...').start();
@@ -625,47 +521,8 @@ export class CapyCommand {
     // one, so pick the name: default 'development', or a custom name the
     // user enters. Protection isn't asked here - branches are unprotected
     // by default and can be protected later via a dedicated action.
-    let initialBranchChoice: string;
-    if (wizard) {
-      // No TTY under --web: without a browser screen here, init dies one step
-      // before createBranch/writeActiveBranch and leaves a branchless project.
-      const chosen = await wizard.askBranchChoice();
-      if (chosen === null) {
-        throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
-      }
-      initialBranchChoice = chosen;
-    } else {
-      ({ initialBranchChoice } = await inquirer.prompt([{
-        type: 'list',
-        name: 'initialBranchChoice',
-        message: 'What branch should this project start with?',
-        choices: [
-          { name: 'development (default)', value: 'development' },
-          { name: 'another branch', value: 'other' },
-        ],
-      }]));
-    }
-
-    let initialBranchName: string;
-    if (initialBranchChoice === 'other') {
-      if (wizard) {
-        const entered = await wizard.askBranchName();
-        if (entered === null) {
-          throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
-        }
-        initialBranchName = entered;
-      } else {
-        const { branchName } = await inquirer.prompt([{
-          type: 'input',
-          name: 'branchName',
-          message: 'Branch name:',
-          validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
-        }]);
-        initialBranchName = String(branchName).trim();
-      }
-    } else {
-      initialBranchName = 'development';
-    }
+    const initialBranchChoice = await this.pickInitialBranchChoiceForInit(wizard);
+    const initialBranchName = await this.resolveInitialBranchNameForInit(wizard, initialBranchChoice);
     const initialBranchProtected = false;
 
     const branchSpinner = ora(`Creating branch ${initialBranchName}...`).start();
@@ -704,8 +561,8 @@ export class CapyCommand {
     const hasLocalEnv = existsSync(localEnvPath);
 
     if (hasLocalEnv) {
-      const localEnv = this.fileManager.readEnvFile(this.options.envPath);
-      const localVarCount = Object.keys(localEnv).length;
+      const rawLocalEnv = this.fileManager.readEnvFile(this.options.envPath);
+      const localVarCount = Object.keys(rawLocalEnv).length;
       // The last stop stops being a blank the moment the directory is read: an
       // empty .env is a stop this run will not visit, and the rail says so
       // rather than leaving it looking outstanding.
@@ -713,53 +570,62 @@ export class CapyCommand {
 
       if (localVarCount > 0) {
         // Cross-org exfiltration guard
-        const encryptedEntries = Object.entries(localEnv)
+        const encryptedEntries = Object.entries(rawLocalEnv)
           .filter(([_, value]) => value.startsWith('capy:'));
 
-        if (encryptedEntries.length > 0) {
-          const foreignKeys: string[] = [];
-          for (const [key, value] of encryptedEntries) {
-            try {
-              this.fileManager.decryptValue(value, encryptionKey);
-            } catch {
-              foreignKeys.push(key);
-            }
+        // One decrypt attempt per encrypted entry — reused below both to
+        // find which ones belong to a different project's key (`foreignKeys`,
+        // was a `for` loop pushing into a mutable array) and to build the
+        // final decrypted env (was `localEnv[key] = decryptValue(...)` in a
+        // second loop, mutating the object `readEnvFile` returned).
+        const decryptAttempts = encryptedEntries.map(([key, value]) => {
+          try {
+            return { key, ok: true as const, value: this.fileManager.decryptValue(value, encryptionKey) };
+          } catch {
+            return { key, ok: false as const };
           }
+        });
+        const foreignKeys = decryptAttempts.filter((a) => !a.ok).map((a) => a.key);
 
-          if (foreignKeys.length > 0) {
-            console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted with a different project's key:`);
-            for (const key of foreignKeys) {
-              console.error(`  ${key}`);
-            }
-            console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
-            // The stop this run dies at is the consent gate, and the variables
-            // are the whole subject — so they go as NAMES, in the field that
-            // draws them as a list of things to go and find in a file, rather
-            // than as a count inside a red sentence. Names only: these values
-            // cannot be read by this key, which is the problem.
-            wizard?.willBlock(
-              'encrypt',
-              {
-                code: ERROR_CODES.PERMISSION_DENIED,
-                title: 'This .env holds values encrypted to a different project',
-                detail:
-                  'These variables cannot be read with this organization\'s key, so they cannot be pushed to it. Delete the .env file, or replace those values with plaintext, and run capy again.',
-                remedy: 'capy',
-              },
-              { names: foreignKeys },
-            );
-            throw new CapyError(
-              'Cannot push secrets encrypted with a different project\'s key to a new org',
-              ERROR_CODES.PERMISSION_DENIED,
-              { foreignKeys }
-            );
+        if (foreignKeys.length > 0) {
+          console.error(`\nCannot initialize: .env contains ${foreignKeys.length} value(s) encrypted with a different project's key:`);
+          for (const key of foreignKeys) {
+            console.error(`  ${key}`);
           }
-
-          // Values are encrypted but belong to this project — decrypt them for push
-          for (const [key, value] of encryptedEntries) {
-            localEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
-          }
+          console.error('\nTo fix: delete the .env file or replace encrypted values with plaintext before initializing a new project.');
+          // The stop this run dies at is the consent gate, and the variables
+          // are the whole subject — so they go as NAMES, in the field that
+          // draws them as a list of things to go and find in a file, rather
+          // than as a count inside a red sentence. Names only: these values
+          // cannot be read by this key, which is the problem.
+          wizard?.willBlock(
+            'encrypt',
+            {
+              code: ERROR_CODES.PERMISSION_DENIED,
+              title: 'This .env holds values encrypted to a different project',
+              detail:
+                'These variables cannot be read with this organization\'s key, so they cannot be pushed to it. Delete the .env file, or replace those values with plaintext, and run capy again.',
+              remedy: 'capy',
+            },
+            { names: foreignKeys },
+          );
+          throw new CapyError(
+            'Cannot push secrets encrypted with a different project\'s key to a new org',
+            ERROR_CODES.PERMISSION_DENIED,
+            { foreignKeys }
+          );
         }
+
+        // Values are encrypted but belong to this project — decrypt them for
+        // push. A no-op merge when there was nothing encrypted to begin with.
+        const localEnv: Record<string, string> = {
+          ...rawLocalEnv,
+          ...Object.fromEntries(
+            decryptAttempts
+              .filter((a): a is { key: string; ok: true; value: string } => a.ok)
+              .map((a) => [a.key, a.value]),
+          ),
+        };
 
         // Show found variables (max 5 names, "etc." for 6+)
         const varNames = Object.keys(localEnv);
@@ -779,27 +645,14 @@ export class CapyCommand {
         // Confirm before encrypting + pushing — user may not be in the
         // right project on first setup. After this step .env is rewritten
         // with ciphertext, so getting it wrong is painful to recover from.
-        let confirmEncrypt: boolean;
-        if (wizard) {
-          // NAMES and a count reach the page — never a value, and not even a
-          // snippet of one. The whole question this stop asks is whether these
-          // may stop being plaintext, and showing more than the terminal shows
-          // in order to ask it would answer part of it first.
-          //
-          // A closed window is a "no": `askEncrypt` resolves false on cancel,
-          // which is the same thing `chosen === 'yes'` already meant.
-          confirmEncrypt = await wizard.askEncrypt(
-            { count: localVarCount, names: varNames },
-            { projectName, orgName: selectedOrg.name, branch: initBranch },
-          );
-        } else {
-          ({ confirmEncrypt } = await inquirer.prompt([{
-            type: 'confirm',
-            name: 'confirmEncrypt',
-            message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${selectedOrg.name}) on ${B(initBranch)}?`,
-            default: true,
-          }]));
-        }
+        const confirmEncrypt = await this.confirmEncryptForInit(
+          wizard,
+          localVarCount,
+          varNames,
+          projectName,
+          selectedOrg.name,
+          initBranch,
+        );
 
         if (!confirmEncrypt) {
           console.log(`\nSkipped. Your .env was not modified.`);
@@ -808,74 +661,16 @@ export class CapyCommand {
         }
 
         const syncSpinner = ora('Syncing local variables...').start();
+        const syncResult = await this.syncInitialSecrets(
+          localEnv,
+          keep,
+          encryptionKey,
+          initBranch,
+          projectResult,
+          authResult.user_id,
+        );
 
-        // What this actually got done, for the report a failure has to make.
-        // Read off the writes themselves rather than inferred afterwards: the
-        // three facts that matter are whether the values reached Keep, whether
-        // the plaintext copy was kept, and whether the .env in this directory
-        // is now ciphertext — and the third one is the reason this cannot be
-        // answered by looking at the error.
-        let pushedToKeep = false;
-        let backupWritten = false;
-        let envRewritten = false;
-
-        try {
-          const { createHash } = await import('crypto');
-          const { deriveResourceId } = await import('../crypto/resourceId');
-          const { Encryptor } = await import('../crypto/encryptor');
-
-          // Build encrypted env blob and keep.lock hashes
-          const encrypted: Record<string, string> = {};
-          const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-          for (const [key, value] of Object.entries(localEnv)) {
-            const resourceId = deriveResourceId(initBranch, key);
-            const enc = Encryptor.encrypt(value, encryptionKey);
-            encrypted[key] = `capy:${resourceId}:${enc}`;
-            pushedVars[key] = {
-              resource_id: resourceId,
-              value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-            };
-          }
-
-          const envBlob = Object.entries(encrypted)
-            .map(([k, v]) => `${k}=${v}`)
-            .join('\n');
-
-          const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
-          const keepJson = JSON.stringify(updatedKeep);
-
-          const initPushResult = await this.serviceClient.pushSecrets(
-            projectResult.project_id,
-            keepJson,
-            envBlob,
-            initBranch,
-          );
-          pushedToKeep = true;
-
-          // Prefer the server's copy — it carries server-assigned changed_at
-          this.fileManager.writeKeepFile(
-            SyncEngine.adoptServerKeep(initPushResult.keep_file, updatedKeep, initBranch),
-          );
-
-          // Cache encrypted blob locally
-          const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
-          writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
-
-          this.fileManager.writeSyncState({
-            last_sync: new Date().toISOString(),
-            synced_variables: Object.keys(localEnv),
-            user_id: authResult.user_id,
-            keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
-          });
-
-          // Backup plaintext .env before encrypting
-          this.fileManager.backupPlaintextEnv(this.options.envPath);
-          backupWritten = true;
-
-          // Encrypt the local .env file
-          this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch);
-          envRewritten = true;
-
+        if (syncResult.ok) {
           syncSpinner.succeed(`keep.lock created (pinned to ${initBranch}, ${localVarCount} secrets)`);
 
           // Install git hooks
@@ -885,8 +680,9 @@ export class CapyCommand {
           console.log(`prefix your command with ${B('capy run')} (e.g. ${B('capy run -- npm start')}).`);
           console.log(`See: https://docs.capy.sc/using/running-your-app`);
           console.log(`\nRun ${B('capy push')} to share your secrets with teammates.`);
-        } catch (syncError: any) {
-          syncSpinner.fail(`Failed to sync variables: ${syncError.message}`);
+        } else {
+          const syncError: any = syncResult.error;
+          syncSpinner.fail(`Failed to sync variables: ${syncError?.message}`);
           console.log(`You can run ${B('capy')} again to retry syncing`);
           // This is the one failure that happens after the last question, and
           // the terminal path swallows it and carries on — which under --web
@@ -898,9 +694,9 @@ export class CapyCommand {
           await wizard?.reportEncryptFailure({
             code: syncError instanceof CapyError ? syncError.code : ERROR_CODES.SERVICE_ERROR,
             reason: syncError?.message ? String(syncError.message) : 'The push failed.',
-            envRewritten,
-            backupWritten,
-            pushed: pushedToKeep,
+            envRewritten: syncResult.progress.envRewritten,
+            backupWritten: syncResult.progress.backupWritten,
+            pushed: syncResult.progress.pushedToKeep,
           });
         }
       } else {
@@ -918,6 +714,353 @@ export class CapyCommand {
       // Install git hooks
       this.installGitHooks();
     }
+  }
+
+  /**
+   * Org resolution for `capy` init: create-org-if-none, else let the user
+   * pick (wizard or inquirer) — creating a new org, staying on the current
+   * one, or switching auth to a different one they already belong to.
+   * Extracted so `runInitialization` holds no `let selectedOrg` mutated
+   * across three branches — each branch here just returns its answer.
+   */
+  private async resolveSelectedOrgForInit(
+    wizard: InitWizard,
+    orgs: Organization[],
+    currentOrgId: string | undefined,
+    refreshToken: string | undefined,
+    userId: string,
+  ): Promise<Organization> {
+    if (orgs.length === 0) {
+      console.log('\nNo organization found. Let\'s create one.');
+      const created = await this.createNewOrganization(refreshToken!, userId);
+      wizard?.record({ organization: { kind: 'new', name: created.name }, recoveryShown: true });
+      return created;
+    }
+
+    const currentOrg = orgs.find(o => o.id === currentOrgId);
+    const orgId = await this.pickOrgIdForInit(wizard, orgs, currentOrgId);
+
+    if (orgId === CREATE_NEW_ORG) {
+      const created = await this.createNewOrganization(refreshToken!, userId);
+      // Naming it and being shown the phrase both happened, elsewhere. The
+      // rail settles those two stops rather than leaving them ◌ behind a
+      // fork this run has already taken.
+      wizard?.record({ organization: { kind: 'new', name: created.name }, recoveryShown: true });
+      return created;
+    }
+    if (currentOrg && orgId === currentOrg.id) {
+      return currentOrg;
+    }
+
+    const picked = orgs.find(o => o.id === orgId)!;
+    await this.switchOrganizationAuthForInit(picked, refreshToken, userId);
+    return picked;
+  }
+
+  /** Which org to use, from the wizard's `organization` stop or an inquirer list. */
+  private async pickOrgIdForInit(
+    wizard: InitWizard,
+    orgs: Organization[],
+    currentOrgId: string | undefined,
+  ): Promise<string> {
+    if (wizard) {
+      // No TTY under --web (e.g. driven through the MCP): the picker is the
+      // wizard's `organization` stop, which carries the same list and the
+      // same "create new" row an inquirer prompt would have shown — and, on
+      // the rail beside it, the five stops that come after.
+      const chosen = await wizard.askOrganization(
+        orgs.map(o => ({ id: o.id, name: o.name, isCurrent: o.id === currentOrgId })),
+      );
+      if (chosen === null) {
+        throw new CapyError('Organization selection cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return chosen === 'create' ? CREATE_NEW_ORG : chosen;
+    }
+    const { orgId } = await inquirer.prompt([{
+      type: 'list',
+      name: 'orgId',
+      message: 'Select organization for project:',
+      choices: [
+        ...orgs.map(o => ({
+          name: o.id === currentOrgId ? `${o.name}  \x1b[38;5;43m← current\x1b[0m` : o.name,
+          value: o.id,
+        })),
+        { name: 'Create new organization +', value: CREATE_NEW_ORG },
+      ],
+      default: currentOrgId,
+    }]);
+    return orgId;
+  }
+
+  /** Re-scope auth to a different org the user already belongs to. */
+  private async switchOrganizationAuthForInit(
+    selectedOrg: Organization,
+    refreshToken: string | undefined,
+    userId: string | undefined,
+  ): Promise<void> {
+    const orgSpinner = ora('Switching organization...').start();
+    const initialAuth = await this.authService.refreshWithCredentials(
+      refreshToken!,
+      selectedOrg.id,
+      userId,
+    );
+    const scopedAuth = initialAuth.success
+      ? initialAuth
+      : await (async () => {
+          orgSpinner.text = 'Re-authenticating...';
+          this.authService.clearToken();
+          return this.authService.authenticate(selectedOrg.id);
+        })();
+    if (!scopedAuth.success) {
+      orgSpinner.fail('Failed to authenticate with organization');
+      throw new CapyError(
+        scopedAuth.error || 'Organization authentication failed',
+        ERROR_CODES.AUTH_FAILED,
+      );
+    }
+    orgSpinner.succeed(`Organization: ${selectedOrg.name}`);
+  }
+
+  /** Existing projects in the org — `unavailable` distinguishes "lookup failed" from "none exist". */
+  private async listExistingProjectsForInit(): Promise<{
+    projects: Array<{ id: string; name: string; organization_id: string }>;
+    unavailable: boolean;
+  }> {
+    try {
+      const listSpinner = ora('Looking for existing projects...').start();
+      const projects = await this.serviceClient.listProjects();
+      listSpinner.stop();
+      this.debug('listProjects response', projects);
+      return { projects, unavailable: false };
+    } catch (err) {
+      this.debugError('listProjects failed', err);
+      // Network or auth issue — fall through to new-project flow
+      return { projects: [], unavailable: true };
+    }
+  }
+
+  /** Bootstrap an existing project, or create a new one — from the wizard's `project` stop or an inquirer list. */
+  private async pickProjectChoiceForInit(
+    wizard: InitWizard,
+    existingProjects: Array<{ id: string; name: string }>,
+  ): Promise<string> {
+    if (wizard) {
+      const chosen = await wizard.askProject(
+        existingProjects.map(p => ({ id: p.id, name: p.name })),
+      );
+      if (chosen === null) {
+        throw new CapyError('Project selection cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return chosen === 'new' ? CREATE_NEW_PROJECT : chosen;
+    }
+    const { projectChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'projectChoice',
+      message: 'Which project do you want to use?',
+      choices: [
+        { name: 'New project', value: CREATE_NEW_PROJECT },
+        ...existingProjects.map(p => ({ name: p.name, value: p.id })),
+      ],
+      default: CREATE_NEW_PROJECT,
+    }]);
+    return projectChoice;
+  }
+
+  /** New project's name, from the wizard's `projectName` stop or the prompt engine. */
+  private async promptProjectNameForInit(wizard: InitWizard, defaultName: string): Promise<string> {
+    if (wizard) {
+      // Same two refusals the TTY validator makes, in the same words — the
+      // screen holds its button on both, so either arriving here means the
+      // submit did not come from the screen.
+      const entered = await wizard.askProjectName(defaultName);
+      if (entered === null) {
+        throw new CapyError('Project naming cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return entered;
+    }
+    return this.promptEngine.promptForProjectName(defaultName);
+  }
+
+  /** 'development' (default) or a custom branch name — from the wizard's branch stops or inquirer. */
+  private async pickInitialBranchChoiceForInit(wizard: InitWizard): Promise<string> {
+    if (wizard) {
+      // No TTY under --web: without a browser screen here, init dies one step
+      // before createBranch/writeActiveBranch and leaves a branchless project.
+      const chosen = await wizard.askBranchChoice();
+      if (chosen === null) {
+        throw new CapyError('Branch selection cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return chosen;
+    }
+    const { initialBranchChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'initialBranchChoice',
+      message: 'What branch should this project start with?',
+      choices: [
+        { name: 'development (default)', value: 'development' },
+        { name: 'another branch', value: 'other' },
+      ],
+    }]);
+    return initialBranchChoice;
+  }
+
+  /** Resolves the initial branch's actual name once `pickInitialBranchChoiceForInit` has an answer. */
+  private async resolveInitialBranchNameForInit(wizard: InitWizard, choice: string): Promise<string> {
+    if (choice !== 'other') return 'development';
+    if (wizard) {
+      const entered = await wizard.askBranchName();
+      if (entered === null) {
+        throw new CapyError('Branch naming cancelled', ERROR_CODES.AUTH_FAILED);
+      }
+      return entered;
+    }
+    const { branchName } = await inquirer.prompt([{
+      type: 'input',
+      name: 'branchName',
+      message: 'Branch name:',
+      validate: (input: string) => input.trim().length > 0 || 'Branch name cannot be empty',
+    }]);
+    return String(branchName).trim();
+  }
+
+  /** Confirm before encrypting + pushing an existing .env — from the wizard's `encrypt` stop or inquirer. */
+  private async confirmEncryptForInit(
+    wizard: InitWizard,
+    localVarCount: number,
+    varNames: string[],
+    projectName: string,
+    orgName: string,
+    initBranch: string,
+  ): Promise<boolean> {
+    if (wizard) {
+      // NAMES and a count reach the page — never a value, and not even a
+      // snippet of one. The whole question this stop asks is whether these
+      // may stop being plaintext, and showing more than the terminal shows
+      // in order to ask it would answer part of it first.
+      //
+      // A closed window is a "no": `askEncrypt` resolves false on cancel,
+      // which is the same thing `chosen === 'yes'` already meant.
+      return wizard.askEncrypt(
+        { count: localVarCount, names: varNames },
+        { projectName, orgName, branch: initBranch },
+      );
+    }
+    const { confirmEncrypt } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmEncrypt',
+      message: `Encrypt these ${localVarCount} secrets and push to ${B(projectName)} (${orgName}) on ${B(initBranch)}?`,
+      default: true,
+    }]);
+    return confirmEncrypt;
+  }
+
+  /**
+   * The initial `.env` → Keep sync during `capy` init: push secrets, cache +
+   * write keep.lock/sync-state, back up plaintext .env, then rewrite it as
+   * ciphertext. Each step only runs if the previous one succeeded via
+   * `tryStep` (module-level, top of file) rather than mutable progress
+   * flags a catch block reads after the fact — the three booleans returned
+   * on failure say exactly how far it got, which is what
+   * `wizard.reportEncryptFailure` needs and a caught error alone can't say
+   * (whether the values reached Keep, whether the plaintext copy survived,
+   * whether .env is ciphertext now).
+   */
+  private async syncInitialSecrets(
+    localEnv: Record<string, string>,
+    keep: KeepFile,
+    encryptionKey: string,
+    initBranch: string,
+    projectResult: { org_id: string; project_id: string },
+    userId: string | undefined,
+  ): Promise<
+    | { ok: true }
+    | {
+        ok: false;
+        progress: { pushedToKeep: boolean; backupWritten: boolean; envRewritten: boolean };
+        error: unknown;
+      }
+  > {
+    const { createHash } = await import('crypto');
+    const { deriveResourceId } = await import('../crypto/resourceId');
+    const { Encryptor } = await import('../crypto/encryptor');
+
+    const encrypted = Object.fromEntries(
+      Object.entries(localEnv).map(([key, value]) => {
+        const resourceId = deriveResourceId(initBranch, key);
+        const enc = Encryptor.encrypt(value, encryptionKey);
+        return [key, `capy:${resourceId}:${enc}`];
+      }),
+    );
+    const pushedVars = Object.fromEntries(
+      Object.entries(localEnv).map(([key, value]) => [
+        key,
+        {
+          resource_id: deriveResourceId(initBranch, key),
+          value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+        },
+      ]),
+    );
+    const envBlob = Object.entries(encrypted)
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n');
+
+    const updatedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, initBranch);
+    const keepJson = JSON.stringify(updatedKeep);
+
+    const pushResult = await tryStep(() =>
+      this.serviceClient.pushSecrets(projectResult.project_id, keepJson, envBlob, initBranch),
+    );
+    if (!pushResult.ok) {
+      return {
+        ok: false,
+        progress: { pushedToKeep: false, backupWritten: false, envRewritten: false },
+        error: pushResult.error,
+      };
+    }
+
+    const localWrites = await tryStep(() => {
+      // Prefer the server's copy — it carries server-assigned changed_at
+      this.fileManager.writeKeepFile(
+        SyncEngine.adoptServerKeep(pushResult.value.keep_file, updatedKeep, initBranch),
+      );
+      const initKeepHash = SyncEngine.computeKeepHash(updatedKeep, initBranch);
+      writeKeepCache(projectResult.org_id, projectResult.project_id, initKeepHash, envBlob);
+      this.fileManager.writeSyncState({
+        last_sync: new Date().toISOString(),
+        synced_variables: Object.keys(localEnv),
+        user_id: userId,
+        keep_hash: setSyncKeepHash(null, initBranch, initKeepHash),
+      });
+    });
+    if (!localWrites.ok) {
+      return {
+        ok: false,
+        progress: { pushedToKeep: true, backupWritten: false, envRewritten: false },
+        error: localWrites.error,
+      };
+    }
+
+    const backup = await tryStep(() => this.fileManager.backupPlaintextEnv(this.options.envPath));
+    if (!backup.ok) {
+      return {
+        ok: false,
+        progress: { pushedToKeep: true, backupWritten: false, envRewritten: false },
+        error: backup.error,
+      };
+    }
+
+    const encryptEnv = await tryStep(() =>
+      this.fileManager.writeEncryptedEnvFile(localEnv, encryptionKey, undefined, updatedKeep, initBranch),
+    );
+    if (!encryptEnv.ok) {
+      return {
+        ok: false,
+        progress: { pushedToKeep: true, backupWritten: true, envRewritten: false },
+        error: encryptEnv.error,
+      };
+    }
+
+    return { ok: true };
   }
 
   /**
@@ -1233,21 +1376,20 @@ export class CapyCommand {
     // session. Everything below this point is shared with the server path,
     // gated by `localMode` at the few seams that would otherwise call out.
     const localMode = isLocalOnly();
-    let branch: string;
 
-    let authResult: AuthResult;
+    const { authResult, branch } = await (async (): Promise<{ authResult: AuthResult; branch: string }> => {
+      if (localMode) {
+        const localBranch = await this.resolveActiveBranch(projectState, true);
+        projectState.activeBranch = localBranch;
+        this.displayHeader(
+          projectState.projectName || 'local project',
+          'local (this machine only)',
+          'local',
+          localBranch,
+        );
+        return { authResult: { success: true, user_id: LOCAL_USER_ID }, branch: localBranch };
+      }
 
-    if (localMode) {
-      authResult = { success: true, user_id: LOCAL_USER_ID };
-      branch = await this.resolveActiveBranch(projectState, true);
-      projectState.activeBranch = branch;
-      this.displayHeader(
-        projectState.projectName || 'local project',
-        'local (this machine only)',
-        'local',
-        branch,
-      );
-    } else {
       // Load user-scoped session if we know who last synced this project
       if (projectState.userId) {
         this.authService.setSessionUserId(projectState.userId);
@@ -1255,17 +1397,17 @@ export class CapyCommand {
 
       // Authenticate — try silent first, then interactive if needed.
       const spinner = ora('Authenticating...').start();
-      let result = await this.authService.authenticateSilent(projectState.organizationId);
+      const result = await (async (): Promise<AuthResult> => {
+        const silent = await this.authService.authenticateSilent(projectState.organizationId);
+        if (silent.success) return silent;
 
-      // If silent auth failed, try without a specific org to use any valid session
-      if (!result.success) {
-        result = await this.authService.authenticateSilent();
-      }
+        // If silent auth failed, try without a specific org to use any valid session
+        const silentAny = await this.authService.authenticateSilent();
+        if (silentAny.success) return silentAny;
 
-      // If still no session, fall through to interactive auth — except on
-      // network failures: a browser round-trip can't fix an unreachable
-      // service, and bouncing to OAuth there hides the real problem.
-      if (!result.success) {
+        // If still no session, fall through to interactive auth — except on
+        // network failures: a browser round-trip can't fix an unreachable
+        // service, and bouncing to OAuth there hides the real problem.
         const refreshFailure = this.authService.getLastRefreshFailure();
         if (refreshFailure?.reason === 'network') {
           spinner.fail('Could not reach the Capy service to refresh your session');
@@ -1279,8 +1421,8 @@ export class CapyCommand {
           // Say why the browser is about to open instead of silently bouncing.
           spinner.text = 'Session expired — opening your browser to sign in again...';
         }
-        result = await this.authService.authenticate(projectState.organizationId);
-      }
+        return this.authService.authenticate(projectState.organizationId);
+      })();
 
       this.debug('authResult', {
         success: result.success,
@@ -1307,8 +1449,8 @@ export class CapyCommand {
 
       // Branch resolution needs a token (server-assisted steps: branch list,
       // conflict validation, fresh-clone prompt) — so it runs post-auth.
-      branch = await this.resolveActiveBranch(projectState, false);
-      projectState.activeBranch = branch;
+      const resolvedBranch = await this.resolveActiveBranch(projectState, false);
+      projectState.activeBranch = resolvedBranch;
 
       const orgName = result.organization_name
         || result.organizations?.find(o => o.id === result.organization_id)?.name
@@ -1319,7 +1461,7 @@ export class CapyCommand {
         projectState.projectName || 'not yet created',
         orgName,
         result.user_first_name || result.user_email || '',
-        branch,
+        resolvedBranch,
       );
 
       const token = this.authService.getToken();
@@ -1330,60 +1472,54 @@ export class CapyCommand {
           ERROR_CODES.PERMISSION_DENIED
         );
       }
-      authResult = result;
-    }
+      return { authResult: result, branch: resolvedBranch };
+    })();
 
-    let encryptionKey: string;
-    try {
-      if (localMode) {
-        encryptionKey = await resolveLocalProjectKey(projectState.projectId!);
-      } else {
-        encryptionKey = await resolveProjectKey(
-          projectState.organizationId!,
-          projectState.projectId!,
-          authResult.user_id!,
-          this.keyServiceOps(),
-        );
+    const encryptionKey = await (async (): Promise<string> => {
+      try {
+        return localMode
+          ? await resolveLocalProjectKey(projectState.projectId!)
+          : await resolveProjectKey(
+              projectState.organizationId!,
+              projectState.projectId!,
+              authResult.user_id!,
+              this.keyServiceOps(),
+            );
+      } catch (err: any) {
+        // Confirmed kick → destructive local cleanup (wraps key, user dir,
+        // project caches, keep.lock). Any other error path — bare 403,
+        // network blip, etc. — leaves local state untouched. The single
+        // gate predicate lives in errors/membershipRevoked.ts. Never runs in
+        // local mode (no server, no membership).
+        if (!localMode && isMembershipRevokedError(err)) {
+          cleanupOrgData(projectState.organizationId!, projectState.userId);
+        }
+        throw err;
       }
-    } catch (err: any) {
-      // Confirmed kick → destructive local cleanup (wraps key, user dir,
-      // project caches, keep.lock). Any other error path — bare 403,
-      // network blip, etc. — leaves local state untouched. The single
-      // gate predicate lives in errors/membershipRevoked.ts. Never runs in
-      // local mode (no server, no membership).
-      if (!localMode && isMembershipRevokedError(err)) {
-        cleanupOrgData(projectState.organizationId!, projectState.userId);
-      }
-      throw err;
-    }
+    })();
 
     // Read keep.lock. The file is git-owned (CAP-303): the fetch below never
-    // rewrites an existing keep.lock, so currentKeep only mutates in the
-    // bootstrap case (no local file → reconstructed from the server, where
-    // `pinned` is empty anyway) and the diff table always reflects what was
-    // actually pinned on this machine.
-    let currentKeep = this.projectManager.readKeepFile();
-    this.debug('keep.lock', currentKeep ? {
-      version: currentKeep.version,
-      org_id: currentKeep.org_id,
-      project_id: currentKeep.project_id,
-      variableCount: Object.keys(currentKeep.variables).length,
-      variables: Object.keys(currentKeep.variables),
+    // rewrites an existing keep.lock — `currentKeep` (returned by the fetch
+    // IIFE below) only differs from this initial read in the bootstrap case
+    // (no local file → reconstructed from the server, where `pinned` is
+    // empty anyway) — and the diff table always reflects what was actually
+    // pinned on this machine.
+    const initialKeep = this.projectManager.readKeepFile();
+    this.debug('keep.lock', initialKeep ? {
+      version: initialKeep.version,
+      org_id: initialKeep.org_id,
+      project_id: initialKeep.project_id,
+      variableCount: Object.keys(initialKeep.variables).length,
+      variables: Object.keys(initialKeep.variables),
     } : 'NOT FOUND');
 
-    const rebuildPinned = (keep: KeepFile | null) => {
-      const next: Record<string, string> = {};
-      if (keep) {
-        for (const [varName, entries] of Object.entries(keep.variables)) {
-          const entry = entries.find(e => e.branch === branch);
-          if (entry) {
-            next[varName] = entry.value_hash;
-          }
-        }
-      }
-      return next;
-    };
-    const pinned = rebuildPinned(currentKeep);
+    const rebuildPinned = (keep: KeepFile | null): Record<string, string> =>
+      Object.fromEntries(
+        Object.entries(keep?.variables ?? {})
+          .map(([varName, entries]) => [varName, entries.find(e => e.branch === branch)?.value_hash])
+          .filter((pair): pair is [string, string] => pair[1] !== undefined),
+      );
+    const pinned = rebuildPinned(initialKeep);
     this.debug('pinned', pinned);
 
     // Read local .env and compute hashes
@@ -1393,19 +1529,9 @@ export class CapyCommand {
       const rawLocal = this.fileManager.readEnvFile(this.options.envPath);
       this.debug('.env keys', Object.keys(rawLocal));
       for (const [key, value] of Object.entries(rawLocal)) {
-        let plaintext = value;
-        if (value.startsWith('capy:')) {
-          try {
-            plaintext = this.fileManager.decryptValue(value, encryptionKey);
-          } catch (decryptErr) {
-            this.debugError(`decrypt failed for ${key}`, decryptErr);
-            throw new CapyError(
-              `"${key}" is encrypted with a different project's key and cannot be used in this project.`,
-              ERROR_CODES.PERMISSION_DENIED,
-              { variable: key }
-            );
-          }
-        }
+        const plaintext = value.startsWith('capy:')
+          ? this.decryptLocalEnvValueForSync(key, value, encryptionKey)
+          : value;
         localPlaintext[key] = plaintext;
         localHashes[key] = hashValue(plaintext);
       }
@@ -1417,110 +1543,123 @@ export class CapyCommand {
 
     // Fetch remote secrets. In local-only mode there is no remote — skip the
     // fetch entirely and reuse the existing offline path (networkAvailable
-    // false → empty remote → pinned-vs-local comparison only).
-    const remotePlaintext: Record<string, string> = {};
-    const remoteHashes: Record<string, string> = {};
-    let networkAvailable = !localMode;
+    // false → empty remote → pinned-vs-local comparison only). Returns
+    // `currentKeep` (bootstrapped from the server when there was no local
+    // file at all — see the comment above `initialKeep`) rather than
+    // reassigning it, and `networkAvailable`/`remotePlaintext`/`remoteHashes`
+    // likewise, in place of the `let`s and in-loop mutation this used to be.
+    const { currentKeep, networkAvailable, remotePlaintext, remoteHashes } = await (async (): Promise<{
+      currentKeep: KeepFile | null;
+      networkAvailable: boolean;
+      remotePlaintext: Record<string, string>;
+      remoteHashes: Record<string, string>;
+    }> => {
+      const remotePlaintext: Record<string, string> = {};
+      const remoteHashes: Record<string, string> = {};
+      if (localMode) {
+        return { currentKeep: initialKeep, networkAvailable: false, remotePlaintext, remoteHashes };
+      }
 
-    if (!localMode) {
-    const fetchSpinner = ora('Fetching remote secrets...').start();
-    try {
-      // Always ask for the latest remote blob for this branch (no keep_hash).
-      // The server returns the env_blob AND the latest keep.json — used only
-      // to bootstrap a missing keep.lock (never to rewrite an existing one).
-      this.debug('getDecryptData request', {
-        projectId: projectState.projectId,
-        branch,
-        keepHash: undefined,
-        includeLatestHash: true,
-      });
-      const decryptData = await this.serviceClient.getDecryptData(
-        projectState.projectId!,
-        branch,
-        undefined, // no keep_hash — get latest for this branch
-        true,      // includeLatestHash
-      );
-      this.debug('getDecryptData response', {
-        hasEnvContent: !!decryptData.env_content,
-        envContentLength: decryptData.env_content?.length || 0,
-        keepHash: decryptData.keep_hash,
-        hasKeepFile: !!decryptData.keep_file,
-      });
+      const fetchSpinner = ora('Fetching remote secrets...').start();
+      try {
+        // Always ask for the latest remote blob for this branch (no keep_hash).
+        // The server returns the env_blob AND the latest keep.json — used only
+        // to bootstrap a missing keep.lock (never to rewrite an existing one).
+        this.debug('getDecryptData request', {
+          projectId: projectState.projectId,
+          branch,
+          keepHash: undefined,
+          includeLatestHash: true,
+        });
+        const decryptData = await this.serviceClient.getDecryptData(
+          projectState.projectId!,
+          branch,
+          undefined, // no keep_hash — get latest for this branch
+          true,      // includeLatestHash
+        );
+        this.debug('getDecryptData response', {
+          hasEnvContent: !!decryptData.env_content,
+          envContentLength: decryptData.env_content?.length || 0,
+          keepHash: decryptData.keep_hash,
+          hasKeepFile: !!decryptData.keep_file,
+        });
 
-      if (decryptData.env_content) {
-        const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
-        for (const [key, value] of Object.entries(encrypted)) {
-          try {
-            const plaintext = this.fileManager.decryptValue(value, encryptionKey);
-            remotePlaintext[key] = plaintext;
-            remoteHashes[key] = hashValue(plaintext);
-          } catch (decryptErr) {
-            this.debugError(`remote decrypt failed for ${key}`, decryptErr);
+        if (decryptData.env_content) {
+          const encrypted = this.fileManager.parseEnvContent(decryptData.env_content);
+          for (const [key, value] of Object.entries(encrypted)) {
+            try {
+              const plaintext = this.fileManager.decryptValue(value, encryptionKey);
+              remotePlaintext[key] = plaintext;
+              remoteHashes[key] = hashValue(plaintext);
+            } catch (decryptErr) {
+              this.debugError(`remote decrypt failed for ${key}`, decryptErr);
+            }
           }
         }
-      }
-      this.debug('remote hashes', remoteHashes);
+        this.debug('remote hashes', remoteHashes);
 
-      // Bootstrap only (CAP-303): an existing keep.lock is git-owned and is
-      // never overwritten outside an explicit user action — the old silent
-      // "self-heal" adopted whatever the last pusher's file looked like and
-      // could erase branches the pusher didn't have. Reconstruction from the
-      // server is only legitimate when there is no local file at all.
-      if (decryptData.keep_file && !currentKeep) {
-        const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
-        this.debug('bootstrap: no local keep.lock, reconstructing from server');
-        this.fileManager.writeKeepFile(serverKeep);
-        currentKeep = serverKeep;
-      }
-      fetchSpinner.stop();
-    } catch (err: any) {
-      this.debugError('remote fetch failed', err);
-      // 403 may be one of two different cases:
-      //   (a) User was kicked from the org — confirmed by an explicit
-      //       `code: 'MEMBERSHIP_REVOKED'` from the server. Destructive
-      //       cleanup runs (key.enc, user dir, project caches, keep.lock).
-      //   (b) Anything else — branch-level denial, WorkOS hiccup, token-scope
-      //       mismatch, route-handler 403. DO NOT cleanup. The wrapped M and
-      //       all other local state stay intact; the user can retry.
-      if (err instanceof CapyError) {
-        const status = err.details?.status;
-        if (status === 403) {
-          if (isMembershipRevokedError(err)) {
-            fetchSpinner.fail('Access denied — you have been removed from this organization.');
-            cleanupOrgData(projectState.organizationId!, projectState.userId);
+        // Bootstrap only (CAP-303): an existing keep.lock is git-owned and is
+        // never overwritten outside an explicit user action — the old silent
+        // "self-heal" adopted whatever the last pusher's file looked like and
+        // could erase branches the pusher didn't have. Reconstruction from the
+        // server is only legitimate when there is no local file at all.
+        const bootstrappedKeep = ((): KeepFile | null => {
+          if (!decryptData.keep_file || initialKeep) return initialKeep;
+          const serverKeep = JSON.parse(decryptData.keep_file) as KeepFile;
+          this.debug('bootstrap: no local keep.lock, reconstructing from server');
+          this.fileManager.writeKeepFile(serverKeep);
+          return serverKeep;
+        })();
+        fetchSpinner.stop();
+        return { currentKeep: bootstrappedKeep, networkAvailable: true, remotePlaintext, remoteHashes };
+      } catch (err: any) {
+        this.debugError('remote fetch failed', err);
+        // 403 may be one of two different cases:
+        //   (a) User was kicked from the org — confirmed by an explicit
+        //       `code: 'MEMBERSHIP_REVOKED'` from the server. Destructive
+        //       cleanup runs (key.enc, user dir, project caches, keep.lock).
+        //   (b) Anything else — branch-level denial, WorkOS hiccup, token-scope
+        //       mismatch, route-handler 403. DO NOT cleanup. The wrapped M and
+        //       all other local state stay intact; the user can retry.
+        if (err instanceof CapyError) {
+          const status = err.details?.status;
+          if (status === 403) {
+            if (isMembershipRevokedError(err)) {
+              fetchSpinner.fail('Access denied — you have been removed from this organization.');
+              cleanupOrgData(projectState.organizationId!, projectState.userId);
+              throw err;
+            }
+            // Branch-level denial: user is still in the org, just can't read THIS branch.
+            // This is the demotion scenario — the user may have been a Project Admin
+            // with access to a protected branch, then downgraded to Member. Try to
+            // suggest an accessible alternative before throwing.
+            fetchSpinner.fail(`No access to branch "${branch}" — your role does not permit reading this branch.`);
+            try {
+              const branches = await this.serviceClient.listBranches(projectState.projectId!);
+              const candidates = branches.filter(b => !b.is_protected);
+              if (candidates.length > 0) {
+                const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
+                console.log('\nBranches you can switch to:');
+                for (const b of candidates) {
+                  console.log(`  ${B(b.name)}`);
+                }
+                const suggested = candidates[0].name;
+                console.log(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);
+              }
+            } catch (listErr) {
+              this.debugError('listBranches failed during 403 recovery', listErr);
+            }
             throw err;
           }
-          // Branch-level denial: user is still in the org, just can't read THIS branch.
-          // This is the demotion scenario — the user may have been a Project Admin
-          // with access to a protected branch, then downgraded to Member. Try to
-          // suggest an accessible alternative before throwing.
-          fetchSpinner.fail(`No access to branch "${branch}" — your role does not permit reading this branch.`);
-          try {
-            const branches = await this.serviceClient.listBranches(projectState.projectId!);
-            const candidates = branches.filter(b => !b.is_protected);
-            if (candidates.length > 0) {
-              const B = (s: string) => `\x1b[1m${s}\x1b[0m`;
-              console.log('\nBranches you can switch to:');
-              for (const b of candidates) {
-                console.log(`  ${B(b.name)}`);
-              }
-              const suggested = candidates[0].name;
-              console.log(`\nRun ${B(`capy checkout ${suggested || ''}`)} to switch.`);
-            }
-          } catch (listErr) {
-            this.debugError('listBranches failed during 403 recovery', listErr);
+          if (status === 401) {
+            fetchSpinner.fail(err.message);
+            throw err;
           }
-          throw err;
         }
-        if (status === 401) {
-          fetchSpinner.fail(err.message);
-          throw err;
-        }
+        fetchSpinner.fail('Cannot reach remote. Showing local changes only.');
+        return { currentKeep: initialKeep, networkAvailable: false, remotePlaintext, remoteHashes };
       }
-      networkAvailable = false;
-      fetchSpinner.fail('Cannot reach remote. Showing local changes only.');
-    }
-    } // end if (!localMode) remote fetch
+    })();
 
     // 3-way comparison
     const hasRemote = Object.keys(remotePlaintext).length > 0;
@@ -1565,55 +1704,63 @@ export class CapyCommand {
 
     // Onboarding detection: local .env is empty (or belongs to a different project)
     // and remote has values — the user has no local changes to commit or resolve.
-    let isOnboarding = false;
-    if (Object.keys(localHashes).length === 0 && Object.keys(remotePlaintext).length > 0) {
+    const isOnboarding = ((): boolean => {
+      if (Object.keys(localHashes).length !== 0 || Object.keys(remotePlaintext).length === 0) return false;
       const envMeta = this.fileManager.readEnvMeta(this.options.envPath);
-      isOnboarding = !(envMeta.org_id === projectState.organizationId
-        && envMeta.project_id === projectState.projectId);
-    }
+      return !(envMeta.org_id === projectState.organizationId && envMeta.project_id === projectState.projectId);
+    })();
 
     // Hide local column for onboarding — it's all "-" and adds noise
     const effectiveShowLocal = isOnboarding ? false : showLocal;
 
-    // Resolve pinned plaintext for display. Try local first, then fetch from S3.
-    const pinnedPlaintext: Record<string, string> = {};
-    let needsFetch = false;
-    for (const variable of Object.keys(pinned)) {
-      // Presence is `!== undefined`: '' is a valid pinned value, and a falsy
-      // check forces a remote fetch on every sync for empty variables.
-      if (localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinned[variable]) {
-        pinnedPlaintext[variable] = localPlaintext[variable];
-      } else {
-        needsFetch = true;
-      }
-    }
-    if (needsFetch && currentKeep && Object.keys(pinned).length > 0) {
-      try {
-        const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
-        const blob = localMode
-          ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
-          : await fetchSecretsWithCache(
-              this.serviceClient,
-              projectState.organizationId!,
-              projectState.projectId!,
-              keepHash,
-            );
-        if (blob?.env_file) {
-          const encrypted = this.fileManager.parseEnvContent(blob.env_file);
-          for (const [key, value] of Object.entries(encrypted)) {
-            if (pinned[key] && pinnedPlaintext[key] === undefined) {
-              try {
-                pinnedPlaintext[key] = this.fileManager.decryptValue(value, encryptionKey);
-              } catch (decryptErr) {
-                this.debugError(`pinned decrypt failed for ${key}`, decryptErr);
-              }
+    // Resolve pinned plaintext for display. Try local first (a pinned
+    // variable whose local value already matches), then fetch from S3 for
+    // anything that doesn't — `needsFetch` derived from the same predicate
+    // rather than a `let` flipped inside the loop that built `localMatches`.
+    const localMatches: Record<string, string> = Object.fromEntries(
+      Object.keys(pinned)
+        // Presence is `!== undefined`: '' is a valid pinned value, and a
+        // falsy check forces a remote fetch on every sync for empty variables.
+        .filter((variable) => localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinned[variable])
+        .map((variable) => [variable, localPlaintext[variable]]),
+    );
+    const needsFetch = Object.keys(pinned).some(
+      (variable) => !(localPlaintext[variable] !== undefined && hashValue(localPlaintext[variable]) === pinned[variable]),
+    );
+    const pinnedPlaintext: Record<string, string> =
+      needsFetch && currentKeep && Object.keys(pinned).length > 0
+        ? await (async (): Promise<Record<string, string>> => {
+            try {
+              const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
+              const blob = localMode
+                ? readSecretsLocal(projectState.organizationId!, projectState.projectId!, keepHash)
+                : await fetchSecretsWithCache(
+                    this.serviceClient,
+                    projectState.organizationId!,
+                    projectState.projectId!,
+                    keepHash,
+                  );
+              if (!blob?.env_file) return localMatches;
+              const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+              const fetched = Object.fromEntries(
+                Object.entries(encrypted)
+                  .filter(([key]) => pinned[key] && localMatches[key] === undefined)
+                  .flatMap(([key, value]) => {
+                    try {
+                      return [[key, this.fileManager.decryptValue(value, encryptionKey)]] as const;
+                    } catch (decryptErr) {
+                      this.debugError(`pinned decrypt failed for ${key}`, decryptErr);
+                      return [];
+                    }
+                  }),
+              );
+              return { ...localMatches, ...fetched };
+            } catch (err) {
+              this.debugError('pinned fetch failed', err);
+              return localMatches;
             }
-          }
-        }
-      } catch (err) {
-        this.debugError('pinned fetch failed', err);
-      }
-    }
+          })()
+        : localMatches;
 
     const DIM = '\x1b[90m';
     const RST = '\x1b[0m';
@@ -1627,7 +1774,6 @@ export class CapyCommand {
     }
 
     // Build menu options based on what columns are visible
-    const menuChoices: { name: string; value: string }[] = [];
     const hasPinned = Object.keys(pinned).length > 0;
 
     // Direction detection: compare sync-state keep_hash to current keep.lock
@@ -1638,120 +1784,149 @@ export class CapyCommand {
       && currentKeepHash != null
       && savedHash !== currentKeepHash;
 
-    if (isOnboarding) {
-      // Onboarding: local .env is empty/foreign — only offer retrieve options
-      if (!showRemote) {
-        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-      } else {
-        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
+    type MenuChoice = { name: string; value: string };
+    const stateMenuChoices: MenuChoice[] = ((): MenuChoice[] => {
+      if (isOnboarding) {
+        // Onboarding: local .env is empty/foreign — only offer retrieve options
+        return showRemote
+          ? [
+              { name: 'Retrieve all pinned values', value: 'retrieve_pinned' },
+              { name: 'Retrieve all remote values', value: 'retrieve_remote' },
+            ]
+          : [{ name: 'Retrieve all pinned values', value: 'retrieve_pinned' }];
       }
-    } else if (!hasPinned) {
-      // State 6: No pinned values — only offer commit or skip
-      menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
-    } else if (!hasRemote) {
-      // State 5: No remote values — local vs pinned only
-      menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
-      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
-    } else if (showLocal && !showRemote) {
-      // State 2: Local differs from pinned, remote matches pinned
-      if (isBehind) {
-        // 2b: keep.lock changed via git pull → user is behind
-        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
-      } else {
-        // 2a: user edited .env locally → user is ahead
-        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
-        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
+      if (!hasPinned) {
+        // State 6: No pinned values — only offer commit or skip
+        return [{ name: 'Commit and push all local values', value: 'commit_local' }];
       }
-      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
-    } else if (!showLocal && showRemote) {
-      // State 3: Remote differs from pinned, local matches pinned
-      menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
-      menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
-    } else {
+      if (!hasRemote) {
+        // State 5: No remote values — local vs pinned only
+        return [
+          { name: 'Commit and push all local values', value: 'commit_local' },
+          { name: 'Individually resolve', value: 'individual' },
+        ];
+      }
+      if (showLocal && !showRemote) {
+        // State 2: Local differs from pinned, remote matches pinned
+        return [
+          ...(isBehind
+            ? [
+                // 2b: keep.lock changed via git pull → user is behind
+                { name: 'Retrieve all pinned values', value: 'retrieve_pinned' },
+                { name: 'Commit and push all local values', value: 'commit_local' },
+              ]
+            : [
+                // 2a: user edited .env locally → user is ahead
+                { name: 'Commit and push all local values', value: 'commit_local' },
+                { name: 'Retrieve all pinned values', value: 'retrieve_pinned' },
+              ]),
+          { name: 'Individually resolve', value: 'individual' },
+        ];
+      }
+      if (!showLocal && showRemote) {
+        // State 3: Remote differs from pinned, local matches pinned
+        return [
+          { name: 'Retrieve all remote values', value: 'retrieve_remote' },
+          { name: 'Retrieve all pinned values', value: 'retrieve_pinned' },
+          { name: 'Individually resolve', value: 'individual' },
+        ];
+      }
       // State 4: Both differ
-      if (isBehind) {
-        // 4b: keep.lock changed + another push happened → retrieve remote first
-        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
-        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
-      } else {
-        // 4a: user edited .env + teammate pushed
-        menuChoices.push({ name: 'Commit and push all local values', value: 'commit_local' });
-        menuChoices.push({ name: 'Retrieve all pinned values', value: 'retrieve_pinned' });
-        menuChoices.push({ name: 'Retrieve all remote values', value: 'retrieve_remote' });
-      }
-      menuChoices.push({ name: 'Individually resolve', value: 'individual' });
-    }
+      return [
+        ...(isBehind
+          ? [
+              // 4b: keep.lock changed + another push happened → retrieve remote first
+              { name: 'Retrieve all remote values', value: 'retrieve_remote' },
+              { name: 'Retrieve all pinned values', value: 'retrieve_pinned' },
+              { name: 'Commit and push all local values', value: 'commit_local' },
+            ]
+          : [
+              // 4a: user edited .env + teammate pushed
+              { name: 'Commit and push all local values', value: 'commit_local' },
+              { name: 'Retrieve all pinned values', value: 'retrieve_pinned' },
+              { name: 'Retrieve all remote values', value: 'retrieve_remote' },
+            ]),
+        { name: 'Individually resolve', value: 'individual' },
+      ];
+    })();
 
-    menuChoices.push({ name: 'Continue working', value: 'skip' });
-
-    // In local-only mode there is no remote, so "push" is misleading.
-    if (localMode) {
-      for (const c of menuChoices) {
-        if (c.value === 'commit_local') c.name = 'Commit all local values';
+    // In local-only mode there is no remote, so "push" is misleading — build
+    // a new array with that one choice's label swapped, rather than mutating
+    // each choice object in place.
+    const menuChoices: MenuChoice[] = [...stateMenuChoices, { name: 'Continue working', value: 'skip' }].map((c) =>
+      localMode && c.value === 'commit_local' ? { ...c, name: 'Commit all local values' } : c,
+    );
+    // Which action the user picked, and (web only) the env individual
+    // resolution already produced — a discriminated result rather than
+    // `let action`/`let webFinalEnv` mutated in an if/else, with an `abort`
+    // case standing in for the early `return` the web "closed window" path
+    // used to take right from inside this same block.
+    const conflictDecision = await (async (): Promise<
+      | { kind: 'abort' }
+      | { kind: 'proceed'; action: string; webFinalEnv: Record<string, string> | undefined }
+    > => {
+      if (this.options.web) {
+        // The browser now answers the same two-level question the terminal asks,
+        // so the whole-run menu goes to it verbatim — same wording, same order,
+        // and that order is the CLI's recommendation. It used to be discarded
+        // here and `individual` forced in its place.
+        const resolved = await this.resolveConflictViaBrowser(
+          diffs, effectiveShowLocal, showRemote, pinned,
+          localPlaintext, remotePlaintext, pinnedPlaintext,
+          projectState.projectName || 'project', branch,
+          {
+            localMode,
+            isOnboarding,
+            isBehind,
+            remoteState: showRemote ? 'ok' : 'empty',
+            actions: menuChoices.map(c => ({ value: c.value, label: c.name })),
+          },
+        );
+        if (resolved === null) {
+          return { kind: 'abort' };
+        }
+        // Only individual resolution hands back an env; every other action is
+        // applied below by the same branch the terminal path takes.
+        return { kind: 'proceed', action: resolved.action, webFinalEnv: resolved.finalEnv };
       }
-    }
-
-    let action: string;
-    // When the conflict is resolved in the browser we already hold the final env;
-    // we tag the action 'individual' and skip the TTY ResolveTable below.
-    let webFinalEnv: Record<string, string> | undefined;
-    if (this.options.web) {
-      // The browser now answers the same two-level question the terminal asks,
-      // so the whole-run menu goes to it verbatim — same wording, same order,
-      // and that order is the CLI's recommendation. It used to be discarded
-      // here and `individual` forced in its place.
-      const resolved = await this.resolveConflictViaBrowser(
-        diffs, effectiveShowLocal, showRemote, pinned,
-        localPlaintext, remotePlaintext, pinnedPlaintext,
-        projectState.projectName || 'project', branch,
-        {
-          localMode,
-          isOnboarding,
-          isBehind,
-          remoteState: showRemote ? 'ok' : 'empty',
-          actions: menuChoices.map(c => ({ value: c.value, label: c.name })),
-        },
-      );
-      if (resolved === null) {
-        console.log('\n  No changes applied.');
-        // A closed window changed nothing on disk, and the report says exactly
-        // that rather than reporting a sync that did not happen.
-        await this.reportSyncResult(projectState, branch, {
-          outcome: 'nothing-to-do',
-          pulled: [],
-          pushed: [],
-          envRewritten: false,
-        });
-        return;
-      }
-      // Only individual resolution hands back an env; every other action is
-      // applied below by the same branch the terminal path takes.
-      webFinalEnv = resolved.finalEnv;
-      action = resolved.action;
-    } else {
       const res = await inquirer.prompt([{
         type: 'list',
         name: 'action',
         message: 'What would you like to do?',
         choices: menuChoices,
       }]);
-      action = res.action as string;
+      return { kind: 'proceed', action: res.action as string, webFinalEnv: undefined };
+    })();
+
+    if (conflictDecision.kind === 'abort') {
+      console.log('\n  No changes applied.');
+      // A closed window changed nothing on disk, and the report says exactly
+      // that rather than reporting a sync that did not happen.
+      await this.reportSyncResult(projectState, branch, {
+        outcome: 'nothing-to-do',
+        pulled: [],
+        pushed: [],
+        envRewritten: false,
+      });
+      return;
     }
+    const { action, webFinalEnv } = conflictDecision;
 
-    // Apply the chosen action
-    let finalEnv: Record<string, string>;
-
-    if (action === 'retrieve_pinned') {
-      // Fetch the pinned snapshot — the one displayed in the Pinned column of
-      // the diff table. currentKeep is exactly what keep.lock pins (the fetch
-      // never rewrites it), and the snapshot is still in S3 because env blobs
-      // are content-addressed and immutable.
-      finalEnv = { ...localPlaintext };
-      if (currentKeep && Object.keys(pinned).length > 0) {
+    // Apply the chosen action. Same `abort`-or-`proceed` shape as above, in
+    // place of `let finalEnv` plus a bare `return` from two of its branches
+    // (a failed pinned-fetch, a cancelled individual resolution).
+    const finalEnvDecision = await (async (): Promise<
+      | { kind: 'abort' }
+      | { kind: 'proceed'; finalEnv: Record<string, string> }
+    > => {
+      if (action === 'retrieve_pinned') {
+        // Fetch the pinned snapshot — the one displayed in the Pinned column of
+        // the diff table. currentKeep is exactly what keep.lock pins (the fetch
+        // never rewrites it), and the snapshot is still in S3 because env blobs
+        // are content-addressed and immutable.
+        if (!(currentKeep && Object.keys(pinned).length > 0)) {
+          return { kind: 'proceed', finalEnv: { ...localPlaintext } };
+        }
         const keepHash = SyncEngine.computeKeepHash(currentKeep, branch);
         try {
           const blob = localMode
@@ -1762,41 +1937,50 @@ export class CapyCommand {
                 projectState.projectId!,
                 keepHash,
               );
-          if (blob?.env_file) {
-            const encrypted = this.fileManager.parseEnvContent(blob.env_file);
-            finalEnv = {};
-            for (const [key, value] of Object.entries(encrypted)) {
+          if (!blob?.env_file) {
+            return { kind: 'proceed', finalEnv: { ...localPlaintext } };
+          }
+          const encrypted = this.fileManager.parseEnvContent(blob.env_file);
+          const fetchedEnv = Object.fromEntries(
+            Object.entries(encrypted).flatMap(([key, value]) => {
               try {
-                finalEnv[key] = this.fileManager.decryptValue(value, encryptionKey);
+                return [[key, this.fileManager.decryptValue(value, encryptionKey)]] as const;
               } catch (decryptErr) {
                 this.debugError(`retrieve_pinned decrypt failed for ${key}`, decryptErr);
+                return [];
               }
-            }
-          }
+            }),
+          );
+          return { kind: 'proceed', finalEnv: fetchedEnv };
         } catch (err) {
           this.debugError('retrieve_pinned fetch failed', err);
           console.log('Could not fetch pinned values from remote.');
-          return;
+          return { kind: 'abort' };
         }
       }
-    } else if (action === 'retrieve_remote') {
-      finalEnv = { ...remotePlaintext };
-    } else if (action === 'commit_local') {
-      finalEnv = { ...localPlaintext };
-    } else if (action === 'skip') {
-      await this.reportSyncResult(projectState, branch, {
-        outcome: 'nothing-to-do',
-        pulled: [],
-        pushed: [],
-        envRewritten: false,
-      });
-      return;
-    } else {
+      if (action === 'retrieve_remote') {
+        return { kind: 'proceed', finalEnv: { ...remotePlaintext } };
+      }
+      if (action === 'commit_local') {
+        return { kind: 'proceed', finalEnv: { ...localPlaintext } };
+      }
+      if (action === 'skip') {
+        await this.reportSyncResult(projectState, branch, {
+          outcome: 'nothing-to-do',
+          pulled: [],
+          pushed: [],
+          envRewritten: false,
+        });
+        return { kind: 'abort' };
+      }
       // Individual resolution — already resolved in the browser when --web.
       const resolved = webFinalEnv ?? await this.resolveIndividually(diffs, showLocal, showRemote, pinned, localPlaintext, remotePlaintext, pinnedPlaintext);
-      if (!resolved) return; // Cancelled
-      finalEnv = resolved;
-    }
+      if (!resolved) return { kind: 'abort' }; // Cancelled
+      return { kind: 'proceed', finalEnv: resolved };
+    })();
+
+    if (finalEnvDecision.kind === 'abort') return;
+    const { finalEnv } = finalEnvDecision;
 
     // Update keep.lock
     const { createHash } = await import('crypto');
@@ -1810,29 +1994,32 @@ export class CapyCommand {
       variables: {},
     };
 
-    const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-    for (const [key, value] of Object.entries(finalEnv)) {
-      pushedVars[key] = {
-        resource_id: deriveResourceId(branch, key),
-        value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
-      };
-    }
+    const pushedVars = Object.fromEntries(
+      Object.entries(finalEnv).map(([key, value]) => [
+        key,
+        {
+          resource_id: deriveResourceId(branch, key),
+          value_hash: createHash('sha256').update(value).digest('hex').slice(0, 16),
+        },
+      ]),
+    );
 
-    const finalKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, branch);
+    const mergedKeep = this.syncEngine.mergeWithKeep(keep, pushedVars, branch);
 
-    // Remove variables not in finalEnv from keep (for this branch)
-    for (const varName of Object.keys(finalKeep.variables)) {
-      if (!(varName in finalEnv)) {
-        const entries = finalKeep.variables[varName].filter(e =>
-          e.branch !== branch
-        );
-        if (entries.length > 0) {
-          finalKeep.variables[varName] = entries;
-        } else {
-          delete finalKeep.variables[varName];
-        }
-      }
-    }
+    // Remove variables not in finalEnv from keep (for this branch) — built as
+    // a new object rather than mutated in place (was a `for` loop doing
+    // `finalKeep.variables[varName] = entries` / `delete
+    // finalKeep.variables[varName]` on the value mergeWithKeep returned).
+    const finalKeep: KeepFile = {
+      ...mergedKeep,
+      variables: Object.fromEntries(
+        Object.entries(mergedKeep.variables).flatMap(([varName, entries]) => {
+          if (varName in finalEnv) return [[varName, entries]];
+          const kept = entries.filter(e => e.branch !== branch);
+          return kept.length > 0 ? [[varName, kept]] : [];
+        }),
+      ),
+    };
 
     this.fileManager.writeKeepFile(finalKeep);
 
@@ -1911,6 +2098,24 @@ export class CapyCommand {
       pushed: action === 'commit_local' ? changes(diffs) : [],
       envRewritten: true,
     });
+  }
+
+  /**
+   * Decrypt one `.env` value during `syncProject`'s local read — wrapped so
+   * the caller can use it in a ternary rather than a `let plaintext = value`
+   * reassigned inside a conditional try/catch.
+   */
+  private decryptLocalEnvValueForSync(key: string, value: string, encryptionKey: string): string {
+    try {
+      return this.fileManager.decryptValue(value, encryptionKey);
+    } catch (decryptErr) {
+      this.debugError(`decrypt failed for ${key}`, decryptErr);
+      throw new CapyError(
+        `"${key}" is encrypted with a different project's key and cannot be used in this project.`,
+        ERROR_CODES.PERMISSION_DENIED,
+        { variable: key }
+      );
+    }
   }
 
   /**

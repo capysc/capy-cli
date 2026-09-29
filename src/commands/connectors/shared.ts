@@ -160,35 +160,46 @@ export async function writeAndSync(
     return;
   }
 
-  const encrypted: Record<string, string> = {};
-  for (const [k, v] of Object.entries(finalEnv)) {
-    const resourceId = deriveResourceId(branch, k);
-    encrypted[k] = `capy:${resourceId}:${Encryptor.encrypt(v, projectKey)}`;
-  }
+  const encrypted = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      `capy:${deriveResourceId(branch, k)}:${Encryptor.encrypt(v, projectKey)}`,
+    ]),
+  );
   const envBlob = Object.entries(encrypted)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');
 
-  const pushedVars: Record<string, { resource_id: string; value_hash: string }> = {};
-  for (const [k, v] of Object.entries(finalEnv)) {
-    pushedVars[k] = {
-      resource_id: deriveResourceId(branch, k),
-      value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16),
-    };
-  }
+  const pushedVars = Object.fromEntries(
+    Object.entries(finalEnv).map(([k, v]) => [
+      k,
+      {
+        resource_id: deriveResourceId(branch, k),
+        value_hash: createHash('sha256').update(v).digest('hex').slice(0, 16),
+      },
+    ]),
+  );
 
   const syncEngine = new SyncEngine();
-  let finalKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
+  const mergedKeep = syncEngine.mergeWithKeep(keep, pushedVars, branch);
 
-  for (const name of Object.keys(finalKeep.variables)) {
-    if (!(name in finalEnv)) {
-      const entries = finalKeep.variables[name].filter((e) => e.branch !== branch);
-      if (entries.length > 0) finalKeep.variables[name] = entries;
-      else delete finalKeep.variables[name];
-    }
-  }
+  // Drop entries for variables no longer in finalEnv — built as a new object
+  // rather than mutated in place (was a `for` loop doing
+  // `finalKeep.variables[name] = entries` / `delete
+  // finalKeep.variables[name]` on the value mergeWithKeep returned, with
+  // `finalKeep` itself a `let` reassigned again just below).
+  const prunedKeep: KeepFile = {
+    ...mergedKeep,
+    variables: Object.fromEntries(
+      Object.entries(mergedKeep.variables).flatMap(([name, entries]) => {
+        if (name in finalEnv) return [[name, entries]];
+        const kept = entries.filter((e) => e.branch !== branch);
+        return kept.length > 0 ? [[name, kept]] : [];
+      }),
+    ),
+  };
 
-  finalKeep = applyConnectors(finalKeep, branch, varName, opts.connector, opts.alsoConnect);
+  const finalKeep = applyConnectors(prunedKeep, branch, varName, opts.connector, opts.alsoConnect);
 
   const result = await serviceClient.pushSecrets(projectId, JSON.stringify(finalKeep), envBlob, branch);
 
