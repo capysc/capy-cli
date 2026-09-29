@@ -64,6 +64,7 @@ ISOLATED_FILES=(
   tests/commands/secretsCommand.test.ts
   tests/commands/runCommandSystemStore.test.ts
   tests/commands/connectDiscoveryRouting.test.ts
+  tests/commands/agentsCommand.test.ts
 )
 
 # Build a grep pattern to exclude isolated files from the batch run
