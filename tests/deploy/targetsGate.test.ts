@@ -14,6 +14,7 @@ import {
   allDeployIdsForTarget,
   supersededDeployIdsForTarget,
   clearSupersededDeployIds,
+  deliveryWorthGating,
 } from '../../src/deploy/targetsGate';
 import { KeepFile } from '../../src/types/index';
 
@@ -396,5 +397,143 @@ describe('allDeployIdsForTarget / supersededDeployIdsForTarget / clearSuperseded
     const before = JSON.stringify(withSuperseded);
     clearSupersededDeployIds(withSuperseded, 'dokploy', 'backend-preview', new Set(['dep_1', 'dep_2']));
     expect(JSON.stringify(withSuperseded)).toBe(before);
+  });
+});
+
+// ── "No CI churn" (validator fix-first): a fresh deploy_id alone must NEVER
+// be what decides a CI deploy needs a PR — only value hashes and pending
+// state. deliveryWorthGating is what deployCommand.ts's CI gate now calls
+// BEFORE minting, precisely so a same-value CI redeploy mints nothing. ──
+describe('deliveryWorthGating', () => {
+  const PROVIDER = 'dokploy';
+  const TARGET = 'backend-preview';
+
+  test('unchanged value, already delivered, not pending → false (no PR warranted)', () => {
+    const base = keep({
+      DATABASE_URL: [
+        {
+          resource_id: 'r1',
+          branch: 'preview',
+          value_hash: 'h1',
+          targets: [{ provider: PROVIDER, target: TARGET, deployed_value_hash: 'h1', deployed_at: 't0', deploy_id: 'dep_old' }],
+        },
+      ],
+    });
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1' }]),
+    ).toBe(false);
+  });
+
+  test('a DIFFERENT deploy_id alone (same value) is still false — deploy_id is never a gating factor', () => {
+    const base = keep({
+      DATABASE_URL: [
+        {
+          resource_id: 'r1',
+          branch: 'preview',
+          value_hash: 'h1',
+          targets: [{ provider: PROVIDER, target: TARGET, deployed_value_hash: 'h1', deployed_at: 't0', deploy_id: 'dep_old' }],
+        },
+      ],
+    });
+    // Simulates: a fresh token would be minted with a new deploy_id, but the
+    // GATE never even sees deploy_id — only the value hash, which matches.
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1' }]),
+    ).toBe(false);
+  });
+
+  test('a genuinely changed value → true', () => {
+    const base = keep({
+      DATABASE_URL: [
+        {
+          resource_id: 'r1',
+          branch: 'preview',
+          value_hash: 'h1',
+          targets: [{ provider: PROVIDER, target: TARGET, deployed_value_hash: 'h1', deployed_at: 't0', deploy_id: 'dep_old' }],
+        },
+      ],
+    });
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1new' }]),
+    ).toBe(true);
+  });
+
+  test('a var not tracked on this branch at all yet → true', () => {
+    const base = keep({});
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1' }]),
+    ).toBe(true);
+  });
+
+  test('first-ever delivery to this (provider, target) — value tracked, but no targets element yet → true', () => {
+    const base = keep({
+      DATABASE_URL: [{ resource_id: 'r1', branch: 'preview', value_hash: 'h1' }],
+    });
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1' }]),
+    ).toBe(true);
+  });
+
+  test('a DIFFERENT (provider, target) already delivered does not count as "first-ever" for this one', () => {
+    const base = keep({
+      DATABASE_URL: [
+        {
+          resource_id: 'r1',
+          branch: 'preview',
+          value_hash: 'h1',
+          targets: [{ provider: 'vercel', target: 'web-prod', deployed_value_hash: 'h1', deployed_at: 't0' }],
+        },
+      ],
+    });
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1' }]),
+    ).toBe(true);
+  });
+
+  test('pending → real (clearing a --no-deploy element) is a real change, even with the same value', () => {
+    const base = keep({
+      DATABASE_URL: [
+        {
+          resource_id: 'r1',
+          branch: 'preview',
+          value_hash: 'h1',
+          targets: [{ provider: PROVIDER, target: TARGET, deployed_value_hash: 'h1', deployed_at: 't0', deployed: false }],
+        },
+      ],
+    });
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [{ name: 'DATABASE_URL', valueHash: 'h1' }]),
+    ).toBe(true);
+  });
+
+  test('real → pending (a --no-deploy write) is also a real change', () => {
+    const base = keep({
+      DATABASE_URL: [
+        {
+          resource_id: 'r1',
+          branch: 'preview',
+          value_hash: 'h1',
+          targets: [{ provider: PROVIDER, target: TARGET, deployed_value_hash: 'h1', deployed_at: 't0' }],
+        },
+      ],
+    });
+    expect(deliveryWorthGating(base, 'preview', PROVIDER, TARGET, false, [{ name: 'DATABASE_URL', valueHash: 'h1' }])).toBe(true);
+  });
+
+  test('multiple vars: any one changing is enough to gate true', () => {
+    const base = keep({
+      A: [{ resource_id: 'ra', branch: 'preview', value_hash: 'ha', targets: [{ provider: PROVIDER, target: TARGET, deployed_value_hash: 'ha', deployed_at: 't0' }] }],
+      B: [{ resource_id: 'rb', branch: 'preview', value_hash: 'hb', targets: [{ provider: PROVIDER, target: TARGET, deployed_value_hash: 'hb', deployed_at: 't0' }] }],
+    });
+    expect(
+      deliveryWorthGating(base, 'preview', PROVIDER, TARGET, undefined, [
+        { name: 'A', valueHash: 'ha' },
+        { name: 'B', valueHash: 'hb-CHANGED' },
+      ]),
+    ).toBe(true);
+  });
+
+  test('no values at all → false (nothing to gate on)', () => {
+    expect(deliveryWorthGating(keep({}), 'preview', PROVIDER, TARGET, undefined, [])).toBe(false);
   });
 });

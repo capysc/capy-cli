@@ -149,6 +149,43 @@ export interface VarDelivery {
 }
 
 /**
+ * Whether delivering `values` to (provider, target) on `branch` would be a
+ * REAL change worth gating a CI deploy on — a value hash differing from
+ * what's on `keep`, a var not tracked there at all yet, this (provider,
+ * target) never having delivered before, or its recorded pending-ness
+ * (`deployed`) differing from what THIS delivery would set. Deliberately
+ * NEVER `deploy_id` — a fresh token alone must never itself reopen a PR
+ * (see `upsertTargetElement`'s "no untracked tokens" doc: a fresh token is
+ * tracked via `superseded_deploy_ids`, and revoked once a REAL deploy
+ * confirms the new one landed — neither of which requires a PR when the
+ * secret value itself is unchanged).
+ *
+ * Used BEFORE any token is minted — `deployCommand.ts`'s CI change-gate
+ * calls this first, off a plain decrypt, so an unchanged run never mints,
+ * never writes to the platform, and never opens a PR.
+ */
+export function deliveryWorthGating(
+  keep: KeepFile,
+  branch: string,
+  provider: string,
+  target: string,
+  deployed: boolean | undefined,
+  values: ReadonlyArray<VarDelivery>,
+): boolean {
+  return values.some(({ name, valueHash }) => {
+    const entries = keep.variables[name] ?? [];
+    const entry = entries.find((e) => (e.branch ?? '') === branch);
+    if (!entry) return true; // not tracked on this branch yet — a real fact to record
+    if (entry.value_hash !== valueHash) return true;
+    const match = ((entry as EntryWithTargets).targets ?? []).find(
+      (t) => t.provider === provider && t.target === target,
+    );
+    if (!match) return true; // first-ever delivery to this target
+    return (match.deployed ?? true) !== (deployed ?? true);
+  });
+}
+
+/**
  * Record one target's delivery into every (var, branch) entry it actually
  * shipped. Only entries whose name is in `values` AND whose branch matches
  * are touched — everything else in `keep` is returned unchanged (same object
