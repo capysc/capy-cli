@@ -428,7 +428,7 @@ describe('mergeManagedValuesBlock / removeManagedValuesBlock — round trip', ()
 // ── describeDokployPlainMergeProblem: mixed-problem grouping ───────────────
 
 describe('describeDokployPlainMergeProblem', () => {
-  test('groups a mix of DOKPLOY_VALUE_HAS_REFERENCE and DOKPLOY_VALUE_UNREPRESENTABLE, naming every variable, with no single misleading top-level code', () => {
+  test('groups a mix of DOKPLOY_VALUE_HAS_REFERENCE and DOKPLOY_VALUE_UNREPRESENTABLE, naming every variable, under the DOKPLOY_VALUE_INVALID umbrella code', () => {
     const bad = "' and " + '`' + ' and " and a literal \\n';
     const r = mergeManagedValuesBlock('NODE_ENV=production', [
       { name: 'REF_VAR', value: '${{project.OTHER}}' },
@@ -441,9 +441,23 @@ describe('describeDokployPlainMergeProblem', () => {
     expect(described.reason).toContain('BAD_VAR');
     expect(described.hint).toContain('REF_VAR');
     expect(described.hint).toContain('BAD_VAR');
-    // Mixed problem set — no single ErrorCode correctly describes both, so
-    // none is reported (Rule 5: never a misleading/wrong code).
-    expect(described.code).toBeUndefined();
+    // Mixed problem set — neither specific code alone would correctly
+    // describe every variable, so the umbrella code is reported instead of
+    // omitting one (Rule 5: always a real, stable code).
+    expect(described.code).toBe('DOKPLOY_VALUE_INVALID');
+  });
+
+  test('grammar: singular vs. plural "contains"/"contain" for the reference-value reason', () => {
+    const oneRef = mergeManagedValuesBlock('NODE_ENV=production', [{ name: 'REF_VAR', value: '${{project.OTHER}}' }]);
+    if (oneRef.ok) throw new Error('expected a refusal');
+    expect(describeDokployPlainMergeProblem(oneRef.problem).reason).toContain('REF_VAR contains a literal');
+
+    const twoRefs = mergeManagedValuesBlock('NODE_ENV=production', [
+      { name: 'REF_ONE', value: '${{project.A}}' },
+      { name: 'REF_TWO', value: '${{project.B}}' },
+    ]);
+    if (twoRefs.ok) throw new Error('expected a refusal');
+    expect(describeDokployPlainMergeProblem(twoRefs.problem).reason).toContain('REF_ONE, REF_TWO contain a literal');
   });
 
   test('a single-reason refusal DOES carry the matching code', () => {

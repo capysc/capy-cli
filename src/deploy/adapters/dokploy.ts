@@ -814,12 +814,14 @@ async function onRemoveCompose(
     return {
       ok: false,
       code: 'non_interactive',
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
       detail: strayMarkers
         ? 'Dokploy environment left untouched — not asking to un-comment Capy-marked lines outside a terminal.'
         : 'Dokploy environment left untouched — not asking to strip the Capy block outside a terminal.',
       manualHint: manualStripHint(opts),
     };
   }
+  // COPY-FLAG: new user-facing string, minimal/neutral wording.
   const confirmed = await ctx.confirm(
     strayMarkers
       ? `Also un-comment the lines Capy previously disabled in the Dokploy Compose env for "${config.name}"?`
@@ -863,6 +865,7 @@ async function onRemoveCompose(
       manualHint: manualStripHint(opts),
     };
   }
+  // COPY-FLAG: new user-facing string, minimal/neutral wording.
   const removedWhat = strayMarkers ? 'Un-commented the lines Capy had disabled' : 'Removed the Capy block';
   if (ctx.noDeploy) {
     return {
@@ -1265,12 +1268,14 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
         return {
           ok: false,
           code: 'non_interactive',
+          // COPY-FLAG: new user-facing string, minimal/neutral wording.
           detail: strayMarkers
             ? 'Dokploy environment left untouched — not asking to un-comment Capy-marked lines outside a terminal.'
             : 'Dokploy environment left untouched — not asking to strip the Capy block outside a terminal.',
           manualHint: manualStripHint(opts),
         };
       }
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
       const confirmed = await ctx.confirm(
         strayMarkers
           ? `Also un-comment the lines Capy previously disabled in the Dokploy Application env for "${config.name}"?`
@@ -1332,6 +1337,7 @@ export function createDokployAdapter(deps: DokployAdapterDeps = {}): DeployAdapt
           manualHint: manualStripHint(opts),
         };
       }
+      // COPY-FLAG: new user-facing string, minimal/neutral wording.
       return {
         ok: true,
         code: 'stripped',

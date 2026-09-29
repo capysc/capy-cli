@@ -1424,15 +1424,17 @@ export function describeEnvWarning(w: EnvWarning): string {
 
 /**
  * `mergeManagedValuesBlock`'s refusal, as a printable reason + hint.
- * `code` is a stable `ErrorCode` (Rule 5) ONLY when every offending
- * variable shares the SAME `DotenvValueProblem` — `p.problems` can freely
- * mix `DOKPLOY_VALUE_UNREPRESENTABLE` and `DOKPLOY_VALUE_HAS_REFERENCE`
- * across different variables in one delivery, and there is no single
- * correct code to report for a mixed refusal (`reason`/`hint` still name
- * every variable and its own specific problem either way). `malformed_block`
- * mirrors `describeEnvProblem`'s OWN pre-existing refusal, which has never
- * carried a machine code (an edited/duplicated block is reported by
- * `reason` alone, same as before CAP-682). Names only, never a value.
+ * `code` is the SPECIFIC `ErrorCode` when every offending variable shares
+ * the SAME `DotenvValueProblem`; when `p.problems` mixes
+ * `DOKPLOY_VALUE_UNREPRESENTABLE` and `DOKPLOY_VALUE_HAS_REFERENCE` across
+ * different variables in one delivery, neither specific code alone would
+ * correctly describe every variable, so the umbrella `DOKPLOY_VALUE_INVALID`
+ * is reported instead (Rule 5: always a real, stable code — never omitted).
+ * `reason`/`hint` name every variable and its own specific problem either
+ * way. `malformed_block` mirrors `describeEnvProblem`'s OWN pre-existing
+ * refusal, which has never carried a machine code (an edited/duplicated
+ * block is reported by `reason` alone, same as before CAP-682). Names
+ * only, never a value.
  */
 // COPY-FLAG: new user-facing strings, minimal/neutral wording.
 export function describeDokployPlainMergeProblem(
@@ -1443,9 +1445,10 @@ export function describeDokployPlainMergeProblem(
   }
   const referenceNames = p.problems.filter((x) => x.code === 'DOKPLOY_VALUE_HAS_REFERENCE').map((x) => x.name);
   const unrepresentableNames = p.problems.filter((x) => x.code === 'DOKPLOY_VALUE_UNREPRESENTABLE').map((x) => x.name);
+  const referenceVerb = referenceNames.length === 1 ? 'contains' : 'contain';
   const reasonParts = [
     referenceNames.length
-      ? `${referenceNames.join(', ')} contain a literal \${{ — Dokploy resolves that itself at deploy time, so Capy's own value would never reach the container unchanged`
+      ? `${referenceNames.join(', ')} ${referenceVerb} a literal \${{ — Dokploy resolves that itself at deploy time, so Capy's own value would never reach the container unchanged`
       : null,
     unrepresentableNames.length
       ? `${unrepresentableNames.join(', ')} cannot be written to Dokploy as an exact dotenv value — every quote style dotenv understands is already in use, or it contains a carriage return`
@@ -1462,11 +1465,11 @@ export function describeDokployPlainMergeProblem(
       ? 'DOKPLOY_VALUE_HAS_REFERENCE'
       : referenceNames.length === 0 && unrepresentableNames.length > 0
         ? 'DOKPLOY_VALUE_UNREPRESENTABLE'
-        : undefined; // mixed — no single correct code; reason/hint still say everything needed
+        : 'DOKPLOY_VALUE_INVALID'; // mixed — umbrella code; reason/hint still say everything needed
   return {
     reason: reasonParts.join('; '),
     hint: `${hintParts.join('; ')}, then re-run \`capy deploy\`.`,
-    ...(code ? { code } : {}),
+    code,
   };
 }
 

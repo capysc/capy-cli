@@ -564,6 +564,16 @@ export const ERROR_CODES = {
    * VARIABLE only, never the value.
    */
   DOKPLOY_VALUE_HAS_REFERENCE: 'DOKPLOY_VALUE_HAS_REFERENCE',
+  /**
+   * A single delivery refused MORE THAN ONE distinct reason across its
+   * variables — some values `DOKPLOY_VALUE_UNREPRESENTABLE`, others
+   * `DOKPLOY_VALUE_HAS_REFERENCE`. Neither specific code alone would
+   * correctly describe every variable in the refusal, so this umbrella
+   * code covers the mixed case; a refusal where every variable shares ONE
+   * specific reason still carries that specific code instead (see
+   * `describeDokployPlainMergeProblem`).
+   */
+  DOKPLOY_VALUE_INVALID: 'DOKPLOY_VALUE_INVALID',
   /** CI-mode preflight: the Dokploy Application/Compose service has auto-deploy turned off, so merging the keep.lock PR would never trigger a deploy. */
   DOKPLOY_AUTODEPLOY_OFF: 'DOKPLOY_AUTODEPLOY_OFF',
   /** CI-mode preflight: the git branch Dokploy is tracking doesn't match the deploy PR's base branch — merging it would never reach Dokploy's auto-deploy. */
