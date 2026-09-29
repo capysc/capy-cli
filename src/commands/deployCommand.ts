@@ -3020,7 +3020,8 @@ function buildDeployPrBody(target: TargetConfig): string {
         `keep.lock pin lands here.`,
       ].join('\n')
     : adapter?.id === 'dokploy'
-      ? [
+      ? // COPY-FLAG: new user-facing string, minimal/neutral wording.
+        [
           `Merging this PR is the deploy signal. Dokploy's own auto-deploy builds`,
           `and deploys on merge, reading the env vars written above directly from`,
           `its store — no decrypt step at build. capy does **not** call`,
