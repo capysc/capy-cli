@@ -295,6 +295,171 @@ export function tokenEnvProblem(raw: string | undefined): string | null {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(raw.trim()) ? null : 'not a valid environment variable name';
 }
 
+/** Which kind of Dokploy service a parsed/verified URL points at. */
+export type DokployServiceKind = 'compose' | 'application';
+
+export interface DokployServiceUrlOk {
+  ok: true;
+  baseUrl: string;
+  kind: DokployServiceKind;
+  id: string;
+}
+
+export interface DokployServiceUrlErr {
+  ok: false;
+  /** Stable code — branch on this, never on `reason` (Rule 5). */
+  code: typeof ERROR_CODES.DOKPLOY_URL_INVALID;
+  /** Human-readable, for display only. */
+  reason: string;
+}
+
+export type DokployServiceUrlParse = DokployServiceUrlOk | DokployServiceUrlErr;
+
+/**
+ * Every Dokploy dashboard route shape a service's "view" page has shipped
+ * with, confirmed against Dokploy's own source (github.com/Dokploy/dokploy):
+ *
+ *  - v0.30.0 (current, `apps/dokploy/pages/dashboard/project/[projectId]/
+ *    environment/[environmentId]/services/{compose,application}/[id].tsx`):
+ *    `.../dashboard/project/:projectId/environment/:environmentId/services/(compose|application)/:id`
+ *  - v0.20.0 and earlier (before Dokploy's "environments" feature existed;
+ *    `apps/dokploy/pages/dashboard/project/[projectId]/services/{compose,
+ *    application}/[id].tsx` at that tag): same shape MINUS the
+ *    `environment/:environmentId` segment.
+ *
+ * Both are matched by making that segment optional. A capturing prefix
+ * before `/dashboard/project/` absorbs a reverse-proxy subpath (Dokploy
+ * mounted under e.g. `/tools/dokploy`) into `baseUrl` rather than rejecting
+ * it — `apiBase()` (dokployApi.ts) appends `/api` to whatever `baseUrl`
+ * ends up being, exactly as it does for a hand-typed one today.
+ */
+const SERVICE_URL_PATTERN =
+  /^(.*)\/dashboard\/project\/[^/]+\/(?:environment\/[^/]+\/)?services\/(compose|application)\/([^/?#]+)\/?$/;
+
+/**
+ * Parse a Dokploy dashboard URL — the browser address of a Compose or
+ * Application service's page — into the same `{ baseUrl, kind, id }` shape
+ * `resolveAdapterOptions`'s Dokploy branch used to ask as three separate
+ * questions. Pure: no I/O, no verification — `deployCommand.ts` calls the
+ * live `compose.one`/`application.one` check separately, after this parses
+ * successfully, using the API key.
+ *
+ * Accepts http/https (loopback-only for http, same rule as `baseUrlProblem`),
+ * any port, a query string or `#hash` (Dokploy's own tab state — e.g.
+ * `?tab=environment` — ignored), and a trailing slash. Rejects anything that
+ * isn't a URL at all, the wrong scheme, or a path that doesn't match either
+ * route shape above — callers fall back to asking for a bare id instead of
+ * calling this at all when the input has no `scheme://`.
+ */
+export function parseDokployServiceUrl(raw: string): DokployServiceUrlParse {
+  const trimmed = (raw ?? '').trim();
+  const invalid = (reason: string): DokployServiceUrlErr => ({
+    ok: false,
+    code: ERROR_CODES.DOKPLOY_URL_INVALID,
+    reason,
+  });
+  if (!trimmed) return invalid('required');
+  const url = parseUrl(trimmed);
+  if (!url) return invalid('not a URL');
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+    return invalid('must start with https://');
+  }
+  const match = SERVICE_URL_PATTERN.exec(url.pathname);
+  if (!match) {
+    return invalid(
+      'not a recognized Dokploy service URL — expected .../dashboard/project/<id>/[environment/<id>/]services/(compose|application)/<id>',
+    );
+  }
+  const [, prefix, kindMatch, idMatch] = match;
+  const id = decodeURIComponent(idMatch);
+  if (!id) return invalid('missing service id');
+  return {
+    ok: true,
+    baseUrl: `${url.protocol}//${url.host}${prefix}`,
+    kind: kindMatch as DokployServiceKind,
+    id,
+  };
+}
+
+/**
+ * Whether a raw setup-picker answer was meant as a URL at all — a leading
+ * `scheme://`, same test browsers use to decide "this is an address, not a
+ * search term". `capy deploy`'s picker uses this to route: a bare id
+ * (nothing that looks like a URL) falls back to asking kind + base URL
+ * exactly as before `parseDokployServiceUrl` existed; anything that DOES
+ * look like a URL goes through `parseDokployServiceUrl` and, on a match
+ * failure, is refused (`DOKPLOY_URL_INVALID`) and re-asked rather than
+ * silently treated as an id.
+ */
+export function looksLikeUrl(raw: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(raw.trim());
+}
+
+/**
+ * The subset of a live `compose.one`/`application.one` response the setup
+ * picker shows back to the user to confirm before saving (CAP-657 follow-up:
+ * "verify, don't just parse"). `environmentId` alone is rarely a human-
+ * readable label — see `resolveDokployEnvironmentLabel`, which turns it into
+ * one via `project.all` on a best-effort basis.
+ */
+export interface DokployServiceVerification {
+  name?: string;
+  appName?: string;
+  environmentId?: string;
+}
+
+/**
+ * Verify a parsed URL's `{ kind, id }` actually names a live service, using
+ * the resolved Dokploy API key — the same read the deploy/preflight path
+ * already does, just run once more, up front, so the picker can show a name
+ * to confirm instead of saving an id nobody has looked at. Returns the
+ * underlying `DokployApiError` on failure (never throws it) so the caller
+ * can branch on its stable `.code` (`'not_found'` → refuse + re-ask;
+ * anything else → best-effort skip, never a hard block — see
+ * `resolveDokployServiceOptions` in deployCommand.ts).
+ */
+export async function verifyDokployService(
+  client: DokployClient,
+  kind: DokployServiceKind,
+  id: string,
+): Promise<{ ok: true; value: DokployServiceVerification } | { ok: false; error: DokployApiError }> {
+  try {
+    const service = kind === 'compose' ? await client.getCompose(id) : await client.getApplication(id);
+    return {
+      ok: true,
+      value: { name: service.name, appName: service.appName, environmentId: service.environmentId },
+    };
+  } catch (err) {
+    if (err instanceof DokployApiError) return { ok: false, error: err };
+    throw err;
+  }
+}
+
+/**
+ * Best-effort "<project> · <environment>" label for a verified service's
+ * `environmentId`, resolved via `project.all` (the only call that knows
+ * project/environment NAMES — `compose.one`/`application.one` return only
+ * the id). Never throws and never blocks the picker: a listing failure (rate
+ * limit, a permission scope without `project:read`, …) just means the
+ * confirmation line shows the service name alone.
+ */
+export async function resolveDokployEnvironmentLabel(
+  client: DokployClient,
+  environmentId: string | undefined,
+): Promise<string | undefined> {
+  if (!environmentId) return undefined;
+  try {
+    const projects = await client.listProjects();
+    for (const project of projects) {
+      const env = project.environments.find((e) => e.environmentId === environmentId);
+      if (env) return `${project.name} · ${env.name}`;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Whether this target's config is broken badly enough that even TALKING to
  * Dokploy (or asking for a token first) would be pointless: an unusable

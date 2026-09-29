@@ -15,6 +15,7 @@ import { join, basename } from 'path';
 import inquirer from 'inquirer';
 import { FileManager } from '../files/fileManager';
 import {
+  AdapterCallContext,
   DeployAdapter,
   DeployContext,
   DeployMode,
@@ -66,9 +67,18 @@ import {
   dokploySecretsMayPrompt,
   dokployConnectionProblem,
   resolveDokployApiKey,
+  parseDokployServiceUrl,
+  looksLikeUrl,
+  verifyDokployService,
+  resolveDokployEnvironmentLabel,
 } from '../deploy/adapters/dokploy';
-import type { ResolveDokployApiKeyResult } from '../deploy/adapters/dokploy';
-import { DOKPLOY_CONNECTOR_SECRET_NAME, DOKPLOY_TARGET_SECRET_NAME, DokploySystemStoreCallOptions } from '../deploy/dokployApi';
+import type { ResolveDokployApiKeyResult, DokployServiceKind, DokployServiceUrlOk } from '../deploy/adapters/dokploy';
+import {
+  DOKPLOY_CONNECTOR_SECRET_NAME,
+  DOKPLOY_TARGET_SECRET_NAME,
+  DokploySystemStoreCallOptions,
+  createDokployClient,
+} from '../deploy/dokployApi';
 import { classify, isBuildTime } from '../deploy/classify';
 import type { WebDeployAdapterContext } from '../ui/deployScreens';
 import { deployPlan, unansweredDeployStops, type DeployStopId } from '../core/deployPlan';
@@ -83,7 +93,7 @@ import type {
   DeployTargetRow,
 } from '../ui/screens/contract';
 import { CHECKBOX_INSTRUCTIONS, CHECKBOX_THEME, LIST_THEME } from '../ui/promptStyle';
-import { keypressConfirm } from '../ui/keypressConfirm';
+import { keypressConfirm, keypressPreflightMenu, PreflightFailureAction } from '../ui/keypressConfirm';
 import {
   deployConfigPath,
   getTarget,
@@ -230,7 +240,8 @@ async function authenticateSilentWithFallback(
 
 // ── Project-level keep.lock parsing ────────────────────────────────────────
 
-interface KeepInfo {
+/** Exported (additive) so `resolvePreflightWithRecovery` is testable with a real `KeepInfo` shape, not `any`. */
+export interface KeepInfo {
   orgId: string;
   projectId: string;
   variables: string[];
@@ -938,6 +949,198 @@ async function resolveAdapterChoice(
 }
 
 /**
+ * Resolve the Dokploy API key for the SETUP PICKER's own verification call
+ * (CAP-657 URL input follow-up) — deliberately separate from
+ * `resolveDokployApiKeyOnce` (which needs a saved `TargetConfig` that
+ * doesn't exist yet while the picker is still building one). Same store,
+ * same "target key first, connector key as a fallback" wiring
+ * (`getDirectionalConnectorSecret`) — just callable with only a `tokenEnv`
+ * and an org id.
+ *
+ * Always `interactive: true`: every caller runs inside the terminal picker's
+ * own inquirer prompts, which already requires a TTY, so a human is right
+ * there to answer the store's own prompt if it needs one.
+ *
+ * `devMode` is deliberately not threaded in here — this verification is
+ * best-effort UX (a failed or wrong-environment lookup falls back to "could
+ * not verify, saving as entered" in `resolveDokployServiceOptions`, never a
+ * hard block), and threading it would mean adding a `devMode` parameter to
+ * every `runPicker` call site for a read this cheap to fail safely. The real
+ * deploy-time key resolution (`resolveDokployApiKeyOnce`) is unaffected and
+ * still devMode-aware.
+ */
+async function resolveDokployApiKeyForPicker(
+  tokenEnv: string | undefined,
+  orgId: string | undefined,
+): Promise<ResolveDokployApiKeyResult> {
+  const { getDirectionalConnectorSecret } = await import('../system/systemStore');
+  const getConnectorSecret = (name: string, opts: DokploySystemStoreCallOptions) =>
+    getDirectionalConnectorSecret(name, DOKPLOY_CONNECTOR_SECRET_NAME, {
+      ...opts,
+      missingWithFallbackCode: ERROR_CODES.DOKPLOY_TARGET_KEY_MISSING,
+    });
+  return resolveDokployApiKey({
+    tokenEnv,
+    env: process.env,
+    interactive: true,
+    orgId,
+    storeName: DOKPLOY_TARGET_SECRET_NAME,
+    deps: { getConnectorSecret },
+  });
+}
+
+/** Whether a setup-picker answer reads as a bare Dokploy id rather than a URL. */
+function isBareDokployId(answer: string): boolean {
+  return !looksLikeUrl(answer);
+}
+
+/**
+ * The legacy three-question shape (kind, then base URL — the id is already
+ * known, either typed just now as a bare id or carried over from an existing
+ * target): still reachable when the picker's one URL question gets a bare
+ * id instead of a link, or when re-editing a target whose URL can't be
+ * reconstructed (see `resolveDokployServiceOptions`'s doc for why).
+ */
+async function askDokployKindAndBaseUrl(
+  id: string,
+  existingOpts: Record<string, string>,
+  existingKind: DokployServiceKind,
+): Promise<DokployServiceUrlOk> {
+  const ans = (await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'kind',
+      message: 'Dokploy service kind:',
+      theme: LIST_THEME,
+      choices: [
+        { name: 'Compose', value: 'compose' },
+        { name: 'Application', value: 'application' },
+      ],
+      default: existingKind,
+    },
+    {
+      type: 'input',
+      name: 'baseUrl',
+      message: 'Dokploy URL:',
+      default: existingOpts.baseUrl,
+      validate: (v: string) => baseUrlProblem(v) ?? true,
+      filter: (v: string) => v.trim(),
+    },
+  ] as any[])) as { kind: DokployServiceKind; baseUrl: string };
+  return { ok: true, baseUrl: ans.baseUrl, kind: ans.kind, id };
+}
+
+/**
+ * CAP-657 URL input: the Dokploy setup picker's ONE question, replacing the
+ * old baseUrl → kind → composeId/applicationId sequence. Loops (always at a
+ * TTY — this whole branch is terminal-only, see `TERMINAL_ONLY_SETUP`) until
+ * a usable target is confirmed or the underlying id/URL genuinely can't be
+ * resolved:
+ *
+ *  1. Ask for the service's Dokploy dashboard URL (or, still, a bare id).
+ *  2. A bare id (no `scheme://`) falls back to asking kind + base URL, same
+ *     shape as before this URL question existed — no verification, exactly
+ *     like today's behavior for a hand-typed id.
+ *  3. Anything that looks like a URL is parsed with `parseDokployServiceUrl`.
+ *     A parse failure is a coded refusal (`DOKPLOY_URL_INVALID`), shown and
+ *     re-asked — never silently downgraded to "treat it as an id" once the
+ *     input clearly claimed to be a URL.
+ *  4. A successful parse is VERIFIED against the live API
+ *     (`compose.one`/`application.one`) before being trusted: a 404 is a
+ *     coded refusal (`DOKPLOY_SERVICE_NOT_FOUND`), re-asked the same way;
+ *     any other API problem (no key yet, unauthorized, unreachable, …) is
+ *     never a hard block — it's logged and the parsed URL is saved as
+ *     entered, same trust level as the bare-id path always had.
+ *  5. A verified service is named back to the user ("Use "<name>" (<project>
+ *     · <environment>) as this target?") for a yes/no confirmation before
+ *     being saved — declining loops back to step 1 instead of saving.
+ *
+ * Re-editing an existing target prefills the URL question with the id alone
+ * (never the full old URL): the saved fields are `baseUrl` +
+ * `composeId`/`applicationId` only — no `projectId`/`environmentId` is ever
+ * persisted (`DokployOptions` has never carried them), so a full dashboard
+ * URL genuinely cannot be reconstructed from what's on disk. Prefilling the
+ * id keeps a plain Enter-to-continue re-edit working exactly as it always
+ * has (step 2's bare-id path, defaulted to the existing baseUrl/kind).
+ */
+export async function resolveDokployServiceOptions(
+  existingOpts: Record<string, string>,
+  orgId: string | undefined,
+): Promise<DokployServiceUrlOk> {
+  const existingKind: DokployServiceKind =
+    existingOpts.applicationId && !existingOpts.composeId ? 'application' : 'compose';
+  const existingId = existingOpts.composeId ?? existingOpts.applicationId;
+
+  const askUrlOrId = async (): Promise<string> => {
+    const ans = (await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'serviceUrl',
+        message: 'Dokploy service URL (paste the dashboard link for this app or compose service, or its id):',
+        default: existingId,
+        validate: (v: string) => (v.trim() ? true : 'required'),
+        filter: (v: string) => v.trim(),
+      },
+    ])) as { serviceUrl: string };
+    return ans.serviceUrl;
+  };
+
+  // No mutable loop state: each iteration either returns or recurses on the
+  // next answer, so retries never need a reassigned local.
+  const resolve = async (): Promise<DokployServiceUrlOk> => {
+    const answer = await askUrlOrId();
+
+    if (isBareDokployId(answer)) {
+      return askDokployKindAndBaseUrl(answer, existingOpts, existingKind);
+    }
+
+    const parsed = parseDokployServiceUrl(answer);
+    if (!parsed.ok) {
+      console.error(`${RED('✗')} ${parsed.code}: ${parsed.reason}`);
+      console.error(`  Paste the Dokploy dashboard link for this app or compose service, or just its id.`);
+      return resolve();
+    }
+
+    const apiKey = await resolveDokployApiKeyForPicker(existingOpts.tokenEnv, orgId);
+    if (!apiKey.ok) {
+      console.log(`  ${DIM('Could not verify against Dokploy yet (no API key) — saving as entered.')}`);
+      return parsed;
+    }
+
+    const client = createDokployClient(parsed.baseUrl, apiKey.value);
+    const verification = await verifyDokployService(client, parsed.kind, parsed.id);
+    if (!verification.ok) {
+      if (verification.error.code === 'not_found') {
+        console.error(
+          `${RED('✗')} ${ERROR_CODES.DOKPLOY_SERVICE_NOT_FOUND}: no ${parsed.kind} service with that id at ${parsed.baseUrl}.`,
+        );
+        console.error(`  Check the link and try again.`);
+        return resolve();
+      }
+      console.log(
+        `  ${DIM(`Could not verify against Dokploy (${verification.error.code}) — saving as entered.`)}`,
+      );
+      return parsed;
+    }
+
+    const label = verification.value.name || verification.value.appName || parsed.id;
+    const envLabel = await resolveDokployEnvironmentLabel(client, verification.value.environmentId);
+    const suffix = envLabel ? ` ${DIM(`(${envLabel})`)}` : '';
+    const { confirmed } = (await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'confirmed',
+        message: `Use "${label}"${suffix} as this target?`,
+        default: true,
+      },
+    ])) as { confirmed: boolean };
+    return confirmed ? parsed : resolve();
+  };
+
+  return resolve();
+}
+
+/**
  * Adapter-specific options, asked once the adapter and branch are known.
  *
  * Exported (additive) so `tests/commands/deployDokployPickerTokenEnv.test.ts`
@@ -955,6 +1158,13 @@ export async function resolveAdapterOptions(
   branchVars: string[],
   detectedOpts: Record<string, string>,
   existingOpts: Record<string, string>,
+  /**
+   * The active org id, used ONLY by the Dokploy branch's live verification
+   * call (`resolveDokployServiceOptions`) to resolve the org system store's
+   * API key. Optional and additive: every other adapter branch, and every
+   * existing caller that never had an org id to pass, is unaffected.
+   */
+  orgId?: string,
 ): Promise<Record<string, unknown>> {
   if (adapter.id === 'cf-worker') {
     return await inquirer.prompt([
@@ -1097,67 +1307,16 @@ export async function resolveAdapterOptions(
     // or set via `--token-env`) is carried through untouched: re-entering
     // this picker must never silently drop it.
     //
-    // CAP-679 follow-up (item 6): a target configures EXACTLY ONE of
-    // `composeId` / `applicationId` (see `DokployOptions`'s own doc) — ask
-    // which kind up front so a Compose target (what Capy's Dokploy customer
-    // actually runs) is reachable from this picker at all, not just via
-    // hand-edited `.capy/deploy.json`. Compose listed first, and also the
-    // default for a brand-new target (no existing options at all); re-editing
-    // an existing target defaults to whichever kind it already has
-    // (`composeId` present → Compose, `applicationId` present → Application).
-    const existingKind: 'compose' | 'application' = existingOpts.applicationId && !existingOpts.composeId
-      ? 'application'
-      : 'compose';
-    // `as any[]`: inquirer's own overload resolution chokes on a mixed
-    // input/list array with a `when` clause (same reason `runPicker`'s own
-    // adapter-choice array above is typed `any[]`) — every question here is
-    // still a plain, correctly-shaped inquirer question.
-    const ans = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'baseUrl',
-        message: 'Dokploy URL:',
-        default: existingOpts.baseUrl,
-        validate: (v: string) => baseUrlProblem(v) ?? true,
-        filter: (v: string) => v.trim(),
-      },
-      {
-        type: 'list',
-        name: 'kind',
-        message: 'Dokploy service kind:',
-        theme: LIST_THEME,
-        choices: [
-          { name: 'Compose', value: 'compose' },
-          { name: 'Application', value: 'application' },
-        ],
-        default: existingKind,
-      },
-      {
-        type: 'input',
-        name: 'composeId',
-        message: 'Dokploy compose ID:',
-        when: (a: { kind: string }) => a.kind === 'compose',
-        default: existingOpts.composeId,
-        validate: (v: string) => (v.trim() ? true : 'required'),
-        filter: (v: string) => v.trim(),
-      },
-      {
-        type: 'input',
-        name: 'applicationId',
-        message: 'Dokploy application ID:',
-        when: (a: { kind: string }) => a.kind !== 'compose',
-        default: existingOpts.applicationId,
-        validate: (v: string) => (v.trim() ? true : 'required'),
-        filter: (v: string) => v.trim(),
-      },
-    ] as any[]);
-    // Exactly one of composeId/applicationId survives — switching kind on a
-    // re-edit drops whichever one no longer applies, never carrying a stale
-    // `applicationId` alongside a freshly-picked `composeId` or vice versa.
+    // CAP-657 URL input follow-up: what used to be three questions (baseUrl,
+    // kind, composeId/applicationId) is now ONE — the service's Dokploy
+    // dashboard URL, parsed and verified against the live API — with the old
+    // three-question shape still reachable as a fallback for a bare id. See
+    // `resolveDokployServiceOptions`'s own doc for the full decision tree.
+    const resolved = await resolveDokployServiceOptions(existingOpts, orgId);
     const result: Record<string, unknown> =
-      ans.kind === 'compose'
-        ? { baseUrl: ans.baseUrl, composeId: ans.composeId }
-        : { baseUrl: ans.baseUrl, applicationId: ans.applicationId };
+      resolved.kind === 'compose'
+        ? { baseUrl: resolved.baseUrl, composeId: resolved.id }
+        : { baseUrl: resolved.baseUrl, applicationId: resolved.id };
     return existingOpts.tokenEnv ? { ...result, tokenEnv: existingOpts.tokenEnv } : result;
   }
   return {};
@@ -1342,7 +1501,7 @@ async function runPicker(
   // 4. Adapter-specific options.
   const detectedOpts = (detected.options ?? {}) as Record<string, string>;
   const existingOpts = (existing?.options ?? {}) as Record<string, string>;
-  const options = await resolveAdapterOptions(adapter, cwd, branchVars, detectedOpts, existingOpts);
+  const options = await resolveAdapterOptions(adapter, cwd, branchVars, detectedOpts, existingOpts, keep.orgId);
 
   // 5. Var picking — show every var in keep.lock and pre-select the ones
   // most likely to be relevant for this adapter (runtime for cf-worker,
@@ -2415,6 +2574,89 @@ async function commitDirectModeKeepLock(
   return { ok: true, stashed };
 }
 
+/** `resolvePreflightWithRecovery`'s terminal outcomes — see its own doc. */
+export type PreflightRecoveryOutcome =
+  | { kind: 'ok'; target: TargetConfig; preflight: PreflightResult }
+  | { kind: 'cancelled' }
+  | { kind: 'refused' };
+
+/**
+ * CAP-657 "no trap" follow-up: what `capy deploy <target>` does with a
+ * failing `adapter.preflight()` instead of just exiting.
+ *
+ *  - `interactive` false (the caller's call: non-TTY, `--yes`, `--json`, or
+ *    `--web` — none of those have a keypress menu to show) keeps EXACTLY
+ *    the behavior this replaced: print the coded reason + the adapter's own
+ *    hint (unchanged), then an explicit fix naming the real invocation
+ *    shape (`capy deploy <name> --edit` — a positional target name, not
+ *    whatever order an adapter's own `hint` string happens to use), and
+ *    refuse.
+ *  - `interactive` true offers edit/retry/cancel (`keypressPreflightMenu`)
+ *    and loops — recursing on a retry's or an edit's fresh preflight result
+ *    — until one passes or the human cancels.
+ *
+ * Two boundaries are injectable via `deps`, both defaulting to the real
+ * production behavior:
+ *  - `promptMenu` defaults to the real `keypressPreflightMenu`, which reads
+ *    one raw keypress directly off `process.stdin`. That's deliberately NOT
+ *    drivable through a faked TTY in a test (`setRawMode` throws on a
+ *    stream that isn't actually TTY-backed — the identical limitation
+ *    `deployDokploySystemStoreToken.test.ts` documents for
+ *    `keypressConfirm`); injecting the menu's DECISION here, instead of
+ *    trying to script the keypress that produces it, is the seam tests use
+ *    to prove "edit → fixed → passes", "retry", and "cancel exits with the
+ *    original refusal" without touching real stdin at all.
+ *  - `editTarget` defaults to the real `runPicker` (the full multi-question
+ *    picker, saving via `upsertTarget`) — injectable so a test can prove
+ *    this function's OWN retry/cancel/loop behavior with a synthetic
+ *    adapter (no registry entry, no real inquirer sequence, no network or
+ *    installed vendor CLI needed to make a fake preflight pass).
+ */
+export async function resolvePreflightWithRecovery(
+  cwd: string,
+  keep: KeepInfo,
+  adapter: DeployAdapter,
+  target: TargetConfig,
+  initialPreflight: PreflightResult,
+  adapterCallCtx: AdapterCallContext,
+  interactive: boolean,
+  deps: {
+    promptMenu?: (message: string) => Promise<PreflightFailureAction>;
+    editTarget?: (t: TargetConfig) => Promise<TargetConfig | null>;
+  } = {},
+): Promise<PreflightRecoveryOutcome> {
+  const promptMenu = deps.promptMenu ?? ((message: string) => keypressPreflightMenu({ message }));
+  const editTarget = deps.editTarget ?? ((t: TargetConfig) => runPicker(cwd, keep, t, undefined, undefined));
+
+  const settle = async (t: TargetConfig, p: PreflightResult): Promise<PreflightRecoveryOutcome> => {
+    if (p.ok) return { kind: 'ok', target: t, preflight: p };
+
+    console.error(`${RED('✗')} preflight: ${p.reason}`);
+    if (p.hint) console.error('\n' + p.hint);
+
+    if (!interactive) {
+      console.error(`Run \`capy deploy ${t.name} --edit\` to fix.`);
+      return { kind: 'refused' };
+    }
+
+    const action = await promptMenu('Preflight failed. What now?');
+    if (action === 'cancel') return { kind: 'cancelled' };
+
+    if (action === 'retry') {
+      return settle(t, await adapter.preflight(t, { cwd, ...adapterCallCtx }));
+    }
+
+    // action === 'edit'
+    const edited = await editTarget(t);
+    if (!edited) return { kind: 'cancelled' };
+    upsertTarget(cwd, edited);
+    console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
+    renderPlan(edited, adapter);
+    return settle(edited, await adapter.preflight(edited, { cwd, ...adapterCallCtx }));
+  };
+  return settle(target, initialPreflight);
+}
+
 // ── Main: capy deploy [name] ───────────────────────────────────────────────
 
 export async function deployCommand(
@@ -2763,13 +3005,33 @@ export async function deployCommand(
   const dokployApiKey = await resolveDokployApiKeyOnce(adapter, target, keep.orgId, options.devMode, secretsInteractive);
   const adapterCallCtx = { orgId: keep.orgId, devMode: options.devMode, interactive: secretsInteractive, resolvedApiKey: dokployApiKey };
 
-  // Preflight (fail BEFORE decryption).
-  const preflight = await adapter.preflight(target, { cwd, ...adapterCallCtx });
-  if (!preflight.ok) {
-    console.error(`${RED('✗')} preflight: ${preflight.reason}`);
-    if (preflight.hint) console.error('\n' + preflight.hint);
-    return 1;
+  // Preflight (fail BEFORE decryption). CAP-657 "no trap" follow-up: a
+  // failing preflight used to be an immediate exit — a dead end at a real
+  // terminal, where fixing the target and trying again is one keypress
+  // away. At a TTY (never under `--web`/`--yes`/`--json` — those keep
+  // EXACTLY today's behavior: print the reason + hint, then exit 1),
+  // `resolvePreflightWithRecovery` now offers edit/retry/cancel instead,
+  // looping until preflight passes or the human cancels. Reused below for
+  // the confirm-loop's OWN "edit" action, whose re-check used to have the
+  // identical dead end.
+  const preflightInteractive = process.stdin.isTTY === true && !web.web && !options.yes && !options.json;
+
+  const preflightOutcome = await resolvePreflightWithRecovery(
+    cwd,
+    keep,
+    adapter,
+    target,
+    await adapter.preflight(target, { cwd, ...adapterCallCtx }),
+    adapterCallCtx,
+    preflightInteractive,
+  );
+  if (preflightOutcome.kind === 'cancelled') {
+    console.log('Cancelled.');
+    return 0;
   }
+  if (preflightOutcome.kind === 'refused') return 1;
+  target = preflightOutcome.target;
+  const preflight = preflightOutcome.preflight;
   for (const w of preflight.warnings ?? []) {
     console.log(`  ${YELLOW('!')} ${w.message}`);
   }
@@ -2815,20 +3077,30 @@ export async function deployCommand(
           console.log('Cancelled.');
           return 0;
         }
-        target = edited;
-        upsertTarget(cwd, target);
-        console.log(GREEN(`✓ Saved target "${target.name}" to .capy/deploy.json`));
-        renderPlan(target, adapter);
+        upsertTarget(cwd, edited);
+        console.log(GREEN(`✓ Saved target "${edited.name}" to .capy/deploy.json`));
+        renderPlan(edited, adapter);
         // Re-run preflight after edit — paths/options may have changed.
         // Reuses the SAME resolvedApiKey from above: it was resolved once
         // for this command, and an edit here changes vars/branch/mode, never
-        // the Dokploy token source.
-        const recheck = await adapter.preflight(target, { cwd, ...adapterCallCtx });
-        if (!recheck.ok) {
-          console.error(`${RED('✗')} preflight: ${recheck.reason}`);
-          if (recheck.hint) console.error('\n' + recheck.hint);
-          return 1;
+        // the Dokploy token source. CAP-657 "no trap" follow-up: a STILL
+        // failing preflight reuses the same edit/retry/cancel recovery as
+        // the initial check, rather than exiting outright.
+        const recheck = await resolvePreflightWithRecovery(
+          cwd,
+          keep,
+          adapter,
+          edited,
+          await adapter.preflight(edited, { cwd, ...adapterCallCtx }),
+          adapterCallCtx,
+          preflightInteractive,
+        );
+        if (recheck.kind === 'cancelled') {
+          console.log('Cancelled.');
+          return 0;
         }
+        if (recheck.kind === 'refused') return 1;
+        target = recheck.target;
         // Loop back to confirm prompt with the edited target.
         continue;
       }

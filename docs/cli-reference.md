@@ -680,6 +680,8 @@ Every refusal carries a stable `code` — branch on it, never on message text.
 - `DOKPLOY_AUTODEPLOY_OFF`
 - `DOKPLOY_BRANCH_MISMATCH`
 - `DOKPLOY_WATCH_PATHS_EXCLUDE_KEEP`
+- `DOKPLOY_URL_INVALID`
+- `DOKPLOY_SERVICE_NOT_FOUND`
 
 ## Conventions
 
