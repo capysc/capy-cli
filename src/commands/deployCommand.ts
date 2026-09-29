@@ -326,6 +326,15 @@ async function decryptCurrentBranch(
  * `capy run` consumes). Same devMode-aware auth as decryptCurrentBranch — so
  * under capy-dev it talks to the dev service, not prod. The bundle carries
  * only `vars` — the target's selection — never the whole `.env`.
+ *
+ * CAP-682: no shipped adapter has `needsDeployToken: true` anymore (Dokploy
+ * — the only one that ever did — moved to plain-value delivery), so this
+ * function's one call site below (inside `loadDeploySecrets`) is currently
+ * unreachable. Deliberately KEPT, not deleted: the original CAP-682 spec is
+ * explicit that "the blob/token machinery stays for other adapters and
+ * `capy run`" — this is the mechanism a future token-based adapter opts
+ * into by setting `needsDeployToken: true`, and removing it now would
+ * silently retract that documented capability rather than leave it dormant.
  */
 async function mintForDeploy(
   cwd: string,
