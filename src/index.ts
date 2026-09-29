@@ -702,7 +702,6 @@ program
   .option('--json', 'emit machine-readable JSON instead of the human UI')
   .option('--project <name>', 'only rows with a location in this project')
   .option('--branch <name>', 'only rows with a location on this branch')
-  .option('--no-interactive', 'print the static table even on a TTY')
   .action(async (options) => {
     assertNotLocalOnly('secrets');
     const { SecretsCommand } = await import('./commands/secretsCommand');
@@ -711,7 +710,6 @@ program
       json: options.json,
       project: options.project,
       branch: options.branch,
-      noInteractive: options.interactive === false,
     });
   });
 
