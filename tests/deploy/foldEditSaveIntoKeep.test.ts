@@ -173,4 +173,116 @@ describe('foldEditSaveIntoKeep', () => {
 
     expect(serializeKeep(keep)).toBe(beforeSerialized);
   });
+
+  // ── Dates rule (product owner, must-fix review) ───────────────────────────
+  // Mirrors buildDeployKeep's `entry.value_hash !== hash` check: same
+  // value_hash as the target already has → keep the TARGET's own entry
+  // exactly (its dates are never moved by an unrelated save); different hash
+  // → use the save's entry (which carries the real server-assigned date).
+
+  test('same value_hash as the target: keeps the TARGET entry\'s changed_at exactly, ignoring the save\'s own changed_at', () => {
+    const keep = baseKeep({
+      API_KEY: [
+        entry({ resource_id: 'r1', branch: 'production', value_hash: 'aaaa000000000002', changed_at: '2026-01-02T00:00:00.000Z' }),
+      ],
+    });
+    const record: EditSaveRecord = {
+      branch: 'production',
+      entries: [
+        {
+          variable: 'API_KEY',
+          entry: entry({
+            resource_id: 'r1',
+            branch: 'production',
+            value_hash: 'aaaa000000000002', // same hash as the target
+            changed_at: '2026-09-29T10:05:00.000Z', // the save's own (wrong) date
+          }),
+        },
+      ],
+    };
+
+    const folded = foldEditSaveIntoKeep(keep, record);
+
+    expect(folded.variables.API_KEY[0].changed_at).toBe('2026-01-02T00:00:00.000Z');
+    // The target's entry is used byte-for-byte — not just its date.
+    expect(folded.variables.API_KEY[0]).toEqual(keep.variables.API_KEY[0]);
+  });
+
+  test('same value_hash, target has no changed_at at all: stays absent, not backfilled from the save', () => {
+    const keep = baseKeep({
+      API_KEY: [entry({ resource_id: 'r1', branch: 'production', value_hash: 'same-hash' })], // no changed_at
+    });
+    const record: EditSaveRecord = {
+      branch: 'production',
+      entries: [
+        {
+          variable: 'API_KEY',
+          entry: entry({
+            resource_id: 'r1',
+            branch: 'production',
+            value_hash: 'same-hash',
+            changed_at: '2026-09-29T10:05:00.000Z',
+          }),
+        },
+      ],
+    };
+
+    const folded = foldEditSaveIntoKeep(keep, record);
+
+    expect(folded.variables.API_KEY[0].changed_at).toBeUndefined();
+    expect(folded.variables.API_KEY[0]).toEqual(keep.variables.API_KEY[0]);
+  });
+
+  test('different value_hash: uses the save\'s entry, changed_at included', () => {
+    const keep = baseKeep({
+      API_KEY: [
+        entry({ resource_id: 'r1', branch: 'production', value_hash: 'old-hash', changed_at: '2026-01-02T00:00:00.000Z' }),
+      ],
+    });
+    const record: EditSaveRecord = {
+      branch: 'production',
+      entries: [
+        {
+          variable: 'API_KEY',
+          entry: entry({
+            resource_id: 'r1',
+            branch: 'production',
+            value_hash: 'new-hash',
+            changed_at: '2026-09-29T10:05:00.000Z',
+          }),
+        },
+      ],
+    };
+
+    const folded = foldEditSaveIntoKeep(keep, record);
+
+    expect(folded.variables.API_KEY[0].value_hash).toBe('new-hash');
+    expect(folded.variables.API_KEY[0].changed_at).toBe('2026-09-29T10:05:00.000Z');
+  });
+
+  test('a save whose every touched entry has the same value_hash as the target produces no diff', () => {
+    const keep = baseKeep({
+      API_KEY: [
+        entry({ resource_id: 'r1', branch: 'production', value_hash: 'same-hash', changed_at: '2026-01-02T00:00:00.000Z' }),
+      ],
+      DB_URL: [entry({ resource_id: 'r2', branch: 'production', value_hash: 'same-hash-2' })],
+    });
+    const record: EditSaveRecord = {
+      branch: 'production',
+      entries: [
+        {
+          variable: 'API_KEY',
+          entry: entry({ resource_id: 'r1', branch: 'production', value_hash: 'same-hash', changed_at: '2026-09-29T10:05:00.000Z' }),
+        },
+        {
+          variable: 'DB_URL',
+          entry: entry({ resource_id: 'r2', branch: 'production', value_hash: 'same-hash-2', changed_at: '2026-09-29T10:05:00.000Z' }),
+        },
+      ],
+    };
+
+    const folded = foldEditSaveIntoKeep(keep, record);
+
+    expect(serializeKeep(folded)).toBe(serializeKeep(keep));
+  });
 });

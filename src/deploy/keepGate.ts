@@ -119,18 +119,43 @@ export interface EditSaveRecord {
 }
 
 /**
- * Fold one recorded edit-session save into `keep`: replace the
- * (variable, branch) entry, remove it for a `null` entry (deletion), drop a
- * variable whose entry list becomes empty as a result, and leave every
- * other entry — same variable/other branch, or any other variable —
- * untouched.
+ * What should land in the folded keep for one (variable, branch): a `null`
+ * `saveEntry` is a deletion — drop any existing entry outright, regardless
+ * of hashes. Otherwise, mirror `buildDeployKeep`'s `entry.value_hash !==
+ * hash` check: the target (git) already has an entry with the SAME
+ * value_hash → the value hasn't actually changed from git's perspective, so
+ * keep the target's entry EXACTLY as it is — every field, including an
+ * absent `changed_at` — rather than let an unrelated save move its date.
+ * Different hash (or no existing entry at all) → use the save's entry,
+ * which already carries the real server-assigned `changed_at` from the push
+ * that produced it.
+ */
+function resolveEntryForFold(
+  existingEntry: KeepVariableEntry | undefined,
+  saveEntry: KeepVariableEntry | null,
+): KeepVariableEntry | undefined {
+  if (saveEntry === null) return undefined;
+  if (existingEntry && existingEntry.value_hash === saveEntry.value_hash) return existingEntry;
+  return saveEntry;
+}
+
+/**
+ * Fold one recorded edit-session save into `keep`: resolve the
+ * (variable, branch) entry per `resolveEntryForFold` above, drop a variable
+ * whose entry list becomes empty as a result, and leave every other entry —
+ * same variable/other branch, or any other variable — untouched. A save
+ * whose every touched variable already matches the target's value_hash
+ * resolves to exactly the target's own entries, so it serializes identically
+ * to `keep` — the caller's no-diff check (editExitFlow.ts) skips committing it.
  */
 export function foldEditSaveIntoKeep(keep: KeepFile, record: EditSaveRecord): KeepFile {
   const variables = record.entries.reduce<Record<string, KeepVariableEntry[]>>(
     (vars, { variable, entry }) => {
       const existing = vars[variable] ?? [];
       const withoutBranch = existing.filter((e) => e.branch !== record.branch);
-      const nextEntries = entry ? [...withoutBranch, entry] : withoutBranch;
+      const existingEntry = existing.find((e) => e.branch === record.branch);
+      const resolvedEntry = resolveEntryForFold(existingEntry, entry);
+      const nextEntries = resolvedEntry ? [...withoutBranch, resolvedEntry] : withoutBranch;
       if (nextEntries.length === 0) {
         const { [variable]: _dropped, ...rest } = vars;
         return rest;
