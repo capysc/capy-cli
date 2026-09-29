@@ -51,7 +51,9 @@ import {
   supersededDeployIdsForTarget,
   clearSupersededDeployIds,
   allDeployIdsForTarget,
+  deliveryWorthGating,
   TargetDeliveryDescriptor,
+  VarDelivery,
 } from '../deploy/targetsGate';
 import { KeepFile, ERROR_CODES, AuthResult, ErrorCode } from '../types/index';
 import type { AuthService } from '../auth/authService';
@@ -705,7 +707,7 @@ function adapterChoices(): DeployAdapterChoice[] {
  * the CLI's fallback. Two lists of defaults would be two answers to "what does
  * this box start as", and the box is what a target gets saved with.
  */
-function settingsDefaults(
+export function settingsDefaults(
   adapterId: string,
   cwd: string,
   existingOpts: Record<string, string>,
@@ -748,9 +750,20 @@ function settingsDefaults(
       // tokenEnv is no longer asked by default (CAP-664: the org system
       // store is the default source) — only an EXISTING target's own value
       // is shown here, never defaulted to the fallback env var name.
+      //
+      // CAP-679 follow-up (item 6, validator fix-first): the terminal picker
+      // now asks Compose vs. Application up front (`resolveAdapterOptions`'s
+      // dokploy branch) and defaults `kind`/`composeId` from an existing
+      // target. This is the web surface's copy of that same default — the
+      // web flow doesn't have its own Dokploy settings screen (it isn't
+      // being built here), but keeping these two defaults in sync means
+      // neither surface silently disagrees about what a re-edit starts from
+      // if/when one is added.
       return {
         baseUrl: existingOpts.baseUrl ?? '',
         applicationId: existingOpts.applicationId ?? '',
+        composeId: existingOpts.composeId ?? '',
+        kind: existingOpts.applicationId && !existingOpts.composeId ? 'application' : 'compose',
         ...(existingOpts.tokenEnv ? { tokenEnv: existingOpts.tokenEnv } : {}),
       };
     default:
@@ -2154,32 +2167,50 @@ async function resolveForceRedeploy(
 type CiChangeGate = { ok: true; keepLockChanged: boolean; deployKeepContent: string } | { ok: false };
 
 /**
- * "Does this deploy change what's recorded on the target branch?" — keyed off
- * the decrypted values being pushed, folded into origin/<base>'s keep.lock,
- * NOT the local keep.lock file (which can lag .env). The folded keep IS what
- * gets committed for the PR, so the gate and the committed artifact can't
- * disagree.
+ * The CI gate's decision, made BEFORE anything is minted or pushed:
+ *   - `error`: a git/decrypt failure — the caller returns 1.
+ *   - `unchanged`: nothing worth a PR — the caller mints NOTHING, pushes
+ *     NOTHING, opens no PR, and returns 0. This is the whole point of
+ *     splitting the gate from `buildFinalCiKeep` below: deciding "did
+ *     anything change" must never itself require a deploy token to exist.
+ *   - `proceed`: a real change (or `--force`) — the caller mints (for a
+ *     token adapter), then calls `buildFinalCiKeep` with the real result.
+ */
+type CiGateOutcome = { kind: 'error' } | { kind: 'unchanged' } | { kind: 'proceed'; baseKeep: KeepFile };
+
+/**
+ * "Does this deploy change what's recorded on the target branch?" — decided
+ * off a plain decrypt (never a minted token — see `deliveryWorthGating`'s
+ * own doc for why `deploy_id` must never be part of this decision), folded
+ * against origin/<base>'s keep.lock, NOT the local keep.lock file (which can
+ * lag `.env`).
+ *
+ * Runs BEFORE `loadDeploySecrets`/minting — a token adapter (Dokploy) that's
+ * unchanged never gets a fresh token minted or written to the platform at
+ * all, which is the fix for CI churn: minting unconditionally (the old
+ * behavior) meant every CI run installed a fresh, effectively untracked
+ * token on the platform (CI mode never runs `recordDeployTargets` — that's
+ * direct-mode only — so a token minted-and-written here with no PR opening
+ * to record it was never tracked anywhere).
  *
  * Only called when `gitOk && mode === 'ci' && !options.dryRun` — direct mode
  * and dry runs never reach this, and the caller's own fallback (unchanged,
  * empty content) covers them without calling in here at all.
  */
-async function computeCiChangeGate(
+async function resolveCiGateOutcome(
   cwd: string,
   baseBranch: string,
-  env: Record<string, string>,
   target: TargetConfig,
   adapter: DeployAdapter,
   mode: DeployMode,
   options: DeployCliOptions,
   web: WebContext,
   preflight: PreflightResult,
-  deployId?: string,
-): Promise<CiChangeGate> {
+): Promise<CiGateOutcome> {
   const fetched = fetchRemoteBranch(cwd, baseBranch);
   if (!fetched.ok) {
     console.error(`${RED('✗')} git fetch origin ${baseBranch}: ${fetched.error}`);
-    return { ok: false };
+    return { kind: 'error' };
   }
   const relKeep = repoRelPath(cwd, 'keep.lock');
   const baseRaw = readFileAtRef(cwd, `origin/${baseBranch}`, relKeep);
@@ -2189,8 +2220,53 @@ async function computeCiChangeGate(
     ? JSON.parse(baseRaw)
     : { ...JSON.parse(readFileSync(join(cwd, 'keep.lock'), 'utf-8')), variables: {} };
 
-  // CAP-679: fold this target's delivery in alongside the value_hash bump —
-  // the PR's keep.lock IS what gets committed if the deploy below succeeds.
+  const gateEnv = await (async (): Promise<{ ok: true; env: Record<string, string> } | { ok: false; message: string }> => {
+    try {
+      return { ok: true, env: await decryptCurrentBranch(cwd, options.devMode) };
+    } catch (err: any) {
+      return { ok: false, message: err.message };
+    }
+  })();
+  if (!gateEnv.ok) {
+    console.error(`${RED('✗')} decrypt: ${gateEnv.message}`);
+    return { kind: 'error' };
+  }
+
+  const values: VarDelivery[] = target.vars
+    .filter((v) => gateEnv.env[v] !== undefined)
+    .map((v) => ({ name: v, valueHash: hashValue(gateEnv.env[v]) }));
+  const deployed = options.noDeploy ? false : undefined;
+  const changed = deliveryWorthGating(baseKeep, target.branch, adapter.id, target.name, deployed, values);
+  if (changed) return { kind: 'proceed', baseKeep };
+
+  // No secret change vs the target. --force (or a confirm) touches
+  // keep.lock's changed_at so there's a real diff to PR + re-trigger CI.
+  const force = await resolveForceRedeploy(options, web, cwd, target, adapter, mode, preflight, baseBranch);
+  if (force) return { kind: 'proceed', baseKeep };
+
+  console.log(
+    `  ${DIM('·')} no secret changes vs origin/${baseBranch} — nothing to deploy. ${DIM('Use --force to re-trigger CI.')}`,
+  );
+  return { kind: 'unchanged' };
+}
+
+/**
+ * The PR's keep.lock content — called only once `resolveCiGateOutcome` has
+ * already decided to proceed (a real change, or `--force`), and — for a
+ * token adapter — a fresh token has been minted. Folds the delivery in WITH
+ * its real `deploy_id` this time (the gate decision above never sees one),
+ * so a freshly minted token IS recorded (and, if it superseded one, tracked
+ * via `superseded_deploy_ids`) even when the only reason we're here is
+ * `--force` on an otherwise-unchanged value.
+ */
+function buildFinalCiKeep(
+  baseKeep: KeepFile,
+  env: Record<string, string>,
+  target: TargetConfig,
+  adapter: DeployAdapter,
+  deployId: string | undefined,
+  options: DeployCliOptions,
+): CiChangeGate {
   const delivery: TargetDeliveryDescriptor = {
     provider: adapter.id,
     target: target.name,
@@ -2199,25 +2275,13 @@ async function computeCiChangeGate(
     ...(options.noDeploy ? { deployed: false } : {}),
   };
   const built = buildDeployKeep(baseKeep, env, target.vars, target.branch, delivery);
-  if (built.changed) {
-    return { ok: true, keepLockChanged: true, deployKeepContent: built.content };
-  }
-
-  // No secret change vs the target. --force (or a confirm) touches
-  // keep.lock's changed_at so there's a real diff to PR + re-trigger CI.
-  const force = await resolveForceRedeploy(options, web, cwd, target, adapter, mode, preflight, baseBranch);
-  if (force) {
-    return {
-      ok: true,
-      keepLockChanged: true,
-      deployKeepContent: touchDeployKeep(baseKeep, target.vars, target.branch),
-    };
-  }
-
-  console.log(
-    `  ${DIM('·')} no secret changes vs origin/${baseBranch} — deploying secrets only (no PR). ${DIM('Use --force to re-trigger CI.')}`,
-  );
-  return { ok: true, keepLockChanged: false, deployKeepContent: built.content };
+  // A `--force` on an otherwise-unchanged, non-token adapter (no deployId to
+  // fold in — e.g. cf-worker/vercel) still needs SOME diff to actually
+  // retrigger CI — fall back to the `deploy_revision` bump `touchDeployKeep`
+  // provides, the same as before this split.
+  return built.changed
+    ? { ok: true, keepLockChanged: true, deployKeepContent: built.content }
+    : { ok: true, keepLockChanged: true, deployKeepContent: touchDeployKeep(baseKeep, target.vars, target.branch) };
 }
 
 /** Everything `deployRemove` needs after `showRunResult`'s `pr` field. */
@@ -2759,20 +2823,30 @@ export async function deployCommand(
   const msg = `chore(deploy): ${target.name} → ${target.branch} (${target.kind})`;
   const baseBranch = target.gitBaseBranch ?? 'main';
 
-  // ── Decrypt the secrets we're about to push. In CI mode these same values
-  //    drive the change-gate, so it measures exactly what ships.
+  // ── CI change-gate — BEFORE any mint (see resolveCiGateOutcome's own doc:
+  //    deciding "did anything change" must never itself require a token, or
+  //    every CI run of a token adapter mints and writes one regardless of
+  //    whether anything changed). Direct mode and dry runs are never gated
+  //    — `gateOutcome` stays `null` and the fallback below covers them.
+  const ciGated = gitOk && mode === 'ci' && !options.dryRun;
+  const gateOutcome: CiGateOutcome | null = ciGated
+    ? await resolveCiGateOutcome(cwd, baseBranch, target, adapter, mode, options, web, preflight)
+    : null;
+  if (gateOutcome?.kind === 'error') return 1;
+  if (gateOutcome?.kind === 'unchanged') return 0;
+
+  // ── Decrypt the secrets we're about to push (and, for a token adapter,
+  //    mint) — only reached when direct mode, or CI mode just decided
+  //    something is actually worth shipping.
   const secrets = await loadDeploySecrets(cwd, adapter, target, options);
   if (!secrets) return 1;
   const { env, deployToken, valueHashes } = secrets;
 
-  // ── CI change-gate ────────────────────────────────────────────
-  // "Does this deploy change what's recorded on the target branch?" — keyed off
-  // the decrypted values being pushed, folded into origin/<base>'s keep.lock,
-  // NOT the local keep.lock file (which can lag .env). The folded keep IS what
-  // we commit for the PR, so the gate and the committed artifact can't disagree.
+  // The PR's keep.lock content, now that a real deploy_id (if any) is known
+  // — see `buildFinalCiKeep`'s own doc.
   const changeGate: CiChangeGate =
-    gitOk && mode === 'ci' && !options.dryRun
-      ? await computeCiChangeGate(cwd, baseBranch, env, target, adapter, mode, options, web, preflight, deployToken?.deployId)
+    gateOutcome?.kind === 'proceed'
+      ? buildFinalCiKeep(gateOutcome.baseKeep, env, target, adapter, deployToken?.deployId, options)
       : { ok: true, keepLockChanged: false, deployKeepContent: '' };
   if (!changeGate.ok) return 1;
   const { keepLockChanged, deployKeepContent } = changeGate;
@@ -2813,7 +2887,7 @@ export async function deployCommand(
 
   // ── Record targets (CAP-679) ─────────────────────────────────────────────
   // Direct mode only: CI mode already folded this delivery into the PR's
-  // keep.lock above (`computeCiChangeGate`'s `delivery` param) — recording it
+  // keep.lock above (`buildFinalCiKeep`'s `delivery` param) — recording it
   // AGAIN here, against the user's own branch, would be wrong: CI mode never
   // touches the user's tree.
   if (mode === 'direct' && !options.dryRun) {
